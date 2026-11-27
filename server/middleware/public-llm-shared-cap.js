@@ -94,7 +94,10 @@ const PHOTO_ASSESSMENT_CAP = { bucket: 'photo-assessment', envVar: 'PUBLIC_LLM_D
 const BUG_ID_EXTENSION_CAP = {
   bucket: 'bug-id-extension', envVar: 'PUBLIC_LLM_DAILY_CAP_BUG_ID_EXTENSION', defaultMax: 100, failClosed: true,
 };
+const JOB_SCREEN_CAP = {
+  bucket: 'job-screen', envVar: 'PUBLIC_LLM_DAILY_CAP_JOB_SCREEN', defaultMax: 200,
+};
 
 module.exports = {
-  consumeSharedDailyCap, resolveMax, DAILY_LIMIT_MESSAGE, ASK_WAVES_CAP, PHOTO_ASSESSMENT_CAP, BUG_ID_EXTENSION_CAP,
+  consumeSharedDailyCap, resolveMax, DAILY_LIMIT_MESSAGE, ASK_WAVES_CAP, PHOTO_ASSESSMENT_CAP, BUG_ID_EXTENSION_CAP, JOB_SCREEN_CAP,
 };

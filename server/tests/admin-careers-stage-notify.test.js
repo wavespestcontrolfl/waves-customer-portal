@@ -238,11 +238,23 @@ describe('GET /:id/stage-preview', () => {
     expect(mockDb.__rows()[0].interview_token).toBeNull(); // never minted by preview
   });
 
-  test('interview status with an existing token -> real interview_url', async () => {
+  test('interview status with an existing token -> real interview_url for owner, redacted for non-owner admin', async () => {
     mockDb.__setRows([appRow({ interview_token: 'a'.repeat(64) })]);
-    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001/stage-preview?status=interview`);
-    const body = await res.json();
-    expect(body.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'a'.repeat(64)}`);
+    mockStaffEmail = null;
+    const nonOwnerRes = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001/stage-preview?status=interview`);
+    const nonOwnerBody = await nonOwnerRes.json();
+    expect(nonOwnerBody.interview_url).toBeNull();
+    expect(nonOwnerBody.has_interview_link).toBe(true);
+
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    try {
+      const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001/stage-preview?status=interview`);
+      const body = await res.json();
+      expect(body.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'a'.repeat(64)}`);
+      expect(body.has_interview_link).toBe(true);
+    } finally {
+      mockStaffEmail = null;
+    }
   });
 
   test('sending_enabled reflects the gate', async () => {
@@ -266,25 +278,31 @@ describe('PATCH /:id/status', () => {
 
   test('status change to interview with notify mints a token once; response never carries the raw token', async () => {
     mockDb.__setRows([appRow({ status: 'reviewed' })]);
-    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
-      status: 'interview',
-      notify: { sms: true, email: true },
-    });
-    expect(status).toBe(200);
-    expect(body.application.interview_token).toBeUndefined();
-    expect(body.application.interview_url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/careers\/interview\/[0-9a-f]{64}$/);
-    expect(body.sent).toEqual({ sms: 'sent', email: 'sent' });
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    try {
+      const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+        status: 'interview',
+        notify: { sms: true, email: true },
+      });
+      expect(status).toBe(200);
+      expect(body.application.interview_token).toBeUndefined();
+      expect(body.application.has_interview_link).toBe(true);
+      expect(body.application.interview_url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/careers\/interview\/[0-9a-f]{64}$/);
+      expect(body.sent).toEqual({ sms: 'sent', email: 'sent' });
 
-    const row = mockDb.__rows()[0];
-    expect(row.status).toBe('interview');
-    expect(row.status_history).toHaveLength(1);
-    expect(row.interview_token).toMatch(/^[0-9a-f]{64}$/);
-    const firstToken = row.interview_token;
+      const row = mockDb.__rows()[0];
+      expect(row.status).toBe('interview');
+      expect(row.status_history).toHaveLength(1);
+      expect(row.interview_token).toMatch(/^[0-9a-f]{64}$/);
+      const firstToken = row.interview_token;
 
-    // A SECOND patch (e.g. a note-only edit) must reuse the same token, not mint again.
-    const second = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'still interviewing' });
-    expect(second.status).toBe(200);
-    expect(mockDb.__rows()[0].interview_token).toBe(firstToken);
+      // A SECOND patch (e.g. a note-only edit) must reuse the same token, not mint again.
+      const second = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'still interviewing' });
+      expect(second.status).toBe(200);
+      expect(mockDb.__rows()[0].interview_token).toBe(firstToken);
+    } finally {
+      mockStaffEmail = null;
+    }
   });
 
   test('resend:true on an already-interview application sends without a new status_history entry', async () => {

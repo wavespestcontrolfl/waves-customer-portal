@@ -17,7 +17,7 @@
  * calls toISOString() to build a displayed date or time.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useLocation, useParams } from 'react-router-dom';
 import { COLORS, FONTS } from '../theme-brand';
 import {
   CustomerColumn,
@@ -127,10 +127,98 @@ const LOW_EMPHASIS_LINK_STYLE = {
   cursor: 'pointer',
 };
 
-const MODE_LABELS = {
-  phone: 'Phone call',
-  in_person: 'In person',
+const SENT_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+// Keeps the applicant's page in the robots-out, no-referrer shape the server
+// also sends as headers: the URL is a private bearer link.
+function usePrivatePage() {
+  useEffect(() => {
+    const added = [];
+    const add = (name, content) => {
+      const meta = document.createElement('meta');
+      meta.name = name;
+      meta.content = content;
+      document.head.appendChild(meta);
+      added.push(meta);
+    };
+    add('robots', 'noindex, nofollow, noarchive');
+    add('referrer', 'no-referrer');
+    return () => added.forEach((meta) => meta.remove());
+  }, []);
+}
+
+const COPY = {
+  en: {
+    loading: 'Loading…',
+    inactiveTitle: 'This interview link is no longer active',
+    inactiveBody: 'It may have already been used, or your application has moved on. Give us a call and we can help — ',
+    withdrawnTitle: 'Thanks for letting us know',
+    withdrawnBody: 'We’ve closed out your application. If you change your mind, reach out any time — ',
+    eyebrow: 'Interview scheduling',
+    greeting: (name) => `Hi ${name || 'there'}`,
+    bookedEyebrow: 'You’re booked',
+    changeTime: 'Change time',
+    intro: 'Pick whichever works best for you. You can always come back to this link to change it.',
+    backToBooked: 'Back to my booked time',
+    modeLegend: 'How would you like to interview?',
+    phoneLabel: 'Phone call',
+    inPersonPrefix: 'In person',
+    pickTime: 'Pick a time',
+    tzNote: 'All times Eastern (ET)',
+    noSlots: 'No times are open right now. Give us a call and we’ll find a time together — ',
+    timesFor: (day) => `Times for ${day}`,
+    pickedSummary: (mode, label) => `You picked ${mode === 'phone' ? 'a phone call' : 'an in-person visit'} on ${label} ET.`,
+    booking: 'Booking…',
+    confirmTime: 'Confirm interview time',
+    slotGoneFallback: 'That time is no longer available. Pick another time below.',
+    unconfirmed: 'We could not confirm that time. Check your connection and try again.',
+    notInterested: 'I’m no longer interested',
+    withdrawPrompt: 'Are you sure? This will withdraw your application.',
+    withdrawError: 'Could not process that. Check your connection and try again.',
+    cancel: 'Cancel',
+    submitting: 'Submitting…',
+    yesWithdraw: 'Yes, withdraw',
+    modeLine: (mode, addr) => (mode === 'in_person' ? `See you at ${addr}` : "We'll call you at this number"),
+    onWord: 'on',
+  },
+  es: {
+    loading: 'Cargando…',
+    inactiveTitle: 'Este enlace de entrevista ya no está activo',
+    inactiveBody: 'Es posible que ya se haya usado o que tu solicitud haya avanzado. Llámanos y con gusto te ayudamos — ',
+    withdrawnTitle: 'Gracias por avisarnos',
+    withdrawnBody: 'Hemos cerrado tu solicitud. Si cambias de opinión, contáctanos cuando quieras — ',
+    eyebrow: 'Programación de entrevista',
+    greeting: (name) => `Hola ${name || ''}`.trim(),
+    bookedEyebrow: 'Tu entrevista está confirmada',
+    changeTime: 'Cambiar horario',
+    intro: 'Elige la opción que mejor te funcione. Siempre puedes volver a este enlace para cambiarla.',
+    backToBooked: 'Volver a mi horario reservado',
+    modeLegend: '¿Cómo prefieres realizar la entrevista?',
+    phoneLabel: 'Llamada telefónica',
+    inPersonPrefix: 'En persona',
+    pickTime: 'Elige un horario',
+    tzNote: 'Todas las horas en hora del Este (ET)',
+    noSlots: 'No hay horarios disponibles en este momento. Llámanos y buscaremos un horario juntos — ',
+    timesFor: (day) => `Horarios para ${day}`,
+    pickedSummary: (mode, label) => `Elegiste ${mode === 'phone' ? 'una llamada telefónica' : 'una entrevista en persona'} el ${label} ET.`,
+    booking: 'Reservando…',
+    confirmTime: 'Confirmar horario de entrevista',
+    slotGoneFallback: 'Ese horario ya no está disponible. Elige otro horario abajo.',
+    unconfirmed: 'No pudimos confirmar ese horario. Revisa tu conexión e inténtalo de nuevo.',
+    notInterested: 'Ya no estoy interesado/a',
+    withdrawPrompt: '¿Estás seguro/a? Esto retirará tu solicitud.',
+    withdrawError: 'No pudimos procesar tu solicitud. Revisa tu conexión e inténtalo de nuevo.',
+    cancel: 'Cancelar',
+    submitting: 'Enviando…',
+    yesWithdraw: 'Sí, retirar solicitud',
+    modeLine: (mode, addr) => (mode === 'in_person' ? `Nos vemos en ${addr}` : 'Te llamaremos a este número'),
+    onWord: 'el',
+  },
 };
+
+function copyFor(lang) {
+  return lang === 'es' ? COPY.es : COPY.en;
+}
 
 // slot.label from the API looks like "Tue Sep 22, 4:30 PM" — split it once
 // for the day-group header and the per-slot button text. Never recomputed
@@ -162,11 +250,6 @@ function groupSlotsByDay(slots) {
   });
 }
 
-function modeLine(mode, inPersonAddress) {
-  if (mode === 'in_person') return `See you at ${inPersonAddress}`;
-  return "We'll call you at this number";
-}
-
 // Full-page "still loading" card. Stateless — no reason for the applicant
 // data or callbacks to reach this far.
 function InterviewLoadingState() {
@@ -185,13 +268,13 @@ function InterviewLoadingState() {
 // retried, or a completed withdrawal. Each ends the applicant's session on
 // this page, so they share one component rather than three near-duplicate
 // early returns in the page body.
-function InterviewTerminalState({ kind, onRetry }) {
+function InterviewTerminalState({ kind, lang, onRetry }) {
+  const t = copyFor(lang);
   if (kind === 'notfound') {
     return (
       <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
-        <PublicStateCard state="not-found" title="This interview link is no longer active" contact="none">
-          It may have already been used, or your application has moved on. Give us a call and we can
-          help — <HelpPhoneLink tone="dark" inline />.
+        <PublicStateCard state="not-found" title={t.inactiveTitle} contact="none">
+          {t.inactiveBody}<HelpPhoneLink tone="dark" inline />.
         </PublicStateCard>
       </CustomerColumn>
     );
@@ -199,9 +282,8 @@ function InterviewTerminalState({ kind, onRetry }) {
   if (kind === 'withdrawn') {
     return (
       <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
-        <PublicStateCard state="withdrawn" title="Thanks for letting us know" contact="none">
-          We&rsquo;ve closed out your application. If you change your mind, reach out any time —{' '}
-          <HelpPhoneLink tone="dark" inline />.
+        <PublicStateCard state="withdrawn" title={t.withdrawnTitle} contact="none">
+          {t.withdrawnBody}<HelpPhoneLink tone="dark" inline />.
         </PublicStateCard>
       </CustomerColumn>
     );
@@ -218,6 +300,7 @@ function InterviewTerminalState({ kind, onRetry }) {
 // booking/bookError) — none of it is needed outside this panel, so it lives
 // here instead of being threaded down from the page.
 function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
+  const t = copyFor(data?.language);
   const [changingTime, setChangingTime] = useState(false);
   const [mode, setMode] = useState(null);
   const [selectedSlot, setSelectedSlot] = useState(null);
@@ -266,23 +349,13 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
         body: JSON.stringify({ mode, start: selectedSlot.start }),
       });
       const body = await res.json().catch(() => ({}));
-      // 409 = the link itself is dead (token/status mismatch under the row
-      // lock). 404 = the application left the Interview stage entirely
-      // (withdrawn, advanced, etc. — route.param already 404s a malformed
-      // token before any handler runs, so a 404 here is always the same
-      // "not this stage any more" case). Both are the same inactive-link
-      // terminal state to the applicant (Codex P2); any other non-OK status
-      // is an ordinary slot conflict, handled below.
       if (res.status === 409 || res.status === 404) {
         onInactiveLink();
         return;
       }
       if (!res.ok) {
-        // The chosen slot is gone (someone else took it, or the window
-        // rolled) — clear it BEFORE refreshing so the vanished time never
-        // renders as still-picked with Confirm enabled (local audit P2).
         setSelectedSlot(null);
-        setBookError(body.error || 'That time is no longer available. Pick another time below.');
+        setBookError(body.error || t.slotGoneFallback);
         refreshSlots();
         return;
       }
@@ -290,9 +363,6 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
       setChangingTime(false);
       setSelectedSlot(null);
     } catch {
-      // No response: the booking may still have committed (recruiting audit
-      // R5). Re-read the link before saying anything failed. Retrying the
-      // same time is safe — the server answers it as the existing booking.
       const seq = ++attemptSeq.current;
       try {
         const res = await fetch(`${API_BASE}/public/careers/interview/${encodeURIComponent(token)}`);
@@ -312,7 +382,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
       } catch {
         // still offline — fall through to the unconfirmed message
       }
-      setBookError('We could not confirm that time. Check your connection and try again.');
+      setBookError(t.unconfirmed);
     } finally {
       setBooking(false);
     }
@@ -323,17 +393,15 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
   if (showBooked) {
     return (
       <BrandCard padding={24}>
-        <div style={EYEBROW}>You&rsquo;re booked</div>
+        <div style={EYEBROW}>{t.bookedEyebrow}</div>
         <p style={BODY_STYLE}>
-          {modeLine(data.booked.mode, data.in_person_address)} on <strong>{data.booked.label}</strong>.
+          {t.modeLine(data.booked.mode, data.in_person_address)} {t.onWord}{' '}
+          <strong>{data.booked.label} ET</strong>.
         </p>
-        {data.booked.mode === 'in_person' && (
-          <p style={{ ...BODY_STYLE, marginTop: 6 }}>{data.in_person_address}</p>
-        )}
 
         <div style={{ display: 'flex', gap: 10, marginTop: 18, flexWrap: 'wrap' }}>
           <BrandButton variant="secondary" onClick={startChangeTime}>
-            Change time
+            {t.changeTime}
           </BrandButton>
         </div>
       </BrandCard>
@@ -342,7 +410,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
 
   return (
     <BrandCard padding={24}>
-      <p style={BODY_STYLE}>Pick whichever works best for you. You can always come back to this link to change it.</p>
+      <p style={BODY_STYLE}>{t.intro}</p>
 
       {changingTime && data.booked && (
         <button
@@ -353,12 +421,12 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
             setBookError('');
           }}
         >
-          Back to my booked time
+          {t.backToBooked}
         </button>
       )}
 
       <fieldset style={{ border: 'none', padding: 0, margin: '18px 0 0' }}>
-        <legend style={EYEBROW}>How would you like to interview?</legend>
+        <legend style={EYEBROW}>{t.modeLegend}</legend>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 10 }}>
           {(data.mode_options || []).map((opt) => (
             <label key={opt} style={modeCardStyle(mode === opt)}>
@@ -375,8 +443,10 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
               />
               <span style={{ fontFamily: FONTS.ui, fontSize: 14, color: TEXT, lineHeight: 1.4 }}>
                 {opt === 'in_person'
-                  ? `In person — ${data.in_person_address}`
-                  : MODE_LABELS[opt] || opt}
+                  ? `${t.inPersonPrefix} — ${data.in_person_address}`
+                  : opt === 'phone'
+                    ? t.phoneLabel
+                    : opt}
               </span>
             </label>
           ))}
@@ -384,17 +454,17 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
       </fieldset>
 
       <div style={{ marginTop: 20 }}>
-        <div style={EYEBROW}>Pick a time</div>
+        <div style={EYEBROW}>{t.pickTime}</div>
+        <p style={{ ...BODY_STYLE, fontSize: 13, color: MUTED, marginBottom: 10 }}>{t.tzNote}</p>
         {groups.length === 0 ? (
           <p style={BODY_STYLE}>
-            No times are open right now. Give us a call and we&rsquo;ll find a time together —{' '}
-            <HelpPhoneLink tone="dark" inline />.
+            {t.noSlots}<HelpPhoneLink tone="dark" inline />.
           </p>
         ) : (
           groups.map((group) => (
             <div key={group.date} style={{ marginBottom: 16 }}>
               <div style={DAY_HEADER_STYLE}>{group.dayLabel}</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} role="group" aria-label={`Times for ${group.dayLabel}`}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }} role="group" aria-label={t.timesFor(group.dayLabel)}>
                 {group.slots.map((slot) => (
                   <button
                     key={slot.start}
@@ -427,7 +497,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
             color: TEXT,
           }}
         >
-          You picked {mode === 'phone' ? 'a phone call' : 'an in-person visit'} on {selectedSlot.label}.
+          {t.pickedSummary(mode, selectedSlot.label)}
         </div>
       )}
 
@@ -439,7 +509,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
         onClick={confirmBooking}
         style={{ marginTop: 16 }}
       >
-        {booking ? 'Booking…' : 'Confirm interview time'}
+        {booking ? t.booking : t.confirmTime}
       </BrandButton>
     </BrandCard>
   );
@@ -449,7 +519,8 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
 // Owns its own confirming/submitting state and the withdraw POST — the page
 // only needs to know when it succeeds (to show the terminal state) or hits
 // an inactive link (409/404, same as the booking panel's handling).
-function WithdrawalControl({ token, onWithdrawn, onInactiveLink }) {
+function WithdrawalControl({ token, lang, onWithdrawn, onInactiveLink }) {
+  const t = copyFor(lang);
   const [withdrawStep, setWithdrawStep] = useState('idle'); // idle | confirming | submitting
   const [withdrawError, setWithdrawError] = useState('');
 
@@ -467,7 +538,7 @@ function WithdrawalControl({ token, onWithdrawn, onInactiveLink }) {
       if (!res.ok) throw new Error('failed');
       onWithdrawn();
     } catch {
-      setWithdrawError('Could not process that. Check your connection and try again.');
+      setWithdrawError(t.withdrawError);
       setWithdrawStep('confirming');
     }
   };
@@ -476,11 +547,11 @@ function WithdrawalControl({ token, onWithdrawn, onInactiveLink }) {
     <div style={{ marginTop: 20, paddingTop: 4 }}>
       {withdrawStep === 'idle' ? (
         <button type="button" style={LOW_EMPHASIS_LINK_STYLE} onClick={() => setWithdrawStep('confirming')}>
-          I&rsquo;m no longer interested
+          {t.notInterested}
         </button>
       ) : (
         <div role="alert">
-          <p style={BODY_STYLE}>Are you sure? This will withdraw your application.</p>
+          <p style={BODY_STYLE}>{t.withdrawPrompt}</p>
           {withdrawError && <div style={ERROR_BANNER_STYLE}>{withdrawError}</div>}
           <div style={{ display: 'flex', gap: 10, marginTop: 10, flexWrap: 'wrap' }}>
             <BrandButton
@@ -488,10 +559,10 @@ function WithdrawalControl({ token, onWithdrawn, onInactiveLink }) {
               disabled={withdrawStep === 'submitting'}
               onClick={() => setWithdrawStep('idle')}
             >
-              Cancel
+              {t.cancel}
             </BrandButton>
             <BrandButton disabled={withdrawStep === 'submitting'} onClick={confirmWithdraw}>
-              {withdrawStep === 'submitting' ? 'Submitting…' : 'Yes, withdraw'}
+              {withdrawStep === 'submitting' ? t.submitting : t.yesWithdraw}
             </BrandButton>
           </div>
         </div>
@@ -502,16 +573,28 @@ function WithdrawalControl({ token, onWithdrawn, onInactiveLink }) {
 
 export default function CareersInterviewPage() {
   const { token } = useParams();
+  const { pathname } = useLocation();
+  const sent = SENT_TOKEN_RE.test(token || '') && !pathname.includes('%');
+  return <InterviewPage key={token} token={sent ? token : ''} />;
+}
+
+function InterviewPage({ token }) {
   useGlassSurface(true);
+  usePrivatePage();
 
   const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null); // null | 'notfound' | 'temporary'
+  const [loading, setLoading] = useState(Boolean(token));
+  const [error, setError] = useState(token ? null : 'notfound'); // null | 'notfound' | 'temporary'
   const [loadAttempt, setLoadAttempt] = useState(0);
 
   const [withdrawn, setWithdrawn] = useState(false);
 
   useEffect(() => {
+    if (!token) {
+      setLoading(false);
+      setError('notfound');
+      return undefined;
+    }
     let cancelled = false;
     setLoading(true);
     setError(null);
@@ -549,17 +632,18 @@ export default function CareersInterviewPage() {
   // settling when they withdrew comes back 404 and must not replace the
   // confirmation with "link no longer active".
   if (withdrawn) {
-    return <InterviewTerminalState kind="withdrawn" />;
+    return <InterviewTerminalState kind="withdrawn" lang={data?.language} />;
   }
 
   if (error === 'notfound') {
-    return <InterviewTerminalState kind="notfound" />;
+    return <InterviewTerminalState kind="notfound" lang={data?.language} />;
   }
 
   if (error === 'temporary' || !data) {
-    return <InterviewTerminalState kind="temporary" onRetry={() => setLoadAttempt((a) => a + 1)} />;
+    return <InterviewTerminalState kind="temporary" lang={data?.language} onRetry={() => setLoadAttempt((a) => a + 1)} />;
   }
 
+  const t = copyFor(data.language);
   const goInactive = () => {
     setData(null);
     setError('notfound');
@@ -567,10 +651,11 @@ export default function CareersInterviewPage() {
 
   return (
     <CustomerColumn style={{ position: 'relative', zIndex: 1 }}>
-      <div style={EYEBROW}>Interview scheduling</div>
-      <h1 style={{ ...H1_STYLE, fontSize: 26 }}>Hi {data.first_name || 'there'}</h1>
+      <div style={EYEBROW}>{t.eyebrow}</div>
+      <h1 style={{ ...H1_STYLE, fontSize: 26 }}>{t.greeting(data.first_name)}</h1>
 
       <InterviewBookingPanel
+        key={token}
         token={token}
         data={data}
         onDataChange={setData}
@@ -581,7 +666,9 @@ export default function CareersInterviewPage() {
           invited but is not interested should be able to say so without
           first booking a time (local audit P1). */}
       <WithdrawalControl
+        key={`withdraw-${token}`}
         token={token}
+        lang={data.language}
         onWithdrawn={() => setWithdrawn(true)}
         onInactiveLink={goInactive}
       />

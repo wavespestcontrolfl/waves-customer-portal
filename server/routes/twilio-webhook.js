@@ -730,6 +730,52 @@ router.post('/sms', async (req, res) => {
         await fireContactCorrection(optOutSmsLogId);
       }
 
+      // Best-effort recruiting visibility: if this phone belongs to an open
+      // job application, record the opt-out on its comms_history and revoke
+      // open job-offer text reminder consent so Recruiting reflects STOP too.
+      try {
+        const { phoneMatchDigits } = require('../utils/phone');
+        const variants = phoneMatchDigits(From);
+        if (variants.length) {
+          const openApps = await db('job_applications')
+            .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
+            .whereIn('status', ['new', 'reviewed', 'interview', 'offer'])
+            .select('id', 'comms_history');
+          if (openApps.length) {
+            const { appendCommsHistory, maskPhone: maskRecruitPhone } = require('../services/recruiting-comms');
+            const { redactOfferLinks } = require('../utils/offer-link-redaction');
+            const crypto = require('crypto');
+            for (const app of openApps) {
+              const hist = Array.isArray(app.comms_history) ? app.comms_history : [];
+              if (MessageSid && hist.some((e) => e && e.twilio_sid === MessageSid)) continue;
+              await appendCommsHistory(app.id, {
+                id: crypto.randomUUID(),
+                at: new Date().toISOString(),
+                stage: 'applicant_opt_out',
+                channel: 'sms',
+                to: maskRecruitPhone(From),
+                outcome: 'received',
+                code: optCommand.reason || null,
+                body: redactOfferLinks(Body || ''),
+                by: 'applicant',
+                twilio_sid: MessageSid || null,
+              });
+            }
+            const appIds = openApps.map((a) => a.id);
+            await db('job_offers')
+              .whereIn('application_id', appIds)
+              .whereIn('status', ['sent', 'date_requested'])
+              .whereNotNull('text_consent_at')
+              .update({ text_consent_at: null, updated_at: new Date() })
+              .catch(() => {});
+          }
+        }
+      } catch (recErr) {
+        if (!recErr || recErr.code !== '42P01') {
+          logger.warn(`[sms-optout] recruiting compliance mirror failed: ${recErr && recErr.message}`);
+        }
+      }
+
       return res.type('text/xml').send(
         optOut.applied
           ? `<Response><Message>You've been unsubscribed from Waves SMS. Reply START to re-subscribe.</Message></Response>`
@@ -898,6 +944,41 @@ router.post('/sms', async (req, res) => {
             customer_id: customer.id, action: 'sms_opt_in',
             description: `${customer.first_name} ${customer.last_name} re-subscribed to SMS`,
           }).catch(() => {});
+        }
+        try {
+          const { phoneMatchDigits } = require('../utils/phone');
+          const variants = phoneMatchDigits(From);
+          if (variants.length) {
+            const openApps = await db('job_applications')
+              .whereRaw("regexp_replace(COALESCE(contact_snapshot->>'phone', ''), '[^0-9]', '', 'g') = ANY (?::text[])", [variants])
+              .whereIn('status', ['new', 'reviewed', 'interview', 'offer'])
+              .select('id', 'comms_history');
+            if (openApps.length) {
+              const { appendCommsHistory, maskPhone: maskRecruitPhone } = require('../services/recruiting-comms');
+              const { redactOfferLinks } = require('../utils/offer-link-redaction');
+              const crypto = require('crypto');
+              for (const app of openApps) {
+                const hist = Array.isArray(app.comms_history) ? app.comms_history : [];
+                if (MessageSid && hist.some((e) => e && e.twilio_sid === MessageSid)) continue;
+                await appendCommsHistory(app.id, {
+                  id: crypto.randomUUID(),
+                  at: new Date().toISOString(),
+                  stage: 'applicant_opt_in',
+                  channel: 'sms',
+                  to: maskRecruitPhone(From),
+                  outcome: 'received',
+                  code: null,
+                  body: redactOfferLinks(Body || ''),
+                  by: 'applicant',
+                  twilio_sid: MessageSid || null,
+                });
+              }
+            }
+          }
+        } catch (recErr) {
+          if (!recErr || recErr.code !== '42P01') {
+            logger.warn(`[sms-optin] recruiting compliance mirror failed: ${recErr && recErr.message}`);
+          }
         }
       }
 

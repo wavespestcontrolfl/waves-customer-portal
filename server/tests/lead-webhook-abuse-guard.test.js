@@ -228,6 +228,26 @@ describe('verifyTurnstileToken', () => {
     expect(r).toMatchObject({ ok: true, enforced: true, reason: 'verified' });
     expect(String(fetchSpy.mock.calls[0][1].body)).toContain('secret=lone-secret');
   });
+
+  test('siteverify hostname mismatch fails CLOSED when Cloudflare returns another registrable domain', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, hostname: 'attacker-other-site.com' }),
+    });
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', 'www.wavespestcontrol.com');
+    expect(r).toMatchObject({ ok: false, enforced: true, reason: 'hostname_mismatch' });
+  });
+
+  test('siteverify hostname matching registrable domain (subdomain -> apex) passes', async () => {
+    process.env.TURNSTILE_SECRET_KEY = TWO_WIDGETS;
+    fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, hostname: 'portal.wavespestcontrol.com' }),
+    });
+    const r = await verifyTurnstileToken('tok', '1.2.3.4', 'www.wavespestcontrol.com');
+    expect(r).toMatchObject({ ok: true, enforced: true, reason: 'verified' });
+  });
 });
 
 describe('isHoldableTokenlessPost — who the unverified lead hold accepts', () => {

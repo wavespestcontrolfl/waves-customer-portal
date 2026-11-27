@@ -10,7 +10,7 @@
  * Deep link: ?application=<id> opens that application's detail (the bell
  * notification links here).
  */
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { UserPlus, Phone, MessageSquare, Mail } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
@@ -157,6 +157,8 @@ const STAGE_LABEL = {
   offer_reminder: "Job offer reminder",
   applicant_reply: "Applicant text",
   owner_reply: "Office text",
+  applicant_opt_out: "Applicant opted out of texts",
+  applicant_opt_in: "Applicant opted back in to texts",
 };
 
 // "Link sent" means a delivery attempt that may have reached the applicant
@@ -346,6 +348,7 @@ function StageChangeForm({
   error,
 }) {
   const templated = Boolean(preview?.templated);
+  const sendingEnabled = preview?.sending_enabled !== false;
   const smsAvailable = Boolean(preview?.channels?.sms?.available);
   const emailAvailable = Boolean(preview?.channels?.email?.available);
 
@@ -362,9 +365,9 @@ function StageChangeForm({
 
       {templated && (
         <div className="flex flex-col gap-3 border-hairline border rounded p-3">
-          {!preview.sending_enabled && (
+          {!sendingEnabled && (
             <div className="text-14 text-zinc-500">
-              Sending is off (GATE_RECRUITING_COMMS)
+              Automatic applicant messaging is currently turned off.
             </div>
           )}
 
@@ -372,7 +375,7 @@ function StageChangeForm({
             id="stage-notify-sms"
             label={channelLabel("sms", preview.channels?.sms)}
             checked={smsChecked}
-            disabled={!smsAvailable || moveWithoutNotifying}
+            disabled={!sendingEnabled || !smsAvailable || moveWithoutNotifying}
             onChange={(e) => onSmsCheckedChange(e.target.checked)}
           />
           {smsChecked && !moveWithoutNotifying && (
@@ -380,6 +383,7 @@ function StageChangeForm({
               <Field label="Text message">
                 <Textarea
                   value={smsBody}
+                  disabled={!sendingEnabled}
                   onChange={(e) => onSmsBodyChange(e.target.value.slice(0, 320))}
                   rows={3}
                   maxLength={320}
@@ -395,7 +399,7 @@ function StageChangeForm({
             id="stage-notify-email"
             label={channelLabel("email", preview.channels?.email)}
             checked={emailChecked}
-            disabled={!emailAvailable || moveWithoutNotifying}
+            disabled={!sendingEnabled || !emailAvailable || moveWithoutNotifying}
             onChange={(e) => onEmailCheckedChange(e.target.checked)}
           />
           {emailChecked && !moveWithoutNotifying && (
@@ -403,6 +407,7 @@ function StageChangeForm({
               <Field label="Subject">
                 <Input
                   value={emailSubject}
+                  disabled={!sendingEnabled}
                   onChange={(e) => onEmailSubjectChange(e.target.value.slice(0, 150))}
                   maxLength={150}
                   placeholder="Subject"
@@ -411,6 +416,7 @@ function StageChangeForm({
               <Field label="Email message">
                 <Textarea
                   value={emailBody}
+                  disabled={!sendingEnabled}
                   onChange={(e) => onEmailBodyChange(e.target.value.slice(0, 4000))}
                   rows={6}
                   maxLength={4000}
@@ -423,6 +429,7 @@ function StageChangeForm({
             id="stage-move-without-notifying"
             label="Move without notifying"
             checked={moveWithoutNotifying}
+            disabled={!sendingEnabled}
             onChange={(e) => onMoveWithoutNotifyingChange(e.target.checked)}
           />
         </div>
@@ -804,8 +811,9 @@ function useStageChangeWorkflow(detail, tab, load, onApplicationUpdated, refresh
 // branching (the booked/unbooked split, the link-status copy).
 // disabled: the application could not be re-read, so its stage may be out of date.
 function InterviewSchedulingBlock({ detail, onOpenStageDialog, disabled }) {
+  const hasLink = Boolean(detail.has_interview_link || detail.interview_url);
   const relevant = ["offer", "hired"].includes(detail.status)
-    ? Boolean(detail.interview_booked_at || detail.interview_url)
+    ? Boolean(detail.interview_booked_at || hasLink)
     : detail.status === "interview";
   if (!relevant) return null;
 
@@ -840,7 +848,7 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog, disabled }) {
           <span className="text-14 text-zinc-600">
             {inviteDelivered(detail)
               ? "Link sent, waiting for the applicant to pick a time."
-              : detail.interview_url
+              : hasLink
                 ? "Link created but not delivered — resend it."
                 : "No scheduling link sent yet."}
           </span>
@@ -851,7 +859,7 @@ function InterviewSchedulingBlock({ detail, onOpenStageDialog, disabled }) {
               onClick={() => onOpenStageDialog("interview", { resend: true })}
               disabled={disabled}
             >
-              {detail.interview_url ? "Resend link" : "Send link"}
+              {hasLink ? "Resend link" : "Send link"}
             </Button>
           )}
         </div>
@@ -915,10 +923,81 @@ const CLOSED_STATUSES = ["hired", "rejected", "withdrawn"];
 // A hired, rejected or withdrawn application: the server refuses every offer write on it (APPLICATION_CLOSED).
 const isClosed = (application) => CLOSED_STATUSES.includes(application?.status);
 
+const NEXT_STAGE = { new: "reviewed", reviewed: "interview", interview: "offer", offer: "hired" };
+const TERMINAL_STAGES = new Set(["rejected", "withdrawn"]);
+
+function ContactEditor({ contact, onSave, onCancel }) {
+  const [name, setName] = useState(contact?.name || "");
+  const [phone, setPhone] = useState(contact?.phone || "");
+  const [email, setEmail] = useState(contact?.email || "");
+  const [city, setCity] = useState(contact?.city || "");
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSaving(true);
+    setErr(null);
+    try {
+      await onSave({ name, phone, email, city });
+      onCancel();
+    } catch (error) {
+      setErr(error.message || "Failed to save contact details");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="mb-4 border-hairline border rounded p-3 flex flex-col gap-2.5">
+      <div className="text-ui-caption font-medium text-ink-secondary">Edit contact details</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <Field label="Name">
+          <Input value={name} onChange={(e) => setName(e.target.value)} maxLength={120} disabled={saving} />
+        </Field>
+        <Field label="Phone">
+          <Input value={phone} onChange={(e) => setPhone(e.target.value)} maxLength={40} disabled={saving} />
+        </Field>
+        <Field label="Email">
+          <Input type="email" value={email} onChange={(e) => setEmail(e.target.value)} maxLength={200} disabled={saving} />
+        </Field>
+        <Field label="City">
+          <Input value={city} onChange={(e) => setCity(e.target.value)} maxLength={100} disabled={saving} />
+        </Field>
+      </div>
+      {err && <ActionFeedback error>{err}</ActionFeedback>}
+      <div className="flex gap-2 justify-end">
+        <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={saving}>
+          Cancel
+        </Button>
+        <Button type="submit" size="sm" disabled={saving}>
+          {saving ? "Saving…" : "Save contact"}
+        </Button>
+      </div>
+    </form>
+  );
+}
+
 // The Offer button opens the Offer form while the offer flow is on for a
 // technician application, and is today's status-only move only when the
 // server said the flow is off (or for a non-technician).
-function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, onOfferChanged, refreshError, onRetryRefresh, onOpenStageDialog, onOpenApplication, onClose }) {
+function ApplicationDetailContent({
+  detail,
+  replyMedia,
+  samePhone,
+  offerFlow,
+  onOfferChanged,
+  refreshError,
+  onRetryRefresh,
+  onOpenStageDialog,
+  onOpenApplication,
+  onSaveContact,
+  onRescreen,
+  onClose,
+}) {
+  const [editingContact, setEditingContact] = useState(false);
+  const [rescreening, setRescreening] = useState(false);
+  const [rescreenError, setRescreenError] = useState(null);
   const contact = detail?.contact_snapshot || {};
   const technician = detail.role === "technician";
   // A closed application cannot take an offer: Offer is the plain status move there, whatever the offer read says (the
@@ -929,6 +1008,24 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
   const offerPending = technician && !closed && (offerFlow.loading || Boolean(offerFlow.error) || Boolean(offerFlow.refreshError));
   const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));
   const screen = detail?.ai_screen || null;
+  const callSummary = detail?.source?.call_summary || null;
+
+  useEffect(() => {
+    setEditingContact(false);
+    setRescreenError(null);
+  }, [detail?.id]);
+
+  const handleRescreen = async () => {
+    setRescreening(true);
+    setRescreenError(null);
+    try {
+      await onRescreen(detail.id);
+    } catch (err) {
+      setRescreenError(err.message || "Failed to run AI screening");
+    } finally {
+      setRescreening(false);
+    }
+  };
 
   return (
     <>
@@ -960,27 +1057,60 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
             <span className="text-14 text-zinc-500">{contact.city}</span>
           )}
           <Badge>{detail.status}</Badge>
+          {!editingContact && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => setEditingContact(true)}
+            >
+              Edit contact
+            </Button>
+          )}
         </div>
+
+        {editingContact && (
+          <ContactEditor
+            contact={contact}
+            onSave={(fields) => onSaveContact(detail.id, fields)}
+            onCancel={() => setEditingContact(false)}
+          />
+        )}
 
         <SamePhoneBlock records={samePhone} onOpenApplication={onOpenApplication} />
 
-        {screen && (
+        {callSummary && (
           <div className="mb-4 border-hairline border rounded p-3">
-            <div className="flex items-center gap-3 mb-1.5">
-              <span
-                className={cn(
-                  "text-20 tabular-nums font-medium",
-                  scoreTone(detail.ai_score),
-                )}
-              >
-                {detail.ai_score}
-              </span>
-              <RecommendationBadge
-                recommendation={detail.ai_recommendation}
-              />
-              <span className="text-14 text-zinc-400">
-                AI screen — ranking assist only
-              </span>
+            <div className="text-ui-caption font-medium text-ink-secondary mb-1">
+              Phone call summary
+            </div>
+            <div className="text-14 text-zinc-800 whitespace-pre-wrap">
+              {callSummary}
+            </div>
+          </div>
+        )}
+
+        {screen ? (
+          <div className="mb-4 border-hairline border rounded p-3">
+            <div className="flex items-center justify-between gap-3 flex-wrap mb-1.5">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span
+                  className={cn(
+                    "text-20 tabular-nums font-medium",
+                    scoreTone(detail.ai_score),
+                  )}
+                >
+                  {detail.ai_score}
+                </span>
+                <RecommendationBadge
+                  recommendation={detail.ai_recommendation}
+                />
+                <span className="text-14 text-zinc-400">
+                  AI screen — ranking assist only
+                </span>
+              </div>
+              <Button size="sm" variant="ghost" onClick={handleRescreen} disabled={rescreening}>
+                {rescreening ? "Screening…" : "Re-screen"}
+              </Button>
             </div>
             {screen.summary && (
               <div className="text-14 text-zinc-700 mb-1.5">
@@ -997,6 +1127,17 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
                 Probe: {screen.flags.join(" · ")}
               </div>
             )}
+            {rescreenError && <ActionFeedback error className="mt-2">{rescreenError}</ActionFeedback>}
+          </div>
+        ) : (
+          <div className="mb-4 border-hairline border rounded p-3 flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <div className="text-14 text-zinc-600">Not screened yet</div>
+              {rescreenError && <ActionFeedback error className="mt-1.5">{rescreenError}</ActionFeedback>}
+            </div>
+            <Button size="sm" variant="secondary" onClick={handleRescreen} disabled={rescreening}>
+              {rescreening ? "Screening…" : "Run AI screen"}
+            </Button>
           </div>
         )}
 
@@ -1026,17 +1167,24 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
       <DialogFooter>
         <div className="flex flex-wrap gap-1.5">
           {STATUS_TABS.filter(({ key }) => key !== detail.status).map(
-            ({ key, label }) => (
-              <Button
-                key={key}
-                size="sm"
-                variant="secondary"
-                onClick={() => onStageButton(key)}
-                disabled={Boolean(refreshError) || (key === "offer" && offerPending)}
-              >
-                {label}
-              </Button>
-            ),
+            ({ key, label }) => {
+              const variant = key === NEXT_STAGE[detail.status]
+                ? "primary"
+                : TERMINAL_STAGES.has(key)
+                  ? "ghost"
+                  : "secondary";
+              return (
+                <Button
+                  key={key}
+                  size="sm"
+                  variant={variant}
+                  onClick={() => onStageButton(key)}
+                  disabled={Boolean(refreshError) || (key === "offer" && offerPending)}
+                >
+                  {label}
+                </Button>
+              );
+            },
           )}
           <Button size="sm" variant="ghost" onClick={onClose}>
             Close
@@ -1047,11 +1195,19 @@ function ApplicationDetailContent({ detail, replyMedia, samePhone, offerFlow, on
   );
 }
 
+const VALID_TAB_KEYS = new Set(STATUS_TABS.map((t) => t.key));
+
 export default function RecruitingPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const [tab, setTab] = useState("new");
+  const initialTab = VALID_TAB_KEYS.has(searchParams.get("tab")) ? searchParams.get("tab") : "new";
+  const [tab, setTab] = useState(initialTab);
   const tabRef = useRef(tab);
   tabRef.current = tab;
+  const [roleFilter, setRoleFilter] = useState("");
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const filterRef = useRef({ role: "", q: "" });
+  filterRef.current = { role: roleFilter, q: searchQuery };
   const [applications, setApplications] = useState([]);
   // The status whose rows `applications` holds. A failed read for another
   // tab must not show the previous tab's cards under it, or an empty state
@@ -1059,6 +1215,8 @@ export default function RecruitingPage() {
   const [loadedStatus, setLoadedStatus] = useState(null);
   const [counts, setCounts] = useState({});
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [error, setError] = useState(null);
   const [detail, setDetail] = useState(null);
   // Set when the in-place re-read of the open application after an offer change failed.
@@ -1072,14 +1230,16 @@ export default function RecruitingPage() {
   const requestSeq = useRef(0);
 
   const load = useCallback(
-    async (status, { offset = 0, append = false } = {}) => {
+    async (status, { offset = 0, append = false, role = filterRef.current.role, q = filterRef.current.q } = {}) => {
       const seq = ++requestSeq.current;
-      if (!append) setLoading(true);
+      if (append) setLoadingMore(true);
+      else setLoading(true);
       setError(null);
       try {
-        const data = await adminFetch(
-          `/admin/careers?status=${encodeURIComponent(status)}&offset=${offset}`,
-        );
+        const params = new URLSearchParams({ status, offset: String(offset) });
+        if (role) params.set("role", role);
+        if (q && q.trim()) params.set("q", q.trim());
+        const data = await adminFetch(`/admin/careers?${params.toString()}`);
         if (seq !== requestSeq.current) return; // superseded by a newer request
         setApplications((prev) =>
           append
@@ -1091,15 +1251,31 @@ export default function RecruitingPage() {
       } catch (err) {
         if (seq === requestSeq.current) setError(err.message);
       } finally {
-        if (seq === requestSeq.current) setLoading(false);
+        if (seq === requestSeq.current) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
       }
     },
     [],
   );
 
+  const handleTabChange = useCallback(
+    (nextTab) => {
+      setTab(nextTab);
+      setSearchParams((prev) => {
+        const next = new URLSearchParams(prev);
+        if (nextTab === "new") next.delete("tab");
+        else next.set("tab", nextTab);
+        return next;
+      }, { replace: true });
+    },
+    [setSearchParams],
+  );
+
   useEffect(() => {
-    load(tab);
-  }, [tab, load]);
+    load(tab, { role: roleFilter, q: searchQuery });
+  }, [tab, roleFilter, searchQuery, load]);
 
   // Same monotonic guard as the list: a slow response for applicant A must
   // not replace an already-opened applicant B (a status/note could land on
@@ -1119,6 +1295,7 @@ export default function RecruitingPage() {
   // The offer form open now, if any: the draft it opened on, the offers out the owner saw first, and its key.
   const { draft: formDraft, seenOut, key: formKey } = offerFlow.form || {};
   const stageWorkflow = useStageChangeWorkflow(detail, tab, load, applyStageAnswer, Boolean(detailRefreshError), offerFlow.reload);
+  const { resetForNewApplicant, closeStageDialog } = stageWorkflow;
   const detailIdRef = useRef(null);
   detailIdRef.current = detail?.id ?? null;
 
@@ -1127,8 +1304,8 @@ export default function RecruitingPage() {
   // applies only while that applicant is still the one on screen and nothing
   // newer has reached it (a later re-read, or a stage move's answer: refreshSeq).
   // An explicit open (a list click, a bell link) of the applicant already on screen
-  // is read in place the same way, except that it cancels any other open (the owner
-  // asked for this applicant last) and acknowledges replies, as every open does.
+  // also reads in place with ?peek=1 (cancelling any pending switch to another
+  // applicant) so replies are never silently acknowledged behind a nested dialog.
   const openDetail = useCallback(async (id, { refresh } = {}) => {
     // An action that finished after the owner opened another applicant: its
     // re-read is for one no longer on screen, and it must not cancel the open
@@ -1142,6 +1319,7 @@ export default function RecruitingPage() {
     // stage move's, a later re-read) outranks it.
     let fresh = 0;
     const newest = () => wanted() && (!inPlace || fresh === refreshSeq.current);
+    if (!inPlace) setDetailLoading(true);
     try {
       // An explicit open of the applicant on screen re-reads the offer card first: a date request or an answer changes
       // the offer without changing the stage. The offer, then the application, as after an offer action, so the stage
@@ -1163,14 +1341,16 @@ export default function RecruitingPage() {
       setDetailRefreshError(null);
       // Only another applicant resets the stage workflow: for the one on screen, an open stage dialog, its typed note
       // and a move in flight all still belong to it.
-      if (!inPlace) stageWorkflow.resetForNewApplicant();
+      if (!inPlace) resetForNewApplicant();
     } catch (err) {
       if (!newest()) return;
       // A failed in-place read stays on the detail with Try again (the list reload clears the page error).
       if (inPlace) setDetailRefreshError(err.message);
       else setError(err.message);
+    } finally {
+      if (!inPlace && seq === detailSeq.current) setDetailLoading(false);
     }
-  }, [stageWorkflow, reloadOfferFor]);
+  }, [resetForNewApplicant, reloadOfferFor]);
 
   // The offer read returns the stage it read with the offers (applicationStatus). The application is read on its own,
   // and a first open reads it before the offer, so an answer between the two reads leaves the stage behind the offer
@@ -1187,12 +1367,32 @@ export default function RecruitingPage() {
   const closeDetail = useCallback(() => {
     detailSeq.current += 1; // invalidate any in-flight open
     setDetail(null);
+    setDetailLoading(false);
     setDetailRefreshError(null);
     setSamePhone([]);
     // The stage dialog nests inside the detail dialog's lifetime — closing
     // the outer one must not leave the inner one open over a null detail.
-    stageWorkflow.closeStageDialog();
-  }, [stageWorkflow]);
+    closeStageDialog();
+  }, [closeStageDialog]);
+
+  const saveContact = useCallback(async (id, fields) => {
+    const data = await adminFetch(`/admin/careers/${id}/contact`, {
+      method: "PATCH",
+      body: JSON.stringify(fields),
+    });
+    applyStageAnswer(data.application);
+    load(tabRef.current);
+  }, [applyStageAnswer, load]);
+
+  const rescreenApplication = useCallback(async (id) => {
+    const data = await adminFetch(`/admin/careers/${id}/rescreen`, {
+      method: "POST",
+    });
+    applyStageAnswer(data.application);
+    load(tabRef.current);
+  }, [applyStageAnswer, load]);
+
+  const activeFilters = useMemo(() => Boolean(roleFilter || searchQuery.trim()), [roleFilter, searchQuery]);
 
   // After any offer write, or one the server refused because something moved
   // on: re-read the offer, then the open application and the list in place. A
@@ -1235,9 +1435,9 @@ export default function RecruitingPage() {
 
       <Tabs
         value={tab}
-        onValueChange={setTab}
+        onValueChange={handleTabChange}
         variant="section"
-        className="mb-5"
+        className="mb-3"
       >
         <TabList scrollable aria-label="Application status">
           {STATUS_TABS.map(({ key, label }) => (
@@ -1250,6 +1450,59 @@ export default function RecruitingPage() {
           ))}
         </TabList>
       </Tabs>
+
+      <form
+        className="flex flex-wrap items-center gap-2 mb-4"
+        onSubmit={(e) => {
+          e.preventDefault();
+          setSearchQuery(searchInput);
+        }}
+      >
+        <Input
+          aria-label="Search applicants"
+          placeholder="Search name, phone, email, city…"
+          value={searchInput}
+          onChange={(e) => {
+            const v = e.target.value;
+            setSearchInput(v);
+            if (!v.trim() && searchQuery) setSearchQuery("");
+          }}
+          className="w-full sm:w-64"
+        />
+        <select
+          aria-label="Filter by role"
+          value={roleFilter}
+          onChange={(e) => setRoleFilter(e.target.value)}
+          className="min-h-11 md:min-h-9 rounded-md border border-hairline bg-white px-3 text-14 text-zinc-800 u-focus-ring"
+        >
+          <option value="">All roles</option>
+          {Object.entries(ROLE_LABELS).map(([key, label]) => (
+            <option key={key} value={key}>{label}</option>
+          ))}
+        </select>
+        <Button type="submit" size="sm" variant="secondary">
+          Search
+        </Button>
+        {activeFilters && (
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setRoleFilter("");
+              setSearchInput("");
+              setSearchQuery("");
+            }}
+          >
+            Clear
+          </Button>
+        )}
+        {detailLoading && (
+          <span className="text-14 text-zinc-500 ml-auto" role="status">
+            Loading applicant…
+          </span>
+        )}
+      </form>
 
       {error && (
         <ActionFeedback
@@ -1305,6 +1558,12 @@ export default function RecruitingPage() {
                               · ES
                             </span>
                           )}
+                          {RECORD_ORIGIN_LABEL[app.origin] && (
+                            <span className="text-zinc-400 font-normal">
+                              {" "}
+                              · {RECORD_ORIGIN_LABEL[app.origin]}
+                            </span>
+                          )}
                         </div>
                         {app.ai_summary && (
                           <div className="text-14 text-zinc-500 mt-0.5 truncate">
@@ -1345,11 +1604,12 @@ export default function RecruitingPage() {
               <Button
                 size="sm"
                 variant="secondary"
+                disabled={loadingMore}
                 onClick={() =>
                   load(tab, { offset: applications.length, append: true })
                 }
               >
-                Load more ({applications.length} of {counts[tab]})
+                {loadingMore ? "Loading…" : `Load more (${applications.length} of ${counts[tab]})`}
               </Button>
             </div>
           )}
@@ -1368,6 +1628,8 @@ export default function RecruitingPage() {
             onRetryRefresh={() => openDetail(detail.id, { refresh: true })}
             onOpenStageDialog={stageWorkflow.openStageDialog}
             onOpenApplication={openDetail}
+            onSaveContact={saveContact}
+            onRescreen={rescreenApplication}
             onClose={closeDetail}
           />
         )}

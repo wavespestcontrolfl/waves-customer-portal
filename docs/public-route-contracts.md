@@ -10054,8 +10054,10 @@ estimate-write contract as security-critical.)
 `/api/contracts/:token` (GET; the `/contract/:token` signing page read and its `?format=pdf` review copy, no gate). Token format gate (32-160 characters, else the generic 404 `Contract not found` before any read), the router's 60/min public limiter and `no-store`. Lifecycle: an unknown token answers 404 `Contract not found`; an expired link 410 `Contract link expired`; a signed contract 410 `Contract has already been signed`; a cancelled or voided one 410 `Contract is no longer available`. A `sent` contract is stamped `viewed` (with a `viewed` event) on the first read. The payload (or the PDF) is built from a second read made after that stamp, and the second read gets the same lifecycle answers: a signature or a link rotation that committed between the two reads burned or replaced the token, so the re-read finds no row (404 `Contract not found`) or a signed or cancelled one (410), exactly like any spent link and never a server error (contracts audit F7). The JSON payload and the PDF are unchanged for a link that is still live.
 `/api/public/careers/apply` (POST; public job-application intake for the
 careers funnel. Guards mirror the lead webhook: GATE_JOB_APPLICATIONS
-(404 dark until flipped, unobservable-when-dark), IP limiter (6/10min)
-+ per-phone limiter (3/hr), honeypot silent-200, Turnstile shadow-verify
+(404 dark until flipped, mounted above `cors()` and the global limiter so
+dark probes and OPTIONS preflights stay unobservable), IP limiter (6/10min
+and 12/24hr) + per-phone limiter (3/hr), honeypot silent-200, Turnstile
+shadow-verify (including verified `hostname` registrable-domain check)
 with enforcement under the shared leadTurnstile gate, strict validation
 with 400 fail-closed (malformed shapes, non-string or over-length
 answers, over-length city, unknown role all reject; answer keys are an
@@ -10069,16 +10071,18 @@ and starts none of the side effects below, and answers the same 200
 `{success:true}`; the check runs under the per-phone advisory lock the
 call-filed path takes (`createJobApplication`, team/staff audit F6).
 Post-insert side effects are fire-and-forget: an AI ranking
-screen that is assist-only (it never changes status or any
-applicant-facing outcome — every decision is the owner's, which also
-keeps us clear of automated-employment-decision law), an owner
-bell/push, and — as of the recruiting-comms lane, `GATE_RECRUITING_COMMS`
-— the applicant's own submit confirmation: an email whenever one is on
-file, plus SMS only when `sms_consent` was checked on the form. While
-that gate is dark the confirmation is skipped entirely (byte-identical to
-before the lane); it is never a blocking part of the request either way.
-Treat the gate, the limiters, the no-customer/no-lead rule, and the
-fire-and-forget-only comms contract as security-critical.)
+screen bounded by the shared daily cap (`JOB_SCREEN_CAP`, 200/day default,
+leaving applications saved unscored when exceeded) that is assist-only
+(it never changes status or any applicant-facing outcome — every decision
+is the owner's, which also keeps us clear of automated-employment-decision
+law), an owner bell/push, and — as of the recruiting-comms lane,
+`GATE_RECRUITING_COMMS` — the applicant's own submit confirmation: an
+email whenever one is on file, plus SMS only when `sms_consent` was
+checked on the form. While that gate is dark the confirmation is skipped
+entirely (byte-identical to before the lane); it is never a blocking part
+of the request either way. Treat the gate, the limiters, the
+no-customer/no-lead rule, and the fire-and-forget-only comms contract as
+security-critical.)
 `/api/public/careers/offer/:token` (GET; `/offer/:token/v2/text-consent`, `/offer/:token/v2/accept`,
 `/offer/:token/v2/date-request` and `/offer/:token/v2/decline`, all POST, each also without `/v2` — the applicant's
 private job offer
@@ -10220,7 +10224,7 @@ rotated in this PR) and format-gated via `router.param` before any
 database read — malformed, unknown, and non-`interview`-status tokens all
 answer the same generic `{error:'Not found'}` 404. A 30/10min per-IP
 limiter (prod only, `ipFallbackKey`) sits behind both gates. GET returns
-`{first_name, status:'open'|'booked', mode_options, in_person_address,
+`{first_name, language, status:'open'|'booked', mode_options, in_person_address,
 timezone, booked, slots}` — `slots` come from
 `server/services/interview-slots.js` (weekly window template, 4-hour lead
 time, 30-minute slots, 15-minute buffer against the owner's own route
@@ -10253,12 +10257,14 @@ two taps on one application cannot overwrite each other,
 and the status_history entry is appended in SQL; the write is still
 conditional on `status='interview' AND interview_token=?`, a 0-row result
 (a race with a withdraw) is a 409, never a silent overwrite. Privacy
-headers (`noStore`: no-store + noindex + no-referrer) are mounted on the
-`/api/public/careers/interview` prefix in index.js AHEAD of the outer
-`jobApplications` careers gate and ahead of the global `/api` limiter, so
-every outcome — including a dark 404 from either gate — carries them; the
-SPA document `/careers/interview/<64-hex>` gets the same headers via
-`utils/sensitive-spa-headers.js`. Applicant threads are OWNER-ONLY in
+headers (`noStore`: no-store + noindex + no-referrer) and dark gates are
+mounted on the `/api/public/careers/interview` prefix in index.js AHEAD of
+`cors()`, the outer `jobApplications` careers gate, `rejectUndecodablePath`,
+and the global `/api` limiter, so every outcome — including a dark 404,
+OPTIONS preflight, or malformed percent-escape — carries them; the
+SPA document `/careers/interview/:token` gets the same headers via
+`utils/sensitive-spa-headers.js` (`isCareersInterviewPath`, matching
+`isCareersOfferPath` on decoded case-insensitive paths). Applicant threads are OWNER-ONLY in
 every shared reader: the invite carries this bearer link and dual-writes
 into the unified inbox, so `utils/recruiting-thread-scope.js` filters every
 recruiting MESSAGE (`message_type LIKE 'job_%'` — the invite/confirmation

@@ -1719,6 +1719,21 @@ async function hireTechnician(req, res, next) {
         critical: true,
         trx,
       });
+      // Sync Recruiting's first-days checklist when this prospective hire came
+      // from a signed job offer (best-effort inside the transaction).
+      try {
+        const JobOffers = require('../services/job-offers');
+        if (typeof JobOffers.markOfferLoginActivated === 'function') {
+          await JobOffers.markOfferLoginActivated(
+            trx,
+            target.id,
+            { id: req.technicianId || null, name: (req.technician && req.technician.name) || null },
+            now,
+          );
+        }
+      } catch (syncErr) {
+        logger.warn(`[team] job-offer login checklist sync skipped for technician id=${target.id}: ${syncErr.code || syncErr.message}`);
+      }
       return { tech: await trx('technicians').where({ id: target.id }).first() };
     });
 

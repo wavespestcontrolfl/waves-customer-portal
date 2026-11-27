@@ -1,12 +1,10 @@
 /**
  * Interview self-scheduling slots for the recruiting comms lane
- * (GATE_RECRUITING_COMMS). Pure(ish) read-side computation — one DB read
- * for route conflicts, one for other-applicant conflicts, per candidate
- * day — building on the shared ET wall-clock helpers so slot boundaries
- * never drift with server-local time (Railway runs TZ=UTC).
- *
- * The owner is the only field technician: route conflicts read
- * scheduled_services with no technician filter.
+ * (GATE_RECRUITING_COMMS). Pure(ish) read-side computation — one batched DB
+ * read for route conflicts across the horizon, one for other-applicant
+ * conflicts, plus best-effort owner-tech scoping and absence filtering —
+ * building on the shared ET wall-clock helpers so slot boundaries never drift
+ * with server-local time (Railway runs TZ=UTC).
  */
 
 const db = require('../models/db');
@@ -143,6 +141,53 @@ function slotLabel(startDate) {
   return `${weekday} ${monthDay}, ${formatETTime(startDate)}`;
 }
 
+// Best-effort owner-interviewer context: when multiple active field techs
+// exist, scope route conflicts to the interviewing owner's route (plus
+// unassigned stops) and exclude days where the owner has an uncleared
+// technician_absences row. Gracefully falls back to tech-blind single-tech
+// behavior when technicians/absences tables are empty or unavailable (unit
+// test mocks).
+async function resolveOwnerInterviewContext(conn, dateStrs) {
+  let ownerTechId = null;
+  let scopeToOwner = false;
+  try {
+    const techs = await conn('technicians')
+      .where({ is_active: true })
+      .select('id', 'email', 'role', 'field_dispatchable');
+    if (Array.isArray(techs) && techs.length > 0) {
+      const configured = String(process.env.IB_FULL_ACCESS_EMAILS || 'contact@wavespestcontrol.com')
+        .split(',')
+        .map((e) => e.trim().toLowerCase())
+        .filter(Boolean);
+      const ownerRow = techs.find((t) => configured.includes(String(t.email || '').trim().toLowerCase()))
+        || techs.find((t) => t.role === 'admin');
+      if (ownerRow) ownerTechId = ownerRow.id;
+      const activeFieldCount = techs.filter((t) => t.field_dispatchable !== false).length;
+      scopeToOwner = Boolean(ownerTechId && activeFieldCount > 1);
+    }
+  } catch {
+    // Unit-test mocks without technicians table fall through cleanly.
+  }
+
+  const absentDates = new Set();
+  if (ownerTechId && dateStrs.length > 0) {
+    try {
+      const absences = await conn('technician_absences')
+        .where({ technician_id: ownerTechId })
+        .whereIn('absence_date', dateStrs)
+        .whereNull('cleared_at')
+        .select('absence_date');
+      for (const a of absences || []) {
+        const d = scheduledDateStr(a.absence_date);
+        if (d) absentDates.add(d);
+      }
+    } catch {
+      // Best-effort: absence table may be omitted in unit mocks.
+    }
+  }
+  return { ownerTechId, scopeToOwner, absentDates };
+}
+
 /**
  * @param {{ now?: Date, excludeApplicationId?: string }} opts
  * @returns {Promise<Array<{ start: string, end: string, date: string, label: string }>>}
@@ -169,6 +214,12 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
     })
     .select('id', 'interview_at', 'interview_end_at');
 
+  // Precompute candidate days & the exact set of ET dates needed for a single
+  // batched route-conflict read (including each candidate day's previous ET
+  // day so late combined allocations running past midnight still shadow
+  // early-morning windows).
+  const candidateDays = [];
+  const routeDatesSet = new Set();
   for (let dayOffset = 0; dayOffset < HORIZON_DAYS; dayOffset++) {
     const dayAnchor = addETDays(now, dayOffset);
     const dp = etParts(dayAnchor);
@@ -176,25 +227,54 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
     const iso = String(isoWeekdayOf(dp.dayOfWeek));
     const dayWindows = windows[iso] || [];
     if (!dayWindows.length) continue;
-
-
-    // This ET day AND the previous one (Codex r14 P2): occupiedRows lets a
-    // combined allocation's endMin run past midnight, so a late previous-day
-    // allocation must still shadow an early-morning window on this day. The
-    // intervals are absolute instants, so no clipping is needed.
     const prevDateStr = etDateStr(addETDays(dayAnchor, -1));
-    const routeRows = await conn('scheduled_services')
-      .whereIn('scheduled_date', [prevDateStr, dateStr])
-      .whereNotIn('status', NOT_ROUTE_STOP_STATUSES)
-      .whereNotNull('window_start')
-      // Same active-hold predicate as the canonical occupancy readers: an
-      // expired estimate-slot hold has released its window (Codex r6 P2).
-      .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
-      .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
-        'estimated_duration_minutes', 'reservation_service_mix');
+    candidateDays.push({ dateStr, prevDateStr, dayWindows });
+    routeDatesSet.add(prevDateStr);
+    routeDatesSet.add(dateStr);
+  }
+  if (!candidateDays.length) return slots;
 
-     
-    const appRows = allAppRows;
+  const { ownerTechId, scopeToOwner, absentDates } = await resolveOwnerInterviewContext(
+    conn,
+    candidateDays.map((d) => d.dateStr),
+  );
+
+  // Single batched read across all needed dates (replaces up to 14 sequential
+  // per-day queries under the booking advisory lock).
+  const allRouteRowsRaw = await conn('scheduled_services')
+    .whereIn('scheduled_date', [...routeDatesSet])
+    .whereNotIn('status', NOT_ROUTE_STOP_STATUSES)
+    .whereNotNull('window_start')
+    // Same active-hold predicate as the canonical occupancy readers: an
+    // expired estimate-slot hold has released its window (Codex r6 P2).
+    .where((q) => { q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'); })
+    .select('id', 'customer_id', 'technician_id', 'scheduled_date', 'window_start', 'window_end',
+      'estimated_duration_minutes', 'reservation_service_mix');
+
+  const allRouteRows = scopeToOwner
+    ? allRouteRowsRaw.filter((r) => r.technician_id == null || r.technician_id === ownerTechId)
+    : allRouteRowsRaw;
+
+  const routeRowsByDate = new Map();
+  for (const row of allRouteRows) {
+    const d = scheduledDateStr(row.scheduled_date);
+    if (!routeRowsByDate.has(d)) routeRowsByDate.set(d, []);
+    routeRowsByDate.get(d).push(row);
+  }
+
+  // Buffer each other applicant's interview the same BUFFER_MINUTES both
+  // sides as route stops (Codex P2) — an interview immediately adjacent to
+  // another still needs travel/setup room between them.
+  const appIntervals = allAppRows.map((a) => {
+    const rawStartMs = new Date(a.interview_at).getTime();
+    const rawEndMs = a.interview_end_at
+      ? new Date(a.interview_end_at).getTime()
+      : rawStartMs + SLOT_MINUTES * 60000;
+    return { startMs: rawStartMs - BUFFER_MINUTES * 60000, endMs: rawEndMs + BUFFER_MINUTES * 60000 };
+  });
+
+  for (const { dateStr, prevDateStr, dayWindows } of candidateDays) {
+    if (absentDates.has(dateStr)) continue;
 
     // Canonical occupancy math (server/services/scheduling/occupancy.js
     // occupiedRows): a version-2 combined service allocation occupies the SUM
@@ -203,22 +283,11 @@ async function listInterviewSlots({ now = new Date(), excludeApplicationId, conn
     // under-counted a combined allocation whose members extend past this
     // row's own window_end (Codex P1).
     const routeIntervals = [prevDateStr, dateStr].flatMap((d) => (
-      occupiedRows(routeRows.filter((r) => scheduledDateStr(r.scheduled_date) === d)).map((r) => ({
+      occupiedRows(routeRowsByDate.get(d) || []).map((r) => ({
         startMs: minutesToETMs(d, r.startMin),
         endMs: minutesToETMs(d, r.endMin),
       }))
     ));
-
-    // Buffer each other applicant's interview the same BUFFER_MINUTES both
-    // sides as route stops (Codex P2) — an interview immediately adjacent to
-    // another still needs travel/setup room between them.
-    const appIntervals = appRows.map((a) => {
-      const rawStartMs = new Date(a.interview_at).getTime();
-      const rawEndMs = a.interview_end_at
-        ? new Date(a.interview_end_at).getTime()
-        : rawStartMs + SLOT_MINUTES * 60000;
-      return { startMs: rawStartMs - BUFFER_MINUTES * 60000, endMs: rawEndMs + BUFFER_MINUTES * 60000 };
-    });
 
     for (const [startHHMM, endHHMM] of dayWindows) {
       const windowStartMin = timeToMinutes(startHHMM);

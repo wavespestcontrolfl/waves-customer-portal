@@ -26,7 +26,7 @@ const TOKEN_FAILURE_CODES = new Set([
 // Verify a token against ONE secret. Assumes a non-blank, length-checked token.
 // Returns the same shape as verifyTurnstileToken (fail OPEN on transport/config,
 // CLOSED only on a definitive token failure).
-async function verifyOneSecret(secret, token, remoteip) {
+async function verifyOneSecret(secret, token, remoteip, expectedHostname) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
   try {
@@ -50,6 +50,14 @@ async function verifyOneSecret(secret, token, remoteip) {
 
     const data = await res.json();
     if (data && data.success) {
+      const verifiedHost = typeof data.hostname === 'string' ? data.hostname.trim().toLowerCase() : '';
+      const expected = typeof expectedHostname === 'string' ? expectedHostname.trim().toLowerCase() : '';
+      if (verifiedHost && expected && verifiedHost !== 'example.com' && verifiedHost !== 'dummy.turnstile.cloudflare.com') {
+        if (registrableDomain(verifiedHost) !== registrableDomain(expected)) {
+          logger.warn(`[turnstile] siteverify hostname mismatch (verified="${verifiedHost}", expected="${expected}")`);
+          return { ok: false, enforced: true, reason: 'hostname_mismatch' };
+        }
+      }
       return { ok: true, enforced: true, reason: 'verified' };
     }
     const codes = Array.isArray(data && data['error-codes'])
@@ -193,7 +201,7 @@ async function verifyTurnstileToken(token, remoteip, hostname) {
     logger.info(`[turnstile] no widget matched host "${hostname || ''}"`);
     return { ok: false, enforced: true, reason: 'no_widget_match' };
   }
-  return verifyOneSecret(secret, trimmedToken, remoteip);
+  return verifyOneSecret(secret, trimmedToken, remoteip, hostname);
 }
 
 module.exports = { verifyTurnstileToken };
