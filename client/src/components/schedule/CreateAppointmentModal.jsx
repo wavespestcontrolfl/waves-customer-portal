@@ -4047,6 +4047,19 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     attempt(350, 0);
     return () => { cancelled = true; clearTimeout(retryTimer); };
   }, [previewRequestKey, previewRetryNonce]);
+  // A blank WDO line goes to the preview with no price: the server prices it from the table itself. A WDO price shown again
+  // with a new amount (Save or Book read it again) leaves that request as it was, so the preview is read again here. Else a
+  // credit's split stays at the old price, and every save is refused as PRICE_DIVERGED until a reload (pre-push audit P1).
+  const shownWdoPrice = wdoQuoteShown ? wdoQuote.price : null;
+  const lastShownWdoPriceRef = useRef(null);
+  useEffect(() => {
+    if (shownWdoPrice == null) return;
+    const before = lastShownWdoPriceRef.current;
+    lastShownWdoPriceRef.current = shownWdoPrice;
+    if (before == null || before === shownWdoPrice || !previewRequestKey) return;
+    setServerPreview((prev) => ({ ...prev, status: 'loading' }));
+    setPreviewRetryNonce((n) => n + 1);
+  }, [shownWdoPrice, previewRequestKey]);
   // Submit is held (disabled, via canSubmit below) while ANY
   // regime-dependent group's server-confirmed preview hasn't landed for
   // the CURRENT inputs yet, so there is no window in which a click can

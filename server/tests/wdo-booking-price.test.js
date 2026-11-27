@@ -130,9 +130,9 @@ describe('a blank WDO line books at the table price of the home', () => {
 
   test('a commercial site gets no table price: the catalog price stands', async () => {
     lookup.mockResolvedValue(record(2600, 'frame'));
-    // The customer row, the primary property row, or the record itself calls it commercial.
+    // The customer row, the primary property row at the customer's address, or the record itself calls it commercial.
     expect((await bookBlankWdo({ customer: { ...HOME, property_type: 'commercial' } })).finalPrice).toBe(250);
-    wireDb({ customer_properties: { ...RENTAL, is_primary: true, occupancy_type: 'commercial' } });
+    wireDb({ customer_properties: { ...RENTAL, address_line1: HOME.address_line1, city: HOME.city, zip: HOME.zip, is_primary: true, occupancy_type: 'commercial' } });
     expect((await bookBlankWdo()).finalPrice).toBe(250);
     expect(lookup).not.toHaveBeenCalled();
     wireDb({ customer_properties: undefined });
@@ -157,20 +157,36 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).not.toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
   });
 
-  test('no property named: a customer\'s one active property is the home priced, where the visit is stamped, even when it is not marked primary', async () => {
+  test('no property named: the visit is the customer\'s own address, where dispatch shows it; a lone property at another address gets no table price', async () => {
     lookup.mockResolvedValue(record(4200, 'crawl'));
-    // The sole active property read (no id, no primary flag), the read by id, and no primary property.
-    const rows = (active) => (cond) => {
+    // The sole active property read (no id, no primary flag), the read by id, and the primary property.
+    const rows = (active, primary) => (cond) => {
       if (cond.id) return active.find((property) => property.id === cond.id);
-      return cond.is_primary ? undefined : active;
+      return cond.is_primary ? primary : active;
     };
-    wireDb({ customers: HOME, customer_properties: rows([RENTAL]) });
+    // The customer's one active property is at their own address, not marked primary: the save stamps it, and its own
+    // records count.
+    const AT_HOME = { ...RENTAL, address_line1: HOME.address_line1, city: HOME.city, zip: HOME.zip };
+    wireDb({ customers: HOME, customer_properties: rows([AT_HOME]) });
     expect((await bookBlankWdo()).finalPrice).toBe(275);
-    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
-    // Two active properties: the visit is stamped with neither, and the customer's own home is priced.
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+    wireDb({ customers: HOME, customer_properties: rows([{ ...AT_HOME, occupancy_type: 'commercial' }]) });
+    expect((await bookBlankWdo()).finalPrice).toBe(250);
+    // The one active property is a rental at another address. The save stamps the visit with it but no street, so
+    // dispatch shows the customer's own address: two homes, so the catalog price stands and no record is read.
     lookup.mockClear();
-    wireDb({ customers: HOME, customer_properties: rows([RENTAL, { ...RENTAL, id: 'b9e1c3d4-1111-4a2b-9c3d-5e6f7a8b9c0d' }]) });
-    await bookBlankWdo();
+    wireDb({ customers: HOME, customer_properties: rows([RENTAL]) });
+    const stampedElsewhere = await bookBlankWdo();
+    expect(stampedElsewhere.finalPrice).toBe(250);
+    expect(stampedElsewhere.wdoTable).toBeUndefined();
+    expect(lookup).not.toHaveBeenCalled();
+    // Two active properties, the primary at another address: the save stamps neither, so the customer's own home is
+    // priced, never the primary's.
+    const primaryElsewhere = { ...RENTAL, is_primary: true };
+    const SECOND = { ...RENTAL, id: 'b9e1c3d4-1111-4a2b-9c3d-5e6f7a8b9c0d', address_line1: '300 Sample Ave' };
+    wireDb({ customers: HOME, customer_properties: rows([primaryElsewhere, SECOND], primaryElsewhere) });
+    expect((await bookBlankWdo()).finalPrice).toBe(275);
+    expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
   });
 
@@ -181,20 +197,22 @@ describe('a blank WDO line books at the table price of the home', () => {
       if (cond.id) return active.find((property) => property.id === cond.id);
       return cond.is_primary ? undefined : active;
     };
-    wireDb({ customers: HOME, customer_properties: rows([RENTAL]) });
+    // The customer's one active property, at their own address.
+    const AT_HOME = { ...RENTAL, address_line1: HOME.address_line1, city: HOME.city, zip: HOME.zip };
+    wireDb({ customers: HOME, customer_properties: rows([AT_HOME]) });
     const pricing = await bookBlankWdo();
     expect(pricing.finalPrice).toBe(275);
     const check = (table, propertyId) => assertWdoTableHomeUnchanged(table, { customerId: CUSTOMER_ID, propertyId, trx: dbMock });
     // The save stamps the same sole property: it goes on.
     await expect(check(pricing.wdoTable, PROPERTY_ID)).resolves.toBeUndefined();
-    // The rental was replaced by another property, or its address was edited, before the save stamped it.
+    // The property was replaced by one at another address, or its address was edited, before the save stamped it.
     const OTHER = { ...RENTAL, id: 'c0d1e2f3-2222-4b3c-8d4e-6f7a8b9c0d1e', address_line1: '300 Sample Ct' };
     wireDb({ customers: HOME, customer_properties: rows([OTHER]) });
     await expect(check(pricing.wdoTable, OTHER.id)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
-    wireDb({ customers: HOME, customer_properties: rows([{ ...RENTAL, address_line1: '300 Sample Ct' }]) });
+    wireDb({ customers: HOME, customer_properties: rows([{ ...AT_HOME, address_line1: '300 Sample Ct' }]) });
     await expect(check(pricing.wdoTable, PROPERTY_ID)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
     // Two active properties: the visit is stamped with neither, and the customer's own home was priced: it goes on.
-    wireDb({ customers: HOME, customer_properties: rows([RENTAL, OTHER]) });
+    wireDb({ customers: HOME, customer_properties: rows([AT_HOME, OTHER]) });
     const atHome = await bookBlankWdo();
     await expect(check(atHome.wdoTable, null)).resolves.toBeUndefined();
     // The property record is read only before the save; a booking with no table price has nothing to check.

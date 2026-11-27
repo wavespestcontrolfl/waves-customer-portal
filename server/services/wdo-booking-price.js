@@ -21,8 +21,8 @@
  *   - walls not on the record, or a reading the record's own evidence does not back: concrete block on a slab;
  *   - both together: the lowest table price, with a staff note that says so and what a confirmed home would cost.
  * A booking is never blocked. null means "no table price": the stored records call the property commercial (the engine
- * quotes those by hand), the booking property is not the customer's, or the read failed. The caller then keeps the price it
- * filled before this rule: the catalog price.
+ * quotes those by hand), the booking property is not the customer's, the home cannot be told, or the read failed. The
+ * caller then keeps the price it filled before this rule: the catalog price.
  */
 
 const db = require('../models/db');
@@ -68,18 +68,20 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   const { addressForCustomer } = require('./customer-pricing-ai');
   const { addressKey } = require('./customer-properties');
   // No property named: a booking stamps the customer's sole active property when there is exactly one
-  // (customer-properties soleActivePropertyId), so that property is the home priced, even one not marked primary
+  // (customer-properties soleActivePropertyId), so that property's own records count, even one not marked primary
   // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
   const activeRows = propertyId || written ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
   const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
   let at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
-  // A linked estimate quoted the customer's own address. A sole active property at another address is the one the save
-  // stamps the visit with: another home than the one quoted, so the home cannot be told (pre-push audit P0). With no sole
-  // property the visit is the customer's own address: a primary property saved at another address does not stand in for
-  // it, and only the account's own records can call it commercial (pre-push audit P0).
-  if (customerAddress && at.otherProperty) {
-    if (soleActive) return { refusal: 'the estimate quotes the customer\'s own address, and the visit is stamped with a property at another address' };
+  // No property named and no address written: the save stamps no street, so dispatch shows the visit at the customer's
+  // own address (COALESCE(service_address_line1, customers.address_line1)). A linked estimate that quoted the customer's
+  // own address names the same home. A sole active property at another address is the one the save stamps the visit
+  // with: the price would read one home and dispatch would show another, so the home cannot be told (pre-push audit P0).
+  // With no sole property the save stamps none: a primary property saved at another address does not stand in for the
+  // customer's own address, and only the account's own records can call it commercial (pre-push audit P0).
+  if ((customerAddress || (!propertyId && !written)) && at.otherProperty) {
+    if (soleActive) return { refusal: 'the visit is stamped with the customer\'s one property, at another address than the customer\'s own' };
     const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
     at = {
       customer: row,

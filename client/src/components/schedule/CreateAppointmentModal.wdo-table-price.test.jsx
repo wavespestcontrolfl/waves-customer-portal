@@ -15,6 +15,7 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
   useDiscountStackingState: vi.fn(() => ({ enabled: false, known: true, retry: vi.fn() })),
   ensureStackingFresh: vi.fn(async () => ({ enabled: false, known: true })),
 }));
+import { ensureStackingFresh, useDiscountStackingState } from '../../hooks/useDiscountStacking';
 import CreateAppointmentModal, {
   newCallerBookBlockReason, saveFormMoved, wdoLineHintText, wdoQuoteAnswer, wdoQuoteBody, wdoQuoteQuery, wdoSubmitGate,
 } from './CreateAppointmentModal.jsx';
@@ -204,6 +205,7 @@ const quoteCalls = (fetcher) => {
   return calls.map(([, o]) => JSON.parse(o.body));
 };
 const schedulePosts = (fetcher) => fetcher.mock.calls.filter(([u, o]) => String(u).endsWith('/admin/schedule') && o?.method === 'POST').map(([, o]) => JSON.parse(o.body));
+const previewPosts = (fetcher) => fetcher.mock.calls.filter(([u, o]) => String(u).endsWith('/admin/schedule/preview') && o?.method === 'POST');
 const saveButton = () => screen.getByRole('button', { name: 'Schedule appointment' });
 
 describe('a WDO line in the modal', () => {
@@ -309,6 +311,35 @@ describe('a WDO line in the modal', () => {
     fireEvent.click(saveButton());
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
     expect(schedulePosts(fetcher)[0]).toMatchObject({ primaryLinePrice: null, wdoExpectedPrice: 225 });
+  });
+
+  it('a WDO price shown again with a new amount reads the discount preview again: the preview went with the line blank', async () => {
+    vi.mocked(useDiscountStackingState).mockImplementation(() => ({ enabled: true, known: true, retry: vi.fn() }));
+    vi.mocked(ensureStackingFresh).mockImplementation(async () => ({ enabled: true, known: true }));
+    try {
+      let answer = FRAME_2600;
+      const fetcher = installFetch({
+        quote: () => answer,
+        discounts: [{ id: 'd-credit', name: 'Neighbor credit', discount_type: 'fixed_amount', amount: '10.00', is_active: true, show_in_invoices: true }],
+      });
+      mount();
+      await addWdoLine();
+      await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+      fireEvent.change(await screen.findByLabelText('Appointment discount'), { target: { value: 'd-credit' } });
+      await waitFor(() => expect(previewPosts(fetcher).length).toBeGreaterThan(0));
+      await waitFor(() => expect(saveButton().disabled).toBe(false));
+      const previews = previewPosts(fetcher).length;
+      // The preview names the line blank, so a new WDO price leaves its request as it was.
+      expect(JSON.parse(previewPosts(fetcher).at(-1)[1].body).groups[0]).toMatchObject({ serviceId: 'svc-wdo', primaryLinePrice: null });
+      answer = { price: 225, source: 'wdo_table', basis: '3,600 sq ft, wood frame', staffNote: null };
+      fireEvent.click(saveButton());
+      await waitFor(() => expect(hint()?.textContent).toBe('Table price: $225.00 (3,600 sq ft, wood frame).'));
+      await waitFor(() => expect(previewPosts(fetcher)).toHaveLength(previews + 1));
+      expect(schedulePosts(fetcher)).toHaveLength(0);
+    } finally {
+      vi.mocked(useDiscountStackingState).mockImplementation(() => ({ enabled: false, known: true, retry: vi.fn() }));
+      vi.mocked(ensureStackingFresh).mockImplementation(async () => ({ enabled: false, known: true }));
+    }
   });
 
   it('a save the server refused because the price changed reads the price again, so the line shows the new one', async () => {
