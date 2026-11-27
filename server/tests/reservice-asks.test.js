@@ -589,3 +589,119 @@ describe('pestsIn', () => {
     for (const word of ['roach', 'roaches']) expect(roach.test(word)).toBe(true);
   });
 });
+
+describe('selfBookedNoteText', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('returns the typed note without the booking flow appendix', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Please text first — Unit: 5')).toBe('Please text first');
+    expect(selfBookedNoteText('Self-booked via portal — Unit: 5')).toBeNull();
+    expect(selfBookedNoteText(null)).toBeNull();
+  });
+  test('a re-service request line is not a booking note', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service request: ants are back')).toBeNull();
+  });
+});
+
+describe('selfBookedNoteText: multiline and the original booking', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('keeps continuation lines up to the booking appendix', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Side gate sticks.\nPlease text first. — Unit: 5')).toBe('Side gate sticks. Please text first.');
+  });
+  test('the original booking customer_notes win when given', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Cut short', 'Side gate sticks.\nPlease text first.')).toBe('Side gate sticks. Please text first.');
+    expect(selfBookedNoteText('Self-booked via portal', 'Beware of the dog')).toBe('Beware of the dog');
+    expect(selfBookedNoteText('x', 'Re-service request: ants are back')).toBeNull();
+  });
+});
+
+describe('selfBookedNoteText: stops at records other writers append', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('a rescheduled visit keeps only the booking words', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Please text first — Unit: 5 | RESCHEDULE REQUEST: Move to Friday (preferred: 2026-12-04)')).toBe('Please text first');
+    expect(selfBookedNoteText('Self-booked. Notes: Please text first | RESCHEDULE REQUEST: Move to Friday')).toBe('Please text first');
+    expect(selfBookedNoteText('Self-booked. Notes: Side gate sticks.\nPlease text first. | RESCHEDULE REQUEST: Move it')).toBe('Side gate sticks. Please text first.');
+  });
+  test('the other appended records end the note too', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Beware of the dog — series activation never completed (worker died mid-booking); office converts')).toBe('Beware of the dog');
+    expect(selfBookedNoteText('Self-booked. Notes: Beware of the dog [auto-closed 11PM]')).toBe('Beware of the dog');
+    expect(selfBookedNoteText('Self-booked. Notes: Beware of the dog — booked beside an existing pest plan; kept as a one-off visit')).toBe('Beware of the dog');
+  });
+  test('a visit with no booking note stays empty after a reschedule', () => {
+    expect(selfBookedNoteText('Self-booked via portal — Unit: 5 | RESCHEDULE REQUEST: Move it')).toBeNull();
+  });
+});
+
+describe('selfBookedNoteText: the generated self-serve note', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('the fallback reservice-public.js writes when the customer gave nothing is not their words', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link')).toBeNull();
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link — Unit: 5')).toBeNull();
+    expect(selfBookedNoteText('x', 'Re-service requested via self-serve link')).toBeNull();
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link | RESCHEDULE REQUEST: Friday')).toBeNull();
+  });
+  test('real words that mention the link stay', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link, gate code is open')).toBe('Re-service requested via self-serve link, gate code is open');
+  });
+});
+
+describe('selfBookedNoteText: stops at the office entries', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  const real = 'Self-booked. Notes: Side gate sticks.\nPlease text first.';
+  test('"Moved from <date>: <reason>" ends the note, beside a real multiline note', () => {
+    expect(selfBookedNoteText(`${real}\nMoved from 2026-11-20: customer asked for Friday`)).toBe('Side gate sticks. Please text first.');
+    expect(selfBookedNoteText(`${real} — Unit: 5\nMoved from 2026-11-20: customer asked for Friday`)).toBe('Side gate sticks. Please text first.');
+  });
+  test('"Rescheduled: <reason>" ends the note, beside a real multiline note', () => {
+    expect(selfBookedNoteText(`${real}\nRescheduled: tech out sick`)).toBe('Side gate sticks. Please text first.');
+    expect(selfBookedNoteText('Self-booked via portal\nRescheduled: tech out sick')).toBeNull();
+  });
+  test('both entries together, and a later reschedule request', () => {
+    expect(selfBookedNoteText(`${real}\nMoved from 2026-11-20: a\nRescheduled: b | RESCHEDULE REQUEST: c`)).toBe('Side gate sticks. Please text first.');
+  });
+});
+
+describe('gatherReserviceAsks: holdText screens the ORIGINAL text, before the scrub and the caps', () => {
+  const filler = `${'The ants keep coming in by the back door. '.repeat(8)}`; // past 280 characters
+  const hold = (text) => /photos\.example\.dev|blue42/.test(text);
+
+  test('a candidate whose original text is held never becomes an item, whatever the cut left of it', async () => {
+    const late = `${filler}Photos are at photos.example.dev/yard`;
+    const out = await gatherReserviceAsks('visit-1', {
+      knex: fakeKnex({ visit: baseVisit({ customer_request: late, customer_request_source: 'text' }), sms: [sms('s1', late), sms('s2', 'Ants are back in the kitchen.')] }),
+      now: NOW,
+      holdText: hold,
+    });
+    expect(out.items.map((i) => i.id)).toEqual(['text:s2']);
+  });
+
+  test('the whole text body is screened, not only the capped suggestion', async () => {
+    const late = `Ants are back in the kitchen. ${'x '.repeat(300)} lockbox is blue42`;
+    const out = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ sms: [sms('s1', late)] }), now: NOW, holdText: hold });
+    expect(out.items).toEqual([]);
+  });
+
+  test('without holdText the result is unchanged', async () => {
+    const late = `${filler}Photos are at photos.example.dev/yard`;
+    const out = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ sms: [sms('s1', late)] }), now: NOW });
+    expect(out.items).toHaveLength(1);
+  });
+});
+
+describe('gatherReserviceAsks: holdText sees the whole customer-authored legacy notes, continuation lines included', () => {
+  const hold = (text) => /photos\.example\.dev/.test(text);
+  const notes = 'Self-booked. Notes: Re-service request: ants are back\nPhotos are at photos.example.dev/yard — Unit: 5';
+
+  test('a legacy request whose later line is held is dropped; its first line alone would have passed', async () => {
+    expect(_test.legacyRequestText(notes)).toBe('ants are back');
+    const held = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ visit: baseVisit({ notes }) }), now: NOW, holdText: hold });
+    expect(held.items).toEqual([]);
+    const open = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ visit: baseVisit({ notes }) }), now: NOW });
+    expect(open.items.map((i) => i.text)).toEqual(['ants are back']);
+  });
+
+  test('lines appended by other writers are not part of the customer portion', async () => {
+    const withReschedule = 'Self-booked. Notes: Re-service request: ants are back — Unit: 5 | RESCHEDULE REQUEST: see photos.example.dev/x';
+    const out = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ visit: baseVisit({ notes: withReschedule }) }), now: NOW, holdText: hold });
+    expect(out.items.map((i) => i.text)).toEqual(['ants are back']);
+  });
+});

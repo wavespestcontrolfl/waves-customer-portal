@@ -20,9 +20,9 @@ const {
 } = require('../services/heard-about');
 
 describe('shared heard-about module', () => {
-  test('the allowlist is the ten Astro select ids', () => {
+  test('the allowlist is the eleven Astro select ids', () => {
     expect([...HEARD_ABOUT_OPTIONS].sort()).toEqual([
-      'chatgpt', 'facebook_instagram', 'friend_neighbor', 'google_maps', 'google_search',
+      'chatgpt', 'facebook_group', 'facebook_instagram', 'friend_neighbor', 'google_maps', 'google_search',
       'nextdoor', 'other', 'other_ai', 'truck_yard_sign', 'yelp',
     ]);
   });

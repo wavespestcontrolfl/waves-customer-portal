@@ -982,9 +982,11 @@ describe('the read-free pre-screens select any Zelle word and price grammar (and
     expect(bodyNeedsPaymentRecheck(body)).toBe(false);
     expect(bodyNeedsBillingBoundaryCheck(body)).toBe(false);
   });
-  test('the boundary pre-screen is the recheck pre-screen, status vocabulary included', () => {
-    expect(bodyNeedsBillingBoundaryCheck).toBe(bodyNeedsPaymentRecheck);
+  test('the boundary pre-screen is the recheck pre-screen, status vocabulary included; a report delivery sentence alone is rechecked, never billing-fingerprinted', () => {
     expect(bodyNeedsBillingBoundaryCheck("You're paid up.", { promptVersion: V12 })).toBe(true);
+    const report = 'The service report for your Quarterly Pest Control visit on Friday, Nov 20 has not been emailed yet.';
+    expect(bodyNeedsPaymentRecheck(report)).toBe(true);
+    expect(bodyNeedsBillingBoundaryCheck(report)).toBe(false);
   });
 });
 
@@ -1004,3 +1006,139 @@ describe('auto-send recheck: a second receipt that arrived after drafting makes 
   });
 });
 
+// REPORT DELIVERY (texting AI gap 2): a body stating whether a visit's service report was emailed is re-rendered from today's delivery rows at
+// send. The fake context carries what sms-staff-facts.loadReportDeliveryFacts returns; the sentences are the drafter's real renderer.
+describe('outgoingAmountsStale - the REPORT DELIVERY sentences are rechecked at send', () => {
+  const PENDING = 'The service report for your Quarterly Pest Control visit on Friday, Nov 20 has not been emailed yet.';
+  const SENT = 'The service report for your Quarterly Pest Control visit on Friday, Nov 20 was emailed on Friday, Nov 20 to your email address on file.';
+  const visit = (over = {}) => ({ recordId: 'sr-1', serviceType: 'Quarterly Pest Control', serviceDate: '2026-11-20', state: 'sent', sentOn: '2026-11-20', recipient: 'account', ...over });
+  const billing = { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+  const live = (reportDeliveries) => ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, reportDeliveries });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'did my report go out?', ...extra });
+
+  test('an unchanged sentence passes, read with the report facts only, and is not judged as a payment status', async () => {
+    live({ visits: [visit()] });
+    await expect(run(`Hi Pat! ${SENT}`)).resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenLastCalledWith({ id: 'c1' }, { includeSmsStaffFacts: { reports: true } });
+  });
+
+  test('a delivery row that moved on refuses as report_delivery_changed (queued -> sent, a bounce, the row gone)', async () => {
+    live({ visits: [visit()] });
+    await expect(run(PENDING)).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    live({ visits: [visit({ recipient: 'undelivered' })] });
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    live({ visits: [] });
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    // an AI body that starts a report sentence of its own wording is held too
+    live({ visits: [visit()] });
+    await expect(run('The service report for your visit went to your inbox.')).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+  });
+
+  test('a read that failed is retryable (report_delivery_recheck_failed); no customer fails closed', async () => {
+    live(null);
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_recheck_failed' });
+    ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('db down'));
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_recheck_failed' });
+    await expect(run(SENT, { customerId: null })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    const { blockReasonIsBillingInfrastructure } = require('../services/agent-decision-send-checks');
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (report_delivery_recheck_failed)')).toBe(true);
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (report_delivery_changed)')).toBe(false);
+  });
+
+  test('a staff edit: a retained sentence of the rendered form is rechecked; the staff member\'s own report wording is theirs', async () => {
+    live({ visits: [visit({ state: 'pending', sentOn: undefined, recipient: undefined })] });
+    await expect(run(`Hi Pat, ${SENT}`, { humanEditedBody: true, trustOwedAmounts: true })).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    await expect(run('The service report for your visit was resent this morning.', { humanEditedBody: true, trustOwedAmounts: true })).resolves.toEqual({ stale: false });
+  });
+
+  test('a body with no report sentence reads nothing for it', async () => {
+    await expect(run('See you Tuesday!')).resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
+
+// PHOTO CHECK (texting AI gap 6): a body copying the photo checker's sentence is re-rendered from a fresh read of the customer's stored photo
+// readings at send. The readings are stubbed (sms-photo-fact.loadPhotoChecks); the sentences are the real renderer's.
+describe('outgoingAmountsStale - the PHOTO CHECK sentences are rechecked at send', () => {
+  const photoFact = require('../services/sms-photo-fact');
+  const ROACH = 'From your photo, it looks like a German cockroach. Your technician will confirm at the visit.';
+  const reading = (over = {}) => ({ smsLogId: 'log-1', assessmentId: 'a-1', identification: { slug: 'german-roach', confidence: 'high', category: 'insect', ...over } });
+  const billing = { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+  const live = (checks, { upcoming = [{ type: 'Quarterly Pest Control' }] } = {}) => {
+    jest.spyOn(photoFact, 'loadPhotoChecks').mockResolvedValue(checks);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, upcomingServices: upcoming });
+  };
+  // the customers row (loadCustomerContext) and the inbound sms_log row (its media flag) by table
+  const photoDb = (inbound = { metadata: { media: [{ key: 'sms-media/x.jpg' }] } }) => dbWithTables({ customers: { id: 'c1' }, sms_log: inbound });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: photoDb(), inboundMessage: 'what is this bug?', inboundSmsLogId: 'log-1', ...extra });
+  afterEach(() => jest.restoreAllMocks());
+
+  test("the recheck reads only the reading of the decision's own inbound text; with none to bind to it fails closed", async () => {
+    live([reading()]);
+    await run(ROACH);
+    expect(photoFact.loadPhotoChecks).toHaveBeenCalledWith('c1', expect.objectContaining({ smsLogId: 'log-1' }));
+    // another photo text's reading (the loader returns nothing for this inbound) does not authorize the sentence
+    photoFact.loadPhotoChecks.mockImplementation(async (_c, { smsLogId }) => (smsLogId === 'log-2' ? [reading({ smsLogId: 'log-2' })] : []));
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    await expect(run(ROACH, { inboundSmsLogId: null })).resolves.toEqual({ stale: true, reason: 'photo_check_no_inbound' });
+  });
+
+  test('an unchanged sentence passes and is not judged as a payment status', async () => {
+    live([reading()]);
+    await expect(run(`Thanks for the photo! ${ROACH}`)).resolves.toEqual({ stale: false });
+    expect(bodyNeedsPaymentRecheck(ROACH)).toBe(true);
+    expect(bodyNeedsBillingBoundaryCheck(ROACH)).toBe(false);
+  });
+
+  test('a reading that changed refuses as photo_check_changed (archived or rejected = gone, the visit cancelled, a lower confidence)', async () => {
+    live([]);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    live([reading()], { upcoming: [] });
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    live([reading({ confidence: 'low' })]);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    // an AI body that starts a photo sentence with its own species
+    live([reading()]);
+    await expect(run('From your photo, it looks like a Formosan termite. Your technician will confirm at the visit.')).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+  });
+
+  test('a failed read refuses as photo_check_recheck_failed (retryable); no customer fails closed', async () => {
+    live(null);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_recheck_failed' });
+    await expect(outgoingAmountsStale({ customerId: null, body: ROACH, promptVersion: V12 })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    const { blockReasonIsBillingInfrastructure } = require('../services/agent-decision-send-checks');
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (photo_check_recheck_failed)')).toBe(true);
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (photo_check_changed)')).toBe(false);
+  });
+
+  test('an AI body that says what a photo shows in its own words is held; a staff edit keeps its own wording', async () => {
+    live([reading()]);
+    await expect(run('From the picture, those look like fire ants.')).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run(`${ROACH} The picture shows they are harmless roaches.`)).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run('From the picture, those look like fire ants.', { humanEditedBody: true })).resolves.toEqual({ stale: false });
+    // a staff edit that keeps a rendered sentence no longer live is held
+    live([]);
+    await expect(run(`Hi! ${ROACH}`, { humanEditedBody: true })).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    // plain photo wording with no identification passes without a read
+    await expect(run('Thanks for the photo! Your technician will take a look.')).resolves.toEqual({ stale: false });
+  });
+
+  test("the linked inbound's media flag decides the photo-text rule at send", async () => {
+    live([reading()]);
+    // a photo text: an identification or a safety judgment with no photo word is held
+    await expect(run('Those look like ghost ants.')).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run("It's harmless.")).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    // a text with no photo: the same words are not a photo claim
+    const noPhoto = photoDb({ metadata: { media: [] } });
+    await expect(run('Those look like ghost ants.', { dbh: noPhoto })).resolves.toEqual({ stale: false });
+    // the inbound row cannot be read: fail closed, retryable
+    await expect(run('Those look like ghost ants.', { dbh: photoDb(new Error('db down')) })).resolves.toEqual({ stale: true, reason: 'photo_check_recheck_failed' });
+  });
+
+  test('the read-free pre-screen selects own-words photo replies, so a queued one is rechecked at fire time', () => {
+    expect(bodyNeedsPaymentRecheck('From the picture, those look like fire ants.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('Those look like ghost ants.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('See you Tuesday morning.')).toBe(false);
+    expect(bodyNeedsBillingBoundaryCheck('From the picture, those look like fire ants.')).toBe(false);
+  });
+});

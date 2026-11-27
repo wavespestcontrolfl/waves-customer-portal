@@ -706,6 +706,28 @@ describe('sendEstimateNow — pre-delivery call-linkage revalidation (PR #3304 r
     expect(lawn.sendSnapshot.legacyOneTimePestBuffer).toBe(false);
   });
 
+  test('pest above the 5,500 sq ft table (new quotes only): an unstamped inputs-only pest draft is a pre-rule quote on its FIRST send and a resend; a fresh stamped draft stays new; a resend keeps the stamp', async () => {
+    const inputs = { homeSqFt: 10000, lotSqFt: 9000, stories: 1, services: { pest: { frequency: 'quarterly' } } };
+    const draft = (estimateData, extra = {}) => estimateRow({ status: 'sending', sent_at: null, viewed_at: null, estimate_data: JSON.stringify(estimateData), ...extra });
+    const first = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs }));
+    expect(first.sendSnapshot.legacyPestAboveTable).toBe(true);
+    const resend = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs }, { sent_at: '2026-11-20T12:00:00.000Z' }));
+    expect(resend.sendSnapshot.legacyPestAboveTable).toBe(true);
+    // A draft the engine priced under the rule carries its stamp (false): its first send stays new, and so does every resend.
+    const fresh = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs, pricingMetadata: { legacyPestAboveTable: false } }));
+    expect(fresh.sendSnapshot.legacyPestAboveTable).toBe(false);
+    const freshResend = await router.buildEstimateSendSnapshot(draft({ engineInputs: inputs, pricingMetadata: { legacyPestAboveTable: false } }, { sent_at: '2026-11-20T12:00:00.000Z' }));
+    expect(freshResend.sendSnapshot.legacyPestAboveTable).toBe(false);
+    // A resend whose prior snapshot froze the stamp keeps it even after the rows are gone.
+    const frozen = await router.buildEstimateSendSnapshot(draft({ sendSnapshot: { legacyPestAboveTable: false } }, { sent_at: '2026-11-20T12:00:00.000Z' }));
+    expect(frozen.sendSnapshot.legacyPestAboveTable).toBe(false);
+    const frozenLegacy = await router.buildEstimateSendSnapshot(draft({ sendSnapshot: { legacyPestAboveTable: true } }, { sent_at: '2026-11-20T12:00:00.000Z' }));
+    expect(frozenLegacy.sendSnapshot.legacyPestAboveTable).toBe(true);
+    // A draft with no pest in it pins nothing.
+    const lawn = await router.buildEstimateSendSnapshot(draft({ engineInputs: { ...inputs, services: { lawn: {} } } }));
+    expect(lawn.sendSnapshot.legacyPestAboveTable).toBe(false);
+  });
+
   test('one-time pest: a second send of a snapshot-only mixed-rule quote keeps the frozen choice, band verdict and per-service rule', async () => {
     const frequencies = [{ key: 'quarterly', monthly: 36, annual: 432, perVisit: 108, perServiceTreatments: [{ service: 'pest_control', label: 'Pest Control', perApp: 108 }] }];
     const prior = (choice, current) => ({

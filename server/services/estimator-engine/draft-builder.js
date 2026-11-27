@@ -182,7 +182,7 @@ function knownEnrichedValue(value) {
 // Trust predicate lives in one place — the customer-facing pricing
 // assistant applies the same rule (services/lookup-confidence.js).
 const {
-  lookupBedAreaIsTrustworthy, lookupPalmCountIsTrustworthy, lookupTurfEstimateIsTrustworthy, hasGlobalVerifyFlag,
+  lookupBedAreaIsTrustworthy, lookupPalmCountIsTrustworthy, lookupTurfEstimateIsTrustworthy, hasGlobalVerifyFlag, structuralTrustVerdicts,
 } = require('../lookup-confidence');
 
 function lookupFeatureModifiers(enriched) {
@@ -203,6 +203,9 @@ function lookupFeatureModifiers(enriched) {
   };
 }
 
+// The source families a story count may be attributed to (the lookup's source classifier names them).
+const KNOWN_STORY_SOURCE_TYPES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder', 'listing', 'aggregator']);
+
 // Story provenance → the pricing engine's storiesSource vocabulary.
 // 'estimated' fires the stories_estimated manual-review reason in the
 // story-sensitive pricers (pest per-story, termite bait linear feet).
@@ -222,7 +225,6 @@ function storiesSourceForPricing(propertyFacts) {
       const parsed = new URL(evidence.sourceUrl);
       urlOk = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     } catch { /* not a URL — fail closed */ }
-    const KNOWN_STORY_SOURCE_TYPES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder', 'listing', 'aggregator']);
     const direct = evidence.basis === 'direct'
       && evidence.confidence !== 'low'
       && urlOk
@@ -230,6 +232,18 @@ function storiesSourceForPricing(propertyFacts) {
     return direct ? 'lookup' : 'estimated';
   }
   return 'lookup';
+}
+
+// Does a lookup record's story count name where it came from? Either the AI stories fallback's own evidence (graded above), or
+// the record search's field evidence for the count: a known source family with no verify mark. A count with neither is nobody's
+// finding. Pest above the 5,500 sq ft table reads this before a looked-up count sets a price no person has seen (the website
+// quote and the lead draft); the grader above keeps its own rule for every other reader.
+function storyCountHasEvidence(propertyRecord) {
+  if (propertyRecord?._storiesEvidence) return true;
+  const entry = propertyRecord?._fieldEvidence?.stories;
+  const evidence = Array.isArray(entry) ? entry[0] : entry;
+  return !!evidence && evidence.fieldVerify !== true
+    && KNOWN_STORY_SOURCE_TYPES.has(String(evidence.sourceType || '').toLowerCase());
 }
 
 // Palm count for the Tree & Shrub service line (owner ruling 2026-10-05:
@@ -481,6 +495,10 @@ function buildEngineInput({
     ...(!isCommercial && knownEnrichedValue(lookupEnriched?.foundationType)
       ? { foundationType: lookupEnriched.foundationType }
       : {}),
+    // The lookup's weak-evidence verdict on those two (only the WDO price reads it): false prices the construction as unknown. Its size
+    // verdict is true here: a wrong-premise lookup never reaches this point (hasGlobalVerifyFlag above clears it), and the sizes come
+    // from the call's own facts.
+    ...(!isCommercial ? structuralTrustVerdicts(lookupEnriched || {}) : {}),
     ...(!isCommercial && knownEnrichedValue(lookupEnriched?.roofType)
       ? { roofType: lookupEnriched.roofType }
       : {}),
@@ -910,9 +928,13 @@ function classifyLane({ intent, propertyFacts, engineResult, engineInput = null,
   // owner's hand price. The line's own review mark already parks the draft
   // (partial draft above); this names the cause in the operator's words, and
   // the call-quote auto-send verdict holds on it (lane_review_reason).
-  if (lines.some((l) => l?.service === 'mosquito'
-    && (l.manualReviewReasons || []).includes('mosquito_lot_above_2_acres'))) {
-    reasons.push('Lot above 2 acres: set the mosquito price by hand');
+  const handPricedMosquito = lines.find((l) => l?.service === 'mosquito'
+    && (l.manualReviewReasons || []).includes('mosquito_lot_above_2_acres'));
+  if (handPricedMosquito) {
+    // A lot at the 200,000 sq ft record cap is "4.59 acres or more": the operator is told to enter the real size (specialty prices, 2026-11-26).
+    reasons.push(handPricedMosquito.mosquitoLotAtRecordCap === true
+      ? require('../pricing-engine/service-pricing').MOSQUITO_LOT_AT_RECORD_CAP_TEXT
+      : 'Lot above 2 acres: set the mosquito price by hand');
   }
   const lookupPalmLine = lines.find((l) => l?.service === 'tree_shrub' && l.palmCountFromLookup === true
     && Number(l.palmCount) > 0 && (l.manualReviewReasons || []).includes(LOOKUP_PALM_REVIEW_REASON));
@@ -1698,6 +1720,7 @@ module.exports = {
   // grades its lookup stories through the same evidence test so a
   // low-confidence AI inference prices as 'estimated' on both paths.
   storiesSourceForPricing,
+  storyCountHasEvidence,
   stampPestCurveVersion,
   deriveTotals,
   compsBand,

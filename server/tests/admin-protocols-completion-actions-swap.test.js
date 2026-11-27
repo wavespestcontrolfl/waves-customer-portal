@@ -55,7 +55,7 @@ const handler = adminProtocolsRouter.stack.find((layer) => layer.route?.path ===
 
 function readQuery(rows) {
   const query = {};
-  for (const method of ['where', 'orWhereNull', 'whereIn', 'join', 'select', 'orderByRaw', 'orderBy']) query[method] = jest.fn(() => query);
+  for (const method of ['where', 'orWhereNull', 'whereIn', 'join', 'leftJoin', 'select', 'orderByRaw', 'orderBy']) query[method] = jest.fn(() => query);
   query.first = jest.fn(async () => rows[0] || null);
   query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
   return query;

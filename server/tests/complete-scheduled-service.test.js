@@ -623,12 +623,22 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     });
     afterEach(() => limit.mockRestore());
 
-    test('a fresh attempt is refused with 400 lawn_bermuda_limit_reached and the limit message', async () => {
+    test('a fresh attempt is NOT refused for a cap breach (owner 2026-11-26): the limit message is a warning and the completion goes on', async () => {
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
-      const result = await complete({ products: [] });
-      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_limit_reached', error: expect.stringContaining('LIMIT REACHED') } });
+      let result;
+      try { result = await complete({ products: [] }); } catch { /* the completion proceeds into the committed flow, which this fixture does not model */ }
+      expect(result?.body?.code).not.toBe('lawn_bermuda_limit_reached');
       expect(limit).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
+      expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
+    });
+
+    test('"its limits are not loaded" (setup, not a cap) is still refused with 400 lawn_bermuda_limit_reached', async () => {
+      const completionAttempt = { id: 'fixture-attempt' };
+      attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
+      limit.mockResolvedValue(removal.NOT_CONFIGURED_MESSAGE);
+      const result = await complete({ products: [] });
+      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_limit_reached', error: removal.NOT_CONFIGURED_MESSAGE } });
       expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
 

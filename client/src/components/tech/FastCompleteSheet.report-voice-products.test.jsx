@@ -142,7 +142,7 @@ describe('report flow, voice fill on: products from the note', () => {
     const taurus = sent(request).products.find((p) => p.productId === 'taurus');
     expect(taurus).toMatchObject({ totalAmount: 6, amountUnit: 'fl_oz', applicationMethod: 'spot_treatment' });
     // a product the note did not name keeps the amount it opened with
-    expect(sent(request).products.find((p) => p.productId === 'talstar')).toMatchObject({ totalAmount: 4, amountUnit: 'fl_oz' });
+    expect(sent(request).products.find((p) => p.productId === 'talstar')).toMatchObject({ totalAmount: 2.5, amountUnit: 'fl_oz' });
   });
 
   test('a product the note names that is not on the sheet is added, and the report is written with it', async () => {

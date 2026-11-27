@@ -52,7 +52,11 @@ function fakeDbi({ rows = [], drafted = new Set(), client } = {}) {
   const queries = [];
   const dbi = jest.fn((table) => {
     if (table === 'message_drafts') {
-      return { where: ({ sms_log_id: id }) => ({ first: async () => (drafted.has(id) ? { id: 'existing' } : undefined) }) };
+      // (the photo checker's reading is not a reply draft: the real query skips intent 'photo_triage', pinned below)
+      return { where: ({ sms_log_id: id }) => ({ whereRaw: (sql) => ({ first: async () => {
+        expect(sql).toBe("intent IS DISTINCT FROM 'photo_triage'");
+        return drafted.has(id) ? { id: 'existing' } : undefined;
+      } }) }) };
     }
     const calls = [];
     queries.push({ table, calls });
@@ -205,7 +209,7 @@ describe('candidate selection (the SQL half of the webhook filter)', () => {
   });
 
   test('a text that already has any draft is excluded in SQL (dedup)', () => {
-    expect(sql).toMatch(/not exists \(select 1 from "message_drafts" as "md" where md\.sms_log_id = s\.id\)/);
+    expect(sql).toMatch(/not exists \(select 1 from "message_drafts" as "md" where md\.sms_log_id = s\.id AND md\.intent IS DISTINCT FROM 'photo_triage'\)/);
   });
 
   test('oldest first, bounded', () => {

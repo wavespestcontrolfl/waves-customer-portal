@@ -276,6 +276,19 @@
           "type": "boolean",
           "description": "1.22.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
         },
+        "appointment_texts_scope": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "enum": [
+            "ongoing",
+            "this_visit",
+            "unspecified",
+            null
+          ],
+          "description": "1.32.0, additive/optional (never `required`): read ONLY when wants_appointment_texts is true: how long the caller wants THIS person to get the appointment texts. \"this_visit\" when the caller limits it to the visit being booked (\"just this once\", \"text my tenant when you're on the way today\", \"only for this appointment\"); \"ongoing\" when the caller says every visit or from now on (\"put him on the account for the reminders\", \"always text her too\"); \"unspecified\" when the caller did not say how long. Default \"unspecified\"; do not invent a limit. null or \"unspecified\" when wants_appointment_texts is false. The pipeline reads \"unspecified\" and anything it does not know as every visit (owner ruling 2026-11-25); only \"this_visit\" keeps the person off the account's reminders list."
+        },
         "on_site": {
           "type": "boolean",
           "description": "1.22.0, additive/optional (never `required`): true ONLY when the call says THIS person will be AT the property for the visit (lives there, 'he'll be there', meeting the technician). A relationship alone does not prove presence — false. Default false; do not invent. Needs an evidence quote when true."
@@ -368,6 +381,19 @@
           "wants_appointment_texts": {
             "type": "boolean",
             "description": "1.22.0, additive/optional (never `required`): true ONLY when the caller agreed THIS person should receive the appointment TEXT messages (visit reminders, the 'on the way'/route-tracking link, the arrival text). Wanting the report or invoice emailed to them is NOT enough — false. Default false; do not invent. Needs an evidence quote when true."
+          },
+          "appointment_texts_scope": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "ongoing",
+              "this_visit",
+              "unspecified",
+              null
+            ],
+            "description": "1.32.0, additive/optional (never `required`): read ONLY when wants_appointment_texts is true: how long the caller wants THIS person to get the appointment texts. \"this_visit\" when the caller limits it to the visit being booked (\"just this once\", \"text my tenant when you're on the way today\", \"only for this appointment\"); \"ongoing\" when the caller says every visit or from now on (\"put him on the account for the reminders\", \"always text her too\"); \"unspecified\" when the caller did not say how long. Default \"unspecified\"; do not invent a limit. null or \"unspecified\" when wants_appointment_texts is false. The pipeline reads \"unspecified\" and anything it does not know as every visit (owner ruling 2026-11-25); only \"this_visit\" keeps the person off the account's reminders list."
           },
           "on_site": {
             "type": "boolean",

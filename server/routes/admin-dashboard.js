@@ -1234,6 +1234,17 @@ router.get('/office-cost-per-stop', dashboardCache, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// GET /api/admin/dashboard/cross-sell?months=12
+// The cross-sell number (services/cross-sell-rate.js): the share of recurring customers with two or more kinds of
+// recurring service. The stored months for the trend (monthly snapshot columns), today's live value, how the added
+// service came in, and the pest-only customers. Admin only (router-level gate). Read-only: sends nothing.
+router.get('/cross-sell', dashboardCache, async (req, res, next) => {
+  try {
+    const { getCrossSellSummary } = require('../services/cross-sell-rate');
+    res.json(await getCrossSellSummary({ months: req.query.months, db }));
+  } catch (err) { next(err); }
+});
+
 // GET /api/admin/dashboard/ops-buyer-metrics
 // Work and routes: the owner's field hours and the share of stops others do, revenue per route day, route fill
 // for the next 28 days (planning only), and the 12-month return-visit rate. Read live, read-only; each metric

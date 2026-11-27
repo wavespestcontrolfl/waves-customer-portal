@@ -284,9 +284,43 @@ async function reopenHeldBells(ctx, p, request) {
     .update({ read_at: null, done_at: null, done_by: null, resolution: null, metadata: trx.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [stamp]) })); // notifications has no updated_at
 }
 
+// An OPEN automatic request whose product is back above its low-stock limit
+// (a hand purchase, a count correction) is closed here, in every gate state:
+// the dispatcher's own cancel (cancelAtClaim) runs only for a vendor it
+// can claim from, so a vendor switched off or without an adapter would keep
+// the request open forever, block the next one and re-ring its bell every
+// run. Same lock order as refreshOpenRequest (pricing lock, request row,
+// product row), same cancel and bell retirement as the claim path. Left
+// alone: ordered requests, a request with ANY ledger row (a parked or placed
+// order owns it), a product with an automatic order out, the fertilizer
+// blackout hold, and unknown stock or limit (unknown is not "no longer low").
+// Returns true when it cancelled the request.
+async function cancelIfStockRecovered(ctx, p, existing) {
+  const onHandNow = num(p.inventory_on_hand);
+  const limitNow = num(p.low_stock_threshold);
+  if (onHandNow == null || limitNow == null || onHandNow <= limitNow) return false; // cheap pre-check; the locked re-read decides
+  const dispatch = require('./order-dispatch');
+  return ctx.conn.transaction(async (trx) => {
+    await lockProductPricing(trx, p.id);
+    const request = await trx('product_restock_requests').where({ id: existing.id }).forUpdate().first();
+    if (!request || request.status !== 'open' || request.source !== SOURCE) return false;
+    const fresh = await trx('products_catalog').where({ id: p.id }).forUpdate().first('name', 'inventory_on_hand', 'low_stock_threshold', ...FERTILIZER_COLUMNS);
+    if (!fresh) return false;
+    const onHand = num(fresh.inventory_on_hand);
+    const threshold = num(fresh.low_stock_threshold);
+    if (onHand == null || threshold == null || onHand <= threshold) return false;
+    if (fertilizerBlackoutHold(fresh, ctx.now)) return false;
+    if (await dispatch.findLiveAutoOrder(trx, p.id)) return false;
+    if (await trx('vendor_orders').where({ restock_request_id: request.id }).first('id')) return false;
+    await dispatch.cancelAtClaim(trx, { request, product: fresh, m: parseMeta(request.metadata), ineligible: 'stock_no_longer_low' });
+    return true;
+  });
+}
+
 async function handleLiveRequest(ctx, p, existing) {
   ctx.result.deduped.push({ productId: p.id, name: p.name, requestId: existing.id });
   if (existing.source !== SOURCE || existing.status !== 'open') return;
+  if (await cancelIfStockRecovered(ctx, p, existing)) { ctx.result.cancelled.push({ productId: p.id, name: p.name, requestId: existing.id, reason: 'stock_no_longer_low' }); return; }
   const request = await refreshOpenRequest(ctx, p, existing);
   if (!request) return;
   if (request.held) { await holdOpenRequest(ctx, p, request); return; }
@@ -446,7 +480,7 @@ async function sweepProduct(ctx, p) {
 
 async function runSuppliesAutoReorderSweep({ conn = db, notify = null, now = new Date() } = {}) {
   if (!gateEnvValue(GATE)) return { skipped: 'gated', created: [], deduped: [], unconfigured: [], held: [] };
-  const result = { created: [], deduped: [], unconfigured: [], held: [], errors: [], renotified: [], refreshed: [], bells: [] };
+  const result = { created: [], deduped: [], unconfigured: [], held: [], cancelled: [], errors: [], renotified: [], refreshed: [], bells: [] };
   const ctx = { conn, notify, result, now };
 
   const candidates = await findLowStockCandidates(conn);
@@ -458,7 +492,7 @@ async function runSuppliesAutoReorderSweep({ conn = db, notify = null, now = new
       result.errors.push({ productId: p.id, name: p.name, message: err.message });
     }
   }
-  logger.info(`[auto-reorder] sweep: ${result.created.length} created, ${result.deduped.length} deduped, ${result.unconfigured.length} unconfigured, ${result.held.length} held (fertilizer blackout), ${result.errors.length} errors`);
+  logger.info(`[auto-reorder] sweep: ${result.created.length} created, ${result.deduped.length} deduped, ${result.unconfigured.length} unconfigured, ${result.held.length} held (fertilizer blackout), ${result.cancelled.length} cancelled (stock back above limit), ${result.errors.length} errors`);
   return result;
 }
 

@@ -129,6 +129,11 @@ function normalizeSecondaryContact(contact) {
     wants_appointment_texts: contact.wants_appointment_texts === true,
     on_site: contact.on_site === true,
   };
+  // Schema 1.32.0: a scope the model wrote is kept only when it is one the schema knows; anything else
+  // (null, a typo, another type) is "unspecified" (every visit). A missing scope stays missing (older rows).
+  if (Object.prototype.hasOwnProperty.call(contact, 'appointment_texts_scope')) {
+    normalized.appointment_texts_scope = require('./extraction-compat').appointmentTextsScope(contact.appointment_texts_scope);
+  }
   if (!normalized.name_full && !normalized.first_name && !normalized.last_name
       && !normalized.phone_e164 && !normalized.email) return null;
   return normalized;

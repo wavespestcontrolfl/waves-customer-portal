@@ -167,18 +167,23 @@ function flatView(extraction) {
     secondary_wants_appointment_texts: secondary?.wants_appointment_texts === true,
     secondary_on_site: secondary?.on_site === true,
     // Order-stable per-contact signature over the whole secondary_contacts[]
-    // (phone-identity:role:wants-notifications:text-intent:on-site, '|'-joined, '' when none) so a
+    // (phone-identity:role:wants-notifications:text-intent:on-site:text-scope, '|'-joined, '' when none;
+    // text-scope = the entry's own normalized appointment_texts_scope, schema 1.32.0, which decides
+    // whether the person gets every visit's texts or only the booked one's) so a
     // flag flipping on entries 2+ shows in replay variance too (FIELD_GROUPS
     // high). The singleton is ALWAYS fingerprinted first ('S=' entry), then
     // the array: a candidate whose singleton drifts from secondary_contacts[0]
     // (the live resolver reads both) cannot pass replay unnoticed.
     secondary_contacts_consent_signature: (() => {
-      const sig = (c) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}`;
-      const list = mapSecondaryContactsToLegacy(extraction.secondary_contacts);
+      // The scope is read from the RAW V2 entry (the flat shape does not carry it).
+      const sig = (c, raw) => `${secondaryIdentityKey(c)}:${c.role || 'unknown'}:${c.wants_notifications ? 1 : 0}:${c.wants_appointment_texts ? 1 : 0}:${c.on_site ? 1 : 0}:${appointmentTextsScope(raw && raw.appointment_texts_scope)}`;
+      // The same entries mapSecondaryContactsToLegacy keeps (empty shells drop, cap 3), each with its raw entry.
+      const rawList = Array.isArray(extraction.secondary_contacts) ? extraction.secondary_contacts : [];
+      const list = rawList.map((raw) => [mapSecondaryContactToLegacy(raw), raw]).filter(([c]) => c).slice(0, 3);
       // The RAW singleton (not the canonical merge, which falls back to the
       // array mirror): its own drift is what the 'S=' entry watches.
       const rawSingle = mapSecondaryContactToLegacy(extraction.secondary_contact);
-      return [...(rawSingle ? [`S=${sig(rawSingle)}`] : []), ...list.map(sig)].join('|');
+      return [...(rawSingle ? [`S=${sig(rawSingle, extraction.secondary_contact)}`] : []), ...list.map(([c, raw]) => sig(c, raw))].join('|');
     })(),
 
     appointment_confirmed: sched.status === 'confirmed',
@@ -329,6 +334,15 @@ function secondaryIdentityKey(c) {
   const email = String(c?.email || '').trim().toLowerCase();
   if (email) return email;
   return [c?.first_name, c?.last_name].map((v) => String(v || '').trim().toLowerCase()).filter(Boolean).join(' ').replace(/\s+/g, ' ');
+}
+
+// Schema 1.32.0 secondary_contact(s).appointment_texts_scope, read from the V2 entry itself (the flat V1 shape above does not
+// carry it). Anything but the two explicit answers
+// (missing, null, a typo, another type) is "unspecified": the owner ruling of 2026-11-25 reads that as
+// every visit, and only an explicit "this_visit" limits the person to the booked visit.
+const APPOINTMENT_TEXTS_SCOPES = ['ongoing', 'this_visit'];
+function appointmentTextsScope(value) {
+  return APPOINTMENT_TEXTS_SCOPES.includes(value) ? value : 'unspecified';
 }
 
 function mapSecondaryContactToLegacy(contact) {
@@ -848,6 +862,7 @@ module.exports = {
   mapLeadQualityToLegacy,
   mapAdditionalPropertiesToLegacy,
   mapSecondaryContactToLegacy,
+  appointmentTextsScope,
   mapSentimentToLegacy,
   mapCallNatureToLegacy,
   adoptV2PrimaryFields,

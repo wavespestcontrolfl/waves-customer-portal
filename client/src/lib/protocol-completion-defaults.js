@@ -69,8 +69,12 @@ const MAX_RATE_PER_1000 = { snapshot: 4.6, f13013: 7.5 };
 // A card line that carries its label's rate for this pest (Tekko Pro at 2 fl oz per gallon on the home cockroach card, server
 // utils/protocol-label-rate.js) replaces the catalog band, so the prefill and the review ceiling both start from the card's rate.
 // Any other product passes through unchanged.
+// A blank card rate (two booked cards share the product, or the server holds the rate: its registration or catalog rate does not
+// match the card) clears the row's per-1,000 catalog rate too, so the rate starts blank whatever unit the catalog keeps.
 export function labelUseProduct(product, item) {
-  return item?.labelUseRate ? { ...product, default_rate: item.defaultRate, defaultRate: item.defaultRate } : product;
+  if (!item?.labelUseRate) return product;
+  const blank = item.defaultRate === '' ? { default_rate_per_1000: null, defaultRatePer1000: null, ratePer1000: null } : {};
+  return { ...product, default_rate: item.defaultRate, defaultRate: item.defaultRate, ...blank };
 }
 
 // The visit card's label-rate line for this product, or null: only from a response this hook would seed.
@@ -81,9 +85,27 @@ export function labelUseItemFor(response, productId) {
 
 // A product about to land on the full form, with the visit card's rate and method when it is a card-rate product, however it
 // lands (the seeded row, or the tech removing it and adding it again from the picker). A method the caller names wins.
+// The visit card's own tank rate for this product (response.cardRates: the bed bug cards' Antapex at 20 g per gallon, catalog
+// band 10-30), or null. It covers every line of the card, also one the visit does not seed (the bed bug follow-up).
+function cardRateFor(response, productId) {
+  if (!Array.isArray(response?.cardRates) || OWNED_ELSEWHERE_PROGRAM_KEYS.has(response.programKey)) return null;
+  return response.cardRates.find((row) => String(row?.id) === String(productId)) || null;
+}
+
+// `startRate`: where the form starts the row's per-gallon rate instead of the bottom of the catalog band: the card's rate, or
+// '' (blank) when a booked add-on's card mixes the product at another rate. Undefined: the catalog decides, as before. The
+// band's top stays the review ceiling. The method is the card's too, for a seeded product the tech removes and adds again.
 export function cardRateRow(response, product, methodOverride) {
   const item = labelUseItemFor(response, product.id);
-  return { product: labelUseProduct(product, item), applicationMethodOverride: methodOverride || item?.completionApplicationMethod || undefined };
+  const rate = cardRateFor(response, product.id);
+  const seeded = shouldApplyProtocolCompletionDefaults(response)
+    ? response.products.find((row) => String(row?.id) === String(product.id)) : null;
+  const start = rate?.cardStartRate === '' ? '' : Number(rate?.cardStartRate);
+  return {
+    product: labelUseProduct(product, item),
+    applicationMethodOverride: methodOverride || item?.completionApplicationMethod || rate?.completionApplicationMethod || seeded?.completionApplicationMethod || undefined,
+    ...(start === '' || (start > 0 && Number.isFinite(start)) ? { startRate: start } : {}),
+  };
 }
 
 // The visit's catalog rows with each card-rate product (labelUseProduct) set to its card's rate: the Fast Complete sheet

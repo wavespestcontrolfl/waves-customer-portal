@@ -52,6 +52,7 @@ const {
   readGratitudeContext,
   gratitudeFinalState,
   gratitudeRolloutSettled,
+  mediaCountFromMetadata,
 } = require('./sms-gratitude-context');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
@@ -193,13 +194,26 @@ function autoSendPreflight({ gateOn, baseEligible, mode, actionsSafe, eligible }
  * claimed this draft. Does NOT send and does NOT touch the draft row — the
  * claim is purely the idempotency-keyed decision insert.
  */
+// The draft row's own stored facts block (message_drafts.facts_block, the block it was drafted beside). No draft id: nothing stored to
+// carry a note. A read that fails throws, so the claim fails and nothing sends.
+async function draftCarriesLabelProductNotes(dbh, draftId) {
+  if (draftId == null) return false;
+  const row = await dbh('message_drafts').where({ id: draftId }).first('facts_block');
+  return require('./sms-label-facts').factsBlockCarriesProductNotes(row ? row.facts_block : null);
+}
+
 async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, reply, intent, confidence, model, promptVersion, openTimesSnapshot = null, paymentStatusSnapshot = null, labelFactsSnapshot = null, factsGeneratedAt = null, zelleInvoiceId = null, reserviceBookedSnapshot = null, liveEtaSnapshot = null, techNames = null, visitLoopCommitmentIds = null, visitLoopStatus = null, unanswered = null }) {
   const suggest = require('./sms-suggest-mode');
+  // A draft whose stored facts carry a LABEL FACTS product note is never sent automatically (texting AI gap 5): a person reviews it.
+  // (facts_block is written once, with the draft row, so it needs no lock)
+  if (await draftCarriesLabelProductNotes(db, draftId)) return null;
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
     // to_phone is the Waves number to reply FROM.
-    const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone', 'to_phone');
+    const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone', 'to_phone', 'metadata');
     if (!inbound?.created_at) return null;
+    // A text that carried a photo, or whose media state is unknown, is never answered automatically (texting AI gap 6): a person reviews it.
+    if (mediaCountFromMetadata(inbound.metadata) !== 0) return null;
 
     const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
     const toPhone = inbound.from_phone || null; // the customer
@@ -1569,6 +1583,7 @@ async function reconcileAutoSendClaims({ orphanMinutes = 30, uncertainReconcilia
 
 module.exports = {
   AUTOSEND_WORKFLOW,
+  draftCarriesLabelProductNotes,
   AUTOSEND_AGENT_NAME,
   AUTOSEND_DECISION_VERSION,
   AUTOSEND_MODE,

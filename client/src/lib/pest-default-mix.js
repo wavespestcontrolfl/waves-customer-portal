@@ -10,14 +10,21 @@
 // row it matched no longer exists as such), and (c) extends coverage to
 // the one-time pest control visit, which the 2026-08-29 list deliberately
 // left off. The visit STARTS with all three recorded, at the house
-// totals — 4 oz of Crosscheck, 1.6 fl oz of Taurus SC (see below), 0.25 oz of
-// surfactant.
+// totals — 2.5 fl oz of Crosscheck (see below), 1.6 fl oz of Taurus SC (see
+// below), 0.25 oz of surfactant.
 //
 // Owner ruling 2026-11-19: Taurus SC is 1.6 fl oz per 4-gal tank = 0.03%, the
 // label's 0.4 fl oz/gal rate (EPA 53883-279: 0.03% up to 4 times a calendar
-// year). Crosscheck (4) and the surfactant (0.25) are unchanged. Counting
-// Taurus applications per home, to leave it out of the prefill after 4 in a
-// calendar year, is a later change.
+// year). The surfactant (0.25) is unchanged.
+//
+// Owner 2026-11-25 (protocols page, D21 "fix the label failures"): Crosscheck
+// Plus goes from 4 fl oz to 2.5 fl oz per 4-gal tank. Its label (EPA 10404-120)
+// allows at most 1 fl oz per 1,000 sq ft. The shared tank goes out at the
+// Taurus label's volume, 2 qt per 160 ft of a 2-ft band = 1.5625 gal per
+// 1,000 sq ft, so 4 fl oz per tank put down 1.56 fl oz per 1,000. The most the
+// tank may carry is 0.64 fl oz per gallon (2.56 per tank); 2.5 is the amount a
+// tech can measure under it (0.98 fl oz per 1,000). The page's own figure, 2.6
+// per tank, is 3% over the label at that volume.
 //
 // Owner ruling 2026-11-18: the house bifenthrin is now LESCO Crosscheck Plus
 // (EPA 10404-120) instead of Atticus Talak 7.9 F. Talak stays a valid catalog
@@ -36,7 +43,7 @@
 // surfactant as the applied chemical at the pest total).
 export const PEST_DEFAULT_MIX = [
   { pattern: /^taurus\s*sc\b/i, totalAmount: 1.6 },
-  { pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 4 },
+  { pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 2.5 },
   { pattern: /^lesco\s*90\s*\/?\s*10\s*non-?ionic\s+surfactant$/i, totalAmount: 0.25 },
 ];
 
@@ -63,20 +70,48 @@ const NON_MIX_SERVICE_RE =
 // off a bare name) — isPestDefaultMixVisit below covers the common bare-
 // label case separately, by the row's stable catalog key instead.
 const RECURRING_GENERAL_PEST_RE =
-  /general pest|quarterly|bi-?monthly|\bmonthly\b|semi-?annual|recurring pest|one[-\s]?time\s+pest\s+control/i;
+  /general pest|quarterly|bi-?monthly|\bmonthly\b|recurring pest|one[-\s]?time\s+pest\s+control/i;
+// "Semi-annual" counts as the server's general pest card does: with "pest" in the name, under a general pest key, or as a
+// WHOLE bare name ("Semi-Annual Service") with no key (KEYLESS_GENERAL_PEST_RE).
+const SEMIANNUAL_RE = /semi ?annual/;
 
 // The mix belongs on recurring general-pest maintenance visits and pest
 // re-services ONLY. Callers on an un-gated surface pass the whole
 // schedule row (name tokens exclude the other lines); the recap lane is
 // additionally server-gated to the pest_control category.
+// The general pest catalog keys (server protocol-matcher.js, the general pest rule's serviceKeys, less the two the name
+// test above always excludes: the initial cleanout and pest + rodent).
+// The server's keylessNames for the general pest card (protocol-matcher.js), the same set on the same normalized name
+// (lower case, every run of other characters one space): a WHOLE bare name on a visit with no key.
+const KEYLESS_GENERAL_PEST_RE = /^(re service|reservice|callback|semi annual|semiannual|recurring)( service| visit)?$/;
+const GENERAL_PEST_KEYS = new Set([
+  "pest_general_quarterly", "pest_general_monthly", "pest_general_bimonthly", "pest_general_semiannual",
+  "one_time_pest_control", "pest_re_service",
+]);
+
 export function isPestDefaultMixVisit(service) {
   const raw =
     service?.serviceTypeRaw || service?.serviceType || service?.service_type || "";
   const s = String(raw).toLowerCase();
   if (NON_MIX_SERVICE_RE.test(s)) return false;
-  const isReservice =
-    service?.isCallback === true || /re-?service|callback/.test(s);
-  if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
+  const key = String(
+    service?.completionProfile?.serviceKey
+      || service?.serviceKey
+      || service?.service_key_snapshot
+      || "",
+  ).toLowerCase();
+  // A booked Waves Assessment (key lawn_inspection) is a walk with no product under any name, "Quarterly Service" too.
+  if (key === "lawn_inspection") return false;
+  // A re-service counts as the server's general pest card does (protocol-matcher.js): its name says pest, or its key is a
+  // general pest service, or the WHOLE name is a bare "Re-Service" / "Callback" with no key at all. A callback booking whose
+  // name and key say nothing ("Courtesy Visit"), or a bare "Re-Service" under another service's key, has no card on the
+  // server (no_protocol, owner pick D18): inspection only, nothing prefilled.
+  const name = s.replace(/[^a-z0-9]+/g, " ").trim();
+  const pestWork = /\bpest\b/.test(name) || GENERAL_PEST_KEYS.has(key);
+  const keylessGeneral = !key && KEYLESS_GENERAL_PEST_RE.test(name);
+  const isReservice = (service?.isCallback === true || /re ?service|callback/.test(name)) && pestWork;
+  const semiannual = SEMIANNUAL_RE.test(name) && pestWork;
+  if (keylessGeneral || isReservice || semiannual || RECURRING_GENERAL_PEST_RE.test(s)) return true;
   // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
   // admin-created One-Time Pest Control Service job is often scheduled
   // under the bare "Pest Control Service" label (admin-schedule.js's
@@ -89,12 +124,6 @@ export function isPestDefaultMixVisit(service) {
   // has its own distinct one (tick_control, bee_wasp_removal, …). Checked
   // across every field a caller's dispatch-shaped service object might
   // carry it under.
-  const key = String(
-    service?.completionProfile?.serviceKey
-      || service?.serviceKey
-      || service?.service_key_snapshot
-      || "",
-  ).toLowerCase();
   return key === "one_time_pest_control";
 }
 

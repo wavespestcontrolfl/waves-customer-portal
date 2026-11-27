@@ -538,15 +538,13 @@ describeDb('places and trouble areas through PostgreSQL', () => {
       const confirm = (...ids) => jest.spyOn(lawnFast, 'troubleTypeIdsFor').mockResolvedValue({ takeAll: new Set(ids), chinch: new Set() });
       afterEach(() => jest.restoreAllMocks());
 
-      test('a card row at the mapped place passes; at an unmapped place it is refused with the reason; a Search row at an unmapped place passes', async () => {
+      test('a card row at the mapped place passes; at an unmapped place it passes too (owner 2026-11-26: a warning only); a Search row at an unmapped place passes', async () => {
         await mapBack();
         confirm(catalog['Plain Spot Fungicide'].id.toLowerCase());
         const svc = await svcOf();
         const go = (extra) => areas.preflightPlaces({ knex, svc, products: [row(extra)] });
         expect(await go({ areaPlace: 'back', troubleSource: 'guide_card' })).toBeNull();
-        expect(await go({ areaPlace: 'front', troubleSource: 'guide_card' })).toMatchObject({
-          status: 400, payload: { code: 'lawn_place_not_mapped', place: 'front', error: expect.stringMatching(/mapped take-all areas only/) },
-        });
+        expect(await go({ areaPlace: 'front', troubleSource: 'guide_card' })).toBeNull(); // owner 2026-11-26: a warning, never a refusal
         expect(await go({ areaPlace: 'front', troubleSource: 'tech_tap' })).toBeNull();
         expect(await go({ areaPlace: 'front' })).toBeNull();
       });
@@ -557,7 +555,7 @@ describeDb('places and trouble areas through PostgreSQL', () => {
         const [area] = await knex('lawn_trouble_areas').where({ place: 'back', type: 'take_all' });
         await areas.clearArea(knex, { areaId: area.id, propertyId: world.property.id });
         confirm(catalog['Plain Spot Fungicide'].id.toLowerCase());
-        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back', troubleSource: 'guide_card' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+        expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'back', troubleSource: 'guide_card' })] })).toBeNull(); // owner 2026-11-26: a warning, never a refusal
         jest.restoreAllMocks();
         confirm();
         expect(await areas.preflightPlaces({ knex, svc, products: [row({ areaPlace: 'front', troubleSource: 'guide_card' })] })).toBeNull();

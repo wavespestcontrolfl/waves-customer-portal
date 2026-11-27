@@ -191,6 +191,38 @@ function nextAction({ commitments, disposition, v2, reviewStatus }) {
   return null;
 }
 
+// The call sound check's record (services/call-sound-check.js, metadata.sound_check) as the panel shows it. A record
+// for a recording the call no longer holds describes other audio, so it reads as absent. The spend, the token usage
+// and the recording digest stay out: the panel shows what the model heard, not what it cost.
+function soundCheckView(meta, call) {
+  const rec = meta?.sound_check;
+  if (!rec || typeof rec !== 'object' || Array.isArray(rec)) return null;
+  const { recordingKey } = require('./call-sound-check');
+  if (!call.recording_url || rec.recording_key !== recordingKey(call.recording_url)) return null;
+  const status = ['done', 'failed', 'skipped', 'started'].includes(rec.status) ? rec.status : null;
+  if (!status) return null;
+  const view = { status, reason: status === 'failed' || status === 'skipped' ? String(rec.reason || '') || null : null, at: rec.at || null };
+  if (status !== 'done') return view;
+  const note = rec.note && typeof rec.note === 'object' ? rec.note : {};
+  if (note.no_conversation) return { ...view, no_conversation: true };
+  return { ...view, no_conversation: false, ...soundNoteFields(note), model: typeof rec.model === 'string' ? rec.model : null };
+}
+
+// A done note's findings. A value of the wrong type reads as unknown (null), never as a finding.
+function soundNoteFields(note) {
+  const text = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  const flag = (v) => (typeof v === 'boolean' ? v : null);
+  const claim = note.risky_claim && typeof note.risky_claim === 'object' ? note.risky_claim : {};
+  return {
+    caller_tone_start: text(note.caller_tone_start),
+    caller_tone_end: text(note.caller_tone_end),
+    caller_upset: flag(note.caller_upset),
+    talk_over_count: Number.isInteger(note.talk_over_count) ? note.talk_over_count : null,
+    agent_sounded_rushed: flag(note.agent_sounded_rushed),
+    risky_claim: claim.flag === true ? { flag: true, what: text(claim.what) } : { flag: flag(claim.flag), what: null },
+  };
+}
+
 /**
  * Pure. `call` is the call_log row (with customers join fields optional);
  * `commitments` are normalized rows; `outcomes` is buildCallOutcomes' shape.
@@ -324,6 +356,8 @@ function buildCallIntelligence({ call, commitments = [], outcomes = null }) {
       superseded: Array.isArray(meta.superseded_recordings) ? meta.superseded_recordings : [],
     },
     processing: describeProcessing(call),
+    // The only route (GET /calls/:id/intelligence) is admin-only, as this judges how staff sounded.
+    sound_check: soundCheckView(meta, call),
     transcript_segments: segments,
     schema: {
       extraction_schema_version: v2?.meta?.schema_version || null,
@@ -355,4 +389,4 @@ async function loadCallIntelligence(conn, callId) {
   return buildCallIntelligence({ call, commitments, outcomes });
 }
 
-module.exports = { buildCallIntelligence, describeProcessing, loadCallIntelligence, nextAction };
+module.exports = { buildCallIntelligence, describeProcessing, loadCallIntelligence, nextAction, soundCheckView };

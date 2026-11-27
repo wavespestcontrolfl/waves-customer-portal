@@ -443,6 +443,7 @@ const HEARD_ABOUT_LABELS = {
   chatgpt: "ChatGPT",
   other_ai: "Another AI assistant",
   facebook_instagram: "Facebook or Instagram",
+  facebook_group: "Facebook group",
   nextdoor: "Nextdoor",
   yelp: "Yelp",
   friend_neighbor: "Friend or neighbor",

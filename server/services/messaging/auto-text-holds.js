@@ -288,6 +288,7 @@ module.exports = {
   SPOKEN_NUMBER_EXPRS,
   _callVetoQuery: callVetoQuery,
   deliveredTexts,
+  UNSENT_STATUSES,
   RECENT_CONVERSATION_MS,
   NOT_A_PROSPECT_NATURES,
 };

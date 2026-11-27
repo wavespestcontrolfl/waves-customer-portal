@@ -18,7 +18,7 @@ maybeDescribe('order-revoke (live Postgres)', () => {
   let revoke;
   let queue;
   let dispatch;
-  const made = { products_catalog: [], product_restock_requests: [], vendor_orders: [], notifications: [] };
+  const made = { products_catalog: [], product_restock_requests: [], vendor_orders: [], notifications: [], vendor_pricing: [] };
   const ACTOR = crypto.randomUUID();
 
   // A placed SiteOne order (its bell rung) for an ordered request.
@@ -79,6 +79,7 @@ maybeDescribe('order-revoke (live Postgres)', () => {
       await db('vendor_orders').whereIn('restock_request_id', made.product_restock_requests).del();
       await db('product_restock_requests').whereIn('id', made.product_restock_requests).del();
     }
+    if (made.vendor_pricing.length) await db('vendor_pricing').whereIn('id', made.vendor_pricing).del();
     if (made.products_catalog.length) await db('products_catalog').whereIn('id', made.products_catalog).del();
     await db.destroy();
   }, 120000);
@@ -190,5 +191,86 @@ maybeDescribe('order-revoke (live Postgres)', () => {
       expect(err).toMatchObject({ statusCode: 400, code: 'bad_request' });
     }
     await expectUntouched(f);
+  });
+
+  // The dispatcher itself, with a scripted vendor: an order that may exist on a request that
+  // changed while the vendor call ran. Each run dispatches ONE fixture request by its id.
+  describe('a post-submit park on a request that changed during the vendor call', () => {
+    const GATES = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true' };
+    let gatesBefore;
+    beforeAll(() => { gatesBefore = Object.fromEntries(Object.keys(GATES).map((k) => [k, process.env[k]])); Object.assign(process.env, GATES); });
+    afterAll(() => { for (const [k, v] of Object.entries(gatesBefore)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+
+    // An open automatic reorder of 500 of one vendor item (the vendor row is the migration's, code 25).
+    async function autoRequest() {
+      const vendor = await db('vendors').where({ code: 25 }).first();
+      const id = crypto.randomUUID();
+      const sku = `item-${id.slice(0, 8)}`;
+      const [product] = await db('products_catalog').insert({
+        id, name: `Fixture sticker ${id.slice(0, 8)}`, category: 'supplies', inventory_unit: 'each', inventory_on_hand: 40, low_stock_threshold: 100,
+        auto_reorder_enabled: true, auto_reorder_vendor_id: vendor.id, reorder_quantity: 500,
+      }).returning('*');
+      made.products_catalog.push(product.id);
+      const [price] = await db('vendor_pricing').insert({ product_id: product.id, vendor_id: vendor.id, price: 314, quantity: '500', unit: 'each', vendor_sku: sku, approval_status: 'approved', is_active: true }).returning('id');
+      made.vendor_pricing.push(price.id);
+      const [request] = await db('product_restock_requests').insert({
+        id: crypto.randomUUID(), product_id: product.id, status: 'open', priority: 'normal', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id, vendorSku: sku }),
+      }).returning('*');
+      made.product_restock_requests.push(request.id);
+      return { request, ledger: () => db('vendor_orders').where({ restock_request_id: request.id }).first() };
+    }
+    // A vendor that confirms its total before the order, so the dispatcher calls place(). The call
+    // ends with no answer (the order may exist) after the request changed under it.
+    const lostCallAfter = (fx, change) => ({
+      key: 'stickermule', preSubmitTotal: 'vendor', packagedQuantity: false, configured: () => true,
+      bindingQuote: async () => ({ cents: 31400, source: 'order SM-0' }),
+      place: jest.fn(async () => {
+        await db('product_restock_requests').where({ id: fx.request.id }).update(change);
+        throw Object.assign(new Error('timeout after POST'), { ambiguous: true });
+      }),
+    });
+    // The monthly cap is out of reach of every other row in the database; the notifier lands nothing.
+    const env = { AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '2000000000' };
+    const dispatchWith = (fx, adapter) => dispatch.dispatchRestockOrder(fx.request.id, { conn: db, notify: jest.fn(async () => null), adapters: { stickermule: adapter }, env });
+
+    test('received during the call: the order stays live and no replacement can be ordered', async () => {
+      const fx = await autoRequest();
+      const adapter = lostCallAfter(fx, { status: 'received', closed_at: new Date() });
+      expect(await dispatchWith(fx, adapter)).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit', bellPending: true });
+      expect(adapter.place).toHaveBeenCalledTimes(1);
+      const vo = await fx.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(vo).toMatchObject({ status: 'needs_review', amount_cents: 31400 });
+      expect(vo.placed_at).not.toBeNull();
+      expect(vo.evidence).toMatchObject({ landedAfterReceive: expect.any(String), bell: { body: expect.stringMatching(/the order MAY exist at Sticker Mule.*Do NOT re-order/) } });
+      expect(await db('product_restock_requests').where({ id: fx.request.id }).first('status')).toEqual({ status: 'received' });
+      // The received request does not settle this row: the product stays blocked.
+      expect(await dispatch.findLiveAutoOrder(db, fx.request.product_id)).toBeTruthy();
+      expect(await dispatch.landedAfterReceiveFor(db, fx.request.id)).toBe(true);
+    });
+
+    test('cancelled during the call: the request goes back to ordered', async () => {
+      const fx = await autoRequest();
+      const adapter = lostCallAfter(fx, { status: 'cancelled', closed_at: new Date() });
+      expect(await dispatchWith(fx, adapter)).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+      const vo = await fx.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(vo.evidence).toMatchObject({ reopenedFromCancelledAt: expect.any(String) });
+      expect(vo.evidence).not.toHaveProperty('landedAfterReceive');
+      expect(await db('product_restock_requests').where({ id: fx.request.id }).first('status', 'closed_at')).toEqual({ status: 'ordered', closed_at: null });
+      expect(await dispatch.findLiveAutoOrder(db, fx.request.product_id)).toBeTruthy();
+    });
+
+    test('still open after the call: the request is left as it is', async () => {
+      const fx = await autoRequest();
+      const adapter = lostCallAfter(fx, { updated_at: new Date() });
+      expect(await dispatchWith(fx, adapter)).toMatchObject({ status: 'needs_review', reason: 'ambiguous_after_submit' });
+      const vo = await fx.ledger();
+      made.vendor_orders.push(vo.id);
+      expect(vo.evidence).not.toHaveProperty('landedAfterReceive');
+      expect(vo.evidence).not.toHaveProperty('reopenedFromCancelledAt');
+      expect(await db('product_restock_requests').where({ id: fx.request.id }).first('status')).toEqual({ status: 'open' });
+      expect(await dispatch.findLiveAutoOrder(db, fx.request.product_id)).toBeTruthy();
+    });
   });
 });

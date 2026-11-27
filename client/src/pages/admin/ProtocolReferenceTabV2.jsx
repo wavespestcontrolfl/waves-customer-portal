@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, ScanStrip, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
-import ProtocolTankSheet from "./ProtocolTankSheet";
+import ProtocolTankSheet, { directionLines, itemMixWarnings, mixOrderWarnings, sheetTanks } from "./ProtocolTankSheet";
+import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
 import {
@@ -363,6 +364,7 @@ function CurrentVisitCardV2({ visit, isLawnTrack, pricingRestricted, description
             )}
           </div>
         )}
+        <ProtocolMixTable mixRates={visit.mixRates} />
         {" "}
         <div className="mb-3 rounded-sm border-hairline border-zinc-200 overflow-hidden">
           {" "}
@@ -563,6 +565,10 @@ export function ProtocolMixCard({
             <div className="text-11 text-ink-secondary leading-normal mt-1">
               {item.raw}
             </div>
+            {/* The same lines as the tank card, by product id: each Do not mix or Caution pair of this line's tank. */}
+            {directionLines(itemMixWarnings(item, plan), { productId: item.product?.id, verdicts: ["never", "caution"] }).map((text) => (
+              <div key={text} className="text-11 font-medium text-alert-fg leading-normal mt-1">{text}</div>
+            ))}
             <div className="mt-1 flex gap-1.5 flex-wrap">
               {(item.fieldHold || item.conditional) && (
                 <Badge tone="neutral">{item.fieldHold ? "On hold" : checked ? "Selected" : "Optional"}</Badge>
@@ -859,26 +865,7 @@ export function ProtocolMixCard({
         </div>{" "}
         <div className="p-4 space-y-2">
           {plan.mixingOrder?.length ? (
-            plan.mixingOrder.map((step) => (
-              <div
-                key={`${step.step}-${step.productId}`}
-                className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
-              >
-                {" "}
-                <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
-                  {step.step}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div className="text-13 font-medium text-zinc-900">
-                    {step.productName}
-                  </div>{" "}
-                  <div className="text-12 text-ink-secondary leading-normal mt-1">
-                    {step.instruction}
-                  </div>{" "}
-                </div>{" "}
-              </div>
-            ))
+            <MixOrderSteps steps={plan.mixingOrder} tanks={sheetTanks(plan).base} mixCheck={plan.mixCheck} nameClass="text-13" textClass="text-12" />
           ) : plan.blocks?.length ? (
             <div className="text-13 text-alert-fg">
               {plan.blocks.map((b) => b.message).join(" ")}
@@ -896,25 +883,44 @@ export function ProtocolMixCard({
             <div className="text-14 font-medium text-zinc-900">Bermuda backpack mix</div>
           </div>
           <div className="p-4 space-y-2">
-            {plan.bermudaMixingOrder.map((step) => (
-              <div
-                key={`${step.step}-${step.productId}`}
-                className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
-              >
-                <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
-                  {step.step}
-                </div>
-                <div>
-                  <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
-                  <div className="text-14 text-ink-secondary leading-normal mt-1">{step.instruction}</div>
-                </div>
-              </div>
-            ))}
+            <MixOrderSteps steps={plan.bermudaMixingOrder} tanks={[sheetTanks(plan).bermuda]} mixCheck={plan.mixCheck} nameClass="text-14" textClass="text-14" />
           </div>
         </Card>
       )}
       <ProductLabelsCard items={plan.items} />{" "}
     </div>
+  );
+}
+
+// A mixing order, its verdicts from the sheet's one path (mixOrderWarnings: each tank on its own, by product id). Every non-Yes line
+// (Do not mix, Caution, jar test, no rule) comes before the steps, and a "Do not mix" line also sits directly under each step
+// it concerns. The steps, their numbers and text, every product and its amount line stay as sent (owner 2026-11-26).
+function MixOrderSteps({ steps, tanks, mixCheck, nameClass, textClass }) {
+  const warnings = mixOrderWarnings(steps, tanks, mixCheck);
+  const ordered = [...warnings.filter((warning) => warning.replacesLine), ...warnings.filter((warning) => !warning.replacesLine)];
+  return (
+    <>
+      {ordered.map((warning) => (
+        <div key={warning.text} className={`${textClass} ${warning.replacesLine ? "font-medium text-alert-fg" : warning.verdict === "unknown" ? "text-zinc-700" : "text-alert-fg"}`}>{warning.text}</div>
+      ))}
+      {steps.map((step) => (
+        <div
+          key={`${step.step}-${step.productId}`}
+          className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
+        >
+          <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
+            {step.step}
+          </div>
+          <div>
+            <div className={`${nameClass} font-medium text-zinc-900`}>{step.productName}</div>
+            <div className={`${textClass} text-ink-secondary leading-normal mt-1`}>{step.instruction}</div>
+            {directionLines(warnings, { productId: step.productId }).map((text) => (
+              <div key={text} className={`${textClass} font-medium text-alert-fg mt-1`}>{text}</div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -1346,7 +1352,7 @@ export default function ProtocolReferenceTabV2() {
               </Card>
             ) : (
               mixPlan && <>
-                <ProtocolTankSheet plan={mixPlan} calibration={equipmentOptions.find((row) => row.id === mixPlan.equipment?.calibrationId)} safetyRules={safetyRules} />
+                <ProtocolTankSheet plan={mixPlan} safetyRules={safetyRules} />
                 <Button variant="secondary" onClick={() => setShowDetailedMix((value) => !value)}>
                   {showDetailedMix ? "Hide application details" : "Application details & conditional products"}
                 </Button>

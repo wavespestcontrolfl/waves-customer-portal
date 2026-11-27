@@ -85,6 +85,7 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
       service_line varchar(40),
       status text DEFAULT 'completed' CHECK (status IN ('scheduled', 'in_progress', 'completed', 'cancelled')),
       technician_notes text,
+      structured_notes jsonb,
       created_at timestamptz NOT NULL DEFAULT now()
     )`);
     await db.raw(`CREATE TABLE service_products (
@@ -225,6 +226,25 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
     expect(byId.get(alpine)).toMatchObject({ display_name: 'Alpine', inventory_unit: 'g', inventory_on_hand: 12.5, formulation: 'WSG' });
     expect(byId.get(demand)).toMatchObject({ display_name: null, inventory_unit: 'fl_oz', inventory_on_hand: 0 });
     expect(byId.get(gentrol)).toMatchObject({ display_name: null, inventory_unit: null, inventory_on_hand: null });
+  });
+
+  test('a line flagged over its ceiling (owner 2026-11-26) is never the usual amount or unit', async () => {
+    const celsius = await product('Celsius WG');
+    await record('2026-09-10', [{ id: celsius, amount: 2, unit: 'lb' }]);
+    const flaggedRecord = await record('2026-09-11', [{ id: celsius, amount: 406, unit: 'oz' }]);
+    const [flaggedLine] = await db('service_products').where({ service_record_id: flaggedRecord }).select('id');
+    await db('service_records').where({ id: flaggedRecord }).update({
+      structured_notes: JSON.stringify({ inventoryDeductions: [{ productId: celsius, serviceProductId: flaggedLine.id, status: 'not_deducted_implausible', amount: 406, amountUnit: 'oz' }] }),
+    });
+    // A deduction saved before the service product id was kept matches on product, unit and amount.
+    const legacyRecord = await record('2026-09-12', [{ id: celsius, amount: 9000, unit: 'oz' }]);
+    await db('service_records').where({ id: legacyRecord }).update({
+      structured_notes: JSON.stringify({ inventoryDeductions: [{ productId: celsius, status: 'not_deducted_implausible', amount: 9000, amountUnit: 'oz' }] }),
+    });
+    const pestVisit = await visit('Quarterly Pest Control');
+    jest.useFakeTimers(FAKE_DATE_ONLY);
+    const result = await buildRecapContext(pestVisit, db, { includeCommonProducts: true });
+    expect(result.commonProducts).toEqual([expect.objectContaining({ productId: celsius, visits: 1, usualUnit: 'lb', usualAmount: 2 })]);
   });
 
   test('returns at most 8, most visits first and then by name', async () => {

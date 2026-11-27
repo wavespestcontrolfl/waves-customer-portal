@@ -138,15 +138,11 @@ const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUT
 const REMOTE_RUNNER = 'mac';
 const siteoneRunsOnMac = (env = process.env) => String(env.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() === REMOTE_RUNNER;
 const MAC_RUNNER_MARKER = Object.freeze({ remoteRunner: REMOTE_RUNNER });
-// Any other non-empty value is a typo, never the server's own adapter (which can submit for real):
-// its SiteOne requests go to the office with the "order manually" bell.
-const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true });
-const siteoneSlot = (env) => {
-  if (siteoneRunsOnMac(env)) return MAC_RUNNER_MARKER;
-  // Only an absent or empty value keeps the server's own adapter; anything else (spaces included) is invalid.
-  if (env.SITEONE_ORDER_RUNNER != null && env.SITEONE_ORDER_RUNNER !== '') return INVALID_RUNNER_MARKER;
-  return require('./adapters/siteone');
-};
+// Any value but 'mac' (unset, empty, a typo) is never the server's own SiteOne adapter, which signs in
+// with the stored login, empties the cart and submits for real from a server SiteOne blocks (owner
+// 2026-11-27): its SiteOne requests go to the office with the "order manually" bell.
+const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true, configured: () => false }); // never configured: canAutoOrder reads it as manual
+const siteoneSlot = (env) => (siteoneRunsOnMac(env) ? MAC_RUNNER_MARKER : INVALID_RUNNER_MARKER);
 
 function loadAdapters(env = process.env) {
   return {
@@ -190,13 +186,12 @@ const num = (v) => { const n = Number(v); return v == null || v === '' || !Numbe
  * vendor check so the sweep never suppresses its manual bell for a request
  * the dispatcher will then refuse (Codex r1 P2).
  */
-async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
+async function canAutoOrder({ conn = db, vendorId, vendor = null, adapters = null } = {}) {
   if (!gateEnvValue(GATE)) return false;
   const row = vendor || (vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active') : null);
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
-  const adapter = key ? loadAdapters()[key] : null;
-  if (adapter && adapter.invalidRunner) return false; // a SITEONE_ORDER_RUNNER typo: the sweep's manual bell stays
+  const adapter = key ? (adapters || loadAdapters())[key] : null;
   // An adapter without its credential must not own requests: the sweep would
   // stand down its manual bell and the dispatcher would park every claim as
   // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20
@@ -507,6 +502,9 @@ async function findDispatchable(conn = db) {
 // The headline, why and done-when for a persisted bell. The title and body are written into the ledger row
 // (evidence.bell) and re-rung from it, so they keep their text and ride in the alert's detail; the
 // headline and why are one short line each, chosen from the kind of bell the title and body name.
+// The words of parkBellText's account check, read back out of a persisted bell's body by
+// bellAlertParts (as 'Do NOT re-order' is), so the headline carries the check too.
+const ACCOUNT_CHECK = 'account first: if an order already in covers this request in full';
 function bellAlertParts({ title, body, productName }) {
   const named = (templates) => fitAction('Inventory', productName, templates);
   const text = String(title || '');
@@ -518,6 +516,15 @@ function bellAlertParts({ title, body, productName }) {
     };
   }
   if (/^Auto-order (?:failed|needs review)/.test(text) && !String(body || '').includes('Do NOT re-order')) {
+    // A vendor the dispatcher never places for: an order placed by hand may already be in. The
+    // check leads the alert itself — the detail alone would leave the headline at "order by hand".
+    if (String(body || '').includes(ACCOUNT_CHECK)) {
+      return {
+        action: named([(n) => `order ${n} by hand if not yet on order`, (n) => `order ${n} if not yet on order`]),
+        why: 'No order was sent; check the vendor account first, then order by hand only what is not already on order.',
+        doneWhen: 'restock_request_ordered',
+      };
+    }
     return {
       action: named([(n) => `order ${n} by hand, the auto-order failed`, (n) => `order ${n} by hand`]),
       why: 'The auto-order did not go through; order it manually, then mark the restock request ordered.',
@@ -652,7 +659,7 @@ async function reringPendingBells({ conn = db, notify = null, now = new Date() }
 // The bell a park rings — persisted with the outcome (evidence.bell) so a
 // failed send is re-rung, never lost. Post-submit reasons say do-NOT-re-order.
 function parkBell(args) { return versioned(parkBellText(args)); }
-function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed }) {
+function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst = false }) {
   if (reason === 'dry_run') {
     return {
       title: `Auto-order dry run: ${product.name} (${vendor.name})`,
@@ -663,7 +670,17 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   if (POST_SUBMIT_REASONS.has(reason)) {
     return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.` };
   }
-  return { title, body: `${message} The restock request stays open — order manually, then mark it ordered.` };
+  // A pre-submit park: no order was sent, so the next step is an order placed by hand. A vendor the
+  // dispatcher never places for (checkAccountFirst) gets ALL its orders by hand, on an account the
+  // portal does not read: one may already be in (in production, or not paid yet), and "order
+  // manually" alone could buy it twice. Every pre-submit park of such a vendor says so, whatever
+  // its reason — a failed lookup included. The request's own quantity is named: an order already
+  // in for fewer does not cover it.
+  const needed = [request?.requested_quantity, request?.unit].filter((part) => part != null && part !== '').join(' ');
+  const next = checkAccountFirst
+    ? `check the ${vendor.name} ${ACCOUNT_CHECK}${needed ? ` (${needed})` : ''}, mark the request ordered; if not, order what is missing by hand, then mark it ordered.`
+    : 'order manually, then mark it ordered.';
+  return { title, body: `${message} The restock request stays open — ${next}` };
 }
 
 // The ledger row's parked state. placed_at = when the vendor call was
@@ -688,19 +705,21 @@ function parkPatch({ status, reason, message, evidence, bell, amountCents, postS
  * dispatcher or pod already settled keeps that outcome — no overwrite, no
  * second audit (pre-push P1). Then the bell.
  */
-async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false, staleBefore = null }) {
+async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false, staleBefore = null, checkAccountFirst = false }) {
   const postSubmit = POST_SUBMIT_REASONS.has(reason);
   if (postSubmit && status !== 'needs_review') throw new Error(`post-submit reason ${reason} must park as needs_review`);
-  const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed });
+  const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst });
   const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
     let rowPatch = patch;
     let reopen = false;
-    if (staleBefore) {
-      // Stale recovery: the request's status is read HERE, under the ledger →
-      // request locks (the scan's snapshot is unlocked): received by an older
-      // pod meanwhile ⇒ the park carries landedAfterReceive so every
-      // live-order guard keeps the possibly-placed order live (Codex r30 P1).
+    if (postSubmit) {
+      // Every post-submit park (stale recovery, an ambiguous submit, a placed
+      // order whose record failed): the order exists or may, so the request's
+      // status is read HERE, under the ledger → request locks (the claim's
+      // and the scan's snapshots are unlocked): received by an older pod
+      // meanwhile ⇒ the park carries landedAfterReceive so every live-order
+      // guard keeps the possibly-placed order live (Codex r30 P1).
       await trx('vendor_orders').where({ id: ledger.id }).forUpdate().first('id');
       const fresh = await trx('product_restock_requests').where({ id: request.id }).forUpdate().first('status');
       if (fresh?.status === 'received') rowPatch = { ...patch, evidence: JSON.stringify({ ...JSON.parse(patch.evidence), landedAfterReceive: new Date().toISOString() }) };
@@ -708,7 +727,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
       // have gone out, and a cancelled request can be neither received nor
       // revoked (both refuse) while the live-order guard blocks a
       // replacement — restore it to ordered, as a late placement does
-      // (Codex r31 P1).
+      // (Codex r31 P1). A pre-submit park leaves the request alone: no order.
       if (fresh?.status === 'cancelled') { reopen = true; rowPatch = { ...rowPatch, evidence: JSON.stringify({ ...JSON.parse(rowPatch.evidence), reopenedFromCancelledAt: new Date().toISOString() }) }; }
     }
     const transition = trx('vendor_orders').where({ id: ledger.id, status: 'placing' });
@@ -994,21 +1013,25 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
  * from history, cap-reserved atomically. Returns { quoteCents } to proceed or
  * { parked } — the park result to return as this request's outcome.
  */
+// An adapter whose API confirms no current total before an order (Sticker Mule: 'history') is
+// never placed for: resolveBindingTotal parks its request with the last identical order's figure,
+// and the order is placed by hand on the vendor's own site.
+const neverPlacedFor = (adapter) => adapter?.preSubmitTotal !== 'vendor';
 async function resolveBindingTotal(conn, { adapter, ctx, vendor, vendorSku, quantity, now, env }) {
   let bq;
   try { bq = await adapter.bindingQuote({ vendorSku, quantity }); }
   catch (err) { return { parked: await park(conn, { ...ctx, status: 'failed', reason: 'adapter_error', message: `binding total lookup failed: ${err.message}` }) }; }
-  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no prior order of item ${vendorSku} at ${quantity} on the account, so there is no binding total to cap; place one identical order by hand first.` }) };
+  if (!bq || !Number.isFinite(bq.cents) || bq.cents <= 0) return { parked: await park(conn, { ...ctx, reason: 'no_binding_total', message: `${vendor.name} has no usable prior order of item ${vendorSku} at ${quantity}: there is none among its newest orders, or the latest one is not paid yet, was canceled, or cannot be read. So there is no binding total to cap.` }) };
   const quoteCents = bq.cents;
   const cap = await reserveUnderCaps(conn, ctx.ledger.id, quoteCents, { env });
   if (!cap.ok) return { parked: await park(conn, { ...ctx, reason: cap.reason, message: `${cap.message} (${vendor.name} total for the last identical order${bq.source ? `, ${bq.source}` : ''})`, amountCents: quoteCents }) };
-  if (adapter.preSubmitTotal !== 'vendor') {
+  if (neverPlacedFor(adapter)) {
     // A historical charge is not a vendor-confirmed current total: price,
     // tax or shipping may have moved since, and a cap can only be
     // enforced BEFORE money moves. Park with everything the office needs
     // for a one-minute manual reorder (pre-push audit P0; owner ruling
     // pending on accepting history-total placement).
-    return { parked: await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. Reorder item ${vendorSku} × ${quantity} by hand.`, amountCents: quoteCents }) };
+    return { parked: await park(conn, { ...ctx, reason: 'no_vendor_confirmed_total', message: `${vendor.name}'s API confirms no current total before ordering; the last identical order (${bq.source || 'history'}) was ${dollars(quoteCents)}, which fits the caps. A reorder by hand is item ${vendorSku} × ${quantity}.`, amountCents: quoteCents }) };
   }
   return { quoteCents };
 }
@@ -1311,7 +1334,9 @@ const poNumberFor = (ledger) => `WAVES-${String(ledger.id).replace(/[^a-zA-Z0-9]
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
   const { request, vendor, adapterKey, product, ledger, pricing, order, credentials } = claim;
   const adapter = registry[adapterKey];
-  const ctx = { ledger, request, product, vendor, adapterKey, notify };
+  // Each pre-submit park of a never-placed-for adapter's request sends staff to the vendor
+  // account first (parkBellText): every order of its items is placed by hand there.
+  const ctx = { ledger, request, product, vendor, adapterKey, notify, checkAccountFirst: neverPlacedFor(adapter) };
   const releaseClaim = () => conn('vendor_orders').where({ id: ledger.id, status: 'placing' }).delete();
   let submitted = false; // true once the vendor call left the process
   let placed = null;

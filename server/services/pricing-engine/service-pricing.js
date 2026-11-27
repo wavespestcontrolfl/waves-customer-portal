@@ -11,6 +11,7 @@ const {
   WAVEGUARD,
 } = require('./constants');
 const { newRuleListPrice } = require('./one-time-pest-price');
+const { normalizeConstruction, normalizeFoundation, wdoWallColumn, foundationIsCrawlClass } = require('./structural-facts');
 const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
 const { areaAddOnKnobsFor } = require('./area-addon-config');
 const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } = require('./lawn-cost-plus-knobs');
@@ -43,6 +44,20 @@ function roundMoney(value) {
 
 function roundRatio(value) {
   return Math.round((Number(value) || 0) * 1000) / 1000;
+}
+
+// Pest footprint step. The footprint table is live as on main (Settings edits move its prices). Above 5,500 sq ft a NEW quote adds a
+// premium on top of the table price (owner 2026-11-26): +$8 per visit at quarterly for each 1,000 sq ft above the start point,
+// pro-rated to the square foot, no cap. The start point and the rate are CODE constants (PEST.aboveTableStartSqFt,
+// PEST.aboveTablePer1000), never read from the table, so a Settings edit of the last bracket cannot move the premium on a quote
+// already sent. A quote saved before the rule (legacyPestAboveTable stamp) carries no premium, as it was sold.
+function pestFootprintAdjustment(footprint, brackets, legacyPestAboveTable = false) {
+  const table = interpolate(footprint, brackets);
+  if (legacyPestAboveTable) return table;
+  const start = Number(PEST.aboveTableStartSqFt);
+  const per1000 = Number(PEST.aboveTablePer1000);
+  if (!Number.isFinite(start) || !Number.isFinite(per1000) || per1000 <= 0) return table;
+  return table + per1000 * Math.max(0, footprint - start) / 1000;
 }
 
 // ── Utility: Linear interpolation between brackets ────────────
@@ -894,6 +909,19 @@ function optionBooleanTrue(value) {
   return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes';
 }
 
+// Size basis of the whole-home services (cockroach treatment, bed bug treatment, rodent guarantee). 'total_living_area' is the
+// live rule (owner 2026-11-26 "whole home"); 'ground_floor' is the rule before it (living area / stories), kept ONLY so a
+// stored estimate quoted that way replays at the price it was sent at (property.wholeHomeSizingLegacy, set by the engine from
+// the estimate's own stamp: estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), and for a COMMERCIAL building
+// (property.wholeHomeSizingCommercial, the engine's own commercial verdict): the whole-home rule is for homes, and a commercial
+// caller sends a measured building footprint beside a placeholder homeSqFt, so a commercial line keeps the footprint path exactly.
+const HOME_SIZE_BASIS_TOTAL = 'total_living_area';
+const HOME_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
+const HOME_SIZE_UNCLEAR_WARNING = 'Home size may be ground floor only: confirm total living area before sending.';
+const wholeHomeBasisOf = (property) => (property && (property.wholeHomeSizingLegacy === true || property.wholeHomeSizingCommercial === true)
+  ? HOME_SIZE_BASIS_GROUND_FLOOR
+  : HOME_SIZE_BASIS_TOTAL);
+
 function resolvePestFootprint(property = {}, options = {}) {
   const fallback = positiveFiniteNumber(options.fallback) || 2000;
   const manualReviewReasons = [];
@@ -1544,9 +1572,10 @@ function pricePestControl(property, options = {}) {
     ...pestAgeMeta.pestAgeAdjWarnings,
     ...poolCageMeta.warnings,
   ]);
-  const footprintAdj = interpolate(
+  const footprintAdj = pestFootprintAdjustment(
     footprint,
-    PEST.footprintBrackets.map(b => [b.sqft, b.adj])
+    PEST.footprintBrackets.map(b => [b.sqft, b.adj]),
+    options.legacyPestAboveTable === true
   );
 
   let additionalAdj = 0;
@@ -1759,7 +1788,10 @@ function pricePestInitialRoach(property, options = {}) {
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
   const roachType = roachMeta.roachType;
   if (roachType === 'none') return null;
-  const footprintResolution = resolvePestFootprint(property);
+  // The treatment covers every floor, so the bracket reads the home's TOTAL living area (owner 2026-11-26 "whole home"), not the
+  // ground-floor footprint. A stored estimate quoted before that replays the footprint (property.wholeHomeSizingLegacy).
+  // An unclear size (a building measurement on a multi-story home) adds the resolution's size review reason and warning below.
+  const footprintResolution = resolveWholeHomeBasisSize(property);
 
   // Standalone Cockroach Treatment (without recurring pest) uses a higher
   // scale — no future visits to amortize the heavier visit-1 burden across.
@@ -1794,16 +1826,20 @@ function pricePestInitialRoach(property, options = {}) {
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
   const isGerman = roachType === 'german';
-  const unmeasuredFootprint = buildingSizeMeasured === false;
+  // The route's "no measured building" flag is about the size it POSTED (its 2,000 sq ft placeholder). When the server lookup's
+  // own measured home sized this line instead (whole-home basis only), the bracket is not a guess and the flag does not apply.
+  const unmeasuredFootprint = buildingSizeMeasured === false && footprintResolution.source !== 'lookup_measured_home';
   const manualReviewReasons = uniqueList([
     ...footprintResolution.manualReviewReasons,
     ...(unmeasuredFootprint ? ['building_size_unmeasured_pest_footprint'] : []),
+    ...footprintResolution.sizeReviewReasons,
     ...(severityMeta.severity === 'severe' && !isGerman
       ? ['severe_native_roach_activity_manual_review']
       : []),
   ]);
   const warnings = uniqueList([
     ...footprintResolution.warnings,
+    ...footprintResolution.sizeWarnings,
     ...roachMeta.roachWarnings,
     ...severityMeta.warnings,
     ...(severityMeta.severity === 'severe' && isGerman
@@ -1860,6 +1896,9 @@ function pricePestInitialRoach(property, options = {}) {
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
+    homeSizeBasis: footprintResolution.homeSizeBasis,
+    // Present only when the server lookup's measured home replaced the posted size (a website quote).
+    ...footprintResolution.postedSizeFields,
     requiresManualReview: footprintResolution.requiresManualReview || manualReviewReasons.length > 0,
     manualReviewReasons,
     warnings,
@@ -4815,10 +4854,23 @@ function mosquitoLotSizePressure(sqft) {
 // manualReviewReasons: public quote, lead automation, call-quote draft lane,
 // voice agent, add-service offers). The price below 2 acres is unchanged and
 // an admin can still set a price and send the estimate.
+// Owner 2026-11-26 (evening, supersedes the hand price above for NEW quotes): a lot above 2 acres is priced. The per-visit price is
+// the 2-acre visit price plus $85 for each added acre, pro-rated by the square foot (seasonal 9-visit: 2 ac $117, 3 ac $202,
+// 4 ac $287). The monthly program keeps its existing ratio to seasonal (mosquitoBoundedBasePrice), no cap. CODE constants, not
+// Settings; options.legacySpecialty1126 (estimate stamp legacySpecialty1126, estimate-engine.js) keeps the hand-price hold and the
+// flat curve for a quote priced before it.
+const MOSQUITO_ADDED_ACRE_PER_VISIT = 85;
+const MOSQUITO_SQFT_PER_ACRE = 43560;
 const MOSQUITO_LOT_ABOVE_2_ACRES_SQFT = 87120;
 const MOSQUITO_LOT_ABOVE_2_ACRES_REASON = 'mosquito_lot_above_2_acres';
 // Staff wording (draft lane reason, office bell, estimate tool). Never shown to a customer.
 const MOSQUITO_LOT_ABOVE_2_ACRES_TEXT = 'Lot above 2 acres: set the mosquito price by hand';
+// Property records stop a home lot at 200,000 sq ft (4.59 acres): the county and AI lookups (ai-property-lookup LOT_SQFT_MAX), the
+// website quote (public-quote LOT_CAP) and the customer's saved lot each store a larger parcel as exactly that number. So a lot AT
+// that number means "4.59 acres or more", not a size. Its added acres are not priced: it keeps the hand-price hold and the flat
+// price it has on main. A number above it can only be typed by staff or verified by a tech, and is priced as entered.
+const MOSQUITO_RECORD_LOT_CAP_SQFT = 200000;
+const MOSQUITO_LOT_AT_RECORD_CAP_TEXT = 'Lot is 4.59 acres or more (property records stop there): enter the real lot size to price mosquito, or set the price by hand';
 
 function priceMosquito(property, options = {}) {
   const {
@@ -4876,7 +4928,44 @@ function priceMosquito(property, options = {}) {
   if (tierWasForced) recommendationReasons.push('forced_by_request');
   const basePrice = mosquitoBoundedBasePrice(tierIndex, pricingSqFt);
 
-  const perVisit = Math.round(basePrice * pressure);
+  // The lot the pricer used: the gross parcel or the treatable area, whichever is larger (an explicit treatable area can stand
+  // without a parcel). An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
+  const lotSqFtUsed = Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0);
+  const lotAbove2Acres = options.lotSizeMeasured !== false && lotSqFtUsed > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
+  // A lot at the record cap is a truncated size (4.59 acres or more): hand price, as a quote priced before the rule. The gross
+  // parcel is checked on its own: a larger treatable area beside a parcel at the cap does not make the parcel's real size known.
+  const lotAtRecordCap = lotAbove2Acres
+    && (Number(property.lotSqFt) === MOSQUITO_RECORD_LOT_CAP_SQFT || lotSqFtUsed === MOSQUITO_RECORD_LOT_CAP_SQFT);
+  const legacyHandPrice = options.legacySpecialty1126 === true || lotAtRecordCap;
+  // The acres past the second (pro-rated), priced for a new quote; zero for a lot at or under 2 acres and for a legacy quote.
+  const addedAcres = lotAbove2Acres && !legacyHandPrice
+    ? (lotSqFtUsed - MOSQUITO_LOT_ABOVE_2_ACRES_SQFT) / MOSQUITO_SQFT_PER_ACRE
+    : 0;
+  // A lot above 2 acres is anchored at the 2-acre boundary: this pricer's own answer for the same home on exactly 2 acres (same
+  // footprint, features and pressure inputs; options.twoAcreProperty carries the profile re-derived at 2 acres, else the lot is capped
+  // here), then the seasonal visit plus $85 for each added acre, and the other program at its existing ratio to seasonal at 2 acres.
+  const seasonalIndex = MOSQUITO.programs.indexOf('seasonal9');
+  let perVisitForProgram = null;
+  if (addedAcres > 0 && seasonalIndex >= 0) {
+    const cappedProperty = options.twoAcreProperty && typeof options.twoAcreProperty === 'object'
+      ? options.twoAcreProperty
+      : {
+        ...property,
+        lotSqFt: Math.min(Number(property.lotSqFt) || 0, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT),
+        ...(Number(property.mosquitoTreatableSqFt) > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT ? { mosquitoTreatableSqFt: MOSQUITO_LOT_ABOVE_2_ACRES_SQFT } : {}),
+      };
+    const atTwoAcres = priceMosquito(cappedProperty, { ...options, twoAcreProperty: undefined, legacySpecialty1126: true });
+    const twoAcrePv = Object.fromEntries(atTwoAcres.tiers.map((t) => [t.tier, t.perVisit]));
+    const seasonalName = MOSQUITO.programs[seasonalIndex];
+    const seasonalAbove = twoAcrePv[seasonalName] + MOSQUITO_ADDED_ACRE_PER_VISIT * addedAcres;
+    perVisitForProgram = (programIndex) => {
+      const name = MOSQUITO.programs[programIndex];
+      if (programIndex === seasonalIndex || !(twoAcrePv[seasonalName] > 0)) return Math.round(seasonalAbove);
+      return Math.round(seasonalAbove * (twoAcrePv[name] / twoAcrePv[seasonalName]));
+    };
+  }
+
+  const perVisit = perVisitForProgram ? perVisitForProgram(tierIndex) : Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
   const stationMeta = normalizeMosquitoAddOnCount(stationCount, 'station');
   const dunkMeta = normalizeMosquitoAddOnCount(dunkCount, 'dunk');
@@ -4906,8 +4995,7 @@ function priceMosquito(property, options = {}) {
   const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
-    const bp = mosquitoBoundedBasePrice(idx, pricingSqFt);
-    const pv = Math.round(bp * pressure);
+    const pv = perVisitForProgram ? perVisitForProgram(idx) : Math.round(mosquitoBoundedBasePrice(idx, pricingSqFt) * pressure);
     const v = MOSQUITO.tierVisits[name];
     const ann = pv * v + annualAddOns;
     return {
@@ -4925,15 +5013,10 @@ function priceMosquito(property, options = {}) {
     };
   });
 
-  // The lot the pricer used: the gross parcel or the treatable area, whichever
-  // is larger (an explicit treatable area can stand without a parcel).
-  // An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
-  const lotAbove2Acres = options.lotSizeMeasured !== false
-    && Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0) > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
   const manualReviewReasons = uniqueList([
     // First, so the reason a customer-facing hold and the office read
-    // (manualReviewReasons[0]) names the real cause.
-    lotAbove2Acres ? MOSQUITO_LOT_ABOVE_2_ACRES_REASON : null,
+    // (manualReviewReasons[0]) names the real cause. A new quote prices the lot (addedAcres) and carries no hold for size.
+    lotAbove2Acres && legacyHandPrice ? MOSQUITO_LOT_ABOVE_2_ACRES_REASON : null,
     ...areaResolution.manualReviewReasons,
     ...categoryResolution.manualReviewReasons,
     // A synthetic/default lot (caller passed lotSizeMeasured:false) is not a
@@ -4980,6 +5063,10 @@ function priceMosquito(property, options = {}) {
     fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
     missingAreaData: areaResolution.missingAreaData,
     pricingSqFt,
+    // Acres past the second that this price carries ($85 per visit each, pro-rated); 0 on a lot at or under 2 acres.
+    ...(addedAcres > 0 ? { mosquitoAddedAcres: Math.round(addedAcres * 1000) / 1000, mosquitoAddedAcreAdder: MOSQUITO_ADDED_ACRE_PER_VISIT } : {}),
+    // The lot is the record cap, so the real lot may be larger: staff read MOSQUITO_LOT_AT_RECORD_CAP_TEXT beside the hold.
+    ...(lotAtRecordCap ? { mosquitoLotAtRecordCap: true } : {}),
     basePrice, pressureMultiplier: pressure,
     pressureBeforeCap,
     perVisit, visits, annual, monthly,
@@ -6468,7 +6555,13 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'recurringPestPerApp';
   } else {
     if (hasValue(recurringPestPerApp)) warnings.push('invalid_recurring_pest_per_app_ignored');
-    baselinePest = pricePestControl(property, { frequency: 'quarterly', roachType: 'none', legacyOneTimePestBuffer: legacy });
+    baselinePest = pricePestControl(property, {
+      frequency: 'quarterly',
+      roachType: 'none',
+      legacyOneTimePestBuffer: legacy,
+      // A quote saved before the above-table rule keeps the flat footprint step for its own baseline too.
+      legacyPestAboveTable: options.legacyPestAboveTable === true,
+    });
     base = baselinePest.basePrice;
     baseSource = 'computed_quarterly_baseline';
   }
@@ -8015,7 +8108,7 @@ function normalizeBedBugOptions(property = {}, options) {
           ? undefined
           : propertyFootprint
       );
-  const footprint = footprintValue === null || footprintValue === undefined || footprintValue === ''
+  const groundFloorFootprint = footprintValue === null || footprintValue === undefined || footprintValue === ''
     ? undefined
     : assertPositiveNumber(footprintValue, 'footprint');
 
@@ -8023,6 +8116,31 @@ function normalizeBedBugOptions(property = {}, options) {
   const stories = storiesValue === null || storiesValue === undefined || storiesValue === ''
     ? undefined
     : assertPositiveInteger(storiesValue, 'stories');
+
+  // The size modifier steps on the home's TOTAL living area (owner 2026-11-26 "whole home"), not the ground-floor footprint.
+  // A stored estimate quoted before that replays the footprint (property.wholeHomeSizingLegacy). With no size evidence at all
+  // the modifier stays 1 and priceBedBugTreatment routes the line to review, as before.
+  const homeSizeBasis = wholeHomeBasisOf(property);
+  let homeSizeResolution = null;
+  let footprint;
+  // The area a whole-home heat treatment heats when the caller gave no heat area of its own. Ground-floor basis: the profile's
+  // homeSqFt, as sold. Whole-home basis: the resolved whole home, the same size the modifier steps on, so one treatment never
+  // prices on two areas (homeSqFt 1,500 beside livingAreaSqFt 3,000 heats 3,000).
+  let wholeHomeHeatAreaSqFt = property.homeSqFt;
+  if (homeSizeBasis === HOME_SIZE_BASIS_GROUND_FLOOR) {
+    footprint = groundFloorFootprint;
+  } else {
+    homeSizeResolution = resolveWholeHomeBasisSize({
+      ...property,
+      stories,
+      ...(hasOptionFootprint ? { footprint: options.footprint, wholeHomeExplicitFootprint: options.footprint } : {}),
+    });
+    // No size evidence (the resolver's 2,000 fallback is not a measurement): the modifier stays 1 and the heat area is read as before.
+    if (!homeSizeResolution.wasDefaulted) {
+      footprint = homeSizeResolution.footprint;
+      wholeHomeHeatAreaSqFt = footprint;
+    }
+  }
 
   const equipmentValue = options.equipment ?? options.bedbugEquipment;
   const equipment = readBedBugEnum(equipmentValue);
@@ -8043,7 +8161,7 @@ function normalizeBedBugOptions(property = {}, options) {
     assertEnum(heatScope, BED_BUG.heat.heatScope.allowed, 'heatScope');
     if (heatScope === 'WHOLE_HOME') {
       heatAreaSqFt = readBedBugPropertyNumber(
-        options.heatAreaSqFt ?? options.heatSqFt ?? options.homeSqFt ?? property.homeSqFt ?? property.squareFootage,
+        options.heatAreaSqFt ?? options.heatSqFt ?? options.homeSqFt ?? wholeHomeHeatAreaSqFt ?? property.squareFootage,
       );
     }
   }
@@ -8070,6 +8188,9 @@ function normalizeBedBugOptions(property = {}, options) {
       heatScope: method === 'CHEMICAL' ? undefined : heatScope,
       subcontractCost,
       quoteRequiredReason,
+      // A held row keeps the same size evidence a priced row has (priceBedBugTreatment reads both).
+      homeSizeBasis,
+      homeSizeResolution,
       urgency: options.urgency ?? options.bedbugUrgency ?? 'standard',
       afterHours: options.afterHours ?? options.isAfterHours ?? false,
       includeInternalCostBasis: options.includeInternalCostBasis === true,
@@ -8103,6 +8224,9 @@ function normalizeBedBugOptions(property = {}, options) {
     method,
     rooms,
     footprint,
+    homeSizeBasis,
+    // Whole-home basis only (null on the ground-floor basis): the resolver's answer, read by priceBedBugTreatment.
+    homeSizeResolution,
     heatAreaSqFt,
     stories,
     severity,
@@ -8311,9 +8435,10 @@ function bedBugCommonResult(normalized, fields) {
   };
 }
 
-function resolveChemicalPrice(normalized) {
+// The direct cost and the cost-ratio base price of a chemical job of `rooms` rooms (visit minutes, material and the severity's visit
+// count). Room 1 of this curve is the first-room price of the added-room rule below.
+function bedBugChemicalCost(normalized, rooms) {
   const chemical = BED_BUG.chemical;
-  const rooms = normalized.rooms;
   const extraRooms = rooms - 1;
   const severityConfig = BED_BUG.severity[normalized.severity];
   const laborRate = getBedBugLaborRate();
@@ -8356,9 +8481,25 @@ function resolveChemicalPrice(normalized) {
 
   const costRatioPrice = directCost / chemical.targetCostRatio;
   const minimumPrice = chemical.minimumBase + chemical.minimumAdditionalRoom * extraRooms;
-  const baseChemicalPrice = Math.max(costRatioPrice, minimumPrice);
+  return { directCost, includedVisits, basePrice: Math.max(costRatioPrice, minimumPrice) };
+}
+
+// Chemical bed bug price (owner 2026-11-26, new quotes only): the first room is the price the engine already gives one room, with
+// every factor it has today (the cost-ratio price or the $400 minimum with the severity's visit count, then footprint, severity,
+// prep, occupancy, story and urgency), and each room after the first adds the flat BED_BUG.chemical.addedRoomPrice ($349) to that
+// FINAL price. The added rooms take no factor. options.legacySpecialty1126 (estimate stamp legacySpecialty1126, estimate-engine.js)
+// keeps the old per-room cost curve for a quote priced before the rule.
+function resolveChemicalPrice(normalized, { legacyRoomRate = false } = {}) {
+  const chemical = BED_BUG.chemical;
+  const rooms = normalized.rooms;
+  const extraRooms = rooms - 1;
+  const { directCost, includedVisits, basePrice: curvePrice } = bedBugChemicalCost(normalized, rooms);
+  const useFlatRooms = !legacyRoomRate && extraRooms > 0;
+  // The first-room base: the one-room cost curve under the new rule, the whole curve (all rooms) under the old one.
+  const baseChemicalPrice = useFlatRooms ? bedBugChemicalCost(normalized, 1).basePrice : curvePrice;
   const multipliers = getBedBugMultipliers(normalized, chemical.sizeModifiers);
-  const price = roundPrice(applyBedBugMultipliers(baseChemicalPrice, multipliers));
+  const addedRoomsTotal = useFlatRooms ? chemical.addedRoomPrice * extraRooms : 0;
+  const price = roundPrice(applyBedBugMultipliers(baseChemicalPrice, multipliers)) + addedRoomsTotal;
   const warnings = uniqueWarnings(chemical.warnings);
   const protocol = buildBedBugChemicalProtocol(includedVisits);
   const estimatedGrossMargin = price > 0 ? roundedRatio((price - directCost) / price) : 0;
@@ -8392,6 +8533,7 @@ function resolveChemicalPrice(normalized) {
       pricingModel: chemical.pricingModel,
       targetCostRatio: chemical.targetCostRatio,
       protocol,
+      ...(addedRoomsTotal > 0 ? { addedRoomsTotal, addedRoomPrice: chemical.addedRoomPrice } : {}),
     },
   });
 }
@@ -8525,18 +8667,31 @@ function resolveHybridPrice(property, normalized) {
 
 function priceBedBugTreatment(property, options) {
   const normalized = normalizeBedBugOptions(property, options);
+  // The size the modifier used. Whole-home basis (sized): the total living area, the resolver's source, and the review mark when a
+  // building measurement on a multi-story home may be the ground floor only. Ground-floor basis: the footprint as given.
+  const sized = normalized.homeSizeResolution;
   const footprintResolution = normalized.footprint
     ? {
         footprint: normalized.footprint,
-        source: 'footprint',
+        source: sized ? sized.source : 'footprint',
         wasDefaulted: false,
-        requiresManualReview: false,
-        manualReviewReasons: [],
-        warnings: [],
+        requiresManualReview: sized ? sized.sizeReviewReasons.length > 0 : false,
+        manualReviewReasons: sized ? sized.sizeReviewReasons : [],
+        warnings: sized ? sized.sizeWarnings : [],
       }
     : resolvePestFootprint(property);
   const severityConfig = BED_BUG.severity[normalized.severity];
   const prepConfig = BED_BUG.prepStatus[normalized.prepStatus];
+  // The size evidence every bed bug row carries, held or priced: the size, its source, the basis, and (a website quote on the
+  // whole-home basis only) the posted size the server lookup's measured home replaced. A held row needs it as much as a priced
+  // one: the replay and a staff revision restore the measured home from the stored row.
+  const sizeEvidence = {
+    footprintUsed: footprintResolution.footprint,
+    footprintSource: footprintResolution.source,
+    footprintWasDefaulted: footprintResolution.wasDefaulted,
+    homeSizeBasis: normalized.homeSizeBasis,
+    ...sized?.postedSizeFields,
+  };
 
   if (severityConfig.quoteRequired) {
     const quote = buildBedBugQuoteRequired(normalized, 'SEVERE_INFESTATION', [
@@ -8544,9 +8699,7 @@ function priceBedBugTreatment(property, options) {
     ]);
     return {
       ...quote,
-      footprintUsed: footprintResolution.footprint,
-      footprintSource: footprintResolution.source,
-      footprintWasDefaulted: footprintResolution.wasDefaulted,
+      ...sizeEvidence,
       requiresManualReview: true,
       manualReviewReasons: combineManualReviewMetadata(footprintResolution.manualReviewReasons, ['SEVERE_INFESTATION']),
       warnings: uniqueWarnings(quote.warnings, footprintResolution.warnings),
@@ -8558,9 +8711,7 @@ function priceBedBugTreatment(property, options) {
     ]);
     return {
       ...quote,
-      footprintUsed: footprintResolution.footprint,
-      footprintSource: footprintResolution.source,
-      footprintWasDefaulted: footprintResolution.wasDefaulted,
+      ...sizeEvidence,
       requiresManualReview: true,
       manualReviewReasons: combineManualReviewMetadata(footprintResolution.manualReviewReasons, ['PREP_REFUSED']),
       warnings: uniqueWarnings(quote.warnings, footprintResolution.warnings),
@@ -8568,16 +8719,14 @@ function priceBedBugTreatment(property, options) {
   }
 
   let result;
-  if (normalized.method === 'CHEMICAL') result = resolveChemicalPrice(normalized);
+  if (normalized.method === 'CHEMICAL') result = resolveChemicalPrice(normalized, { legacyRoomRate: options.legacySpecialty1126 === true });
   else if (normalized.method === 'HEAT') result = resolveHeatPrice(property, normalized);
   else result = resolveHybridPrice(property, normalized);
 
   if (normalized.includeInternalCostBasis && normalized.isInternal) {
     result.internalCostBasis = BED_BUG.internalCostBasis;
   }
-  result.footprintUsed = footprintResolution.footprint;
-  result.footprintSource = footprintResolution.source;
-  result.footprintWasDefaulted = footprintResolution.wasDefaulted;
+  Object.assign(result, sizeEvidence);
   result.requiresManualReview = footprintResolution.requiresManualReview;
   result.manualReviewReasons = footprintResolution.manualReviewReasons;
   result.warnings = uniqueWarnings(result.warnings, footprintResolution.warnings);
@@ -8601,38 +8750,97 @@ function priceBedBug(rooms, method = 'CHEMICAL', footprint = 2000) {
   });
 }
 
-function priceWDO(input) {
+// The home's living area on a property: the one helper the WDO table reads (homeSqFt first, then livingAreaSqFt).
+const wdoLivingArea = (property) => positiveFiniteNumber(property.homeSqFt) ?? positiveFiniteNumber(property.livingAreaSqFt);
+
+// Size = the home's living area, from the engine's own living-area inputs (homeSqFt, then livingAreaSqFt, the order the flea
+// pricer reads them); a quote with none prices on the footprint the legacy path reads. A wrong-premise lookup's sizes describe a
+// neighbouring parcel (homeSizeTrusted false, lookup-confidence): no size at all, so the smallest tier (`unconfirmed`).
+function wdoSizeTier(property, footprint) {
+  const tiers = SPECIALTY.wdo.sizeTable.tiers;
+  if (property.homeSizeTrusted === false) return { size: null, tier: tiers[0], unconfirmed: true };
+  const size = wdoLivingArea(property) || footprint;
+  return { size, tier: tiers.find((t) => size <= t.maxSqFt) || tiers[tiers.length - 1], unconfirmed: false };
+}
+
+// Walls: whatever text arrives is normalized by the shared normalizer (structural-facts.js), and a reading counts only when it is
+// stamped trusted (=== true). An unstamped, untrusted or unrecognised reading is unknown (null): block + a staff note, never a guess up.
+function wdoWallClass(property, options) {
+  if ((options.constructionTrusted ?? property.constructionTrusted) !== true) return null;
+  return wdoWallColumn(normalizeConstruction(options.constructionType ?? property.constructionMaterial));
+}
+
+// Foundation: same rule. An untrusted reading is not used (the home prices as on a slab); `dropped` = that discarded read claimed a
+// crawl space or raised foundation.
+function wdoFoundation(property, options) {
+  const claimsCrawl = foundationIsCrawlClass(normalizeFoundation(options.foundationType ?? property.foundationType));
+  const trusted = (options.foundationTrusted ?? property.foundationTrusted) === true;
+  return { crawl: claimsCrawl && trusted, dropped: claimsCrawl && !trusted };
+}
+
+// A trusted crawl space is a stated fact on its own and wins; the walls decide the rest.
+const wdoTableColumn = (crawl, wallClass) => (crawl ? 'crawl' : (wallClass === 'frame' ? 'frame' : 'block'));
+
+// An internal staff note that names the price chosen and what a confirmed alternative would cost. Three cases: the walls are
+// unknown or untrusted (and no trusted crawl space prices the home), a crawl-space / raised-foundation read was dropped as untrusted,
+// or both. A trusted crawl space with unknown walls is a stated fact: no note (null).
+function wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }) {
+  if (!((!wallsKnown && !crawl) || dropped)) return null;
+  let because = 'the home construction is not verified';
+  if (wallsKnown) because = 'the crawl space or raised foundation read is not verified';
+  else if (dropped) because = 'the home construction and the crawl space or raised foundation read are not verified';
+  const alternatives = [
+    column === 'block' ? `wood frame on a slab would be $${tier.frame}` : null,
+    `a confirmed crawl space or raised foundation would be $${tier.crawl}`,
+  ].filter(Boolean).join('; ');
+  const asPriced = `priced as ${column === 'frame' ? 'wood frame' : 'concrete block'} on a slab ($${tier[column]})`;
+  return `${SPECIALTY.wdo.sizeTable.staffNoteMarker} ${asPriced}: ${because}. If confirmed, ${alternatives}. Confirm before sending.`;
+}
+
+// options.legacyWdoFlat (from the quote's own rule stamp, see estimate-engine legacyWdoFlat) runs the flat price the quote was
+// sold at, unchanged. Otherwise the size + construction table. The construction and size read are the ones on the property passed
+// in: a replay passes the quote's stored inputs, never a live lookup. constructionTrusted / foundationTrusted === false marks a
+// lookup value the record's own evidence flags as weak; only a stamped-true reading is used, per field: never a guess up.
+function priceWDO(input, options = {}) {
   const property = typeof input === 'number' || typeof input === 'string'
     ? { footprint: input }
     : (input || {});
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
-  for (const bracket of SPECIALTY.wdo.brackets) {
-    if (footprint <= bracket.maxSqFt) {
-      return {
-        service: 'wdo_inspection',
-        price: bracket.price,
-        footprintUsed: footprint,
-        footprintSource: footprintResolution.source,
-        footprintWasDefaulted: footprintResolution.wasDefaulted,
-        requiresManualReview: footprintResolution.requiresManualReview,
-        manualReviewReasons: footprintResolution.manualReviewReasons,
-        warnings: footprintResolution.warnings,
-        bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}`,
-      };
-    }
-  }
-  const bracket = SPECIALTY.wdo.brackets[SPECIALTY.wdo.brackets.length - 1];
-  return {
+  const base = {
     service: 'wdo_inspection',
-    price: bracket.price,
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
     requiresManualReview: footprintResolution.requiresManualReview,
     manualReviewReasons: footprintResolution.manualReviewReasons,
     warnings: footprintResolution.warnings,
-    bracketLabel: '>3500',
+  };
+  if (options.legacyWdoFlat === true) {
+    const brackets = SPECIALTY.wdo.brackets;
+    const bracket = brackets.find((b) => footprint <= b.maxSqFt) || brackets[brackets.length - 1];
+    return { ...base, price: bracket.price, bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}` };
+  }
+  const { size, tier, unconfirmed } = wdoSizeTier(property, footprint);
+  const wallClass = wdoWallClass(property, options);
+  const { crawl, dropped } = wdoFoundation(property, options);
+  const column = wdoTableColumn(crawl, wallClass);
+  const wallsKnown = wallClass !== null;
+  const { tiers, staffNoteMarker } = SPECIALTY.wdo.sizeTable;
+  // An unconfirmed size sends the line to review, as a quote with no size does, with a note that says why.
+  const notes = [
+    unconfirmed ? `${staffNoteMarker} priced at the smallest size ($${tier[column]}): the address needs confirmation, so the looked-up home size is not used. Confirm the home size before sending.` : null,
+    wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }),
+  ].filter(Boolean);
+  return {
+    ...base,
+    ...(unconfirmed ? { requiresManualReview: true, manualReviewReasons: [...base.manualReviewReasons, 'wdo_home_size_unconfirmed'] } : {}),
+    warnings: [...(base.warnings || []), ...notes],
+    price: tier[column],
+    sizeUsed: size,
+    bracketLabel: tier.maxSqFt === Infinity ? `>${tiers[tiers.length - 2].maxSqFt}` : `<=${tier.maxSqFt}`,
+    wdoConstructionClass: column,
+    wdoConstructionKnown: wallsKnown || crawl,
   };
 }
 
@@ -8772,8 +8980,8 @@ function fleaOfferConfig(cfg) {
 const FLEA_SIZE_BASIS_TOTAL = 'total_living_area';
 const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
 
-// The size the interior flea package steps on: the home's total living area.
-// Same result shape as resolvePestFootprint. Order: the living-area inputs
+// The size a whole-home service steps on: the home's total living area (flea interior, cockroach treatment, bed bug
+// treatment; owner 2026-11-26 "whole home"). Same result shape as resolvePestFootprint. Order: the living-area inputs
 // first (homeSqFt, livingAreaSqFt; see the provenance flags below), then a measured ground-floor footprint
 // scaled up by the story count (a footprint alone is the best evidence left
 // of the whole home; buildingSqFt is a footprint too and scales the same way).
@@ -8781,9 +8989,9 @@ const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
 // aggregate whose summed living area is not one home) keeps the pest
 // footprint rules untouched: explicit footprint only, else the 2,000 fallback
 // with manual review.
-function resolveFleaInteriorSize(property = {}) {
+function resolveWholeHomeSize(property = {}) {
   // The profile clears footprintUnknown when a measured footprint exists, so the engine also passes the original flag.
-  if (property.footprintUnknown === true || property.fleaFootprintUnknown === true) {
+  if (property.footprintUnknown === true || property.wholeHomeFootprintUnknown === true) {
     return resolvePestFootprint({ ...property, footprintUnknown: true });
   }
   // The public quote route substituted its 2,000 sq ft default for a missing home size and passes the server lookup's measured
@@ -8796,6 +9004,10 @@ function resolveFleaInteriorSize(property = {}) {
       requiresManualReview: false,
       manualReviewReasons: [],
       warnings: [],
+      // The size the request posted, which the measured home replaced. It rides onto a cockroach or bed bug row under the key
+      // the flea row gave it (priceFlea writes its own): a revision of the sent quote compares it to tell whether the operator
+      // edited the size (estimate-flea-size-replay generateWithFleaRecord).
+      postedSizeFields: Number(property.homeSqFt) > 0 ? { fleaPostedHomeSqFt: Math.round(Number(property.homeSqFt)) } : {},
     };
   }
   const stories = positiveStories(property.stories);
@@ -8809,8 +9021,8 @@ function resolveFleaInteriorSize(property = {}) {
   // living area: the reading that never inflates a quote. buildingSizeMeasured is not read either (the tool defaults it
   // to false beside a real homeSqFt). Through generateEstimate only a SUPPLIED footprint counts: the profile's footprint
   // is homeSqFt / stories when none was supplied; a direct caller's footprint fields are read as given.
-  const suppliedFootprint = Object.prototype.hasOwnProperty.call(property, 'fleaExplicitFootprint')
-    ? [['footprintSqFt', property.fleaExplicitFootprint, scaled]]
+  const suppliedFootprint = Object.prototype.hasOwnProperty.call(property, 'wholeHomeExplicitFootprint')
+    ? [['footprintSqFt', property.wholeHomeExplicitFootprint, scaled]]
     : [['footprint', property.footprint, scaled], ['footprintSqFt', property.footprintSqFt, scaled]];
   // homeSqFt equal to buildingSqFt may be the Intelligence Bar's alias of a building measurement rather than a living area.
   // An explicit livingAreaSqFt wins over it. Otherwise the supplied value prices as a living area (never inflated) and the
@@ -8834,6 +9046,72 @@ function resolveFleaInteriorSize(property = {}) {
   // positive-number test, so it reaches the same dead end and returns the
   // shared 2,000 fallback with its review reasons.
   return resolvePestFootprint(property);
+}
+
+// The home size the rodent guarantee tiers on, and the fields its line carries about that size (lineFields).
+// Live rule: the home's total living area. A caller's own homeSqFt (the Admin V2 path passes the profile's) is the total living
+// area and is read as given, with one exception: when the server lookup's measured home replaced the route's placeholder, a
+// caller's copy of that same placeholder is not a size, and the measured home tiers the guarantee as it sizes the other lines.
+// Without a caller size: the shared resolver's size, null when the property carries no size evidence (the 2,000 fallback is not a
+// measurement). The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
+// same count that picks the tier.
+// lineFields: the size evidence a cockroach or bed bug row carries (basis, size, source, and the posted size a measured home
+// replaced: the replay restores the measurement from the row, estimate-flea-size-replay.js), plus the resolver's review reasons
+// and warnings when there is no usable size or the size may be the ground floor only.
+// Ground-floor basis (a quote priced before the rule, property.wholeHomeSizingLegacy, or a commercial building): the caller's
+// size, else the profile's ground-floor footprint, exactly as the guarantee read it then, and no added field.
+function resolveGuaranteeHomeSize(property = {}, callerHomeSqFt) {
+  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return { homeSqFt: callerHomeSqFt || property.footprint || null, lineFields: {} };
+  const sized = resolveWholeHomeBasisSize(property);
+  const callerIsPlaceholder = sized.source === 'lookup_measured_home' && Number(callerHomeSqFt) === Number(property.homeSqFt);
+  if (callerHomeSqFt && !callerIsPlaceholder) {
+    return {
+      homeSqFt: callerHomeSqFt,
+      lineFields: {
+        homeSizeBasis: HOME_SIZE_BASIS_TOTAL, footprintUsed: positiveFiniteNumber(callerHomeSqFt), footprintSource: 'service_home_sqft', footprintWasDefaulted: false,
+      },
+    };
+  }
+  // The resolver's own reasons (no usable size at all: the 2,000 fallback) and the unclear-size reason alike.
+  const manualReviewReasons = uniqueList([...sized.manualReviewReasons, ...sized.sizeReviewReasons]);
+  return {
+    homeSqFt: sized.wasDefaulted ? null : sized.footprint,
+    lineFields: {
+      homeSizeBasis: sized.homeSizeBasis, footprintUsed: sized.footprint, footprintSource: sized.source, footprintWasDefaulted: sized.wasDefaulted,
+      ...sized.postedSizeFields,
+      ...(manualReviewReasons.length
+        ? { requiresManualReview: true, manualReviewReasons, warnings: uniqueList([...sized.warnings, ...sized.sizeWarnings]) }
+        : {}),
+    },
+  };
+}
+
+// The size the cockroach treatment and the bed bug treatment price on, under the basis the estimate was priced with. Live rule:
+// the total living area. A quote priced before the rule (property.wholeHomeSizingLegacy): the ground-floor footprint
+// (resolvePestFootprint, the code it was sold on). Same shape as resolvePestFootprint, plus homeSizeBasis and the review reason
+// and warning for a size that may be the ground floor only (sizeReviewReasons / sizeWarnings: always lists, empty when the size
+// is clear and on the ground-floor basis). They stay separate from the resolver's own lists so each caller keeps its reason order.
+function resolveWholeHomeBasisSize(property = {}) {
+  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) {
+    return { ...resolvePestFootprint(property), homeSizeBasis: HOME_SIZE_BASIS_GROUND_FLOOR, sizeReviewReasons: [], sizeWarnings: [] };
+  }
+  const resolution = resolveWholeHomeSize(property);
+  const unclear = wholeHomeSizeSourceUnclear(property, resolution);
+  return {
+    ...resolution,
+    homeSizeBasis: HOME_SIZE_BASIS_TOTAL,
+    sizeReviewReasons: unclear ? ['home_size_source_unclear'] : [],
+    sizeWarnings: unclear ? [HOME_SIZE_UNCLEAR_WARNING] : [],
+  };
+}
+
+// Home size that may be the ground floor only (a buildingSqFt measurement, or the Intelligence Bar's alias of it in homeSqFt,
+// on a multi-story home): priced as a living area, never inflated, but a person confirms the total living area before it
+// goes out. Decided from the inputs, so every entry point (compute_estimate, the draft path, a replay) agrees.
+function wholeHomeSizeSourceUnclear(property, resolution) {
+  return positiveStories(property.stories) > 1
+    && (resolution.source === 'buildingSqFt'
+      || (resolution.source === 'homeSqFt' && Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt)));
 }
 
 function priceFlea(property = {}) {
@@ -8865,7 +9143,7 @@ function priceFlea(property = {}) {
         ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
         : property.homeSqFt,
     })
-    : resolveFleaInteriorSize(property);
+    : resolveWholeHomeSize(property);
   // Named `footprint` for the adjustment table (its keys keep the name), but
   // under the whole-home basis it is the total living area, not a footprint.
   const footprint = footprintResolution.footprint;
@@ -8941,9 +9219,7 @@ function priceFlea(property = {}) {
   // Home size that may be the ground floor only (a buildingSqFt measurement, or the Intelligence Bar's alias of it in homeSqFt,
   // on a multi-story home): priced as a living area, never inflated, but a person confirms the total living area before it
   // goes out. Decided here from the inputs, so every entry point (compute_estimate, the draft path, a replay) agrees.
-  const homeSizeSourceUnclear = fleaSizeBasis === FLEA_SIZE_BASIS_TOTAL && positiveStories(property.stories) > 1
-    && (footprintResolution.source === 'buildingSqFt'
-      || (footprintResolution.source === 'homeSqFt' && Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt)));
+  const homeSizeSourceUnclear = fleaSizeBasis === FLEA_SIZE_BASIS_TOTAL && wholeHomeSizeSourceUnclear(property, footprintResolution);
   if (homeSizeSourceUnclear) manualReviewReasons.push('flea_home_size_source_unclear');
   if (exteriorSelected && exterior.source === 'UNKNOWN') {
     manualReviewReasons.push('flea_exterior_area_source_unknown');
@@ -9905,16 +10181,23 @@ function priceStingingInsect(options = {}) {
     hasRecurringPest = false,
   } = options;
   const cfg = SPECIALTY.wasp;
+  // options.legacySpecialty1126 (estimate stamp legacySpecialty1126, estimate-engine.js): a quote priced before the 2026-11-26
+  // specialty prices keeps the $250 second level and the species names it was sold with.
+  const legacySpecialty = options.legacySpecialty1126 === true;
   const speciesNames = {
     PAPER_WASP: 'Paper Wasps', YJ_AERIAL: 'Yellow Jackets (aerial)',
     YJ_GROUND: 'Yellow Jackets (ground)', MUD_DAUBER: 'Mud Daubers',
     HONEYBEE_NEW: 'Honeybees (new)', HONEYBEE_EST: 'Honeybees (established)',
     CARPENTER: 'Carpenter Bees', BALDFACED: 'Baldfaced Hornets',
     AFRICANIZED: 'Africanized Bees',
+    // The estimator's call/Intelligence Bar intent names the species YELLOW_JACKET; it had no name here, so the line read
+    // "Stinging Insect - YELLOW_JACKET". It prices through the same levels as every species (the species only names the line).
+    ...(legacySpecialty ? {} : { YELLOW_JACKET: 'Yellow Jackets' }),
   };
 
   const tierNumber = assertPositiveInteger(assertNonNegativeQuantity(tier, 'stingingTier'), 'stingingTier');
-  let price = cfg.tiers[Math.min(cfg.tiers.length - 1, tierNumber - 1)];
+  const levelPrices = legacySpecialty && Array.isArray(cfg.legacyTiers) ? cfg.legacyTiers : cfg.tiers;
+  let price = levelPrices[Math.min(levelPrices.length - 1, tierNumber - 1)];
   const mods = [];
   // v2 parity: raw addon values (not r'd). Base tiers stay r'd-matched.
   if (aggressive === 'MILD') { price += 75; mods.push('+$75 aggressive'); }
@@ -10812,6 +11095,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
+  resolveGuaranteeHomeSize,
   barrelMeasurementHold,
   oneTimeLawnPlateauMonthly,
   calcBermudaRemovalAnnualCost,
@@ -10819,7 +11103,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
+  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, MOSQUITO_RECORD_LOT_CAP_SQFT, MOSQUITO_LOT_AT_RECORD_CAP_TEXT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,

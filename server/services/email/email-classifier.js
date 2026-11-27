@@ -40,7 +40,7 @@ async function classifyEmailContent(email) {
 
   const bodyPreview = (email.body_text || email.snippet || '').substring(0, 2000);
 
-  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
+  const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.emailClassify, {
     laneId: 'email_classify',
     maxTokens: 512,
     jsonMode: true,

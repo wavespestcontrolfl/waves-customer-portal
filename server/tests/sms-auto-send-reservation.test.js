@@ -49,7 +49,7 @@ function chain(overrides = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   const inbound = chain({ first: jest.fn(async () => ({
-    created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161',
+    created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161', metadata: { media: [] },
   })) });
   const activeClaim = chain();
   decisions = chain();
@@ -105,6 +105,17 @@ test('active-claim SQL extends only linked sending provider uncertainty', async 
   expect(compiled.bindings).toEqual(expect.arrayContaining([
     autoSend.AUTOSEND_WORKFLOW, autoSend.CLAIM_STATUS, 'outbound', 'sending', '2025550101',
   ]));
+});
+
+// texting AI gap 6: a text that carried a photo, or whose media list is unknown, is never answered automatically (refused at the claim)
+test.each([
+  ['a photo', { media: [{ key: 'sms-media/x.jpg' }] }],
+  ['an unknown media list', {}],
+  ['no metadata', null],
+])('an inbound with %s is never claimed for auto-send', async (_label, metadata) => {
+  db.trx('sms_log').first.mockResolvedValueOnce({ created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161', metadata });
+  await expect(attempt()).resolves.toMatchObject({ sent: false, reason: 'guarded_or_claimed' });
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
 test('an atomic reservation failure prevents provider entry', async () => {

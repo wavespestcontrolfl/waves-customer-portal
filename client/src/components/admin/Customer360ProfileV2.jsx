@@ -80,6 +80,7 @@ import {
 } from "lucide-react";
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import { ActiveCodeRow, AddCodeForm, FoundCodeCard } from "./AccessCodePanels";
+import HomeNoteSection from "../../pages/tech/HomeNoteSection";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
@@ -2381,6 +2382,8 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
                         <span className="font-medium text-zinc-900">
                           {approvalCodeLabel(block.code)}
                         </span>
+                        {/* A label limit (a third Velista in a row): recorded with the visit, never covered by the approval above. */}
+                        {block.approvable === false ? " · Label limit, not covered by an approval" : ""}
                         {block.productName ? ` · ${block.productName}` : ""}
                         {block.message ? ` — ${block.message}` : ""}
                       </div>
@@ -8374,6 +8377,8 @@ function CustomerProfileProperty({
             awayWatchEnabled={awayWatchEnabled}
             onSaved={handlePropertyChanged}
           />
+          {/* Outside the Access & Preferences read/edit switch, so opening or closing that editor keeps a note draft. */}
+          {isAdmin && <HomeNoteSection request={adminFetch} path={`/admin/customers/${customerId}/home-note`} />}
         </div>{" "}
       </div>{" "}
     </div>

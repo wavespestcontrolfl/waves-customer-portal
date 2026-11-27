@@ -10,6 +10,7 @@ import MobileFold from "../MobileFold";
 import { KpiStrip, KpiTile } from "../KpiTile";
 import EbitdaBridgeCard from "../EbitdaBridgeCard";
 import OfficeCostPerStopCard from "../OfficeCostPerStopCard";
+import CrossSellCard from "../CrossSellCard";
 import WorkAndRoutesCard from "../WorkAndRoutesCard";
 import MarginByLineBars from "../MarginByLineBars";
 
@@ -26,6 +27,7 @@ export default function ProfitSection({
   mix,
   ebitda,
   officeCost,
+  crossSell,
   opsMetrics,
   revenueOverview,
   isMobile,
@@ -128,6 +130,15 @@ export default function ProfitSection({
         <ChartCard title="Office cost per stop" sub="office costs ÷ paid stops · stored monthly">
           <DashboardFeed value={officeCost} pending={pending.officeCost} label="office cost per stop" onRetry={onRetry}>
             <OfficeCostPerStopCard data={officeCost} />
+          </DashboardFeed>
+        </ChartCard>
+      </div>
+
+      {/* Customers with 2+ services: today's live value plus the stored monthly trend (read-only, sends nothing). */}
+      <div className="mb-4 md:mb-5">
+        <ChartCard title="Customers with 2+ services" sub="recurring customers with two or more kinds of service · stored monthly">
+          <DashboardFeed value={crossSell} pending={pending.crossSell} label="customers with 2+ services" onRetry={onRetry}>
+            <CrossSellCard data={crossSell} />
           </DashboardFeed>
         </ChartCard>
       </div>

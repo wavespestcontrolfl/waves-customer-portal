@@ -3,7 +3,12 @@
  *
  * Sticker Mule contract:
  *   - bindingQuote = the account's latest single-item order of this item at this
- *     exact quantity (vendor total); no match / unreadable shape → null
+ *     exact quantity (vendor total), found by reading the newest orders one by
+ *     one (the live list has no item lines); it must be paid, in a documented
+ *     placed state, in USD; no match / an order that cannot be read in full /
+ *     a tie for latest that may go on past the page → null. Item lines are
+ *     read strictly: a line with no item or no whole positive count makes the
+ *     order unreadable
  *   - no API key → RefusedError no_api_key before any call
  *   - item not on the account / ≠1 address / ≠1 payment → RefusedError, NO POST
  *   - POST failure / missing number → err.ambiguous (never re-POSTed)
@@ -36,23 +41,165 @@ const happy = () => ({
   'GET /api/orders': { orders: [{ number: 'SM-90001', total: '318.40' }] },
 });
 
+// The vendor's documented order states: the ones of an order that stands as placed, and every
+// other answer (canceled, an unclaimed gift, a value the reference does not list, none at all).
+const PLACED = ['complete', 'ready_for_production', 'in_production', 'ready_to_proof', 'awaiting_scheduled_date'];
+const NOT_PLACED = [{ state: 'canceled' }, { state: 'gift_unclaimed' }, { state: 'pending' }, { state: 'COMPLETE' }, { state: '' }, { state: null }, { state: undefined }, { state: true }];
+
+// The live shapes (read 2026-11-26): the order list has NO item lines; one order carries them.
+const order = (number, placedAt, total, items, extra = {}) => ({ number, state: 'complete', paymentState: 'paid', shipmentState: 'delivered', placedAt, currency: 'USD', total, items, ...extra });
+const line = (id = '4242', quantity = 500) => ({ id, product: 'rounded-corner-stickers', quantity, total: 314 });
+// Routes for an account history, given newest first: the list (item lines stripped) + one GET per order.
+function history(orders) {
+  const routes = { 'GET /api/orders': { orders: orders.map(({ items, ...listed }) => listed), canLoadMore: false } };
+  for (const o of orders) routes[`GET /api/orders/${o.number}`] = o;
+  return routes;
+}
+const quote = (orders, { vendorSku = '4242', quantity = 500 } = {}) => sm.bindingQuote({ vendorSku, quantity }, { fetchImpl: fakeFetch(Array.isArray(orders) ? history(orders) : orders).fetchImpl });
+
 beforeEach(() => { process.env.STICKERMULE_API_KEY = 'test-key'; });
 afterAll(() => { delete process.env.STICKERMULE_API_KEY; });
 
-test('bindingQuote = the latest identical single-item order on the account, vendor total', async () => {
-  const orders = { orders: [
-    { number: 'SM-1', total: '318.40', createdAt: '2026-07-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
-    { number: 'SM-2', total: '322.10', createdAt: '2026-08-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
-    { number: 'SM-3', total: '600.00', createdAt: '2026-08-15T00:00:00Z', items: [{ id: 4242, quantity: 500 }, { id: 9, quantity: 1 }] },
-    { number: 'SM-4', total: '520.00', createdAt: '2026-08-20T00:00:00Z', items: [{ id: 4242, quantity: 1000 }] },
-  ] };
-  const { fetchImpl, calls } = fakeFetch({ 'GET /api/orders': orders });
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toEqual({ cents: 32210, source: 'order SM-2' });
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 1000 }, { fetchImpl })).toEqual({ cents: 52000, source: 'order SM-4' });
+test('bindingQuote = the latest order of exactly this item at this count, read order by order', async () => {
+  const { fetchImpl, calls } = fakeFetch(history([
+    order('R4', '2026-08-20T00:00:00Z', 520, [line('4242', 1000)]),
+    order('R3', '2026-08-15T00:00:00Z', 600, [line('4242', 500), line('9', 1)]), // a bundle total would over-state the line
+    order('R2', '2026-08-01T00:00:00Z', 322.1, [line()]),
+    order('R1', '2026-07-01T00:00:00Z', 318.4, [line()]),
+  ]));
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toEqual({ cents: 32210, source: 'order R2' });
+  // One list page, then each newer order: the walk stops at the latest identical one (R1 is never read).
+  expect(calls.map((c) => c.path)).toEqual(['/api/orders', '/api/orders/R4', '/api/orders/R3', '/api/orders/R2']);
+  expect(String(fetchImpl.mock.calls[0][0])).toMatch(/\/api\/orders\?limit=50$/);
+  expect(calls.every((c) => c.method === 'GET')).toBe(true);
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 1000 }, { fetchImpl })).toEqual({ cents: 52000, source: 'order R4' });
+  expect(await sm.bindingQuote({ vendorSku: 4242, quantity: 500 }, { fetchImpl })).toEqual({ cents: 32210, source: 'order R2' });
   expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 300 }, { fetchImpl })).toBeNull();
   expect(await sm.bindingQuote({ vendorSku: '9999', quantity: 500 }, { fetchImpl })).toBeNull();
-  expect(calls.every((c) => c.method === 'GET')).toBe(true);
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl: fakeFetch({ 'GET /api/orders': { orders: [{ number: 'X', total: '100', lines: [] }] } }).fetchImpl })).toBeNull();
+  expect(await quote([])).toBeNull();
+});
+
+test('bindingQuote: the LATEST identical order binds — canceled, unpaid, unreadable or not in USD refuses, never an older cheaper one', async () => {
+  const older = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
+  const q = (latest) => quote([order('R2', '2026-09-01T00:00:00Z', 140, [line()], latest), older]);
+  expect(await q({})).toEqual({ cents: 14000, source: 'order R2' });
+  for (const bad of [{ state: 'canceled', paymentState: 'balance_due' }, { paymentState: 'balance_due' }, { paymentState: 'completed' }, { paymentState: null }, { total: null }, { currency: 'EUR' }, { currency: undefined }, ...NOT_PLACED]) {
+    expect(await q(bad)).toBeNull();
+  }
+  // Paid alone is not enough: the order must also be in a state the vendor documents for a placed order.
+  for (const state of PLACED) expect(await q({ state })).toEqual({ cents: 14000, source: 'order R2' });
+});
+
+test('bindingQuote: an order that cannot be read in full refuses — a newer identical order could hide behind it', async () => {
+  const good = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
+  const newer = (detail) => { const routes = history([order('R2', '2026-09-01T00:00:00Z', 50, [line('7', 1)]), good]); routes['GET /api/orders/R2'] = detail; return quote(routes); };
+  expect(await newer({ number: 'R2', items: [line('7', 1)] })).toEqual({ cents: 10000, source: 'order R1' }); // readable, not identical
+  expect(await newer({ number: 'R2', total: 50, currency: 'USD' })).toBeNull(); // no item lines (the list shape)
+  expect(await newer({})).toBeNull();
+  expect(await newer({ number: 'R9', items: [line('7', 1)] })).toBeNull(); // another order's answer
+  expect(await newer({ number: 'R2', items: [{ quantity: 1 }] })).toBeNull(); // a line with no item id
+  expect(await newer({ number: 'R2', items: [{ id: '7' }] })).toBeNull(); // a line with no count
+  // Nothing is coerced: a count that is not a whole positive number, an empty item id, an order
+  // with no line at all, or ONE bad line beside a good one makes the order unreadable. None of
+  // them may pass for "another item" and let the older, cheaper order bind.
+  for (const quantity of [null, 0, -1, 1.5, '1', '', true, NaN]) expect(await newer({ number: 'R2', items: [{ id: '7', quantity }] })).toBeNull();
+  for (const id of [null, '', '  ', {}, true]) expect(await newer({ number: 'R2', items: [{ id, quantity: 1 }] })).toBeNull();
+  expect(await newer({ number: 'R2', items: [] })).toBeNull();
+  expect(await newer({ number: 'R2', items: [line('7', 1), { id: '8', quantity: null }] })).toBeNull();
+  expect(await newer({ number: 'R2', items: [line('7', 1), null] })).toBeNull();
+  expect(await newer({ number: 'R2', lineItems: [line('7', 1)] })).toBeNull(); // lines under another key
+  // The single-order GET failing is an error, not "no prior order": the dispatcher parks it, nothing is ordered.
+  await expect(newer({ status: 404, body: { type: 'NotFoundError', message: 'order R2 was not found' } })).rejects.toThrow(/HTTP 404/);
+  // A listed order with no number cannot be read at all.
+  expect(await quote({ 'GET /api/orders': { orders: [{ placedAt: '2026-09-01T00:00:00Z' }, { number: 'R1', placedAt: '2026-07-01T00:00:00Z' }] }, 'GET /api/orders/R1': good })).toBeNull();
+});
+
+test('bindingQuote: the list must be newest first with a stamp on every order, or the latest cannot be told apart', async () => {
+  const older = order('R1', '2026-07-01T00:00:00Z', 100, [line()]);
+  const newer = order('R2', '2026-09-01T00:00:00Z', 140, [line()]);
+  expect(await quote([newer, older])).toEqual({ cents: 14000, source: 'order R2' });
+  expect(await quote([older, newer])).toBeNull(); // oldest first: the first match would be the OLD order
+  expect(await quote([newer, { ...older, placedAt: undefined }])).toBeNull();
+  expect(await quote([{ ...newer, placedAt: 'not a date' }, older])).toBeNull();
+});
+
+test('bindingQuote: a tie for latest with different totals refuses; the same total binds', async () => {
+  const o = (number, total, extra) => order(number, '2026-09-01T00:00:00Z', total, [line()], extra);
+  expect(await quote([o('A', 100), o('B', 140)])).toBeNull();
+  expect(await quote([o('A', 100), o('B', 100, { state: 'canceled' })])).toBeNull();
+  expect(await quote([o('A', 100), o('B', 100)])).toEqual({ cents: 10000, source: 'order A' });
+  expect(await quote([o('A', 100), order('C', '2026-09-01T00:00:00Z', 900, [line('7', 1)])])).toEqual({ cents: 10000, source: 'order A' });
+});
+
+test('bindingQuote: a tie for latest that runs to the end of a page that may not be the last one refuses', async () => {
+  const o = (number, placedAt, total = 100) => order(number, placedAt, total, [line()]);
+  const other = (number, placedAt) => order(number, placedAt, 900, [line('7', 1)]);
+  // The list page as served: canLoadMore true (more orders exist), false (the last page) or not said.
+  const page = (orders, canLoadMore) => { const routes = history(orders); routes['GET /api/orders'] = { orders: routes['GET /api/orders'].orders, ...(canLoadMore === undefined ? {} : { canLoadMore }) }; return quote(routes); };
+  const tied = [other('N', '2026-10-01T00:00:00Z'), o('A', '2026-09-01T00:00:00Z'), o('B', '2026-09-01T00:00:00Z')];
+  expect(await page(tied, false)).toEqual({ cents: 10000, source: 'order A' }); // the last page: the whole tie was read
+  expect(await page(tied, true)).toBeNull(); // more orders exist: one of the same moment could carry another total
+  expect(await page(tied, undefined)).toBeNull(); // not said: not known to be the last page
+  expect(await page(tied, 'false')).toBeNull(); // only the boolean false says "the last page"
+  // The latest identical order is the page's last order, with more to load: the same refusal.
+  expect(await page([o('A', '2026-09-01T00:00:00Z')], true)).toBeNull();
+  expect(await page([o('A', '2026-09-01T00:00:00Z')], false)).toEqual({ cents: 10000, source: 'order A' });
+  // The page goes on past the match's moment: the tie ended on this page, whatever follows it.
+  expect(await page([o('A', '2026-09-01T00:00:00Z'), other('Z', '2026-08-01T00:00:00Z')], true)).toEqual({ cents: 10000, source: 'order A' });
+  // No identical order on a page with more to load stays "no usable prior order".
+  expect(await page([other('N', '2026-10-01T00:00:00Z')], true)).toBeNull();
+});
+
+test('bindingQuote: the whole lookup has ONE deadline — past it nothing more is read and the lookup throws', async () => {
+  // 50 orders, none of this item: the list and 50 order reads when the vendor is quick.
+  const orders = Array.from({ length: 50 }, (_, i) => order(`R${50 - i}`, new Date(Date.UTC(2026, 8, 1) - i * 86400000).toISOString(), 900, [line('7', 1)]));
+  const quick = fakeFetch(history(orders));
+  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl: quick.fetchImpl })).toBeNull();
+  expect(quick.calls).toHaveLength(51);
+  // A slow vendor: every answer takes 10 s. The lookup has 90 s in all, not 51 timeouts.
+  let t = 0;
+  const slow = fakeFetch(history(orders));
+  const fetchImpl = async (...args) => { const r = await slow.fetchImpl(...args); t += 10000; return r; };
+  await expect(sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl, now: () => t })).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
+  expect(slow.calls).toHaveLength(9); // the reads that started inside the 90 s; the 10th was never sent
+});
+
+test('bindingQuote: a read still running at the deadline is cut off then, not after its own 30 s', async () => {
+  jest.useFakeTimers();
+  try {
+    // The match is the 3rd order. Every answer takes 28 s: the list, R3, R2, then R1 with 6 s left.
+    const base = fakeFetch(history([order('R3', '2026-09-03T00:00:00Z', 900, [line('7', 1)]), order('R2', '2026-09-02T00:00:00Z', 900, [line('7', 1)]), order('R1', '2026-09-01T00:00:00Z', 100, [line()])]));
+    const fetchImpl = (url, init) => new Promise((resolve, reject) => {
+      const answer = setTimeout(() => resolve(base.fetchImpl(url, init)), 28000);
+      init.signal.addEventListener('abort', () => { clearTimeout(answer); reject(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' })); });
+    });
+    const start = Date.now();
+    let endedAfter = null;
+    const lookup = sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl }).finally(() => { endedAfter = Date.now() - start; });
+    const refused = expect(lookup).rejects.toThrow(/Sticker Mule order history lookup did not finish in 90 s/);
+    await jest.advanceTimersByTimeAsync(200000);
+    await refused;
+    expect(endedAfter).toBe(90000);
+    expect(base.calls.map((c) => c.path)).toEqual(['/api/orders', '/api/orders/R3', '/api/orders/R2']); // R1 was cut off before its answer
+  } finally { jest.useRealTimers(); }
+});
+
+test('a malformed total (true, an array, exponent text) is unreadable, never a charge', async () => {
+  const q = (total) => quote([order('A', '2026-09-01T00:00:00Z', total, [line()])]);
+  for (const bad of [true, [1], '1e3', '', ' ', '-5', '0', 0, -5]) expect(await q(bad)).toBeNull();
+  expect(await q('318.40')).toEqual({ cents: 31840, source: 'order A' });
+  expect(await q(318.4)).toEqual({ cents: 31840, source: 'order A' });
+  expect(await q(322.19)).toEqual({ cents: 32219, source: 'order A' });
+  expect(await q(318.405)).toBeNull(); // not whole cents
+});
+
+test('only the documented grand total field is a total: no other field stands in for a missing one', async () => {
+  // A paid USD order with no readable total, and other money-looking fields beside it.
+  const others = [{ total: null, amount: 1 }, { total: undefined, itemTotal: 297.57 }, { total: '', totals: { total: 5 } }, { total: null, price: { total: 5 } }, { total: null, amount: '318.40', totalCents: 31840 }];
+  for (const extra of others) {
+    expect(await quote([order('A', '2026-09-01T00:00:00Z', 100, [line()], extra)])).toBeNull();
+    expect(sm._internals.orderTotalCents({ paymentState: 'paid', ...extra })).toBeNull();
+  }
 });
 
 test('every call goes to www.stickermule.com/api — api.stickermule.com does not resolve (verified 2026-09-06)', async () => {
@@ -62,15 +209,6 @@ test('every call goes to www.stickermule.com/api — api.stickermule.com does no
   expect([...hosts]).toEqual(['www.stickermule.com']);
   expect(fetchImpl.mock.calls.map(([url]) => new URL(url).pathname).every((p) => p.startsWith('/api/'))).toBe(true);
   expect(sm._internals.BASE_URL).toBe('https://www.stickermule.com');
-});
-
-test('bindingQuote orders history by the live `placedAt` stamp', async () => {
-  const orders = { orders: [
-    { number: 'SM-NEW', total: '330.00', placedAt: '2026-09-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
-    { number: 'SM-OLD', total: '318.40', placedAt: '2026-07-01T00:00:00Z', items: [{ id: 4242, quantity: 500 }] },
-  ] };
-  const { fetchImpl } = fakeFetch({ 'GET /api/orders': orders });
-  expect(await sm.bindingQuote({ vendorSku: '4242', quantity: 500 }, { fetchImpl })).toEqual({ cents: 33000, source: 'order SM-NEW' });
 });
 
 test('no API key → refused before any call', async () => {
@@ -549,6 +687,19 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.qty).toBe(2);
     expect(st.cart).toEqual([]); // post-run cleanup: nothing left for the next run
     expect(st.placeClicked).toBe(0);
+  });
+
+  test('no dryRun option and SITEONE_BOT_DRY_RUN unset or not exactly "false" is a dry run: the Place order click never happens (fail closed)', async () => {
+    const saved = process.env.SITEONE_BOT_DRY_RUN;
+    try {
+      for (const value of [undefined, '', 'true', 'FALSE', 'no']) {
+        if (value === undefined) delete process.env.SITEONE_BOT_DRY_RUN; else process.env.SITEONE_BOT_DRY_RUN = value;
+        const { st, deps } = fakeSiteOne();
+        const r = await s1.place(args({ dryRun: undefined }), deps);
+        expect(r).toMatchObject({ dryRun: true });
+        expect(st.placeClicked).toBe(0);
+      }
+    } finally { if (saved === undefined) delete process.env.SITEONE_BOT_DRY_RUN; else process.env.SITEONE_BOT_DRY_RUN = saved; }
   });
 
   test('an unexpected extra cart line refuses cart_mismatch with the lines in evidence (r1 P1)', async () => {
