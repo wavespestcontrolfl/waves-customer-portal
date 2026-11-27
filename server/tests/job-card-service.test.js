@@ -2061,8 +2061,9 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     };
     const bermuda = await run({ tierSqFt: 1000, grassType: 'bermuda' });
     expect(bermuda).toMatchObject({ amount: null, ratePer1000: 0.147, unit: 'oz', rateSource: 'governed', rateText: expect.stringContaining('4 gal of water per 1,000 sq ft') });
+    // The label's own area basis, limit and safety line ride beside the rate, as on the card.
+    expect(bermuda.governedRates).toEqual([expect.objectContaining({ service: 'Lawn Insect Spot Treatment', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') })]);
     expect(bermuda.warnings).toContain('Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
-    expect(bermuda.warnings.join(' ')).toContain('Booked rate: 0.147 oz per 1,000 sq ft');
     expect((await run(null)).warnings).toContain('Grass on the estimate is not on this visit (the rate is St. Augustine only)');
     const ok = await run({ tierSqFt: 1000, grassType: 'st_augustine' });
     expect(ok.warnings.join(' ')).not.toMatch(/Grass on the estimate/);
@@ -2428,7 +2429,50 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     dbh.raw = (sql) => sql;
     const out = await jobCard.mixForProduct('sn', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-01-14T14:00:00Z') });
     expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Bed Pre-Emergent Treatment', ratePer1000: 3.45, rateUnit: 'lb' })]);
-    expect(out.warnings.join(' ')).toContain('Bed Pre-Emergent Treatment: Booked rate: 3.45 lb per 1,000 sq ft');
+    expect(out.governedRates[0].text).toContain('3.45 lb per 1,000 sq ft');
+  });
+
+  // Owner 2026-11-26: the real April line states its rate in the same clause as its condition; the search still reads it.
+  test('the April Tree & Shrub Distance IGR "if needed" line shows its own 6-8 fl oz per 100 gal, narrowed to the label band', async () => {
+    const protocols = require('../config/protocols.json');
+    const distance = { id: 'di', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-04-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [distance], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('di', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 6, amountMax: 8, unit: 'fl_oz', ratePerGallon: { lo: 0.06, hi: 0.08 }, rateSource: 'protocol', context: { conditional: true } });
+    expect(out.warnings.join(' ')).toMatch(/Listed as "if needed"/);
+  });
+
+  // Owner 2026-11-26: the lawn plan stays the amount's source; a booked add-on's rate and grass warning ride under its service name.
+  test('a lawn plan that names Arena keeps the booked Lawn Insect Spot add-on rate and grass warning beside the plan amount', async () => {
+    const arena = { id: 'ar', name: 'Arena 50 WDG', default_rate_per_1000: 0.3, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' }], products_catalog: [arena], equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 }], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Lawn Insect Spot Treatment', category: 'lawn_care', service_key: 'area_addon_lawn_insect_spot', area_addon_scope: JSON.stringify({ tierSqFt: 1000, grassType: 'bermuda' }) }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'ar' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
+    const protocols = { area_addon: require('../config/protocols.json').area_addon };
+    const out = await jobCard.mixForProduct('ar', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [], warnings: [] }) }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 11, rateSource: 'plan' });
+    expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Lawn Insect Spot Treatment', ratePer1000: 0.147 })]);
+    expect(out.warnings).toContain('Lawn Insect Spot Treatment: Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {

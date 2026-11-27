@@ -7439,12 +7439,20 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
                 {[...(mix.warnings || []), ...(mix.rotationWarnings || [])].map((warning, i) => <div key={i}>Warning: {warning}</div>)}
               </div>
             )}
-            {mix?.rateText && <div style={{ fontSize: 12, color: D.muted }}>Booked rate: {mix.rateText}</div>}
-            {mix?.governedRates?.length > 0 && (
-              <div style={{ fontSize: 12, color: D.muted, display: "grid", gap: 2 }}>
-                {mix.governedRates.map((row) => <div key={row.service}>{row.service}: {fmtAmount(row.ratePer1000, row.rateUnit)} per 1,000 sq ft{row.text ? ` · ${row.text}` : ""}</div>)}
+            {/* Each booked area add-on's rate under its service name, with the label's own words, area basis, limit and safety line. */}
+            {mix?.governedRates?.length > 0 ? (
+              <div style={{ fontSize: 13, color: D.text, display: "grid", gap: 8 }}>
+                {mix.governedRates.map((row) => (
+                  <div key={row.service} style={{ display: "grid", gap: 2 }}>
+                    <div style={{ fontWeight: 500 }}>{row.service}: {fmtAmount(row.ratePer1000, row.rateUnit)} per 1,000 sq ft</div>
+                    {row.text && <div style={{ color: D.muted }}>Booked rate: {row.text}</div>}
+                    {row.area && <div>Area: {row.area}</div>}
+                    {row.limit && <div>Limit: {row.limit}</div>}
+                    {row.safety && <div>Safety: {row.safety}</div>}
+                  </div>
+                ))}
               </div>
-            )}
+            ) : mix?.rateText && <div style={{ fontSize: 12, color: D.muted }}>Booked rate: {mix.rateText}</div>}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
