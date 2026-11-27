@@ -240,4 +240,27 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     expect(puts(request)[0][0]).toBe('/admin/schedule/b/home-note');
     expect(JSON.parse(puts(request)[0][1].body).expectedRevision).toBe(NOTE.revision);
   });
+
+  it('shows nothing when the schedule row is now for another customer than the note it carries, and drops an open draft', async () => {
+    const request = vi.fn(async () => ({}));
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: CUSTOMER }]} byService={answered(NOTE)} />);
+    expect(screen.getByText(NOTE.body)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'typed for the old customer' } });
+    // A merge or undo moved the visit; the retained brief still carries the old customer's note under the same visit id.
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: 'c2' }]} byService={answered(NOTE)} />);
+    expect(screen.queryByText(NOTE.body)).toBeNull();
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+    // The refreshed brief for the new customer shows again, with no draft left over.
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: 'c2' }]} byService={{ b: { brief: { homeNote: { note: null, customerId: 'c2' } } } }} />);
+    expect(screen.getByText('No note yet.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+    expect(puts(request)).toHaveLength(0);
+  });
+
+  it('a schedule row without a customer id cannot be compared, so the carried note still shows', () => {
+    render(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={[{ id: 'b' }]} byService={answered(NOTE)} />);
+    expect(screen.getByText(NOTE.body)).toBeInTheDocument();
+  });
 });

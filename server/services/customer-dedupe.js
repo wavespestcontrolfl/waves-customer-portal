@@ -2282,7 +2282,8 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
 // table allows 2100 characters (two full 1000-character notes plus the 10-character joint), so two saved notes always fit; a
 // chain of merges that would pass it aborts the merge (nothing is cut) so a person shortens one note first. The journal
 // lists this table in collision_handlers, so the revert endpoint refuses the merge: undo cannot split a joined note. No
-// body is read into any log or journal field; only the table name is recorded.
+// body is read into any log or journal field; only the table name is recorded. A failed join UPDATE is rethrown as the
+// operation and database error code only.
 const HOME_NOTE_JOINT = '\n(merged) ';
 const HOME_NOTE_TABLE_MAX = 2100;
 async function mergeHomeNotes(trx, table, column, winnerId, loserId) {
@@ -2296,7 +2297,13 @@ async function mergeHomeNotes(trx, table, column, winnerId, loserId) {
   if (joined.length > HOME_NOTE_TABLE_MAX) {
     throw new Error(`home notes are too long to join (${joined.length} characters, limit ${HOME_NOTE_TABLE_MAX}): shorten one note, then merge again`);
   }
-  await trx(table).where(column, winnerId).update({ body: joined, revision: Number(winnerRow.revision) + 1, updated_at: trx.fn.now() });
+  try {
+    await trx(table).where(column, winnerId).update({ body: joined, revision: Number(winnerRow.revision) + 1, updated_at: trx.fn.now() });
+  } catch (err) {
+    // A failed UPDATE's message can carry its bound values (both notes), and merge errors are logged: only the operation and
+    // the database error code go on.
+    throw Object.assign(new Error(`home note join failed (update, ${(err && err.code) || 'unknown'})`), { code: 'home_note_join_failed' });
+  }
   await trx(table).where(column, loserId).del();
   return 'joined the two notes on the kept customer';
 }

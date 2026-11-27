@@ -1402,7 +1402,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
-      <HomeNoteSection request={request} stopKey={service.id} services={stop.services} byService={byService} onSaved={onRetry} />
+      <HomeNoteSection request={request} stopKey={stop.key} services={stop.services} byService={byService} onSaved={onRetry} />
       <AccessFlagsSection members={accessFlags} grouped={stop.services.length > 1} request={request} onChanged={onRetry} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>

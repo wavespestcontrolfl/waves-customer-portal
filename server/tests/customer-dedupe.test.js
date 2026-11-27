@@ -612,6 +612,23 @@ describe('mergeHomeNotes ("About this home" staff notes: never lose text)', () =
     expect(tooLong.state).toEqual({ updated: null, deleted: false, repointed: null });
   });
 
+  it('a failed join update is rethrown as the operation and database code only: neither note text reaches the message', async () => {
+    const trx = jest.fn((table) => makeChain(table, (q) => {
+      if (q.called('first')) return q.args('where')[1] === 'L' ? { id: 'n2', body: 'archived private text', revision: 1 } : { id: 'n1', body: 'kept private text', revision: 1 };
+      if (q.called('update')) {
+        const err = new Error('update "home_notes" set "body" = \'kept private text\n(merged) archived private text\' - invalid byte sequence');
+        err.code = '22021';
+        throw err;
+      }
+      return [];
+    }));
+    trx.fn = { now: () => 'NOW' };
+    const err = await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L').catch((e) => e);
+    expect(err.message).toBe('home note join failed (update, 22021)');
+    expect(err.message).not.toMatch(/private text/);
+    expect(err.code).toBe('home_note_join_failed');
+  });
+
   it('is the registered unique-collision handler for home_notes', () => {
     expect(dedupe._test.UNIQUE_COLLISION_HANDLERS.home_notes).toBe(mergeHomeNotes);
   });
