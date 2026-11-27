@@ -1984,7 +1984,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect([category, headline]).toEqual(['estimate', 'Estimates — quote Jordan Example the plan by hand']);
       expect(why).toBe('Their one-time pest job was done Tue, Mar 5, and the app cannot price the plan offer.');
       expect(options).toMatchObject({
-        link: '/admin/customers?customerId=cust-1',
+        link: '/admin/estimates?tab=new&customerId=cust-1',
         dedupeKey: _test.officeItemKey('job-1'),
         bell: true,
         metadata: {
@@ -2478,7 +2478,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       else process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES = savedExpanded;
     });
 
-    test('raiseOfficeItem attaches provisionalEstimateUrl, waiveSetupFee, offerEndDate, and clean expanded-service copy', async () => {
+    test('raiseOfficeItem links directly to the prefilled Estimate Tool with service-appropriate copy', async () => {
       await _test.defaultDeps().raiseOfficeItem({
         job: { ...JOB, service_key: 'lawn_inspection' },
         customer: CUSTOMER,
@@ -2488,36 +2488,79 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(notifyAdmin).toHaveBeenCalledTimes(1);
       const [, , why, options] = notifyAdmin.mock.calls[0];
       expect(why).toBe('Their Waves assessment was done Tue, Mar 5 and qualifies for a plan offer.');
+      expect(options.link).toBe('/admin/estimates?tab=new&customerId=cust-1');
       expect(options.metadata).toMatchObject({
-        provisionalEstimateUrl: '/admin/estimates?tab=new&customerId=cust-1&planOfferJobId=job-1',
+        estimateUrl: '/admin/estimates?tab=new&customerId=cust-1',
         offerEndDate: '2030-04-04',
-        waiveSetupFee: true,
         serviceKey: 'lawn_inspection',
         reason: 'expanded_service_review',
       });
       expect(options.detail).toContain('Pest or Lawn plan');
+      expect(options.detail).not.toContain('Quarterly Pest Control Service');
+
+      notifyAdmin.mockClear();
+      await _test.defaultDeps().raiseOfficeItem({
+        job: { ...JOB, service_key: 'one_time_pest_control' },
+        customer: CUSTOMER,
+        offerDay: '2030-03-05',
+        reason: 'not_priced',
+      });
+      const [, , , pestOpts] = notifyAdmin.mock.calls[0];
+      expect(pestOpts.link).toBe('/admin/estimates?tab=new&customerId=cust-1');
+      expect(pestOpts.detail).toContain('Quarterly Pest Control Service');
     });
 
-    test('gate OFF keeps qualifyingJobs strictly to pest and cockroach; gate ON widens sweep to 4 expanded services while keeping dueOfferOfJob restricted', async () => {
+    test('gate OFF queries only the 2 pest/roach keys; gate ON queries all 6 keys, requires free assessment to be $0, and keeps dueOfferOfJob restricted', async () => {
       const { dueOfferOfJob } = require('../services/onetime-plan-offer');
-      delete process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES;
-      const offDb = fakeDb({});
-      await runOnetimePlanOfferJob({ now: NOW, deps: { ..._test.defaultDeps(), db: offDb } });
-      expect(offDb.queriesOf('scheduled_services as s')).toHaveLength(0);
-
-      // Gate ON in live mode: unconverted free Waves Assessment (no invoice) passes jobPaid & routes to office item, NEVER auto-sending pest template.
       process.env.GATE_ONETIME_PLAN_OFFER = 'live';
-      process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES = 'true';
-      const assessmentJob = { id: 'job-assess', customer_id: 'cust-1', service_day: '2030-03-05', job_day: '2030-03-05', service_key: 'lawn_inspection' };
-      const deps = liveWorld({
+
+      // Gate OFF: published template lets the sweep run and query scheduled_services with ONLY the 2 pest/roach keys.
+      delete process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES;
+      const offDeps = liveWorld({
         tables: {
-          'scheduled_services as s': [assessmentJob],
+          'scheduled_services as s': [],
           customers: [CUSTOMER],
           invoices: [],
         },
         planStartBlocker: jest.fn(async () => null),
       });
+      await runOnetimePlanOfferJob({ now: NOW, deps: offDeps });
+      const offQueries = offDeps.db.queriesOf('scheduled_services as s');
+      expect(offQueries.length).toBeGreaterThan(0);
+      const offWhereIn = offQueries[0].calls.find(([m]) => m === 'whereIn');
+      expect(offWhereIn[2]).toEqual(['one_time_pest_control', 'cockroach_control']);
+
+      // Gate ON in live mode: sweep widens to all 6 keys; $0 unconverted Waves Assessment passes jobPaid & routes to office item.
+      process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES = 'true';
+      const assessmentJob = {
+        id: 'job-assess',
+        customer_id: 'cust-1',
+        service_day: '2030-03-05',
+        job_day: '2030-03-05',
+        service_key: 'lawn_inspection',
+        estimated_price: 0,
+        primary_line_price: 0,
+        prepaid_amount: 0,
+      };
+      const deps = liveWorld({
+        tables: {
+          'scheduled_services as s': [assessmentJob],
+          customers: [CUSTOMER],
+          'invoices as i': [],
+        },
+        planStartBlocker: jest.fn(async () => null),
+      });
       const summary = await runOnetimePlanOfferJob({ now: NOW, deps });
+      const onQueries = deps.db.queriesOf('scheduled_services as s');
+      const onWhereIn = onQueries[0].calls.find(([m]) => m === 'whereIn');
+      expect(onWhereIn[2]).toEqual([
+        'one_time_pest_control',
+        'cockroach_control',
+        'wdo_inspection',
+        'rodent_trapping',
+        'bee_wasp_removal',
+        'lawn_inspection',
+      ]);
       expect(summary.office).toBe(1);
       expect(summary.sent).toBe(0);
       expect(summary.reasons.expanded_service_review).toBe(1);
@@ -2528,12 +2571,28 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         reason: 'expanded_service_review',
       }));
 
+      // A priced or prepaid lawn_inspection with no invoice MUST hold as no_invoice (never bypass paid-invoice rule).
+      for (const pricedPatch of [{ estimated_price: 49 }, { estimated_price: null, primary_line_price: 49 }, { prepaid_amount: 25 }]) {
+        const pricedDeps = liveWorld({
+          tables: {
+            'scheduled_services as s': [{ ...assessmentJob, ...pricedPatch }],
+            customers: [CUSTOMER],
+            'invoices as i': [],
+          },
+          planStartBlocker: jest.fn(async () => null),
+        });
+        const pricedSummary = await runOnetimePlanOfferJob({ now: NOW, deps: pricedDeps });
+        expect(pricedSummary.held).toBe(1);
+        expect(pricedSummary.reasons.no_invoice).toBe(1);
+        expect(pricedDeps.raiseOfficeItem).not.toHaveBeenCalled();
+      }
+
       // Expanded service with has_plan blocker is held (not sent to office).
       const blockerDeps = liveWorld({
         tables: {
           'scheduled_services as s': [assessmentJob],
           customers: [CUSTOMER],
-          invoices: [],
+          'invoices as i': [],
         },
         planStartBlocker: jest.fn(async () => 'has_plan'),
       });

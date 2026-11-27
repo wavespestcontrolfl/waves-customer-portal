@@ -326,6 +326,7 @@ function dueJobsPage(database, today, after, window = OFFER_WINDOW, onlyWhere = 
   if (onlyWhere) page.whereRaw(onlyWhere);
   return page.select(
     's.id', 's.customer_id',
+    's.estimated_price', 's.primary_line_price', 's.prepaid_amount',
     database.raw(`${OFFER_DAY_SQL} AS service_day`),
     'done.service_day as job_day',
     database.raw('COALESCE(s.service_key_snapshot, sv.service_key) AS service_key'),
@@ -513,12 +514,21 @@ async function owesMoney({ job, deps }) {
   return false;
 }
 
+function isUnpricedFreeAssessment(job) {
+  if (!FREE_ASSESSMENT_SERVICE_KEYS.includes(job?.service_key)) return false;
+  const hasEstimated = job?.estimated_price != null && job.estimated_price !== '';
+  const hasPrimary = job?.primary_line_price != null && job.primary_line_price !== '';
+  const price = hasEstimated ? Number(job.estimated_price) : (hasPrimary ? Number(job.primary_line_price) : 0);
+  const prepaid = job?.prepaid_amount != null && job.prepaid_amount !== '' ? Number(job.prepaid_amount) : 0;
+  return Number.isFinite(price) && price <= 0 && Number.isFinite(prepaid) && prepaid <= 0;
+}
+
 // The job is paid, its price can be read, and nothing else is owed.
 async function jobPaid(ctx) {
   const invoices = await jobInvoices(ctx.deps.db, ctx.job);
   if (!invoices.length) {
-    // Free unconverted assessments (lawn_inspection) carry no invoice; still verify no balance is owed.
-    if (FREE_ASSESSMENT_SERVICE_KEYS.includes(ctx.job.service_key)) {
+    // Only genuinely $0 assessments (no estimated/primary price or prepayment) bypass the paid-invoice rule.
+    if (isUnpricedFreeAssessment(ctx.job)) {
       if (await owesMoney(ctx)) return 'open_balance';
       ctx.jobPrice = null;
       return null;
@@ -1166,8 +1176,8 @@ const OFFICE_REASON_WORDS = Object.freeze({
 });
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;
 
-function officeEstimatePrefillUrl(customerId, jobId) {
-  return `/admin/estimates?tab=new&customerId=${encodeURIComponent(customerId)}&planOfferJobId=${encodeURIComponent(String(jobId))}`;
+function officeEstimateUrl(customerId) {
+  return `/admin/estimates?tab=new&customerId=${encodeURIComponent(customerId)}`;
 }
 
 function officeItemWhy(job, shortOfferDay) {
@@ -1178,25 +1188,32 @@ function officeItemWhy(job, shortOfferDay) {
   return `Their one-time pest job was done ${shortOfferDay}, and the app cannot price the plan offer.`;
 }
 
+function officeOfferGuidance(job, shortLastDay) {
+  if (isExpandedServiceKey(job?.service_key)) {
+    return `Open the Estimate Tool to quote the right Pest or Lawn plan with the setup fee waived, good through ${shortLastDay}.`;
+  }
+  return `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortLastDay}.`;
+}
+
 async function raiseOfficeItem({ job, customer, offerDay, reason }) {
   const { fitAction, fullName } = require('./admin-alert-names');
   const name = fullName(customer) || 'a customer';
   const { lastDay } = offerTerms(offerDay);
   const shortDay = (ymd) => formatDateOnly(ymd, { year: undefined, month: 'short', weekday: 'short' });
-  const provisionalEstimateUrl = officeEstimatePrefillUrl(customer.id, job.id);
+  const estimateUrl = officeEstimateUrl(customer.id);
   const notif = await require('./admin-alert-compose').raiseAdminAlert('estimate', {
     area: 'Estimates',
     action: fitAction('Estimates', name, [(who) => `quote ${who} the plan by hand`]),
     why: officeItemWhy(job, shortDay(offerDay)),
     severity: 'needs-you',
-    link: `/admin/customers?customerId=${encodeURIComponent(customer.id)}`,
+    link: estimateUrl,
     subject: { type: 'customer', id: customer.id },
     doneWhen: 'plan_offer_quoted',
     who: 'person',
   }, {
     detail: [
       OFFICE_REASON_WORDS[reason] || OFFICE_REASON_WORDS.not_priced,
-      `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortDay(lastDay)}.`,
+      officeOfferGuidance(job, shortDay(lastDay)),
       'No email went to the customer. Send the estimate by hand, or mark this done.',
       'This closes by itself when the customer has a new estimate, or when the offer ends.',
     ].join(' '),
@@ -1208,7 +1225,7 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
     ringOnRefresh: () => false,
     metadata: {
       source: 'onetime-plan-offer', kind: 'plan_offer_office', customerId: customer.id, jobId: String(job.id), lastDay, reason,
-      provisionalEstimateUrl, offerEndDate: lastDay, waiveSetupFee: true,
+      estimateUrl, offerEndDate: lastDay,
       ...(job?.service_key ? { serviceKey: job.service_key } : {}),
     },
   });
