@@ -211,7 +211,14 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
     const savedGate = process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
     process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = 'true';
     try {
-      const { apsCohortVersion } = require('../scripts/v2-promotion-readiness');
+      const { mainCohortVersions, apsCohortVersion } = require('../scripts/v2-promotion-readiness');
+      // When system layout is active, legacy gate-off PROMPT_HASH rows are excluded from main cohort checks.
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'gemini' }))
+        .toEqual([extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'gemini' })]);
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'gemini' })).not.toContain(PROMPT_HASH);
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'openai' }))
+        .toEqual([extractionPromptVersion(['General Pest Control'], { systemLayout: true, provider: 'openai' })]);
+      expect(mainCohortVersions(['General Pest Control'], { provider: 'openai' })).not.toContain(PROMPT_HASH);
       expect(apsCohortVersion([], { provider: 'openai' })).toBe(SYSTEM_APS_PROMPT_HASH);
       expect(apsCohortVersion([], { provider: 'anthropic' })).toBe(SYSTEM_APS_PROMPT_HASH);
       expect(apsCohortVersion([], { provider: 'gemini' })).toBe(GEMINI_SYSTEM_APS_PROMPT_HASH);
