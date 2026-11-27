@@ -595,7 +595,7 @@ describe('the fallback save: bed bug, mosquito and wasp rows the browser cannot 
     let error = null;
     try { assertFallback(data); } catch (err) { error = err; }
     expect(error && error.statusCode).toBe(409);
-    expect(error.message).toMatch(/bed bug, mosquito or wasp price the browser cannot set.*reload the page and regenerate/);
+    expect(error.message).toMatch(/bed bug, mosquito, wasp or WDO inspection price the browser cannot set.*reload the page and regenerate/);
   };
   const price = (data, stored = null, recompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' })) => resolveServerAuthoritativePricing({
     estimateData: data, clientPreview: { monthlyTotal: 37.33, annualTotal: 448, onetimeTotal: 0 }, quoteRequired: false, now: NOW, recompute, storedEstimateData: stored,

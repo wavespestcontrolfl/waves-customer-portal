@@ -54,6 +54,8 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'legacyPricingRules',
   // Two-story roof-point stamp (rodent exclusion, 2026-11-26): server-derived from its own stamp, same rule.
   'legacyTwoStoryRoof',
+  // WDO size + construction stamp (2026-11-26): server-derived from its own stamp, same rule.
+  'legacyWdoFlat',
   // One-time pest rule (new quotes only, 2026-11-26): server-derived from its own stamp, same rule.
   'legacyOneTimePestBuffer',
   // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): server-derived from its own stamp, same rule.

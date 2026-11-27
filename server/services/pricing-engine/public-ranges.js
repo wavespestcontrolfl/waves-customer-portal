@@ -99,6 +99,11 @@ function recurringLawnTracks() {
   return Object.keys(constants.LAWN_BRACKETS).filter((track) => !bahiaHasNoProgram(track));
 }
 
+// Every price in the WDO size table (all tiers, all construction columns).
+function wdoTableValues() {
+  return constants.SPECIALTY.wdo.sizeTable.tiers.flatMap((tier) => [tier.block, tier.frame, tier.crawl]);
+}
+
 function buildRows() {
   const rows = [];
   const errors = [];
@@ -497,8 +502,14 @@ function buildRows() {
     key: 'wdo_inspection',
     name: 'WDO Inspection',
     unit: 'per inspection',
-    values: [150, 350].concat(sweepValues(TYPICAL_FOOTPRINTS, (f) => sp.priceWDO(f), (r) => r.price)),
-    notes: 'Wood-destroying organism inspection with official FDACS report.',
+    // Owner ruling 2026-11-26: $150 to $275 by home size and construction. The range is the min and max over every cell of the
+    // code table (SPECIALTY.wdo.sizeTable), so a table edit moves it; the typical-home sweep can only widen it.
+    values: wdoTableValues().concat(sweepValues(
+      TYPICAL_HOMES.flatMap((homeSqFt) => [{ constructionMaterial: 'CBS' }, { constructionMaterial: 'WOOD_FRAME' }, { constructionMaterial: 'CBS', foundationType: 'CRAWLSPACE' }]
+        .map((construction) => ({ homeSqFt, constructionTrusted: true, foundationTrusted: true, ...construction }))),
+      (property) => sp.priceWDO(property),
+      (r) => r.price)),
+    notes: 'Wood-destroying organism inspection with official FDACS report. Price by home size and construction.',
   }));
 
   add('lawn_care_program', () => rangeRow({
