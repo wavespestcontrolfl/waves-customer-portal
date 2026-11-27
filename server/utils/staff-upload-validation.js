@@ -72,6 +72,29 @@ function validateStaffPhotoUpload(file) {
   return detected;
 }
 
+const DOC_MAGIC_RULES = [
+  { exts: ['pdf'], match: (buf) => buf.length >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-', mime: () => 'application/pdf' },
+  {
+    exts: ['docx', 'xlsx'],
+    match: (buf) => buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04,
+    mime: (ext) => (ext === 'docx'
+      ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'),
+  },
+  {
+    exts: ['doc', 'xls'],
+    match: (buf) => buf.length >= 4 && buf[0] === 0xD0 && buf[1] === 0xCF && buf[2] === 0x11 && buf[3] === 0xE0,
+    mime: (ext) => (ext === 'doc' ? 'application/msword' : 'application/vnd.ms-excel'),
+  },
+  {
+    exts: ['txt', 'csv'],
+    match: (buf) => !buf.includes(0) && !looksLikeActiveMarkup(buf),
+    mime: (ext) => (ext === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8'),
+  },
+];
+
+const IMAGE_DOC_EXTS = new Set(['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif']);
+
 function validateCompanyDocumentUpload(file) {
   if (!file || !Buffer.isBuffer(file.buffer) || file.buffer.length === 0) {
     return { error: 'No file provided' };
@@ -84,31 +107,12 @@ function validateCompanyDocumentUpload(file) {
   if (!ext || FORBIDDEN_DOC_EXTENSIONS.has(ext)) {
     return { error: 'Unsupported or unsafe file type. Allowed: PDF, images, Word, Excel, CSV, or plain text.' };
   }
-  const buf = file.buffer;
-  const img = detectImageFromBytes(buf);
-  if (img && ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'].includes(ext)) {
-    return img;
+  if (IMAGE_DOC_EXTS.has(ext)) {
+    const img = detectImageFromBytes(file.buffer);
+    if (img) return img;
   }
-  if (ext === 'pdf' && buf.length >= 5 && buf.subarray(0, 5).toString('ascii') === '%PDF-') {
-    return { ext: 'pdf', contentType: 'application/pdf' };
-  }
-  if ((ext === 'docx' || ext === 'xlsx') && buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04) {
-    return {
-      ext,
-      contentType: ext === 'docx'
-        ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    };
-  }
-  if ((ext === 'doc' || ext === 'xls') && buf.length >= 4 && buf[0] === 0xD0 && buf[1] === 0xCF && buf[2] === 0x11 && buf[3] === 0xE0) {
-    return {
-      ext,
-      contentType: ext === 'doc' ? 'application/msword' : 'application/vnd.ms-excel',
-    };
-  }
-  if ((ext === 'txt' || ext === 'csv') && !buf.includes(0) && !looksLikeActiveMarkup(buf)) {
-    return { ext, contentType: ext === 'csv' ? 'text/csv; charset=utf-8' : 'text/plain; charset=utf-8' };
-  }
+  const rule = DOC_MAGIC_RULES.find((r) => r.exts.includes(ext) && r.match(file.buffer));
+  if (rule) return { ext, contentType: rule.mime(ext) };
   return { error: 'File contents do not match an allowed document type (PDF, image, Word, Excel, CSV, or plain text).' };
 }
 

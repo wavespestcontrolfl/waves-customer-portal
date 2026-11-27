@@ -3,7 +3,7 @@ import useIsMobile from "../../hooks/useIsMobile";
 import useModalFocus from "../../hooks/useModalFocus";
 import useRenderedTabBeacon from "../../hooks/useRenderedTabBeacon";
 import { createPortal } from "react-dom";
-import { useSearchParams } from "react-router-dom";
+import { useOutletContext, useSearchParams } from "react-router-dom";
 import StaffDocumentLibrary from "../../components/staffDocuments/Library";
 import useStaffDocumentsAvailable from "../../hooks/useStaffDocumentsAvailable";
 import PayrollSettings from "../../components/payroll/PayrollSettings";
@@ -165,7 +165,17 @@ const fmt = (n) =>
 const fmtHrs = (min) =>
   min != null ? (parseFloat(min) / 60).toFixed(1) + "h" : "--";
 const fmtPct = (p) => (p != null ? parseFloat(p).toFixed(1) + "%" : "--");
-const isMobile = typeof window !== "undefined" && window.innerWidth < 640;
+const errMessage = (e, fallback = "Request failed") =>
+  (e && e.data && e.data.error) || (e && e.message) || fallback;
+const isErrorToastText = (msg) =>
+  /^(failed|error|could not|upload failed|download failed|restore failed|approve failed|bulk approve failed|unlock failed|dispute failed|confirm failed|export failed|load failed|detail load failed|earnings failed|photo upload failed|saved, but not|approved payroll export failed)/i.test(
+    String(msg || "").trim(),
+  );
+const effectivePayRate = (tech) =>
+  tech && tech.pay_rate != null && tech.pay_rate !== "" && Number.isFinite(Number(tech.pay_rate))
+    ? Number(tech.pay_rate)
+    : LABOR_RATE;
+const ymdOnly = (v) => (v == null ? "" : String(v).slice(0, 10));
 
 const STATUS_COLORS = {
   active: "#15803D", // green-700
@@ -175,6 +185,7 @@ const STATUS_COLORS = {
   pending: "#A16207", // amber (mirrors edited = needs attention)
   approved: "#15803D", // green (mirrors active = good state)
   disputed: "#991B1B", // red (mirrors voided = bad state)
+  rejected: "#991B1B", // red
   exported: "#52525B", // zinc-600 — distinct from completed
 };
 const TYPE_COLORS = {
@@ -262,29 +273,36 @@ const AVAILABILITY_WORDS = {
 };
 
 export default function TimeTrackingPage() {
+  const outletContext = useOutletContext();
+  const staffProfile = useMemo(
+    () => outletContext?.user || readStaffProfile(),
+    [outletContext?.user],
+  );
+  const staffRole = staffProfile?.role || null;
   const controlledDocumentsAvailable = useStaffDocumentsAvailable();
-  const payrollAvailable = usePayrollAvailable(readStaffRole() === "admin");
+  const payrollAvailable = usePayrollAvailable(staffRole === "admin");
   const payStubs = useTechPayStubs();
   const scoreboard = useTechScoreboardAvailability();
   const [searchParams, setSearchParams] = useSearchParams();
   const rawTab = STAFF_LEAF_BY_KEY[searchParams.get("tab")] ? searchParams.get("tab") : "dashboard";
   // null = payroll requested by an admin while availability is still
   // unknown: no leaf renders and no beacon fires until it resolves.
-  const payrollGateOpen = payrollAvailable === true && readStaffRole() === "admin";
-  const tab = resolveStaffTab(rawTab, readStaffRole(), payrollAvailable, payStubs.status, scoreboard.status);
+  const payrollGateOpen = payrollAvailable === true && staffRole === "admin";
+  const tab = resolveStaffTab(rawTab, staffRole, payrollAvailable, payStubs.status, scoreboard.status);
   // The leaves this viewer can open in a section; a section with none is not shown.
   const leafOpen = {
     payroll: payrollGateOpen,
     "pay-stubs": payStubs.status === "ready",
     scoreboard: scoreboard.status === "ready",
   };
-  const visibleLeaves = (group) => openStaffLeaves(group, leafOpen, readStaffRole());
+  const visibleLeaves = (group) => openStaffLeaves(group, leafOpen, staffRole);
   // weekStart: the Monday an Approvals link opens (the same ?weekStart= a
   // timesheet bell carries).
   const setTab = (value, weekStart = null) => {
     const next = new URLSearchParams(searchParams);
     next.set("tab", value);
     if (weekStart) next.set("weekStart", weekStart);
+    else if (value !== "approvals") next.delete("weekStart");
     if (value !== "documents") { next.delete("document"); next.delete("version"); }
     setSearchParams(next);
   };
@@ -292,11 +310,23 @@ export default function TimeTrackingPage() {
     TIMETRACKING_TAB_GROUPS.find((g) => g.tabs.includes(tab ?? rawTab)) ||
     TIMETRACKING_TAB_GROUPS[0];
   useRenderedTabBeacon("/admin/timetracking", tab, [searchParams]);
-  const [toast, setToast] = useState("");
-  const showToast = (m) => {
-    setToast(m);
-    setTimeout(() => setToast(""), 3500);
-  };
+  const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
+  const showToast = useCallback((m, opts = {}) => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    const message = String(m || "");
+    const isError = typeof opts.error === "boolean" ? opts.error : isErrorToastText(message);
+    setToast(message ? { message, isError } : null);
+    if (message) {
+      toastTimerRef.current = setTimeout(() => {
+        setToast(null);
+        toastTimerRef.current = null;
+      }, isError ? 5000 : 3500);
+    }
+  }, []);
+  useEffect(() => () => {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, []);
 
   return (
     <div className="staff-foundation mx-auto max-w-[1500px]">
@@ -329,7 +359,7 @@ export default function TimeTrackingPage() {
       {tab === "timesheet" && (
         <TimesheetTab
           showToast={showToast}
-          onOpenApprovals={() => setTab("approvals")}
+          onOpenApprovals={(weekStart) => setTab("approvals", weekStart)}
         />
       )}
       {tab === "approvals" && (
@@ -342,7 +372,7 @@ export default function TimeTrackingPage() {
         />
       )}
       {tab === "analytics" && <AnalyticsTab />}
-      {tab === "team" && <TeamTab showToast={showToast} />}
+      {tab === "team" && <TeamTab showToast={showToast} staffProfile={staffProfile} />}
       {tab === "documents" && (controlledDocumentsAvailable ? <>
         <StaffDocumentLibrary manage />
         <details style={{ marginTop: 24 }}>
@@ -357,12 +387,14 @@ export default function TimeTrackingPage() {
       {tab === "scoreboard" && <Scoreboard />}
       {tab === null && <p role="status" style={{ color: "#71717A" }}>{AVAILABILITY_WORDS[rawTab] || "Checking availability…"}</p>}
       <div
+        role="status"
+        aria-live="polite"
         style={{
           position: "fixed",
           bottom: 20,
           right: 20,
           background: D.card,
-          border: `1px solid ${D.green}`,
+          border: `1px solid ${toast?.isError ? D.red : D.green}`,
           borderRadius: 8,
           padding: "10px 16px",
           display: "flex",
@@ -378,8 +410,10 @@ export default function TimeTrackingPage() {
         }}
       >
         {" "}
-        <span style={{ color: D.green }}>OK</span>
-        <span style={{ color: D.text }}>{toast}</span>{" "}
+        <span style={{ color: toast?.isError ? D.red : D.green, fontWeight: 600 }}>
+          {toast?.isError ? "Error" : "OK"}
+        </span>
+        <span style={{ color: D.text }}>{toast?.message || ""}</span>{" "}
       </div>
     </div>
   );
@@ -389,6 +423,7 @@ export default function TimeTrackingPage() {
 // DASHBOARD TAB
 // =============================================================================
 export function DashboardTab({ showToast }) {
+  const isMobile = useIsMobile(640);
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -400,7 +435,7 @@ export function DashboardTab({ showToast }) {
       showToast("Failed to load dashboard");
     }
     setLoading(false);
-  }, []);
+  }, [showToast]);
 
   useEffect(() => {
     load();
@@ -416,9 +451,9 @@ export function DashboardTab({ showToast }) {
     );
   if (!data)
     return (
-      <div style={{ color: D.red, padding: 40, textAlign: "center" }}>
-        Failed to load
-      </div>
+      <LoadFailedNotice onRetry={load}>
+        Failed to load dashboard.
+      </LoadFailedNotice>
     );
 
   const { activeShifts, todaySummaries, weekDailies, allTechs } = data;
@@ -430,12 +465,19 @@ export function DashboardTab({ showToast }) {
   // number instead of hidden.
   const isRestrictedViewer = data.viewerRole === "technician";
 
-  // Today totals
-  const todayShiftMin = todaySummaries.reduce(
-    (s, d) => s + parseFloat(d.total_shift_minutes || 0),
-    0,
-  );
-  const todayPaidMin = todaySummaries.reduce((s, d) => s + paidMinutesOf(d), 0);
+  const nowMs = Date.now();
+  const activeMinutesFor = (shift) =>
+    shift && shift.clock_in ? Math.max(0, (nowMs - new Date(shift.clock_in).getTime()) / 60000) : 0;
+
+  // Today totals: include currently active shifts that have not yet been
+  // rolled into time_entry_daily_summary.
+  const activeShiftMinTotal = activeShifts.reduce((s, sh) => s + activeMinutesFor(sh), 0);
+  const todayShiftMin =
+    todaySummaries.reduce((s, d) => s + parseFloat(d.total_shift_minutes || 0), 0) +
+    activeShiftMinTotal;
+  const todayPaidMin =
+    todaySummaries.reduce((s, d) => s + paidMinutesOf(d), 0) +
+    activeShiftMinTotal;
   const todayJobMin = todaySummaries.reduce(
     (s, d) => s + parseFloat(d.total_job_minutes || 0),
     0,
@@ -445,18 +487,22 @@ export function DashboardTab({ showToast }) {
     0,
   );
   const todayJobs = todaySummaries.reduce((s, d) => s + (d.job_count || 0), 0);
-  // Labor cost is per-tech now: each tech's daily shift minutes × that
-  // tech's pay_rate (falling back to LABOR_RATE = $35 when unset, so
-  // techs without a configured rate stay consistent with the legacy
-  // single-rate calc instead of being silently dropped).
-  const todayLaborCost = todaySummaries.reduce((s, d) => {
-    const tech = allTechs.find((t) => t.id === d.technician_id);
-    const rate =
-      tech && parseFloat(tech.pay_rate) > 0
-        ? parseFloat(tech.pay_rate)
-        : LABOR_RATE;
-    return s + (paidMinutesOf(d) / 60) * rate;
-  }, 0);
+  // Labor cost is per-tech: regular hours at pay_rate, overtime hours at 1.5x,
+  // plus active-shift elapsed hours (falling back to LABOR_RATE = $35 only when
+  // pay_rate is unset, preserving an explicit $0 rate).
+  const todayLaborCost =
+    todaySummaries.reduce((s, d) => {
+      const tech = allTechs.find((t) => t.id === d.technician_id);
+      const rate = effectivePayRate(tech);
+      const paidMin = paidMinutesOf(d);
+      const otMin = Math.min(paidMin, Math.max(0, parseFloat(d.overtime_minutes || 0)));
+      const regMin = Math.max(0, paidMin - otMin);
+      return s + ((regMin + otMin * 1.5) / 60) * rate;
+    }, 0) +
+    activeShifts.reduce((s, sh) => {
+      const tech = allTechs.find((t) => t.id === sh.technician_id);
+      return s + (activeMinutesFor(sh) / 60) * effectivePayRate(tech);
+    }, 0);
   const todayUtil = todayShiftMin > 0 ? (todayJobMin / todayShiftMin) * 100 : 0;
 
   // This week totals
@@ -519,12 +565,9 @@ export function DashboardTab({ showToast }) {
             const summary = todaySummaries.find(
               (s) => s.technician_id === tech.id,
             );
-            const shiftDur = active
-              ? (Date.now() - new Date(active.clock_in).getTime()) / 60000
-              : 0;
-            const dayHrs = summary
-              ? parseFloat(summary.total_shift_minutes || 0) / 60
-              : 0;
+            const shiftDur = activeMinutesFor(active);
+            const dayHrs =
+              ((summary ? paidMinutesOf(summary) : 0) + shiftDur) / 60;
             const dayJobs = summary ? summary.job_count : 0;
             const dayRev = summary
               ? parseFloat(summary.revenue_generated || 0)
@@ -816,11 +859,32 @@ function UtilRing({ pct, size = 32 }) {
 }
 
 function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
-  const maxMin = 720; // 12 hours as max bar
+  const isMobile = useIsMobile(640);
   const barH = 120;
   const barW = isMobile ? 28 : 50;
   // Room above the bars for a 14px hours label, so a full day is not cut off.
   const top = 18;
+
+  const dayRows = DAYS.map((day, i) => {
+    const dateStr = addDays(weekStart, i);
+    const dayData = weekDailies.filter(
+      (d) =>
+        d.work_date === dateStr ||
+        (d.work_date && String(d.work_date).split("T")[0] === dateStr),
+    );
+    const shiftMin = dayData.reduce((s, d) => s + paidMinutesOf(d), 0);
+    // codex round-3 P2: overtime_minutes is never sent to a restricted
+    // (technician) viewer (techSafeDailySummary) — reading it as 0
+    // wouldn't fabricate a number, but the OT/regular split it drives
+    // is still coworker performance framing, so skip the split (whole
+    // bar renders as regular time) for that viewer.
+    const otMin = isRestrictedViewer
+      ? 0
+      : Math.min(shiftMin, dayData.reduce((s, d) => s + parseFloat(d.overtime_minutes || 0), 0));
+    const regMin = Math.max(0, shiftMin - otMin);
+    return { day, shiftMin, regMin, otMin };
+  });
+  const maxMin = Math.max(480, ...dayRows.map((d) => d.shiftMin));
 
   return (
     <svg
@@ -828,24 +892,7 @@ function WeekBarChart({ weekDailies, weekStart, isRestrictedViewer }) {
       height={top + barH + 30}
       viewBox={`0 0 ${7 * (barW + 12) + 20} ${top + barH + 30}`}
     >
-      {DAYS.map((day, i) => {
-        const dateStr = addDays(weekStart, i);
-        const dayData = weekDailies.filter(
-          (d) =>
-            d.work_date === dateStr ||
-            (d.work_date && d.work_date.split("T")[0] === dateStr),
-        );
-        const shiftMin = dayData.reduce((s, d) => s + paidMinutesOf(d), 0);
-        // codex round-3 P2: overtime_minutes is never sent to a restricted
-        // (technician) viewer (techSafeDailySummary) — reading it as 0
-        // wouldn't fabricate a number, but the OT/regular split it drives
-        // is still coworker performance framing, so skip the split (whole
-        // bar renders as regular time) for that viewer.
-        const otMin = isRestrictedViewer ? 0 : dayData.reduce(
-          (s, d) => s + parseFloat(d.overtime_minutes || 0),
-          0,
-        );
-        const regMin = shiftMin - otMin;
+      {dayRows.map(({ day, shiftMin, regMin, otMin }, i) => {
         const regH = Math.min((regMin / maxMin) * barH, barH);
         const otH = Math.min((otMin / maxMin) * barH, barH - regH);
         const x = i * (barW + 12) + 10;
@@ -995,8 +1042,15 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
     fetch(`${API_BASE}/admin/timesheets/export?weekStart=${weekStart}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then((response) => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      .then(async (response) => {
+        if (!response.ok) {
+          let detail = `HTTP ${response.status}`;
+          try {
+            const body = await response.json();
+            if (body?.error) detail = body.error;
+          } catch { /* non-JSON error */ }
+          throw new Error(detail);
+        }
         return response.blob();
       })
       .then((blob) => {
@@ -1007,7 +1061,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
         anchor.click();
         URL.revokeObjectURL(url);
       })
-      .catch(() => showToast("Approved payroll export failed"));
+      .catch((e) => showToast(`Approved payroll export failed: ${e.message}`));
   }, [weekStart, showToast]);
 
   // Group dailies by tech
@@ -1075,7 +1129,7 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
           Next &#9654;
         </button>{" "}
         <div style={{ flex: 1 }} />{" "}
-        <button onClick={onOpenApprovals} style={sBtn(D.green, D.white)}>
+        <button onClick={() => onOpenApprovals(weekStart)} style={sBtn(D.green, D.white)}>
           Review &amp; Approve Weeks
         </button>{" "}
         <button onClick={exportCSV} style={sBtn(D.teal, D.white)}>
@@ -1129,11 +1183,14 @@ export function TimesheetTab({ showToast, onOpenApprovals }) {
               });
               const weekStatus = allStatuses.includes("disputed")
                 ? "disputed"
-                : allStatuses.includes("pending")
-                  ? "pending"
-                  : allStatuses.length > 0
-                    ? "approved"
-                    : "pending";
+                : allStatuses.includes("rejected")
+                  ? "rejected"
+                  : allStatuses.includes("pending") || allStatuses.includes("edited")
+                    ? "pending"
+                    : allStatuses.length > 0 &&
+                        allStatuses.every((s) => s === "approved" || s === "exported")
+                      ? "approved"
+                      : "pending";
 
               return (
                 <tr
@@ -1864,6 +1921,7 @@ export function EntriesTab({ showToast, onOpenApprovals }) {
 // instants only) and the server refuses overlaps and approved or paid weeks.
 function AddShiftModal({ techs, defaultTechId, onClose, onSave }) {
   const isMobile = useIsMobile(640);
+  const dialogRef = useModalFocus(true, onClose);
   const [form, setForm] = useState({
     technician_id: defaultTechId || "",
     date: etDateString(),
@@ -1920,7 +1978,9 @@ function AddShiftModal({ techs, defaultTechId, onClose, onSave }) {
       onClick={onClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
+        aria-modal="true"
         aria-label="Add missed shift"
         style={{
           ...sCard,
@@ -2006,6 +2066,7 @@ function AddShiftModal({ techs, defaultTechId, onClose, onSave }) {
 function EditEntryModal({ entry, onClose, onSave, onOpenApprovals }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  const dialogRef = useModalFocus(true, onClose);
   const [form, setForm] = useState({
     id: entry.id,
     clock_in: etDatetimeLocalValue(entry.clock_in),
@@ -2078,7 +2139,9 @@ function EditEntryModal({ entry, onClose, onSave, onOpenApprovals }) {
     >
       {" "}
       <div
+        ref={dialogRef}
         role="dialog"
+        aria-modal="true"
         aria-label="Edit time entry"
         style={{
           ...sCard,
@@ -2302,13 +2365,17 @@ function AnalyticsTab() {
   const [data, setData] = useState(null);
   const [comparison, setComparison] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const reqSeqRef = useRef(0);
   const [range, setRange] = useState({
     start: addDays(etDateString(), -30),
     end: etDateString(),
   });
 
-  useEffect(() => {
+  const load = useCallback(() => {
+    const seq = ++reqSeqRef.current;
     setLoading(true);
+    setLoadError("");
     Promise.all([
       adminFetch(
         `/admin/timetracking/analytics?startDate=${range.start}&endDate=${range.end}`,
@@ -2318,12 +2385,22 @@ function AnalyticsTab() {
       ),
     ])
       .then(([ana, cmp]) => {
+        if (seq !== reqSeqRef.current) return;
         setData(ana);
         setComparison(cmp);
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (seq !== reqSeqRef.current) return;
+        setLoadError(errMessage(e, "Failed to load analytics"));
+      })
+      .finally(() => {
+        if (seq === reqSeqRef.current) setLoading(false);
+      });
   }, [range]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
 
   if (loading)
     return (
@@ -2333,13 +2410,12 @@ function AnalyticsTab() {
     );
   if (!data)
     return (
-      <div style={{ color: D.red, padding: 40, textAlign: "center" }}>
-        Failed to load analytics
-      </div>
+      <LoadFailedNotice onRetry={load}>
+        {loadError || "Failed to load analytics"}
+      </LoadFailedNotice>
     );
 
-  const { serviceTypeStats, utilizationByTech, rpmhByTech, overtimeTrend } =
-    data;
+  const { serviceTypeStats, rpmhByTech, overtimeTrend } = data;
   // Older server responses carry neither field.
   const efficiencyByTech = data.efficiencyByTech || [];
   const loadAheadWeeks = (data.loadAhead && data.loadAhead.weeks) || [];
@@ -2359,10 +2435,11 @@ function AnalyticsTab() {
   // Build utilization trend data (12 weeks)
   const utilTrend = {};
   (overtimeTrend || []).forEach((o) => {
-    if (!utilTrend[o.week_start])
-      utilTrend[o.week_start] = { week: o.week_start, util: [], ot: 0 };
-    utilTrend[o.week_start].util.push(parseFloat(o.utilization_pct || 0));
-    utilTrend[o.week_start].ot += parseFloat(o.overtime_minutes || 0);
+    const wk = ymdOnly(o.week_start);
+    if (!utilTrend[wk])
+      utilTrend[wk] = { week: wk, util: [], ot: 0 };
+    utilTrend[wk].util.push(parseFloat(o.utilization_pct || 0));
+    utilTrend[wk].ot += parseFloat(o.overtime_minutes || 0);
   });
   const utilWeeks = Object.values(utilTrend).sort((a, b) =>
     a.week < b.week ? -1 : 1,
@@ -2370,6 +2447,11 @@ function AnalyticsTab() {
 
   return (
     <div>
+      {loadError && (
+        <LoadFailedNotice onRetry={load}>
+          Could not refresh analytics: {loadError}
+        </LoadFailedNotice>
+      )}
       {/* Date range */}
       <div
         style={{
@@ -2461,11 +2543,14 @@ function AnalyticsTab() {
             </thead>{" "}
             <tbody>
               {serviceTypeStats.map((s) => {
-                const est = parseFloat(s.avg_estimated || 0);
+                const hasEst = s.avg_estimated != null && Number.isFinite(parseFloat(s.avg_estimated));
+                const est = hasEst ? parseFloat(s.avg_estimated) : null;
                 const act = parseFloat(s.avg_actual || 0);
-                const variance = act - est;
+                const variance = hasEst ? act - est : null;
                 const accuracy =
-                  est > 0 ? (1 - Math.abs(variance) / est) * 100 : 0;
+                  hasEst && est > 0
+                    ? Math.max(0, Math.min(100, (1 - Math.abs(variance) / est) * 100))
+                    : null;
                 return (
                   <tr
                     key={s.svc_type}
@@ -2479,7 +2564,7 @@ function AnalyticsTab() {
                       {s.job_count}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
-                      {est.toFixed(0)}
+                      {hasEst ? est.toFixed(0) : "—"}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
                       {act.toFixed(0)}
@@ -2488,25 +2573,26 @@ function AnalyticsTab() {
                       style={{
                         ...tdStyle,
                         fontFamily: MONO,
-                        color: variance > 0 ? D.red : D.green,
+                        color: variance == null ? D.muted : variance > 0 ? D.red : D.green,
                       }}
                     >
-                      {variance > 0 ? "+" : ""}
-                      {variance.toFixed(0)}
+                      {variance == null ? "—" : `${variance > 0 ? "+" : ""}${variance.toFixed(0)}`}
                     </td>{" "}
                     <td
                       style={{
                         ...tdStyle,
                         fontFamily: MONO,
                         color:
-                          accuracy >= 80
-                            ? D.green
-                            : accuracy >= 60
-                              ? D.amber
-                              : D.red,
+                          accuracy == null
+                            ? D.muted
+                            : accuracy >= 80
+                              ? D.green
+                              : accuracy >= 60
+                                ? D.amber
+                                : D.red,
                       }}
                     >
-                      {accuracy.toFixed(0)}%
+                      {accuracy == null ? "—" : `${accuracy.toFixed(0)}%`}
                     </td>{" "}
                   </tr>
                 );
@@ -2555,9 +2641,10 @@ function AnalyticsTab() {
             </thead>{" "}
             <tbody>
               {comparison.map((c, i) => {
-                const est = parseFloat(c.avg_estimated || 0);
+                const hasEst = c.avg_estimated != null && Number.isFinite(parseFloat(c.avg_estimated));
+                const est = hasEst ? parseFloat(c.avg_estimated) : null;
                 const act = parseFloat(c.avg_actual || 0);
-                const v = act - est;
+                const v = hasEst ? act - est : null;
                 return (
                   <tr key={i} style={{ borderBottom: `1px solid ${D.border}` }}>
                     {" "}
@@ -2567,7 +2654,7 @@ function AnalyticsTab() {
                       {c.job_count}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
-                      {est.toFixed(0)} min
+                      {hasEst ? `${est.toFixed(0)} min` : "—"}
                     </td>{" "}
                     <td style={{ ...tdStyle, fontFamily: MONO }}>
                       {act.toFixed(0)} min
@@ -2576,11 +2663,10 @@ function AnalyticsTab() {
                       style={{
                         ...tdStyle,
                         fontFamily: MONO,
-                        color: v > 0 ? D.red : D.green,
+                        color: v == null ? D.muted : v > 0 ? D.red : D.green,
                       }}
                     >
-                      {v > 0 ? "+" : ""}
-                      {v.toFixed(0)} min
+                      {v == null ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(0)} min`}
                     </td>{" "}
                   </tr>
                 );
@@ -2756,9 +2842,9 @@ function AnalyticsTab() {
               <tr>
                 {[
                   "Tech",
-                  "This Week",
+                  "Latest Week",
                   "4-Week Avg",
-                  "vs $35 Target",
+                  "vs $35 Benchmark",
                   "Status",
                 ].map((h) => (
                   <th key={h} style={thStyle}>
@@ -2769,14 +2855,18 @@ function AnalyticsTab() {
             </thead>{" "}
             <tbody>
               {Object.values(rpmhMap).map(({ name, weeks }) => {
-                const latest = weeks[weeks.length - 1];
+                const sortedWeeks = [...weeks].sort((a, b) =>
+                  ymdOnly(a.week_start).localeCompare(ymdOnly(b.week_start)),
+                );
+                const latest = sortedWeeks[sortedWeeks.length - 1];
+                const totalRev = sortedWeeks.reduce((s, w) => s + parseFloat(w.total_revenue || 0), 0);
+                const totalShiftMin = sortedWeeks.reduce((s, w) => s + parseFloat(w.total_shift_minutes || 0), 0);
                 const avg4 =
-                  weeks.length > 0
-                    ? weeks.reduce(
-                        (s, w) => s + parseFloat(w.avg_rpmh || 0),
-                        0,
-                      ) / weeks.length
-                    : 0;
+                  totalShiftMin > 0
+                    ? totalRev / (totalShiftMin / 60)
+                    : sortedWeeks.length > 0
+                      ? sortedWeeks.reduce((s, w) => s + parseFloat(w.avg_rpmh || 0), 0) / sortedWeeks.length
+                      : 0;
                 const vsTarget = avg4 - LABOR_RATE;
                 const color =
                   vsTarget >= 0 ? D.green : vsTarget >= -10 ? D.amber : D.red;
@@ -2799,7 +2889,7 @@ function AnalyticsTab() {
                     </td>{" "}
                     <td style={tdStyle}>
                       <span style={sBadge(color + "22", color)}>
-                        {vsTarget >= 0 ? "PROFITABLE" : "BELOW TARGET"}
+                        {vsTarget >= 0 ? "ABOVE BENCHMARK" : "BELOW BENCHMARK"}
                       </span>
                     </td>{" "}
                   </tr>
@@ -2851,6 +2941,7 @@ function AnalyticsTab() {
 }
 
 function UtilizationLineChart({ weeks }) {
+  const isMobile = useIsMobile(640);
   const w = isMobile ? 300 : 600;
   const h = 150;
   const pad = { t: 20, r: 20, b: 30, l: 44 };
@@ -2859,13 +2950,14 @@ function UtilizationLineChart({ weeks }) {
 
   const maxUtil = 100;
   const points = weeks.map((wk, i) => {
-    const avgUtil =
+    const rawUtil =
       wk.util.length > 0
         ? wk.util.reduce((a, b) => a + b, 0) / wk.util.length
         : 0;
+    const avgUtil = Math.max(0, Math.min(maxUtil, rawUtil));
     const x = pad.l + (i / Math.max(weeks.length - 1, 1)) * innerW;
     const y = pad.t + innerH - (avgUtil / maxUtil) * innerH;
-    return { x, y, util: avgUtil, week: wk.week };
+    return { x, y, util: avgUtil, week: ymdOnly(wk.week) };
   });
 
   const pathD = points
@@ -3204,7 +3296,7 @@ function GoogleSigninField({ enabled, tech, value, onChange }) {
 // The supply store goes in the save only when the admin changed it (absent = unchanged on the server).
 const supplyStorePatch = (value, loaded) => ((value ?? "") === (loaded ?? "") ? {} : { supplyStore: value });
 
-export function TeamTab({ showToast }) {
+export function TeamTab({ showToast, staffProfile }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
   // A failed roster read is not an empty team: the empty-state invitation to
@@ -3235,6 +3327,7 @@ export function TeamTab({ showToast }) {
   const [googleSigninEnabled, setGoogleSigninEnabled] = useState(false);
   const [showPayrollSection, setShowPayrollSection] = useState(false);
   const [saving, setSaving] = useState(false);
+  const saveInFlightRef = useRef(false);
   const [earningsTech, setEarningsTech] = useState(null);
   const [capabilitiesTech, setCapabilitiesTech] = useState(null);
   const [deactivateTech, setDeactivateTech] = useState(null);
@@ -3250,8 +3343,9 @@ export function TeamTab({ showToast }) {
   // The add, edit, earnings, capabilities and activate routes are admin-only;
   // the roster itself is readable by technicians, so those actions are hidden
   // for them rather than 403ing. A technician changes only its own photo.
-  const isAdmin = useMemo(() => readStaffRole() === "admin", []);
-  const ownStaffId = useMemo(() => readStaffProfile().id || null, []);
+  const viewer = useMemo(() => staffProfile || readStaffProfile(), [staffProfile]);
+  const isAdmin = viewer.role === "admin";
+  const ownStaffId = viewer.id || null;
   // Photo upload state. fileInputRef is shared across rows because
   // mounting one <input type=file>per tech is needless DOM. Uploads
   // are serialized: while uploadingId is non-null, every row's Photo
@@ -3290,11 +3384,18 @@ export function TeamTab({ showToast }) {
           body: fd,
         },
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const body = await res.json();
+          if (body?.error) detail = body.error;
+        } catch { /* non-JSON error */ }
+        throw new Error(detail);
+      }
       showToast("Photo uploaded");
       load();
     } catch (err) {
-      showToast("Photo upload failed: " + err.message);
+      showToast("Photo upload failed: " + errMessage(err));
     }
     setUploadingId(null);
     setPhotoTargetId(null);
@@ -3330,31 +3431,44 @@ export function TeamTab({ showToast }) {
 
   // A refused link (another domain, already linked) is reported; the profile
   // save above it stands.
-  const saveGoogleSignin = async (techId) => {
+  const saveGoogleSignin = async (techId, existingWarning = "") => {
     const next = form.googleEmail.trim();
-    if (!googleSigninEnabled || next.toLowerCase() === (editingTech?.google_email || "").toLowerCase()) return;
+    if (!googleSigninEnabled || next.toLowerCase() === (editingTech?.google_email || "").toLowerCase()) {
+      return { ok: true };
+    }
     try {
       await adminFetch(`/admin/timetracking/technicians/${techId}/google-signin`, {
         method: "PUT",
         body: JSON.stringify({ googleEmail: next || null }),
       });
+      return { ok: true };
     } catch (e) {
-      showToast("Saved, but not the Google sign-in: " + ((e && e.data && e.data.error) || (e && e.message) || "Unknown error"));
+      const reason = errMessage(e, "Unknown error");
+      showToast(
+        existingWarning
+          ? `Saved (${existingWarning}), but not the Google sign-in: ${reason}`
+          : "Saved, but not the Google sign-in: " + reason,
+        { error: true },
+      );
+      return { ok: false };
     }
   };
 
   const handleSave = async () => {
-    if (!form.name.trim()) return;
+    if (saveInFlightRef.current || !form.name.trim()) return;
     if (workDaysEnabled && form.workDays.length === 0) {
-      showToast("Pick at least one work day");
+      showToast("Pick at least one work day", { error: true });
       return;
     }
     if (shiftHoursEnabled && shiftHoursProblem(form)) {
-      showToast(shiftHoursProblem(form));
+      showToast(shiftHoursProblem(form), { error: true });
       return;
     }
+    saveInFlightRef.current = true;
     setSaving(true);
     try {
+      let targetId = editingId;
+      let warningNote = "";
       if (editingId) {
         const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
@@ -3378,8 +3492,13 @@ export function TeamTab({ showToast }) {
         const stillThere = pending.length
           ? `${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
           : outside.length && `${outside.length} upcoming visit${outside.length === 1 ? "" : "s"} outside the new shift hours; move or reassign on the Schedule`;
+        warningNote = stillThere || "";
+        const gRes = await saveGoogleSignin(editingId, warningNote);
+        if (!gRes.ok) {
+          load();
+          return;
+        }
         showToast(stillThere ? `Technician updated — ${stillThere}` : "Technician updated");
-        await saveGoogleSignin(editingId);
       } else {
         const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const created = await adminFetch("/admin/timetracking/technicians", {
@@ -3390,8 +3509,14 @@ export function TeamTab({ showToast }) {
             ...buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd),
           }),
         });
+        targetId = created.technician.id;
+        const gRes = await saveGoogleSignin(targetId);
+        if (!gRes.ok) {
+          setEditingId(targetId);
+          load();
+          return;
+        }
         showToast("Technician added");
-        await saveGoogleSignin(created.technician.id);
       }
       setShowAdd(false);
       setEditingId(null);
@@ -3399,9 +3524,11 @@ export function TeamTab({ showToast }) {
       setShowPayrollSection(false);
       load();
     } catch (e) {
-      showToast("Failed: " + e.message);
+      showToast("Failed: " + errMessage(e));
+    } finally {
+      saveInFlightRef.current = false;
+      setSaving(false);
     }
-    setSaving(false);
   };
 
   const handleActivate = async (tech) => {
@@ -3413,7 +3540,7 @@ export function TeamTab({ showToast }) {
       showToast(`${tech.name} activated`);
       load();
     } catch (e) {
-      showToast("Failed: " + e.message);
+      showToast("Failed: " + errMessage(e));
     }
   };
 
@@ -3437,7 +3564,7 @@ export function TeamTab({ showToast }) {
       setDeactivateTech(null);
       load();
     } catch (e) {
-      const message = "Failed to deactivate: " + String(e.message || "Unknown error");
+      const message = "Failed to deactivate: " + errMessage(e, "Unknown error");
       setDeactivateError(message);
       showToast(message);
     } finally {
@@ -4324,287 +4451,30 @@ export function TeamTab({ showToast }) {
           </thead>{" "}
           <tbody>
             {techs.map((t) => (
-              <tr key={t.id} style={{ opacity: (t.employment_status || (t.active ? "active" : "inactive")) === "inactive" ? 0.5 : 1 }}>
-                {" "}
-                <td
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: `1px solid ${D.border}`,
-                  }}
-                >
-                  {t.avatar_url ? (
-                    <img
-                      src={t.avatar_url}
-                      alt={t.name}
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: "50%",
-                        objectFit: "cover",
-                        display: "block",
-                      }}
-                    />
-                  ) : (
-                    <div
-                      aria-hidden
-                      style={{
-                        width: 32,
-                        height: 32,
-                        borderRadius: "50%",
-                        background: D.border,
-                        color: D.muted,
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: 14,
-                        fontWeight: 500,
-                      }}
-                    >
-                      {(t.name || "?")
-                        .split(/\s+/)
-                        .filter(Boolean)
-                        .slice(0, 2)
-                        .map((n) => n.charAt(0).toUpperCase())
-                        .join("")}
-                    </div>
-                  )}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: `1px solid ${D.border}`,
-                    color: D.heading,
-                    fontWeight: 500,
-                  }}
-                >
-                  {" "}
-                  <div>{t.name}</div>
-                  {isAdmin && (
-                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
-                      {describeStartPoint(t)}
-                    </div>
-                  )}
-                  {workDaysEnabled && describeWorkDays(t.work_days) && (
-                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
-                      {`Works ${describeWorkDays(t.work_days)}`}
-                    </div>
-                  )}
-                  {shiftHoursEnabled && describeShiftHours(t.shift_start, t.shift_end) && (
-                    <div style={{ fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 }}>
-                      {`Shift ${describeShiftHours(t.shift_start, t.shift_end)}`}
-                    </div>
-                  )}
-                  {(t.job_title || t.pay_rate) && (
-                    <div
-                      style={{
-                        fontSize: 14,
-                        fontWeight: 400,
-                        color: D.muted,
-                        marginTop: 2,
-                      }}
-                    >
-                      {t.job_title || ""}
-                      {t.job_title && t.pay_rate ? " · " : ""}
-                      {t.pay_rate
-                        ? `$${parseFloat(t.pay_rate).toFixed(2)}/hr`
-                        : ""}
-                      {t.employment_type
-                        ? ` · ${t.employment_type === "w2" ? "W-2" : "1099"}`
-                        : ""}
-                    </div>
-                  )}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: `1px solid ${D.border}`,
-                    color: D.muted,
-                    fontFamily: MONO,
-                    fontSize: 14,
-                  }}
-                >
-                  {t.phone || "\u2014"}
-                  {t.twilio_number && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>
-                      Line {TECH_LINE_NUMBERS.find((n) => n.number === t.twilio_number)?.formatted || t.twilio_number}
-                    </div>
-                  )}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: `1px solid ${D.border}`,
-                    color: D.muted,
-                    fontSize: 14,
-                  }}
-                >
-                  {t.email || "\u2014"}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: `1px solid ${D.border}`,
-                  }}
-                >
-                  {" "}
-                  {(() => {
-                    const status = t.employment_status || (t.active ? "active" : "inactive");
-                    const tone = status === "active" ? D.green : status === "prospective" ? D.amber : D.red;
-                    const label = status === "active" ? "Active" : status === "prospective" ? "Prospective" : "Inactive";
-                    return (
-                      <span style={sBadge(tone + "22", tone)}>{label}</span>
-                    );
-                  })()}{" "}
-                  {t.employment_status === "active" && !t.field_dispatchable && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                      Office only
-                    </div>
-                  )}
-                  {t.employment_status === "active" && t.field_dispatchable && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                      Field dispatchable
-                    </div>
-                  )}
-                  {t.hire_google_only && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                      {GOOGLE_ONLY_LABELS[t.hire_google_only] || GOOGLE_ONLY_LABELS.off}
-                    </div>
-                  )}
-                  {/* Capability counts matter only for someone who takes (or will
-                      take) field work — an office-only admin never reaches
-                      auto-dispatch, so the line would be noise there. */}
-                  {t.capability_summary && (t.field_dispatchable || t.employment_status === "prospective") && (
-                    <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
-                      {summarizeCapabilityCounts(t.capability_summary)}
-                    </div>
-                  )}
-                </td>{" "}
-                <td
-                  style={{
-                    padding: "10px 12px",
-                    borderBottom: `1px solid ${D.border}`,
-                  }}
-                >
-                  {" "}
-                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                    {" "}
-                    {isAdmin && (
-                      <>
-                        <button
-                          onClick={() => startEdit(t)}
-                          style={{
-                            padding: "4px 10px",
-                            background: "transparent",
-                            border: `1px solid ${D.border}`,
-                            borderRadius: 6,
-                            color: D.teal,
-                            fontSize: 14,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Edit
-                        </button>{" "}
-                        <button
-                          onClick={() => setEarningsTech(t)}
-                          style={{
-                            padding: "4px 10px",
-                            background: "transparent",
-                            border: `1px solid ${D.border}`,
-                            borderRadius: 6,
-                            color: D.green,
-                            fontSize: 14,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Earnings
-                        </button>{" "}
-                        <button
-                          onClick={() => setCapabilitiesTech(t)}
-                          style={{
-                            padding: "4px 10px",
-                            background: "transparent",
-                            border: `1px solid ${D.border}`,
-                            borderRadius: 6,
-                            color: D.teal,
-                            fontSize: 14,
-                            cursor: "pointer",
-                          }}
-                        >
-                          Capabilities
-                        </button>
-                      </>
-                    )}{" "}
-                    {(isAdmin || t.id === ownStaffId) && (
-                      <button
-                        onClick={() => handlePhotoClick(t.id)}
-                        disabled={uploadingId !== null}
-                        style={{
-                          padding: "4px 10px",
-                          background: "transparent",
-                          border: `1px solid ${D.border}`,
-                          borderRadius: 6,
-                          color: D.teal,
-                          fontSize: 14,
-                          cursor: uploadingId !== null ? "wait" : "pointer",
-                          opacity:
-                            uploadingId !== null && uploadingId !== t.id
-                              ? 0.4
-                              : uploadingId === t.id
-                                ? 0.6
-                                : 1,
-                        }}
-                      >
-                        {uploadingId === t.id ? "Uploading…" : "Photo"}
-                      </button>
-                    )}{" "}
-                    {t.hire_action === "hire" && (
-                      <button
-                        onClick={(event) => {
-                          event.currentTarget.focus({ preventScroll: true });
-                          setHireError("");
-                          setHireTech(t);
-                        }}
-                        style={{
-                          padding: "4px 10px",
-                          background: D.teal,
-                          border: `1px solid ${D.teal}`,
-                          borderRadius: 6,
-                          color: D.white,
-                          fontSize: 14,
-                          cursor: "pointer",
-                        }}
-                      >
-                        Hired
-                      </button>
-                    )}{" "}
-                    {isAdmin && t.hire_action !== "hire" && (
-                      <button
-                        onClick={(event) => {
-                          if (t.active) {
-                            event.currentTarget.focus({ preventScroll: true });
-                            setDeactivateError("");
-                            setDeactivateTech(t);
-                          } else {
-                            handleActivate(t);
-                          }
-                        }}
-                        title={t.employment_status === "prospective" ? "Marks this hire as started. They sign in with their linked Google account or set a password via Forgot password on the admin login." : undefined}
-                        style={{
-                          padding: "4px 10px",
-                          background: "transparent",
-                          border: `1px solid ${D.border}`,
-                          borderRadius: 6,
-                          color: t.active ? D.amber : D.green,
-                          fontSize: 14,
-                          cursor: "pointer",
-                        }}
-                      >
-                        {t.active ? "Deactivate" : "Activate"}
-                      </button>
-                    )}{" "}
-                  </div>{" "}
-                </td>{" "}
-              </tr>
+              <TeamTechRow
+                key={t.id}
+                tech={t}
+                isAdmin={isAdmin}
+                ownStaffId={ownStaffId}
+                workDaysEnabled={workDaysEnabled}
+                shiftHoursEnabled={shiftHoursEnabled}
+                uploadingId={uploadingId}
+                onEdit={startEdit}
+                onEarnings={setEarningsTech}
+                onCapabilities={setCapabilitiesTech}
+                onPhoto={handlePhotoClick}
+                onHire={(row, event) => {
+                  event.currentTarget.focus({ preventScroll: true });
+                  setHireError("");
+                  setHireTech(row);
+                }}
+                onDeactivate={(row, event) => {
+                  event.currentTarget.focus({ preventScroll: true });
+                  setDeactivateError("");
+                  setDeactivateTech(row);
+                }}
+                onActivate={handleActivate}
+              />
             ))}
             {techs.length === 0 && !loadFailed && (
               <tr>
@@ -4674,6 +4544,191 @@ const GOOGLE_ONLY_LABELS = {
   off: "No sign-in. Staff Google sign-in is off or not set up.",
   returning: "Google-only account. Turn it on from the edit form, or clear its Google sign-in first.",
 };
+
+function licenseBadgeInfo(tech) {
+  if (!tech.fl_applicator_license && !tech.license_expiry) return null;
+  const expiry = tech.license_expiry ? ymdOnly(tech.license_expiry) : "";
+  const today = etDateString();
+  const soon = addDays(today, 60);
+  const expired = expiry && expiry < today;
+  const expiringSoon = expiry && !expired && expiry <= soon;
+  const tone = expired ? D.red : expiringSoon ? D.amber : D.muted;
+  const parts = [];
+  if (tech.fl_applicator_license) parts.push(`FL Lic ${tech.fl_applicator_license}`);
+  if (expiry) parts.push(expired ? `expired ${expiry}` : `exp ${expiry}`);
+  return { text: parts.join(" · "), tone };
+}
+
+function TeamTechRow({
+  tech: t,
+  isAdmin,
+  ownStaffId,
+  workDaysEnabled,
+  shiftHoursEnabled,
+  uploadingId,
+  onEdit,
+  onEarnings,
+  onCapabilities,
+  onPhoto,
+  onHire,
+  onDeactivate,
+  onActivate,
+}) {
+  const status = t.employment_status || (t.active ? "active" : "inactive");
+  const statusTone = status === "active" ? D.green : status === "prospective" ? D.amber : D.red;
+  const statusLabel = status === "active" ? "Active" : status === "prospective" ? "Prospective" : "Inactive";
+  const licenseInfo = isAdmin ? licenseBadgeInfo(t) : null;
+  const rowBtn = (color) => ({
+    padding: "4px 10px",
+    background: "transparent",
+    border: `1px solid ${D.border}`,
+    borderRadius: 6,
+    color,
+    fontSize: 14,
+    cursor: "pointer",
+  });
+  const cellStyle = { padding: "10px 12px", borderBottom: `1px solid ${D.border}` };
+  const subLine = { fontSize: 14, fontWeight: 400, color: D.muted, marginTop: 2 };
+  const initials = (t.name || "?")
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((n) => n.charAt(0).toUpperCase())
+    .join("");
+  const formattedTwilio = t.twilio_number
+    ? TECH_LINE_NUMBERS.find((n) => n.number === t.twilio_number)?.formatted || t.twilio_number
+    : null;
+  const payMeta = [
+    t.job_title || "",
+    t.pay_rate != null && t.pay_rate !== "" ? `$${parseFloat(t.pay_rate).toFixed(2)}/hr` : "",
+    t.employment_type ? (t.employment_type === "w2" ? "W-2" : "1099") : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <tr style={{ opacity: status === "inactive" ? 0.5 : 1 }}>
+      <td style={cellStyle}>
+        {t.avatar_url ? (
+          <img
+            src={t.avatar_url}
+            alt={t.name}
+            style={{ width: 32, height: 32, borderRadius: "50%", objectFit: "cover", display: "block" }}
+          />
+        ) : (
+          <div
+            aria-hidden
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: "50%",
+              background: D.border,
+              color: D.muted,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 14,
+              fontWeight: 500,
+            }}
+          >
+            {initials}
+          </div>
+        )}
+      </td>
+      <td style={{ ...cellStyle, color: D.heading, fontWeight: 500 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <span>{t.name}</span>
+          {t.role === "admin" && <span style={sBadge(D.border, D.text)}>Admin</span>}
+        </div>
+        {isAdmin && <div style={subLine}>{describeStartPoint(t)}</div>}
+        {workDaysEnabled && describeWorkDays(t.work_days) && (
+          <div style={subLine}>{`Works ${describeWorkDays(t.work_days)}`}</div>
+        )}
+        {shiftHoursEnabled && describeShiftHours(t.shift_start, t.shift_end) && (
+          <div style={subLine}>{`Shift ${describeShiftHours(t.shift_start, t.shift_end)}`}</div>
+        )}
+        {payMeta && <div style={subLine}>{payMeta}</div>}
+        {licenseInfo && (
+          <div style={{ ...subLine, color: licenseInfo.tone }}>{licenseInfo.text}</div>
+        )}
+      </td>
+      <td style={{ ...cellStyle, color: D.muted, fontFamily: MONO, fontSize: 14 }}>
+        {t.phone || "\u2014"}
+        {formattedTwilio && <div style={{ fontSize: 14, color: D.muted, marginTop: 2 }}>Line {formattedTwilio}</div>}
+      </td>
+      <td style={{ ...cellStyle, color: D.muted, fontSize: 14 }}>
+        {t.email || "\u2014"}
+      </td>
+      <td style={cellStyle}>
+        <span style={sBadge(statusTone + "22", statusTone)}>{statusLabel}</span>
+        {t.employment_status === "active" && (
+          <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+            {t.field_dispatchable ? "Field dispatchable" : "Office only"}
+          </div>
+        )}
+        {t.hire_google_only && (
+          <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+            {GOOGLE_ONLY_LABELS[t.hire_google_only] || GOOGLE_ONLY_LABELS.off}
+          </div>
+        )}
+        {t.capability_summary && (t.field_dispatchable || t.employment_status === "prospective") && (
+          <div style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
+            {summarizeCapabilityCounts(t.capability_summary)}
+          </div>
+        )}
+      </td>
+      <td style={cellStyle}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {isAdmin && (
+            <>
+              <button onClick={() => onEdit(t)} style={rowBtn(D.teal)}>Edit</button>
+              <button onClick={() => onEarnings(t)} style={rowBtn(D.green)}>Earnings</button>
+              <button onClick={() => onCapabilities(t)} style={rowBtn(D.teal)}>Capabilities</button>
+            </>
+          )}
+          {(isAdmin || t.id === ownStaffId) && (
+            <button
+              onClick={() => onPhoto(t.id)}
+              disabled={uploadingId !== null}
+              style={{
+                ...rowBtn(D.teal),
+                cursor: uploadingId !== null ? "wait" : "pointer",
+                opacity: uploadingId !== null && uploadingId !== t.id ? 0.4 : uploadingId === t.id ? 0.6 : 1,
+              }}
+            >
+              {uploadingId === t.id ? "Uploading…" : "Photo"}
+            </button>
+          )}
+          {t.hire_action === "hire" && (
+            <button
+              onClick={(event) => onHire(t, event)}
+              style={{
+                padding: "4px 10px",
+                background: D.teal,
+                border: `1px solid ${D.teal}`,
+                borderRadius: 6,
+                color: D.white,
+                fontSize: 14,
+                cursor: "pointer",
+              }}
+            >
+              Hired
+            </button>
+          )}
+          {isAdmin && t.hire_action !== "hire" && (
+            <button
+              onClick={(event) => (t.active ? onDeactivate(t, event) : onActivate(t))}
+              title={t.employment_status === "prospective" ? "Marks this hire as started. They sign in with their linked Google account or set a password via Forgot password on the admin login." : undefined}
+              style={rowBtn(t.active ? D.amber : D.green)}
+            >
+              {t.active ? "Deactivate" : "Activate"}
+            </button>
+          )}
+        </div>
+      </td>
+    </tr>
+  );
+}
 
 // One click turns a prospective placeholder into an active staff account that
 // signs in with its linked company Google address and nothing else: no password
@@ -4964,6 +5019,11 @@ export function TechVoicePinField({ technicianId }) {
           {busy ? "Setting…" : "Set PIN"}
         </button>
       </div>
+      {pin.length > 0 && !message && (
+        <div style={{ fontSize: 13, color: D.amber, marginTop: 4 }}>
+          Click Set PIN to save — Update does not save the PIN.
+        </div>
+      )}
       {message && (
         <div role="status" style={{ fontSize: 14, color: D.muted, marginTop: 4 }}>
           {message}
@@ -5101,11 +5161,11 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
       onSaved();
       onClose();
     } catch (e) {
-      if (/HTTP 409/.test(e.message)) {
-        showToast("Someone else changed this technician's capabilities — reloaded, please review and save again");
+      if (e?.status === 409 || /HTTP 409/.test(e.message)) {
+        showToast("Someone else changed this technician's capabilities — reloaded, please review and save again", { error: true });
         setAttempt((n) => n + 1);
       } else {
-        showToast("Failed: " + e.message);
+        showToast("Failed: " + errMessage(e));
       }
     }
     setSaving(false);
@@ -5312,9 +5372,12 @@ function CapabilitiesModal({ tech, onClose, onSaved, showToast }) {
 function EarningsModal({ tech, onClose, showToast }) {
   // Reactive (rotation-safe) — the module-level snapshot never recomputes.
   const isMobile = useIsMobile(640);
+  const dialogRef = useModalFocus(true, onClose);
   const [thisWeek, setThisWeek] = useState(null);
   const [lastWeek, setLastWeek] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [attempt, setAttempt] = useState(0);
   // Keep a stable handle on showToast so the fetch effect can stay
   // keyed only on tech.id. The parent recreates showToast on every
   // render; if we depended on it directly, a failed fetch would call
@@ -5329,6 +5392,7 @@ function EarningsModal({ tech, onClose, showToast }) {
     let cancelled = false;
     (async () => {
       setLoading(true);
+      setLoadError("");
       try {
         // Server anchors the week boundaries on ET so admins outside
         // ET (or hitting this near midnight) can't drift onto the
@@ -5347,18 +5411,18 @@ function EarningsModal({ tech, onClose, showToast }) {
           setLastWeek(b);
         }
       } catch (e) {
-        // Use the latest showToast via ref so this effect doesn't
-        // depend on showToast's identity. Parent re-renders recreate
-        // showToast, and a failed fetch that called it directly here
-        // would re-trigger the effect → loop.
-        if (!cancelled) showToastRef.current("Earnings failed: " + e.message);
+        if (!cancelled) {
+          const msg = errMessage(e);
+          setLoadError(msg);
+          showToastRef.current("Earnings failed: " + msg);
+        }
       }
       if (!cancelled) setLoading(false);
     })();
     return () => {
       cancelled = true;
     };
-  }, [tech.id]);
+  }, [tech.id, attempt]);
 
   return createPortal(
     <div
@@ -5377,6 +5441,10 @@ function EarningsModal({ tech, onClose, showToast }) {
     >
       {" "}
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${tech.name} earnings statement`}
         onClick={(e) => e.stopPropagation()}
         style={{
           background: D.card,
@@ -5441,7 +5509,15 @@ function EarningsModal({ tech, onClose, showToast }) {
             Loading…
           </div>
         )}
-        {!loading && thisWeek && (
+        {!loading && loadError && (
+          <div role="alert" style={{ padding: 20, textAlign: "center", color: D.red, fontSize: 14 }}>
+            <div style={{ marginBottom: 10 }}>Could not load earnings: {loadError}</div>
+            <button type="button" onClick={() => setAttempt((n) => n + 1)} style={sBtn(D.card, D.text)}>
+              Retry
+            </button>
+          </div>
+        )}
+        {!loading && !loadError && thisWeek && (
           <>
             {" "}
             <EarningsBlock label="This week" data={thisWeek} />{" "}
@@ -5584,6 +5660,7 @@ const FILE_ICONS = {
 };
 
 function DocumentsTab({ showToast }) {
+  const isMobile = useIsMobile(640);
   const [docs, setDocs] = useState([]);
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -5690,7 +5767,14 @@ function DocumentsTab({ showToast }) {
         headers: { Authorization: `Bearer ${token}` },
         body: fd,
       });
-      if (!r.ok) throw new Error(`Upload failed: HTTP ${r.status}`);
+      if (!r.ok) {
+        let detail = `HTTP ${r.status}`;
+        try {
+          const body = await r.json();
+          if (body?.error) detail = body.error;
+        } catch { /* non-JSON error */ }
+        throw new Error(detail);
+      }
       showToast("Document uploaded");
       setShowUpload(false);
       setUploadForm({
@@ -5703,7 +5787,7 @@ function DocumentsTab({ showToast }) {
       setFile(null);
       reload();
     } catch (e) {
-      showToast("Upload failed: " + e.message);
+      showToast("Upload failed: " + errMessage(e));
     }
     setUploading(false);
   };
@@ -5715,7 +5799,7 @@ function DocumentsTab({ showToast }) {
       );
       window.open(res.url, "_blank");
     } catch (e) {
-      showToast("Download failed: " + e.message);
+      showToast("Download failed: " + errMessage(e));
     }
   };
 
@@ -5728,7 +5812,7 @@ function DocumentsTab({ showToast }) {
       showToast("Document archived");
       reload();
     } catch (e) {
-      showToast("Failed: " + e.message);
+      showToast("Failed: " + errMessage(e));
     }
   };
 
@@ -5742,7 +5826,7 @@ function DocumentsTab({ showToast }) {
       showToast("Document restored");
       reload();
     } catch (e) {
-      showToast("Restore failed: " + (e.data?.error || e.message));
+      showToast("Restore failed: " + errMessage(e));
     }
   };
 
@@ -5756,7 +5840,7 @@ function DocumentsTab({ showToast }) {
       setEditingId(null);
       reload();
     } catch (e) {
-      showToast("Failed: " + e.message);
+      showToast("Failed: " + errMessage(e));
     }
   };
 
@@ -6529,6 +6613,10 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
   const [selected, setSelected] = useState(new Set());
   const [expanded, setExpanded] = useState(null);
   const [detail, setDetail] = useState(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+  const [busyTechId, setBusyTechId] = useState(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = useCallback(async () => {
     const request = ++loadRequestRef.current;
@@ -6545,7 +6633,7 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
     } catch (e) {
       if (request !== loadRequestRef.current) return;
       setLoadFailed(true);
-      showToast(`Load failed: ${e.message}`);
+      showToast(`Load failed: ${errMessage(e)}`);
     } finally {
       if (request === loadRequestRef.current) setLoading(false);
     }
@@ -6562,28 +6650,45 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
     setSelected(new Set());
     setExpanded(null);
     setDetail(null);
+    setDetailLoading(false);
+    setDetailError("");
   }, [weekStart]);
+
+  const refreshDetail = useCallback(async (techId) => {
+    const request = ++detailRequestRef.current;
+    setExpanded(techId);
+    setDetailLoading(true);
+    setDetailError("");
+    try {
+      const d = await adminFetch(
+        `/admin/timesheets/week-detail?technicianId=${techId}&weekStart=${weekStart}`,
+      );
+      if (request === detailRequestRef.current) {
+        setDetail(d);
+        setDetailError("");
+      }
+    } catch (e) {
+      if (request === detailRequestRef.current) {
+        const msg = errMessage(e);
+        setDetailError(msg);
+        showToast(`Detail load failed: ${msg}`);
+      }
+    } finally {
+      if (request === detailRequestRef.current) setDetailLoading(false);
+    }
+  }, [weekStart, showToast]);
 
   const loadDetail = async (techId) => {
     if (expanded === techId) {
       detailRequestRef.current += 1;
       setExpanded(null);
       setDetail(null);
+      setDetailLoading(false);
+      setDetailError("");
       return;
     }
-    const request = ++detailRequestRef.current;
-    setExpanded(techId);
     setDetail(null);
-    try {
-      const d = await adminFetch(
-        `/admin/timesheets/week-detail?technicianId=${techId}&weekStart=${weekStart}`,
-      );
-      if (request === detailRequestRef.current) setDetail(d);
-    } catch (e) {
-      if (request === detailRequestRef.current) {
-        showToast(`Detail load failed: ${e.message}`);
-      }
-    }
+    await refreshDetail(techId);
   };
 
   const toggleSelect = (id) => {
@@ -6606,6 +6711,8 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
   };
 
   const approveOne = async (techId) => {
+    if (busyTechId || bulkBusy) return;
+    setBusyTechId(techId);
     try {
       const reviewToken = techs.find(
         (candidate) => candidate.technician_id === techId,
@@ -6616,19 +6723,23 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
       });
       showToast("Week approved");
       load();
+      if (expanded === techId) refreshDetail(techId);
     } catch (e) {
-      showToast(`Approve failed: ${e.message}`);
+      showToast(`Approve failed: ${errMessage(e)}`);
+    } finally {
+      setBusyTechId(null);
     }
   };
 
   const bulkApprove = async () => {
-    if (!selected.size) return;
+    if (!selected.size || bulkBusy) return;
     if (
       !confirm(
         `Approve ${selected.size} tech week${selected.size === 1 ? "" : "s"}?`,
       )
     )
       return;
+    setBulkBusy(true);
     try {
       const r = await adminFetch("/admin/timesheets/bulk-approve", {
         method: "POST",
@@ -6642,45 +6753,54 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
           ),
         },
       });
-      showToast(
-        `Approved ${r.approved}${r.failed?.length ? `, ${r.failed.length} failed` : ""}`,
-      );
+      const failedSummary = r.failed?.length
+        ? `, ${r.failed.length} failed (${r.failed.map((f) => f.error).filter(Boolean).slice(0, 2).join("; ")})`
+        : "";
+      showToast(`Approved ${r.approved}${failedSummary}`, { error: r.approved === 0 && (r.failed?.length || 0) > 0 });
       load();
     } catch (e) {
-      showToast(`Bulk approve failed: ${e.message}`);
+      showToast(`Bulk approve failed: ${errMessage(e)}`);
+    } finally {
+      setBulkBusy(false);
     }
   };
 
   const unlock = async (techId) => {
+    if (busyTechId || bulkBusy) return;
     const reason = prompt("Reason for unlocking this week?");
-    if (!reason) return;
+    if (!reason || !reason.trim()) return;
+    setBusyTechId(techId);
     try {
       const reviewToken = techs.find(
         (candidate) => candidate.technician_id === techId,
       )?.review_token;
       await adminFetch("/admin/timesheets/unlock", {
         method: "POST",
-        body: { technicianId: techId, weekStart, reason, reviewToken },
+        body: { technicianId: techId, weekStart, reason: reason.trim(), reviewToken },
       });
       showToast("Week unlocked");
       load();
+      if (expanded === techId) refreshDetail(techId);
     } catch (e) {
-      showToast(`Unlock failed: ${e.message}`);
+      showToast(`Unlock failed: ${errMessage(e)}`);
+    } finally {
+      setBusyTechId(null);
     }
   };
 
   const disputeEntry = async (entryId) => {
     const reason = prompt("Reason for disputing this entry?");
-    if (!reason) return;
+    if (!reason || !reason.trim()) return;
     try {
       await adminFetch("/admin/timesheets/dispute", {
         method: "POST",
-        body: { entryId, reason },
+        body: { entryId, reason: reason.trim() },
       });
       showToast("Entry disputed");
-      if (expanded) loadDetail(expanded);
+      load();
+      if (expanded) await refreshDetail(expanded);
     } catch (e) {
-      showToast(`Dispute failed: ${e.message}`);
+      showToast(`Dispute failed: ${errMessage(e)}`);
     }
   };
 
@@ -6692,15 +6812,9 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
       });
       showToast("Clock-out confirmed");
       load();
-      if (expanded) {
-        const request = ++detailRequestRef.current;
-        const d = await adminFetch(
-          `/admin/timesheets/week-detail?technicianId=${expanded}&weekStart=${weekStart}`,
-        );
-        if (request === detailRequestRef.current) setDetail(d);
-      }
+      if (expanded) await refreshDetail(expanded);
     } catch (e) {
-      showToast(`Confirm failed: ${e.message}`);
+      showToast(`Confirm failed: ${errMessage(e)}`);
     }
   };
 
@@ -6709,8 +6823,15 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
     fetch(`${API_BASE}/admin/timesheets/export?weekStart=${weekStart}`, {
       headers: { Authorization: `Bearer ${token}` },
     })
-      .then((r) => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      .then(async (r) => {
+        if (!r.ok) {
+          let msg = `HTTP ${r.status}`;
+          try {
+            const body = await r.json();
+            if (body?.error) msg = body.error;
+          } catch { /* non-JSON error */ }
+          throw new Error(msg);
+        }
         return r.blob();
       })
       .then((blob) => {
@@ -6821,8 +6942,12 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
           </button>
         )}
         {current && selected.size > 0 && (
-          <button onClick={bulkApprove} style={sBtn(D.green, D.white)}>
-            Approve {selected.size} selected
+          <button
+            onClick={bulkApprove}
+            disabled={bulkBusy}
+            style={{ ...sBtn(D.green, D.white), opacity: bulkBusy ? 0.6 : 1 }}
+          >
+            {bulkBusy ? "Approving…" : `Approve ${selected.size} selected`}
           </button>
         )}
       </div>
@@ -6959,16 +7084,18 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
               {approved ? (
                 <button
                   onClick={() => unlock(t.technician_id)}
-                  style={sBtn(D.card, D.red)}
+                  disabled={busyTechId === t.technician_id || bulkBusy}
+                  style={{ ...sBtn(D.card, D.red), opacity: busyTechId === t.technician_id || bulkBusy ? 0.6 : 1 }}
                 >
-                  Unlock
+                  {busyTechId === t.technician_id ? "Working…" : "Unlock"}
                 </button>
               ) : (
                 <button
                   onClick={() => approveOne(t.technician_id)}
-                  style={sBtn(D.green, D.white)}
+                  disabled={busyTechId === t.technician_id || bulkBusy}
+                  style={{ ...sBtn(D.green, D.white), opacity: busyTechId === t.technician_id || bulkBusy ? 0.6 : 1 }}
                 >
-                  Approve
+                  {busyTechId === t.technician_id ? "Approving…" : "Approve"}
                 </button>
               )}
             </div>
@@ -6980,12 +7107,23 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
                   borderTop: `1px solid ${D.border}`,
                 }}
               >
-                {!detail && (
+                {detailError ? (
+                  <div role="alert" style={{ color: D.red, fontSize: 14, display: "flex", alignItems: "center", gap: 10 }}>
+                    <span>Could not load week detail: {detailError}</span>
+                    <button
+                      type="button"
+                      onClick={() => refreshDetail(t.technician_id)}
+                      style={sBtn(D.card, D.text)}
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : detailLoading || !detail ? (
                   <div style={{ color: D.muted, fontSize: 14 }}>
                     Loading detail…
                   </div>
-                )}
-                {detail && detail.dailies && (
+                ) : null}
+                {!detailError && detail && detail.dailies && (
                   <>
                     {" "}
                     <div
@@ -7033,7 +7171,7 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
                             >
                               {" "}
                               <td style={{ padding: 8, fontFamily: MONO }}>
-                                {d.work_date}
+                                {ymdOnly(d.work_date)}
                               </td>{" "}
                               <td style={{ padding: 8 }}>
                                 {fmtHrs(d.total_shift_minutes)}
@@ -7178,8 +7316,9 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
                               >
                                 {" "}
                                 <div>
-                                  <strong>{e.entry_type}</strong>·{" "}
-                                  {new Date(e.clock_in).toLocaleString()}
+                                  <strong>{e.entry_type}</strong> ·{" "}
+                                  {formatETDateTime(e.clock_in)}
+                                  {e.clock_out ? ` – ${formatETTime(e.clock_out)}` : ""}
                                 </div>
                                 {e.approval_notes && (
                                   <div style={{ color: D.muted, marginTop: 2 }}>
@@ -7207,21 +7346,25 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
                         >
                           {detail.entries
                             .filter((e) => e.approval_status !== "disputed")
-                            .slice(0, 20)
-                            .map((e) => (
-                              <button
-                                key={e.id}
-                                onClick={() => disputeEntry(e.id)}
-                                style={{
-                                  ...sBtn(D.card, D.red),
-                                  fontSize: 14,
-                                  padding: "4px 8px",
-                                }}
-                              >
-                                Dispute {e.entry_type}{" "}
-                                {new Date(e.clock_in).toLocaleDateString()}
-                              </button>
-                            ))}
+                            .map((e) => {
+                              const dateLabel = formatETDate(e.clock_in, { month: "short", day: "numeric" });
+                              const timeRange = `${formatETTime(e.clock_in)}${e.clock_out ? `–${formatETTime(e.clock_out)}` : ""}`;
+                              const durLabel = e.duration_minutes ? ` (${fmtHrs(e.duration_minutes)})` : "";
+                              return (
+                                <button
+                                  key={e.id}
+                                  onClick={() => disputeEntry(e.id)}
+                                  style={{
+                                    ...sBtn(D.card, D.red),
+                                    fontSize: 14,
+                                    padding: "4px 8px",
+                                  }}
+                                >
+                                  Dispute {e.entry_type} {dateLabel} {timeRange}
+                                  {durLabel}
+                                </button>
+                              );
+                            })}
                         </div>{" "}
                       </div>
                     )}

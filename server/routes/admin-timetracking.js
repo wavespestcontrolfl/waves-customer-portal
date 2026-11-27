@@ -729,7 +729,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       .select(
         'technicians.name as tech_name',
         'time_weekly_summary.technician_id',
-        'time_weekly_summary.week_start',
+        db.raw("to_char(time_weekly_summary.week_start, 'YYYY-MM-DD') as week_start"),
         'time_weekly_summary.avg_rpmh',
         'time_weekly_summary.total_revenue',
         'time_weekly_summary.total_shift_minutes',
@@ -743,7 +743,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       .leftJoin('technicians', 'time_weekly_summary.technician_id', 'technicians.id')
       .select(
         'technicians.name as tech_name',
-        'time_weekly_summary.week_start',
+        db.raw("to_char(time_weekly_summary.week_start, 'YYYY-MM-DD') as week_start"),
         'time_weekly_summary.overtime_minutes',
         'time_weekly_summary.utilization_pct',
       )
@@ -2397,6 +2397,61 @@ router.get('/documents', requireAdmin, async (req, res, next) => {
 // POST /documents/upload — upload a file. Optional binding:
 //   technicianId — bind to one tech (omit / empty for company-wide)
 //   expirationDate — YYYY-MM-DD for licenses, certs, I-9s with reverify dates
+function validateDocumentUploadBody(body, file) {
+  const { title, category, description, technicianId, expirationDate } = body || {};
+  const finalTitle = title !== undefined && String(title).trim()
+    ? String(title).trim()
+    : String(file.originalname || '').trim();
+  if (!finalTitle || finalTitle.length > 200) {
+    return { error: 'Title must be 1 to 200 characters' };
+  }
+  const finalCategory = category || 'general';
+  if (!ALLOWED_DOC_CATEGORIES.has(finalCategory)) {
+    return { error: 'Invalid document category' };
+  }
+  if (technicianId && !UUID_PARAM_RE.test(String(technicianId))) {
+    return { error: 'technicianId must be a valid ID' };
+  }
+  if (expirationDate && !validDateOnly(expirationDate)) {
+    return { error: 'expirationDate must be a valid YYYY-MM-DD date' };
+  }
+  return {
+    finalTitle,
+    finalCategory,
+    description: description || null,
+    technicianId: technicianId || null,
+    expirationDate: expirationDate || null,
+  };
+}
+
+function buildDocumentUpdatePatch(body) {
+  const { title, category, description, technicianId, expirationDate } = body || {};
+  const updates = { updated_at: new Date() };
+  if (title !== undefined) {
+    const trimmed = typeof title === 'string' ? title.trim() : '';
+    if (!trimmed || trimmed.length > 200) return { error: 'Title must be 1 to 200 characters' };
+    updates.title = trimmed;
+  }
+  if (category !== undefined) {
+    if (!ALLOWED_DOC_CATEGORIES.has(category)) return { error: 'Invalid document category' };
+    updates.category = category;
+  }
+  if (description !== undefined) updates.description = description;
+  if (technicianId !== undefined) {
+    if (technicianId !== '' && technicianId !== null && !UUID_PARAM_RE.test(String(technicianId))) {
+      return { error: 'technicianId must be a valid ID' };
+    }
+    updates.technician_id = technicianId === '' ? null : technicianId;
+  }
+  if (expirationDate !== undefined) {
+    if (expirationDate !== '' && expirationDate !== null && !validDateOnly(expirationDate)) {
+      return { error: 'expirationDate must be a valid YYYY-MM-DD date' };
+    }
+    updates.expiration_date = expirationDate === '' ? null : expirationDate;
+  }
+  return { updates };
+}
+
 router.post('/documents/upload', requireAdmin, upload.single('file'), async (req, res, next) => {
   try {
     await ensureDocTable();
@@ -2404,23 +2459,8 @@ router.post('/documents/upload', requireAdmin, upload.single('file'), async (req
     const fileCheck = validateCompanyDocumentUpload(req.file);
     if (fileCheck.error) return res.status(400).json({ error: fileCheck.error });
 
-    const { title, category, description, technicianId, expirationDate } = req.body || {};
-    const finalTitle = title !== undefined && String(title).trim()
-      ? String(title).trim()
-      : String(req.file.originalname || '').trim();
-    if (!finalTitle || finalTitle.length > 200) {
-      return res.status(400).json({ error: 'Title must be 1 to 200 characters' });
-    }
-    const finalCategory = category || 'general';
-    if (!ALLOWED_DOC_CATEGORIES.has(finalCategory)) {
-      return res.status(400).json({ error: 'Invalid document category' });
-    }
-    if (technicianId && !UUID_PARAM_RE.test(String(technicianId))) {
-      return res.status(400).json({ error: 'technicianId must be a valid ID' });
-    }
-    if (expirationDate && !validDateOnly(expirationDate)) {
-      return res.status(400).json({ error: 'expirationDate must be a valid YYYY-MM-DD date' });
-    }
+    const bodyCheck = validateDocumentUploadBody(req.body, req.file);
+    if (bodyCheck.error) return res.status(400).json({ error: bodyCheck.error });
     if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
 
     const ext = fileCheck.ext;
@@ -2436,16 +2476,16 @@ router.post('/documents/upload', requireAdmin, upload.single('file'), async (req
     }));
 
     const [doc] = await db('company_documents').insert({
-      title: finalTitle,
-      category: finalCategory,
-      description: description || null,
+      title: bodyCheck.finalTitle,
+      category: bodyCheck.finalCategory,
+      description: bodyCheck.description,
       file_name: String(req.file.originalname || '').slice(0, 255),
       file_type: ext,
       file_size: req.file.size,
       s3_key: key,
       uploaded_by: req.technicianId || null,
-      technician_id: technicianId || null,
-      expiration_date: expirationDate || null,
+      technician_id: bodyCheck.technicianId,
+      expiration_date: bodyCheck.expirationDate,
     }).returning('*');
 
     await recordAuditEvent({
@@ -2502,35 +2542,9 @@ router.put('/documents/:id', requireAdmin, async (req, res, next) => {
     if (!UUID_PARAM_RE.test(String(req.params.id || ''))) {
       return res.status(400).json({ error: 'Invalid ID' });
     }
-    const { title, category, description, technicianId, expirationDate } = req.body || {};
-    const updates = { updated_at: new Date() };
-    if (title !== undefined) {
-      const trimmed = typeof title === 'string' ? title.trim() : '';
-      if (!trimmed || trimmed.length > 200) {
-        return res.status(400).json({ error: 'Title must be 1 to 200 characters' });
-      }
-      updates.title = trimmed;
-    }
-    if (category !== undefined) {
-      if (!ALLOWED_DOC_CATEGORIES.has(category)) {
-        return res.status(400).json({ error: 'Invalid document category' });
-      }
-      updates.category = category;
-    }
-    if (description !== undefined) updates.description = description;
-    if (technicianId !== undefined) {
-      if (technicianId !== '' && technicianId !== null && !UUID_PARAM_RE.test(String(technicianId))) {
-        return res.status(400).json({ error: 'technicianId must be a valid ID' });
-      }
-      updates.technician_id = technicianId === '' ? null : technicianId;
-    }
-    if (expirationDate !== undefined) {
-      if (expirationDate !== '' && expirationDate !== null && !validDateOnly(expirationDate)) {
-        return res.status(400).json({ error: 'expirationDate must be a valid YYYY-MM-DD date' });
-      }
-      updates.expiration_date = expirationDate === '' ? null : expirationDate;
-    }
-    const [doc] = await db('company_documents').where({ id: req.params.id }).update(updates).returning('*');
+    const patch = buildDocumentUpdatePatch(req.body);
+    if (patch.error) return res.status(400).json({ error: patch.error });
+    const [doc] = await db('company_documents').where({ id: req.params.id }).update(patch.updates).returning('*');
     if (!doc) return res.status(404).json({ error: 'Document not found' });
     await recordAuditEvent({
       actor_type: 'admin',

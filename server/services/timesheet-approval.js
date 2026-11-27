@@ -159,7 +159,58 @@ function hasSameTypeOverlap(entries) {
   return false;
 }
 
-function assertEntriesReadyForWeeklyReview(entries, action) {
+function csvCell(value) {
+  const raw = value == null ? '' : String(value);
+  const safe = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
+  if (/[",\r\n]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
+  }
+  return safe;
+}
+
+function normalizeWeeklyDates(weekly) {
+  if (!weekly) return weekly;
+  return {
+    ...weekly,
+    ...(weekly.week_start != null ? { week_start: dateOnly(weekly.week_start) } : {}),
+    ...(weekly.week_end != null ? { week_end: dateOnly(weekly.week_end) } : {}),
+  };
+}
+
+function normalizeDailyDates(dailies) {
+  return (dailies || []).map((daily) => (
+    daily && daily.work_date != null
+      ? { ...daily, work_date: dateOnly(daily.work_date) }
+      : daily
+  ));
+}
+
+function findOrphanChild(entries, coveringShifts = []) {
+  const shifts = [
+    ...entries.filter(entry => entry.entry_type === 'shift'),
+    ...(coveringShifts || []).filter(entry => entry.entry_type === 'shift'),
+  ];
+  return entries.find(entry => (
+    ['job', 'break', 'drive', 'admin_time'].includes(entry.entry_type)
+    && !shifts.some(shift => (
+      new Date(entry.clock_in).getTime() >= new Date(shift.clock_in).getTime()
+      && new Date(entry.clock_out).getTime() <= new Date(shift.clock_out).getTime()
+    ))
+  ));
+}
+
+async function loadCoveringOvernightShifts(trx, technicianId, start, entries) {
+  const orphan = findOrphanChild(entries);
+  if (!orphan || staffWorkDate(orphan.clock_in) !== start) return [];
+  return trx('time_entries')
+    .where({ technician_id: technicianId, entry_type: 'shift' })
+    .whereIn('status', ['completed', 'edited'])
+    .whereRaw(`${STAFF_WORK_DATE_SQL} < ?::date`, [start])
+    .where('clock_out', '>=', orphan.clock_out)
+    .orderBy('clock_in');
+}
+
+function assertEntriesReadyForWeeklyReview(entries, action, { coveringShifts = [] } = {}) {
   const actionVerb = action === 'approval' ? 'approving' : action;
   if (!entries.length) {
     throw approvalHttpError(404, 'No time entries exist for that week.');
@@ -176,14 +227,7 @@ function assertEntriesReadyForWeeklyReview(entries, action) {
       `Week contains an invalid time interval; correct it before ${action}.`,
     );
   }
-  const shifts = entries.filter(entry => entry.entry_type === 'shift');
-  const orphanChild = entries.find(entry => (
-    ['job', 'break', 'drive', 'admin_time'].includes(entry.entry_type)
-    && !shifts.some(shift => (
-      new Date(entry.clock_in).getTime() >= new Date(shift.clock_in).getTime()
-      && new Date(entry.clock_out).getTime() <= new Date(shift.clock_out).getTime()
-    ))
-  ));
+  const orphanChild = findOrphanChild(entries, coveringShifts);
   if (orphanChild) {
     throw approvalHttpError(
       409,
@@ -231,7 +275,8 @@ async function signWeek({ technicianId, weekStart, signature, reviewToken, now =
       .where('status', '!=', 'voided')
       .orderBy('clock_in')
       .forUpdate();
-    assertEntriesReadyForWeeklyReview(entries, 'signing');
+    const coveringShifts = await loadCoveringOvernightShifts(trx, technicianId, start, entries);
+    assertEntriesReadyForWeeklyReview(entries, 'signing', { coveringShifts });
     let dailies = await trx('time_entry_daily_summary')
       .where({ technician_id: technicianId })
       .where('work_date', '>=', start)
@@ -471,7 +516,7 @@ async function getPendingWeeks(weekStart, { strict = false } = {}) {
       entry.auto_closed_at && !entry.auto_close_reviewed_at
     )).length;
     results.push({
-      ...weekly,
+      ...normalizeWeeklyDates(weekly),
       tech_name: tech.name || 'Inactive technician',
       ...(autoClosePending ? { auto_close_pending: autoClosePending } : {}),
       review_token: reviewSnapshotToken(snapshot),
@@ -512,8 +557,8 @@ async function getWeekDetail(technicianId, weekStart) {
   const reviewToken = reviewSnapshotToken({ weekly, dailies, entries });
   return {
     tech,
-    weekly: weekly ? { ...weekly, review_token: reviewToken } : weekly,
-    dailies,
+    weekly: weekly ? { ...normalizeWeeklyDates(weekly), review_token: reviewToken } : weekly,
+    dailies: normalizeDailyDates(dailies),
     entries,
     reviewToken,
   };
@@ -523,7 +568,7 @@ async function getWeekDetail(technicianId, weekStart) {
  * Approve the full week for a tech. Locks every non-voided entry in the window,
  * flips the daily and weekly summary status, stamps approved_by/at.
  */
-async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToken }) {
+async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToken, settleBell = true }) {
   const { start, end } = validateApprovalWeek(weekStart);
   if (!reviewToken || typeof reviewToken !== 'string') {
     throw approvalHttpError(400, 'reviewToken is required; reload the week before approval.');
@@ -544,7 +589,8 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
       .orderBy('clock_in')
       .orderBy('id')
       .forUpdate();
-    assertEntriesReadyForWeeklyReview(entries, 'approval');
+    const coveringShifts = await loadCoveringOvernightShifts(trx, technicianId, start, entries);
+    assertEntriesReadyForWeeklyReview(entries, 'approval', { coveringShifts });
     if (entries.some(entry => normalizedEntryApprovalStatus(entry) === 'disputed')) {
       throw approvalHttpError(409, 'Resolve every disputed entry before approving the week.');
     }
@@ -674,7 +720,7 @@ async function approveWeek({ technicianId, weekStart, adminId, notes, reviewToke
   });
 
   logger.info(`[timesheet-approval] Week ${start} approved for tech ${technicianId} by ${adminId}`);
-  await timesheetBells.settleWeekBell(start);
+  if (settleBell) await timesheetBells.settleWeekBell(start);
   return getWeekDetail(technicianId, weekStart);
 }
 
@@ -691,11 +737,15 @@ async function bulkApproveWeeks({ technicianIds, weekStart, adminId, notes, revi
         adminId,
         notes,
         reviewToken: reviewTokens[techId],
+        settleBell: false,
       });
       results.approved++;
     } catch (err) {
       results.failed.push({ technicianId: techId, error: err.message });
     }
+  }
+  if (results.approved > 0) {
+    await timesheetBells.settleWeekBell(validateCanonicalWeek(weekStart).start);
   }
   return results;
 }
@@ -957,8 +1007,8 @@ async function generateWeeklyPayrollExport(weekStart, now = new Date()) {
       const otMin = parseFloat(r.overtime_minutes || 0);
       const unpaidMin = parseFloat(r.unpaid_meal_minutes || 0);
       return [
-        (r.tech_name || '').replace(/,/g, ' '),
-        dateOnly(r.week_start),
+        csvCell(r.tech_name || ''),
+        csvCell(dateOnly(r.week_start)),
         (regMin / 60).toFixed(2),
         (otMin / 60).toFixed(2),
         ((regMin + otMin) / 60).toFixed(2),
@@ -967,7 +1017,7 @@ async function generateWeeklyPayrollExport(weekStart, now = new Date()) {
         parseFloat(r.total_revenue || 0).toFixed(2),
         parseFloat(r.avg_rpmh || 0).toFixed(2),
         parseFloat(r.utilization_pct || 0).toFixed(1),
-        r.status || 'pending',
+        csvCell(r.status || 'pending'),
       ];
     });
 
