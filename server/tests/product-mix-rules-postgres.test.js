@@ -11,11 +11,15 @@ jest.mock('../models/db', () => new Proxy(function db() {}, {
   apply: (_target, _this, args) => mockTrx(...args),
   get: (_target, prop) => (typeof mockTrx[prop] === 'function' ? mockTrx[prop].bind(mockTrx) : mockTrx[prop]),
 }));
-const mockAudit = { fail: false, events: [] };
+const mockAudit = { fail: false, events: [], persist: false };
 jest.mock('../services/audit-log', () => ({
   recordAuditEvent: jest.fn(async (event) => {
     if (mockAudit.fail) throw new Error('audit_log write failed');
     mockAudit.events.push(event);
+    // persist: also write the row to the scratch audit_log, for a down() that reads its own up() events.
+    if (mockAudit.persist && event.trx) {
+      await event.trx('audit_log').insert({ action: event.action, resource_type: event.resource_type, resource_id: event.resource_id, metadata: JSON.stringify(event.metadata || {}) });
+    }
   }),
 }));
 
@@ -47,7 +51,8 @@ const mix = require('../services/product-mix-rules');
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(150) NOT NULL, category varchar(30),
         subcategory varchar(100), active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
         application_method varchar(50), mixing_order_category varchar(50), requires_surfactant boolean, allows_surfactant boolean,
-        do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true, updated_at timestamptz DEFAULT now()
+        do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true, updated_at timestamptz DEFAULT now(),
+        analysis_n numeric(5,2), analysis_p numeric(5,2), analysis_k numeric(5,2)
       );
     `);
     const products = [
@@ -70,7 +75,7 @@ const mix = require('../services/product-mix-rules');
     await versionMigration.up(mockTrx);
   });
 
-  afterEach(async () => { await mockTrx.rollback(); mockTrx = null; mockAudit.fail = false; mockAudit.events = []; });
+  afterEach(async () => { await mockTrx.rollback(); mockTrx = null; mockAudit.fail = false; mockAudit.events = []; mockAudit.persist = false; });
   afterAll(async () => { await knex.destroy(); });
 
   test('the seed adds the quoted rules for the products present, and a second run adds nothing', async () => {
@@ -243,6 +248,102 @@ const mix = require('../services/product-mix-rules');
     expect(mockAudit.events.map((e) => e.action)).toEqual(['migration:20261127190000_reliant_fertilizer_test:up']);
     await reliantFix.down(mockTrx);
     expect(await mockTrx('product_mix_rules').where({ product_a_id: reliant.id, group_b: 'fertilizer' })).toHaveLength(0);
+  });
+
+  describe('migration 20261127240000 (TriTek limits; rollback by its own audited ids)', () => {
+    const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+    const fix = require('../models/migrations/20261127240000_mix_rules_group_fixes');
+    let actor;
+    const tritekRows = () => mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', fix._RULES.map((r) => r.group_b));
+    const ruleFor = (group) => fix._RULES.find((r) => r.group_b === group);
+
+    async function prepare() {
+      await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY, action text, resource_type text, resource_id text, metadata jsonb)');
+      mockAudit.persist = true;
+      [{ id: actor }] = await mockTrx('technicians').insert({}).returning('id');
+      await groupsFix.up(mockTrx);
+      // The new groups must be in the CHECK list before an admin can write a twin on them.
+      await mockTrx.raw(`ALTER TABLE product_mix_rules DROP CONSTRAINT product_mix_rules_group_check`);
+      await mockTrx.raw(`ALTER TABLE product_mix_rules ADD CONSTRAINT product_mix_rules_group_check CHECK (group_b IS NULL OR group_b IN (${fix._GROUPS.map((g) => `'${g}'`).join(', ')}))`);
+    }
+
+    test('up() inserts each TriTek limit once with its id audited; NPK only; down() removes exactly those rows and the groups', async () => {
+      await prepare();
+      mockAudit.events = [];
+      const [sulfur] = await mockTrx('products_catalog').insert({ name: 'Micro Sulf', category: 'fungicide', active_ingredient: 'Sulfur' }).returning('id');
+      const [iron] = await mockTrx('products_catalog').insert({ name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient', category: 'Micronutrient Fertilizer', formulation: 'soluble granule' }).returning('id');
+      await fix.up(mockTrx);
+      await fix.up(mockTrx);
+      const rows = await tritekRows();
+      expect(rows.map((r) => r.group_b).sort()).toEqual(['captan', 'carbaryl', 'dimethoate', 'npk_spray_fertilizer', 'sulfur']);
+      const ups = mockAudit.events.filter((e) => e.action === 'migration:20261127240000_mix_rules_group_fixes:up');
+      expect(ups.map((e) => e.metadata.row_id).sort()).toEqual(rows.map((r) => r.id).sort());
+      expect(ups.every((e) => e.metadata.version === 1 && e.critical === true)).toBe(true);
+      expect((await mix.checkMix([ids.fert, ids.oil])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not mix TriTek with NPK foliar fertilizer.' });
+      expect((await mix.checkMix([sulfur.id, ids.oil])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not mix TriTek with sulfur.' });
+      // An iron-only micronutrient (no N, P or K on file) is not the card's NPK foliar fertilizer.
+      expect((await mix.checkMix([iron.id, ids.oil])).pairs[0].reason).not.toBe('Do not mix TriTek with NPK foliar fertilizer.');
+      await fix.down(mockTrx);
+      expect(await tritekRows()).toHaveLength(0);
+      // No row uses a new group: the old CHECK list is back.
+      await mockTrx.raw('SAVEPOINT old_check');
+      await expect(mockTrx('product_mix_rules').insert({ product_a_id: ids.tetrino, group_b: 'captan', verdict: 'ok', reason: 'x' })).rejects.toMatchObject({ constraint: 'product_mix_rules_group_check' });
+      await mockTrx.raw('ROLLBACK TO SAVEPOINT old_check');
+    });
+
+    test('an admin twin with identical values at version 1 survives up() and down()', async () => {
+      await prepare();
+      const rule = ruleFor('sulfur');
+      const twin = await mix.upsertRule({ productAId: ids.oil, groupB: 'sulfur', verdict: rule.verdict, reason: rule.reason, source: rule.source });
+      expect(twin).toMatchObject({ version: 1 });
+      await fix.up(mockTrx);
+      expect(await mockTrx('product_mix_rules').where({ product_a_id: ids.oil, group_b: 'sulfur' })).toEqual([expect.objectContaining({ id: twin.id, version: 1 })]);
+      await fix.down(mockTrx);
+      expect(await mockTrx('product_mix_rules').where({ id: twin.id }).first()).toMatchObject({ active: true, reason: rule.reason, version: 1 });
+      // The other four seeds are gone; the twin keeps the wider CHECK list in place, and down() did not throw.
+      expect((await tritekRows()).map((r) => r.id)).toEqual([twin.id]);
+    });
+
+    test('a seed an admin touched (edited or removed) survives down()', async () => {
+      await prepare();
+      await fix.up(mockTrx);
+      const [captan, sulfur] = await Promise.all(['captan', 'sulfur'].map((g) => mockTrx('product_mix_rules').where({ product_a_id: ids.oil, group_b: g }).first()));
+      await mix.upsertRule({ productAId: ids.oil, groupB: 'captan', verdict: 'caution', reason: 'Owner: jar test.', version: captan.version }, { id: captan.id, actorId: actor });
+      await mix.deactivateRule(sulfur.id, { actorId: actor, version: sulfur.version });
+      await fix.down(mockTrx);
+      expect((await tritekRows()).map((r) => [r.group_b, r.active]).sort()).toEqual([['captan', true], ['sulfur', false]]);
+    });
+
+    test('a renamed or deactivated TriTek, or missing audit events, never make down() throw; the untouched seeds still go by id', async () => {
+      await prepare();
+      await fix.up(mockTrx);
+      await mockTrx('products_catalog').where({ id: ids.oil }).update({ name: 'Renamed oil', active: false });
+      await expect(fix.down(mockTrx)).resolves.toBeUndefined();
+      expect(await tritekRows()).toHaveLength(0);
+      await expect(fix.down(mockTrx)).resolves.toBeUndefined();
+      await mockTrx.raw('DROP TABLE audit_log');
+      await expect(fix.down(mockTrx)).resolves.toBeUndefined();
+    });
+  });
+
+  // Why rolling back 20261127200000 then 20261127190000 is safe although it leaves the Reliant row: both moves add 1 to
+  // version, so 190000's down() (version 1 only, so it never deletes an admin's edit) skips it. What stays is the
+  // caution "Jar test and plant test first." on fertilizer: a warning only (owner 2026-11-26, a safety alert never
+  // blocks), audited, and one Remove on the Mix safety screen takes it out.
+  test('rolling back 20261127200000 then 20261127190000 leaves the Reliant caution as a warning-only row, never a block', async () => {
+    const reliantFix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
+    const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    const [reliant] = await mockTrx('products_catalog').insert({ name: 'Reliant Systemic Fungicide', category: 'fungicide' }).returning('id');
+    await reliantFix.up(mockTrx);
+    await groupsFix.up(mockTrx);
+    await groupsFix.down(mockTrx);
+    await reliantFix.down(mockTrx);
+    const left = await mockTrx('product_mix_rules').where({ product_a_id: reliant.id });
+    expect(left).toEqual([expect.objectContaining({ group_b: 'fertilizer', verdict: 'caution', reason: 'Jar test and plant test first.', active: true, version: 3 })]);
+    expect(mix.VERDICTS).not.toContain('block');
+    const removed = await mix.deactivateRule(left[0].id, { version: 3 });
+    expect(removed).toMatchObject({ active: false });
   });
 
   test('migration 20261127200000 widens the groups, scopes Reliant to sprayed fertilizer, adds Sequestar + miticide; down() reverses', async () => {

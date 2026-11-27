@@ -127,3 +127,27 @@ describe('the REPORT DELIVERY sentences are part of the send-time fingerprint', 
     expect(await hashWith({ reportDeliveries: null })).toBe(base);
   });
 });
+
+// Texting AI gap 5: a text that named one service ("the lawn treatment") got the prep guide of that service's upcoming visit. The family rides
+// on the stamp, so the send-time fingerprint renders the same guide pick the draft was written from.
+describe('a named service\'s prep guide pick rides on the stamp', () => {
+  test('the family reaches the context read at draft time and at send time; none named reads as before', async () => {
+    const { draftFactsFingerprint, factsFingerprintRefusal, draftStamp } = require('../services/sms-unanswered-reply');
+    require('../models/db').mockImplementation(dbh);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'X', billing, prepGuide: { sections: [] } });
+    process.env.GATE_SMS_UNANSWERED_REPLY = 'true';
+    try {
+      const fp = await draftFactsFingerprint({ id: 'c1' }, { prepGuideFamily: 'lawn' });
+      expect(fp).toMatchObject({ prepGuideFamily: 'lawn' });
+      expect(ContextAggregator.getContextForCustomer.mock.calls.at(-1)[1]).toMatchObject({ includeSmsStaffFacts: true, smsPrepGuideFamily: 'lawn' });
+      const stamp = draftStamp({ factsFingerprint: fp }).unanswered;
+      expect(stamp.facts_prep_family).toBe('lawn');
+      expect(await factsFingerprintRefusal(dbh, { customerId: 'c1', stamp })).toBeNull();
+      expect(ContextAggregator.getContextForCustomer.mock.calls.at(-1)[1]).toMatchObject({ smsPrepGuideFamily: 'lawn' });
+      const plain = await draftFactsFingerprint({ id: 'c1' });
+      expect(plain).not.toHaveProperty('prepGuideFamily');
+      expect(ContextAggregator.getContextForCustomer.mock.calls.at(-1)[1]).not.toHaveProperty('smsPrepGuideFamily');
+      expect(draftStamp({ factsFingerprint: plain }).unanswered).not.toHaveProperty('facts_prep_family');
+    } finally { delete process.env.GATE_SMS_UNANSWERED_REPLY; }
+  });
+});

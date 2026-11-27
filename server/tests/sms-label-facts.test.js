@@ -2764,7 +2764,7 @@ describe('generateGroundedDraft — LABEL FACTS reach the facts block and the co
     mockFetchLabelFacts.mockResolvedValue(labelFacts([product({ rainfastMinutes: 180 })]));
     const client = makeClient([draft(RAIN3), { supported: true, violations: [] }]);
     const r = await generateGroundedDraft(args(client));
-    expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1' });
+    expect(mockFetchLabelFacts).toHaveBeenCalledWith({ customerId: 'cust-1', inbound: ['Will rain wash it off?'] }); // (texting AI gap 5: the texts pick the visit asked about)
     expect(r.factsBlock).toContain(`- ${RAIN3}`);
     expect(r.promptVersion).toBe('house_voice_v12_real_answers93_n+e');
     expect(r.converged).toBe(true);

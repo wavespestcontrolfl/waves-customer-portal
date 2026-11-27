@@ -275,19 +275,25 @@ function guideGroups(blocks, productNames) {
  * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
  * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
  */
-async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
+// The guide the completed services agree on, else null. A named service (`family`): only a guide of that service, never another
+// service's last guide.
+function lastGuideConfig(completed, family) {
+  const keys = new Set(completed.map((guide) => (family && guide.pestType !== family ? null : guide.config?.emailTemplateKey || null)));
+  return keys.size === 1 && [...keys][0] ? completed[0].config : null;
+}
+async function loadPrepGuideFacts(customerId, lastRecords, { db, family } = {}) {
   const none = { sections: [] };
   if (!customerId || !db) return null;
   const completedRecords = [].concat(lastRecords || []);
   try {
     const sender = require('./prep-guide-sender');
-    const booked = await sender.bookedPrepGuide([customerId]);
+    // `family` (texting AI gap 5): the service the customer named; a later upcoming visit that carries its guide comes back as source 'named'
+    const booked = await sender.bookedPrepGuide([customerId], { family });
     // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
     // Each resolves to the guide it carried; they must all agree, else no guide is named.
     // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
     const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceRecordId: record?.id, serviceType: record?.service_type })));
-    const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
-    const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
+    const config = booked ? booked.config : lastGuideConfig(completed, family);
     if (!config) return none;
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     // the template must be one the customer's own page and the email sender would use: published (an active version) and not switched off
@@ -295,7 +301,7 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
     const raw = loaded.activeVersion.blocks;
     const blocks = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const sections = guideGroups(blocks, await require('./company-facts-bank').readProductNames(db));
-    return sections.length ? { source: booked ? 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
+    return sections.length ? { source: booked ? booked.source || 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}: ${err.message}`);
     return null;
