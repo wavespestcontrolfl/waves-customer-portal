@@ -54,4 +54,10 @@ async function releaseSendClaim(claimKey, conn = db) {
   await conn('sms_send_claims').where({ claim_key: claimKey }).del();
 }
 
-module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, WEEKLY_CLAIM_PREFIXES };
+async function hasAnySendClaim(claimKeys, conn = db) {
+  if (!Array.isArray(claimKeys) || claimKeys.length === 0) return false;
+  const row = await conn('sms_send_claims').whereIn('claim_key', claimKeys).first('id');
+  return Boolean(row);
+}
+
+module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, hasAnySendClaim, WEEKLY_CLAIM_PREFIXES };

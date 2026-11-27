@@ -29,7 +29,7 @@
 
 const logger = require('./logger');
 const db = require('../models/db');
-const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
+const { takeSendClaim, releaseSendClaim, hasAnySendClaim } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { AREAS } = require('./admin-alert-compose');
 const { isFullAccessEmail } = require('./intelligence-bar/ib-access');
@@ -148,10 +148,7 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
 }
 
 async function hasAudienceClaim(day) {
-  const row = await db('sms_send_claims')
-    .whereIn('claim_key', [`${CLAIM_PREFIX}${day}:owner`, `${CLAIM_PREFIX}${day}:shared`])
-    .first('id');
-  return Boolean(row);
+  return hasAnySendClaim([`${CLAIM_PREFIX}${day}:owner`, `${CLAIM_PREFIX}${day}:shared`]);
 }
 
 // Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
