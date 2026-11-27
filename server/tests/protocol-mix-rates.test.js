@@ -42,7 +42,8 @@ describe('protocol card mix rates', () => {
           expect([at, typeof row.dose]).toEqual([at, 'string']);
           expect(row.sprayers).toBeUndefined();
         }
-        expect([at, /^\d+-\d+$/.test(row.epa)]).toEqual([at, true]);
+        // A pesticide row names its registration; the surfactant has none.
+        if (!/surfactant/i.test(row.product)) expect([at, /^\d+-\d+$/.test(row.epa)]).toEqual([at, true]);
       }
     }
   });

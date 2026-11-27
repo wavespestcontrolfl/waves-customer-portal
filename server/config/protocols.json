@@ -1923,8 +1923,21 @@
               "flowzone_4_gal"
             ],
             "sprayVolume": "2 qt per 160 linear ft",
-            "limit": "4 applications a calendar year at this strength",
+            "limit": "4 applications a calendar year at this strength; fewer when a 0.8 fl oz per gal application was made at the home this year",
             "epa": "53883-279"
+          },
+          {
+            "product": "LESCO 90/10 Nonionic Surfactant",
+            "where": "Same tank as the outside mix",
+            "perGallon": {
+              "amount": 0.0625,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "0.25 fl oz in the 4 gal FlowZone"
           },
           {
             "product": "Atticus Antapex WSG",
@@ -3742,7 +3755,7 @@
         "mixRates": [
           {
             "product": "MGK Crossfire Bed Bug Concentrate",
-            "where": "Only where live bugs or eggs are found",
+            "where": "Only where live bugs or fresh eggs are found",
             "perGallon": {
               "amount": 13,
               "unit": "fl oz"
@@ -3845,12 +3858,12 @@
               "rig_100_gal"
             ],
             "sprayVolume": "4 gal per 10 linear ft for each foot of depth",
-            "limit": "Never weaker than 0.8 fl oz per gal",
+            "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
             "epa": "7969-210"
           },
           {
             "product": "Taurus SC",
-            "where": "Same use, when Termidor is not on the truck",
+            "where": "Same use, only when the work order names Taurus",
             "perGallon": {
               "amount": 0.8,
               "unit": "fl oz"
@@ -3861,7 +3874,7 @@
               "rig_100_gal"
             ],
             "sprayVolume": "4 gal per 10 linear ft for each foot of depth",
-            "limit": "Never weaker than 0.8 fl oz per gal",
+            "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
             "epa": "53883-279"
           }
         ]
