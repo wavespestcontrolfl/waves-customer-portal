@@ -133,7 +133,7 @@ export default function PushSettingsV2() {
   const [prefsFailed, setPrefsFailed] = useState(false);
   const [prefsVersion, setPrefsVersion] = useState(null);
 
-  const loadPreferences = async () => {
+  const loadPreferences = async ({ clearError = false } = {}) => {
     setPrefsLoading(true);
     setPrefsFailed(false);
     try {
@@ -141,6 +141,7 @@ export default function PushSettingsV2() {
       setPrefs(r.preferences || []);
       setCatPrefs(r.bellCategories || []);
       setPrefsVersion(r.version || null);
+      if (clearError) setPushError("");
       return true;
     } catch {
       setPrefsFailed(true);
@@ -344,7 +345,7 @@ export default function PushSettingsV2() {
         {prefsFailed && (
           <div role="alert" className="p-3 mb-4 bg-alert-bg border-hairline border-alert-fg rounded-md text-14 text-alert-fg">
             <p className="mb-2">Notification preferences couldn&apos;t be loaded. Try again before saving.</p>
-            <Button variant="secondary" size="sm" onClick={loadPreferences}>Try again</Button>
+            <Button variant="secondary" size="sm" onClick={() => loadPreferences({ clearError: true })}>Try again</Button>
           </div>
         )}
 
@@ -423,7 +424,8 @@ export default function PushSettingsV2() {
             <div className="px-3 pb-2 text-12 text-ink-tertiary">
               Customer communication (texts, emails, calls, voicemails, new
               leads) rings by default. Most categories below start off;
-              categories that start on can also be silenced here. Each toggle
+              categories that start on keep ringing the shared admin bell until
+              every active administrator turns them off here. Each toggle
               controls that category&apos;s bell (and phone banner, for
               categories that send push notifications).
             </div>{" "}

@@ -1752,7 +1752,7 @@ const STRIP_COPY = {
   },
   staff: {
     title: 'Get push notifications on this device',
-    body: 'Banner alerts for customer texts, calls, voicemails, new leads, and failed payments.',
+    body: 'Banner alerts for customer texts, schedule changes, and visit updates.',
     button: 'Enable push',
     busy: 'Enabling…',
   },

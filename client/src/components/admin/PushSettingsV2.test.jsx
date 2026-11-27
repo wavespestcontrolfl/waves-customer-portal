@@ -136,6 +136,7 @@ it('renders server-filtered triggers, labels all categories, locks switches duri
     expect(global.fetch).toHaveBeenCalledTimes(1);
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
+    expect(screen.queryByText(/Couldn't confirm saving notification preferences/)).toBeNull();
   }
 
   // 409 VERSION_CONFLICT (e.g. a timed-out save committed late): client sends

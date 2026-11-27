@@ -2295,7 +2295,7 @@ describe('NotificationBell customer alerts strip, tabs and link taps', () => {
       render(<NotificationBell type="admin" />);
       await act(async () => { fireEvent.click(screen.getByRole('button', { name: /notifications/i })); });
       const button = await screen.findByRole('button', { name: 'Enable push' });
-      expect(button.parentElement).toHaveTextContent('Banner alerts for customer texts, calls, voicemails, new leads, and failed payments.');
+      expect(button.parentElement).toHaveTextContent('Banner alerts for customer texts, schedule changes, and visit updates.');
       expect(screen.queryByRole('button', { name: 'Account' })).toBeNull();
       expect(screen.queryByRole('button', { name: "What's new" })).toBeNull();
     } finally {
