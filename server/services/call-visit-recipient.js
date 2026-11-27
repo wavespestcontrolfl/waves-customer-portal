@@ -190,11 +190,14 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
-      // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ON CONFLICT DO
-      // NOTHING, so a later call never changes a listed person, never narrows one ("just this visit" removes nobody) and never
-      // clears a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
-      if (!entry.thisVisitOnly) await trx.raw(
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'call_log_id');
+      // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. Decided ONCE per
+      // call: only the pass that first records this call's row for the number may list them, so a reprocess of the same call
+      // (whatever its new extraction says) never widens a "just this visit" answer. A row this call already wrote means the
+      // decision was made. ON CONFLICT DO NOTHING, so a later call never changes a listed person, never narrows one ("just this
+      // visit" removes nobody) and never clears a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
+      const callDecidedBefore = !callLogId || (existing && existing.call_log_id && String(existing.call_log_id) === String(callLogId));
+      if (!entry.thisVisitOnly && !callDecidedBefore) await trx.raw(
         `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (customer_id, phone_key) DO NOTHING`,
         [visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
@@ -244,26 +247,36 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
   if (!scheduledServiceId) return;
   await conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
+    // ONE read of the visit's customer; both statements below are pinned to it, and it is checked again after them.
+    const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+    if (!visit || !visit.customer_id) return;
+    const owner = String(visit.customer_id);
     // A row for a listed number that is NOT bound to the visit's current customer (never bound, or left over from a customer the
     // visit was moved away from) would hold the unique key and block the copy: delete it first, so the copy is a fresh row with a
     // NEW id and anything queued or minted under the old id (a held text, a claim, a tracker token) finds no row and drops.
     await trx.raw(
       `DELETE FROM ${TABLE} r
         USING scheduled_services s
-        WHERE s.id = ? AND r.scheduled_service_id = s.id
+        WHERE s.id = ? AND s.customer_id = ? AND r.scheduled_service_id = s.id
           AND r.customer_id IS DISTINCT FROM s.customer_id
           AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id AND c.stopped_at IS NULL)`,
-      [scheduledServiceId],
+      [scheduledServiceId, owner],
     );
     await trx.raw(
       `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
        SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
          FROM scheduled_services s
          JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id AND c.stopped_at IS NULL
-        WHERE s.id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
+        WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
        ON CONFLICT (scheduled_service_id, phone_key) DO NOTHING`,
-      [REMINDER_SOURCE, scheduledServiceId, ...LIVE_STATUSES],
+      [REMINDER_SOURCE, scheduledServiceId, owner, ...LIVE_STATUSES],
     );
+    // The visit moved to another customer while the copy ran: the copy may be incomplete for the new customer. Throw, so the
+    // sender treats it as an unreadable recipient list (one staff bell), never a silent miss.
+    const again = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+    if (!again || String(again.customer_id || '') !== owner) {
+      throw Object.assign(new Error('visit customer changed during the every-visit copy'), { code: 'VISIT_CUSTOMER_CHANGED' });
+    }
   });
 }
 

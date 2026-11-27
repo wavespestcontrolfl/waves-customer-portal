@@ -40,6 +40,8 @@ exports.up = async function up(knex) {
 // refuses; turn GATE_CALL_GIVEN_VISIT_TEXTS off first and carry the stops forward by hand.
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('customer_reminder_contacts'))) return;
+  // Held through the drop (the migration runs in one transaction): no stop can be written between the check and the drop.
+  await knex.raw('LOCK TABLE customer_reminder_contacts IN ACCESS EXCLUSIVE MODE');
   const stop = await knex('customer_reminder_contacts').whereNotNull('stopped_at').first('id');
   if (stop) throw new Error('customer_reminder_contacts holds recorded stops; refusing to drop them (turn GATE_CALL_GIVEN_VISIT_TEXTS off and keep the stops first)');
   await knex.schema.dropTable('customer_reminder_contacts');

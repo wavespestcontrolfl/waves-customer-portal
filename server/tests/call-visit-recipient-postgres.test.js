@@ -547,16 +547,31 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       });
 
       test('"just this visit" records the visit only and puts nobody on the list; it never narrows a listed person', async () => {
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        // Bob is listed (every visit) by the beforeEach call; a "just this visit" person joins the visit only
         await record({}, entry({ phone_e164: phone(60), appointment_texts_scope: 'this_visit' }));
         expect((await rows()).map((row) => row.phone_key)).toContain(phone(60).slice(-10));
-        expect(await listed()).toHaveLength(0);
-        // Bob is listed (every visit); a later "just this visit" call about him removes nothing
-        await record();
+        // a "just this visit" answer about Bob removes nothing
         await record({}, entry({ appointment_texts_scope: 'this_visit' }));
         const list = await listed();
         expect(list.map((row) => row.phone_key)).toEqual([BOB.slice(-10)]);
         expect(list[0].stopped_at).toBeNull();
+      });
+
+      test('a reprocess of the SAME call never widens its "just this visit" answer; a later call can', async () => {
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        const CARL = phone(61);
+        await record({}, entry({ phone_e164: CARL, appointment_texts_scope: 'this_visit' }));
+        await record({}, entry({ phone_e164: CARL }));
+        await record({}, entry({ phone_e164: CARL, appointment_texts_scope: 'ongoing' }));
+        expect(await listed()).toHaveLength(0);
+        const [{ id: laterCall }] = await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
+        try {
+          await record({ callLogId: laterCall }, entry({ phone_e164: CARL, appointment_texts_scope: 'ongoing' }));
+          expect((await listed()).map((row) => row.phone_key)).toEqual([CARL.slice(-10)]);
+        } finally {
+          await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+          await db('call_log').where({ id: laterCall }).del();
+        }
       });
 
       test('a left-over row for the same number bound to another customer is replaced by a fresh row (new id, no token, no claims)', async () => {
