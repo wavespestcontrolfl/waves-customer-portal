@@ -207,7 +207,11 @@ const modelOutputSchema = require('../../schemas/call-extraction.model-output.sc
 // price first quoted on the call stays price.caller_response's job; staff offering or pressing is
 // not an answer; booking a visit is not by itself a yes. No consumer in this change: nothing reads
 // the field yet. New field and instructions: a new cohort.
-const PROMPT_VERSION = 'v35';
+// v36: secondary_contact(s).appointment_texts_scope (schema 1.32.0; owner ruling 2026-11-25): for a
+// person who gets the appointment texts, whether the caller limited it to the booked visit
+// ("this_visit"), asked for every visit ("ongoing"), or did not say ("unspecified", the default, read
+// as every visit). Same extraction call, no new AI call. New field and instructions: a new cohort.
+const PROMPT_VERSION = 'v36';
 
 // Cross-call threading (2026-07-11): callers finish one arrangement across
 // several calls — a realtor whose first call cut off mid-dictation of the
@@ -434,6 +438,7 @@ SECONDARY CONTACT (a SECOND person who is a party to the service):
 - role is this person's relationship to the TRANSACTION: the buyer a realtor is booking for is home_buyer (not real_estate_agent); the borrower a loan officer is arranging an inspection for is home_buyer, while a loan officer named as a party by someone else is lender.
 - wants_notifications: true ONLY when the caller explicitly directs that this person receive notifications, confirmations, updates, the report, or the invoice ("send notifications to the buyer and myself", "text my tenant when you're on the way"). A person merely mentioned — or explicitly excluded ("you don't have to involve Matt") — is false.
 - wants_appointment_texts: true ONLY when the caller agreed this person should receive the appointment TEXT messages — visit reminders, the "on the way"/route-tracking link, the arrival text ("we could put his cell on the account so he'll get the reminders" — "yeah"; "text my tenant when you're on the way"). Wanting the REPORT or INVOICE sent to someone ("email him the report") is NOT appointment-text intent: false. wants_notifications can be true while this is false. Default false; do not invent.
+- appointment_texts_scope: only when wants_appointment_texts is true, how long the caller wants this person to get those texts: "this_visit" when the caller limits it to the visit being booked ("just this once", "text my tenant when you're on the way today", "only for this appointment"); "ongoing" when the caller says every visit or from now on ("put him on the account for the reminders", "always text her too"); "unspecified" when the caller did not say how long. Default "unspecified"; do not invent a limit. null or "unspecified" when wants_appointment_texts is false.
 - on_site: true ONLY when the call says this person will be AT the property for the visit — they live there, "he'll be there", "she'll meet your technician". A relationship alone (spouse, buyer) does not prove presence: if the call does not say they will be there, false. Default false; do not invent.
 - is_billing_party: true ONLY when the caller clearly says THIS person pays for the service ("the owner Jim will pay by credit card", "bill the management company", "send the invoice to the landlord"). Merely being the owner/landlord/manager is NOT enough — the caller must indicate this person covers the cost. false/absent otherwise. At most one party is the billing party.
 - secondary_contacts (ARRAY): when MORE THAN ONE other person is a party to the service (buyer + co-buyer + agent; tenant + owner + manager), list EVERY such person here — up to 3, ordered most notification-central first (the person the caller designates for contact/notifications leads; the property's buyer/occupant beats a bystander). Each entry follows every rule in this section. The FIRST entry must be the SAME person as secondary_contact. One other party → a one-entry array. Nobody → [] or null.

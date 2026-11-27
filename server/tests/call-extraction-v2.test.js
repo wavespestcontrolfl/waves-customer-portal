@@ -139,7 +139,7 @@ function validPersisted() {
 
 describe('schema validation', () => {
   test('schema version is 1.21.0', () => {
-    expect(SCHEMA_VERSION).toBe('1.31.0');
+    expect(SCHEMA_VERSION).toBe('1.32.0');
   });
 
   describe('model-output schema', () => {
@@ -355,6 +355,46 @@ describe('schema validation', () => {
       odd.meta.schema_version = '1.31.0';
       odd.service_request.estimate_response = 'maybe';
       expect(flatView(odd).estimate_response).toBeNull();
+    });
+
+    test('1.32.0: secondary_contact(s).appointment_texts_scope validates in both schemas as an optional nullable enum; the normalizers read missing or garbage as "unspecified"', () => {
+      const contact = (over = {}) => ({ first_name: 'Bob', phone_e164: '+19415550002', role: 'tenant', wants_notifications: false, wants_appointment_texts: true, ...over });
+      for (const value of ['ongoing', 'this_visit', 'unspecified', null]) {
+        const out = validModelOutput();
+        out.secondary_contact = contact({ appointment_texts_scope: value });
+        out.secondary_contacts = [contact({ appointment_texts_scope: value })];
+        expect(validateModelOutput(out).valid).toBe(true);
+        const persisted = validPersisted();
+        persisted.meta.schema_version = '1.32.0';
+        persisted.secondary_contact = contact({ appointment_texts_scope: value });
+        persisted.secondary_contacts = [contact({ appointment_texts_scope: value })];
+        expect(validatePersisted(persisted).valid).toBe(true);
+      }
+      for (const bad of ['forever', 'THIS_VISIT', true, 3]) {
+        const out = validModelOutput();
+        out.secondary_contacts = [contact({ appointment_texts_scope: bad })];
+        expect(validateModelOutput(out).valid).toBe(false);
+      }
+      for (const schema of [require('../schemas/call-extraction.model-output.schema.json'), require('../schemas/call-extraction.persisted.schema.json')]) {
+        for (const object of [schema.properties.secondary_contact, schema.properties.secondary_contacts.items]) {
+          expect(object.properties.appointment_texts_scope.enum).toEqual(['ongoing', 'this_visit', 'unspecified', null]);
+          expect(object.required).not.toContain('appointment_texts_scope');
+        }
+      }
+      // The V2 normalizer: a known value is kept, garbage becomes "unspecified", a missing key stays missing (older rows).
+      const normalizedScope = (value) => {
+        const out = validModelOutput();
+        out.secondary_contacts = [contact(value === undefined ? {} : { appointment_texts_scope: value })];
+        return normalizeExtractionV2(out).secondary_contacts[0];
+      };
+      expect(normalizedScope('this_visit').appointment_texts_scope).toBe('this_visit');
+      expect(normalizedScope('ongoing').appointment_texts_scope).toBe('ongoing');
+      for (const garbage of [null, 'forever', 7, { a: 1 }]) expect(normalizedScope(garbage).appointment_texts_scope).toBe('unspecified');
+      expect(normalizedScope(undefined)).not.toHaveProperty('appointment_texts_scope');
+      // The one reader of the raw V2 entry (call-visit-recipient): "unspecified" unless the caller said one of the two answers.
+      const { appointmentTextsScope } = require('../utils/extraction-compat');
+      expect(['ongoing', 'this_visit'].map(appointmentTextsScope)).toEqual(['ongoing', 'this_visit']);
+      expect([undefined, null, '', 'This_Visit', 'always', 1, []].map(appointmentTextsScope)).toEqual(Array(7).fill('unspecified'));
     });
 
     test('1.30.0: the household safety notes survive normalization and read in the flat view, null when absent, blank or not text', () => {
@@ -1561,7 +1601,7 @@ describe('extraction compat adapter', () => {
       entry('lender', false, false, 'Third Person'),
     ];
     expect(flatView(v2).secondary_contacts_consent_signature)
-      .toBe('5550100123:spouse_partner:1:1:1|other@example.com:tenant:1:1:0|third person:lender:1:0:0');
+      .toBe('5550100123:spouse_partner:1:1:1:unspecified|other@example.com:tenant:1:1:0:unspecified|third person:lender:1:0:0:unspecified');
     // Swapping the flags between two people changes the signature (flags are bound to identity, not position).
     const swapped = validPersisted();
     swapped.secondary_contacts = [entry('spouse_partner', false, false, 'Sample', '+15550100123'), entry('tenant', true, true, 'Other', null, 'other@example.com')];
@@ -1570,7 +1610,7 @@ describe('extraction compat adapter', () => {
     expect(flatView(swapped).secondary_contacts_consent_signature).not.toBe(flatView(original).secondary_contacts_consent_signature);
     // Singleton-only payloads are fingerprinted too; a phone change changes the signature.
     const single = (phone) => { const x = validPersisted(); x.secondary_contact = entry('spouse_partner', true, true, 'Sample', phone); return x; };
-    expect(flatView(single('+15550100123')).secondary_contacts_consent_signature).toBe('S=5550100123:spouse_partner:1:1:1');
+    expect(flatView(single('+15550100123')).secondary_contacts_consent_signature).toBe('S=5550100123:spouse_partner:1:1:1:unspecified');
     // The singleton is fingerprinted even when the array is populated: a
     // singleton phone drifting from secondary_contacts[0] changes the signature.
     const both = (singlePhone) => {
@@ -1605,6 +1645,20 @@ describe('extraction compat adapter', () => {
     arrayOnly.secondary_contacts = [entry('tenant', true, true, 'Sample Spouse', '+15550100123')];
     expect(flatView(arrayOnly).secondary_contact).toMatchObject({ phone: '+15550100123', wants_appointment_texts: true, on_site: true });
     expect(flatView(single('+15550100124')).secondary_contacts_consent_signature).not.toBe(flatView(single('+15550100123')).secondary_contacts_consent_signature);
+    // Schema 1.32.0: a scope-only change shows on each representation (the singleton's 'S=' entry and an array entry).
+    const scoped = (where, scope) => {
+      const x = both('+15550100123');
+      const target = where === 'single' ? x.secondary_contact : x.secondary_contacts[0];
+      target.appointment_texts_scope = scope;
+      return flatView(x).secondary_contacts_consent_signature;
+    };
+    for (const where of ['single', 'array']) {
+      expect(scoped(where, 'this_visit')).not.toBe(scoped(where, 'ongoing'));
+      expect(scoped(where, 'this_visit')).not.toBe(scoped(where, undefined));
+      expect(scoped(where, 'garbage')).toBe(scoped(where, undefined)); // normalized: both read "unspecified"
+    }
+    expect(scoped('single', 'this_visit')).toBe('S=5550100123:spouse_partner:1:1:1:this_visit|5550100123:spouse_partner:1:1:1:unspecified');
+    expect(scoped('array', 'this_visit')).toBe('S=5550100123:spouse_partner:1:1:1:unspecified|5550100123:spouse_partner:1:1:1:this_visit');
     // Flat singleton mirrors; the retired evidence/grounded mirrors and the transcript option are gone.
     const flat = flatView(single('+15550100123'));
     expect(flat).toMatchObject({ secondary_wants_appointment_texts: true, secondary_on_site: true });
