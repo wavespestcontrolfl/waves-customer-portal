@@ -56,7 +56,8 @@ function fakeDbh({ throws = {}, rows = ROWS } = {}) {
       return q;
     };
     q.whereRaw = (sql, bindings) => {
-      if (/sr\.scheduled_service_id IS DISTINCT FROM \?/.test(sql)) [state.notVisit] = bindings;
+      // The viewed day's visits of this customer (the stub's scheduled_services): the viewed one and a sibling.
+      if (/NOT IN \(\s*SELECT vd\.id FROM scheduled_services vd/.test(sql) && bindings[0] === 'cust-1') state.notVisit = ['svc-now', 'svc-sib'];
       return q;
     };
     q.limit = (n) => { state.limit = n; return q; };
@@ -67,7 +68,7 @@ function fakeDbh({ throws = {}, rows = ROWS } = {}) {
       // No bound given = every row: a test fails if the code ever drops the bound.
       return rows
         .filter((r) => !state.beforeDay || r.service_date < state.beforeDay)
-        .filter((r) => state.notVisit === undefined || r.scheduled_service_id !== state.notVisit)
+        .filter((r) => state.notVisit === undefined || !state.notVisit.includes(r.scheduled_service_id))
         .slice(0, state.limit ?? rows.length);
     };
     q.first = async () => undefined;
@@ -88,9 +89,10 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(visits.map((v) => v.date)).not.toContain('2026-11-26');
   });
 
-  test('the viewed visit\'s own record is left out even when it is dated earlier; a record with no schedule link stays', async () => {
+  test('records of the viewed day\'s visits are left out even when dated earlier (own and a sibling); a record with no schedule link stays', async () => {
     const rows = [
       rec('own', '2026-11-20', 'Pest Control Service', { scheduled_service_id: 'svc-now' }),
+      rec('sib', '2026-11-19', 'Lawn Care Treatment', { scheduled_service_id: 'svc-sib' }),
       rec('legacy', '2026-11-15', 'Pest Control Service', { scheduled_service_id: null }),
       ...ROWS,
     ];
