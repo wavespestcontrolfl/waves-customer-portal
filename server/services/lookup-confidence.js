@@ -19,6 +19,8 @@
  * enough to price" means.
  */
 
+const { normalizeConstruction, normalizeFoundation } = require('./pricing-engine/structural-facts');
+
 // Below this the lookup's own copy calls the read low-confidence.
 const LOOKUP_AI_CONFIDENCE_FLOOR = 60;
 
@@ -340,7 +342,9 @@ function structuralFactIsRecordBacked({ record, field }) {
   if (!known || !structuralFactIsTrustworthy({ record, field })) return false;
   // Field evidence from an accepted source is required. A value with none (an older cached record, a listing record) does not
   // back the price premium, and neither does an AI-reported "county" claim (model_inference), a listing or a generic web page.
-  return evidenceSourceIsAccepted(firstStructuralEvidence(record?._fieldEvidence?.[field]));
+  // The evidence must also name this value (evidenceNamesValue).
+  const evidence = firstStructuralEvidence(record?._fieldEvidence?.[field]);
+  return evidenceSourceIsAccepted(evidence) && evidenceNamesValue(field, evidence, value);
 }
 
 // The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
@@ -359,13 +363,27 @@ function firstStructuralEvidence(stored) {
   if (Array.isArray(stored)) return stored.find((e) => e && typeof e === 'object') || null;
   return stored && typeof stored === 'object' ? stored : null;
 }
+// Evidence vouches only for the value it carries. Evidence with no value (an older shape) names nothing to compare and passes; one
+// that names another value (the technician confirmed SLAB, the profile says RAISED) backs nothing, whatever its source or a stamp
+// says. Two texts name the same value when they match, or when the field's reader reads them the same ("Crawl space" = CRAWLSPACE).
+const FIELD_READERS = {
+  constructionMaterial: normalizeConstruction,
+  foundationType: normalizeFoundation,
+  squareFootage: (size) => (Number(size) > 0 ? Number(size) : undefined),
+};
+function evidenceNamesValue(field, evidence, value) {
+  if (evidence?.value == null) return true;
+  if (String(evidence.value).trim().toUpperCase() === String(value ?? '').trim().toUpperCase()) return true;
+  const reading = FIELD_READERS[field](evidence.value);
+  return reading !== undefined && reading === FIELD_READERS[field](value);
+}
 // A technician's saved confirmation of a value: the lookup cache's verified override writes the value and this evidence, and the
 // override is keyed by the requested address, so it describes the customer's home even when the record describes a neighbour's.
 // It vouches only for the value it carries.
-function technicianConfirmed(stored, value) {
+function technicianConfirmed(field, stored, value) {
   const evidence = firstStructuralEvidence(stored);
-  return evidence?.sourceType === 'verified' && evidence.fieldVerify !== true
-    && String(evidence.value ?? '').trim().toUpperCase() === String(value ?? '').trim().toUpperCase();
+  return evidence?.sourceType === 'verified' && evidence.fieldVerify !== true && evidence.value != null
+    && evidenceNamesValue(field, evidence, value);
 }
 const fieldEvidenceOf = (profile, field) => profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
 function profileStructuralFactIsTrusted(profile, { field, flag }) {
@@ -373,14 +391,14 @@ function profileStructuralFactIsTrusted(profile, { field, flag }) {
   // stale machine stamp from the lookup that was there before the edit. So is a technician's saved confirmation of the value.
   if (Array.isArray(profile?._manualFields) && profile._manualFields.includes(field)) return true;
   const stored = fieldEvidenceOf(profile, field);
-  if (technicianConfirmed(stored, profile?.[field])) return true;
+  if (technicianConfirmed(field, stored, profile?.[field])) return true;
   // A wrong-premise lookup (the geocoder snapped to a neighbouring parcel) makes every machine reading untrusted, stamp or not.
   if (hasWrongPremiseFlag(profile)) return false;
   if (profile?.[flag] === false) return false;
   const evidence = firstStructuralEvidence(stored);
   if (Array.isArray(stored) ? stored.some((e) => e?.fieldVerify) : evidence?.fieldVerify) return false;
-  // Evidence from a source outside the allowlist overrides a machine stamp true (the stamp was computed from that evidence).
-  if (evidence && !evidenceSourceIsAccepted(evidence)) return false;
+  // Evidence from a source outside the allowlist, or evidence naming another value, overrides a machine stamp true.
+  if (evidence && !(evidenceSourceIsAccepted(evidence) && evidenceNamesValue(field, evidence, profile?.[field]))) return false;
   if (profile?.[flag] === true) return true;
   return !!evidence;
 }
@@ -393,7 +411,7 @@ const WDO_STRUCTURAL_FIELDS = Object.freeze({
 // technician's saved confirmation of the living area the profile carries.
 function profileHomeSizeIsTrusted(profile) {
   if (!hasWrongPremiseFlag(profile) || profile?._homeSqFtManuallyEdited === true) return true;
-  return technicianConfirmed(fieldEvidenceOf(profile, 'squareFootage'), profile?.homeSqFt || profile?.squareFootage);
+  return technicianConfirmed('squareFootage', fieldEvidenceOf(profile, 'squareFootage'), profile?.homeSqFt || profile?.squareFootage);
 }
 // { constructionTrusted, foundationTrusted, homeSizeTrusted }: always all three, true or false. The pricer reads a construction or
 // foundation verdict only when it is true, and the size verdict only when it is false.

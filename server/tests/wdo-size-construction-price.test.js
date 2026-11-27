@@ -629,8 +629,9 @@ describe('MIXED construction moves no termite, pest or inspection-time price (it
   const { calcConstructionModifier, calcTermiteConstructionMult, calcWDOTimeMult } = require('../routes/property-lookup-v2')._private;
   const MAIN = 'WOOD_FRAME'; // what a county "FRAME STUCCO" read as on main
 
-  test('a county FRAME STUCCO home reads MIXED, and every consumer prices MIXED exactly as it priced WOOD_FRAME', () => {
-    expect(normalizeCountyConstruction('FRAME STUCCO')).toBe('MIXED');
+  test('a county FRAME STUCCO home still reads WOOD_FRAME, and every consumer prices MIXED exactly as WOOD_FRAME', () => {
+    expect(normalizeCountyConstruction('FRAME STUCCO')).toBe(MAIN);
+    expect(normalizeCountyConstruction('CONCRETE BLOCK/FRAME')).toBe('MIXED');
     expect(deriveModifiers({ constructionMaterial: 'MIXED' }).termiteConstructionMult).toBe(deriveModifiers({ constructionMaterial: MAIN }).termiteConstructionMult);
     expect(deriveModifiers({ constructionMaterial: 'MIXED' }).wdoConstructionMult).toBe(1.15);
     expect(calcTermiteConstructionMult('MIXED')).toBe(calcTermiteConstructionMult(MAIN));
@@ -770,7 +771,8 @@ describe('one shared normalizer at every entry', () => {
 
   test('county ingestion: "steel frame" is metal, so the quote is block + the staff note', () => {
     expect(normalizeCountyConstruction('STEEL FRAME')).toBe('METAL');
-    expect(normalizeCountyConstruction('FRAME STUCCO')).toBe('MIXED');
+    expect(normalizeCountyConstruction('FRAME STUCCO')).toBe('WOOD_FRAME');
+    expect(normalizeCountyConstruction('STUCCO')).toBeNull();
     expect(normalizeCountyConstruction('CONCRETE BLOCK')).toBe('CBS');
     expect(normalizeCountyConstruction('CMU')).toBe('CBS');
     expect(normalizeCountyConstruction('WOOD FRAME')).toBe('WOOD_FRAME');
@@ -851,5 +853,86 @@ describe('public price list range comes from the table', () => {
     const row = computePublicPricingRanges({ refresh: true }).services.find((r) => r.key === 'wdo_inspection');
     expect(row.low).toBe(Math.min(...cells));
     expect(row.high).toBe(Math.max(...cells));
+  });
+});
+
+describe('no overcharge from hedged text, from evidence for another value, or from a price the server did not set', () => {
+  const { normalizeConstruction, normalizeFoundation, readCountyConstruction } = require('../services/pricing-engine/structural-facts');
+  const { structuralTrustVerdicts, structuralFactIsRecordBacked } = require('../services/lookup-confidence');
+
+  test('a premium needs text that affirms it: hedged or qualified text reads unknown and keeps the $175 block price', () => {
+    for (const text of ['crawl space excluded', 'may have a crawl space', 'has a crawl space', 'crawl or slab', 'crawl space per owner', 'could be raised', 'crawl space is a slab']) {
+      expect([text, normalizeFoundation(text)]).toEqual([text, undefined]);
+    }
+    for (const text of ['wood frame excluded', 'wood frame per neighbour', 'frame stucco avg']) expect([text, normalizeConstruction(text)]).toEqual([text, undefined]);
+    // The reported cases, typed in as the WDO option for a 3,000 sq ft block home: the block slab cell ($175), not the crawl column ($225).
+    for (const foundationType of ['crawl space excluded', 'may have a crawl space']) {
+      expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { foundationType } } })).toBe(175);
+    }
+    expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { constructionType: 'wood frame excluded' } } })).toBe(175);
+    // A technician entering one saves nothing for the field (there is no reading to keep).
+    expect(require('../services/property-lookup/lookup-cache').sanitizeVerifiedValue('foundationType', 'may have a crawl space')).toBeUndefined();
+    // Plain descriptor text still affirms the premium.
+    for (const [text, reading] of [
+      ['crawl space', 'CRAWLSPACE'], ['raised on piers', 'RAISED'], ['pier and beam', 'RAISED'], ['stem wall', 'RAISED'], ['Concrete Pilings', 'RAISED'],
+      ['slab and crawl space', 'CRAWLSPACE'], ['vented crawl space with vapor barrier', 'CRAWLSPACE'], ['2 story on stilts', 'RAISED'],
+    ]) expect([text, normalizeFoundation(text)]).toEqual([text, reading]);
+    for (const [text, reading] of [
+      ['wood frame', 'WOOD_FRAME'], ['Frame/Stucco', 'MIXED'], ['brick veneer over frame', 'MIXED'], ['CBS first floor, frame second floor', 'MIXED'],
+      ['frame w/ stucco', 'MIXED'], ['hardie board over frame', 'WOOD_FRAME'],
+    ]) expect([text, normalizeConstruction(text)]).toEqual([text, reading]);
+    expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { foundationType: 'raised on piers' } } })).toBe(225);
+    // A county code is the appraiser's own word for the wall: it reads in full, as before ("AVG" is no structural term, and
+    // stucco is only the finish there).
+    expect(readCountyConstruction('FRAME STUCCO AVG')).toBe('WOOD_FRAME');
+    expect(require('../services/property-lookup/ai-property-lookup')._private.normalizeCountyConstruction('FRAME STUCCO AVG')).toBe('WOOD_FRAME');
+  });
+
+  test("field evidence vouches only for the value it names: a profile reading RAISED beside a technician's SLAB prices $175, not $225", () => {
+    const profile = {
+      homeSqFt: 3000, squareFootage: 3000, lotSqFt: 9000, address: '1 Test St', constructionMaterial: 'CBS', foundationType: 'RAISED',
+      constructionTrusted: true, foundationTrusted: true,
+      fieldEvidence: { constructionMaterial: { sourceType: 'county', value: 'CBS' }, foundationType: { sourceType: 'verified', value: 'SLAB', fieldVerify: false } },
+    };
+    expect(structuralTrustVerdicts(profile)).toMatchObject({ constructionTrusted: true, foundationTrusted: false });
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const line = wdoLine(generateEstimate(translateV2CallToV1Input(profile, ['WDO'], { urgency: 'ROUTINE' })));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeTruthy();
+    // County evidence for block walls backs no wood frame reading, on the profile or on the record.
+    expect(structuralTrustVerdicts({ ...profile, constructionMaterial: 'WOOD_FRAME' }).constructionTrusted).toBe(false);
+    const countyBlock = { constructionMaterial: { sourceType: 'county', value: 'CBS' } };
+    expect(structuralFactIsRecordBacked({ record: { constructionMaterial: 'WOOD_FRAME', _fieldEvidence: countyBlock }, field: 'constructionMaterial' })).toBe(false);
+    expect(structuralFactIsRecordBacked({ record: { constructionMaterial: 'CBS', _fieldEvidence: countyBlock }, field: 'constructionMaterial' })).toBe(true);
+    // The same value written another way still counts; evidence with no value names nothing to compare.
+    expect(structuralTrustVerdicts({ ...profile, foundationType: 'CRAWLSPACE', fieldEvidence: { foundationType: { sourceType: 'county', value: 'Crawl space' } } }).foundationTrusted).toBe(true);
+    expect(structuralFactIsRecordBacked({ record: { foundationType: 'RAISED', _fieldEvidence: { foundationType: { sourceType: 'county' } } }, field: 'foundationType' })).toBe(true);
+  });
+
+  test('a save the server cannot price may not carry a WDO row: the browser has no WDO price, so a $250 row there is an old one', () => {
+    const { assertSpecialtyClientFallbackSave: assertFallback } = require('../services/admin-estimate-persistence');
+    const refused = (data) => {
+      let error = null;
+      try { assertFallback(data); } catch (err) { error = err; }
+      expect(error && error.statusCode).toBe(409);
+      expect(error.message).toMatch(/WDO inspection price the browser cannot set/);
+    };
+    // The reported case: a staff revision carrying the old $250 preview, in each saved shape.
+    refused({ result: { lineItems: [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 250 }] } });
+    refused({ result: { oneTime: { items: [{ name: 'WDO Inspection', price: 250 }] } } });
+    refused({ engineResult: { lineItems: [{ service: 'wdo_inspection', price: 250 }] } });
+    refused({ sendSnapshot: { pricingBundle: { oneTimeBreakdown: { items: [{ label: 'Wood-Destroying Organism Inspection', price: 250 }] } } } });
+    refused({ result: { results: { wdo: { price: 250 } } } });
+    // The server's own result with a WDO line is refused as well; one with none passes, stamp key and all.
+    const withWdo = estimate({ homeSqFt: 2000, constructionMaterial: 'CBS' });
+    refused({ result: mapV1ToLegacyShape(withWdo), engineResult: withWdo });
+    for (const services of [{ pest: { frequency: 'quarterly' } }, { pest: { frequency: 'quarterly' }, termiteBait: {} }, { treeShrub: { tier: 'standard' } }]) {
+      const raw = generateEstimate(baseInput({ services }));
+      expect(raw.lineItems.length).toBeGreaterThan(0);
+      expect(raw.pricingMetadata.legacyWdoFlat).toBe(false);
+      expect(() => assertFallback({ result: mapV1ToLegacyShape(raw), engineResult: raw })).not.toThrow();
+    }
+    // A WDO request that sits in the inputs only is not a row.
+    expect(() => assertFallback({ inputs: { services: { wdo: {} } }, result: { lineItems: [] } })).not.toThrow();
   });
 });

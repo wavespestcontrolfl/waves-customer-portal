@@ -19,7 +19,7 @@
  */
 
 const logger = require('../logger');
-const { normalizeConstruction } = require('../pricing-engine/structural-facts');
+const { readCountyConstruction } = require('../pricing-engine/structural-facts');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive, lookupBusinessIdentityLive, commercialSuiteSizingLive } = require('../../config/feature-gates');
@@ -4984,10 +4984,10 @@ function normalizeManateeConstruction(value) {
   return normalizeCountyConstruction(value);
 }
 
-// County exterior-wall words go through the one shared normalizer (pricing-engine/structural-facts.js): "steel frame" is metal,
-// never wood frame, and wood + masonry is mixed.
+// County exterior-wall codes go through the shared county reader (pricing-engine/structural-facts.js): "steel frame" is metal,
+// never wood frame, wood + masonry is mixed, and an appraiser's code reads in full (it names what the wall is).
 function normalizeCountyConstruction(value) {
-  return normalizeConstruction(value) || null;
+  return readCountyConstruction(value);
 }
 
 function normalizeManateeRoof(material, type) {

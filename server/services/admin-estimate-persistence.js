@@ -1583,10 +1583,10 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
-  // The server could not price this save, so the browser's price stands. The browser prices the flat top of the pest table and
-  // mirrors none of the specialty rules (the $349 bed bug rooms, the $85 mosquito acres, the wasp levels). So the save may not name
-  // a building above 5,500 sq ft (assertPestAboveTableClientFallbackSave) or carry a bed bug, mosquito or wasp row
-  // (assertSpecialtyClientFallbackSave), and its rule stamps are the server's. A staff revision that the server CAN price re-prices
+  // The server could not price this save, so the browser's price stands. The browser prices the flat top of the pest table,
+  // mirrors none of the specialty rules (the $349 bed bug rooms, the $85 mosquito acres, the wasp levels) and has no WDO price.
+  // So the save may not name a building above 5,500 sq ft (assertPestAboveTableClientFallbackSave) or carry a bed bug, mosquito,
+  // wasp or WDO inspection row (assertSpecialtyClientFallbackSave), and its rule stamps are the server's. A staff revision that the server CAN price re-prices
   // on the CURRENT rules by design (owner 2026-09-26 ruling, the same decision as #8626, #8631 and both of these rules): the stored
   // stamps are not wired into that path, so a delivered wasp quote revised by staff goes $250 -> $275. A customer replay of the sent
   // quote (replaySavedPricingKnobs) keeps the sent price. All four sit AFTER the log lines above: a refused save commits nothing, so
@@ -2158,14 +2158,16 @@ function stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateD
   }
 }
 
-// Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only). A save the server
-// could not price (the CLIENT_FALLBACK authority: no replayable engine input, or an engine error) keeps the BROWSER's price, and the
-// browser mirrors none of these rules (the $349 rooms, the $85 acres, the wasp levels). So such a save is refused (409, reload and
-// let the server price it) when it NAMES bed bug, mosquito, wasp, hornet, yellow jacket or a stinging insect anywhere outside its
+// Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only), and the WDO
+// inspection by home size and construction (2026-11-26, new quotes only). A save the server could not price (the CLIENT_FALLBACK
+// authority: no replayable engine input, or an engine error) keeps the BROWSER's price, and the browser mirrors none of these rules
+// (the $349 rooms, the $85 acres, the wasp levels) and has no WDO price at all (a WDO row there is an older server price, such as
+// the $250 flat). So such a save is refused (409, reload and let the server price it) when it NAMES bed bug, mosquito, wasp,
+// hornet, yellow jacket, a stinging insect or a WDO (wood-destroying organism) inspection anywhere outside its
 // inputs: priced or $0, in any result container or shape, whatever stamp it posts, and whether or not it changed (no
 // unchanged-resave exception, so nothing to compare). The check sits where the pricing authority is decided, not behind any
 // browser-shape test.
-const SPECIALTY_ROW_WORDS = /bed[ _-]?bug|mosquito|wasp|hornet|yellow[ _-]?jacket|stinging/i;
+const SPECIALTY_ROW_WORDS = /bed[ _-]?bug|mosquito|wasp|hornet|yellow[ _-]?jacket|stinging|\bwdo|wood[ _-]?destroying/i;
 const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
 // True when the saved blob names one of the three anywhere outside its input carriers, in `result`, `engineResult`, the bare data or
 // the send snapshot. A row is known by whatever names it: its service key or its name under ANY field (service, serviceKey,
@@ -2196,7 +2198,7 @@ function saveHoldsSpecialtyRow(estimateData) {
 
 function assertSpecialtyClientFallbackSave(estimateData) {
   if (!isPlainRecord(estimateData) || !saveHoldsSpecialtyRow(estimateData)) return;
-  throw errorWithStatus('This estimate has a bed bug, mosquito or wasp price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
+  throw errorWithStatus('This estimate has a bed bug, mosquito, wasp or WDO inspection price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
 }
 // The rule evidence of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's stamp and
 // its per-service list (a quote sold before the rule stays on it), a first save is new. A save that passed the check above holds
