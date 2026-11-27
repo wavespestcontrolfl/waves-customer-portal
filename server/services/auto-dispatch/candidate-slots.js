@@ -617,7 +617,16 @@ async function filterAndScoreSharedModelCandidates(service, geo, candidates, ctx
     }
     const key = `${cand.technician_id}|${cand.date}`;
     if (!stopsByTechDay.has(key)) stopsByTechDay.set(key, stopsForTechDay(dayStops, cand.technician_id, cand.date));
-    kept.push(scoreOnSharedModel(service, geo, cand, stopsByTechDay.get(key), siblings, placement, homeFor(ctx, cand.technician_id)));
+    const dayStopList = stopsByTechDay.get(key);
+    // A candidate certified only via mid-route insertion (cand.route_order_ids)
+    // must still match the day's stops cleanly; if an unassigned stop or
+    // between-read edit invalidated its order, drop it rather than keeping an
+    // unverified append-at-999 slot.
+    if (Array.isArray(cand.route_order_ids) && !isSamePlacement(service, cand)
+      && !certifiedRouteOrderIds(service, cand, dayStopList, siblings)) {
+      continue;
+    }
+    kept.push(scoreOnSharedModel(service, geo, cand, dayStopList, siblings, placement, homeFor(ctx, cand.technician_id)));
   }
   return kept;
 }

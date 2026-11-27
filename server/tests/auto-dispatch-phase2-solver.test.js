@@ -119,6 +119,10 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
       const withUnassigned = [...stops, { id: 'u1', technician_id: null, geo: SOUTH, startMin: 600, window_start: '10:00', route_order: null }];
       const unassignedScored = scoreOnSharedModel(svc, NEAR_NORTH, shiftedCand, withUnassigned, [], { targets: [] });
       expect(unassignedScored.route_order_ids).toBeUndefined();
+      // Removed stop lingering in route_order_ids (bijection mismatch) also rejects certification.
+      const staleOrderCand = { ...shiftedCand, route_order_ids: ['s1', 'removed-stop', '__candidate__', 's2'] };
+      const staleScored = scoreOnSharedModel(svc, NEAR_NORTH, staleOrderCand, stops, [], { targets: [] });
+      expect(staleScored.route_order_ids).toBeUndefined();
     } finally {
       if (prevAdmin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdmin;

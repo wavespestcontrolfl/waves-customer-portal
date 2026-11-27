@@ -676,12 +676,26 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       expect(out.applied).toBe(cand2);
       expect(SmartRebooker.reschedule.mock.calls[0][5].placeInRoute).toBe(true);
       expect(SmartRebooker.reschedule.mock.calls[0][5].placeInRouteOpts).toEqual({
-        startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p1', nextId: 'n1' },
+        autoDispatchPlace: true, startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p1', nextId: 'n1' },
       });
       expect(SmartRebooker.reschedule.mock.calls[1][5].placeInRoute).toBe(true);
       expect(SmartRebooker.reschedule.mock.calls[1][5].placeInRouteOpts).toEqual({
-        startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p2', nextId: null },
+        autoDispatchPlace: true, startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p2', nextId: null },
       });
+
+      // Rescoring after ROUTE_ORDER_CHANGED allows retrying the SAME slot when refreshed with new neighbors.
+      SmartRebooker.reschedule.mockReset();
+      const cand1Refreshed = { ...cand1, route_order_ids: ['p1', '__candidate__', 'n2'] };
+      const queue2 = [row, row, { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+      db.mockImplementation(() => queue2.shift());
+      SmartRebooker.reschedule
+        .mockRejectedValueOnce(Object.assign(new Error('neighbors changed'), { code: 'ROUTE_ORDER_CHANGED', statusCode: 409 }))
+        .mockResolvedValueOnce({ success: true, landedStatus: 'confirmed' });
+      const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [cand1Refreshed] });
+      const out2 = await applyAutoDispatchMove(SERVICE, cand1, 'run1', { departureMinutes: 450, rescore });
+      expect(out2.ok).toBe(true);
+      expect(out2.attempts).toBe(2);
+      expect(out2.applied).toBe(cand1Refreshed);
     } finally {
       if (prevShared === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
       else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = prevShared;

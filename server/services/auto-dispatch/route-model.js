@@ -87,8 +87,16 @@ function stopRankIn(stop, rank) {
 function routeOrderCovers(stops, routeOrderIds) {
   if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return false;
   const rank = new Map(routeOrderIds.map((id, i) => [String(id), i]));
-  if (!rank.has('__candidate__')) return false;
-  return physicalStops(stops).every((s) => stopRankIn(s, rank) != null);
+  if (rank.size !== routeOrderIds.length || !rank.has('__candidate__')) return false;
+  const phys = physicalStops(stops);
+  if (routeOrderIds.length !== phys.length + 1) return false;
+  const matched = new Set();
+  for (const s of phys) {
+    const r = stopRankIn(s, rank);
+    if (r == null || matched.has(r)) return false;
+    matched.add(r);
+  }
+  return matched.size === phys.length;
 }
 
 function insertByRouteOrder(sequence, unit, routeOrderIds) {

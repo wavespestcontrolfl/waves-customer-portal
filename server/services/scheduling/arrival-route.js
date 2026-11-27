@@ -8,7 +8,7 @@ const db = require('../../models/db');
 const logger = require('../logger');
 const RouteOptimizer = require('../route-optimizer');
 const { loadTechStartPoint } = require('./tech-start-point');
-const { gateEnvValue, multiTechConfirmLive, techShiftHoursLive } = require('../../config/feature-gates');
+const { gateEnvValue, multiTechConfirmLive, techShiftHoursLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { savepointScope } = require('../../utils/savepoint-read');
 const { etDateString, etParts } = require('../../utils/datetime-et');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
@@ -1406,11 +1406,11 @@ function verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours 
   }
 }
 
-async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false, startPoints = false, vanDepartureMin, expectedNeighbours = null } = {}) {
+async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false, autoDispatchPlace = false, startPoints = false, vanDepartureMin, expectedNeighbours = null } = {}) {
   if (capacityEnabled() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
-    return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, startPoints, vanDepartureMin, expectedNeighbours }));
+    return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, autoDispatchPlace, startPoints, vanDepartureMin, expectedNeighbours }));
   } catch (error) {
     if (expectedNeighbours || (error && error.code === 'ROUTE_ORDER_CHANGED')) throw error;
     logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
@@ -1456,7 +1456,33 @@ async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, t
   return order;
 }
 
-async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, startPoints = false, vanDepartureMin, expectedNeighbours = null }) {
+function savepointContextOptions({ autoDispatchPlace, startPoints, vanDepartureMin }) {
+  if (autoDispatchPlace === true) {
+    return { preserveCapacity: true, planningMinutes: schedulingPlanMinutesOnly(), startPoints: true, vanDepartureMin };
+  }
+  return { startPoints, vanDepartureMin };
+}
+
+async function evaluatePlacementInSavepoint(sp, { context, row, date, autoDispatchPlace, lateDays }) {
+  const windowStart = String(row.window_start).slice(0, 5);
+  const windowEnd = row.window_end ? String(row.window_end).slice(0, 5) : undefined;
+  if (autoDispatchPlace === true) {
+    // Mirror find-time.js findCapacitySlots (arrivalSearch + arrivalInsert):
+    // same capacity blockers/grouping, planning minutes, van departure,
+    // 15-minute insertion margin, and technician shift-end check.
+    const shiftEndMin = await pickedShiftEnd(context, { conn: sp, date, windowStart, windowEnd });
+    return evaluateArrivalPlacement({ ...context, insertTarget: true }, {
+      windowStart, windowEnd, bufferMinutes: 0, allowInsertion: true, insertionMargin: true,
+      ...(shiftEndMin != null ? { shiftEndMin } : {}),
+    });
+  }
+  return evaluateArrivalPlacement(context, {
+    windowStart, windowEnd, place: true,
+    ...(lateDays === true ? { lateDays: true } : {}),
+  });
+}
+
+async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, autoDispatchPlace = false, startPoints = false, vanDepartureMin, expectedNeighbours = null }) {
   const row = await sp('scheduled_services').where({ id: serviceId })
     .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
   const date = row ? dateOnly(row.scheduled_date) : '';
@@ -1468,21 +1494,16 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, st
   if (!row.technician_id) return refuse('unassigned');
   if (!row.window_start || !date) return refuse('untimed');
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
-  // From the office by default (staff saves), or from the technician's start
-  // point + van departure when auto-dispatch's arrival search certified from
-  // there (startPoints / vanDepartureMin).
-  const context = await loadSavedRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id, startPoints, vanDepartureMin });
+  // From the office by default (staff saves), or under the exact arrival-search
+  // route rules when auto-dispatch places a certified standalone move.
+  const context = await loadSavedRouteContext({
+    conn: sp, serviceId, date, technicianId: row.technician_id,
+    ...savepointContextOptions({ autoDispatchPlace, startPoints, vanDepartureMin }),
+  });
   if (!context) return refuse('no_context');
   if (context.grouped) return refuse('grouped');
   if (staffSave === true) context.travel = staffSaveTravel(date);
-  // `lateDays` (the staff saves' callers only): the save numbers the day in
-  // the same bounded late-day order its picker offered the hour on. The automatic writers never pass it.
-  // Non-capacity resolvePlacementOrigin reads `departureMin` (not context.vanDepartureMin),
-  // so pass vanDepartureMin through as departureMin when auto-dispatch certified with one.
-  const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
-    windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
-    ...(Number.isFinite(vanDepartureMin) ? { departureMin: vanDepartureMin } : {}),
-    ...(lateDays === true ? { lateDays: true } : {}) });
+  const fit = await evaluatePlacementInSavepoint(sp, { context, row, date, autoDispatchPlace, lateDays });
   // A refused check still numbers the visit by its arrival time for ordinary
   // callers, but when auto-dispatch requires verified neighbors, an infeasible
   // commit-time check must abort and roll back rather than fall back to clock order.
