@@ -92,6 +92,9 @@ function screenOk(text, codes) {
   return moneyFree(text) && require('./tech-visit-texts').screenBodyForTechnician(text, { codes }) === 'ok';
 }
 
+// An office-only message (damage we caused, money, a complaint, a missed visit) is the office's: nothing of it shows.
+const officeOnly = (text) => Boolean(require('./reservice-office-only').officeOnlyReason(text));
+
 // Run on the FULL text, before the 280-character cut (a price or a link past the cut must not slip through because the cut
 // hid it): an item that fails is dropped.
 function entry(kind, at, text, extra = {}, codes = null) {
@@ -149,7 +152,7 @@ async function bookingNoteItems(svc, dbh, codes) {
   const row = await typedBookingRow(svc, dbh);
   if (!row) return [];
   const text = require('./reservice-asks').selfBookedNoteText(svc.notes, row.customer_notes);
-  return text ? [entry('booking_note', svc.created_at, text, {}, codes)] : [];
+  return text && !officeOnly(text) ? [entry('booking_note', svc.created_at, text, {}, codes)] : [];
 }
 
 // Does this account provably have ONE premises? The re-service asks' own fail-closed proof; a failed read is "no".
@@ -318,7 +321,7 @@ function requestRowText(row, codes = null) {
   const subject = compact(row.subject);
   if (row.source || metaOf(row)?.writer === 'portal_flow') return subject;
   const description = compact(row.description);
-  if (!description || !screenOk(description, codes)) return '';
+  if (!description || !screenOk(description, codes) || officeOnly(description)) return '';
   return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
 }
 
@@ -341,7 +344,7 @@ async function portalItems(svc, dbh, singleSoon, codes) {
       if (row.source === RESCHEDULE_SOURCE) {
         const revised = rescheduleNote(row.description, row.created_at);
         // `appointment` marks a note that belongs to this one appointment, so a grouped stop keeps it with its service.
-        return revised ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }, codes) : null;
+        return revised && !officeOnly(revised.note) ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }, codes) : null;
       }
       return entry('portal_request', row.created_at, requestRowText(row, codes), { source: 'portal' }, codes);
     })
@@ -372,7 +375,10 @@ function messageWindow(svc, now = new Date()) {
   return { since, until: dayEnd < now ? dayEnd : now };
 }
 
-const safeMessage = (text, codes = null) => screenOk(text, codes) && !require('./reservice-office-only').officeOnlyReason(text);
+// A message with no letters after normalization (digits, spaces, punctuation: "48", "1", "4 5 1 1") is never shown, whatever came
+// before it or wherever the read ends: it can be the tail of a code or a card number whose first part is held or unread.
+const hasLetters = (text) => /\p{L}/u.test(String(text).normalize('NFKC'));
+const safeMessage = (text, codes = null) => hasLetters(text) && screenOk(text, codes) && !officeOnly(text);
 
 async function portalMessageItems(svc, dbh, singleSoon, codes) {
   if (!svc?.customer_id) return [];
@@ -392,10 +398,7 @@ async function portalMessageItems(svc, dbh, singleSoon, codes) {
   const sequenceHeld = require('./tech-visit-texts').sequenceHeldIds(
     (rows || []).map((row) => ({ id: row.id, direction: 'inbound', message_body: row.body, created_at: row.created_at })),
   );
-  // A full read means older messages may sit past it: the oldest fetched one could be the reply to a held message that was not
-  // read, so it is never displayed (rows are newest first).
-  const shown = (rows || []).length >= PORTAL_READ_LIMIT ? rows.slice(0, -1) : rows || [];
-  return shown
+  return (rows || [])
     .filter((row) => !sequenceHeld.has(row.id))
     .filter((row) => compact(row.body) && safeMessage(compact(row.body), codes))
     .slice(0, PORTAL_ROW_LIMIT)

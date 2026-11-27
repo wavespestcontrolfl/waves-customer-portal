@@ -786,24 +786,54 @@ describe('customerAskedFacts: portal messages are screened as a sequence, like t
     expect(JSON.stringify(facts)).not.toMatch(/verification|"7"/);
   });
 
-  test('an ordinary short reply after an ordinary message is not held', async () => {
-    const messages = [{ body: '9', created_at: at(2) }, { body: 'How many techs will come', created_at: at(1) }];
-    expect((await customerAskedFacts(VISIT, fakeDbh({ messages }))).items.map((i) => i.text).sort()).toEqual(['9', 'How many techs will come']);
+  test('an ordinary word reply after an ordinary message is not held; a bare number never shows', async () => {
+    const messages = [{ body: 'Thanks', created_at: at(3) }, { body: '9', created_at: at(2) }, { body: 'How many techs will come', created_at: at(1) }];
+    expect((await customerAskedFacts(VISIT, fakeDbh({ messages }))).items.map((i) => i.text).sort()).toEqual(['How many techs will come', 'Thanks']);
   });
 });
 
-describe('customerAskedFacts: a full portal-message read never displays its oldest row', () => {
+describe('customerAskedFacts: a portal message with no letters never shows, at either cutoff', () => {
   const VISIT = { ...SVC, scheduled_date: '2026-11-27' };
   beforeEach(() => { process.env.GATE_PORTAL_MESSAGES = 'true'; });
   afterAll(() => { delete process.env.GATE_PORTAL_MESSAGES; });
-  const held = (n) => ({ body: `see photos.example.dev/${n}`, created_at: `2026-11-25T${String(10 + (n % 10)).padStart(2, '0')}:00:00.000Z` });
+  const ordinary = (n) => ({ body: `Gate is open ${'a'.repeat(n)}`, created_at: `2026-11-25T1${n % 10}:00:00.000Z` });
 
-  test('with 40 rows read, the oldest (possibly the reply to an unread held message) is not shown; with fewer it is', async () => {
-    const oldest = { body: 'Please come after noon', created_at: '2026-11-21T10:00:00.000Z' };
-    const full = [...Array.from({ length: 39 }, (_, n) => held(n)), oldest];
-    expect(await customerAskedFacts(VISIT, fakeDbh({ messages: full }))).toBeNull();
-    const short = [...Array.from({ length: 38 }, (_, n) => held(n)), oldest];
-    expect((await customerAskedFacts(VISIT, fakeDbh({ messages: short }))).items.map((i) => i.text)).toEqual(['Please come after noon']);
+  test.each(['48', '1', ' 4 5 ', '4-8', '１２', '(48).', '٤٨'])('"%s" is dropped whatever surrounds it', async (body) => {
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: [ordinary(1), { body, created_at: '2026-11-21T10:00:00.000Z' }] }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Gate is open a']);
+  });
+
+  test('the credential prompt just outside the 7-day window: its "48" and "1" inside show nothing', async () => {
+    // The window query never returns the prompt; only its digit replies are inside.
+    const messages = [{ body: '1', created_at: '2026-11-20T10:05:00.000Z' }, { body: '48', created_at: '2026-11-20T10:01:00.000Z' }];
+    expect(await customerAskedFacts(VISIT, fakeDbh({ messages }))).toBeNull();
+  });
+
+  test('the credential prompt just outside the 40-row read: the oldest rows "48" and "1" show nothing', async () => {
+    const recent = Array.from({ length: 38 }, (_, n) => ({ body: `see photos.example.dev/${n}`, created_at: `2026-11-26T${String(10 + (n % 10)).padStart(2, '0')}:00:00.000Z` }));
+    const messages = [...recent, { body: '1', created_at: '2026-11-21T10:05:00.000Z' }, { body: '48', created_at: '2026-11-21T10:01:00.000Z' }];
+    expect(messages).toHaveLength(40);
+    expect(await customerAskedFacts(VISIT, fakeDbh({ messages }))).toBeNull();
+  });
+
+  test('a message with letters and a short number stays', async () => {
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: [{ body: 'Come at 9 please', created_at: '2026-11-25T10:00:00.000Z' }] }));
+    expect(facts.items).toHaveLength(1);
+  });
+});
+
+describe('customerAskedFacts: office-only words show nothing, in every free-text kind', () => {
+  const OFFICE = 'The tech killed my dog\'s favorite plants with the spray';
+  test('a typed request, a booking note and a reschedule note that are office-only are dropped', async () => {
+    const row = formRow({ subject: OFFICE, description: OFFICE, metadata: { writer: 'portal_form' } });
+    const resched = formRow({ subject: 'Reschedule', source: 'customer_portal_reschedule', description: `Appointment svc-1: Pest on 2026-12-01\nCustomer notes: ${OFFICE}` });
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: `Self-booked. Notes: ${OFFICE}` };
+    expect(await customerAskedFacts(svc, fakeDbh({ rows: [row, resched], booking: { customer_notes: OFFICE, source: 'direct' } }))).toBeNull();
+  });
+
+  test('ordinary words in the same kinds still show', async () => {
+    const row = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen', metadata: { writer: 'portal_form' } });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).items).toHaveLength(1);
   });
 });
 
