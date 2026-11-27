@@ -2745,6 +2745,7 @@ describe('customer-provided facts stay out of systemInstruction', () => {
       const refereeCall = dispatch.mock.calls.find(([, payload]) => String(payload?.promptVersion).endsWith(':referee'));
       expect(refereeCall).toBeDefined();
       const [, refereePayload] = refereeCall;
+      expect(String(refereePayload.system || '')).toContain('third, independent look');
       expect(String(refereePayload.system || '')).not.toContain(injectedName);
       expect(String(refereePayload.text || '')).toContain(injectedName);
     } finally {
