@@ -5265,9 +5265,8 @@ router.put('/:id/contact-notification-prefs/:slot', requireAdmin, async (req, re
 });
 
 // GET / PUT /api/admin/customers/:id/home-note   body { body, expectedUpdatedAt }   (admin only; a technician is 403)
-// The office's way to write "About this home" (services/home-note.js) for a home with no visit open. The same one note
-// the technician reads at the top of the Visit Brief. A customer with several homes is 422: that note is added from a
-// visit at the home. A stale save is 409 with the current note. Staff only: never in a customer or token payload.
+// The office's way to write "About this home" (services/home-note.js) with no visit open. The same one note per customer
+// the technician reads at the top of the Visit Brief. A stale save is 409 with the current note. Staff only: never in a customer or token payload.
 const homeNoteCustomer = async (req, res) => {
   const id = String(req.params.id);
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
@@ -5282,7 +5281,7 @@ router.get('/:id/home-note', requireAdmin, async (req, res, next) => {
   try {
     const HomeNote = require('../services/home-note');
     const row = await homeNoteCustomer(req, res);
-    if (row) HomeNote.sendHomeNote(res, await HomeNote.readHomeNote(row, { office: true }));
+    if (row) HomeNote.sendHomeNote(res, await HomeNote.readHomeNote(row));
   } catch (err) { next(err); }
 });
 router.put('/:id/home-note', requireAdmin, require('../services/home-note').homeNoteLimiter, async (req, res, next) => {
@@ -5290,7 +5289,7 @@ router.put('/:id/home-note', requireAdmin, require('../services/home-note').home
     const HomeNote = require('../services/home-note');
     const row = await homeNoteCustomer(req, res);
     if (!row) return;
-    HomeNote.sendHomeNote(res, await HomeNote.saveHomeNote(row, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { office: true }));
+    HomeNote.sendHomeNote(res, await HomeNote.saveHomeNote(row, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }));
   } catch (err) { next(err); }
 });
 

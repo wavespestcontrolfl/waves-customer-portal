@@ -2276,6 +2276,31 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
   return discarded.length;
 }
 
+// home_notes (UNIQUE customer_id, "About this home"): staff-typed text must survive a merge. When both profiles have a
+// note the kept customer's row becomes "<kept body>\n(merged) <archived body>" and the archived row goes; a note only the
+// archived profile had is simply repointed (the sweep's own update), one only the kept profile has never reaches here. The
+// table allows 2100 characters (two full 1000-character notes plus the 10-character joint), so two saved notes always fit; a
+// chain of merges that would pass it aborts the merge (nothing is cut) so a person shortens one note first. The journal
+// lists this table in collision_handlers, so the revert endpoint refuses the merge: undo cannot split a joined note. No
+// body is read into any log or journal field; only the table name is recorded.
+const HOME_NOTE_JOINT = '\n(merged) ';
+const HOME_NOTE_TABLE_MAX = 2100;
+async function mergeHomeNotes(trx, table, column, winnerId, loserId) {
+  const rows = new Map();
+  for (const id of [winnerId, loserId].sort()) rows.set(id, await trx(table).where(column, id).forUpdate().first());
+  const loserRow = rows.get(loserId);
+  const winnerRow = rows.get(winnerId);
+  if (!loserRow) return 'no loser note';
+  if (!winnerRow) return trx(table).where(column, loserId).update({ [column]: winnerId });
+  const joined = `${winnerRow.body}${HOME_NOTE_JOINT}${loserRow.body}`;
+  if (joined.length > HOME_NOTE_TABLE_MAX) {
+    throw new Error(`home notes are too long to join (${joined.length} characters, limit ${HOME_NOTE_TABLE_MAX}): shorten one note, then merge again`);
+  }
+  await trx(table).where(column, winnerId).update({ body: joined, updated_at: trx.fn.now() });
+  await trx(table).where(column, loserId).del();
+  return 'joined the two notes on the kept customer';
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
   service_contact_notification_prefs: foldContactNotificationPrefs,
@@ -2315,10 +2340,9 @@ const UNIQUE_COLLISION_HANDLERS = {
   // one profile no longer counts for the discount; familyMultiHomeEligible
   // requires 2+ live members).
   multi_home_family_members: repointRowwiseDropCollisions,
-  // UNIQUE(customer_id, property): both duplicate profiles holding an "About this home" note for the same home — the
-  // winner's note stays (it is the account the technicians now read), the loser's copy for that home drops; notes for
-  // homes only the loser had move across.
-  home_notes: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id): both duplicate profiles holding an "About this home" note — typed staff text, never dropped:
+  // the two are joined into the kept customer's one row (mergeHomeNotes).
+  home_notes: mergeHomeNotes,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the
@@ -7701,12 +7725,15 @@ async function predictCollisionFolds(database, winner, loser) {
       throw e;
     }
   };
-  for (const table of ['notification_prefs', 'property_preferences']) {
+  const bothRowsText = {
+    notification_prefs: 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped',
+    property_preferences: 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped',
+    home_notes: 'both records have an About this home note: the two notes are joined into one on the surviving record',
+  };
+  for (const [table, text] of Object.entries(bothRowsText)) {
     const rows = await read(table, ['customer_id']);
-    const owners = new Set(rows.map((r) => String(r.customer_id)));
-    if (owners.has(String(winnerId)) && owners.has(String(loserId))) {
-      details[table] = 'both records have a row: the fields merge into the surviving row and the archived record\'s row is dropped';
-    }
+    const owners = new Set((Array.isArray(rows) ? rows : []).map((r) => String(r.customer_id)));
+    if (owners.has(String(winnerId)) && owners.has(String(loserId))) details[table] = text;
   }
   // executeMerge initializes an addressed winner's missing primary before the
   // FK sweep. If the loser owns a primary, that deliberate collision invokes
@@ -7930,6 +7957,7 @@ module.exports = {
     isEmptyValue,
     mergeSingletonPrefRow,
     repointRowwiseDropCollisions,
+    mergeHomeNotes,
     repointWeekPlansKeepAvailable,
     foldContactNotificationPrefs,
     pruneDiscardedContactPrefs,

@@ -36,10 +36,13 @@ const customersRouter = require('../routes/admin-customers');
 
 const VISIT = '0a1b2c3d-0000-4000-8000-000000000001';
 const CUSTOMER = '0a1b2c3d-0000-4000-8000-000000000002';
-const VISIT_ROW = { id: VISIT, customer_id: CUSTOMER, property_id: null };
+const VISIT_ROW = { id: VISIT, customer_id: CUSTOMER };
 
 // ownsVisit false = the visit exists but is not the technician's (or was reassigned): the ownership-scoped read finds nothing.
+// ownsVisit as an array answers the visit reads in order (the fetch, then each later recheck), so a test can reassign the
+// visit between the first read and the answer: [true, false].
 function stubDb({ ownsVisit = true, customerExists = true } = {}) {
+  const visitReads = [].concat(ownsVisit);
   const table = (name) => {
     const q = {};
     q.where = jest.fn(() => q);
@@ -49,7 +52,8 @@ function stubDb({ ownsVisit = true, customerExists = true } = {}) {
     q.modify = jest.fn((cb) => { cb(q); return q; });
     q.first = jest.fn(async () => {
       if (name === 'customers') return customerExists ? { id: CUSTOMER } : undefined;
-      return ownsVisit ? VISIT_ROW : undefined;
+      const owns = visitReads.length > 1 ? visitReads.shift() : visitReads[0];
+      return owns ? VISIT_ROW : undefined;
     });
     return q;
   };
@@ -159,16 +163,47 @@ describe('visit brief read', () => {
   });
 });
 
+describe('reassignment between the first read and the answer', () => {
+  test('GET /:id/home-note: the note is read, the visit is then no longer the technician\'s: 403, no note in the answer', async () => {
+    stubDb({ ownsVisit: [true, false] });
+    await withServer(async (base) => {
+      const res = await call(base, `/admin/schedule/${VISIT}/home-note`, { role: 'technician' });
+      expect(res.status).toBe(403);
+      const text = await res.text();
+      expect(text).not.toContain(NOTE.body);
+      expect(mockRead).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('GET /:id/visit-brief: the note is read, the visit is then no longer the technician\'s: the whole answer is withheld', async () => {
+    stubDb({ ownsVisit: [true, false] });
+    await withServer(async (base) => {
+      const res = await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' });
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body).toEqual({ brief: null });
+      expect(JSON.stringify(body)).not.toContain(NOTE.body);
+      expect(mockRead).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  test('the recheck is on even with every brief gate off, and still passes an unchanged visit', async () => {
+    stubDb({ ownsVisit: [true, true] });
+    await withServer(async (base) => {
+      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: NOTE });
+    });
+  });
+});
+
 describe('office routes', () => {
   test('an admin reads and saves a customer\'s home note; the service is told it is the office', async () => {
     stubDb();
     await withServer(async (base) => {
       expect((await call(base, `/admin/customers/${CUSTOMER}/home-note`)).status).toBe(200);
-      expect(mockRead).toHaveBeenCalledWith({ customer_id: CUSTOMER }, { office: true });
+      expect(mockRead).toHaveBeenCalledWith({ customer_id: CUSTOMER });
       const put = await call(base, `/admin/customers/${CUSTOMER}/home-note`, { method: 'PUT', body: { body: 'Call before arriving.' } });
       expect(put.status).toBe(200);
       expect(mockSave.mock.calls[0][0]).toEqual({ customer_id: CUSTOMER });
-      expect(mockSave.mock.calls[0][2]).toEqual({ office: true });
     });
   });
 

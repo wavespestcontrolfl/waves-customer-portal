@@ -1,15 +1,13 @@
 /**
- * "About this home": ONE short lasting staff note per home (owner 2026-11-26), read at the top of every visit on the
- * technician's Visit Brief and written by any technician assigned to a visit there, or an admin.
+ * "About this home": ONE short lasting staff note per customer (owner 2026-11-26), read at the top of every visit on the
+ * technician's Visit Brief and written by any technician assigned to a visit for that customer, or an admin.
  *
- * Staff-only free text. This file is the ONLY reader and writer of home_notes: the note never goes into a customer
- * payload, a report, a token page, an email, a text or a model call, and its body is never logged or audited (the audit
- * row records who changed it, not what it says). home-note-isolation.test.js keeps the table out of every other file.
+ * Staff-only free text. This file is the ONLY reader and writer of home_notes (a customer merge joins two notes in
+ * customer-dedupe.js): the note never goes into a customer payload, a report, a token page, an email, a text or a model
+ * call, and its body is never logged or audited (the audit row records who changed it, not what it says).
+ * home-note-isolation.test.js keeps the table out of every other file.
  *
- * A home = customer + property. The property is the visit's own property_id; a visit with none falls to the customer's
- * only active property, and a customer with no single property uses the NULL property (one home per customer). The
- * office entry point (no visit) uses the same rule, and refuses a customer with several homes, whose note belongs to a
- * visit at one of them.
+ * Keyed by customer alone, like property_preferences: a customer with several homes shares one note.
  *
  * Stale guard: a save carries the updated_at the editor last saw (`expectedUpdatedAt`, null = "no note yet"). When the
  * stored row differs, nothing is written and the answer is 409 with the current note, so two phones never overwrite
@@ -19,29 +17,12 @@ const db = require('../models/db');
 const { recordAuditEvent } = require('./audit-log');
 
 const MAX_LENGTH = 1000;
-const NO_PROPERTY = null;
 
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
 // Two stored-or-sent times name the same instant; a missing one matches only another missing one.
 const sameInstant = (a, b) => {
   if (!a || !b) return !a && !b;
   return new Date(a).getTime() === new Date(b).getTime();
-};
-
-// Which home a visit row (or, for the office, { customer_id }) is at. { home: null } = no customer to hang a note on.
-async function resolveHome(row, { conn = db, office = false } = {}) {
-  const customerId = row && row.customer_id;
-  if (!customerId) return { home: null };
-  if (row.property_id) return { home: { customerId, propertyId: row.property_id } };
-  const props = await conn('customer_properties').where({ customer_id: customerId, active: true }).limit(2).select('id');
-  if (props.length === 1) return { home: { customerId, propertyId: props[0].id } };
-  if (props.length > 1 && office) return { home: null, several: true };
-  return { home: { customerId, propertyId: NO_PROPERTY } };
-}
-
-const homeWhere = (q, home) => {
-  q.where('home_notes.customer_id', home.customerId);
-  return home.propertyId ? q.where('home_notes.property_id', home.propertyId) : q.whereNull('home_notes.property_id');
 };
 
 async function shapeNote(row, conn) {
@@ -54,28 +35,22 @@ async function shapeNote(row, conn) {
   return { body: row.body, updatedAt: new Date(row.updated_at).toISOString(), updatedByFirstName: name };
 }
 
-async function currentRow(conn, home, { lock = false } = {}) {
-  const q = homeWhere(conn('home_notes'), home);
+const currentRow = (conn, customerId, { lock = false } = {}) => {
+  const q = conn('home_notes').where('home_notes.customer_id', customerId);
   if (lock) q.forUpdate();
   return q.first('home_notes.*');
-}
+};
 
-// { status: 200, note } or { status: 422, error } (an office read of a customer with several homes).
-async function readHomeNote(row, opts = {}) {
-  const { home, several } = await resolveHome(row, opts);
-  if (several) return { status: 422, error: 'This customer has more than one home. Add the note from a visit at that home.' };
-  if (!home) return { status: 200, note: null, editable: false };
-  const conn = opts.conn || db;
-  return { status: 200, note: await shapeNote(await currentRow(conn, home), conn), editable: true };
+// { status: 200, note, editable }: `row` is a visit row or { customer_id }; no customer = nothing to hang a note on.
+async function readHomeNote(row, { conn = db } = {}) {
+  const customerId = row && row.customer_id;
+  if (!customerId) return { status: 200, note: null, editable: false };
+  return { status: 200, note: await shapeNote(await currentRow(conn, customerId), conn), editable: true };
 }
 
 const refusal = (status, error, extra = {}) => ({ status, error, ...extra });
 
-async function changed(conn, current) {
-  return refusal(409, 'Someone else changed this note.', { code: 'note_changed', note: await shapeNote(current, conn) });
-}
-
-async function writeRow(trx, home, current, body, actor) {
+async function writeRow(trx, customerId, current, body, actor) {
   const stamp = {
     body, updated_by_type: actor.type, updated_by_id: actor.id || null, updated_at: new Date(),
   };
@@ -83,29 +58,28 @@ async function writeRow(trx, home, current, body, actor) {
     await trx('home_notes').where({ id: current.id }).update(stamp);
     return current.id;
   }
-  const [inserted] = await trx('home_notes')
-    .insert({ customer_id: home.customerId, property_id: home.propertyId, ...stamp }).returning('id');
+  const [inserted] = await trx('home_notes').insert({ customer_id: customerId, ...stamp }).returning('id');
   return inserted.id || inserted;
 }
 
 /**
- * Save (or, with an empty body, delete) the home's note. `actor` = { type: 'technician' | 'admin', id, ip, userAgent }.
+ * Save (or, with an empty body, delete) the customer's note. `actor` = { type: 'technician' | 'admin', id, ip, userAgent }.
  * Returns { status: 200, note } | { status: 400 | 409 | 422, error, note? }. Never throws for those refusals.
  */
-async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, opts = {}) {
+async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, { conn = db } = {}) {
   const text = typeof body === 'string' ? body.trim() : null;
   if (text === null) return refusal(400, 'The note must be text.');
   if (text.length > MAX_LENGTH) return refusal(400, `The note can be at most ${MAX_LENGTH} characters.`, { code: 'too_long' });
-  const { home, several } = await resolveHome(row, opts);
-  if (several) return refusal(422, 'This customer has more than one home. Add the note from a visit at that home.');
-  if (!home) return refusal(422, 'This visit has no customer, so there is no home to note.');
+  const customerId = row && row.customer_id;
+  if (!customerId) return refusal(422, 'This visit has no customer, so there is no note to keep.');
+  const changed = async (current) => refusal(409, 'Someone else changed this note.', { code: 'note_changed', note: await shapeNote(current, conn) });
   const run = async (trx) => {
-    const current = await currentRow(trx, home, { lock: true });
-    if (!sameInstant(current ? current.updated_at : null, expectedUpdatedAt || null)) return changed(trx, current);
+    const current = await currentRow(trx, customerId, { lock: true });
+    if (!sameInstant(current ? current.updated_at : null, expectedUpdatedAt || null)) return changed(current);
     if (!text && !current) return { status: 200, note: null };
     let noteId = current && current.id;
     if (!text) await trx('home_notes').where({ id: current.id }).del();
-    else noteId = await writeRow(trx, home, current, text, actor);
+    else noteId = await writeRow(trx, customerId, current, text, actor);
     // Who and what kind of change only: the body never goes to the audit log.
     await recordAuditEvent({
       trx,
@@ -115,20 +89,19 @@ async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, opts
       action: text ? (current ? 'home_note.update' : 'home_note.create') : 'home_note.delete',
       resource_type: 'home_notes',
       resource_id: noteId,
-      metadata: { customer_id: home.customerId, property_id: home.propertyId, length: text.length },
+      metadata: { customer_id: customerId, length: text.length },
       ip_address: actor.ip || null,
       user_agent: actor.userAgent || null,
     });
-    return { status: 200, note: text ? await shapeNote(await currentRow(trx, home), trx) : null };
+    return { status: 200, note: text ? await shapeNote(await currentRow(trx, customerId), trx) : null };
   };
-  const conn = opts.conn || db;
   try {
     // A nested call (the route holds the visit row locked in its own transaction) runs in a savepoint.
     return await conn.transaction(run);
   } catch (err) {
-    // Two first saves for a new home race on the unique index: the loser sees the winner's note.
+    // Two first saves for a new customer race on the unique key: the loser sees the winner's note.
     if (!(err && err.code === '23505')) throw err;
-    return changed(conn, await currentRow(conn, home));
+    return changed(await currentRow(conn, customerId));
   }
 }
 
@@ -162,5 +135,5 @@ const homeNoteLimiter = require('express-rate-limit')({
 });
 
 module.exports = {
-  MAX_LENGTH, readHomeNote, saveHomeNote, resolveHome, saveInput, homeNoteActor, sendHomeNote, homeNoteLimiter,
+  MAX_LENGTH, readHomeNote, saveHomeNote, saveInput, homeNoteActor, sendHomeNote, homeNoteLimiter,
 };

@@ -24893,14 +24893,16 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
       return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
     };
-    // "About this home" (services/home-note.js): the home's one staff note rides every answer, so the tech's Visit Brief
+    // "About this home" (services/home-note.js): the customer's one staff note rides every answer, so the tech's Visit Brief
     // shows it at the top with no request of its own. `homeNote` is the note or null (no note yet); the key is left out when
-    // the visit has no customer or the read fails, so those answers are exactly as before. The read follows the one
-    // ownership-scoped fetch above; finalRecheck below withholds the whole answer when it runs.
+    // the visit has no customer or the read fails, so those answers are exactly as before. Whichever brief gates are on, a
+    // served note is followed by its own ownership check (homeNoteStillOwned): a visit reassigned (or moved to another
+    // customer) during the read withholds the whole answer, the same `{ brief: null }` as finalRecheck.
     const withHomeNote = async (payload) => {
       try {
         const out = await require('../services/home-note').readHomeNote(svc);
-        return out.editable ? { ...payload, homeNote: out.note } : payload;
+        if (!out.editable) return payload;
+        return (await homeNoteStillOwned(req, svc)) ? { ...payload, homeNote: out.note } : { brief: null };
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief home note failed for ${svc.id}: ${err.message}`);
         return payload;
@@ -24957,14 +24959,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+// Still this technician's visit, for the same customer, right now (a reassignment or a customer merge changes either).
+const homeNoteStillOwned = (req, svc) => db('scheduled_services')
+  .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
+  .modify((q) => technicianCurrentVisitFilter(req, q))
+  .first('scheduled_services.id');
 // GET / PUT /api/admin/schedule/:id/home-note   body { body, expectedUpdatedAt }
-// "About this home" (services/home-note.js): the one short lasting staff note for the home this visit is at, read at the
-// top of the tech Visit Brief. Same assignment check as GET /:id/visit-brief (technicianCurrentVisitFilter): a technician
+// "About this home" (services/home-note.js): the customer's one short lasting staff note, read at the top of the tech
+// Visit Brief. Same assignment check as GET /:id/visit-brief (technicianCurrentVisitFilter): a technician
 // reaches only a visit assigned to them (403 otherwise, so a visit's existence is not told); an admin reaches any. The PUT
 // holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
 // (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
 // route reads this table.
-const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id'];
+const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id'];
 const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
   ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
   : res.status(404).json({ error: 'Scheduled service not found' }));
@@ -24978,7 +24985,10 @@ router.get('/:id/home-note', async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first(HOME_NOTE_VISIT_COLUMNS);
     if (!svc) return homeNoteVisitRefusal(req, res);
-    HomeNote.sendHomeNote(res, await HomeNote.readHomeNote(svc));
+    const out = await HomeNote.readHomeNote(svc);
+    // Recheck as the last read before the answer: a note read for a visit reassigned meanwhile is never sent.
+    if (!(await homeNoteStillOwned(req, svc))) return homeNoteVisitRefusal(req, res);
+    HomeNote.sendHomeNote(res, out);
   } catch (err) { next(err); }
 });
 router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, async (req, res, next) => {
@@ -24986,7 +24996,7 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
     const HomeNote = require('../services/home-note');
     if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
     const out = await db.transaction(async (trx) => {
-      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id', 'property_id'], { allowCompleted: true });
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
     });
     HomeNote.sendHomeNote(res, out);
