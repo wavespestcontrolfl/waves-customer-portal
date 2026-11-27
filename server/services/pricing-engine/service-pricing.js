@@ -6901,8 +6901,10 @@ function priceOneTimeLawn(property, options = {}) {
   } = options;
 
   const normalizedTreatment = ['fertilization', 'fertilizer'].includes(treatmentType) ? 'fert' : treatmentType;
-  assertEnum(normalizedTreatment, Object.keys(ONE_TIME.lawn.treatmentMultipliers), 'treatmentType');
+  // The rule first, then its own treatment list (pre-push audit P1): a treatment only the Settings list holds fails closed on a
+  // new quote instead of taking a 1.0 factor; a quote saved before the rule checks the Settings list, as before.
   const rule = oneTimeLawnRule(options);
+  assertEnum(normalizedTreatment, Object.keys(rule.treatmentMultipliers), 'treatmentType');
   const lawnResult = priceLawnCare(property, {
     track,
     // The market rows the anchor reads: the one price lane for a new quote, the grass's own for a quote saved before the rule.

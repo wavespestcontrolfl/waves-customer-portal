@@ -2185,8 +2185,9 @@ const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$
 // (specialty-prices-20261126.test.js prices both and checks).
 const specialtyKeyHoldsRows = (value) => !!value && typeof value === 'object' && Object.keys(value).length > 0;
 // The walk itself, for any set of row words (the whole-home sizing check below reads the same way). browserRowKey: a key the
-// browser estimator files such rows under without naming them (the mosquito tier rows under `mq`).
-function saveHoldsRowNamed(estimateData, words, browserRowKey = null) {
+// browser estimator files such rows under without naming them (the mosquito tier rows under `mq`). skipField(row, key): a field
+// of a row that names something other than the row itself (the lawn check below; no other check passes one).
+function saveHoldsRowNamed(estimateData, words, browserRowKey = null, skipField = null) {
   const seen = new Set();
   const walk = (node) => {
     if (typeof node === 'string') return words.test(node);
@@ -2195,6 +2196,7 @@ function saveHoldsRowNamed(estimateData, words, browserRowKey = null) {
     if (Array.isArray(node)) return node.some(walk);
     return Object.entries(node).some(([key, value]) => {
       if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
+      if (skipField && skipField(node, key)) return false;
       if ((key === browserRowKey || words.test(key)) && specialtyKeyHoldsRows(value)) return true;
       return walk(value);
     });
@@ -2266,11 +2268,37 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
 const LAWN_ONE_LANE_ROW_WORDS = {
   test: (text) => /lawn[ _-]?care|one[ _-]?time[ _-]?lawn|\bot[ _-]?lawn|lawn[ _-]?pest/i.test(text) || /^lawn(Meta|Tiers)?$/.test(text),
 };
+// The estimate page and the converter key a plan row by recurringServiceKey (estimate-public.js): any identity holding "lawn",
+// and not "pest" or "commercial", is lawn care there. So a plan row under a catalog name the words above do not hold ("Lawn
+// Fertilization & Weed Control", lawn_fertilization) is still a lawn care price on the page and at acceptance (pre-push audit
+// P0). Every recurring row the save carries is read the page's way: each recurring.services list outside the inputs, at any
+// depth (result, the bare data, the send snapshot). An engine result needs no second reading: the page maps its lawn row from
+// the lawn_care line only (v1-legacy-mapper), and the word check reads that key.
+function saveHoldsRecurringLawnCare(estimateData) {
+  const { recurringServiceKey } = require('../routes/estimate-public');
+  const holdsLawnCare = (rows) => Array.isArray(rows) && rows.some((row) => isPlainRecord(row) && recurringServiceKey(row) === 'lawn_care');
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(walk);
+    if (isPlainRecord(node.recurring) && holdsLawnCare(node.recurring.services)) return true;
+    return Object.entries(node).some(([key, value]) => !SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key) && walk(value));
+  };
+  return walk(estimateData);
+}
+// The browser's commercial manual-quote row (commercialManualQuoteItem in client/src/lib/estimateEngine.js: service
+// commercial_lawn, price null, quoteRequired) records the service the visitor asked for as originalRequestedService 'lawn_care'.
+// That field names the request, not the row, and this rule does not price commercial lawn (pre-push audit P1). It is skipped
+// only on a row the page keys as commercial, so a residential lawn row cannot use it to pass.
+const lawnRequestFieldOfCommercialRow = (row, key) => key === 'originalRequestedService'
+  && /^commercial_/.test(require('../routes/estimate-public').recurringServiceKey(row));
 // The lawn rule stamp of a browser-priced save that passed the refusal (it holds no lawn row) is the server's reading, never the
 // browser's: a revision keeps the stored estimate's stamp, so a lawn service the server adds later stays on the rule the estimate
 // was sold on; a first save is new. Written on every result container, so the reader finds it whichever one it picks.
 function guardLawnOneLaneOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  if (saveHoldsRowNamed(estimateData, LAWN_ONE_LANE_ROW_WORDS)) {
+  if (saveHoldsRowNamed(estimateData, LAWN_ONE_LANE_ROW_WORDS, null, lawnRequestFieldOfCommercialRow)
+    || saveHoldsRecurringLawnCare(estimateData)) {
     throw errorWithStatus('This estimate has a lawn care or one-time lawn price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
   }
   if (!isPlainRecord(estimateData)) return;

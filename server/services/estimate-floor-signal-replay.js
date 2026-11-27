@@ -435,9 +435,13 @@ function storedRequestsLawn(estData) {
   // The builder request names its services as tokens (LAWN = the plan, OT_LAWN = the one-time treatment), as it names PEST.
   if (request && Array.isArray(request.selectedServices)
     && request.selectedServices.some((key) => ['LAWN', 'OT_LAWN'].includes(String(key || '').toUpperCase()))) return true;
+  // The office form saves its own flags (svcLawn = the plan, svcOnetimeLawn = the one-time treatment and the lawn pest
+  // knockdown), not a services block (pre-push audit P1): an unstamped draft holding them asks for lawn too.
   return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
-    .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
-      && !!(carrier.services.lawn || carrier.services.oneTimeLawn || carrier.services.lawnPestControl));
+    .some((carrier) => carrier && typeof carrier === 'object' && (
+      carrier.svcLawn === true || carrier.svcOnetimeLawn === true
+      || (carrier.services && typeof carrier.services === 'object'
+        && !!(carrier.services.lawn || carrier.services.oneTimeLawn || carrier.services.lawnPestControl))));
 }
 
 function savedLegacyLawnOneLaneSignal(rawEstData) {

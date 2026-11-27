@@ -170,6 +170,19 @@ describe('one-time lawn: 1.8 x the St. Augustine anchor for every grass, +20% fo
     expect(Object.isFrozen(lawn.newRule.treatmentMultipliers)).toBe(true);
   });
 
+  test('a treatment only the Settings list holds fails closed on a new quote; a quote saved before the rule still takes it', () => {
+    const lawn = constants.ONE_TIME.lawn;
+    const saved = lawn.treatmentMultipliers;
+    lawn.treatmentMultipliers = { ...saved, aeration: 1.5 };
+    try {
+      expect(() => oneTime(4500, 'st_augustine', 'aeration')).toThrow(/treatmentType must be one of/);
+      expect(oneTime(4500, 'st_augustine', 'aeration', LEGACY).price).toBeGreaterThan(0);
+      expect(oneTime(4500, 'st_augustine', 'weed').price).toBe(139);
+    } finally {
+      lawn.treatmentMultipliers = saved;
+    }
+  });
+
   test('the lawn pest knockdown is the one-time lawn insect price', () => {
     const knockdown = (extra = {}) => lineOf(generateEstimate({ ...HOME, lawnSqFt: 4500, services: { lawnPestControl: { track: 'bermuda' } }, ...extra }), 'one_time_lawn');
     expect(knockdown().price).toBe(oneTime(4500, 'st_augustine', 'pest').price);
@@ -241,6 +254,16 @@ describe('replay: a quote priced before this change keeps its grass rows and the
     }
     for (const selectedServices of [['PEST'], ['PLUGGING', 'TOPDRESS', 'DETHATCH']]) {
       expect(replay.savedLegacyLawnOneLaneSignal({ engineRequest: { selectedServices } })).toEqual({ legacyLawnOneLane: undefined });
+    }
+    // The office form saves its own flags, not a services block; its first send freezes the old rule too.
+    for (const inputs of [{ svcLawn: true, grassType: 'bermuda' }, { svcOnetimeLawn: true }]) {
+      expect(replay.savedLegacyLawnOneLaneSignal({ inputs })).toEqual({ legacyLawnOneLane: true });
+      const draft = { inputs, sendSnapshot: { renderedAt: '2026-11-20T15:00:00.000Z' } };
+      replay.freezeSnapshotRuleStamps(draft);
+      expect(draft.sendSnapshot.legacyLawnOneLane).toBe(true);
+    }
+    for (const inputs of [{ svcLawn: false, svcOnetimeLawn: false }, { svcPest: true }]) {
+      expect(replay.savedLegacyLawnOneLaneSignal({ inputs })).toEqual({ legacyLawnOneLane: undefined });
     }
   });
 
@@ -330,6 +353,43 @@ describe('a browser-priced save (the server could not price it)', () => {
     const forged = planRow({ inputs: { grassType: 'st_augustine' } });
     forged.result.pricingMetadata = { legacyLawnOneLane: true };
     expect(() => guard(forged, forged)).toThrow(refused);
+  });
+
+  test('a plan row under a catalog name is refused: the estimate page and the converter key it as lawn care', () => {
+    for (const row of [
+      { service: 'lawn_fertilization', mo: 46 },
+      { name: 'Lawn Fertilization & Weed Control', mo: 46 },
+      { key: 'lawn_program', label: 'Lawn Program', monthly: 46 },
+    ]) {
+      expect(() => guard({ result: { recurring: { services: [row] } } })).toThrow(refused);
+      expect(() => guard({ recurring: { services: [row] } })).toThrow(refused);
+      expect(() => guard({ sendSnapshot: { result: { recurring: { services: [row] } } } })).toThrow(refused);
+    }
+    // The same names in the inputs ask for a service; they price nothing.
+    expect(() => guard({ inputs: { recurring: { services: [{ service: 'lawn_fertilization' }] } }, result: { lineItems: [{ service: 'pest_control', price: 39 }] } }))
+      .not.toThrow();
+  });
+
+  test('the browser\'s commercial manual-quote turf row is not refused; a residential row cannot borrow its request field', () => {
+    // The shape commercialManualQuoteItem (client/src/lib/estimateEngine.js) builds for a commercial lawn request.
+    const commercialTurf = {
+      service: 'commercial_lawn',
+      name: 'Commercial Turf Treatment Program',
+      price: null,
+      detail: 'Commercial turf treatment requires manual quote or commercial pilot pricing.',
+      originalRequestedService: 'lawn_care',
+      propertyType: 'commercial',
+      isCommercial: true,
+      commercialPricingMode: 'manual_quote',
+      quoteRequired: true,
+      manualReviewReasons: ['commercial_property_manual_quote_required'],
+      taxCategory: 'lawn_spraying_or_treatment',
+    };
+    const save = { result: { recurring: { services: [commercialTurf] } } };
+    expect(() => guard(save)).not.toThrow();
+    expect(save.result.pricingMetadata.legacyLawnOneLane).toBe(false);
+    const residential = { service: 'lawn_fertilization', originalRequestedService: 'lawn_care', isCommercial: true, mo: 46 };
+    expect(() => guard({ result: { recurring: { services: [residential] } } })).toThrow(refused);
   });
 
   test('other turf services and the turf basis name no lawn price row', () => {
