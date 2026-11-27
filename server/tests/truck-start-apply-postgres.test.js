@@ -189,6 +189,24 @@ postgres('truck sets the shift start on PostgreSQL (GATE_TRUCK_CLOCK_IN=start)',
     expect(bells).toHaveLength(0);
   });
 
+  test('case B: a tap more than 30 minutes after the arrival still moves back, with one bell', async () => {
+    const tech = await makeTech();
+    const tapped = await addShift(tech, at('10:30'));
+    await shadow(tech, at('08:00'), { would_clock_in: false, skip_reason: 'already_clocked_in' });
+    await tick([tech], at('10:31'));
+
+    const [shift] = await shifts(tech);
+    expect(shift.id).toBe(tapped.id);
+    expect(shift.clock_in.toISOString()).toBe(at('08:00').toISOString());
+    const row = await shadowRow(tech);
+    expect(row.applied_action).toBe('moved_earlier');
+    expect(row.applied_detail).toMatchObject({ minutes_moved: 150, notified: true });
+    expect(bells).toHaveLength(1);
+    expect(bells[0].spec.why).toMatch(/moved back 150 min/);
+    await tick([tech], at('10:33'));
+    expect(bells).toHaveLength(1);
+  });
+
   test('case B on a closed shift: duration recomputed, status edited, original start and end kept', async () => {
     const tech = await makeTech();
     const done = await addShift(tech, at('08:11'), at('12:00'));

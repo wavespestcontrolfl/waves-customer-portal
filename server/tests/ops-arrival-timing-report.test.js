@@ -87,9 +87,11 @@ describe('arrival-timing-report', () => {
     const tally = {};
     report.tallyEvent(tally, { event_type: 'trip-end', payload: { end: { timestamp: at('14:03:10'), odometer: 100 } } });
     report.tallyEvent(tally, { event_type: 'tripEnd', payload: '{"end":{"timestamp":"2026-10-20T15:00:00Z","gps":{"lat":27.35,"lon":-82.45}}}' });
+    report.tallyEvent(tally, { event_type: 'trip-end', payload: { end: { gps: { lat: 27.35, lon: -82.45 } } } });
+    report.tallyEvent(tally, { event_type: 'trip-end', payload: { end: { ts: '2026-10-20T15:05:00Z' } } });
     report.tallyEvent(tally, { event_type: 'trip-start', payload: { start: { timestamp: at('14:40:00'), gps: { lat: 27.35, lon: -82.45 } } } });
     expect(tally).toEqual({
-      'trip-end': { rows: 2, withGps: 1, withEndTime: 2 },
+      'trip-end': { rows: 4, withGps: 2, withEndTime: 3 },
       'trip-start': { rows: 1, withGps: 1, withEndTime: 0 },
     });
   });
