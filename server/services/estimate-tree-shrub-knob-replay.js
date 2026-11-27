@@ -619,14 +619,15 @@ const matchesOptionalNumber = (stored, next) => !Number.isFinite(stored) || next
 function mistingRowMatchesInput(row, inputOpt) {
   if (!row || !inputOpt || typeof inputOpt !== 'object') return false;
   const knobs = plainRecord(row.pricingKnobs);
-  const refill = plainRecord(row.refill);
-  const storedNozzles = positiveOrNull(row.nozzles);
+  const mist = plainRecord(row.misting);
+  const refill = plainRecord(row.refill || mist.refill);
+  const storedNozzles = positiveOrNull(firstFiniteVal(row.nozzles, mist.nozzles));
   // Require explicit layout facts on the row (mapped installation rows omit nozzles/risers).
   if (storedNozzles === null) return false;
-  const storedTier = lowerToken(row.tier || knobs.tier);
-  const storedSol = lowerToken(row.solution || refill.solution || knobs.refillSolution);
-  const storedRisers = storedFigure(row.risers);
-  const storedRefills = storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear));
+  const storedTier = lowerToken(row.tier || mist.tier || knobs.tier);
+  const storedSol = lowerToken(row.solution || mist.solution || refill.solution || knobs.refillSolution);
+  const storedRisers = storedFigure(firstFiniteVal(row.risers, mist.risers));
+  const storedRefills = storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear, mist.refillsPerYear));
   return matchesOptionalToken(storedTier, lowerToken(inputOpt.tier))
     && matchesOptionalToken(storedSol, lowerToken(inputOpt.solution))
     && (inputOpt.nozzles == null || positiveOrNull(inputOpt.nozzles) === storedNozzles)
@@ -643,10 +644,10 @@ function boraCareScopeMatchesInput(row, v1Input, boraCareInput, storedEstimateDa
 
 function storedRowTrustedForRevisionReuse(storedRow) {
   if (!storedRow || typeof storedRow !== 'object') return true;
-  if (String(storedRow.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK') {
-    return Boolean(storedRow.sent_at || ['sent', 'viewed', 'accepted'].includes(String(storedRow.status || '').toLowerCase()));
+  if (storedRow.sent_at || ['sent', 'viewed', 'accepted'].includes(String(storedRow.status || '').toLowerCase())) {
+    return true;
   }
-  return true;
+  return String(storedRow.pricing_authority || '').toUpperCase() === 'SERVER';
 }
 
 // Staff revisions reprice changed services on live config, but MUST preserve
