@@ -534,7 +534,7 @@ describe('POST /api/customer/profile/confirm-email', () => {
     // Written in the change's own transaction, so the two commit together.
     expect(typeof opts.trx).toBe('function');
     // Stripe's copy follows: a durable job queued on the same transaction handle.
-    expect(mockEnqueueStripeSync).toHaveBeenCalledWith(opts.trx, CUSTOMER_ID, 'app_email_change');
+    expect(mockEnqueueStripeSync).toHaveBeenCalledWith(opts.trx, CUSTOMER_ID, NEW_EMAIL, 'app_email_change');
     expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
     expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
   });

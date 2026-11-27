@@ -5,7 +5,8 @@
  *
  * Conservative by design: the app only writes a Stripe profile it can prove belongs to this one record.
  *  - Locks: the customer row FOR UPDATE first (the confirm's order: it updates the customer, then inserts the job), then
- *    the job, both held through one short Stripe call (10 s, no SDK retries). A merge or its undo must lock this
+ *    the job, both held through one short Stripe call (10 s, no SDK retries). The job carries the address the customer
+ *    confirmed; it is written only while the locked record still holds that address. A merge or its undo must lock this
  *    customer row to move its Stripe id, so nothing moves between the checks and the write.
  *  - Skipped with an office alert: a Stripe id another record also holds, another record's saved card uses, or a
  *    third-party payer holds, and any
@@ -24,13 +25,14 @@ const MAX_ATTEMPTS = 6; // Stripe errors after the profile is linked (not-linked
 const STRIPE_TIMEOUT_MS = 10000;
 const MERGE_RETIRED_PHONE_PREFIX = 'merged-';
 
-// Queue a job on the caller's transaction handle. A pending job for this customer is re-armed instead (a fresh change
-// gets a fresh retry budget, and the job reads the newest email anyway). The caller holds the customer row lock (it
-// just wrote the row), so two callers cannot both insert.
-async function enqueue(trx, customerId, source) {
+// Queue a job on the caller's transaction handle for the address the customer just confirmed. A pending job for this
+// customer is re-armed instead, with the new address and a fresh retry budget. The caller holds the customer row lock
+// (it just wrote the row), so two callers cannot both insert.
+async function enqueue(trx, customerId, email, source) {
+  const confirmed = String(email || '').trim();
   const rearmed = await trx(TABLE).where({ customer_id: customerId, status: 'pending' })
-    .update({ attempts: 0, not_linked_checks: 0, last_error: null, source, next_attempt_at: trx.fn.now(), updated_at: trx.fn.now() });
-  if (!rearmed) await trx(TABLE).insert({ customer_id: customerId, source });
+    .update({ email: confirmed, attempts: 0, not_linked_checks: 0, last_error: null, source, next_attempt_at: trx.fn.now(), updated_at: trx.fn.now() });
+  if (!rearmed) await trx(TABLE).insert({ customer_id: customerId, email: confirmed, source });
 }
 
 const NOT_LINKED_RECHECKS = 5;
@@ -106,8 +108,13 @@ async function processJob(jobId) {
       await finish(trx, job, 'done', 'not_linked');
       return 'not_linked';
     }
-    const email = String(customer.email || '').trim();
-    if (!email) { await finish(trx, job, 'done', 'no_email'); return 'no_email'; }
+    // Only the address the customer confirmed goes to Stripe: a record that holds anything else now (an office edit
+    // since) is left alone.
+    const email = String(job.email || '').trim();
+    if (!email || String(customer.email || '').trim().toLowerCase() !== email.toLowerCase()) {
+      await finish(trx, job, 'done', 'superseded');
+      return 'superseded';
+    }
     const merged = await trx('customer_merge_journal')
       .where((q) => q.where({ winner_customer_id: customer.id }).orWhere({ loser_customer_id: customer.id })).first('id');
     if (merged) {
@@ -158,9 +165,9 @@ async function drainDue({ limit = 20 } = {}) {
   // A process with no Stripe key claims nothing, so it can never delay a job a configured process would send.
   if (!require('../config/stripe-config').secretKey) return {};
   const due = await db(TABLE).where({ status: 'pending' }).where('next_attempt_at', '<=', db.fn.now())
-    .orderBy('next_attempt_at').limit(limit).pluck('id');
+    .orderBy('next_attempt_at').limit(limit).select('id', 'updated_at');
   const counts = {};
-  for (const id of due) {
+  for (const { id, updated_at: seen } of due) {
     try {
       const r = await processJob(id);
       counts[r] = (counts[r] || 0) + 1;
@@ -169,7 +176,8 @@ async function drainDue({ limit = 20 } = {}) {
       // failing never holds a place in every tick's batch. Best effort; a failure here is only logged.
       counts.error = (counts.error || 0) + 1;
       logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
-      await db(TABLE).where({ id, status: 'pending' })
+      // Only the version this drain saw: a job re-armed or rescheduled since keeps its own schedule.
+      await db(TABLE).where({ id, status: 'pending', updated_at: seen })
         .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
     }

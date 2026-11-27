@@ -9,7 +9,7 @@ describe('stripe-email-sync processJob', () => {
     jest.resetModules();
     locks = [];
     state = {
-      jobs: [{ id: 'job-1', customer_id: 'c1', status: 'pending', attempts: 0, due: true, ...job }],
+      jobs: [{ id: 'job-1', customer_id: 'c1', email: 'new@example.test', status: 'pending', attempts: 0, due: true, updated_at: 'v1', ...job }],
       customers,
       cards: [],
       journal: [],
@@ -37,7 +37,7 @@ describe('stripe-email-sync processJob', () => {
           && !(q.skip && table === 'customers' && lockedCustomers.includes(r.id)));
       const note = (rs) => { if (q.locked) rs.forEach((r) => locks.push(`${table}:${r.id}`)); return rs; };
       q.first = async () => { if (state.throwOn === table) throw new Error('boom'); const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
-      q.select = async () => note(rows()).map((r) => ({ id: r.id }));
+      q.select = async (...cols) => note(rows()).map((r) => (cols.length > 1 ? Object.fromEntries(cols.map((c) => [c, r[c]])) : { id: r.id }));
       q.update = async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; };
       return q;
     };
@@ -138,8 +138,28 @@ describe('stripe-email-sync processJob', () => {
     await expect(other.processJob('job-1')).resolves.toBe('updated');
   });
 
-  test('no email, or a merged-away record, finish without a Stripe call', async () => {
-    for (const [row, result] of [[cust({ email: '  ' }), 'no_email'], [cust({ deleted_at: 'x', phone: 'merged-1' }), 'gone']]) {
+  test('only the confirmed address goes to Stripe: a record that holds another address now is left alone', async () => {
+    const sync = load({ customers: [cust({ email: 'office.edit@example.test' })] });
+    await expect(sync.processJob('job-1')).resolves.toBe('superseded');
+    expect(updateEmail).not.toHaveBeenCalled();
+    const sameCase = load({ customers: [cust({ email: 'New@Example.test' })] });
+    await expect(sameCase.processJob('job-1')).resolves.toBe('updated');
+    expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', expect.any(Object));
+  });
+
+  test('a job a confirm re-armed since the failed try keeps its schedule (push-back matches the seen version only)', async () => {
+    const sync = load({ customers: [cust()] });
+    state.throwOn = 'customer_merge_journal';
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    // The drain reads version v1; a confirm re-arms the row (v2) before the failed try's push-back runs.
+    const run = sync.drainDue();
+    state.jobs[0].updated_at = 'v2';
+    await expect(run).resolves.toEqual({ error: 1 });
+    expect(state.jobs[0].next_attempt_at).toBeUndefined();
+  });
+
+  test('a merged-away record finishes without a Stripe call', async () => {
+    for (const [row, result] of [[cust({ deleted_at: 'x', phone: 'merged-1' }), 'gone']]) {
       const sync = load({ customers: [row] });
       await expect(sync.processJob('job-1')).resolves.toBe(result);
       expect(updateEmail).not.toHaveBeenCalled();
@@ -217,15 +237,15 @@ describe('stripe-email-sync enqueue', () => {
   test('a pending job is re-armed with a fresh retry budget and the new source, not duplicated', async () => {
     const { enqueue } = load();
     const { trx, calls } = handle(true);
-    await enqueue(trx, 'c1', 'app_email_change');
+    await enqueue(trx, 'c1', ' new@example.test ', 'app_email_change');
     expect(calls).toEqual([['update', 'stripe_email_sync_jobs', { customer_id: 'c1', status: 'pending' },
-      expect.objectContaining({ attempts: 0, not_linked_checks: 0, last_error: null, source: 'app_email_change', next_attempt_at: 'NOW' })]]);
+      expect.objectContaining({ email: 'new@example.test', attempts: 0, not_linked_checks: 0, last_error: null, source: 'app_email_change', next_attempt_at: 'NOW' })]]);
   });
 
   test('no pending job: inserts one on the caller handle', async () => {
     const { enqueue } = load();
     const { trx, calls } = handle(false);
-    await enqueue(trx, 'c1', 'app_email_change');
-    expect(calls[1]).toEqual(['insert', 'stripe_email_sync_jobs', { customer_id: 'c1', source: 'app_email_change' }]);
+    await enqueue(trx, 'c1', 'new@example.test', 'app_email_change');
+    expect(calls[1]).toEqual(['insert', 'stripe_email_sync_jobs', { customer_id: 'c1', email: 'new@example.test', source: 'app_email_change' }]);
   });
 });

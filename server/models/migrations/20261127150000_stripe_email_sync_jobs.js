@@ -3,8 +3,9 @@
  * linked Stripe customer. Written in the SAME transaction as the app email confirm, so a restart cannot lose it;
  * services/stripe-email-sync.js drains it every minute.
  *
+ *   email              the address the customer confirmed; the job writes Stripe only while the record still holds it
  *   status             pending | done | skipped | failed
- *   result             updated | not_linked | no_email | gone | shared | merged | gave_up
+ *   result             updated | not_linked | superseded | gone | shared | merged | gave_up
  *   attempts           Stripe errors after the profile is linked
  *   not_linked_checks  re-checks of a customer with no Stripe profile yet
  *
@@ -21,6 +22,7 @@ exports.up = async function up(knex) {
     t.string('status', 16).notNullable().defaultTo('pending');
     t.string('result', 24);
     t.string('source', 24).notNullable();
+    t.string('email', 320).notNullable();
     t.integer('attempts').notNullable().defaultTo(0);
     t.integer('not_linked_checks').notNullable().defaultTo(0);
     t.string('last_error', 80);
