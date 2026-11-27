@@ -366,7 +366,11 @@ describe('runPurchaseReceiptRestockSweep', () => {
     processReceiptLine.mockImplementationOnce(async () => { throw new Error('inventory-operations boom'); });
     processReceiptLine.mockImplementationOnce(async () => unmatched);
     const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
-    expect(reconcileFailedLineAlert).toHaveBeenCalledWith({ failed: [expect.objectContaining({ emailId: 'e1', title: 'Taurus SC Termiticide 78 oz' })], floor: expect.any(Date) });
+    // The other line recorded an outcome: its key is the alert's evidence that a failed one is over. The failed one is not.
+    expect(reconcileFailedLineAlert).toHaveBeenCalledWith({
+      failed: [expect.objectContaining({ emailId: 'e1', title: 'Taurus SC Termiticide 78 oz' })],
+      settled: [{ key: 'amazon|900-1000001-1000001|e1|2', emailId: 'e1' }],
+    });
     expect(result.unappliedFailedLines).toBe(1);
     expect(summarize(result)).toMatchObject({ errors: 1, unappliedFailedLines: 1 });
   });
@@ -575,6 +579,20 @@ describe('SiteOne invoices in the sweep', () => {
     const result = await run();
     expect(result.errors).toEqual([{ title: siteOneEmail.subject, message: 'extraction row locked', emailId: 's1' }]);
     expect(result.logged).toEqual([expect.objectContaining({ emailId: 's2' })]);
+  });
+
+  test('an invoice email that could not be read is a failed email entry; a later read that does not throw settles it', async () => {
+    const siteOne = require('../services/purchase-receipts/siteone-invoices');
+    mockState.siteOneEmails = [siteOneEmail];
+    siteOne.readSiteOneInvoice.mockImplementationOnce(async () => { throw new Error('extraction row locked'); });
+    await run();
+    expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({
+      failed: [expect.objectContaining({ kind: 'email', key: 'email|siteone|s1', vendor: 'siteone', emailId: 's1', receivedAt: '2026-09-27T12:00:00.000Z' })],
+      settled: [],
+    });
+    mockState.siteOneInvoice = { pending: true };
+    await run();
+    expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({ failed: [], settled: [{ key: 'email|siteone|s1', emailId: 's1' }] });
   });
 
   test.each([

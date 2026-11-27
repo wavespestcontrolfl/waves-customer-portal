@@ -9,13 +9,21 @@
  * So the failure has no row to find; this alert's own metadata (`failedLines`)
  * is the record, and it carries a line past the 7-day window.
  *
- * Each run: this run's failures + the open alert's carried lines. A carried
- * line drops when (a) its email is still in the window and did not fail this
- * run (it was retried and applied, or no longer applies), or (b) a
- * purchase_receipt_lines row now exists for its key (a person or another lane
- * recorded it). Nothing left closes the alert (count_zero). The row refreshes
- * quietly while the set is the same and rings only when a NEW line joins it.
- * Staff marking the alert Done keeps it done until a new line fails.
+ * An email the sweep could not read at all (a SiteOne invoice read that threw
+ * before any line was attempted) is carried the same way, as one entry keyed
+ * `email|<vendor>|<email id>`.
+ *
+ * Each run: this run's failures + the open alert's carried entries. An entry
+ * drops ONLY on positive evidence: this run recorded an outcome for that exact
+ * key without throwing (`settled`: applied, held, or skipped by a known rule;
+ * for an email, it was read), or purchase_receipt_lines already holds a row for
+ * it (checked for every entry, after both vendors ran, so a second copy that
+ * recorded the same key later in the sweep never lands in the alert). Not
+ * attempting an entry is not evidence. Nothing left closes the alert
+ * (count_zero). The row refreshes quietly while the set is the same and rings
+ * only when a NEW entry joins it. Staff marking it Done keeps it done until a
+ * new entry fails. Every open key stays in metadata (about 250 bytes each, no
+ * cap); only the listed detail is cut to SHOWN.
  *
  * docs/admin-notifications.md, "Receipt lines that failed".
  */
@@ -27,11 +35,13 @@ const { scrubSentryText } = require('../../utils/sentry-scrub');
 const DEDUPE_KEY = 'purchase-receipt-failed-lines';
 const INVENTORY_LINK = '/admin/inventory?tab=products';
 const SHOWN = 5;
-const MAX_STORED = 200;
+const ROW_CHECK_CHUNK = 200;
+const ROW_COLUMNS = ['vendor', 'order_number', 'shipment_key', 'line_no'];
 const VENDOR_NAMES = { amazon: 'Amazon', siteone: 'SiteOne' };
 
 const plural = (n) => (n === 1 ? '' : 's');
 const lineKey = ({ vendor, orderNumber, shipmentKey, lineNo }) => [vendor, orderNumber || 'unknown', shipmentKey, lineNo].join('|');
+const emailKey = (vendor, emailId) => `email|${vendor}|${emailId}`;
 
 // What the sweep records for a failed line (sweep.js recordLineOutcome). The
 // reason is the thrown message with emails, quoted SQL, amounts and numbers masked.
@@ -44,39 +54,61 @@ function failedLineEntry({ receipt, email, orderNumber, shipmentKey, lineNo, ite
   };
 }
 
-async function hasLineRow(entry, conn) {
-  return Boolean(await conn('purchase_receipt_lines')
-    .where({ vendor: entry.vendor, order_number: entry.orderNumber, shipment_key: entry.shipmentKey, line_no: entry.lineNo }).first('id'));
+// An invoice email the sweep could not read (siteone-invoices read threw before any line was attempted).
+function failedEmailEntry({ vendor, email }) {
+  return { kind: 'email', key: emailKey(vendor, email.id), vendor, emailId: email.id, receivedAt: new Date(email.received_at).toISOString() };
 }
 
-// The lines this run failed plus the open alert's lines still unapplied, oldest first.
-async function openFailedLines({ failed, prior, floor, conn }) {
-  const current = new Map(failed.map((entry) => [entry.key, entry]));
-  const open = [...current.values()];
-  for (const entry of prior) {
-    if (current.has(entry.key) || open.some((kept) => kept.key === entry.key)) continue;
-    // Inside the window the sweep retried it this run and it did not fail again.
-    if (new Date(entry.receivedAt) >= floor) continue;
-    if (!(await hasLineRow(entry, conn))) open.push(entry);
+// Keys that already have a purchase_receipt_lines row: a line by its table key, an email by any row it wrote.
+async function recordedKeys(entries, conn) {
+  const recorded = new Set();
+  const lines = entries.filter((entry) => entry.kind !== 'email');
+  for (let i = 0; i < lines.length; i += ROW_CHECK_CHUNK) {
+    const chunk = lines.slice(i, i + ROW_CHECK_CHUNK);
+    const rows = await conn('purchase_receipt_lines')
+      .whereIn(ROW_COLUMNS, chunk.map((e) => [e.vendor, e.orderNumber, e.shipmentKey, e.lineNo])).select(ROW_COLUMNS);
+    for (const row of rows) {
+      recorded.add(lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no }));
+    }
   }
-  return open.sort((a, b) => String(a.receivedAt).localeCompare(String(b.receivedAt)) || a.key.localeCompare(b.key)).slice(0, MAX_STORED);
+  const emails = entries.filter((entry) => entry.kind === 'email');
+  if (emails.length) {
+    const rows = await conn('purchase_receipt_lines').whereIn('email_id', emails.map((e) => e.emailId)).select('vendor', 'email_id');
+    for (const row of rows) recorded.add(emailKey(row.vendor, row.email_id));
+  }
+  return recorded;
+}
+
+// This run's failures plus the open alert's carried entries, minus those with positive evidence, oldest first.
+async function openFailedLines({ failed, settled, prior, conn }) {
+  const settledKeys = new Set(settled.map((entry) => entry.key));
+  const merged = new Map();
+  for (const entry of [...prior, ...failed]) merged.set(entry.key, entry);
+  // A key this run failed AND settled (two copies of one invoice) is judged by its row alone.
+  const failedKeys = new Set(failed.map((entry) => entry.key));
+  const candidates = [...merged.values()].filter((entry) => failedKeys.has(entry.key) || !settledKeys.has(entry.key));
+  const recorded = await recordedKeys(candidates, conn);
+  return candidates.filter((entry) => !recorded.has(entry.key))
+    .sort((a, b) => String(a.receivedAt).localeCompare(String(b.receivedAt)) || a.key.localeCompare(b.key));
 }
 
 function describe(entry) {
   const vendor = VENDOR_NAMES[entry.vendor] || entry.vendor;
-  return `- ${vendor}, ${formatETDate(new Date(entry.receivedAt))}: "${entry.title}" - ${entry.reason}`;
+  const date = formatETDate(new Date(entry.receivedAt));
+  if (entry.kind === 'email') return `- invoice email could not be read: ${vendor} ${date}`;
+  return `- ${vendor}, ${date}: "${entry.title}" - ${entry.reason}`;
 }
 
 function composeFailedLinesAlert(open) {
   const count = open.length;
   const alert = composeAdminAlert({
-    area: 'Inventory', action: `add ${count} failed receipt line${plural(count)} by hand`,
-    why: 'These lines failed to apply, so their stock was not added.',
+    area: 'Inventory', action: `check ${count} failed receipt item${plural(count)}`,
+    why: 'Their stock was not added; log it by hand if it is stock.',
     severity: 'needs-you', who: 'person', link: INVENTORY_LINK,
     subject: { type: 'check', id: DEDUPE_KEY }, doneWhen: 'count_zero',
   });
   const detail = [
-    `${count} receipt line${plural(count)} failed and ${count === 1 ? 'was' : 'were'} not added to stock. The sweep retries a line for 7 days after its email; after that nothing retries it, so log it by hand if it is stock.`,
+    `${count} receipt item${plural(count)} failed and ${count === 1 ? 'was' : 'were'} not added to stock. The sweep retries a line for 7 days after its email; after that nothing retries it, so log it by hand if it is stock.`,
     '',
     ...open.slice(0, SHOWN).map(describe),
     ...(count > SHOWN ? [`and ${count - SHOWN} more`] : []),
@@ -93,16 +125,18 @@ function ringOnNewLine(keys) {
 }
 
 /**
- * @param {{failed: object[], floor: Date}} params failed: this run's failedLines bucket; floor: the sweep's lookback floor
- * @returns {Promise<number>} lines still unapplied
+ * @param {{failed: object[], settled: {key: string}[]}} params failed: this run's failedLines bucket;
+ *   settled: keys this run recorded an outcome for without throwing
+ * @returns {Promise<number>} entries still unapplied
  */
-async function reconcileFailedLineAlert({ failed = [], floor }, conn = db) {
+async function reconcileFailedLineAlert({ failed = [], settled = [] }, conn = db) {
   const episodes = require('../admin-alert-episodes');
   const prior = (await episodes.openAdminAlertMetadata(conn, DEDUPE_KEY))
     .flatMap((meta) => (Array.isArray(meta.failedLines) ? meta.failedLines : []));
   if (!failed.length && !prior.length) return 0;
-  const open = await openFailedLines({ failed, prior, floor, conn });
+  const open = await openFailedLines({ failed, settled, prior, conn });
   if (!open.length) {
+    if (!prior.length) return 0;
     await conn.transaction((trx) => episodes.closeAdminAlertKeys(trx, [DEDUPE_KEY], 'count_zero', {
       resolution: 'Cleared: every receipt line that failed has since been applied',
     }));
@@ -123,4 +157,4 @@ async function reconcileFailedLineAlert({ failed = [], floor }, conn = db) {
   return open.length;
 }
 
-module.exports = { reconcileFailedLineAlert, failedLineEntry, DEDUPE_KEY, SHOWN };
+module.exports = { reconcileFailedLineAlert, failedLineEntry, failedEmailEntry, lineKey, emailKey, DEDUPE_KEY, SHOWN };

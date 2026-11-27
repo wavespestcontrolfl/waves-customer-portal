@@ -54,7 +54,7 @@ const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-de
 const { processReceiptLine, parseMultipack, PACK_CLAIM_RE } = require('./receipt-processor');
 const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('./undelivered-shipments');
 const siteOne = require('./siteone-invoices');
-const { reconcileFailedLineAlert, failedLineEntry } = require('./failed-lines-alert');
+const { reconcileFailedLineAlert, failedLineEntry, failedEmailEntry, lineKey, emailKey } = require('./failed-lines-alert');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { raiserFor } = require('../admin-alert-injected');
@@ -118,7 +118,8 @@ const heldDoneWhen = (status) => HELD_DONE_WHEN[status] || 'line_logged_by_hand'
 // `if (result.skipped)` would swallow every processed email.
 function emptySummary() {
   // failedLines: the lines in `errors` that threw, with what the failed-lines alert needs to carry them past the lookback.
-  const summary = { alreadyProcessed: [], errors: [], failedLines: [] };
+  // settledLines: keys that got an outcome without throwing, the alert's only evidence that a failed one is resolved.
+  const summary = { alreadyProcessed: [], errors: [], failedLines: [], settledLines: [] };
   for (const bucket of Object.values(SUMMARY_BUCKETS)) summary[bucket] = [];
   return summary;
 }
@@ -269,6 +270,7 @@ async function recordLineOutcome({ receipt, email, orderNumber, shipmentKey, ite
     summary.failedLines.push(failedLineEntry({ receipt, email, orderNumber, shipmentKey, lineNo, item, err }));
     return;
   }
+  summary.settledLines.push({ key: lineKey({ vendor: receipt.vendor, orderNumber, shipmentKey, lineNo }) });
   const bucket = SUMMARY_BUCKETS[outcome.status];
   if (!bucket) {
     summary.alreadyProcessed.push({ title: item.title, reason: outcome.reason || null });
@@ -389,8 +391,11 @@ async function processSiteOneInvoices({ floor, since, now, notifyAdmin, totals }
       // One invoice that can't be read never stops the others.
       logger.error(`[purchase-receipts] SiteOne invoice email ${email.id} failed: ${err.message}`);
       totals.errors.push({ title: email.subject, message: err.message, emailId: email.id });
+      totals.failedLines.push({ ...failedEmailEntry({ vendor: siteOne.VENDOR, email }), emailId: email.id });
       continue;
     }
+    // Read without throwing (even to "pending" or "another copy owns it"): an earlier failed read of this email is over.
+    totals.settledLines.push({ key: emailKey(siteOne.VENDOR, email.id), emailId: email.id });
     if (!found) continue;
     const receipt = { vendor: siteOne.VENDOR, noun: 'SiteOne invoice', label: `SiteOne invoice ${found.invoice.number}` };
     const summary = emptySummary();
@@ -470,7 +475,7 @@ async function runPurchaseReceiptRestockSweep({ notify: notifyAdmin } = {}) {
   await closeLoggedDeliveryBells().catch((err) => logger.warn(`[purchase-receipts] close pass failed: ${err.message}`));
   await closeDeliveredUndeliveredBells().catch((err) => logger.warn(`[purchase-receipts] undelivered close pass failed: ${err.message}`));
   // job_health stays 'success' when single lines fail (the run worked), so the alert is what carries them, past the lookback too.
-  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, floor })
+  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, settled: totals.settledLines })
     .catch((err) => { logger.error(`[purchase-receipts] failed-lines alert failed: ${err.message}`); return totals.failedLines.length; });
   return totals;
 }
