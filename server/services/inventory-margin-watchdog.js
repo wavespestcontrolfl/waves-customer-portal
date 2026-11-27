@@ -6,9 +6,10 @@
  *
  * Strictly READ-ONLY alerting — NEVER mutates retail prices, pricing_config,
  * or products_catalog. Cheaper generic chemical swaps are deliberately ignored
- * so Waves keeps the extra margin; only UPWARD vendor cost spikes (>10%) and
- * modeled service gross margins dropping below 35% (or missing/broken COGS
- * mappings such as rodent_trapping / stinging / "bottle" units) raise an admin
+ * so Waves keeps the extra margin; only UPWARD normalized vendor cost spikes
+ * (>10% vs prior normalized price for the winning vendor) and modeled service
+ * gross margins dropping below 35% (or missing/broken COGS mappings, missing
+ * revenue, pricing sync failures, or unavailable inventory) raise an admin
  * notification.
  *
  * Complements `lawn-pricing-invariant-sweep.js` (which owns the Lawn Care
@@ -26,7 +27,7 @@ const { numberOrNull } = require('./product-costing');
 const { eligibleVendorPricing } = require('./vendor-pricing-eligibility');
 
 const WATCHDOG_ALERT_KEY = 'inventory-margin-watchdog:daily';
-const COST_SPIKE_THRESHOLD = 0.10; // >10% upward cost jump triggers review
+const COST_SPIKE_THRESHOLD = 0.10; // >10% upward normalized cost jump triggers review
 const MIN_GROSS_MARGIN_FLOOR = 0.35; // <35% modeled gross margin triggers review
 const SANITY_SPIKE_CAP = 5.0; // >5x is likely a pack-unit mismatch, flagged separately
 
@@ -39,9 +40,12 @@ const REFERENCE_PROPERTY = Object.freeze({
 });
 
 // Services checked against live bottom-up inventory COGS + labor at reference scope.
+// engineServiceKey matches the pricing engine's emitted lineItem.service;
+// inventoryServiceKey matches estimate-pricing-audit SERVICE_MAP / service_product_usage.
 const WATCHED_SERVICES = Object.freeze([
   {
-    serviceKey: 'pest_control',
+    engineServiceKey: 'pest_control',
+    inventoryServiceKey: 'pest_control',
     label: 'Quarterly Pest Control',
     engineServices: { pest: { frequency: 'quarterly' } },
     visitsPerYear: 4,
@@ -49,7 +53,8 @@ const WATCHED_SERVICES = Object.freeze([
     requireMappedCogs: true,
   },
   {
-    serviceKey: 'mosquito',
+    engineServiceKey: 'mosquito',
+    inventoryServiceKey: 'mosquito',
     label: 'Mosquito Control (12x)',
     engineServices: { mosquito: { tier: 'monthly12' } },
     visitsPerYear: 12,
@@ -57,7 +62,8 @@ const WATCHED_SERVICES = Object.freeze([
     requireMappedCogs: true,
   },
   {
-    serviceKey: 'tree_shrub',
+    engineServiceKey: 'tree_shrub',
+    inventoryServiceKey: 'tree_shrub',
     label: 'Tree & Shrub Care',
     engineServices: { treeShrub: { tier: 'standard' } },
     visitsPerYear: 6,
@@ -65,7 +71,8 @@ const WATCHED_SERVICES = Object.freeze([
     requireMappedCogs: true,
   },
   {
-    serviceKey: 'one_time_pest',
+    engineServiceKey: 'one_time_pest',
+    inventoryServiceKey: 'one_time_pest',
     label: 'One-Time Pest Control',
     engineServices: { oneTimePest: {} },
     visitsPerYear: 1,
@@ -73,7 +80,8 @@ const WATCHED_SERVICES = Object.freeze([
     requireMappedCogs: true,
   },
   {
-    serviceKey: 'rodent_trapping',
+    engineServiceKey: 'rodent_trapping',
+    inventoryServiceKey: 'rodent_trapping',
     label: 'Rodent Trapping',
     engineServices: { rodentTrapping: {} },
     visitsPerYear: 1,
@@ -81,42 +89,101 @@ const WATCHED_SERVICES = Object.freeze([
     requireMappedCogs: true,
   },
   {
-    serviceKey: 'stinging',
+    engineServiceKey: 'stinging_insect',
+    inventoryServiceKey: 'stinging',
     label: 'Bee & Wasp Removal',
-    engineServices: { stinging: { level: 'standard' } },
+    engineServices: { stinging: { species: 'PAPER_WASP', tier: 2, removal: 'NONE' } },
     visitsPerYear: 1,
     laborHoursPerVisit: 0.75,
     requireMappedCogs: true,
   },
+  {
+    engineServiceKey: 'trenching',
+    inventoryServiceKey: 'trenching',
+    label: 'Termite Trenching',
+    engineServices: { trenching: { perimeterLF: 200 } },
+    visitsPerYear: 1,
+    laborHoursPerVisit: 4.0,
+    requireMappedCogs: true,
+  },
+  {
+    engineServiceKey: 'bora_care',
+    inventoryServiceKey: 'bora_care',
+    label: 'Bora-Care Wood Treatment',
+    engineServices: { boraCare: { atticSqFt: 1500 } },
+    visitsPerYear: 1,
+    laborHoursPerVisit: 3.0,
+    requireMappedCogs: true,
+  },
 ]);
 
-function detectVendorCostSpikes(catalogRows, approvedVendorRows) {
-  const byProduct = new Map();
+function normalizedCostBasis(scoredEntry, mode) {
+  if (!scoredEntry) return null;
+  if (mode === 'oz' && Number.isFinite(scoredEntry.perOz) && scoredEntry.perOz > 0) return scoredEntry.perOz;
+  if (mode === 'count' && Number.isFinite(scoredEntry.perUnit) && scoredEntry.perUnit > 0) return scoredEntry.perUnit;
+  return Number.isFinite(scoredEntry.price) && scoredEntry.price > 0 ? scoredEntry.price : null;
+}
+
+function priorNormalizedCostForWinner(prod, winner, mode, historyRows, scoreVendorRows) {
+  const currentCost = normalizedCostBasis(winner, mode);
+  if (!(currentCost > 0)) return null;
+  const vendorId = String(winner.row.vendor_id ?? '');
+  // Look for the most recent prior distinct price_history row for the same product+vendor.
+  const vendorHist = (historyRows || []).filter((h) => String(h.vendor_id ?? '') === vendorId);
+  for (const h of vendorHist) {
+    const hPrice = numberOrNull(h.price);
+    if (!(Number.isFinite(hPrice) && hPrice > 0)) continue;
+    const scored = scoreVendorRows([{ price_amount: hPrice, price: hPrice, quantity: h.quantity || winner.row.quantity }], prod);
+    if (scored.mode !== mode) continue;
+    const hCost = normalizedCostBasis(scored.pool[0], mode);
+    if (!(hCost > 0)) continue;
+    // Skip the current price row (recorded alongside the latest approval).
+    if (Math.abs(hCost - currentCost) / currentCost < 1e-6) continue;
+    return hCost;
+  }
+  // Fallback: vendor_pricing.previous_price stamped atomically by applyPriceApproval.
+  const prevPrice = numberOrNull(winner.row.previous_price);
+  if (!(Number.isFinite(prevPrice) && prevPrice > 0)) return null;
+  const scoredPrev = scoreVendorRows([{ price_amount: prevPrice, price: prevPrice, quantity: winner.row.quantity }], prod);
+  if (scoredPrev.mode !== mode) return null;
+  return normalizedCostBasis(scoredPrev.pool[0], mode);
+}
+
+function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRows = [], { scoreVendorRows } = {}) {
+  const scorer = scoreVendorRows || require('../routes/admin-inventory').scoreVendorRows;
+  const vpByProduct = new Map();
   for (const vp of approvedVendorRows || []) {
     const pid = String(vp.product_id);
-    if (!byProduct.has(pid)) byProduct.set(pid, []);
-    byProduct.get(pid).push(vp);
+    if (!vpByProduct.has(pid)) vpByProduct.set(pid, []);
+    vpByProduct.get(pid).push(vp);
+  }
+  const histByProduct = new Map();
+  for (const h of priceHistoryRows || []) {
+    const pid = String(h.product_id);
+    if (!histByProduct.has(pid)) histByProduct.set(pid, []);
+    histByProduct.get(pid).push(h);
   }
   const spikes = [];
   for (const prod of catalogRows || []) {
     if (prod.active === false) continue;
-    const baseline = numberOrNull(prod.best_price);
-    if (!(Number.isFinite(baseline) && baseline > 0)) continue;
-    const candidates = (byProduct.get(String(prod.id)) || [])
-      .map((vp) => numberOrNull(vp.price_amount ?? vp.price))
-      .filter((price) => Number.isFinite(price) && price > 0);
+    const candidates = vpByProduct.get(String(prod.id)) || [];
     if (!candidates.length) continue;
-    const currentMin = Math.min(...candidates);
-    // One-way ONLY: ignore cheaper generic substitutes (currentMin <= baseline).
-    if (currentMin <= baseline) continue;
-    const pctIncrease = (currentMin - baseline) / baseline;
+    const { mode, pool } = scorer(candidates, prod);
+    const winner = pool[0];
+    const currentNorm = normalizedCostBasis(winner, mode);
+    if (!(currentNorm > 0)) continue;
+    const priorNorm = priorNormalizedCostForWinner(prod, winner, mode, histByProduct.get(String(prod.id)), scorer);
+    // One-way ONLY: ignore missing history and ignore cheaper generic substitutes (current <= prior).
+    if (!(priorNorm > 0) || currentNorm <= priorNorm) continue;
+    const pctIncrease = (currentNorm - priorNorm) / priorNorm;
     if (pctIncrease <= COST_SPIKE_THRESHOLD) continue;
-    const unitMismatchLikely = currentMin / baseline > SANITY_SPIKE_CAP;
+    const unitMismatchLikely = currentNorm / priorNorm > SANITY_SPIKE_CAP;
     spikes.push({
       productId: prod.id,
       productName: prod.name,
-      baselinePrice: Number(baseline.toFixed(2)),
-      currentMinPrice: Number(currentMin.toFixed(2)),
+      basis: mode,
+      priorNormalizedCost: Number(priorNorm.toFixed(4)),
+      currentNormalizedCost: Number(currentNorm.toFixed(4)),
       pctIncrease: Number((pctIncrease * 100).toFixed(1)),
       unitMismatchLikely,
     });
@@ -139,48 +206,61 @@ function resolveServiceRevenuePerVisit(line, visitsPerYear) {
   return oneTime > 0 ? oneTime : null;
 }
 
+function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventoryCostFromRows, laborRate }) {
+  const est = generateEstimate({ ...REFERENCE_PROPERTY, services: spec.engineServices });
+  const line = (est?.lineItems || []).find((li) => li.service === spec.engineServiceKey);
+  const revPerVisit = resolveServiceRevenuePerVisit(line, spec.visitsPerYear);
+  const cogs = inventoryCostFromRows(spec.inventoryServiceKey, REFERENCE_PROPERTY, inventory);
+  const out = { lowMargin: null, missingCogs: null, incomplete: null };
+  if (!(revPerVisit > 0)) {
+    out.incomplete = { check: 'missing_revenue', serviceKey: spec.engineServiceKey, label: spec.label };
+  }
+  if (cogs.status === 'missing_cogs' || cogs.status === 'unmapped') {
+    if (spec.requireMappedCogs) {
+      out.missingCogs = { serviceKey: spec.inventoryServiceKey, label: spec.label, reason: cogs.status };
+    }
+    return out;
+  }
+  if (cogs.status === 'warning') {
+    out.missingCogs = {
+      serviceKey: spec.inventoryServiceKey,
+      label: spec.label,
+      reason: 'partial_cogs',
+      warnings: cogs.warnings || [],
+    };
+  }
+  if (!(revPerVisit > 0)) return out;
+  const fixedAmortized = Number(cogs.fixedCost || 0) / Math.max(1, spec.visitsPerYear);
+  const materialCost = Number(cogs.totalPerVisit || 0) + fixedAmortized;
+  const laborCost = spec.laborHoursPerVisit * laborRate;
+  const grossMargin = (revPerVisit - (materialCost + laborCost)) / revPerVisit;
+  if (grossMargin < MIN_GROSS_MARGIN_FLOOR) {
+    out.lowMargin = {
+      serviceKey: spec.engineServiceKey,
+      label: spec.label,
+      revenuePerVisit: Number(revPerVisit.toFixed(2)),
+      materialCost: Number(materialCost.toFixed(2)),
+      laborCost: Number(laborCost.toFixed(2)),
+      grossMarginPct: Number((grossMargin * 100).toFixed(1)),
+    };
+  }
+  return out;
+}
+
 function evaluateServiceMargins({ inventory, generateEstimate, inventoryCostFromRows, laborRate }) {
   const lowMargins = [];
   const missingCogs = [];
+  const incompleteChecks = [];
   for (const spec of WATCHED_SERVICES) {
-    const est = generateEstimate({ ...REFERENCE_PROPERTY, services: spec.engineServices });
-    const line = (est?.lineItems || []).find((li) => li.service === spec.serviceKey);
-    const revPerVisit = resolveServiceRevenuePerVisit(line, spec.visitsPerYear);
-    const cogs = inventoryCostFromRows(spec.serviceKey, REFERENCE_PROPERTY, inventory);
-    if (cogs.status === 'missing_cogs' || cogs.status === 'unmapped') {
-      if (spec.requireMappedCogs) {
-        missingCogs.push({ serviceKey: spec.serviceKey, label: spec.label, reason: cogs.status });
-      }
-      continue;
-    }
-    const materialCost = Number(cogs.totalPerVisit || 0) + (spec.visitsPerYear === 1 ? Number(cogs.fixedCost || 0) : 0);
-    if (cogs.status === 'warning') {
-      missingCogs.push({
-        serviceKey: spec.serviceKey,
-        label: spec.label,
-        reason: 'partial_cogs',
-        warnings: cogs.warnings || [],
-      });
-    }
-    if (!(revPerVisit > 0)) continue;
-    const laborCost = spec.laborHoursPerVisit * laborRate;
-    const totalCost = materialCost + laborCost;
-    const grossMargin = (revPerVisit - totalCost) / revPerVisit;
-    if (grossMargin < MIN_GROSS_MARGIN_FLOOR) {
-      lowMargins.push({
-        serviceKey: spec.serviceKey,
-        label: spec.label,
-        revenuePerVisit: Number(revPerVisit.toFixed(2)),
-        materialCost: Number(materialCost.toFixed(2)),
-        laborCost: Number(laborCost.toFixed(2)),
-        grossMarginPct: Number((grossMargin * 100).toFixed(1)),
-      });
-    }
+    const res = evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventoryCostFromRows, laborRate });
+    if (res.lowMargin) lowMargins.push(res.lowMargin);
+    if (res.missingCogs) missingCogs.push(res.missingCogs);
+    if (res.incomplete) incompleteChecks.push(res.incomplete);
   }
-  return { lowMargins, missingCogs };
+  return { lowMargins, missingCogs, incompleteChecks };
 }
 
-function buildWatchdogDetail({ spikes, lowMargins, missingCogs }) {
+function buildWatchdogDetail({ spikes, lowMargins, missingCogs, incompleteChecks = [] }) {
   const parts = [];
   if (spikes.length) {
     const top = spikes.slice(0, 3).map((s) => `${s.productName} (+${s.pctIncrease}%)`).join(', ');
@@ -194,6 +274,10 @@ function buildWatchdogDetail({ spikes, lowMargins, missingCogs }) {
     const top = missingCogs.slice(0, 4).map((m) => m.label).join(', ');
     parts.push(`Missing or incomplete material COGS mappings: ${top}.`);
   }
+  if (incompleteChecks.length) {
+    const top = incompleteChecks.slice(0, 3).map((c) => c.label || c.check).join(', ');
+    parts.push(`Incomplete margin checks (alert kept open): ${top}.`);
+  }
   parts.push('Read-only alert: retail prices were not changed automatically.');
   return parts.join(' ');
 }
@@ -202,67 +286,107 @@ function defaultWatchdogDeps(overrides = {}) {
   return {
     isLive: () => require('../config/feature-gates').inventoryMarginWatchdogLive?.() === true,
     db,
+    syncConstantsFromDB: (...a) => require('./pricing-engine').syncConstantsFromDB(...a),
+    scoreVendorRows: (...a) => require('../routes/admin-inventory').scoreVendorRows(...a),
     loadInventoryCostRows: (...a) => require('./estimate-pricing-audit').loadInventoryCostRows(...a),
     inventoryCostFromRows: (...a) => require('./estimate-pricing-audit').inventoryCostFromRows(...a),
     generateEstimate: (...a) => require('./pricing-engine/estimate-engine').generateEstimate(...a),
-    laborRate: require('./pricing-engine/constants').GLOBAL?.LABOR_RATE || 35,
+    getLaborRate: () => require('./pricing-engine/constants').GLOBAL?.LABOR_RATE || 35,
     raiseAdminAlert: (...a) => require('./admin-alert-compose').raiseAdminAlert(...a),
     closeAdminAlertKeys: (...a) => require('./admin-alert-episodes').closeAdminAlertKeys(...a),
     ...overrides,
   };
 }
 
-function buildWatchdogWhy({ spikes, lowMargins, missingCogs }) {
+function buildWatchdogWhy({ spikes, lowMargins, missingCogs, incompleteChecks = [] }) {
   const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
   if (lowMargins.length) return `${plural(lowMargins.length, 'service')} dropped below 35% modeled gross margin.`;
   if (spikes.length) return `${plural(spikes.length, 'active product')} saw an approved vendor cost jump over 10%.`;
-  return `${plural(missingCogs.length, 'service')} have missing or incomplete material cost mappings.`;
+  if (missingCogs.length) return `${plural(missingCogs.length, 'service')} have missing or incomplete material cost mappings.`;
+  return `${plural(incompleteChecks.length, 'margin check')} could not be verified.`;
+}
+
+async function loadWatchdogInputs(deps) {
+  const hasPriceHistory = typeof deps.db?.schema?.hasTable === 'function'
+    ? await deps.db.schema.hasTable('price_history')
+    : true;
+  const [catalogRows, approvedVendorRows, priceHistoryRows, inventory] = await Promise.all([
+    deps.db('products_catalog')
+      .where('active', true)
+      .whereNotNull('best_price')
+      .select('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit'),
+    eligibleVendorPricing(deps.db('vendor_pricing'))
+      .select('vendor_pricing.*'),
+    hasPriceHistory
+      ? deps.db('price_history')
+        .orderBy('recorded_at', 'desc')
+        .select('product_id', 'vendor_id', 'price', 'quantity', 'recorded_at')
+      : Promise.resolve([]),
+    deps.loadInventoryCostRows(),
+  ]);
+  return { catalogRows, approvedVendorRows, priceHistoryRows, inventory };
+}
+
+async function runMarginVerification(deps, inventory) {
+  let syncOk = false;
+  try {
+    syncOk = Boolean(await deps.syncConstantsFromDB(deps.db));
+  } catch (err) {
+    logger.warn(`[inventory-margin-watchdog] pricing sync failed: ${err?.code || err?.name || 'error'}`);
+  }
+  if (!syncOk) {
+    return {
+      lowMargins: [],
+      missingCogs: [],
+      incompleteChecks: [{ check: 'config_sync_failed', label: 'pricing_config sync' }],
+    };
+  }
+  if (!inventory?.available) {
+    return {
+      lowMargins: [],
+      missingCogs: [],
+      incompleteChecks: [{ check: 'inventory_unavailable', label: 'inventory COGS table' }],
+    };
+  }
+  const laborRate = typeof deps.laborRate === 'number' ? deps.laborRate : deps.getLaborRate();
+  return evaluateServiceMargins({
+    inventory,
+    generateEstimate: deps.generateEstimate,
+    inventoryCostFromRows: deps.inventoryCostFromRows,
+    laborRate,
+  });
 }
 
 async function runInventoryMarginWatchdog({ deps: overrides = {}, now = new Date() } = {}) {
   const deps = defaultWatchdogDeps(overrides);
   if (!deps.isLive()) return { skipped: true, reason: 'gate_off' };
 
-  const [catalogRows, approvedVendorRows, inventory] = await Promise.all([
-    deps.db('products_catalog')
-      .where('active', true)
-      .whereNotNull('best_price')
-      .select('id', 'name', 'active', 'best_price', 'unit_size_oz'),
-    eligibleVendorPricing(deps.db('vendor_pricing'))
-      .select('vendor_pricing.id', 'vendor_pricing.product_id', 'vendor_pricing.price_amount', 'vendor_pricing.price'),
-    deps.loadInventoryCostRows(),
-  ]);
+  const { catalogRows, approvedVendorRows, priceHistoryRows, inventory } = await loadWatchdogInputs(deps);
+  const spikes = detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRows, {
+    scoreVendorRows: deps.scoreVendorRows,
+  });
+  const { lowMargins, missingCogs, incompleteChecks } = await runMarginVerification(deps, inventory);
 
-  const spikes = detectVendorCostSpikes(catalogRows, approvedVendorRows);
-  const { lowMargins, missingCogs } = inventory?.available
-    ? evaluateServiceMargins({
-      inventory,
-      generateEstimate: deps.generateEstimate,
-      inventoryCostFromRows: deps.inventoryCostFromRows,
-      laborRate: deps.laborRate,
-    })
-    : { lowMargins: [], missingCogs: [] };
-
-  const totalFindings = spikes.length + lowMargins.length + missingCogs.length;
+  const totalFindings = spikes.length + lowMargins.length + missingCogs.length + incompleteChecks.length;
   if (totalFindings === 0) {
     await deps.closeAdminAlertKeys(deps.db, [WATCHDOG_ALERT_KEY], 'margin_watchdog_clean', {
       now,
       resolution: 'Inventory cost spikes and modeled service margins are within target bounds',
     });
-    return { skipped: false, alerted: false, spikes, lowMargins, missingCogs };
+    return { skipped: false, alerted: false, spikes, lowMargins, missingCogs, incompleteChecks };
   }
 
-  await deps.raiseAdminAlert('system', {
+  const receipt = await deps.raiseAdminAlert('system', {
     area: 'Inventory',
     action: 'review vendor cost spikes and service margins',
-    why: buildWatchdogWhy({ spikes, lowMargins, missingCogs }),
+    why: buildWatchdogWhy({ spikes, lowMargins, missingCogs, incompleteChecks }),
     severity: 'needs-you',
     link: '/admin/inventory',
     subject: { type: 'check', id: WATCHDOG_ALERT_KEY },
     doneWhen: 'margin_watchdog_clean',
     who: 'person',
   }, {
-    detail: buildWatchdogDetail({ spikes, lowMargins, missingCogs }),
+    detail: buildWatchdogDetail({ spikes, lowMargins, missingCogs, incompleteChecks }),
     dedupeKey: WATCHDOG_ALERT_KEY,
     dedupeOpenOnly: true,
     refreshOnDedupe: true,
@@ -272,11 +396,15 @@ async function runInventoryMarginWatchdog({ deps: overrides = {}, now = new Date
       spikeCount: spikes.length,
       lowMarginCount: lowMargins.length,
       missingCogsCount: missingCogs.length,
+      incompleteCheckCount: incompleteChecks.length,
     },
   });
+  if (!receipt) {
+    throw Object.assign(new Error('inventory margin watchdog alert did not persist'), { code: 'WATCHDOG_ALERT_FAILED' });
+  }
 
-  logger.info(`[inventory-margin-watchdog] spikes=${spikes.length} lowMargins=${lowMargins.length} missingCogs=${missingCogs.length}`);
-  return { skipped: false, alerted: true, spikes, lowMargins, missingCogs };
+  logger.info(`[inventory-margin-watchdog] spikes=${spikes.length} lowMargins=${lowMargins.length} missingCogs=${missingCogs.length} incomplete=${incompleteChecks.length}`);
+  return { skipped: false, alerted: true, spikes, lowMargins, missingCogs, incompleteChecks };
 }
 
 module.exports = {

@@ -1,10 +1,12 @@
 'use strict';
 
 /**
- * Product catalog COGS cleanup & repair utility (owner audit 2026-11-27).
+ * MUTATES (with --execute): Product catalog COGS cleanup & repair utility
+ * (owner audit 2026-11-27).
  *
  * DRY-RUN BY DEFAULT: prints every proposed row change without modifying the
- * database. Pass `--apply` explicitly to execute changes inside a transaction.
+ * database. Pass `--execute` explicitly to execute changes inside a transaction
+ * with row locks and in-transaction revalidation.
  *
  * Scope (3 deterministic fixes):
  *   1. Stale manual `cost_per_unit` overrides on liquid/granular products ONLY
@@ -13,22 +15,43 @@
  *      SKIPS all count-based items (`unit_size_oz IS NULL`, `cost_unit = 'each'`,
  *      stations, traps, boxes, etc.) so count costing is never disturbed.
  *   2. Active products missing `best_vendor_pricing_id` (e.g. LESCO Dimension)
- *      that have eligible approved `vendor_pricing` rows — links the winning
- *      row deterministically using the same eligibility rules as admin-inventory.
+ *      that have eligible approved `vendor_pricing` rows — previews using the
+ *      canonical `admin-inventory.scoreVendorRows` package scaling and applies
+ *      via the locked `admin-inventory.recalcBestPrice(productId, trx)` writer
+ *      so pack prices never overwrite incompatible single-unit prices.
  *   3. Broken `service_product_usage` rows using non-convertible `"bottle"` units
- *      (e.g. Liquid Termite Perimeter / Termidor SC) on liquid products with a
- *      known `unit_size_oz` — converts `usage_amount * unit_size_oz` to `fl_oz`.
+ *      (e.g. Liquid Termite Perimeter / Termidor SC) on verified LIQUID products
+ *      (`packageMeasure === 'volume'`, `unit_size_oz > 0`, and current
+ *      `costLineFromUsage` broken) — converts BOTH `usage_amount` and
+ *      `usage_per_1000sf` by `unit_size_oz` into `fl_oz`.
  *
  * Usage:
- *   node ops/agents/cleanup-catalog-cost-overrides.js            # dry run
- *   node ops/agents/cleanup-catalog-cost-overrides.js --apply    # apply in trx
+ *   node ops/agents/cleanup-catalog-cost-overrides.js              # dry run
+ *   node ops/agents/cleanup-catalog-cost-overrides.js --execute    # mutate in trx
  */
 
-const { numberOrNull, convertToOz, normalizeUnit } = require('../../server/services/product-costing');
+const {
+  numberOrNull,
+  convertToOz,
+  normalizeUnit,
+  packageMeasure,
+  costLineFromUsage,
+} = require('../../server/services/product-costing');
 const { eligibleVendorPricing } = require('../../server/services/vendor-pricing-eligibility');
 
-const COUNT_COST_UNITS = new Set(['each', 'ea', 'unit', 'station', 'trap', 'box', 'pack', 'bag', 'bottle', 'can', 'tube', 'bar', 'block', 'roll']);
+const COUNT_COST_UNITS = new Set([
+  'each', 'ea', 'unit', 'station', 'trap', 'box', 'pack', 'bag',
+  'bottle', 'can', 'tube', 'bar', 'block', 'roll',
+]);
 const OVERRIDE_DRIFT_RATIO = 0.05;
+
+function loadAdminInventoryHelpers() {
+  const adminInv = require('../../server/routes/admin-inventory');
+  return {
+    scoreVendorRows: adminInv.scoreVendorRows,
+    recalcBestPrice: adminInv.recalcBestPrice,
+  };
+}
 
 function isCountBasedProduct(product) {
   const unitSizeOz = numberOrNull(product?.unit_size_oz);
@@ -51,24 +74,19 @@ function catalogLiveCostPerCostUnit(product) {
   return Number((perOz * ozPerCostUnit).toFixed(4));
 }
 
-function planStaleOverrideClears(catalogRows, approvedVendorPricingIds) {
-  const approvedSet = new Set([...(approvedVendorPricingIds || [])].map(String));
-  const planned = [];
-  const skippedCountItems = [];
-  for (const row of catalogRows || []) {
-    if (row.active === false) continue;
-    const manualCost = numberOrNull(row.cost_per_unit);
-    if (manualCost == null) continue;
-    if (isCountBasedProduct(row)) {
-      skippedCountItems.push({ id: row.id, name: row.name, reason: 'count_item_preserved' });
-      continue;
-    }
-    if (!row.best_vendor_pricing_id || !approvedSet.has(String(row.best_vendor_pricing_id))) continue;
-    const livePerUnit = catalogLiveCostPerCostUnit(row);
-    if (!(Number.isFinite(livePerUnit) && livePerUnit > 0)) continue;
-    const ratioDiff = Math.abs(manualCost - livePerUnit) / livePerUnit;
-    if (ratioDiff <= OVERRIDE_DRIFT_RATIO) continue;
-    planned.push({
+function staleOverrideCandidate(row, approvedSet) {
+  if (!row || row.active === false) return { status: 'skip' };
+  const manualCost = numberOrNull(row.cost_per_unit);
+  if (manualCost == null) return { status: 'skip' };
+  if (isCountBasedProduct(row)) return { status: 'count_item' };
+  if (!row.best_vendor_pricing_id || !approvedSet.has(String(row.best_vendor_pricing_id))) return { status: 'skip' };
+  const livePerUnit = catalogLiveCostPerCostUnit(row);
+  if (!(Number.isFinite(livePerUnit) && livePerUnit > 0)) return { status: 'skip' };
+  const ratioDiff = Math.abs(manualCost - livePerUnit) / livePerUnit;
+  if (ratioDiff <= OVERRIDE_DRIFT_RATIO) return { status: 'skip' };
+  return {
+    status: 'stale',
+    entry: {
       id: row.id,
       name: row.name,
       currentCostPerUnit: manualCost,
@@ -77,12 +95,53 @@ function planStaleOverrideClears(catalogRows, approvedVendorPricingIds) {
       bestPrice: numberOrNull(row.best_price),
       unitSizeOz: numberOrNull(row.unit_size_oz),
       ratio: Number((manualCost / livePerUnit).toFixed(2)),
-    });
+    },
+  };
+}
+
+function planStaleOverrideClears(catalogRows, approvedVendorPricingIds) {
+  const approvedSet = new Set([...(approvedVendorPricingIds || [])].map(String));
+  const planned = [];
+  const skippedCountItems = [];
+  for (const row of catalogRows || []) {
+    const verdict = staleOverrideCandidate(row, approvedSet);
+    if (verdict.status === 'count_item') {
+      skippedCountItems.push({ id: row.id, name: row.name, reason: 'count_item_preserved' });
+    } else if (verdict.status === 'stale') {
+      planned.push(verdict.entry);
+    }
   }
   return { planned, skippedCountItems };
 }
 
-function planMissingVendorLinks(unlinkedProducts, eligibleVendorRows) {
+function previewBestVendorLink(product, rows, scoreVendorRows) {
+  if (!rows.length) return null;
+  const { mode, pool, catalogCount, unitSizeOz } = scoreVendorRows(rows, product);
+  const best = pool[0];
+  if (!best) return null;
+  const countScalable = mode === 'count';
+  const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
+  // Mirror recalcBestPriceLocked's incompatible-unit guard: never overwrite an
+  // existing catalog price with an unscalable raw vendor pack price.
+  if (!scalable && numberOrNull(product?.best_price) != null) return null;
+  const bestPrice = countScalable
+    ? Math.round(best.perUnit * catalogCount * 100) / 100
+    : scalable
+      ? Math.round(best.perOz * unitSizeOz * 100) / 100
+      : best.price;
+  if (!(Number.isFinite(bestPrice) && bestPrice > 0)) return null;
+  return {
+    productId: product.id,
+    productName: product.name,
+    bestVendorPricingId: best.row.id,
+    vendorId: best.row.vendor_id,
+    vendorName: best.row.vendor_name || null,
+    mode,
+    bestPrice,
+  };
+}
+
+function planMissingVendorLinks(unlinkedProducts, eligibleVendorRows, { scoreVendorRows = loadAdminInventoryHelpers().scoreVendorRows } = {}) {
   const byProduct = new Map();
   for (const vp of eligibleVendorRows || []) {
     const key = String(vp.product_id);
@@ -92,51 +151,53 @@ function planMissingVendorLinks(unlinkedProducts, eligibleVendorRows) {
   const planned = [];
   for (const product of unlinkedProducts || []) {
     if (product.active === false || product.best_vendor_pricing_id) continue;
-    const candidates = (byProduct.get(String(product.id)) || [])
-      .map((vp) => ({
-        vp,
-        price: numberOrNull(vp.price_amount ?? vp.price),
-      }))
-      .filter((entry) => Number.isFinite(entry.price) && entry.price > 0)
-      .sort((a, b) => a.price - b.price || String(a.vp.id).localeCompare(String(b.vp.id)));
-    if (!candidates.length) continue;
-    const winner = candidates[0];
-    planned.push({
-      productId: product.id,
-      productName: product.name,
-      bestVendorPricingId: winner.vp.id,
-      vendorId: winner.vp.vendor_id,
-      vendorName: winner.vp.vendor_name || null,
-      bestPrice: Number(winner.price.toFixed(2)),
-    });
+    const preview = previewBestVendorLink(product, byProduct.get(String(product.id)) || [], scoreVendorRows);
+    if (preview) planned.push(preview);
   }
   return planned;
+}
+
+function brokenLiquidBottleCandidate(row) {
+  if (!row || normalizeUnit(row.usage_unit) !== 'bottle') return null;
+  const unitSizeOz = numberOrNull(row.unit_size_oz);
+  if (!(Number.isFinite(unitSizeOz) && unitSizeOz > 0)) return null;
+  // Only convert verified liquid packages (volume family). Dry weight bottles/jars
+  // or ambiguous packages are left untouched so weight is never relabeled fl_oz.
+  if (packageMeasure(row) !== 'volume') return null;
+  const amount = numberOrNull(row.usage_amount);
+  const per1000 = numberOrNull(row.usage_per_1000sf);
+  const hasAmount = Number.isFinite(amount) && amount > 0;
+  const hasPer1000 = Number.isFinite(per1000) && per1000 > 0;
+  if (!hasAmount && !hasPer1000) return null;
+  // Convert ONLY broken mappings: if a manual cost_per_unit per bottle already
+  // prices this usage cleanly with no warning, leave it alone.
+  const currentCosting = costLineFromUsage(row, 1000);
+  if (!currentCosting.warning && Number(currentCosting.cost) > 0) return null;
+  return {
+    usageId: row.id,
+    serviceType: row.service_type,
+    productId: row.product_id,
+    productName: row.product_name,
+    fromAmount: hasAmount ? amount : null,
+    fromPer1000: hasPer1000 ? per1000 : null,
+    fromUnit: row.usage_unit,
+    toAmount: hasAmount ? Number((amount * unitSizeOz).toFixed(2)) : null,
+    toPer1000: hasPer1000 ? Number((per1000 * unitSizeOz).toFixed(2)) : null,
+    toUnit: 'fl_oz',
+    unitSizeOz,
+  };
 }
 
 function planBrokenUsageUnitFixes(usageRows) {
   const planned = [];
   for (const row of usageRows || []) {
-    if (normalizeUnit(row.usage_unit) !== 'bottle') continue;
-    const amount = numberOrNull(row.usage_amount);
-    const unitSizeOz = numberOrNull(row.unit_size_oz);
-    if (!(Number.isFinite(amount) && amount > 0 && Number.isFinite(unitSizeOz) && unitSizeOz > 0)) continue;
-    const nextAmount = Number((amount * unitSizeOz).toFixed(2));
-    planned.push({
-      usageId: row.id,
-      serviceType: row.service_type,
-      productId: row.product_id,
-      productName: row.product_name,
-      fromAmount: amount,
-      fromUnit: row.usage_unit,
-      toAmount: nextAmount,
-      toUnit: 'fl_oz',
-      unitSizeOz,
-    });
+    const fix = brokenLiquidBottleCandidate(row);
+    if (fix) planned.push(fix);
   }
   return planned;
 }
 
-async function buildCleanupPlan(dbc) {
+async function buildCleanupPlan(dbc, helpers = {}) {
   const [catalogRows, approvedVpRows, unlinkedProducts, usageRows] = await Promise.all([
     dbc('products_catalog')
       .where('active', true)
@@ -144,11 +205,11 @@ async function buildCleanupPlan(dbc) {
       .select('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'inventory_unit', 'best_vendor_pricing_id'),
     eligibleVendorPricing(dbc('vendor_pricing'))
       .leftJoin('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
-      .select('vendor_pricing.id', 'vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.price_amount', 'vendor_pricing.price', 'vendors.name as vendor_name'),
+      .select('vendor_pricing.*', 'vendors.name as vendor_name'),
     dbc('products_catalog')
       .where('active', true)
       .whereNull('best_vendor_pricing_id')
-      .select('id', 'name', 'active', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'),
+      .select('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit', 'best_vendor_pricing_id'),
     dbc('service_product_usage')
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .whereRaw("LOWER(BTRIM(COALESCE(service_product_usage.usage_unit, ''))) IN ('bottle', 'bottles')")
@@ -157,23 +218,83 @@ async function buildCleanupPlan(dbc) {
         'service_product_usage.service_type',
         'service_product_usage.product_id',
         'service_product_usage.usage_amount',
+        'service_product_usage.usage_per_1000sf',
         'service_product_usage.usage_unit',
+        'service_product_usage.notes',
         'products_catalog.name as product_name',
         'products_catalog.unit_size_oz',
+        'products_catalog.container_size',
+        'products_catalog.inventory_unit',
+        'products_catalog.cost_per_unit',
+        'products_catalog.cost_unit',
+        'products_catalog.best_price',
       ),
   ]);
 
   const approvedIds = new Set(approvedVpRows.map((r) => String(r.id)));
   const { planned: staleOverrides, skippedCountItems } = planStaleOverrideClears(catalogRows, approvedIds);
-  const missingVendorLinks = planMissingVendorLinks(unlinkedProducts, approvedVpRows);
+  const missingVendorLinks = planMissingVendorLinks(unlinkedProducts, approvedVpRows, helpers);
   const brokenUsageUnits = planBrokenUsageUnitFixes(usageRows);
   return { staleOverrides, skippedCountItems, missingVendorLinks, brokenUsageUnits };
 }
 
-async function runCleanup(dbc, { apply = false } = {}) {
-  const plan = await buildCleanupPlan(dbc);
+async function applyStaleOverrideClear(trx, item) {
+  const fresh = await trx('products_catalog')
+    .where({ id: item.id })
+    .forUpdate()
+    .first('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'inventory_unit', 'best_vendor_pricing_id');
+  if (!fresh || numberOrNull(fresh.cost_per_unit) !== item.currentCostPerUnit) return 0;
+  if (!fresh.best_vendor_pricing_id) return 0;
+  const approved = await eligibleVendorPricing(
+    trx('vendor_pricing').where({ id: fresh.best_vendor_pricing_id }),
+  ).first('id');
+  if (!approved) return 0;
+  if (staleOverrideCandidate(fresh, new Set([String(approved.id)])).status !== 'stale') return 0;
+  const updated = await trx('products_catalog')
+    .where({ id: item.id })
+    .whereNotNull('unit_size_oz')
+    .where('unit_size_oz', '>', 0)
+    .update({ cost_per_unit: null, cost_unit: null, updated_at: new Date() });
+  return Number(updated) || 0;
+}
+
+async function applyMissingVendorLink(trx, link, recalcBestPrice) {
+  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(link.productId)]);
+  const fresh = await trx('products_catalog')
+    .where({ id: link.productId })
+    .forUpdate()
+    .first('id', 'active', 'best_vendor_pricing_id');
+  if (!fresh || fresh.active === false || fresh.best_vendor_pricing_id) return 0;
+  await recalcBestPrice(link.productId, trx);
+  const after = await trx('products_catalog').where({ id: link.productId }).first('best_vendor_pricing_id');
+  return after?.best_vendor_pricing_id ? 1 : 0;
+}
+
+async function applyBrokenUsageUnitFix(trx, fix) {
+  const freshUsage = await trx('service_product_usage')
+    .where({ id: fix.usageId })
+    .forUpdate()
+    .first('id', 'service_type', 'product_id', 'usage_amount', 'usage_per_1000sf', 'usage_unit', 'notes');
+  if (!freshUsage) return 0;
+  if (numberOrNull(freshUsage.usage_amount) !== fix.fromAmount) return 0;
+  if (numberOrNull(freshUsage.usage_per_1000sf) !== fix.fromPer1000) return 0;
+  const product = await trx('products_catalog')
+    .where({ id: freshUsage.product_id })
+    .first('name as product_name', 'unit_size_oz', 'container_size', 'inventory_unit', 'cost_per_unit', 'cost_unit', 'best_price');
+  const rechecked = brokenLiquidBottleCandidate({ ...freshUsage, ...(product || {}) });
+  if (!rechecked) return 0;
+  const patch = { usage_unit: rechecked.toUnit };
+  if (rechecked.toAmount != null) patch.usage_amount = rechecked.toAmount;
+  if (rechecked.toPer1000 != null) patch.usage_per_1000sf = rechecked.toPer1000;
+  const updated = await trx('service_product_usage').where({ id: fix.usageId }).update(patch);
+  return Number(updated) || 0;
+}
+
+async function runCleanup(dbc, { execute = false, helpers = {} } = {}) {
+  const resolvedHelpers = { ...loadAdminInventoryHelpers(), ...helpers };
+  const plan = await buildCleanupPlan(dbc, resolvedHelpers);
   const summary = {
-    mode: apply ? 'apply' : 'dry_run',
+    mode: execute ? 'execute' : 'dry_run',
     staleOverridesPlanned: plan.staleOverrides.length,
     skippedCountItems: plan.skippedCountItems.length,
     missingVendorLinksPlanned: plan.missingVendorLinks.length,
@@ -181,52 +302,26 @@ async function runCleanup(dbc, { apply = false } = {}) {
     applied: { overridesCleared: 0, vendorLinksUpdated: 0, usageUnitsConverted: 0 },
     plan,
   };
-  if (!apply) return summary;
+  if (!execute) return summary;
 
   await dbc.transaction(async (trx) => {
     for (const item of plan.staleOverrides) {
-      const updated = await trx('products_catalog')
-        .where({ id: item.id })
-        .whereNotNull('unit_size_oz')
-        .where('unit_size_oz', '>', 0)
-        .update({ cost_per_unit: null, cost_unit: null, updated_at: new Date() });
-      summary.applied.overridesCleared += Number(updated) || 0;
+      summary.applied.overridesCleared += await applyStaleOverrideClear(trx, item);
     }
     for (const link of plan.missingVendorLinks) {
-      const updated = await trx('products_catalog')
-        .where({ id: link.productId })
-        .whereNull('best_vendor_pricing_id')
-        .update({
-          best_vendor_pricing_id: link.bestVendorPricingId,
-          best_price: link.bestPrice,
-          best_vendor: link.vendorName,
-          best_price_amount_cached: link.bestPrice,
-          best_price_vendor_id_cached: link.vendorId,
-          best_price_status: 'current',
-          needs_pricing: false,
-          best_price_updated_at: new Date(),
-          updated_at: new Date(),
-        });
-      if (Number(updated) > 0) {
-        await trx('vendor_pricing').where({ product_id: link.productId }).update({ is_best_price: false });
-        await trx('vendor_pricing').where({ id: link.bestVendorPricingId }).update({ is_best_price: true });
-        summary.applied.vendorLinksUpdated += 1;
-      }
+      summary.applied.vendorLinksUpdated += await applyMissingVendorLink(trx, link, resolvedHelpers.recalcBestPrice);
     }
     for (const fix of plan.brokenUsageUnits) {
-      const updated = await trx('service_product_usage')
-        .where({ id: fix.usageId })
-        .update({ usage_amount: fix.toAmount, usage_unit: fix.toUnit });
-      summary.applied.usageUnitsConverted += Number(updated) || 0;
+      summary.applied.usageUnitsConverted += await applyBrokenUsageUnitFix(trx, fix);
     }
   });
   return summary;
 }
 
 if (require.main === module) {
-  const apply = process.argv.includes('--apply');
+  const execute = process.argv.includes('--execute');
   const db = require('../../server/models/db');
-  runCleanup(db, { apply })
+  runCleanup(db, { execute })
     .then((result) => {
       console.log(JSON.stringify(result, null, 2));
       return db.destroy();
