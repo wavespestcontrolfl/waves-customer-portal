@@ -3,6 +3,7 @@ const {
   extractImei,
   normalizeTripMetricsPayload,
   pointFromPayload,
+  tripEndTime,
   tripIdentity,
   webhookDedupeKey,
 } = require('../services/bouncie-payload');
@@ -98,5 +99,31 @@ describe('Bouncie payload normalization', () => {
     expect(tripIdentity({ transactionId: '', tripId: 'trip-5' })).toBe('trip-5');
     expect(tripIdentity({ eventType: 'tripStart', imei: 'imei-1' })).toBeNull();
     expect(tripIdentity()).toBeNull();
+  });
+  test('a trip-end reads its end point and never its departure point', () => {
+    const payload = {
+      eventType: 'tripEnd',
+      start: { lat: 27.1, lon: -82.1, timestamp: '2026-11-25T12:00:00.000Z' },
+      end: { lat: 27.5, lon: -82.5, timestamp: '2026-11-25T12:20:00.000Z' },
+    };
+    expect(pointFromPayload(payload, 'trip-end')).toMatchObject({ lat: 27.5, lng: -82.5, reported_at: '2026-11-25T12:20:00.000Z' });
+    expect(pointFromPayload({ eventType: 'tripEnd', start: payload.start, end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', location: { lat: 26.9, lon: -82.0 }, end: payload.end }, 'trip-end')).toMatchObject({ lat: 27.5, lng: -82.5 });
+    expect(pointFromPayload({ eventType: 'tripEnd', location: { lat: 26.9, lon: -82.0 }, end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', lat: 26.9, lon: -82.0, gps: { lat: 26.9, lon: -82.0 } }, 'trip-end')).toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', ts: '2026-11-25T12:21:00.000Z', location: { lat: 26.9, lon: -82.0 }, end: { lat: 27.5, lon: -82.5 } }, 'trip-end'))
+      .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:21:00.000Z' });
+    // The only time belongs to another location sample: the trip-end has no time of its own.
+    expect(pointFromPayload({ eventType: 'tripEnd', end: { lat: 27.5, lon: -82.5 }, location: { lat: 26.9, lon: -82.0, timestamp: '2026-11-25T12:22:00.000Z' } }, 'trip-end'))
+      .toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', end: { ts: 'x' }, disconnect: { lat: 27.2, lon: -82.2, timestamp: 'y' } }, 'trip-end')).toBeNull();
+    expect(tripEndTime({ ts: '2026-11-25T12:23:00.000Z', start: { lat: 1, lon: 1 } })).toBe('2026-11-25T12:23:00.000Z');
+    expect(tripEndTime({ end: { timestamp: 'not-a-date' }, timestamp: '2026-11-25T12:26:00.000Z' })).toBe('2026-11-25T12:26:00.000Z');
+    expect(pointFromPayload({ eventType: 'tripEnd', timestamp: '2026-11-25T12:26:00.000Z', end: { lat: 27.5, lon: -82.5, timestamp: 'bad' } }, 'trip-end'))
+      .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:26:00.000Z' });
+    expect(tripEndTime({ end: { lat: 27.5, lon: -82.5 }, gps: { ts: '2026-11-25T12:24:00.000Z' }, location: { ts: '2026-11-25T12:24:00.000Z' } })).toBeNull();
+    expect(tripEndTime({ end: { gps: { lat: 1, lon: 1, ts: '2026-11-25T12:25:00.000Z' } } })).toBe('2026-11-25T12:25:00.000Z');
+    expect(pointFromPayload({ eventType: 'tripEnd', connect: { lat: 27.1, lon: -82.1 } }, 'trip-end')).toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
   });
 });

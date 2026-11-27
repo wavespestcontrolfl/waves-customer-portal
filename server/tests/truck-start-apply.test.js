@@ -15,7 +15,7 @@ const db = require('../models/db');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
 const { applyTruckStarts, _test } = require('../services/truck-start-apply');
 
-const { skipReason, decideDay, autoCloseAt, isDeferred } = _test;
+const { skipReason, decideDay, autoCloseAt, isDeferred, needsBell } = _test;
 const MIN = 60 * 1000;
 // Wednesday 2026-11-25, 10:00 AM EST (UTC-5).
 const NOW = new Date('2026-11-25T15:00:00.000Z');
@@ -107,6 +107,21 @@ describe('decideDay', () => {
       detail: { shift_id: 's1', original_clock_in: at(8).toISOString(), clock_in: at(-3).toISOString(), minutes_moved: 11 },
     });
     expect(result.mutate.move.id).toBe('s1');
+  });
+
+  test('a move back of more than 30 minutes still moves, and rings one bell (owner 11-26 "FIX")', () => {
+    const result = decide([shift({ clock_in: at(120) })], at(-3));
+    expect(result).toMatchObject({ action: 'moved_earlier', detail: { minutes_moved: 123 } });
+    expect(needsBell(result.action, result.detail)).toBe(true);
+  });
+
+  test('the 30-minute line is judged on exact times', () => {
+    const move = (ms) => ({ original_clock_in: new Date(NOW.getTime() + ms).toISOString(), clock_in: NOW.toISOString() });
+    expect(needsBell('moved_earlier', move(30 * MIN))).toBe(false);
+    expect(needsBell('moved_earlier', move(30 * MIN + 100))).toBe(true);
+    expect(needsBell('moved_earlier', move(11 * MIN))).toBe(false);
+    expect(needsBell('moved_earlier', {})).toBe(false);
+    expect(needsBell('clocked_in', move(300 * MIN))).toBe(false);
   });
 
   test('case B on a closed shift moves it too', () => {
@@ -212,6 +227,7 @@ describe('the owner bell passes the admin notification rules', () => {
     ['needs_review', { reason: 'several_shifts' }],
     ['needs_review', { reason: 'week_closed' }],
     ['needs_review', { reason: 'something_new' }],
+    ['moved_earlier', { minutes_moved: 123, shift_id: 's1', original_clock_in: at(120).toISOString(), clock_in: at(-3).toISOString() }],
   ])('%s %j composes without a violation', async (action, detail) => {
     process.env.GATE_TRUCK_CLOCK_IN = 'start';
     const raised = [];
@@ -228,6 +244,9 @@ describe('the owner bell passes the admin notification rules', () => {
     expect(() => composeAdminAlert(raised[0].spec)).not.toThrow();
     expect(raised[0].category).toBe('payroll');
     expect(raised[0].opts.dedupeKey).toBe(`truck-start:t1:${WORK_DATE}`);
+    if (action === 'moved_earlier') {
+      expect(raised[0].spec.why).toMatch(/moved back 123 min/);
+    }
     if (action === 'flag_early_tap') {
       expect(raised[0].spec.why).toBe('Clocked in 14 min before the truck arrived at the first stop — shop stop or check.');
     }
