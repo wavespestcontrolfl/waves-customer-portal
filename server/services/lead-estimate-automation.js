@@ -182,6 +182,28 @@ function addTreeShrubService(wants, services, review) {
   review.push('tree_shrub_defaults_used');
 }
 
+const LAWN_FERT_PATTERN = /(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b(?!\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:shrubs?|trees?|palms?|ornamentals?)\b)/;
+const LAWN_EXPLICIT_SERVICE_PATTERN = new RegExp(`\\blawn\\s+(?:care|service|program|treatment|plan|maintenance|pest)\\b|${LAWN_FERT_PATTERN.source}|\\bweeds?\\b`);
+const LAWN_LOCATION_ONLY_PATTERN = /\b(?:in|on|around|throughout)\s+(?:the\s+|my\s+|our\s+|front\s+|back\s+)?lawn\b/;
+
+function applyLawnServiceInterest(services, review, { text, pestWanted, oneTime, recurring, wants }) {
+  const wantsExplicitLawn = wants(LAWN_EXPLICIT_SERVICE_PATTERN);
+  if (!wantsExplicitLawn && !wants(/\blawn\b/)) return;
+  // "One-time treatment for ants in my lawn" names where the pest is, not a
+  // separate lawn fertilization/care service.
+  if (pestWanted && !wantsExplicitLawn && LAWN_LOCATION_ONLY_PATTERN.test(text)) return;
+  if (wants(/\blawn pest\b/)) {
+    services.lawnPestControl = {};
+    review.push('lawn_pest_control_defaulted');
+    return;
+  }
+  if (oneTime || (!pestWanted && !recurring && wants(/\bweeds?\b/))) {
+    services.oneTimeLawn = { treatmentType: /\bfertilization\b/.test(text) ? 'fertilizer' : 'weed' };
+    return;
+  }
+  services.lawn = { track: 'st_augustine', tier: 'enhanced' };
+}
+
 function mapServiceInterestToEstimateServices(serviceInterest) {
   // "Tree & Shrub Pest Control" is the plant program's own name, not a
   // second request for household pest control.
@@ -215,18 +237,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (wants(/\blawn\b|(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b(?!\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:shrubs?|trees?|palms?|ornamentals?)\b)|\bweeds?\b/)) {
-    if (wants(/\blawn pest\b/)) {
-      services.lawnPestControl = {};
-      review.push('lawn_pest_control_defaulted');
-    } else if (pestWanted) {
-      services.lawn = { track: 'st_augustine', tier: 'enhanced' };
-    } else if (oneTime || (!recurring && wants(/\bweeds?\b/))) {
-      services.oneTimeLawn = { treatmentType: /\bfertilization\b/.test(text) ? 'fertilizer' : 'weed' };
-    } else {
-      services.lawn = { track: 'st_augustine', tier: 'enhanced' };
-    }
-  }
+  applyLawnServiceInterest(services, review, { text, pestWanted, oneTime, recurring, wants });
 
   if (wants(/\bmosquitoe?s?\b/)) {
     if (oneTime) {
@@ -375,10 +386,15 @@ function resolveLeadFeatures(body, county) {
   };
 }
 
+function isVerifiedZeroTurf(county) {
+  const turf = county?.turf;
+  return Boolean(turf && (turf.turfKnownZero === true || Number(turf.estimatedTurfSf) === 0));
+}
+
 function countyTurfEngineFields(county) {
   const turf = county?.turf;
   if (!turf) return {};
-  if (turf.turfKnownZero === true || Number(turf.estimatedTurfSf) === 0) {
+  if (isVerifiedZeroTurf(county)) {
     return {
       lawnSqFt: 0,
       estimatedTurfSf: 0,
@@ -394,17 +410,38 @@ function countyTurfEngineFields(county) {
   };
 }
 
-function countyMeasurementsSummary(county) {
+function resolvedSummaryFeatures(countyFeatures, resolvedFeatures) {
+  if (!countyFeatures && !resolvedFeatures?.poolCage) return null;
+  const out = { ...(countyFeatures || {}) };
+  if (resolvedFeatures?.poolCage === false) {
+    delete out.poolCage;
+    delete out.poolCageSize;
+    delete out.poolCageSqft;
+    delete out.poolCageReview;
+  } else if (resolvedFeatures?.poolCage === true) {
+    out.poolCage = true;
+    if (resolvedFeatures.poolCageSize) out.poolCageSize = resolvedFeatures.poolCageSize;
+    if (resolvedFeatures.poolCageReview === true) out.poolCageReview = true;
+    else delete out.poolCageReview;
+  }
+  if (resolvedFeatures?.pool === false) delete out.pool;
+  return Object.keys(out).length ? out : null;
+}
+
+function countyMeasurementsSummary(county, resolvedFeatures = null) {
+  const features = resolvedSummaryFeatures(county.features, resolvedFeatures);
   return {
     source: MEASUREMENTS_SOURCE,
     homeSqFt: county.homeSqFt,
     lotSqFt: county.lotSqFt,
     ...(county.stories ? { stories: county.stories } : {}),
     ...(county.propertyType ? { propertyType: county.propertyType } : {}),
-    ...(county.features ? { features: county.features } : {}),
-    ...(county.turf?.estimatedTurfSf > 0
-      ? { estimatedTurfSf: county.turf.estimatedTurfSf, turfSource: county.turf.turfSource || null }
-      : {}),
+    ...(features ? { features } : {}),
+    ...(isVerifiedZeroTurf(county)
+      ? { estimatedTurfSf: 0, turfSource: county.turf?.turfSource || null }
+      : county.turf?.estimatedTurfSf > 0
+        ? { estimatedTurfSf: county.turf.estimatedTurfSf, turfSource: county.turf.turfSource || null }
+        : {}),
   };
 }
 
@@ -454,6 +491,12 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // A review reason like any other: the auto-send lane parks the draft
   // until LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS names it.
   if (county) review.push(FROM_COUNTY_REVIEW);
+  // Verified zero turf on a lawn request (recurring, one-time, or lawn pest)
+  // must park for staff review: the engine treats lawnSqFt=0 as its smallest
+  // bracket rather than "no lawn to treat".
+  if (isVerifiedZeroTurf(county) && (services.lawn || services.oneTimeLawn || services.lawnPestControl)) {
+    review.push('zero_turf_verified');
+  }
   // Gate ON: an unresolved type stays literal 'unknown' — the pricing
   // engine's own normalizer prices it at the neutral default AND stamps
   // propertyTypeWasDefaulted/invalid_property_type warnings, so the default
@@ -712,7 +755,7 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
   // size instead, so staff never read "default size" on a real one.
   let gateRecord = readiness;
   if (engineInput.sizeSource === MEASUREMENTS_SOURCE) {
-    automation.measurements = countyMeasurementsSummary(county);
+    automation.measurements = countyMeasurementsSummary(county, engineInput.input.features);
     gateRecord = {
       ...readiness,
       review: [...new Set((readiness.review || []).map((reason) => (reason === DEFAULTED_REVIEW ? FROM_COUNTY_REVIEW : reason)))],
@@ -733,9 +776,10 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
     const trustedInput = await withTrustedCatalogPricing(engineInput.input);
     const estimate = generateEstimate(trustedInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter(lineRequiresReview);
-    // A stated home above the residential bound is a hand price whatever the lead asks for (see LEAD_HOME_SQFT_LIMIT): the saved
-    // totals are zero and the draft is never auto-sendable.
-    const quoteRequired = manualQuoteLines.length > 0 || engineInput.homeSizeAboveLimit;
+    // A stated home above the residential bound or a lawn request on verified
+    // zero turf is a hand price: saved totals stay zero and never auto-send.
+    const zeroTurfLawn = automation.review.includes('zero_turf_verified');
+    const quoteRequired = manualQuoteLines.length > 0 || engineInput.homeSizeAboveLimit || zeroTurfLawn;
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (

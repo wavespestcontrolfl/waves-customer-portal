@@ -35,9 +35,9 @@ function countyRecord(over = {}) {
 }
 const lookupOf = (record, enriched = {}) => ({ propertyRecord: record, enriched });
 
-function readyLead({ customer = {}, body = {} } = {}) {
+function readyLead({ customer = {}, body = {}, serviceInterest = 'Quarterly Pest Control' } = {}) {
   const intake = {
-    serviceInterest: 'Quarterly Pest Control',
+    serviceInterest,
     email: 'lead@example.com',
     fullAddress: ADDRESS,
     normalizedAddress: { line1: '4521 Synthetic Palm Dr', city: 'Venice', state: 'FL', zip: '34285', fullAddress: ADDRESS },
@@ -571,9 +571,58 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
       aiConfidence: 90, turfSource: 'vision', estimatedTurfSf: 0, turfObservation: 'none_present',
     }));
     expect(zeroTurf.turf).toMatchObject({ estimatedTurfSf: 0, turfKnownZero: true });
-    const zeroDraft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: zeroTurf });
-    expect(zeroDraft.automation.engineInput.lawnSqFt).toBe(0);
-    expect(zeroDraft.automation.engineInput.estimatedTurfSf).toBe(0);
+    // Pest-only on zero turf stays normal; recurring and one-time lawn MUST park for staff review.
+    const zeroPestDraft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: zeroTurf });
+    expect(zeroPestDraft.automation.engineInput.lawnSqFt).toBe(0);
+    expect(zeroPestDraft.automation.engineInput.estimatedTurfSf).toBe(0);
+    expect(zeroPestDraft.automation.review).not.toContain('zero_turf_verified');
+
+    const zeroRecurringLawn = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ serviceInterest: 'Lawn Care' }),
+      measurements: zeroTurf,
+    });
+    expect(zeroRecurringLawn.automation.status).toBe('manual_review_required');
+    expect(zeroRecurringLawn.automation.generated).toBe(false);
+    expect(zeroRecurringLawn.automation.quoteRequired).toBe(true);
+    expect(zeroRecurringLawn.automation.review).toContain('zero_turf_verified');
+    expect(zeroRecurringLawn.monthly).toBe(0);
+
+    const zeroOneTimeLawn = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ serviceInterest: 'One-Time Weed Control' }),
+      measurements: zeroTurf,
+    });
+    expect(zeroOneTimeLawn.automation.status).toBe('manual_review_required');
+    expect(zeroOneTimeLawn.automation.quoteRequired).toBe(true);
+    expect(zeroOneTimeLawn.automation.review).toContain('zero_turf_verified');
+
+    // Named lookup water classifications (CANAL_ADJACENT, POND_ON_PROPERTY) flow into pestPhotoFacts.
+    process.env.GATE_PEST_PRICE_PHOTO_FACTS = 'true';
+    const canalLookup = countyMeasurements({
+      propertyRecord: countyRecord(),
+      enriched: {
+        aiConfidence: 82,
+        turfSource: 'vision',
+        estimatedTurfSf: 4200,
+        nearWater: 'CANAL_ADJACENT',
+        _observed: { nearWater: true },
+        fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM' }],
+      },
+      aiAnalysis: { aiDivergences: [] },
+    });
+    expect(canalLookup.pestPhotoFacts).toEqual({ nearWater: true });
+
+    // Explicit form "no cage" clears BOTH pricing modifier AND displayed measurements.features cage fields.
+    const countyWithCage = countyMeasurements(lookupOf(countyRecord({
+      poolCage: 'YES', poolCageSqft: 650, _poolCageSource: 'county_parcel',
+    })));
+    const noCageDraft = await buildAutomatedLeadDraftEstimate({
+      ...readyLead(),
+      body: { poolCage: 'no' },
+      measurements: countyWithCage,
+    });
+    expect(noCageDraft.automation.engineInput.features.poolCage).toBe(false);
+    expect(noCageDraft.automation.measurements.features?.poolCage).toBeUndefined();
+    expect(noCageDraft.automation.measurements.features?.poolCageSqft).toBeUndefined();
 
     // Unflagged high-confidence turf flows through cleanly.
     const cleanTurf = countyMeasurements(lookupOf(countyRecord(), {
@@ -582,7 +631,7 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(cleanTurf.turf).toEqual({ estimatedTurfSf: 4200, turfSource: 'vision', turfCappedToParcel: false });
   });
 
-  test('plural service-interest keywords map cleanly and negated weeds keep recurring lawn care', () => {
+  test('plural service-interest keywords map cleanly, negated weeds keep recurring lawn care, and one-time ants in lawn does not add recurring lawn', () => {
     expect(mapServiceInterestToEstimateServices('Ants and roaches in kitchen').services).toHaveProperty('pest');
     expect(mapServiceInterestToEstimateServices('Mosquitoes in backyard').services).toHaveProperty('mosquito');
     expect(mapServiceInterestToEstimateServices('Fleas and ticks').services).toHaveProperty('flea');
@@ -591,6 +640,14 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     const recurringNoWeeds = mapServiceInterestToEstimateServices('Quarterly lawn care, no weeds');
     expect(recurringNoWeeds.services).toHaveProperty('lawn');
     expect(recurringNoWeeds.services).not.toHaveProperty('oneTimeLawn');
+    const antsInLawn = mapServiceInterestToEstimateServices('One-time treatment for ants in my lawn');
+    expect(antsInLawn.services).toHaveProperty('oneTimePest');
+    expect(antsInLawn.services).not.toHaveProperty('lawn');
+    expect(antsInLawn.services).not.toHaveProperty('oneTimeLawn');
+    const oneTimePestAndLawn = mapServiceInterestToEstimateServices('One-time pest and lawn');
+    expect(oneTimePestAndLawn.services).toHaveProperty('oneTimePest');
+    expect(oneTimePestAndLawn.services).toHaveProperty('oneTimeLawn');
+    expect(oneTimePestAndLawn.services).not.toHaveProperty('lawn');
   });
 
   test('admin-leads withEstimatePreview marks county-verified SERVER drafts sendReady only when share link exists', () => {

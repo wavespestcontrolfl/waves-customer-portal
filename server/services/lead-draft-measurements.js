@@ -40,7 +40,6 @@ const {
   hasGlobalVerifyFlag,
   lookupDimensionIsTrustworthy,
   lookupFeaturesAreTrustworthy,
-  lookupLawnAreaIsTheOnlyFeatureDoubt,
   lookupDisputedPhotoFields,
   lookupTurfEstimateIsTrustworthy,
   lookupTurfZeroIsObserved,
@@ -137,12 +136,6 @@ function isPhotoFactTrusted(disputed, obs, field) {
   return !disputed.has(field) && (!obs || obs[field] !== false);
 }
 
-const PEST_PHOTO_FACT_READS = [
-  ['shrubs', 'shrubDensity', { LIGHT: 'light', MODERATE: 'moderate', HEAVY: 'heavy' }],
-  ['complexity', 'landscapeComplexity', { SIMPLE: 'simple', MODERATE: 'moderate', COMPLEX: 'complex' }],
-  ['nearWater', 'nearWater', { YES: true, NO: false, NONE: false }],
-];
-
 function trustedSharedPhotoFacts(enriched, aiAnalysis, featuresTrusted) {
   if (!featuresTrusted) return {};
   const obs = enriched._observed && typeof enriched._observed === 'object' ? enriched._observed : null;
@@ -163,25 +156,16 @@ function trustedSharedPhotoFacts(enriched, aiAnalysis, featuresTrusted) {
   return out;
 }
 
-// Mirrors customer-pricing-ai.js pestPhotoFactsFor: when lawn area is the ONLY
-// feature doubt, carry explicitly observed, non-disputed photo facts ONLY via
-// `pestPhotoFacts` (never shared features) so non-pest lines keep strict gating.
+// Reuses customer-pricing-ai.js pestPhotoFactsFor directly so water
+// classifications (CANAL_ADJACENT, POND_ON_PROPERTY, RETENTION_NEARBY,
+// LAKE_ADJACENT, WETLAND_ADJACENT), _observed guards, and disputed-field checks
+// never diverge between the customer pricing path and automated lead drafts.
 function trustedCountyPestPhotoFacts(lookup) {
   const enriched = lookup?.enriched;
   if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
   if (lookupFeaturesAreTrustworthy(enriched)) return null;
-  if (require('../config/feature-gates').pestPricePhotoFactsLive?.() !== true) return null;
-  if (!lookupLawnAreaIsTheOnlyFeatureDoubt(enriched)) return null;
-  const observed = enriched._observed;
-  const aiAnalysis = lookup?.aiAnalysis;
-  if (!observed || typeof observed !== 'object' || !aiAnalysis || typeof aiAnalysis !== 'object') return null;
-  const disputed = lookupDisputedPhotoFields(aiAnalysis);
-  const facts = {};
-  for (const [fact, field, known] of PEST_PHOTO_FACT_READS) {
-    const word = String(enriched[field] ?? '').trim().toUpperCase();
-    if (Object.hasOwn(known, word) && observed[field] === true && !disputed.has(field)) facts[fact] = known[word];
-  }
-  return Object.keys(facts).length ? facts : null;
+  const { pestPhotoFactsFor } = require('./customer-pricing-ai');
+  return pestPhotoFactsFor(enriched, lookup) || null;
 }
 
 function trustedCountyFeatures(lookup) {
