@@ -860,7 +860,7 @@ describe('no overcharge from hedged text, from evidence for another value, or fr
   const { normalizeConstruction, normalizeFoundation, readCountyConstruction } = require('../services/pricing-engine/structural-facts');
   const { structuralTrustVerdicts, structuralFactIsRecordBacked } = require('../services/lookup-confidence');
 
-  test('a premium needs text that affirms it: hedged or qualified text reads unknown and keeps the $175 block price', () => {
+  test('a premium needs text that affirms it: hedged or qualified text reads unknown and keeps the $175 block price', async () => {
     for (const text of ['crawl space excluded', 'may have a crawl space', 'has a crawl space', 'crawl or slab', 'crawl space per owner', 'could be raised', 'crawl space is a slab']) {
       expect([text, normalizeFoundation(text)]).toEqual([text, undefined]);
     }
@@ -872,16 +872,34 @@ describe('no overcharge from hedged text, from evidence for another value, or fr
     expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { constructionType: 'wood frame excluded' } } })).toBe(175);
     // A technician entering one saves nothing for the field (there is no reading to keep).
     expect(require('../services/property-lookup/lookup-cache').sanitizeVerifiedValue('foundationType', 'may have a crawl space')).toBeUndefined();
-    // Plain descriptor text still affirms the premium.
+    // A premium stands only on its exact names: the enum a dropdown sends, or the plain words for it.
     for (const [text, reading] of [
-      ['crawl space', 'CRAWLSPACE'], ['raised on piers', 'RAISED'], ['pier and beam', 'RAISED'], ['stem wall', 'RAISED'], ['Concrete Pilings', 'RAISED'],
-      ['slab and crawl space', 'CRAWLSPACE'], ['vented crawl space with vapor barrier', 'CRAWLSPACE'], ['2 story on stilts', 'RAISED'],
+      ['CRAWLSPACE', 'CRAWLSPACE'], ['crawl space', 'CRAWLSPACE'], ['Crawl Space', 'CRAWLSPACE'], ['RAISED', 'RAISED'], ['raised on piers', 'RAISED'],
+      ['pier and beam', 'RAISED'], ['stem wall', 'RAISED'], ['Concrete Pilings', 'RAISED'],
     ]) expect([text, normalizeFoundation(text)]).toEqual([text, reading]);
     for (const [text, reading] of [
-      ['wood frame', 'WOOD_FRAME'], ['Frame/Stucco', 'MIXED'], ['brick veneer over frame', 'MIXED'], ['CBS first floor, frame second floor', 'MIXED'],
-      ['frame w/ stucco', 'MIXED'], ['hardie board over frame', 'WOOD_FRAME'],
+      ['WOOD_FRAME', 'WOOD_FRAME'], ['wood frame', 'WOOD_FRAME'], ['Frame', 'WOOD_FRAME'], ['MIXED', 'MIXED'], ['Frame/Stucco', 'MIXED'],
+      ['brick veneer over frame', 'MIXED'],
     ]) expect([text, normalizeConstruction(text)]).toEqual([text, reading]);
     expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { foundationType: 'raised on piers' } } })).toBe(225);
+    // Any other text that reads as a premium is unknown, whatever its words: no wording can raise a price.
+    for (const text of ['crawl space: 0', 'slab and crawl space', 'vented crawl space with vapor barrier', '2 story on stilts']) {
+      expect([text, normalizeFoundation(text)]).toEqual([text, undefined]);
+    }
+    for (const text of ['CBS with wood siding', 'CBS with wood floors', 'CBS first floor, frame second floor', 'hardie board over frame']) {
+      expect([text, normalizeConstruction(text)]).toEqual([text, undefined]);
+    }
+    // The two reported cases on a 3,000 sq ft block home: the block slab cell ($175), not $225 or $200. A technician entering either
+    // saves nothing for the field, so the verified-entry path cannot carry the premium either.
+    expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { foundationType: 'crawl space: 0' } } })).toBe(175);
+    expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { constructionType: 'CBS with wood siding' } } })).toBe(175);
+    expect(price({ homeSqFt: 3000, constructionMaterial: 'CBS with wood siding' })).toBe(175);
+    const cache = require('../services/property-lookup/lookup-cache');
+    expect(cache.sanitizeVerifiedValue('constructionMaterial', 'CBS with wood siding')).toBeUndefined();
+    expect(cache.sanitizeVerifiedValue('foundationType', 'crawl space: 0')).toBeUndefined();
+    // The verify route's save keeps no field from them (null = "No verifiable fields", and nothing is written).
+    await expect(cache.saveVerifiedOverride('1 Test St, Bradenton, FL 34211',
+      { constructionMaterial: 'CBS with wood siding', foundationType: 'crawl space: 0' }, 'tech:test')).resolves.toBeNull();
     // A county code is the appraiser's own word for the wall: it reads in full, as before ("AVG" is no structural term, and
     // stucco is only the finish there).
     expect(readCountyConstruction('FRAME STUCCO AVG')).toBe('WOOD_FRAME');
@@ -934,5 +952,22 @@ describe('no overcharge from hedged text, from evidence for another value, or fr
     }
     // A WDO request that sits in the inputs only is not a row.
     expect(() => assertFallback({ inputs: { services: { wdo: {} } }, result: { lineItems: [] } })).not.toThrow();
+    // The revise route takes any object, a list included: a list is read like any other shape.
+    refused([{ result: { lineItems: [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 250 }] } }]);
+    refused([{ name: 'WDO Inspection', price: 250 }]);
+    for (const posted of [[], [{ result: { lineItems: [] } }], null, undefined]) expect(() => assertFallback(posted)).not.toThrow();
+  });
+
+  test('through the revision path: a list-shaped revision with no replayable inputs and a $250 WDO row is refused, not stored', async () => {
+    const { resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
+    const list = [{ result: { lineItems: [{ service: 'wdo_inspection', name: 'WDO Inspection', price: 250 }] } }];
+    await expect(resolveServerAuthoritativePricing({
+      estimateData: list,
+      clientPreview: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 250 },
+      quoteRequired: false,
+      now: new Date('2026-11-27T12:00:00Z'),
+      recompute: async () => ({ recomputed: false, reason: 'NO_INPUTS' }),
+      storedEstimateData: { result: { lineItems: [{ service: 'wdo_inspection', price: 250 }] } },
+    })).rejects.toMatchObject({ statusCode: 409 });
   });
 });

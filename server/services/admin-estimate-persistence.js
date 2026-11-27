@@ -2196,8 +2196,9 @@ function saveHoldsSpecialtyRow(estimateData) {
   return walk(estimateData);
 }
 
+// Every posted shape is read: the revise route takes any object, a list included, and a list is walked like any other node.
 function assertSpecialtyClientFallbackSave(estimateData) {
-  if (!isPlainRecord(estimateData) || !saveHoldsSpecialtyRow(estimateData)) return;
+  if (!saveHoldsSpecialtyRow(estimateData)) return;
   throw errorWithStatus('This estimate has a bed bug, mosquito, wasp or WDO inspection price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
 }
 // The rule evidence of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's stamp and
