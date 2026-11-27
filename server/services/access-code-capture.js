@@ -420,7 +420,7 @@ async function readItems(build, context, promptVersion) {
     throw err;
   }
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
-    text: prompt, jsonSchema: SCHEMA, maxTokens: 4096, laneId: 'sms-access-code-capture', promptVersion,
+    text: prompt, jsonSchema: SCHEMA, maxTokens: 4096, laneId: 'access-code-capture', promptVersion,
   });
   if (!result.ok) throw new Error('access_net_provider_failed');
   if (!validateOutput(result.json)) throw new Error('access_net_invalid_schema');
