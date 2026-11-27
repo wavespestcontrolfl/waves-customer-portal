@@ -122,12 +122,12 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
   // (start / connect) point, and never another sample (top level, location, position,
   // disconnect) whose age is unknown. With no end position the receiver falls back to the
   // truck's last location under its 10-minute freshness check (engineOffPoint). An end position
-  // with no time at all (neither its own nor the event's) is no point: it is never written.
+  // with no readable time (neither its own nor the event's) is no point: it is never written.
   if (canonicalEventType === 'trip-end') {
     const point = pointFromSource(payload.end);
     if (!point) return null;
     if (point.reported_at == null) point.reported_at = tripEndTime(payload);
-    return point.reported_at == null ? null : point;
+    return Number.isFinite(Date.parse(point.reported_at ?? '')) ? point : null;
   }
   return (
     pointFromSource(payload) ||
