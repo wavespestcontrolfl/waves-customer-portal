@@ -144,43 +144,44 @@ describe('a label rate per gallon is bound to its spray volume', () => {
     expect((await mix(home, 1, { calibrations: [truck] })).amount).toBe(2);
   });
 
-  test('a picked rig that sprays 2 gallons per 1,000 sq ft gets no amount: the same mix would be twice the label amount', async () => {
+  // Owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING": a rig at another volume still gets its
+  // amount, with the warning beside it.
+  test('a picked rig that sprays 2 gallons per 1,000 sq ft gets the amount with a warning: the same mix would be twice the label amount', async () => {
     const out = await mix(home, null, { equipmentSystemId: 'sys-1' });
-    expect(out.amount).toBeNull();
-    expect(out.reason).toBe("The card's rate is for 1 gal per 1,000 sq ft. Tank #1 sprays 2: the same mix would put down more than the label amount. Use a sprayer at the card's volume");
-    expect(out.ratePerGallon).toBeNull();
-    expect(out.sprayVolumeGalPer1000).toBeUndefined();
+    expect(out.amount).toBe(220);
+    expect(out.warnings).toContain("The card's rate is for 1 gal per 1,000 sq ft. Tank #1 sprays 2: the same mix would put down more than the label amount. Use a sprayer at the card's volume");
+    expect(out.ratePerGallon).toEqual({ lo: 2, hi: 2, unit: 'fl_oz' });
   });
 
   test('a rig assigned to the visit is named too', async () => {
     const out = await mix({ ...home, assigned_equipment_system_id: 'sys-1' }, 4);
-    expect(out.amount).toBeNull();
-    expect(out.reason).toMatch(/Tank #1 sprays 2/);
+    expect(out.amount).not.toBeNull();
+    expect(out.warnings.join(' ')).toMatch(/Tank #1 sprays 2/);
   });
 
-  test('a picked rig at the card\'s volume gets the amount; any other volume, over or under, gets none', async () => {
+  test('a picked rig at the card\'s volume gets the amount; any other volume, over or under, gets it with a warning', async () => {
     expect(await mix(home, null, { equipmentSystemId: 'sys-2' })).toMatchObject({ amount: 2, gallons: 1, sprayVolumeGalPer1000: 1, coversSqft: 1000, rig: { name: 'Hand sprayer' } });
     // Under the volume the same mix is less than the label amount per area (half of it at 0.5 gal per 1,000 sq ft).
     const light = { ...hand, carrier_gal_per_1000: 0.5 };
     const under = await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, light] });
-    expect(under.amount).toBeNull();
-    expect(under.reason).toBe("The card's rate is for 1 gal per 1,000 sq ft. Hand sprayer sprays 0.5: the same mix would put down less than the label amount. Use a sprayer at the card's volume");
+    expect(under.amount).toBe(2);
+    expect(under.warnings).toContain("The card's rate is for 1 gal per 1,000 sq ft. Hand sprayer sprays 0.5: the same mix would put down less than the label amount. Use a sprayer at the card's volume");
     // No tolerance: a rig a hundredth over it gets no amount.
     const over = { ...hand, carrier_gal_per_1000: 1.01 };
     const refused = await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck, over] });
-    expect(refused.amount).toBeNull();
-    expect(refused.reason).toMatch(/Hand sprayer sprays 1\.01: the same mix would put down more than the label amount/);
+    expect(refused.amount).toBe(2);
+    expect(refused.warnings.join(' ')).toMatch(/Hand sprayer sprays 1\.01: the same mix would put down more than the label amount/);
     // A picked rig with no calibration on file has no volume to judge.
     expect(await mix(home, null, { equipmentSystemId: 'sys-2', calibrations: [truck] })).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1 });
   });
 
-  test('the vehicle cards and the flea card are bound the same way', async () => {
+  test('the vehicle cards and the flea card are warned the same way', async () => {
     const vehicle = { ...home, service_type: 'Vehicle German Roach Treatment (2 Visits)', service_key: 'vehicle_german_roach' };
     expect(await mix(vehicle, 1)).toMatchObject({ amount: 2, sprayVolumeGalPer1000: 1, coversSqft: 1000 });
-    expect((await mix(vehicle, null, { equipmentSystemId: 'sys-1' })).amount).toBeNull();
+    expect((await mix(vehicle, null, { equipmentSystemId: 'sys-1' })).warnings.join(' ')).toMatch(/Tank #1 sprays 2/);
     const flea = { ...home, service_type: 'Flea Control Service', service_category: 'specialty', service_key: 'flea_tick' };
     expect(await mix(flea, 2)).toMatchObject({ amount: 1.32, sprayVolumeGalPer1000: 1, coversSqft: 2000 });
-    expect((await mix(flea, null, { equipmentSystemId: 'sys-1' })).reason).toMatch(/Tank #1 sprays 2/);
+    expect((await mix(flea, null, { equipmentSystemId: 'sys-1' })).warnings.join(' ')).toMatch(/Tank #1 sprays 2/);
   });
 
   test('a per-gallon rate with no stated volume is as before: no volume line, no rig check', async () => {

@@ -24,10 +24,11 @@ describe("area add-on label text on the job card", () => {
     expect(screen.getByText("Safety: The applicator must carry the 2(ee) sheet.")).toBeInTheDocument();
   });
 
-  it("with no grass evidence the rate is replaced by the reason; area, limit and safety stay", () => {
-    render(<JobCardGoverned D={D} governed={{ ...base, sold: "Sold: up to 1,000 sq ft of treated lawn", grass: null, rate: null, rateNote: "Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld" }} />);
-    expect(screen.getByText(/Grass on the estimate is not on this visit/)).toBeInTheDocument();
-    expect(screen.queryByText(/^Rate:/)).toBeNull();
+  // Owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING": the rate shows with the reason beside it.
+  it("with no grass evidence the rate still shows, with the reason as a warning; area, limit and safety stay", () => {
+    render(<JobCardGoverned D={D} governed={{ ...base, sold: "Sold: up to 1,000 sq ft of treated lawn", grass: null, rate: "0.147 oz per 1,000 sq ft", rateNote: "Grass on the estimate is not on this visit (the rate is St. Augustine only)" }} />);
+    expect(screen.getByText(/Warning: Grass on the estimate is not on this visit/)).toBeInTheDocument();
+    expect(screen.getByText("Rate: 0.147 oz per 1,000 sq ft")).toBeInTheDocument();
     expect(screen.queryByText(/Grass on the estimate: /)).toBeNull();
     expect(screen.getByText("Area: Treated square feet.")).toBeInTheDocument();
     expect(screen.getByText(/Safety:/)).toBeInTheDocument();

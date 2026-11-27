@@ -331,10 +331,11 @@ describe("Job card chemical area add-on", () => {
     expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
   });
 
-  it("shows the hold reason in place of a withheld rate, and no Safety line when none is stated", async () => {
-    await show(card({ rate: null, rateNote: "Spray check: wind over 10 mph — rate withheld", safety: null }));
-    expect(await screen.findByText("Spray check: wind over 10 mph — rate withheld")).toBeVisible();
-    expect(screen.queryByText(/^Rate:/)).not.toBeInTheDocument();
+  // Owner 2026-11-26: a hold is a warning beside the rate, never a reason to hide it.
+  it("shows the hold reason as a warning beside the rate, and no Safety line when none is stated", async () => {
+    await show(card({ rateNote: "Spray check: wind over 10 mph", safety: null }));
+    expect(await screen.findByText("Warning: Spray check: wind over 10 mph")).toBeVisible();
+    expect(screen.getByText(/^Rate:/)).toBeVisible();
     expect(screen.queryByText(/^Safety:/)).not.toBeInTheDocument();
     expect(screen.getByText(/^Limit:/)).toBeVisible();
   });
@@ -452,5 +453,26 @@ describe("Job card Tank section rigs", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
     expect(await screen.findByText("Label rate 2 fl oz per gallon")).toBeVisible();
     expect(screen.queryByText(/gal per 1,000 sq ft\. More water/)).toBeNull();
+  });
+});
+
+describe("Job card Tank search warnings (owner 2026-11-26: warned, never blocked)", () => {
+  it("shows the amount with every check beside it as a warning", async () => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p9", name: "Celsius WG", category: "herbicide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
+        return reply({ enabled: true, amount: 6.215, unit: "oz", gallons: 110, ratePer1000: 0.113, rateVerified: false, sprayCheck: { verdict: "hold", reason: "wind over 10 mph" }, warnings: ["Label rate not yet verified", "Spray check: wind over 10 mph"], rotationWarnings: ["Celsius WG repeats HRAC 2."], planBlocks: [] });
+      }
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply({ enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, products: [], addons: [], planBlocks: [], sprayCheck: { window: "not_today" }, tank: { calibrated: true, source: "rig", rigs: [] } });
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "celsius" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Celsius WG" }));
+    expect(await screen.findByText("Warning: Label rate not yet verified")).toBeVisible();
+    expect(screen.getByText("Warning: Spray check: wind over 10 mph")).toBeVisible();
+    expect(screen.getByText("Warning: Celsius WG repeats HRAC 2.")).toBeVisible();
+    expect(screen.queryByText("No mix available")).toBeNull();
   });
 });

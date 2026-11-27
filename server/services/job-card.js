@@ -1347,7 +1347,7 @@ function productBlocksUnderPlan({ plan }, product) {
 // The lawn plan is built from the customer's singleton turf profile — the
 // primary home's grass, area, assessments and nutrient history. A lawn
 // visit stamped elsewhere gets no plan and no amounts.
-const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
+const ALTERNATE_ADDRESS_BLOCK = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, so its amounts may not fit this address' };
 
 // A lawn plan line the engine selects by a Use tick: an "if needed" (conditional-role) line or a primary line written "if …"
 // (protocols.json November St. Augustine: Atrazine "IF <85°F", Three-Way "if too warm"), while the tick alone decides it:
@@ -1598,8 +1598,8 @@ function declaredTankRate(meta, hints, product) {
     return { declaredRate: { lo: labelUse.amount, hi: labelUse.amount, unit: labelUse.unit }, labelUseRate: true, ...(carrier ? { labelCarrierGalPer1000: carrier } : {}) };
   }
   // A weaker-mix line (the flea card's Tekko Pro at 0.66) whose row has another or no registration number, or a catalog rate that
-  // cannot be compared: the catalog band may be the stronger rate, so the tank search withholds the dose (labelHold) and no rate
-  // comes from the card or the catalog.
+  // cannot be compared: the catalog band may be the stronger rate, so the tank search warns (labelHold, owner 2026-11-26: warned, never blocked) and no rate
+  // comes from the card, only the catalog band below.
   const hold = labelRateHoldText(meta, product);
   if (hold) return { labelRateRefused: true, labelHold: hold };
   // The line names a label rate for another registration: its text states that rate too, so no rate is read from it (rateOf below
@@ -1795,11 +1795,10 @@ function mergeProductLines(lines) {
 /**
  * The label text of an area add-on for the card (protocols.json area_addon
  * `labelFacts`) and what the estimate sold (`scope`, the booked
- * area_addon_scope). The rate is a dosing instruction, so it is withheld, with
- * the reason, while the spray check holds, until the catalog label is
- * verified, and, for a rate bound to one grass (the Arena 2(ee) rate), unless
- * the grass the estimate priced is on the visit and matches: the recipe never
- * shows without that evidence. Area basis, limit and safety stay. `sold` and
+ * area_addon_scope). The rate always shows, with the reason beside it as a warning while the spray check holds, the catalog
+ * label is unverified, or a rate bound to one grass (the Arena 2(ee) rate) has
+ * no matching grass on the visit (owner 2026-11-26: warned, never blocked).
+ * Area basis, limit and safety stay. `sold` and
  * `grass` are the "Sold: up to 2,000 sq ft of bed" and "Grass on the estimate:
  * St. Augustine" lines.
  */
@@ -1817,20 +1816,32 @@ function governedForCard(governed, verdict, product = {}, scope = null) {
   const { soldAreaNoun: _soldAreaNoun, requiresGrass, ratePer1000: _ratePer1000, rateUnit: _rateUnit, ...facts } = governed;
   const grass = requiresGrass ? (scope?.grassType || null) : null;
   const grassName = requiresGrass ? GRASS_NAMES[requiresGrass] || requiresGrass : null;
-  // Same contract as a planned amount: no actionable rate while the spray
-  // check holds, or until the catalog product's label is verified.
-  const withheldReason = (verdict.verdict === 'hold' && `Spray check: ${verdict.reason} — rate withheld`)
-    || (!product.label_verified_at && 'Label rate not yet verified — rate withheld')
+  // Owner 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"): a spray-check hold, an
+  // unverified label or a grass mismatch is a warning beside the rate, never a reason to hide it.
+  const withheldReason = (verdict.verdict === 'hold' && `Spray check: ${verdict.reason}`)
+    || (!product.label_verified_at && 'Label rate not yet verified')
     || (requiresGrass && grass !== requiresGrass
-      && (grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${grassName} — rate withheld` : `Grass on the estimate is not on this visit (the rate is ${grassName} only) — rate withheld`))
+      && (grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${grassName} (this rate is ${grassName} only)` : `Grass on the estimate is not on this visit (the rate is ${grassName} only)`))
     || null;
   return {
     ...facts,
-    rate: withheldReason ? null : facts.rate,
+    rate: facts.rate,
+    // The warning beside the rate (the field keeps its name for the client).
     rateNote: withheldReason,
     sold: soldLine(governed, scope),
     grass: requiresGrass && grass === requiresGrass ? `Grass on the estimate: ${grassName}` : null,
   };
+}
+
+// The warning shown beside a card's planned amount (owner 2026-11-26: warned, never blocked). Null when nothing to warn.
+function cardAmountWarning({ unverified, blocked, tankReason, held, reason, hasAmount }) {
+  const parts = [
+    unverified && 'Label rate not yet verified',
+    hasAmount && blocked && 'Plan blocked, see the plan blocks',
+    hasAmount && tankReason,
+    hasAmount && held && `Spray check: ${reason}`,
+  ].filter(Boolean);
+  return parts.length ? parts.join(' · ') : null;
 }
 
 async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = false, tankReason = null, includePricing = false, dbh = db }) {
@@ -1839,17 +1850,13 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
     const p = line.product;
     const verdict = verdicts.find((v) => v.productId === p.id) || { verdict: 'unknown', reason: 'No limit on file' };
     // The appointment plan's own mix (lawn only) — never recomputed here.
-    // The catalog contract holds on this path too: a rate whose label
-    // provenance is unverified is not shown as an actionable amount.
+    // Owner 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"): an unverified label, a
+    // plan block, no usable rig or a spray-check hold no longer hide the planned amount; each becomes a warning
+    // (amountNote) beside it. Only a plan that states no amount at all (demandMix null) shows none.
     const unverified = line.planMix?.amount > 0 && !p.label_verified_at;
-    // No usable rig (none on file, ambiguous) withholds every planned
-    // amount here too, with the Tank section's own reason.
     const { demandMix, inventory, short } = stockForLine(line);
-    // A spray-check Hold withholds the amount on the card exactly as it does
-    // in the tank search — a held product is not dosed anywhere. The rain
-    // rules never hold: owner 2026-10-29.
     const held = verdict.verdict === 'hold';
-    const plannedMix = !blocked && !tankReason && !unverified && !held ? demandMix : null;
+    const plannedMix = demandMix;
     // Unrounded: the client converts small doses to g / mL and rounds once.
     const planned = plannedMix ? { amount: Number(plannedMix.amount), unit: plannedMix.amountUnit || p.rate_unit || null } : null;
     // Unit-aware: the planned amount is in the application unit (fl oz),
@@ -1882,9 +1889,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       // The plan's requirement for the shortage line — never an actionable
       // dose (it survives every withhold so "On hand X vs Y" stays whole).
       demand: demandMix ? { amount: Number(demandMix.amount), unit: demandMix.amountUnit || p.rate_unit || null } : null,
-      amountNote: unverified
-        ? 'Label rate not yet verified — amount withheld'
-        : (tankReason && demandMix ? `${tankReason} — amount withheld` : (held && demandMix ? `Spray check: ${verdict.reason} — amount withheld` : null)),
+      amountNote: cardAmountWarning({ unverified, blocked, tankReason, held, reason: verdict.reason, hasAmount: Boolean(demandMix) }),
       short,
       stockNote,
       onHand,
@@ -2034,11 +2039,24 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
   return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
 }
 
+// The warning beside a month-reference mix (owner 2026-11-26: warned, never blocked): the first check that used to
+// withhold it, or null. A plan block, an unmatched or unverified catalog product, an open label review, or a spray
+// check with no verdict and a real reason (not just a missing forecast).
+function fieldGuideMixWarning({ blocks, row, verdict, labelSource }) {
+  if (blocks.length) return 'Plan blocked, see the plan blocks';
+  if (!row?.label_verified_at) return 'Label rate not yet verified';
+  if (!verdict) return 'No spray check for this product';
+  if (reviewedWeather(row, labelSource)?.unresolved) return 'Label weather review still open, see product checks';
+  if (verdict.verdict === 'unknown' && verdict.forecastGap !== true) return `Spray check: ${verdict.reason}`;
+  return null;
+}
+
 /**
- * The plan's mixing steps the card stands behind. A step stays only while its product's card shows an
- * amount and is the visit's own (a hosted add-on card is a separate application), so a blocked plan,
- * an alternate address, a plan outage, a missing carrier rate, a held spray check or an unverified
- * label all leave no step. Steps renumber from 1. Every instruction goes through describeLine, the
+ * The plan's mixing steps the card stands behind. A step stays while its product's card shows an
+ * amount and is the visit's own (a hosted add-on card is a separate application). Plan blocks, a held
+ * spray check and an unverified label leave the step (they are warnings on the card, owner 2026-11-26);
+ * an alternate address, a plan outage, or a plan that states no amount leave none. Steps renumber from 1.
+ * Every instruction goes through describeLine, the
  * rule the card's own line text uses: a step falls back to the protocol line when its product has no
  * mixing instructions, and that line can carry an owner-only price or a rate.
  */
@@ -2051,13 +2069,13 @@ function mixingOrderForCards(steps, cards) {
 /**
  * The bermuda backpack mix is all or none. The engine leaves its rows without an amount (the treated area is
  * measured in the field), so the amount rule above cannot judge it. It is the engine's whole order, water step
- * included, only while the card has no plan block and every product step is a primary card not on a spray hold.
+ * included, whenever every product step is a primary card. A plan block or a spray hold no longer hides it
+ * (owner 2026-11-26: warned, never blocked); the card shows those as warnings.
  */
-function bermudaMixOrderForCards(steps, cards, blocks) {
+function bermudaMixOrderForCards(steps, cards) {
   const primary = new Map(cards.filter((c) => !c.addOnKey).map((c) => [String(c.id), c]));
   const products = (steps || []).filter((step) => step.productId != null);
-  const whole = products.length > 0 && !blocks.length
-    && products.every((step) => primary.has(String(step.productId)) && primary.get(String(step.productId)).verdict !== 'hold');
+  const whole = products.length > 0 && products.every((step) => primary.has(String(step.productId)));
   return whole ? steps.map((step) => ({ ...step, instruction: describeLine(step.instruction) })) : [];
 }
 
@@ -2114,16 +2132,10 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     { serviceId: facts.serviceId, visitDay: facts.scheduledDate, dbh },
   );
 
-  // A month reference cannot bypass the job's label/weather holds. Keep
-  // target and source details, but withhold scaled mixing amounts until
-  // the exact catalog product and the current checks permit them. Weather
-  // never withholds (owner 2026-10-29): a caution
-  // shows the mix, and so does an unknown that is only a missing forecast;
-  // an open label review still withholds it.
-  const checksPermit = (row, verdict) => {
-    if (reviewedWeather(row, labelSources[row.id])?.unresolved) return false;
-    return verdict.verdict !== 'unknown' || verdict.forecastGap === true;
-  };
+  // A month reference keeps its scaled mixing amounts whatever the label and weather checks say (owner 2026-11-26:
+  // "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"). Each check that used to withhold the
+  // mix now rides beside it as `mixWarning`. Weather never withheld (owner 2026-10-29): a caution shows the
+  // mix, and so does an unknown that is only a missing forecast.
   for (const currentProcedure of [procedure, ...addons.map(addon => addon.procedure)]) {
     if (!currentProcedure?.fieldGuide) continue;
     for (const product of Object.values(currentProcedure.fieldGuide.products)) {
@@ -2132,10 +2144,8 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
       const row = resolveCatalogProductForName(name, catalog, { exactOnly: true })
         || fieldGuideLineProduct(name, products);
       const verdict = sprayCheck.verdicts.find(item => item.productId === row?.id);
-      if (blocks.length || !row?.label_verified_at || !verdict || !checksPermit(row, verdict)) {
-        product.mix = null;
-        product.summary = 'Mix withheld · see product checks';
-      }
+      const warning = fieldGuideMixWarning({ blocks, row, verdict, labelSource: row ? labelSources[row.id] : null });
+      if (warning) product.mixWarning = warning;
     }
   }
 
@@ -2155,7 +2165,7 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     tank: { ...tank, rigs: rigOptions(systems) },
     products: cards,
     mixingOrder: mixingOrderForCards(mixingOrder, cards),
-    bermudaMixingOrder: bermudaMixOrderForCards(bermudaMixingOrder, cards, blocks),
+    bermudaMixingOrder: bermudaMixOrderForCards(bermudaMixingOrder, cards),
     mixRequired,
     bermudaRequired,
     planBlocks: blocks,
@@ -2183,12 +2193,12 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
 // plan — sits in neither mixCalculator list, and the approval engine treats
 // every protocol.base item as planned. The search blocks it itself.
 const UNSELECTED_BASE_REASONS = {
-  mutually_exclusive_branch_not_selected: 'Not the fertilizer branch this property\'s plan selected — amount withheld',
-  premium_or_drought_prep_not_selected: 'Premium-only line, not on this plan — amount withheld',
+  mutually_exclusive_branch_not_selected: 'Not the fertilizer branch this property\'s plan selected',
+  premium_or_drought_prep_not_selected: 'Premium-only line, not on this plan',
 };
 function unselectedBaseBlock(plan, product) {
   const item = (plan?.protocol?.base || []).find((i) => i.product?.id === product.id && i.selected === false);
-  return item ? { code: 'base_not_selected', message: UNSELECTED_BASE_REASONS[item.selectionReason] || 'Not selected by this visit\'s plan — amount withheld' } : null;
+  return item ? { code: 'base_not_selected', message: UNSELECTED_BASE_REASONS[item.selectionReason] || 'Not selected by this visit\'s plan' } : null;
 }
 
 async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId = null, technicianId = null, dbh = db, deps = {}, now = new Date(), includePricing = false, selectedConditionalProductIds = [] } = {}) {
@@ -2305,7 +2315,6 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     ]
     : [];
   const planBlocks = [...planWide, ...productBlocks];
-  const withholdingBlock = productBlocks.find((block) => !isRotationWarning(block));
   const tankMixable = isTankMixable(product);
   // The same spray check as a card product, at the same forecast.
   const coords = propertyCoords(svc.latitude, svc.longitude);
@@ -2325,48 +2334,28 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     const sprayVerdict = buildSprayCheck({ products: [product], hourly, labelSources, rainRules, now: serviceDayInstant(etCalendarDayOf(svc.scheduled_date || now), now, svc.window_start) }).verdicts[0];
     sprayCheck = { verdict: sprayVerdict.verdict, reason: sprayVerdict.reason, ...(sprayVerdict.level ? { level: sprayVerdict.level } : {}), ...(sprayVerdict.action ? { action: sprayVerdict.action } : {}) };
   }
-  // Withhold reasons in guard order — the first that applies wins; the
-  // catalog contract (label_verified_at) and a spray Hold sit among them.
-  const lineFacts = protocolLine || {};
-  const withheld = [
-    // The visit's catalog identity is not a treatment (inspection,
-    // assessment, the specialty grab-bag) and no booked add-on's protocol
-    // names the product: the search is not a way to dose on an inspection.
-    [!treatment && !protocolLine, `No treatment protocol for this visit (${svc.service_category || 'no catalog identity'})`],
-    // A booked lawn add-on has no plan on this visit: a product no primary /
-    // add-on protocol names is not dosed off the catalog past the lawn
-    // plan's turf, ordinance, stress and approval guards.
-    [!protocolLine && !primaryIsLawn && Boolean(lawnAddon), `${lawnAddon} has no plan on this visit — amount withheld`],
-    [planWide.length > 0, 'Lawn plan blocked — amounts withheld'],
-    // A chemical-group repeat is a warning, not a withhold (owner 2026-10-09: "show the mix amount"): it stays in
-    // planBlocks, so the card shows it, and the amount is still given. Every other product check withholds it.
-    [Boolean(withholdingBlock), clean(withholdingBlock?.message, 160)],
-    [Boolean(lineFacts.labelHold), lineFacts.labelHold],
-    [rigOffVolume, `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${pickedRig?.name || tank.systemName || 'This rig'} sprays ${fmtGal(tank.carrierGalPer1000)}: the same mix would put down ${rigCarrier > lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`],
-    // An area add-on dose follows the treated area sold, so it is the label rate on
-    // the card, never a tank amount off the catalog default rate.
-    [Boolean(lineFacts.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
-    // The protocol lists this product as "if needed": no dose until the
-    // call is made, exactly as the card withholds its amount.
-    [lineFacts.selected === false, `Listed as "if needed" on ${lineFacts.addon || "this visit's protocol"} — confirm the call before mixing`],
-    [!tankMixable, 'Not a tank mix — apply as labeled'],
-    [!product.label_verified_at, 'Label rate not yet verified'],
-    [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
-    // Two services on this visit name the product at different rates: the hold names each rate, so it comes only once the
-    // label and spray checks pass and a mixing instruction may be given.
-    [Boolean(lineFacts.conflictLines), conflictText(product, labelPerGallon, lineFacts.conflictLines)],
-  ].find(([applies]) => applies);
-  const mix = withheld
-    ? { amount: null, unit: rateUnit || null, reason: withheld[1] }
+  // Owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW." Every reason that used to
+  // withhold the dose is now a warning beside it, in the old guard order; the amount is always worked out. Only a
+  // dose with no number to show (no carrier, no rate, no tank volume) comes back with `amount: null` and buildMixAmount's
+  // own reason, and the warnings still ride with it.
+  const warnings = mixWarnings({
+    svc, protocolLine, treatment, primaryIsLawn, lawnAddon, planWide, productBlocks, product, tankMixable, sprayCheck,
+    rigOffVolume, lineCarrier, rigCarrier, pickedRig, tank, labelPerGallon,
+  });
+  // No tank amount EXISTS for a product that is not a tank mix (a granular is spread by area) or for an area add-on (its dose is the
+  // card's rate over the area sold, never a tank amount off the catalog default): that is not a withhold, so the warning stands
+  // with no number, and a granular's own label rate still shows beside it.
+  const noTankAmount = !tankMixable || Boolean(protocolLine?.governed);
+  const mix = noTankAmount
+    ? { amount: null, unit: rateUnit || null, reason: warnings.find((w) => /^(Not a tank mix|Area add-on)/.test(w)) || null }
     : (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
   const packSizes = await loadPackSizes(dbh, [product.id]);
-  // The label rate is itself a dosing instruction: it rides only with a
-  // permitted amount, never alongside a withheld one.
+  // The label rate rides with the amount; with no number to show (see above) there is no rate to pair with it.
   const permitted = mix.amount != null;
   return {
     productId: product.id,
     name: product.name,
-    ratePer1000: permitted && ratePer1000 != null ? Number(ratePer1000) : null,
+    ratePer1000: (permitted || !tankMixable) && ratePer1000 != null ? Number(ratePer1000) : null,
     ratePerGallon: permitted ? perGallon : null,
     rateSource: planned ? 'plan' : (protocolPerGallon ? 'protocol' : 'catalog'),
     rateVerified: Boolean(product.label_verified_at),
@@ -2375,8 +2364,10 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     context: protocolLine ? { line: protocolLine.addon, conditional: !protocolLine.selected } : { line: null },
     ...mix,
     // Every group repeat this product would make (Headway can repeat FRAC 3 and FRAC 11), shown beside the amount.
-    // Empty when there is none, or when the amount is withheld (the reason line speaks then).
-    rotationWarnings: permitted ? productBlocks.filter(isRotationWarning).map((block) => clean(block.message, 200)).filter(Boolean) : [],
+    rotationWarnings: productBlocks.filter(isRotationWarning).map((block) => clean(block.message, 200)).filter(Boolean),
+    // Every other check that used to withhold the dose (owner 2026-11-26), in guard order. The client shows each
+    // beside the amount.
+    warnings,
     planBlocks,
     tank,
     // The rig the amount was computed for, so the section labels the dose
@@ -2384,6 +2375,33 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     rig: pickedRig,
     order: packSizes ? orderFor(product, packSizes[product.id], null, { includePricing }) : null,
   };
+}
+
+// The checks that used to withhold a searched product's dose, in the old guard order, as warning text (owner 2026-11-26:
+// warned, never blocked). A chemical-group repeat is not here: it rides as rotationWarnings (owner 2026-10-09).
+function mixWarnings(c) {
+  const { protocolLine, productBlocks, product, sprayCheck, pickedRig, tank } = c;
+  const lineFacts = protocolLine || {};
+  const otherBlocks = productBlocks.filter((block) => !isRotationWarning(block)).map((block) => clean(block.message, 160));
+  return [
+    // The visit's catalog identity is not a treatment (inspection, assessment, the specialty grab-bag) and no booked
+    // add-on's protocol names the product.
+    [!c.treatment && !protocolLine, `No treatment protocol for this visit (${c.svc.service_category || 'no catalog identity'})`],
+    // A booked lawn add-on has no plan on this visit: the lawn plan's turf, ordinance, stress and approval guards do not apply.
+    [!protocolLine && !c.primaryIsLawn && Boolean(c.lawnAddon), `${c.lawnAddon} has no plan on this visit — the lawn plan's checks did not run`],
+    [c.planWide.length > 0, 'Lawn plan blocked — check the plan blocks'],
+    ...otherBlocks.map((message) => [Boolean(message), message]),
+    [Boolean(lineFacts.labelHold), lineFacts.labelHold],
+    [c.rigOffVolume, `The card's rate is for ${fmtGal(c.lineCarrier)} gal per 1,000 sq ft. ${pickedRig?.name || tank.systemName || 'This rig'} sprays ${fmtGal(tank.carrierGalPer1000)}: the same mix would put down ${c.rigCarrier > c.lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`],
+    // An area add-on dose follows the treated area sold: this tank amount is the catalog rate, not the sold-area rate.
+    [Boolean(lineFacts.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
+    [lineFacts.selected === false, `Listed as "if needed" on ${lineFacts.addon || "this visit's protocol"} — confirm the call before mixing`],
+    [!c.tankMixable, 'Not a tank mix — apply as labeled'],
+    [!product.label_verified_at, 'Label rate not yet verified'],
+    [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
+    // Two services on this visit name the product at different rates: the warning names each rate.
+    [Boolean(lineFacts.conflictLines), lineFacts.conflictLines ? conflictText(product, c.labelPerGallon, lineFacts.conflictLines) : null],
+  ].filter(([applies, text]) => applies && text).map(([, text]) => text);
 }
 
 /**
@@ -2442,7 +2460,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw));
     // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
     // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
-    // right one: the dose is withheld. Each service's line goes along (conflictLines) so the hold can name the rates that pass the
+    // right one: the dose carries a warning. Each service's line goes along (conflictLines) so the warning can name the rates that pass the
     // same label check a single dose does (conflictText).
     const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}) });
     const rates = new Set(selectedHits.map((h) => JSON.stringify(rateOf(h))));
@@ -2505,7 +2523,7 @@ function perGallonRate(product) {
 
 // `carrierGalPer1000`: the spray volume a card's label rate is stated over, when it has one. The answer then names it
 // (sprayVolumeGalPer1000) and the area the tank covers at that volume, so the amount is tied to a treated area. (A named rig at
-// another volume never gets here: mixForProduct withholds its dose.)
+// another volume still gets its amount, with a warning from mixForProduct.)
 function buildPerGallonAmount(rate, gallons, carrierGalPer1000 = null) {
   const gal = Number(gallons);
   if (!Number.isFinite(gal) || gal <= 0) return { amount: null, unit: rate.unit, reason: 'Pick a tank volume' };
