@@ -157,20 +157,32 @@ function computeTopicSimilarity(queryFeatures, candidateInbound, candidateReply)
   return Math.min(1, inboundTokenSim * 0.65 + inboundBigramSim * 0.25 + replyTokenSim * 0.15);
 }
 
+function appendSpeakerText(turns, speaker, text) {
+  if (!text) return;
+  if (turns.length && turns[turns.length - 1].speaker === speaker) {
+    turns[turns.length - 1].rawText = `${turns[turns.length - 1].rawText} ${text}`.trim();
+  } else {
+    turns.push({ speaker, rawText: text });
+  }
+}
+
 function parseDiarizedTurns(transcriptText) {
   const lines = String(transcriptText || '').split(/\r?\n/);
   const turns = [];
+  let activeSpeaker = null;
   for (const line of lines) {
-    const match = /^\s*(Caller|Agent)\s*:\s*(.+)$/i.exec(line);
-    if (!match) continue;
-    const speaker = match[1].toLowerCase();
-    const rawContent = String(match[2] || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!rawContent) continue;
-    if (turns.length && turns[turns.length - 1].speaker === speaker) {
-      turns[turns.length - 1].rawText = `${turns[turns.length - 1].rawText} ${rawContent}`.trim();
-    } else {
-      turns.push({ speaker, rawText: rawContent });
+    const labelMatch = /^\s*([A-Za-z][A-Za-z0-9 ]{0,20}?)\s*:\s*(.*)$/.exec(line);
+    if (labelMatch) {
+      const label = labelMatch[1].trim().toLowerCase();
+      activeSpeaker = (label === 'caller' || label === 'agent') ? label : null;
+      if (activeSpeaker) {
+        const rawContent = String(labelMatch[2] || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+        appendSpeakerText(turns, activeSpeaker, rawContent);
+      }
+      continue;
     }
+    const continuation = String(line || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (continuation && activeSpeaker) appendSpeakerText(turns, activeSpeaker, continuation);
   }
   return turns;
 }
@@ -179,18 +191,22 @@ function parseDiarizedTurns(transcriptText) {
  * Extract all clean Caller -> Agent turn pairs from a redacted diarized call transcript.
  */
 function extractCallTranscriptPairs(transcriptText) {
+  const normalizedFull = String(transcriptText || '').replace(/[\r\n\t]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!normalizedFull) return [];
+  // Drop any call transcript that mentions a property access credential
+  // anywhere in the call so delayed answers across intervening turns can
+  // never survive into exemplars.
+  if (ACCESS_CREDENTIAL_TOPIC_RE.test(normalizedFull) || containsReportAccessCode(normalizedFull)) {
+    return [];
+  }
   const turns = parseDiarizedTurns(transcriptText);
   const pairs = [];
   for (let i = 0; i < turns.length - 1; i += 1) {
     if (turns[i].speaker !== 'caller' || turns[i + 1].speaker !== 'agent') continue;
-    const prevAgent = i > 0 && turns[i - 1].speaker === 'agent' ? turns[i - 1].rawText : '';
     const rawCaller = turns[i].rawText;
     const rawAgent = turns[i + 1].rawText;
     if (rawCaller.length < 15 || rawAgent.length < 25) continue;
     if (TRIVIAL_AGENT_TURN_RE.test(rawAgent)) continue;
-    // Reject caller answers immediately following an agent credential question
-    // (e.g., Agent: "What's your gate code?" -> Caller: "4829#, also move Tuesday").
-    if (prevAgent && (ACCESS_CREDENTIAL_TOPIC_RE.test(prevAgent) || containsReportAccessCode(`${prevAgent} ${rawCaller}`))) continue;
     // Screen full unclipped turns together BEFORE clipping so truncation can
     // never strip an access-code cue or compliance phrase while keeping digits.
     if (!isCleanExemplar(rawCaller, rawAgent)) continue;

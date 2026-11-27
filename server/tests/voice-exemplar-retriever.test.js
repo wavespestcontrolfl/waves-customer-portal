@@ -142,6 +142,34 @@ describe('voice-exemplar-retriever', () => {
       'Agent: Sure thing, I can check open times for your mosquito service next Thursday.',
     ].join('\n'));
     expect(reversedWordOrderLeak).toEqual([]);
+
+    // Delayed gate-code answer after intervening agent reassurance drops entire call
+    const delayedCredentialLeak = _internals.extractCallTranscriptPairs([
+      'Agent: What gate code should our tech use?',
+      'Caller: Hold on, let me check my notes for a second.',
+      'Agent: Take your time, no rush at all.',
+      'Caller: It is 4829#, and can we also move our mosquito service to Thursday?',
+      'Agent: Got it, I can check open times for your mosquito service on Thursday.',
+    ].join('\n'));
+    expect(delayedCredentialLeak).toEqual([]);
+
+    // Unlabeled wrapped continuation lines stay attached to their speaker and are screened
+    const wrappedClean = _internals.extractCallTranscriptPairs([
+      'Caller: We are seeing tiny ghost ants trailing',
+      'along the kitchen sink after the rain.',
+      'Agent: Ghost ants love moisture around sinks.',
+      'We can bait those trails so they carry it back to the colony.',
+    ].join('\n'));
+    expect(wrappedClean).toHaveLength(1);
+    expect(wrappedClean[0].inbound_text).toContain('along the kitchen sink');
+    expect(wrappedClean[0].reply_text).toContain('carry it back to the colony');
+
+    const wrappedUnsafe = _internals.extractCallTranscriptPairs([
+      'Caller: What do you use around pets in the backyard?',
+      'Agent: We apply a targeted perimeter treatment',
+      'and it is 100% pet-safe right away.',
+    ].join('\n'));
+    expect(wrappedUnsafe).toEqual([]);
   });
 
   test('excludes property access codes on BOTH inbound and reply sides before selection and formatting', async () => {
