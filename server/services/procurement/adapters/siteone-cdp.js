@@ -622,7 +622,7 @@ function checkPriceJump({ priceOnFileCents, quantity, evidence }, totalCents, wh
   evidence.priceCheck = { onFileCents: priceOnFileCents, seenUnitCents, limitPercent: PRICE_JUMP_LIMIT_PERCENT, checked: what };
   if (totalCents * 100 <= priceOnFileCents * quantity * (100 + PRICE_JUMP_LIMIT_PERCENT)) return;
   const dollars = (c) => `$${(c / 100).toFixed(2)}`;
-  throw new RefusedError('price_jump', `SiteOne's ${what} shows ${dollars(seenUnitCents)} a package (total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${dollars(priceOnFileCents)} on file; nothing was bought.`, evidence, totalCents);
+  throw new RefusedError('price_jump', `SiteOne's ${what} shows ${dollars(seenUnitCents)} a package (total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${dollars(priceOnFileCents)} on file. The robot placed no order; check the SiteOne account before ordering by hand.`, evidence, totalCents);
 }
 
 async function verifyCartAndGate(run) {

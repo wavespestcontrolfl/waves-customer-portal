@@ -90,7 +90,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { startOfETMonth, addETDays, etDateString, etParts, parseETDateTime } = require('../../utils/datetime-et');
+const { startOfETMonth, addETDays } = require('../../utils/datetime-et');
 const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, parsePackCount, countUnitsCompatible, convertToOz } = require('../product-costing');
@@ -114,6 +114,16 @@ const CAPS_LOCK_KEY = 'vendor-order-caps';
 // received request until the revoke CLI records a revoke or the request is
 // received once more — its own receipt (Codex r27 P1, owner ruling).
 const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing', 'no_final_total', 'placed_on_received_request']);
+// The reasons a park BEFORE the buy click gets its own alert wording: Try again, or buy it and press Mark Ordered.
+const TRY_AGAIN_PHRASE = 'Press Try again on the Restock tab';
+const TRY_AGAIN_FIXED = { over_monthly_cap: 'the monthly cap', over_per_order_cap: 'the per-order cap', caps_unconfigured: 'the order caps', price_jump: 'the price', sku_not_found: 'the item number', item_not_found: 'the item', no_price: 'the price row' };
+// A park staff may press Try again on: needs_review before the click (no placed_at), not a dry run (those
+// re-claim on their own), never a post-submit park, not revoked, not already queued. Parks after the click
+// stay "do not reorder" and are reconciled (receive, or cancel with the vendor and record it).
+function isTryAgainPark({ status, error, placedAt = null, revokedAt = null, tryAgain = null }) {
+  const reason = String(error || '').split(':')[0];
+  return status === 'needs_review' && !placedAt && !revokedAt && !tryAgain && !!reason && reason !== 'dry_run' && !POST_SUBMIT_REASONS.has(reason);
+}
 // A received request settles its ledger row — unless the order landed after
 // that receipt (evidence.landedAfterReceive), or the claim is still
 // 'placing' (an older pod received while the call is out: the marker is
@@ -347,7 +357,9 @@ async function assertManualActionAllowed(trx, requestId, action) {
   const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
   if (!row) return {};
   if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
-  if (action === 'cancel' && row.placed_at && !meta(row.evidence).revokedAt) {
+  // Mark Ordered too: a post-submit park (an ambiguous submit above all) means an order may exist at the vendor, so
+  // the request is reconciled (receive it, or cancel with the vendor and record that), never marked ordered by hand.
+  if (['cancel', 'mark_ordered'].includes(action) && row.placed_at && !meta(row.evidence).revokedAt) {
     refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and then use Record vendor cancellation on the Restock tab, which closes the request.`);
   }
   // Returned so both receive paths can admit ONE more receive on a received
@@ -373,6 +385,36 @@ async function settleRequestLedgerBells(trx, requestId) {
   if (!row) return;
   await retireLedgerBells(trx, row.id);
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
+}
+
+/**
+ * Restock tab "Try again" (owner 2026-11-27): re-arm a request parked BEFORE the buy click so the next dispatcher
+ * run claims it again. Owner-only at the route. Under the manual actions' own locks (ledger row, then request row:
+ * the claim takes the same two), and in one transaction: the request is still open and automatic, the ledger row is
+ * still a pre-click park (needs_review, no placed_at, no post-submit reason, not revoked, not a dry run, not already
+ * queued), and no other automatic order for the product is live. Anything else is a 409 and nothing is written.
+ * The write is only evidence.tryAgain: the claim (insertClaim) re-arms the row exactly as it re-arms a dry-run
+ * park, so the single claim and the cap reservation are the dispatcher's own, unchanged.
+ */
+async function tryAgainParkedRequest(requestId, { actorId = null, conn = db } = {}) {
+  const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
+  return conn.transaction(async (trx) => {
+    const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id', 'status', 'error', 'placed_at', 'evidence');
+    const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first('id', 'status', 'source', 'product_id');
+    if (!request) { const err = new Error('Restock request not found'); err.statusCode = 404; err.code = 'request_not_found'; throw err; }
+    if (request.status !== 'open' || request.source !== 'auto_reorder') refuse('request_not_open', 'Try again works on an open automatic request only.');
+    if (!row) refuse('not_parked', 'No automatic order is parked for this request.');
+    if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park, then act.');
+    if (row.placed_at) refuse('auto_order_out', 'An automatic order for this request may already have gone out. Do not try again: receive it when it arrives, or cancel it with the vendor and record that on the Restock tab.');
+    const m = meta(row.evidence);
+    if (!isTryAgainPark({ status: row.status, error: row.error, placedAt: row.placed_at, revokedAt: m.revokedAt, tryAgain: m.tryAgain })) refuse('not_parked', 'This request is not parked before the buy click, or Try again is already queued for it.');
+    if (await findLiveAutoOrder(trx, request.product_id)) refuse('auto_order_live', 'Another automatic order for this product is live — reconcile it first.');
+    await trx('vendor_orders').where({ id: row.id }).update({
+      evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ tryAgain: { at: new Date().toISOString(), by: actorId } })]),
+      updated_at: new Date(),
+    });
+    return { ledgerId: row.id };
+  });
 }
 
 // Unlocked read for a pre-check (the IB tool's confirmation card); the
@@ -488,66 +530,26 @@ async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, acco
 // bell says "turn dry run off to order for real", so the request
 // stays eligible and insertClaim re-arms that row (Codex r4 P1).
 //
-// A park BEFORE the buy click retries when its reason can have changed (owner 2026-11-27, "build fixes"):
-//   over_monthly_cap  -> once the ET month changes, or when the month's room now fits the parked figure;
-//   sku_not_found, item_not_found, unavailable (out of stock), price_jump -> on a later ET day.
-// Every retry also needs "a later day": the row's updated_at (its last attempt, restored to now when an
-// attempt dies run-level) is before today's ET midnight, so a request is tried at most once an ET day
-// however many runners (server, Mac) pass over it. Pre-click = needs_review with placed_at NULL: every
-// post-click park (POST_SUBMIT_REASONS) and every unknown outcome stamps placed_at, and the reason lists
-// below are allow-lists, so those are never retried. A SiteOne cart that is not empty is run-level (the
-// claim is released, no row), so it already retries on the next run.
-// RETRY_MARK: only a park written by this code is retryable. Its alert says the robot will try again and
-// tells staff to press Mark Ordered BEFORE buying by hand (mark ordered takes the request lock the claim
-// takes, so a take-over and a retry can never both buy). A park from before has the old alert, "order
-// manually, then mark it ordered", and carries no mark: it is never retried.
-const RETRY_DAILY_REASONS = ['sku_not_found', 'item_not_found', 'unavailable', 'price_jump'];
-const RETRY_MONTHLY_REASON = 'over_monthly_cap';
-const RETRY_MARK = 'v1';
-const isRetryablePark = ({ reason, status, checkAccountFirst }) => status === 'needs_review' && !POST_SUBMIT_REASONS.has(reason) && !checkAccountFirst
-  && (RETRY_DAILY_REASONS.includes(reason) || reason === RETRY_MONTHLY_REASON);
-// When the robot next tries, in the alert's words (an ET calendar day: the next run is the next morning).
-function retryWhen(reason, now = new Date()) {
-  if (reason === RETRY_MONTHLY_REASON) return 'on a later day when the month\'s order cap has room (or when the month changes)';
-  const { month, day } = etParts(addETDays(now, 1));
-  return `on ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month - 1]} ${day}`;
-}
-const parkReason = (error) => String(error || '').split(':')[0];
-const dryRunParkSql = (col) => `(${col}.status = 'needs_review' AND ${col}.error LIKE 'dry_run:%')`;
-function retryParkSql(col, now) {
-  const reason = `split_part(${col}.error, ':', 1)`;
-  const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
-  return {
-    sql: `(${col}.status = 'needs_review' AND ${col}.placed_at IS NULL AND ${col}.evidence->>'retryMark' = ? AND ${reason} = ANY(?::text[]) AND ${col}.updated_at < ?)`,
-    bindings: [RETRY_MARK, [...RETRY_DAILY_REASONS, RETRY_MONTHLY_REASON], dayStart],
-  };
-}
-// A same-month cap park retries only when the month's room now fits the figure it was parked with.
-async function dropCapParksWithoutRoom(conn, rows, { now, env }) {
-  const sameMonth = rows.filter((r) => parkReason(r.error) === RETRY_MONTHLY_REASON && new Date(r.created_at) >= startOfETMonth(now));
-  if (!sameMonth.length) return rows;
-  const { monthly } = caps(env);
-  const spent = monthly == null ? null : await monthlySpentCents(conn, { now });
-  const fits = (r) => spent != null && r.amount_cents != null && spent + Number(r.amount_cents) <= monthly;
-  return rows.filter((r) => !sameMonth.includes(r) || fits(r));
-}
-async function findDispatchable(conn = db, { now = new Date(), env = process.env } = {}) {
-  const retry = retryParkSql('vo', now);
-  const rows = await conn('product_restock_requests as prr')
+// Try again (owner 2026-11-27, "build fixes"): staff press it on a request parked BEFORE the buy click, and
+// tryAgainParkedRequest (below) stamps evidence.tryAgain on that row under the manual-action locks. That stamp
+// re-arms the row exactly like a dry-run park: the next dispatcher run claims it through the same single claim
+// and cap reservation. A row is never re-armed without it, so no park retries on its own.
+const TRY_AGAIN_MARK_SQL = "(vendor_orders.placed_at IS NULL AND NULLIF(vendor_orders.evidence->>'tryAgain', '') IS NOT NULL)";
+const DRY_RUN_RECLAIMABLE_SQL = `(vendor_orders.status = 'needs_review' AND (vendor_orders.error LIKE 'dry_run:%' OR ${TRY_AGAIN_MARK_SQL}))`;
+async function findDispatchable(conn = db) {
+  return conn('product_restock_requests as prr')
     .leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
     .where('prr.status', 'open')
     .where('prr.source', 'auto_reorder')
-    .where((q) => q.whereNull('vo.id').orWhereRaw(`(${dryRunParkSql('vo')} OR ${retry.sql})`, retry.bindings))
+    .where((q) => q.whereNull('vo.id').orWhereRaw(DRY_RUN_RECLAIMABLE_SQL.replaceAll('vendor_orders.', 'vo.')))
     .whereRaw("NULLIF(prr.metadata->>'vendorId', '') IS NOT NULL")
-    .select('prr.id', 'vo.error', 'vo.amount_cents', 'vo.created_at')
+    .select('prr.id')
     .orderBy('prr.created_at');
-  return (await dropCapParksWithoutRoom(conn, rows, { now, env })).map((r) => ({ id: r.id }));
 }
 
 // The headline, why and done-when for a persisted bell. The title and body are written into the ledger row
 // (evidence.bell) and re-rung from it, so they keep their text and ride in the alert's detail; the
 // headline and why are one short line each, chosen from the kind of bell the title and body name.
-const RETRY_PHRASE = 'The robot will try again';
 // The words of parkBellText's account check, read back out of a persisted bell's body by
 // bellAlertParts (as 'Do NOT re-order' is), so the headline carries the check too.
 const ACCOUNT_CHECK = 'account first: if an order already in covers this request in full';
@@ -562,10 +564,10 @@ function bellAlertParts({ title, body, productName }) {
     };
   }
   if (/^Auto-order (?:failed|needs review)/.test(text) && !String(body || '').includes('Do NOT re-order')) {
-    if (String(body || '').includes(RETRY_PHRASE)) {
+    if (String(body || '').includes(TRY_AGAIN_PHRASE)) {
       return {
-        action: named([(n) => `${n} auto-order parked, robot retries`, (n) => `${n} auto-order retries`]),
-        why: 'The robot will try again; to buy it yourself, press Mark Ordered first, then buy.',
+        action: named([(n) => `${n} auto-order parked, try again or buy`, (n) => `${n} auto-order parked`]),
+        why: 'No order was sent; press Try again when fixed, or buy it and press Mark Ordered.',
         doneWhen: 'restock_request_ordered',
       };
     }
@@ -597,9 +599,7 @@ function bellAlertParts({ title, body, productName }) {
  * a failed send (bellAt stays null) is re-rung by reringPendingBells on the
  * next run. Returns true when the bell landed.
  */
-// quiet: a retried park whose reason did not change refreshes its standing alert without ringing again
-// (owner 2026-11-26: a repeat alert never re-rings daily forever).
-async function deliverBell(conn, { notify, ledgerId, requestId, productName, vendorName, title, body, v = null, quiet = false }) {
+async function deliverBell(conn, { notify, ledgerId, requestId, productName, vendorName, title, body, v = null }) {
   // notifyAdmin swallows its own insert/dedupe failures and returns null
   // (notification-service.js) — a resolved promise is not a landed bell,
   // only a truthy notification row is (Codex r2 P1).
@@ -616,7 +616,7 @@ async function deliverBell(conn, { notify, ledgerId, requestId, productName, ven
       bell: true,
       dedupeKey: v ? `auto-order:${ledgerId}:${v}` : `auto-order:${ledgerId}`,
       refreshOnDedupe: true,
-      ringOnRefresh: quiet ? () => false : ringOnRefreshAfterConversion({ category: 'system', title, body, link: RESTOCK_TAB }),
+      ringOnRefresh: ringOnRefreshAfterConversion({ category: 'system', title, body, link: RESTOCK_TAB }),
       detail: `${title}\n${body}`,
       metadata: { vendorOrderId: ledgerId, restockRequestId: requestId, productName, vendorName },
     });
@@ -714,7 +714,7 @@ async function reringPendingBells({ conn = db, notify = null, now = new Date() }
 // The bell a park rings — persisted with the outcome (evidence.bell) so a
 // failed send is re-rung, never lost. Post-submit reasons say do-NOT-re-order.
 function parkBell(args) { return versioned(parkBellText(args)); }
-function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst = false, now = new Date() }) {
+function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst = false }) {
   if (reason === 'dry_run') {
     return {
       title: `Auto-order dry run: ${product.name} (${vendor.name})`,
@@ -725,16 +725,18 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   if (POST_SUBMIT_REASONS.has(reason)) {
     return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.` };
   }
-  // A retryable pre-click park says the robot tries again and to press Mark Ordered before buying by hand.
-  if (isRetryablePark({ reason, status, checkAccountFirst })) {
-    return { title, body: `${message} The restock request stays open. ${RETRY_PHRASE} ${retryWhen(reason, now)}. To buy it yourself, press Mark Ordered on the Restock tab first, then buy it.` };
-  }
   // A pre-submit park: no order was sent, so the next step is an order placed by hand. A vendor the
   // dispatcher never places for (checkAccountFirst) gets ALL its orders by hand, on an account the
   // portal does not read: one may already be in (in production, or not paid yet), and "order
   // manually" alone could buy it twice. Every pre-submit park of such a vendor says so, whatever
   // its reason — a failed lookup included. The request's own quantity is named: an order already
   // in for fewer does not cover it.
+  // A park before the click on a vendor the robot places for: staff fix the cause and press Try again, or buy it
+  // themselves and press Mark Ordered, which also stops a Try again that is queued (the claim needs an open request).
+  if (!checkAccountFirst && status === 'needs_review' && isTryAgainPark({ status, error: reason })) {
+    const fixed = TRY_AGAIN_FIXED[reason] || 'the cause';
+    return { title, body: `${message} No order was sent and the request stays open. ${TRY_AGAIN_PHRASE} once ${fixed} is fixed, or buy it yourself and press Mark Ordered.` };
+  }
   const needed = [request?.requested_quantity, request?.unit].filter((part) => part != null && part !== '').join(' ');
   const next = checkAccountFirst
     ? `check the ${vendor.name} ${ACCOUNT_CHECK}${needed ? ` (${needed})` : ''}, mark the request ordered; if not, order what is missing by hand, then mark it ordered.`
@@ -745,8 +747,8 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
 // The ledger row's parked state. placed_at = when the vendor call was
 // DISPATCHED (every post-submit park): the marker monthlySpentCents counts.
 // A placed order's number/total stay on the row even though it needs a human.
-function parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed, retryable = false }) {
-  const patch = { status, error: `${reason}: ${message}`.slice(0, 400), evidence: JSON.stringify({ ...(evidence || {}), bell, ...(retryable ? { retryMark: RETRY_MARK } : {}) }), updated_at: new Date() };
+function parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed }) {
+  const patch = { status, error: `${reason}: ${message}`.slice(0, 400), evidence: JSON.stringify({ ...(evidence || {}), bell }), updated_at: new Date() };
   if (amountCents != null) patch.amount_cents = amountCents;
   if (postSubmit) patch.placed_at = new Date();
   if (placed) {
@@ -767,13 +769,8 @@ function parkPatch({ status, reason, message, evidence, bell, amountCents, postS
 async function park(conn, { ledger, request, product, vendor, adapterKey, reason, message, amountCents = null, evidence = null, status = 'needs_review', notify, placed = null, markRequestOrdered = false, staleBefore = null, checkAccountFirst = false }) {
   const postSubmit = POST_SUBMIT_REASONS.has(reason);
   if (postSubmit && status !== 'needs_review') throw new Error(`post-submit reason ${reason} must park as needs_review`);
-  // A retried pre-click park that lands on the SAME reason keeps its alert's version: the alert refreshes
-  // quietly. A new reason gets a new version, which rings and retires the old alert (deliverBell).
-  const prior = ledger.priorPark;
-  const repeat = !!prior && prior.bellStamped && !!prior.bellV && prior.reason === reason && prior.status === status && !postSubmit;
-  const bellText = parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst });
-  const bell = repeat ? { ...bellText, v: prior.bellV } : versioned(bellText);
-  const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed, retryable: isRetryablePark({ reason, status, checkAccountFirst }) });
+  const bell = parkBell({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst });
+  const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
   const transitioned = await conn.transaction(async (trx) => {
     let rowPatch = patch;
     let reopen = false;
@@ -810,7 +807,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
     logger.warn(`[order-dispatch] ledger ${ledger.id} already left 'placing' — ${reason} park skipped, the settled outcome stands`);
     return { requestId: request.id, ledgerId: ledger.id, skipped: 'already_settled' };
   }
-  const bellDelivered = await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...bell, quiet: repeat });
+  const bellDelivered = await deliverBell(conn, { notify, ledgerId: ledger.id, requestId: request.id, productName: product.name, vendorName: vendor.name, ...bell });
   return { requestId: request.id, ledgerId: ledger.id, status, reason, ...(bellDelivered ? {} : { bellPending: true }) };
 }
 
@@ -1005,40 +1002,24 @@ async function stampAuthorizedSku(trx, { request, pricing }) {
 
 // The eligible price row is read under the same lock so the claim's payload
 // records the SKU + vendor quantity the order will carry.
-// The request's existing ledger row (already locked by claimRequest) when it is a retryable pre-click park:
-// what a retried attempt needs to put the row back, and to refresh its alert quietly.
-async function priorRetryablePark(trx, requestId) {
-  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'error', 'evidence', 'amount_cents', 'created_at', 'placed_at');
-  const reason = parkReason(row?.error);
-  const evidence = meta(row?.evidence);
-  if (!row || row.status !== 'needs_review' || row.placed_at || evidence.retryMark !== RETRY_MARK || !(RETRY_DAILY_REASONS.includes(reason) || reason === RETRY_MONTHLY_REASON)) return null;
-  return { reason, status: row.status, error: row.error, amountCents: row.amount_cents, createdAt: row.created_at, evidence, bellV: evidence.bell?.v || null, bellStamped: !!evidence.bellAt };
-}
-
-async function insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity, now }) {
+async function insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity }) {
   const { vendorPricingFor } = require('./auto-reorder');
   const pricing = await vendorPricingFor(trx, product.id, vendor.id);
   const order = pricing?.vendor_sku ? vendorOrderQuantity({ adapter: registry[adapterKey], request, pricing }) : null;
   const payload = { productId: product.id, quantity, unit: request.unit || null, vendorSku: pricing?.vendor_sku || null, vendorQuantity: order?.quantity ?? null, packSize: order?.packSize ?? null, orderedQuantity: order?.orderedQuantity ?? null };
   const claimRow = { restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, status: 'placing', request_payload: JSON.stringify(payload) };
-  // The unique claim is re-armed ONLY over a dry-run park or a retryable pre-click park (nothing was ever
-  // submitted: RETRY_DAILY_REASONS above, time-gated again here so two runners cannot both re-arm one day);
-  // every other existing row wins the conflict (at-most-once).
-  const prior = await priorRetryablePark(trx, request.id);
-  const retry = retryParkSql('vendor_orders', now);
+  // The unique claim is re-armed ONLY over a dry-run park or a pre-click park staff pressed Try again on
+  // (nothing was ever submitted); every other existing row wins the conflict (at-most-once).
   const inserted = await trx('vendor_orders').insert(claimRow)
     .onConflict('restock_request_id')
     // evidence is NOT NULL: reset to {}. created_at is the cap-accounting
     // month (monthlySpentCents): a re-armed claim counts against THIS month.
     .merge({ ...claimRow, error: null, evidence: JSON.stringify({}), amount_cents: null, placed_at: null, external_order_number: null, response_payload: null, created_at: new Date(), updated_at: new Date() })
-    .whereRaw(`(${dryRunParkSql('vendor_orders')} OR ${retry.sql})`, retry.bindings)
+    .whereRaw(DRY_RUN_RECLAIMABLE_SQL)
     .returning('*');
   const ledger = inserted && inserted[0];
   if (ledger) {
-    // A retried park keeps its standing alert open through the attempt: the attempt retires it only when
-    // it ends in a buy (dispatchClaimed), or replaces it when the reason changes (deliverBell).
-    if (prior) ledger.priorPark = prior;
-    else await retireLedgerBells(trx, ledger.id);
+    await retireLedgerBells(trx, ledger.id);
     await stampAuthorizedSku(trx, { request, pricing });
   }
   return { ledger, pricing, order };
@@ -1082,7 +1063,7 @@ async function claimRequest(trx, { requestId, registry, deadAdapters = null, log
   // gone, so staff are never told to buy what the dispatcher is ordering. A
   // failed retire aborts the claim — nothing is ordered (Codex r20 P1).
   await retireRequestBell(trx, request.id);
-  const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity, now });
+  const { ledger, pricing, order } = await insertClaim(trx, { request, product, vendor, adapterKey, registry, quantity });
   if (!ledger) return { skipped: 'already_claimed' };
   return { request, vendor, adapterKey, product, quantity, ledger, pricing, order, credentials };
 }
@@ -1406,20 +1387,12 @@ async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
   return positiveCents(placed?.amountCents) ?? positiveCents(quoteCents) ?? (await ledgerReservation(conn, ledger)).cents;
 }
 
-// The eligible price row's price, in cents per package; null = none on file (the adapter then skips its check).
-const priceCents = (price) => { const n = Number(price); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null; };
-const priceArgs = (adapter, pricing) => (adapter.checksPrice ? { priceOnFileCents: priceCents(pricing.price_amount ?? pricing.price) } : {});
-function releaseClaimRow(conn, ledger) {
-  const p = ledger.priorPark;
-  const claim = conn('vendor_orders').where({ id: ledger.id, status: 'placing' });
-  if (!p) return claim.delete();
-  return claim.update({ status: p.status, error: p.error, amount_cents: p.amountCents, created_at: p.createdAt, evidence: JSON.stringify(p.evidence), placed_at: null, updated_at: new Date() });
-}
-// The order went out (or may have): the earlier pre-click park's "order manually" alert no longer applies.
-const retirePriorParkAlert = (conn, ledger) => (ledger.priorPark ? retireLedgerBells(conn, ledger.id, 'The order was placed for real, so the earlier park note no longer applies') : null);
 // Stages after a committed claim: price → binding total → vendor call →
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
+// The eligible price row's price, in cents per package; null = none on file (the adapter then skips its check).
+const priceCents = (price) => { const n = Number(price); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null; };
+const priceArgs = (adapter, pricing) => (adapter.checksPrice ? { priceOnFileCents: priceCents(pricing.price_amount ?? pricing.price) } : {});
 const poNumberFor = (ledger) => `WAVES-${String(ledger.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}`;
 
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
@@ -1428,9 +1401,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
   // Each pre-submit park of a never-placed-for adapter's request sends staff to the vendor
   // account first (parkBellText): every order of its items is placed by hand there.
   const ctx = { ledger, request, product, vendor, adapterKey, notify, checkAccountFirst: neverPlacedFor(adapter) };
-  // A fresh claim is deleted (nothing was sent). A retried park goes back to the parked state it had, so its
-  // alert and its place in the retry order stay true; its last attempt is now (retried on the next day).
-  const releaseClaim = () => releaseClaimRow(conn, ledger);
+  const releaseClaim = () => conn('vendor_orders').where({ id: ledger.id, status: 'placing' }).delete();
   let submitted = false; // true once the vendor call left the process
   let placed = null;
   let quoteCents = null;
@@ -1469,7 +1440,7 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
       placed = await adapter.place(placeArgs);
     } catch (err) {
       if (err.runLevel) { await releaseClaim(); throw err; }
-      if (err.ambiguous) { submitted = true; await retirePriorParkAlert(conn, ledger); }
+      if (err.ambiguous) submitted = true;
       // A refusal the adapter marks adapterDown (SiteOne rejected the stored
       // login) parks THIS request as usual and takes the adapter out of the
       // run: its remaining requests stay unclaimed instead of resubmitting
@@ -1485,7 +1456,6 @@ async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
     } finally { stopHeartbeat(); }
     if (placed.dryRun) return await park(conn, { ...ctx, reason: 'dry_run', message: 'dry run', amountCents: placed.amountCents, evidence: placed.evidence || null });
     submitted = true; // from here every failure is post-placement: needs_review, never "order manually"
-    await retirePriorParkAlert(conn, ledger);
     const finalCents = await settledFinalCents(conn, { ledger, placed, quoteCents });
     if (finalCents == null) {
       const { amountCents, counted } = unconfirmedAmount(env);
@@ -1741,7 +1711,7 @@ async function dispatchPasses({ conn, notify, adapters, now, env, onlyAdapters =
   // replica's sweep raised while a slow vendor order was in flight is
   // picked up now, not tomorrow. Bounded; a pass that finds nothing new ends.
   for (let pass = 0; pass < 3 && !(runLevelError && !runLevelError.adapterKey); pass += 1) {
-    const rows = (await findDispatchable(conn, { now, env })).filter((r) => !seen.has(r.id));
+    const rows = (await findDispatchable(conn)).filter((r) => !seen.has(r.id));
     if (!rows.length) break;
     for (const row of rows) {
       seen.add(row.id);
@@ -1833,7 +1803,9 @@ module.exports = {
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
   assertManualActionAllowed,
+  tryAgainParkedRequest,
+  isTryAgainPark,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
-  _internals: { RETRY_DAILY_REASONS, RETRY_MONTHLY_REASON, siteoneRunsOnMac, macWatchdog, macStaleMs, poNumberFor, requestAdapterKey, adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
+  _internals: { siteoneRunsOnMac, macWatchdog, macStaleMs, poNumberFor, requestAdapterKey, adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },
 };

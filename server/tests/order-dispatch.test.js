@@ -1087,13 +1087,13 @@ describe('a pre-submit park for a vendor that is never auto-ordered sends staff 
     expect(notify).toHaveBeenLastCalledWith('system', HEADLINE, WHY, expect.objectContaining({ detail: `${evidence.bell.title}\n${evidence.bell.body}` }));
   });
 
-  test('a vendor the dispatcher does place for keeps the plain hand-off', async () => {
+  test('a vendor the dispatcher does place for: a park before the click says Try again, or buy it and press Mark Ordered', async () => {
     const refused = Object.assign(new Error('account has 0 payment methods; exactly one is required'), { refuse: 'no_payment' });
     expect(await run(mockAdapter({ place: jest.fn(async () => { throw refused; }) }))).toMatchObject({ status: 'needs_review', reason: 'no_payment' });
     expect(alert()).toMatchObject({
-      headline: 'Inventory — order Yard sign sticker by hand',
-      why: 'The auto-order did not go through; order it manually, then mark the restock request ordered.',
-      detail: expect.stringMatching(/ The restock request stays open — order manually, then mark it ordered\.$/),
+      headline: expect.stringMatching(/^Inventory — Yard sign sticker auto-order parked/),
+      why: 'No order was sent; press Try again when fixed, or buy it and press Mark Ordered.',
+      detail: expect.stringMatching(/ No order was sent and the request stays open\. Press Try again on the Restock tab once the cause is fixed, or buy it yourself and press Mark Ordered\.$/),
     });
     expect(alert().detail).not.toMatch(/account first/);
   });
