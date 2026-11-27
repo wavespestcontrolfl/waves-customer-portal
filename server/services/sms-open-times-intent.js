@@ -8,6 +8,8 @@
  *   ("Thursday, December 3"): the names that day answers. The drafter adds the first day the picker offers for
  *   each name, even past its first three days; the picker's own horizon still bounds it.
  */
+const { dateOnlyString } = require('../utils/date-only');
+
 const WEEKDAY_RE = /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b|\b(tues?|weds?|thu|thur|thurs|fri)\b\.?/gi;
 const WEEKDAY_ABBREV = { tue: 'tuesday', tues: 'tuesday', wed: 'wednesday', weds: 'wednesday', thu: 'thursday', thur: 'thursday', thurs: 'thursday', fri: 'friday' };
 const MONTHS = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
@@ -81,8 +83,8 @@ function namedDayMatcher(text) {
   return (label, isoDate = null) => {
     const day = parseLabel(label);
     if (!day) return [];
-    const m = /^(\d{4})-\d{2}-\d{2}/.exec(String(isoDate || ''));
-    const isoYear = m ? Number(m[1]) : null;
+    const ymd = dateOnlyString(isoDate);
+    const isoYear = ymd ? Number(ymd.slice(0, 4)) : null;
     return requests.filter((r) => answers(r, day, isoYear)).map((r) => r.key);
   };
 }
