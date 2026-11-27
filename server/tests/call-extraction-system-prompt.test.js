@@ -172,12 +172,12 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
   const oneMessage = buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
   const { system } = buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', CALL_OPTS);
 
-  test('this is the v35 cohort, one hash per layout', () => {
-    expect(PROMPT_VERSION).toBe('v35');
-    expect(PROMPT_HASH).toMatch(/^v35-[a-f0-9]{12}$/);
-    expect(APS_PROMPT_HASH).toMatch(/^v35a-[a-f0-9]{12}$/);
-    expect(SYSTEM_PROMPT_HASH).toMatch(/^v35s-[a-f0-9]{12}$/);
-    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v35b-[a-f0-9]{12}$/);
+  test('this is the v36 cohort, one hash per layout', () => {
+    expect(PROMPT_VERSION).toBe('v36');
+    expect(PROMPT_HASH).toMatch(/^v36-[a-f0-9]{12}$/);
+    expect(APS_PROMPT_HASH).toMatch(/^v36a-[a-f0-9]{12}$/);
+    expect(SYSTEM_PROMPT_HASH).toMatch(/^v36s-[a-f0-9]{12}$/);
+    expect(SYSTEM_APS_PROMPT_HASH).toMatch(/^v36b-[a-f0-9]{12}$/);
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
   });
 

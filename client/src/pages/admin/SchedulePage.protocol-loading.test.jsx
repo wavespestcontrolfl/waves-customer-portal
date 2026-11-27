@@ -331,10 +331,11 @@ describe("Job card chemical area add-on", () => {
     expect(screen.queryByText("Unknown")).not.toBeInTheDocument();
   });
 
-  it("shows the hold reason in place of a withheld rate, and no Safety line when none is stated", async () => {
-    await show(card({ rate: null, rateNote: "Spray check: wind over 10 mph — rate withheld", safety: null }));
-    expect(await screen.findByText("Spray check: wind over 10 mph — rate withheld")).toBeVisible();
-    expect(screen.queryByText(/^Rate:/)).not.toBeInTheDocument();
+  // Owner 2026-11-26: a hold is a warning beside the rate, never a reason to hide it.
+  it("shows the hold reason as a warning beside the rate, and no Safety line when none is stated", async () => {
+    await show(card({ rateNote: "Spray check: wind over 10 mph", safety: null }));
+    expect(await screen.findByText("Warning: Spray check: wind over 10 mph")).toBeVisible();
+    expect(screen.getByText(/^Rate:/)).toBeVisible();
     expect(screen.queryByText(/^Safety:/)).not.toBeInTheDocument();
     expect(screen.getByText(/^Limit:/)).toBeVisible();
   });
@@ -452,5 +453,68 @@ describe("Job card Tank section rigs", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
     expect(await screen.findByText("Label rate 2 fl oz per gallon")).toBeVisible();
     expect(screen.queryByText(/gal per 1,000 sq ft\. More water/)).toBeNull();
+  });
+});
+
+describe("Job card Tank search warnings (owner 2026-11-26: warned, never blocked)", () => {
+  it("shows the amount with every check beside it as a warning", async () => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p9", name: "Celsius WG", category: "herbicide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) {
+        return reply({ enabled: true, amount: 6.215, unit: "oz", gallons: 110, ratePer1000: 0.113, rateVerified: false, sprayCheck: { verdict: "hold", reason: "wind over 10 mph" }, warnings: ["Label rate not yet verified", "Spray check: wind over 10 mph"], rotationWarnings: ["Celsius WG repeats HRAC 2."], planBlocks: [] });
+      }
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply({ enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, products: [], addons: [], planBlocks: [], sprayCheck: { window: "not_today" }, tank: { calibrated: true, source: "rig", rigs: [] } });
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "celsius" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Celsius WG" }));
+    expect(await screen.findByText("Warning: Label rate not yet verified")).toBeVisible();
+    expect(screen.getByText("Warning: Spray check: wind over 10 mph")).toBeVisible();
+    expect(screen.getByText("Warning: Celsius WG repeats HRAC 2.")).toBeVisible();
+    expect(screen.queryByText("No mix available")).toBeNull();
+  });
+
+  const searchAndPick = async (answer) => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p4", name: "Tekko Pro IGR", category: "insecticide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) return reply({ enabled: true, rateVerified: true, sprayCheck: { verdict: "ok" }, planBlocks: [], ...answer });
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply({ enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, products: [], addons: [], planBlocks: [], sprayCheck: { window: "not_today" }, tank: { calibrated: true, source: "rig", rigs: [] } });
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "tekko" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
+  };
+
+  it("names one labeled amount for each service that has its own rate", async () => {
+    await searchAndPick({ amount: null, unit: "fl_oz", gallons: 2, reason: "Each service on this visit has its own amount, see below", serviceAmounts: [
+      { service: "German Roach Cleanout", amount: 4, amountMax: null, unit: "fl_oz", fromCard: true, sprayVolumeGalPer1000: 1, coversSqft: 2000 },
+      { service: "Flea Treatment", amount: 1.32, amountMax: null, unit: "fl_oz", fromCard: true },
+    ] });
+    expect(await screen.findByText(/^German Roach Cleanout:/)).toBeVisible();
+    expect(screen.getByText(/^Flea Treatment:/)).toBeVisible();
+  });
+
+  it("shows the booked add-on rate's own words and its grass warning when a granular or governed product is searched", async () => {
+    await searchAndPick({ amount: null, unit: "oz", reason: "Area add-on — apply the label rate on the card over the area sold; no tank amount", ratePer1000: 0.147, governedRates: [{ service: "Lawn Insect Spot Treatment", ratePer1000: 0.147, rateUnit: "oz", text: "0.147 oz per 1,000 sq ft in 4 gal of water per 1,000 sq ft." }], warnings: ["Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)"] });
+    expect(await screen.findByText("Warning: Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)")).toBeVisible();
+    expect(screen.getByText("Rate: 0.147 oz per 1,000 sq ft in 4 gal of water per 1,000 sq ft.")).toBeVisible();
+  });
+
+  it("lists each booked area add-on's rate under its service name beside a tank amount", async () => {
+    await searchAndPick({ amount: 0.5, unit: "fl_oz", gallons: 1, governedRates: [{ service: "Bed Pre-Emergent Treatment", ratePer1000: 3.45, rateUnit: "lb", text: "3.45 lb per 1,000 sq ft of bed.", area: "Bed square feet treated.", limit: "Label limit 600 lb per acre in 12 months.", safety: "Certified applicator only." }] });
+    expect(await screen.findByText("Bed Pre-Emergent Treatment")).toBeVisible();
+    expect(screen.getByText("Rate: 3.45 lb per 1,000 sq ft of bed.")).toBeVisible();
+    expect(screen.getByText("Limit: Label limit 600 lb per acre in 12 months.")).toBeVisible();
+    expect(screen.getByText("Safety: Certified applicator only.")).toBeVisible();
+  });
+
+  it("keeps the picked rig's coverage and the card volume's coverage as two separate figures", async () => {
+    await searchAndPick({ amount: 220, unit: "fl_oz", gallons: 110, coversSqft: 55000, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1, rigSprayGalPer1000: 2, rig: { name: "Tank #1" }, warnings: ["Tank #1 sprays 2 gal per 1,000 sq ft, so this tank covers 55,000 sq ft. At the card's 1 gal per 1,000 sq ft the same tank would cover 110,000 sq ft"] });
+    expect(await screen.findByText(/· covers 55,000 sq ft/)).toBeVisible();
+    expect(screen.getByText(/the same tank would cover 110,000 sq ft/)).toBeVisible();
   });
 });

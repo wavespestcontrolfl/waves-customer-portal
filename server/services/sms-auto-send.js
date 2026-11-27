@@ -52,6 +52,7 @@ const {
   readGratitudeContext,
   gratitudeFinalState,
   gratitudeRolloutSettled,
+  mediaCountFromMetadata,
 } = require('./sms-gratitude-context');
 
 const AUTOSEND_WORKFLOW = 'sms_house_voice_auto_send';
@@ -198,8 +199,10 @@ async function claimAutoSend({ draftId, customerId, smsLogId, inboundMessage, re
   return db.transaction(async (trx) => {
     // The inbound row is immutable — its phone IS the thread/lock key, and its
     // to_phone is the Waves number to reply FROM.
-    const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone', 'to_phone');
+    const inbound = await trx('sms_log').where({ id: smsLogId }).first('created_at', 'from_phone', 'to_phone', 'metadata');
     if (!inbound?.created_at) return null;
+    // A text that carried a photo, or whose media state is unknown, is never answered automatically (texting AI gap 6): a person reviews it.
+    if (mediaCountFromMetadata(inbound.metadata) !== 0) return null;
 
     const threadLast10 = String(inbound.from_phone || '').replace(/\D/g, '').slice(-10) || null;
     const toPhone = inbound.from_phone || null; // the customer

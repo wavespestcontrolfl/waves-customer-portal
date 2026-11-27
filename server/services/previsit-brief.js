@@ -228,8 +228,8 @@ async function loadPastVisits(dbh, svc) {
 // valid cached brief), this is a read-path convenience with no cached
 // artifact to protect — every lookup is FAIL-SOFT and a partial answer
 // beats a 500. The route omits the key entirely if this still throws.
-// pastVisits: only the Visit Brief route shows them, so only it asks for the read.
-async function deterministicVisitFacts(svc, dbh = db, { pastVisits: wantPastVisits = false } = {}) {
+// pastVisits and customerAsked: only the Visit Brief route shows them, so only it asks for the reads.
+async function deterministicVisitFacts(svc, dbh = db, opts = {}) {
   let prefs = null;
   let prefsUnavailable = false;
   try {
@@ -284,7 +284,13 @@ async function deterministicVisitFacts(svc, dbh = db, { pastVisits: wantPastVisi
       logger.warn(`[previsit-brief] visit-facts customerFlagged unreadable for service ${svc.id}: ${err.message}`);
     }
   }
-  const pastVisits = wantPastVisits ? await loadPastVisits(dbh, svc) : null;
+  const pastVisits = opts.pastVisits ? await loadPastVisits(dbh, svc) : null;
+  // customer_asked: what the customer asked for about this visit (re-service reason and words, the self-booking
+  // note, open portal requests). Only the Visit Brief route shows it, so only it asks. Fail-soft; the service never
+  // throws and logs error codes only.
+  const customerAsked = opts.customerAsked
+    ? await require('./visit-customer-asked').customerAskedFacts(svc, dbh).catch(() => null)
+    : null;
   // history_unavailable: the service-history read failed, so a null last_visit
   // means "unknown", never "no earlier visit" (readers must not claim one).
   // past_visits is additive and absent on a read failure (readers fall back to last_visit).
@@ -294,6 +300,7 @@ async function deterministicVisitFacts(svc, dbh = db, { pastVisits: wantPastVisi
     ...(pastVisits ? { past_visits: pastVisits } : {}),
     ...(history.available ? {} : { history_unavailable: true }),
     ...(customerFlagged ? { customerFlagged } : {}),
+    ...(customerAsked ? { customer_asked: customerAsked } : {}),
     ...(animalWarnings.length ? { labelAnimalWarnings: animalWarnings } : {}),
   };
 }

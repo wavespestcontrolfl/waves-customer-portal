@@ -142,7 +142,21 @@ test('a single-home session (gate on, scoped=false) pins its one property and st
   expect(ok.status).toBe(201);
   const insert = log.find((e) => e[0] === 'insert');
   expect(insert).toBeTruthy();
-  expect(insert[1].metadata).toBeUndefined(); // unscoped: today's row shape
+  // Unscoped: no property stamp, only the writer's mark (the tech Visit Brief reads it). No `flow` = a typed request.
+  expect(JSON.parse(insert[1].metadata)).toEqual({ writer: 'portal_form' });
+});
+
+test('a request is marked portal_form unless it names one of the portal\'s generated pricing flows', async () => {
+  global.__SCOPE__ = { customerId: 'cust-1', enabled: true, multi: false, scoped: false, property: PRIMARY.property };
+  const marks = [];
+  for (const extra of [{ urgency: 'routine' }, {}, { flow: 'pricing_assistant' }, { flow: 'tier_explorer' }]) {
+    const ok = await post({ category: 'schedule_change', subject: 'Move Friday', description: 'Any day next week', ...extra });
+    expect(ok.status).toBe(201);
+    marks.push(JSON.parse(log.filter((e) => e[0] === 'insert').pop()[1].metadata).writer);
+  }
+  expect(marks).toEqual(['portal_form', 'portal_form', 'portal_flow', 'portal_flow']);
+  const bad = await post({ category: 'schedule_change', subject: 'Move Friday', description: 'x', flow: 'something_else' });
+  expect(bad.status).toBe(400);
 });
 
 test('the same covered issue under the PRIMARY selection is still steered to the re-service picker', async () => {

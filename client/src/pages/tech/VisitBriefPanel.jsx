@@ -34,6 +34,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
 import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
+import CustomerAskedSection from './CustomerAskedSection';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isProjectBackedCompletion, projectReportClosed } from '../../lib/dispatchCompletionRouting';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -1405,6 +1406,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
       <HomeNoteSection request={request} stopKey={stop.key} services={stop.services} byService={byService} onSaved={onRetry} />
+      <CustomerAskedSection memberBits={memberBits} />
       <AccessFlagsSection members={accessFlags} grouped={stop.services.length > 1} request={request} onChanged={onRetry} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>

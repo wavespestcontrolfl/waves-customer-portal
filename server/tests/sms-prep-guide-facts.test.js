@@ -263,7 +263,7 @@ describe('loadPrepGuideFacts', () => {
     expect(on).toContain('PREP GUIDE (getting ready for a visit):');
     expect(on).toContain('comes ONLY from a PREP GUIDE section in the context block');
     expect(on).toContain('give no prep step of your own');
-    expect(on).toContain('LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, SCHEDULE CHANGES, the thread');
+    expect(on).toContain('LABEL FACTS, PREP GUIDE, REPORT DELIVERY, PHOTO CHECK, VISIT STATUS & OPEN LOOPS, SCHEDULE CHANGES, the thread');
     delete process.env[GATE];
     expect(buildSystemPrompt()).not.toContain('PREP GUIDE');
   });

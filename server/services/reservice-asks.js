@@ -43,7 +43,13 @@ const CALL_COLUMNS = ['id', 'call_summary', 'ai_extraction', 'ai_extraction_enri
 const CALL_LEAD = 'On your call, you mentioned';
 const OFFICE_LEAD = 'As reported to our office:';
 // What the booking flow appends to a notes line after the customer's words.
-const NOTE_APPENDIX_RE = /\s+—\s+(?=Unit: |booked beside |self-booked plan |first visit reserved |auto-seeded )/;
+const NOTE_APPENDIX_RE = /\s+—\s+(?=Unit: |booked beside |self-booked plan |first visit reserved |auto-seeded |series activation never completed)/;
+// What other writers append to the visit's notes after the customer's words: routes/schedule.js's " | RESCHEDULE
+// REQUEST: ...", time-tracking's " [auto-closed ...]" suffix, and the office's own entries on a new line: schedule-tools'
+// "Moved from <date>: <reason>" and tools.js' "Rescheduled: <reason>".
+const NOTE_RECORD_BOUNDARY_RE = /\s+\|\s+RESCHEDULE REQUEST:|\s+\[auto-closed|\n\s*(?:Moved from |Rescheduled: )/;
+// The note reservice-public.js writes when the customer gave no details: not their words.
+const GENERATED_BOOKING_NOTE_RE = /^Re-service requested via self-serve link\.?$/i;
 const LEGACY_NOTE_RE = /^Re-service request(?: \([^)]*\))?: (.+)$/;
 
 // ---------------------------------------------------------------------------
@@ -189,6 +195,28 @@ function legacyRequestText(notes) {
   return null;
 }
 
+// The note a customer typed when self-booking. The original booking's customer_notes win when the caller has them
+// (the self_booked_appointments row, untouched by later edits). Otherwise it is read from the visit's notes line
+// ("Self-booked. Notes: Please text first — Unit: 5"): everything after the lead up to the appendix the booking flow
+// adds or that a later writer appends (a reschedule request), continuation lines included. A re-service request line is bookingWords' and is not returned here.
+function selfBookedNoteText(notes, customerNotes = null) {
+  let text = compact(customerNotes);
+  if (!text) {
+    const match = /(?:^|\n)\s*Self-booked\.\s*Notes:\s*([\s\S]+)$/.exec(String(notes || ''));
+    text = match ? compact(match[1].split(NOTE_APPENDIX_RE)[0].split(NOTE_RECORD_BOUNDARY_RE)[0]) : '';
+  }
+  return text && !LEGACY_NOTE_RE.test(text) && !GENERATED_BOOKING_NOTE_RE.test(text) ? text : null;
+}
+
+// The WHOLE customer-authored portion of a booking's notes line, continuation lines included: what the customer typed, up to the
+// appendix the booking flow or a later writer adds. A legacy request is read from its first matching line only (legacyRequestText);
+// a screen that must see everything the customer wrote (holdText) reads this.
+function customerNotesPortion(notes) {
+  const text = String(notes || '');
+  const match = /(?:^|\n)\s*Self-booked\.\s*Notes:\s*([\s\S]+)$/.exec(text) || /(?:^|\n)\s*(Re-service request[\s\S]*)$/.exec(text);
+  return match ? compact(match[1].split(NOTE_APPENDIX_RE)[0].split(NOTE_RECORD_BOUNDARY_RE)[0]) : '';
+}
+
 // The booking's own words as { source, text, quoted, lead } before the scrub,
 // or null. Quote rule (owner 2026-09-26): the picker and a text are the
 // customer's exact words; a call is a paraphrase and office words are staff's.
@@ -207,7 +235,7 @@ function bookingWords(visit, lane) {
   if (labels.length) return { source: 'request_form', text: `Picked: ${labels.join(', ')}`, quoted: false, lead: null };
   if (visit.customer_request != null) return null;
   const legacy = legacyRequestText(visit.notes);
-  return legacy ? { source: 'request_form', text: legacy, quoted: true, lead: null } : null;
+  return legacy ? { source: 'request_form', text: legacy, quoted: true, lead: null, fullText: customerNotesPortion(visit.notes) } : null;
 }
 
 // Everything over the cap goes except the booking item and the newest others.
@@ -357,7 +385,11 @@ function dedupeItems(items, bookingId) {
 // call-sourced items (a call's quotes, and booking words that came from a call) taken out of what is returned. So
 // every item id a technician sees exists in the completion gather, and its answer is never dropped as unknown.
 // Left off, the result is unchanged.
-async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false } = {}) {
+//
+// `holdText` (the technician Visit Brief's own screen): a function over the ORIGINAL text of a candidate, before the scrub and
+// the caps cut it. A candidate whose original text it holds is never built into an item: the scrub keeps only some sentences,
+// so a link, a code or a price past the cut would otherwise pass. Left off, the result is unchanged.
+async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false, holdText = null } = {}) {
   const visit = await readVisit(knex, scheduledServiceId);
   if (!visit) return { ok: false, reason: 'not_found' };
   if (!isReserviceVisit(visit)) return { ok: false, reason: 'not_reservice' };
@@ -370,7 +402,8 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 
   const booking = bookingWords(visit, lane);
   const bookingId = `booking:${visit.id}`;
-  const bookingItem = booking ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
+  const held = (candidate) => Boolean(holdText) && [candidate.text, candidate.screenText, candidate.fullText].some((text) => text && holdText(String(text)));
+  const bookingItem = booking && !held(booking) ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
   // A text that repeats the booking words (before or after the scrub) is the
   // same ask, not a second one.
   const bookingKeys = new Set([booking && normalizedWords(booking.text), bookingItem && normalizedWords(bookingItem.text)].filter(Boolean));
@@ -384,7 +417,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 
   // `accountWide` (only when set): the visit's own booking words are this property's; the rest may not be.
   const severalProperties = customerId ? await accountMayHaveSeveralPremises(knex, customerId) : false;
-  const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
+  const items = [bookingItem, ...channels.flat().filter((candidate) => !held(candidate)).map(buildItem)].filter(Boolean)
     .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
   const kept = limitItems(dedupeItems(items, bookingId), bookingId);
   return {
@@ -398,6 +431,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 module.exports = {
   gatherReserviceAsks,
   isReserviceVisit,
+  selfBookedNoteText,
   ASKS_LOOKBACK_DAYS,
   MAX_ITEMS,
   _test: {

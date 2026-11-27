@@ -746,7 +746,14 @@ function withRecipientRow(query, hit, token) {
     .join('visit_text_recipients as r', function onRecipientRow() {
       this.on('r.scheduled_service_id', '=', 's.id').andOn('r.customer_id', '=', 's.customer_id');
     })
-    .where({ 'r.id': hit.recipientId, 'r.track_token': token });
+    .where({ 'r.id': hit.recipientId, 'r.track_token': token })
+    // A copy of the customer's every-visit list stands only while the visit's current customer lists the number.
+    .where(function listedWhenCopied() {
+      this.whereNot('r.source', 'customer_reminder_contact').orWhereExists(function stillListed() {
+        this.select(db.raw('1')).from('customer_reminder_contacts as l')
+          .whereRaw('l.customer_id = s.customer_id AND l.phone_key = r.phone_key');
+      });
+    });
 }
 
 // A resolved recipient link names a visit, a row and a customer; anything less answers as an unknown token.

@@ -162,11 +162,12 @@ function buildRows() {
     unit: 'per treatment',
     // Standalone and recurring-plan-attached knockdowns, regular and German
     // scales, on typical homes.
+    // The bracket reads the home's total living area (owner 2026-11-26), so the sweep is the home-size percentiles.
     values: sweepValues(
-      TYPICAL_FOOTPRINTS.flatMap((f) =>
+      TYPICAL_HOMES.flatMap((homeSqFt) =>
         ['regular', 'german'].flatMap((roachType) =>
-          [true, false].map((standalone) => ({ f, roachType, standalone })))),
-      ({ f, roachType, standalone }) => sp.pricePestInitialRoach({ footprint: f }, { roachType, standalone }),
+          [true, false].map((standalone) => ({ homeSqFt, roachType, standalone })))),
+      ({ homeSqFt, roachType, standalone }) => sp.pricePestInitialRoach({ homeSqFt, stories: 1 }, { roachType, standalone }),
       (r) => r.price),
     notes: 'Standalone treatment, or added to a recurring plan at a lower rate; multi-visit German infestation cleanouts use the cleanout program. Larger homes price higher.',
   }));
@@ -206,11 +207,11 @@ function buildRows() {
     // Typical scope: 1-3 rooms, light/moderate severity, chemical method,
     // ready prep, single-family occupancy — the auto-priced typical job.
     values: sweepValues(
-      TYPICAL_FOOTPRINTS.flatMap((footprint) =>
+      TYPICAL_HOMES.flatMap((homeSqFt) =>
         [1, 2, 3].flatMap((rooms) =>
-          ['light', 'moderate'].map((severity) => ({ footprint, rooms, severity })))),
-      ({ footprint, rooms, severity }) => sp.priceBedBugTreatment(
-        { footprint, stories: 1 },
+          ['light', 'moderate'].map((severity) => ({ homeSqFt, rooms, severity })))),
+      ({ homeSqFt, rooms, severity }) => sp.priceBedBugTreatment(
+        { homeSqFt, stories: 1 },
         { rooms, method: 'CHEMICAL', severity, prepStatus: 'ready', occupancyType: 'singleFamily' }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
     notes: '1-3 rooms; priced by rooms, severity, and home size (the first room is priced with those factors; each room after it adds a flat $349). More rooms, heavier infestations, larger or multi-story homes, in-house heat/hybrid treatment, apartment occupancy, and under-prepared jobs price higher or are quoted after inspection.',
