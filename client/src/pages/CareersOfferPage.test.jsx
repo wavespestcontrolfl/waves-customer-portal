@@ -97,13 +97,8 @@ describe('CareersOfferPage — open state', () => {
   it('expands the terms inline and never injects raw HTML', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload()));
     renderPage();
-    const toggle = await screen.findByRole('button', { name: /Read the Technician Terms/ });
-    const collapsedTerms = screen.getByTestId('offer-terms');
-    expect(collapsedTerms).toHaveClass('careers-offer-terms-collapsed');
-    expect(collapsedTerms).toHaveTextContent('Four 10-hour days.');
-    fireEvent.click(toggle);
+    fireEvent.click(await screen.findByRole('button', { name: /Read the Technician Terms/ }));
     const terms = screen.getByTestId('offer-terms');
-    expect(terms).not.toHaveClass('careers-offer-terms-collapsed');
     expect(terms).toHaveTextContent('Four 10-hour days.');
     expect(terms.querySelector('script')).toBeNull();
     expect(terms).toHaveTextContent('<script>alert(1)</script>');
@@ -151,14 +146,6 @@ describe('CareersOfferPage — open state', () => {
     expect(accept).toBeEnabled();
     fireEvent.click(accept);
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
-    const record = screen.getByTestId('offer-signature-record');
-    expect(record).toHaveTextContent('Signed by: Jordan Rivera');
-    expect(record).toHaveTextContent('Sat, Dec 12, 2026');
-    expect(screen.getByText((_, el) => el.tagName === 'P' && el.textContent === 'Signed by Sam Carter, owner · Dec 11, 2026')).toBeInTheDocument();
-    expect(screen.getByText(/Please don.t give notice at your current job until you have signed this offer\./)).toBeInTheDocument();
-    expect(screen.getByText('Open until Fri, Dec 18')).toBeInTheDocument();
-    expect(screen.getByTestId('offer-terms')).toHaveTextContent('Four 10-hour days.');
-    expect(screen.getByRole('button', { name: 'Print / Save PDF copy' })).toBeInTheDocument();
     expect(fetchMock.mock.calls[1][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
   });
@@ -1235,13 +1222,6 @@ describe('CareersOfferPage — other states', () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
     renderPage();
     expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
-  });
-
-  it('does not enable signed-copy printing when signature evidence is missing', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: null, signedAt: null })));
-    renderPage();
-    expect(await screen.findByText(/^This offer was signed\./)).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Print / Save PDF copy' })).toBeNull();
   });
 
   it('offers a retry when the load fails', async () => {

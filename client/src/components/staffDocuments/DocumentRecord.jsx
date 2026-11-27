@@ -45,10 +45,13 @@ function PrefillNote({ hidden, fields, prefilled, answers }) {
   return labels.length ? <p>Filled from the staff record: {labels.join(', ')}. Check each before you save.</p> : null;
 }
 
-function recordHeading(canWrite, kind, isSignatureForm, completed) {
+function recordHeading(canWrite, kind, isSignatureForm, completed, hasValidSavedSignature) {
   if (!canWrite) return 'Historical records';
   if (kind === 'procedure') return 'Checklist mode';
-  if (isSignatureForm) return completed ? 'Signed agreement' : 'Sign this agreement';
+  if (isSignatureForm) {
+    if (hasValidSavedSignature) return 'Signed agreement';
+    return completed ? 'Completed record' : 'Sign this agreement';
+  }
   return 'Create a record';
 }
 
@@ -136,8 +139,9 @@ function computeRecordState({ rendered, answers, owner, selfId, canWrite, record
   const canSignNow = owner === selfId && (!isSignatureForm || (signatureReady && checkboxesReady));
   const locked = !canWrite || Boolean(record?.completed_at);
   const selectableRecords = [...new Map([...records, ...(record ? [record] : [])].map(item => [item.id, item])).values()];
+  const hasValidSavedSignature = Boolean(record?.completed_at && isSignatureForm && signedNameValid(record.answers?.['signed-name']));
   const borderAccent = record?.completed_at ? D.successText : isSignatureForm ? D.gold : D.blue;
-  return { isSignatureForm, signedName, signatureReady, canSignNow, locked, selectableRecords, borderAccent };
+  return { isSignatureForm, signedName, signatureReady, canSignNow, locked, selectableRecords, hasValidSavedSignature, borderAccent };
 }
 
 function RecordIntro({ canWrite, isSignatureForm, locked }) {
@@ -217,7 +221,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
   const assignable = people.filter(person => (manage || person.id === selfId) && (detail.document.staff_access !== 'admin' || person.role === 'admin'));
 
   return <section style={{ ...box, marginTop: 24, borderLeft: `4px solid ${state.borderAccent}` }}>
-    <h2 style={{ marginTop: 0, fontSize: 20, color: D.accent }}>{recordHeading(canWrite, rendered.kind, state.isSignatureForm, record?.completed_at)}</h2>
+    <h2 style={{ marginTop: 0, fontSize: 20, color: D.accent }}>{recordHeading(canWrite, rendered.kind, state.isSignatureForm, Boolean(record?.completed_at), state.hasValidSavedSignature)}</h2>
     <RecordIntro canWrite={canWrite} isSignatureForm={state.isSignatureForm} locked={state.locked} />
     <SavedRecordsPicker visible={manage || !state.isSignatureForm || state.selectableRecords.length > 0} record={record} records={state.selectableRecords} canWrite={canWrite} isSignatureForm={state.isSignatureForm} onSelect={selectRecord} />
     {error && <p role="alert" style={{ padding: '10px 12px', background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', borderRadius: 6 }}>{error}</p>}

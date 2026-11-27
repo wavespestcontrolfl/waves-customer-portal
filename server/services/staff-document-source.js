@@ -55,6 +55,10 @@ function findUnresolvedMarkers(text) {
   return String(text || '').match(UNRESOLVED_MARKER_RE) || [];
 }
 
+function findTemplateBindings(text) {
+  return String(text || '').match(/\{\{[^}\n]*\}\}|\{\{/g) || [];
+}
+
 function isRequiredSignatureField(field) {
   return Boolean(field && field.id === 'signed-name' && field.type === 'text' && field.required === true);
 }
@@ -254,7 +258,8 @@ function renderSource(source, policyValues) {
     metadata: source.metadata, used_variables: used,
     table_issues: [...new Set(budget.issues)],
     unresolved: [...new Set([...rendered.unresolvedVariables, ...title.unresolvedVariables,
-      ...findUnresolvedMarkers(`${title.rendered}\n${rendered.rendered}\n${metaText}`)])],
+      ...findUnresolvedMarkers(`${title.rendered}\n${rendered.rendered}\n${metaText}`),
+      ...findTemplateBindings(metaText)])],
   };
 }
 

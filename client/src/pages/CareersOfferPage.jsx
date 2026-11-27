@@ -37,8 +37,6 @@ import {
   tomorrowET,
 } from '../components/careers/offerFormat';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
-import { isNativeApp } from '../native/nativeFile';
-import './careers-offer-print.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -241,8 +239,6 @@ function resultMessage(data, own) {
 
 // signed / declined / date_requested: the answer given (see resultMessage).
 function ResultState({ data, own }) {
-  const showSignedCopy = data.state === 'signed' && hasOfferFacts(data);
-  const canPrintSigned = showSignedCopy && Boolean(data.signedName && data.signedAt && data.terms?.markdown?.trim());
   return (
     <Column>
       <div style={EYEBROW}>Waves</div>
@@ -254,49 +250,6 @@ function ResultState({ data, own }) {
           </p>
         )}
         <p style={BODY_STYLE} role="status">{resultMessage(data, own)}</p>
-        {data.state === 'signed' && (data.signedName || data.signedAt) && (
-          <div
-            data-testid="offer-signature-record"
-            style={{
-              marginTop: 12,
-              padding: '12px 14px',
-              borderRadius: 8,
-              background: '#F1F7FA',
-              border: '1px solid #D5DEE5',
-              fontFamily: FONTS.ui,
-              fontSize: 14,
-              color: TEXT,
-            }}
-          >
-            {data.signedName && (
-              <div>
-                <strong style={{ color: 'var(--brand, #04395E)' }}>Signed by:</strong> {data.signedName}
-              </div>
-            )}
-            {data.signedAt && (
-              <div style={{ color: MUTED, marginTop: 2 }}>
-                Signed on: {formatLongInstant(data.signedAt)}
-              </div>
-            )}
-          </div>
-        )}
-        {showSignedCopy && (
-          <>
-            <OfferLetterContent data={data} />
-            {data.expiresAt && (
-              <p style={{ ...BODY_STYLE, marginTop: 14, fontSize: 14, color: MUTED, textAlign: 'center' }}>
-                Open until {formatExpiry(data.expiresAt)}
-              </p>
-            )}
-          </>
-        )}
-        {canPrintSigned && !isNativeApp() && (
-          <div style={{ marginTop: 16 }} className="waves-field-no-print">
-            <BrandButton variant="secondary" fullWidth onClick={() => window.print()}>
-              Print / Save PDF copy
-            </BrandButton>
-          </div>
-        )}
       </BrandCard>
     </Column>
   );
@@ -310,22 +263,6 @@ function OfferRow({ label, children }) {
         {children}
       </div>
     </div>
-  );
-}
-
-function OfferLetterContent({ data }) {
-  return (
-    <>
-      <p style={{ ...BODY_STYLE, marginTop: 14 }}>
-        Signed by {data.owner?.name || 'Adam'}, {data.owner?.title || 'owner'}
-        {data.owner?.sentOn ? <>{' · '}<span style={{ whiteSpace: 'nowrap' }}>{formatSentOn(data.owner.sentOn)}</span></> : null}
-      </p>
-      <OfferSummary data={data} />
-      <TermsSection terms={data.terms} />
-      <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
-        Please don&rsquo;t give notice at your current job until you have signed this offer.
-      </p>
-    </>
   );
 }
 
@@ -352,7 +289,6 @@ function TermsSection({ terms }) {
     <div style={{ borderTop: '1px solid var(--border, #E2E8F0)', padding: '4px 0' }}>
       <button
         type="button"
-        className="waves-field-no-print"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         style={{
@@ -375,15 +311,12 @@ function TermsSection({ terms }) {
         <span>{open ? 'Hide the Technician Terms' : 'Read the Technician Terms'}</span>
         <span aria-hidden="true">{open ? '↑' : '→'}</span>
       </button>
-      <div
-        data-testid="offer-terms"
-        className={open ? undefined : 'careers-offer-terms-collapsed'}
-        aria-hidden={!open}
-        style={{ padding: '4px 0 12px' }}
-      >
-        {terms.title && <div style={{ ...LABEL_STYLE, marginTop: 8 }}>{terms.title}</div>}
-        <SafeMarkdown markdown={terms.markdown} />
-      </div>
+      {open && (
+        <div data-testid="offer-terms" style={{ padding: '4px 0 12px' }}>
+          {terms.title && <div style={{ ...LABEL_STYLE, marginTop: 8 }}>{terms.title}</div>}
+          <SafeMarkdown markdown={terms.markdown} />
+        </div>
+      )}
     </div>
   );
 }
@@ -842,70 +775,71 @@ function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRe
       <div style={EYEBROW}>Waves</div>
       <h1 style={H1_STYLE}>Your job offer</h1>
       <BrandCard padding={24}>
-        <OfferLetterContent data={data} />
-        <div className="waves-field-no-print">
-          <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
-          <SignBlock
-            name={name}
-            onName={setName}
-            busy={anyBusy}
-            saving={accept.busy}
-            frozen={accept.frozen}
-            onAccept={() => {
-              accept.run('/accept', { signedName: name.trim(), version: data.version });
-            }}
-          />
-          {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
-          <LostBanner action={accept} />
-          {unknown > 0 && (
-            <div style={ERROR_BANNER_STYLE} role="alert">
-              {REFRESH_ERROR}
-              <div style={{ marginTop: 8 }}>
-                <BrandButton variant="secondary" disabled={rechecking} onClick={recheck}>
-                  {rechecking ? 'Checking…' : 'Check again'}
-                </BrandButton>
-              </div>
-            </div>
-          )}
-          <OutdatedBanner outdated={outdated} unresolved={unresolved} />
-
-          <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
-            {!isNativeApp() && (
-              <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => window.print()}>
-                Print / Save PDF copy
+        <p style={BODY_STYLE}>
+          Signed by {data.owner?.name || 'Adam'}, {data.owner?.title || 'owner'}
+          {data.owner?.sentOn ? <>{' · '}<span style={{ whiteSpace: 'nowrap' }}>{formatSentOn(data.owner.sentOn)}</span></> : null}
+        </p>
+        <OfferSummary data={data} />
+        <TermsSection terms={data.terms} />
+        <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
+          Please don&rsquo;t give notice at your current job until you have signed this offer.
+        </p>
+        <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
+        <SignBlock
+          name={name}
+          onName={setName}
+          busy={anyBusy}
+          saving={accept.busy}
+          frozen={accept.frozen}
+          onAccept={() => {
+            accept.run('/accept', { signedName: name.trim(), version: data.version });
+          }}
+        />
+        {accept.error && <div style={ERROR_BANNER_STYLE} role="alert">{accept.error}</div>}
+        <LostBanner action={accept} />
+        {unknown > 0 && (
+          <div style={ERROR_BANNER_STYLE} role="alert">
+            {REFRESH_ERROR}
+            <div style={{ marginTop: 8 }}>
+              <BrandButton variant="secondary" disabled={rechecking} onClick={recheck}>
+                {rechecking ? 'Checking…' : 'Check again'}
               </BrandButton>
-            )}
-            <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => setPanel(panel === 'date' ? 'none' : 'date')}>
-              Ask for another start date
-            </BrandButton>
-            <BrandButton fullWidth variant="ghost" disabled={anyBusy} onClick={() => setPanel(panel === 'decline' ? 'none' : 'decline')}>
-              Decline
-            </BrandButton>
+            </div>
           </div>
+        )}
+        <OutdatedBanner outdated={outdated} unresolved={unresolved} />
 
-          {panel === 'date' && (
-            <DateRequestPanel
-              busy={dateReq.busy}
-              frozen={dateReq.frozen}
-              locked={anyBusy}
-              error={dateReq.error}
-              onCancel={() => setPanel('none')}
-              onSubmit={(payload) => dateReq.run('/date-request', { ...payload, version: data.version })}
-            />
-          )}
-          <LostBanner action={dateReq} />
-          {panel === 'decline' && (
-            <DeclinePanel
-              busy={decline.busy}
-              frozen={decline.frozen}
-              locked={anyBusy}
-              error={decline.error}
-              onCancel={() => setPanel('none')}
-              onSubmit={(payload) => decline.run('/decline', { ...payload, version: data.version })}
-            />
-          )}
-          <LostBanner action={decline} />
+        <div style={{ display: 'grid', gap: 10, marginTop: 14 }}>
+          <BrandButton fullWidth variant="secondary" disabled={anyBusy} onClick={() => setPanel(panel === 'date' ? 'none' : 'date')}>
+            Ask for another start date
+          </BrandButton>
+          <BrandButton fullWidth variant="ghost" disabled={anyBusy} onClick={() => setPanel(panel === 'decline' ? 'none' : 'decline')}>
+            Decline
+          </BrandButton>
         </div>
+
+        {panel === 'date' && (
+          <DateRequestPanel
+            busy={dateReq.busy}
+            frozen={dateReq.frozen}
+            locked={anyBusy}
+            error={dateReq.error}
+            onCancel={() => setPanel('none')}
+            onSubmit={(payload) => dateReq.run('/date-request', { ...payload, version: data.version })}
+          />
+        )}
+        <LostBanner action={dateReq} />
+        {panel === 'decline' && (
+          <DeclinePanel
+            busy={decline.busy}
+            frozen={decline.frozen}
+            locked={anyBusy}
+            error={decline.error}
+            onCancel={() => setPanel('none')}
+            onSubmit={(payload) => decline.run('/decline', { ...payload, version: data.version })}
+          />
+        )}
+        <LostBanner action={decline} />
 
         {data.expiresAt && (
           <p style={{ ...BODY_STYLE, marginTop: 18, fontSize: 14, color: MUTED, textAlign: 'center' }}>

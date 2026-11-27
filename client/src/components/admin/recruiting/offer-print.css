@@ -30,4 +30,8 @@
     padding: 0 !important;
     overflow: visible !important;
   }
+
+  .signed-offer-dialog .waves-field-no-print {
+    display: none !important;
+  }
 }

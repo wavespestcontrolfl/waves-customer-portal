@@ -161,3 +161,16 @@ test('an optional signed-name field does not activate agreement mode or label a 
   expect(screen.getByRole('option', { name: /Completed/ })).toBeInTheDocument();
   expect(screen.queryByRole('option', { name: /Signed/ })).not.toBeInTheDocument();
 });
+
+test('a historical completed signature record with a single-character name does not render a Signed agreement heading', () => {
+  const legacy = {
+    id: 'rec-legacy', owner_id: 'hire', answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'x' },
+    completed_steps: [], created_at: '2026-04-01T12:00:00Z', updated_at: '2026-04-01T12:00:00Z',
+    due_at: '2026-04-02T12:00:00Z', completed_at: '2026-04-01T12:05:00Z',
+  };
+  render(<DocumentRecord detail={detail({ records: [legacy] })} people={people} selfId="hire" manage={false} canWrite onSaved={() => {}} />);
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-legacy' } });
+  expect(screen.getByRole('heading', { name: 'Completed record' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Signed agreement' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Signed by/)).not.toBeInTheDocument();
+});

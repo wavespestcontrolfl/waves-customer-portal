@@ -110,6 +110,13 @@ test('unresolved placeholders in displayed metadata are flagged and rejected at 
   const rendered = renderSource(draft, values);
   expect(rendered.unresolved).toEqual(expect.arrayContaining(['[TBD]', '[OWNER: pick field label]', '[DECISION: verify citation]']));
   expect(() => checkRelease(draft, rendered, new Date())).toThrow(/Resolve before issuing/);
+
+  const bindingDraft = source('## Scope {#scope}\nClean body.');
+  bindingDraft.metadata.owner_role = '{{policy.pay_schedule}}';
+  bindingDraft.metadata.fields = [{ id: 'note', label: '{{policy.pay_frequency}}', type: 'text', required: false }];
+  const bindingRendered = renderSource(bindingDraft, values);
+  expect(bindingRendered.unresolved).toEqual(expect.arrayContaining(['{{policy.pay_schedule}}', '{{policy.pay_frequency}}']));
+  expect(() => checkRelease(bindingDraft, bindingRendered, new Date())).toThrow(/Resolve before issuing/);
 });
 test('HTML, scripts, images and unsafe links cannot become executable content', () => {
   const html = renderSource(source('## Example {#example}\n<img src=x onerror=alert(1)> [bad](javascript:alert) [good](https://example.com/?q="x") **Bold**')).sections[0].html;
