@@ -396,16 +396,24 @@ const PRE_SNAKE_CASE_BORACARE_KNOBS = Object.freeze({
   laborRate: 35,
 });
 
+const positiveOrNull = (v) => {
+  const n = storedFigure(v);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
+function firstFiniteVal(...values) {
+  for (const v of values) if (v !== undefined && v !== null) return v;
+  return undefined;
+}
+
 function boraCareStoredScope(row, estData) {
   if (row.atticSqFt !== undefined || row.surfaceSqFt !== undefined) {
-    const a = storedFigure(row.atticSqFt);
-    const s = storedFigure(row.surfaceSqFt);
     return {
-      pinnedAtticSqFt: Number.isFinite(a) && a > 0 ? a : null,
-      pinnedSurfaceSqFt: Number.isFinite(s) && s > 0 ? s : null,
+      pinnedAtticSqFt: positiveOrNull(row.atticSqFt),
+      pinnedSurfaceSqFt: positiveOrNull(row.surfaceSqFt),
     };
   }
-  const storedInputs = estData?.inputs || estData?.engineInputs || null;
+  const storedInputs = estData?.inputs || estData?.engineInputs;
   if (!storedInputs || typeof storedInputs !== 'object') return {};
   const svc = storedInputs.services?.boraCare || storedInputs.services?.bora_care;
   const opts = svc && typeof svc === 'object' ? svc : {};
@@ -413,41 +421,29 @@ function boraCareStoredScope(row, estData) {
   const attic = resolveBoraCareSqFt(storedInputs, opts);
   const surface = resolveBoraCareSurfaceSqFt(storedInputs, {
     ...opts,
-    surfaceLinearFt: opts.surfaceLinearFt ?? opts.wallLinearFt ?? storedInputs.boraCareSurfaceLinearFt ?? storedInputs.boraCareWallLinearFt,
-    surfaceHeightFt: opts.surfaceHeightFt ?? opts.wallHeightFt ?? storedInputs.boraCareSurfaceHeightFt ?? storedInputs.boraCareWallHeightFt,
+    surfaceLinearFt: firstFiniteVal(opts.surfaceLinearFt, opts.wallLinearFt, storedInputs.boraCareSurfaceLinearFt, storedInputs.boraCareWallLinearFt),
+    surfaceHeightFt: firstFiniteVal(opts.surfaceHeightFt, opts.wallHeightFt, storedInputs.boraCareSurfaceHeightFt, storedInputs.boraCareWallHeightFt),
   });
   const pinnedAtticSqFt = attic.value !== null ? attic.value : null;
   const pinnedSurfaceSqFt = surface.surfaceSqFt > 0 ? surface.surfaceSqFt : null;
   return pinnedAtticSqFt !== null || pinnedSurfaceSqFt !== null ? { pinnedAtticSqFt, pinnedSurfaceSqFt } : {};
 }
 
-function boraCareKnobSignalForReplay(estData = {}) {
-  const { storedBoraCareRows } = require('./estimate-result-container');
-  const rows = storedBoraCareRows(estData);
-  if (!rows.length) return null;
+function stampedBoraCareKnobs(rows) {
   for (const row of rows) {
     const k = row.pricingKnobs;
-    if (k && typeof k === 'object' && !Array.isArray(k)) {
-      const galCost = storedFigure(k.galCost);
-      const coverage = storedFigure(k.coverage);
-      const marginDivisor = storedFigure(k.marginDivisor);
-      if (Number.isFinite(galCost) && galCost > 0 && Number.isFinite(coverage) && coverage > 0
-        && Number.isFinite(marginDivisor) && marginDivisor > 0) {
-        return { ...PRE_SNAKE_CASE_BORACARE_KNOBS, ...k };
-      }
+    if (!k || typeof k !== 'object' || Array.isArray(k)) continue;
+    if (positiveOrNull(k.galCost) && positiveOrNull(k.coverage) && positiveOrNull(k.marginDivisor)) {
+      return { ...PRE_SNAKE_CASE_BORACARE_KNOBS, ...k };
     }
   }
-  // Unstamped historical Bora-Care rows could have been priced with pre-fix
-  // camelCase DB overrides (marginDivisor, minJobPrice, etc.) OR code defaults.
-  // Pin their stored base price on unchanged scope so revising or adding
-  // another service never shifts a sent quote's Bora-Care price.
+  return null;
+}
+
+function pinnedBoraCareKnobs(rows, estData) {
   for (const row of rows) {
     if (row.quoteRequired || row.requiresCustomQuote) continue;
-    const storedBase = storedFigure(row.priceBeforeDiscount);
-    const storedNet = storedFigure(row.price);
-    const pinnedPrice = Number.isFinite(storedBase) && storedBase > 0
-      ? storedBase
-      : (Number.isFinite(storedNet) && storedNet > 0 ? storedNet : null);
+    const pinnedPrice = positiveOrNull(row.priceBeforeDiscount) || positiveOrNull(row.price);
     if (pinnedPrice !== null) {
       return {
         ...PRE_SNAKE_CASE_BORACARE_KNOBS,
@@ -456,7 +452,14 @@ function boraCareKnobSignalForReplay(estData = {}) {
       };
     }
   }
-  return { ...PRE_SNAKE_CASE_BORACARE_KNOBS };
+  return null;
+}
+
+function boraCareKnobSignalForReplay(estData = {}) {
+  const { storedBoraCareRows } = require('./estimate-result-container');
+  const rows = storedBoraCareRows(estData);
+  if (!rows.length) return null;
+  return stampedBoraCareKnobs(rows) || pinnedBoraCareKnobs(rows, estData) || { ...PRE_SNAKE_CASE_BORACARE_KNOBS };
 }
 
 // Termiticide and wood-treatment pins as engine-input overrides: only the ones the stored rows carry, so Object.assign adds nothing else.
