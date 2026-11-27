@@ -1599,7 +1599,7 @@ async function writeRescuedFault({ trigger, triggerKey, payload, bellMetadata, w
   return { bellWritten, push: { sent: 0, skipped: 'claude_queue' }, policySilenced: true, claudeQueue: true };
 }
 
-async function triggerNotification(triggerKey, payload = {}, { beforePush = null, beforeHandoff = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null } = {}) {
+async function triggerNotification(triggerKey, payload = {}, { beforePush = null, beforeHandoff = null, relayFailureCall = null, onBell = null, dedupeKey = null, refreshOnDedupe = false, bumpOnRefresh = false, refreshPayload = null, shouldContinue = null, deliveredSubscriptionIds = null, pushOnly = false, adminOnly = false, bellAuthorized = false, onlyUserIds = null, pushOnDedupe = false } = {}) {
   try {
     const trigger = TRIGGER_REGISTRY[triggerKey];
     if (!trigger) {
@@ -1812,9 +1812,12 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           const created = await writeBell(bellMetadata);
           if (created && !created.suppressed) bellWritten = true;
           if (created && !created.suppressed) bellRowId = created.notification?.id || created.id || null;
-          // A refresh carries a NEW message onto the standing row: that is not
-          // an event that already delivered, so its push still goes.
-          if (created?.deduped && !created.refreshed && dedupeKey && (triggerKey === 'sms_reply' || triggerKey === 'promise_chaser' || triggerKey === 'property_lookup_canary_failed' || triggerKey === 'reservice_self_booked' || triggerKey === 'relay_hot_lead' || triggerKey === 'newsletter_proof_blocked' || (triggerKey === 'new_lead' && refreshOnDedupe))) dedupedNoPush = true;
+          // A dedupe HIT without a refresh means this keyed event already landed,
+          // so skip pushing again by default (fail-safe against duplicate pushes on
+          // retries/replays). Callers that intentionally retry failed device pushes
+          // on an existing bell row (e.g. payment_failed with deliveredSubscriptionIds
+          // or job_complete with an atomic beforePush DB claim) opt in via pushOnDedupe: true.
+          if (created?.deduped && !created.refreshed && dedupeKey && !pushOnDedupe && !Array.isArray(deliveredSubscriptionIds)) dedupedNoPush = true;
           if (created?.suppressed) bellSuppressed = true;
         } catch (e) {
           logger.error(`[notification-triggers] bell write failed: ${e.message}`);

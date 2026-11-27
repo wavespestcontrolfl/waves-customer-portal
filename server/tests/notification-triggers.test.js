@@ -822,8 +822,21 @@ describe('triggerNotification bell outcome', () => {
     await triggerNotification('new_lead', { ...text, twilioSid: `SM${'fedcba9876543210'.repeat(2)}`, message: 'Third text' },
       { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true });
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    // A plain dedupe hit on any keyed trigger skips pushing again by default
+    // (including relay_unbooked_call and keyed new_lead), unless pushOnDedupe: true
+    // is explicitly passed by a retry caller that fences push delivery itself.
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'keyed-lead-row', deduped: true });
-    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' });
+    expect(await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'unbooked-bell', deduped: true });
+    expect(await triggerNotification('relay_unbooked_call', { callSid: 'CA-unbooked-1' }, { dedupeKey: 'relay-unbooked:CA-unbooked-1' }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'retry-bell', deduped: true });
+    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc', pushOnDedupe: true });
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
   });
 

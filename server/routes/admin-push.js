@@ -44,6 +44,7 @@ router.get('/vapid-key', (req, res) => {
 // without leaking the private key. Hit this from the browser console
 // when push fails to confirm what's actually loaded.
 router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
+  const pushStatus = PushService.status();
   res.json({
     vapid_public_key_set: !!(process.env.VAPID_PUBLIC_KEY || '').trim(),
     vapid_public_key_length: (process.env.VAPID_PUBLIC_KEY || '').trim().length,
@@ -51,6 +52,8 @@ router.get('/diagnostics', adminAuthenticate, requireAdmin, (req, res) => {
     vapid_private_key_length: (process.env.VAPID_PRIVATE_KEY || '').trim().length,
     vapid_subject: (process.env.VAPID_SUBJECT || '').trim() || 'mailto:contact@wavespestcontrol.com (default)',
     web_push_loaded: (() => { try { require('web-push'); return true; } catch { return false; } })(),
+    apns_configured: Boolean(pushStatus.apns?.configured),
+    fcm_configured: Boolean(pushStatus.fcm?.configured),
     node_env: process.env.NODE_ENV || 'unset',
   });
 });
@@ -394,10 +397,13 @@ router.post('/test', async (req, res, next) => {
       return res.status(400).json({ error: 'Unknown notification preview' });
     }
     const status = PushService.status();
-    if (!status.available || !status.configured) {
+    const webConfigured = Boolean(status.available && status.configured);
+    const apnsConfigured = Boolean(status.apns?.configured);
+    const fcmConfigured = Boolean(status.fcm?.configured);
+    if (!webConfigured && !apnsConfigured && !fcmConfigured) {
       return res.status(503).json({
         ok: false,
-        error: status.error || 'Web push is not configured on the server',
+        error: status.error || 'No push transport (Web Push, APNs, or FCM) is configured on the server',
         status,
       });
     }

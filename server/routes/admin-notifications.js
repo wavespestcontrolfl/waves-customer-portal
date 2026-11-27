@@ -385,6 +385,41 @@ router.put('/read-all', async (req, res, next) => {
 // teammate (admin role required) — necessary because the technicians.active
 // checkpoint is otherwise tautological: adminAuthenticate rejects inactive
 // callers before this handler runs.
+function buildPushTransportChecks(pushStatus) {
+  const vapidOk = Boolean(pushStatus.available && pushStatus.configured);
+  const apnsOk = Boolean(pushStatus.apns?.configured);
+  const fcmOk = Boolean(pushStatus.fcm?.configured);
+  return {
+    vapid: {
+      ok: vapidOk,
+      publicKeyPresent: Boolean(process.env.VAPID_PUBLIC_KEY),
+      privateKeyPresent: Boolean(process.env.VAPID_PRIVATE_KEY),
+      webPushAvailable: pushStatus.available,
+      configured: pushStatus.configured,
+      error: pushStatus.error,
+    },
+    apns: { ok: apnsOk, ...(pushStatus.apns || { configured: false }) },
+    fcm: { ok: fcmOk, ...(pushStatus.fcm || { configured: false }) },
+    pushTransport: { ok: vapidOk || apnsOk || fcmOk, vapid: vapidOk, apns: apnsOk, fcm: fcmOk },
+  };
+}
+
+function summarizeSubscriptions(subs) {
+  const activeSubs = subs.filter((s) => s.active);
+  const byPlatform = { web: 0, ios: 0, android: 0 };
+  for (const s of activeSubs) {
+    const p = s.platform === 'ios' || s.platform === 'android' ? s.platform : 'web';
+    byPlatform[p] += 1;
+  }
+  return {
+    ok: activeSubs.length > 0,
+    total: subs.length,
+    active: activeSubs.length,
+    inactive: subs.length - activeSubs.length,
+    byPlatform,
+  };
+}
+
 router.get('/diagnose', requireAdmin, async (req, res, next) => {
   try {
     const requestedUserId = req.query.userId ? parseInt(req.query.userId, 10) : null;
@@ -395,16 +430,8 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     const userId = requestedUserId || req.technicianId;
     const report = { targetUserId: userId, callerUserId: req.technicianId, checks: {} };
 
-    // 1. VAPID env present (push silently no-ops without these)
-    const pushStatus = PushService.status();
-    report.checks.vapid = {
-      ok: pushStatus.available && pushStatus.configured,
-      publicKeyPresent: Boolean(process.env.VAPID_PUBLIC_KEY),
-      privateKeyPresent: Boolean(process.env.VAPID_PRIVATE_KEY),
-      webPushAvailable: pushStatus.available,
-      configured: pushStatus.configured,
-      error: pushStatus.error,
-    };
+    // 1. Push transports (Web Push VAPID, APNs for Waves Admin iOS, FCM for Android)
+    Object.assign(report.checks, buildPushTransportChecks(PushService.status()));
 
     // 2. web-push module loadable
     let webpushLoaded = false;
@@ -426,13 +453,7 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     // 4. push_subscriptions — auto-deactivated rows (410/404) are a common cause
     try {
       const subs = await db('push_subscriptions').where({ admin_user_id: userId });
-      const active = subs.filter((s) => s.active).length;
-      report.checks.pushSubscriptions = {
-        ok: active > 0,
-        total: subs.length,
-        active,
-        inactive: subs.length - active,
-      };
+      report.checks.pushSubscriptions = summarizeSubscriptions(subs);
     } catch (err) {
       report.checks.pushSubscriptions = { ok: false, error: err.message };
     }
@@ -470,8 +491,9 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
       report.checks.recentBellWrites = { ok: false, error: err.message };
     }
 
+    const optionalTransportChecks = new Set(['vapid', 'apns', 'fcm', 'webPushModule']);
     report.summary = Object.entries(report.checks)
-      .filter(([, v]) => v.ok === false)
+      .filter(([k, v]) => v.ok === false && !(report.checks.pushTransport.ok && optionalTransportChecks.has(k)))
       .map(([k]) => k);
 
     res.json(report);
