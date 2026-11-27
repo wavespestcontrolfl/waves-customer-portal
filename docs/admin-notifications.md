@@ -326,7 +326,7 @@ customer's message by this rule.
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
    a real record (never an automated text, an expired link or an unsent Gmail draft). No plain rule closes a bare "ok" or "yes":
    the model is shown the message it answers (whole, with when it was sent; for a text, the last one sent from the Waves line
-   the yes came to, to the number it came from; for an email, the last Waves email sent to the address the reply came from, read from its HTML when it stored no
+   the yes came to, to the number it came from, never an app push notice; for an email, the last Waves email sent to the address the reply came from, read from its HTML when it stored no
    text, never a forward to staff) and says whether the yes accepts an offered day or time (`yes_to_offer`; a reply without it
    counts as yes). An email reply is cut at quoted history and signatures first, so "Yes" over "Sent from my iPhone" is a bare yes.
    A yes whose message was not shown whole (cut short, no words, or none found; a send whose Cc or Bcc was never captured stops

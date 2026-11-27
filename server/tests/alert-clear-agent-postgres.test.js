@@ -640,14 +640,32 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(toBilling.reply).toMatchObject({ lastBody: 'Ok', prevOutbound: 'Your invoice is ready.', prevAt: at(-10), whole: true });
   });
 
-  // A thread bell with no message id: the reply is the latest text in, and its own two numbers find the message it answers.
-  test('a thread bell with no message id pairs the latest text in by its own numbers', async () => {
+  // A thread bell with no message id: the reply is the latest text in, found by its own query (13 later Waves texts fill the
+  // 12-line excerpt), and its own two numbers find the message it answers.
+  test('a thread bell with no message id pairs the latest text in by its own numbers, past a full excerpt', async () => {
     const cid = await customer();
     const number = phone(79);
-    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: 'Your visit is on Friday.', created_at: at(-60) });
-    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'OK', created_at: at(-5), status: 'received' });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: 'Your visit is on Friday.', created_at: at(-200) });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'OK', created_at: at(-100), status: 'received' });
+    for (let i = 0; i < 13; i += 1) await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: `notice ${i}`, created_at: at(-90 + i) });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'OK', prevOutbound: 'Your visit is on Friday.', prevAt: at(-60), whole: true });
+    expect(timeline.reply).toEqual({ lastBody: 'OK', prevOutbound: 'Your visit is on Friday.', prevAt: at(-200), whole: true });
+  });
+
+  // The Waves line comes from the canonical address rule: the message's own endpoint before the thread's (a thread can be
+  // re-pointed). And an app push notice, even one that kept the text line's number, is no text the customer answered by text.
+  test('the reply\'s Waves line is the message\'s own endpoint, and a push notice is never the offer', async () => {
+    const cid = await customer();
+    const number = phone(80);
+    const sid = `SM${tag}o5`;
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: number, our_endpoint_id: OTHER_LINE }).returning('id');
+    made.conversations.push(conv.id);
+    await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Yes', twilio_sid: sid, created_at: T0, metadata: JSON.stringify({ sms_our_endpoint_id: LINE }) });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'sent', message_body: 'Your visit is coming up.', created_at: at(-20), metadata: { channel: 'push', providerAccepted: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: OTHER_LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-10) });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
+    expect(timeline.reply).toMatchObject({ lastBody: 'Yes', prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
   });
 
   test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {

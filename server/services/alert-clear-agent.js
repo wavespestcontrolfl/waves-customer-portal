@@ -65,7 +65,7 @@ const { etDateString, parseETDateTime, formatETDay, formatETTime } = require('..
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { personSentFilter, emailCustomerLink, extractEmailAddresses, capturedRecipients } = require('./email/email-customer-link');
-const { phoneIdentitySql } = require('./sms-response-policy');
+const { phoneIdentitySql, canonicalSmsFallbackAddressSql } = require('./sms-response-policy');
 const { callEndedAtSql } = require('./sms-pending-conversations');
 const { whereNotSandboxCall } = require('./voice-agent/relay-protocol');
 const { VISIT_NEVER_RAN_STATUSES } = require('./invoice-helpers');
@@ -512,16 +512,17 @@ async function resolveInboundText(r, sid) {
   const canonical = await read('trigger-message', () => messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.twilio_sid', sid)
     .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone"),
-      'c.our_endpoint_id as line'));
+      conn.raw(`${canonicalSmsFallbackAddressSql({ messageAlias: 'm', conversationAlias: 'c', customerAlias: 'c' }).endpointSql} as line`)));
   // Through smsBase: the same recruiting exclusion and reservation filter as every other text-log read.
   const legacy = await read('trigger-sms', () => smsBase(conn).where('os.direction', 'inbound').where('os.twilio_sid', sid)
     .select('os.created_at', 'os.customer_id', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone'), 'os.to_phone as line'));
   const found = [...canonical, ...legacy].filter((x) => x.created_at);
   if (!found.length) return null;
   const first = found.sort((a, b) => toDate(a.created_at) - toDate(b.created_at))[0];
-  // `line`: the Waves number the text came to (the conversation's endpoint, or the text-log row's to_phone).
+  // `line`: the Waves number the text came to, by the canonical address rule (sms-response-policy.js canonicalSmsAddressProjectionSql):
+  // the SID-linked text-log row's to_phone first, then the message's own endpoint, then the thread's.
   return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id), phone: found.find((x) => x.phone)?.phone || null,
-    line: found.find((x) => x.line)?.line || null, body: first.body ?? found.find((x) => x.body)?.body ?? null };
+    line: legacy.find((x) => x.line)?.line || canonical.find((x) => x.line)?.line || null, body: first.body ?? found.find((x) => x.body)?.body ?? null };
 }
 
 // What came before the text, and the pair a bare "yes" is judged on: the triggering text (carried from the canonical message the SID
@@ -535,9 +536,11 @@ async function smsContext(r, anchor, key, trigger) {
   const hasTrigger = typeof trigger?.body === 'string';
   const shown = hasTrigger ? ordered.filter((x) => !(x.direction === 'inbound' && toDate(x.created_at).getTime() === anchor.getTime())) : ordered;
   const ctx = shown.map((x) => smsEvent(x, false).line);
-  // The reply: the text the bell names, or (a thread bell with no message id) the latest text in, with its own two numbers.
+  // The reply: the text the bell names, or (a thread bell with no message id) the latest text in at or before the bell, by its own
+  // query, never only what the capped excerpt holds, with its own two numbers.
   const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor, from_phone: trigger.phone, to_phone: trigger.line }
-    : [...ordered].reverse().find((x) => x.direction === 'inbound');
+    : (await r.read('reply-in', () => scopeToContact(smsBase(r.conn), key, SMS_SCOPE).where('os.direction', 'inbound').where('os.created_at', '<=', anchor)
+      .orderBy('os.created_at', 'desc').limit(1).select('os.created_at', 'os.from_phone', 'os.to_phone', r.conn.raw('left(os.message_body, 1500) as message_body'))))[0];
   if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
   const lastAt = lastIn ? toDate(lastIn.created_at) : null;
   const offer = lastAt ? await lastDeliveredText(r, lastAt, key, lastIn.from_phone, lastIn.to_phone) : { body: '', at: null, whole: false };
@@ -553,7 +556,10 @@ async function lastDeliveredText(r, before, key, senderPhone, linePhone) {
   const sender = phoneIdentityKey(senderPhone);
   const line = phoneIdentityKey(linePhone);
   if (!sender || !line) return { body: '', at: null, whole: false };
+  // An app push notice is no text the customer could answer by text: smsDeliveredSql counts a provider-accepted push, and a push
+  // row can keep the text line's from_phone, so push rows (staff-contact.js's push markers) are left out here.
   const rows = await r.read('prev-offer', () => scopeToContact(smsBase(r.conn).where('os.direction', 'outbound').whereRaw(smsDeliveredSql('os'))
+    .whereRaw("NOT (COALESCE(os.from_phone, '') = 'push' OR COALESCE(os.metadata->>'channel', '') = 'push')")
     .where('os.created_at', '<', before).whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [sender])
     .whereRaw(`${phoneIdentitySql('os.from_phone')} = ?`, [line]), key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
     .orderBy('os.created_at', 'desc').limit(1)
