@@ -23,7 +23,7 @@ const logger = require('./logger');
 const TABLE = 'stripe_email_sync_jobs';
 const MAX_ATTEMPTS = 6; // Stripe errors after the profile is linked (not-linked re-checks count apart)
 const STRIPE_TIMEOUT_MS = 10000;
-const MERGE_RETIRED_PHONE_PREFIX = 'merged-';
+const { isMergeRetiredRow } = require('./merge-retired');
 
 // Queue a job on the caller's transaction handle for the address the customer just confirmed. A pending job for this
 // customer is re-armed instead, with the new address and a fresh retry budget. The caller holds the customer row lock
@@ -92,7 +92,7 @@ async function processJob(jobId) {
       .where('next_attempt_at', '<=', trx.fn.now()).forUpdate().skipLocked().first();
     if (!job) return 'busy';
     if (customer === undefined && await trx('customers').where({ id: peek.customer_id }).first('id')) return 'busy';
-    if (!customer || (customer.deleted_at && String(customer.phone || '').startsWith(MERGE_RETIRED_PHONE_PREFIX))) {
+    if (!customer || isMergeRetiredRow(customer)) {
       await finish(trx, job, 'skipped', 'gone');
       return 'gone';
     }
@@ -165,9 +165,9 @@ async function drainDue({ limit = 20 } = {}) {
   // A process with no Stripe key claims nothing, so it can never delay a job a configured process would send.
   if (!require('../config/stripe-config').secretKey) return {};
   const due = await db(TABLE).where({ status: 'pending' }).where('next_attempt_at', '<=', db.fn.now())
-    .orderBy('next_attempt_at').limit(limit).select('id', 'updated_at');
+    .orderBy('next_attempt_at').limit(limit).select('id', db.raw('updated_at::text AS version'));
   const counts = {};
-  for (const { id, updated_at: seen } of due) {
+  for (const { id, version: seen } of due) {
     try {
       const r = await processJob(id);
       counts[r] = (counts[r] || 0) + 1;
@@ -177,7 +177,7 @@ async function drainDue({ limit = 20 } = {}) {
       counts.error = (counts.error || 0) + 1;
       logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
       // Only the version this drain saw: a job re-armed or rescheduled since keeps its own schedule.
-      await db(TABLE).where({ id, status: 'pending', updated_at: seen })
+      await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
         .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
         .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
     }

@@ -37,7 +37,9 @@ describe('stripe-email-sync processJob', () => {
           && !(q.skip && table === 'customers' && lockedCustomers.includes(r.id)));
       const note = (rs) => { if (q.locked) rs.forEach((r) => locks.push(`${table}:${r.id}`)); return rs; };
       q.first = async () => { if (state.throwOn === table) throw new Error('boom'); const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
-      q.select = async (...cols) => note(rows()).map((r) => (cols.length > 1 ? Object.fromEntries(cols.map((c) => [c, r[c]])) : { id: r.id }));
+      // drainDue selects id + updated_at::text AS version; the fake's updated_at is already a text version.
+      q.select = async (...cols) => note(rows()).map((r) => (cols.length > 1 ? { id: r.id, version: r.updated_at } : { id: r.id }));
+      q.whereRaw = (sql, [v]) => { q.conds.push({ updated_at: v }); return q; };
       q.update = async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; };
       return q;
     };
