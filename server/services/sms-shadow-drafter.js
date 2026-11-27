@@ -239,7 +239,11 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // STAFF FACTS C (owner 2026-11-25, texting AI fix step 2C): the prep guide of the customer's booked visit (else the last completed service) is
 // a new PREP GUIDE fact section, the guide's own published sentences, so a draft stops writing its own prep advice. A new section appears in
 // the facts (optional, like OPEN TIMES, so the fact key stays 'n'), so the numbers move once more, to "65" / "66" (here) and "67" / "68" (B1).
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}65_n`;
+// ESTIMATE TERMS (owner 2026-11-26, "let the AI answer everything"): the open estimate's setup fee (or its waiver) and its pay-for-the-year
+// total become rendered Payment status sentences, a call-drafted or new-home estimate renders its price like any other, and the PENDING
+// ESTIMATE line points at those sentences where it used to forbid the topic. New sentence families and a changed instruction, so the numbers
+// move once more, to "69" / "70" (here) and "71" / "72" (B1). The company facts text is unchanged, so no line is retired.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}69_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -249,16 +253,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}65_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}66_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}70_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers68_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers72_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}67_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}68_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}71_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}72_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
@@ -5614,10 +5618,11 @@ function buildFactsBlock(context, extras = {}) {
   // copy; the estimate itself leads with per-application pricing, so the
   // fact points there).
   // Owner ruling 2026-09-30 (price and fee questions are explained from the estimate on file) with the money contract: the price listed per application
-  // and the applications a year reach the model only as rendered sentences under Payment status sentences (gate on).
+  // and the applications a year reach the model only as rendered sentences under Payment status sentences (gate on); since owner 2026-11-26 so
+  // do the setup fee, its waiver and the pay-for-the-year total, which the line used to forbid outright.
   const est = context.pendingEstimate;
   const estimatePriceNote = realAnswersWording(
-    ' — state a price or the applications a year ONLY by copying a matching sentence from Payment status sentences word for word (with none there, state none); say nothing about a setup fee or a prepay discount',
+    ' — state a price, the applications a year, a setup fee (or that it is waived) or a pay-for-the-year total ONLY by copying a matching sentence from Payment status sentences word for word (with none there, state none). A question about the setup fee or about paying for the year is answered by that sentence alone, with only a greeting or thanks beside it; with no sentence that answers it, return ABSTAIN. Never state a discount or a saving for paying up front',
     '',
   );
   const estimateLine = est

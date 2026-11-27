@@ -74,6 +74,7 @@ const DAY = '[A-Z][a-z]{2} \\d{1,2}, \\d{4}';
 const INVOICE = '[A-Za-z0-9][A-Za-z0-9-]{0,29}';
 // a service name inside an estimate or prepaid-plan sentence (no period or comma, so the sentence cannot split or pose as another one)
 const PLAN_LABEL = "[A-Za-z][A-Za-z0-9 &'()/+-]{1,58}";
+const FOR_PLAN_LABEL = `(?: for ${PLAN_LABEL})?`;
 const SHAPES = Object.freeze({
   payment_received: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}\\.$`),
   payment_partly_refunded: new RegExp(`^We received your ${AMT}${TENDER} payment on ${DAY}, and ${AMT} of it was refunded\\.$`),
@@ -94,8 +95,16 @@ const SHAPES = Object.freeze({
   // prepaid recurring plans (owner 2026-11-25, texting AI fix step 2): rendered from the plan rollup (sms-staff-facts.js), copied the same
   // way. A prepaid plan sentence states visits, never money.
   // the open estimate (owner 2026-11-25): the price LISTED per application and the applications a year, from the estimate's own per-application
-  // average (sms-staff-facts.js). Never a total, a prepay price, a setup fee or a waiver: those have their own authorities and stay with staff.
+  // average (sms-staff-facts.js).
   estimate_application_price: new RegExp(`^Your estimate lists ${PLAN_LABEL} at ${AMT} per application, \\d{1,2} applications? a year\\.$`),
+  // ...and (owner 2026-11-26, "let the AI answer everything") its setup fee, a waiver of it, and the pay-for-the-year total of the plan the
+  // estimate page shows by default: each read from that page's own answer (sms-staff-facts.js estimateFacts.terms). Still never a first-visit
+  // total or a deposit: those stay with staff. A setup sentence names the service when the estimate is for one service only.
+  estimate_setup_fee: new RegExp(`^Your estimate${FOR_PLAN_LABEL} lists a one-time setup fee of ${AMT}\\.$`),
+  estimate_setup_fee_prepay_waived: new RegExp(`^Your estimate${FOR_PLAN_LABEL} lists a one-time setup fee of ${AMT}, waived when you pay for the year up front\\.$`),
+  estimate_setup_fee_waived: new RegExp(`^The setup fee is waived on your estimate${FOR_PLAN_LABEL}\\.$`),
+  estimate_no_setup_fee: new RegExp(`^Your estimate${FOR_PLAN_LABEL} has no setup fee\\.$`),
+  estimate_prepay_total: new RegExp(`^Paid up front for the year, the total on your estimate for ${PLAN_LABEL} is ${AMT}, \\d{1,2} applications? a year\\.$`),
   prepaid_visits_left: new RegExp(`^Your prepaid ${PLAN_LABEL} plan has \\d{1,3} of \\d{1,3} prepaid visits? left\\.$`),
   zelle_offer: new RegExp(`^You can pay invoice ${INVOICE} by Zelle to [^,\\n]{3,80}, with your name or the invoice number in the Zelle memo\\.$`),
   zelle_invoice_unavailable: new RegExp(`^Zelle isn't available for invoice ${INVOICE} right now\\.$`),
@@ -249,7 +258,7 @@ function renderPaymentStatusSentences(context, { today = null } = {}) {
   const depositUnknown = billing.hasDepositActivity !== false;
   const absence = (hasUnmodeledInvoice(billing) || allRows.length !== rows.length || depositUnknown || !everyRowRenders(billing, rows, todayParts))
     ? null : absenceSentence(billing, rows, todayParts);
-  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...estimateSentences(context), ...prepaidSentences(context), ...zelleSentences(billing.zelleFacts)];
+  return [...out, ...(absence ? [absence] : []), ...duesSentences(context), ...estimateSentences(context), ...estimateTermsSentences(context), ...prepaidSentences(context), ...zelleSentences(billing.zelleFacts)];
 }
 
 const labelOk = (label) => new RegExp(`^${PLAN_LABEL}$`).test(String(label || ''));
@@ -267,6 +276,33 @@ function estimateSentences(context) {
     if (labelCount.get(String(line?.label).toLowerCase()) === 1 && labelOk(line?.label) && finiteCents(line?.cents / 100) && Number.isInteger(applications) && applications > 0 && applications < 100) {
       out.push({ kind: 'estimate_application_price', text: `Your estimate lists ${line.label} at ${money(Math.round(line.cents))} per application, ${applications} application${applications === 1 ? '' : 's'} a year.` });
     }
+  }
+  return out;
+}
+
+// The open estimate's setup fee and pay-for-the-year total (estimateFacts.terms, sms-staff-facts.loadEstimateFacts: the estimate page's own
+// answer; null or absent renders nothing). One setup sentence at most: the fee, the fee with the prepay waiver the page shows beside it, a
+// waiver on the estimate's own record, or no fee at all. These are the ONLY wordings in which a waiver or a prepay total may be stated.
+// It names the service when the estimate is for one service only (fee.label), so it answers only a question about that service.
+function estimateTermsSentences(context) {
+  const out = [];
+  const terms = context?.estimateFacts?.terms || {};
+  const fee = terms.setupFee || {};
+  const prepay = terms.prepayTotal || {};
+  const feeCents = Number.isInteger(fee.cents) ? fee.cents : null;
+  const estimate = labelOk(fee.label) ? `estimate for ${fee.label}` : 'estimate';
+  if (feeCents > 0) {
+    out.push(fee.prepayWaives === true
+      ? { kind: 'estimate_setup_fee_prepay_waived', text: `Your ${estimate} lists a one-time setup fee of ${money(feeCents)}, waived when you pay for the year up front.` }
+      : { kind: 'estimate_setup_fee', text: `Your ${estimate} lists a one-time setup fee of ${money(feeCents)}.` });
+  } else if (feeCents === 0) {
+    out.push(fee.waived === true
+      ? { kind: 'estimate_setup_fee_waived', text: `The setup fee is waived on your ${estimate}.` }
+      : { kind: 'estimate_no_setup_fee', text: `Your ${estimate} has no setup fee.` });
+  }
+  const applications = Number(prepay.applications);
+  if (labelOk(prepay.label) && Number.isInteger(prepay.cents) && prepay.cents > 0 && Number.isInteger(applications) && applications > 0 && applications < 100) {
+    out.push({ kind: 'estimate_prepay_total', text: `Paid up front for the year, the total on your estimate for ${prepay.label} is ${money(prepay.cents)}, ${applications} application${applications === 1 ? '' : 's'} a year.` });
   }
   return out;
 }
@@ -657,12 +693,14 @@ const FOR_SERVICE_ASK_RE = /\b(?:visits?|appointments?|applications?|treatments?
 // (paired with the applications a year it means: an estimate sentence carries its cadence as that count, a prepaid plan's label names it)
 const PLAN_CADENCES = [[/(?<!bi-)\bmonthly\b/i, 12], [/\bquarterly\b/i, 4], [/\bbi-?monthly\b/i, 6], [/\bweekly\b/i, 52], [/\bannual(?:ly)?\b/i, 1]];
 // The service a copied estimate or prepaid sentence is about: its own label.
-const sentenceServiceLabel = (sentence) => String((/^Your prepaid (.+) plan has /.exec(sentence) || /^Your estimate lists (.+) at \$/.exec(sentence))?.[1] || '');
+// (a setup, waiver or pay-for-the-year sentence names it after "your estimate for"; a setup sentence of an estimate for several services names none)
+const sentenceServiceLabel = (sentence) => String((/^Your prepaid (.+) plan has /.exec(sentence) || /^Your estimate lists (.+) at \$/.exec(sentence)
+  || /\byour estimate for (.+?)(?: is \$| lists a one-time setup fee of \$| has no setup fee\.$|\.$)/i.exec(sentence))?.[1] || '');
 const FOR_PRICE_ASK_RE = /\bhow much\b[^.?!]{0,20}\bfor\s+(?!(?:my|our|the|this|it|that|a|an|each|every|one|everything|all|both|me|us)\b)[a-z-]+/i;
-function planServiceOffTarget(sentence, inbound) {
+function planServiceOffTarget(sentence, inbound, cadences = PLAN_CADENCES) {
   const label = sentenceServiceLabel(sentence);
-  const applications = /per application, (\d{1,2}) applications? a year\.$/.exec(sentence)?.[1];
-  if (PLAN_CADENCES.some(([cadence, perYear]) => cadence.test(inbound) && !(applications ? Number(applications) === perYear : cadence.test(label)))) return true;
+  const applications = /, (\d{1,2}) applications? a year\.$/.exec(sentence)?.[1];
+  if (cadences.some(([cadence, perYear]) => cadence.test(inbound) && !(applications ? Number(applications) === perYear : cadence.test(label)))) return true;
   const asked = PLAN_SERVICES.filter((service) => service.test(inbound));
   if (asked.length === 0) return NAMED_SERVICE_ASK_RE.test(inbound) || FOR_SERVICE_ASK_RE.test(inbound) || NAMED_PLAN_ASK_RE.test(inbound) || FOR_PRICE_ASK_RE.test(inbound) || NAMED_SERVICE_NOUN_RE.test(inbound); // an unrecognized service name needs a person
   return !asked.every((service) => service.test(label)); // naming two services ("Lawn Pest Control") needs a plan that names both
@@ -671,8 +709,67 @@ function planServiceOffTarget(sentence, inbound) {
 // ...nor a question about what is owed, an invoice or a past charge, unless it also names the estimate.
 const OWED_ASK_RE = /\b(?:owe|owed|balance|invoices?|bills?|billed|paid|payments?|refunds?|charged|past due|overdue)\b/i;
 const NAMES_ESTIMATE_RE = /\b(?:estimate|quote|quoted|proposal)\b/i;
-// ...nor a question about a charge the application line does not carry (the setup fee, a prepay price, a total, a deposit): those amounts stay with staff.
-const OTHER_CHARGE_ASK_RE = /\b(?:set-?up|start-?up|initial|one-time|enrollment|activation|sign-?up)\s+fees?\b|\bpre-?pa(?:y|id|yment)\b|\bprepay\w*\b|\b(?:annual|yearly|monthly|total|full)\s+(?:total|price|cost|amount)\b|\btotal\b|\bdeposit\b|\bdown payment\b/i;
+// ...nor a question about a charge the application line does not carry, unless the reply also copies the sentence that answers it: the setup
+// fee and the pay-for-the-year total each have a rendered sentence of their own (owner 2026-11-26). A first-visit or yearly total outside a
+// prepay question and a deposit have none: those amounts stay with staff.
+const SETUP_FEE_ASK_RE = /\b(?:set[-\s]?up|start[-\s]?up|initial|one[-\s]?time|enrollment|activation|initiation|sign[-\s]?up)\s+fees?\b/i;
+// Paying the whole YEAR at once: "prepay", "pay for the year", "pay annually", "an annual payment", or "up front" / "in full" / "all at once"
+// beside the year it means. "Up front" or "in full" with no year is not one: "how much is due up front?" asks what the first visit bills.
+const YEAR_WORD = '(?:year|annual(?:ly)?|yearly|(?:12|twelve)\\s+months)';
+const LUMP_WORD = '(?:up-?\\s?front|in\\s+full|all\\s+at\\s+once|in\\s+advance)';
+const PREPAY_ASK = '\\bpre-?pa(?:y|id|yment|ying)\\w*\\b'
+  + '|\\b(?:pay|paid|paying)\\b[^.?!]{0,30}\\b(?:(?:for|by)\\s+(?:the|a|one)\\s+(?:whole\\s+|full\\s+|entire\\s+)?year|(?:the\\s+)?(?:whole|full|entire)\\s+year|annually|yearly|once\\s+a\\s+year|(?:12|twelve)\\s+months)\\b'
+  + `|\\b${YEAR_WORD}\\b[^.?!]{0,30}\\b${LUMP_WORD}\\b|\\b${LUMP_WORD}\\b[^.?!]{0,30}\\b${YEAR_WORD}\\b`
+  + '|\\b(?:annual|yearly)\\s+payment\\b';
+const PREPAY_ASK_RE = new RegExp(PREPAY_ASK, 'i');
+const PREPAY_ASK_ALL_RE = new RegExp(PREPAY_ASK, 'gi');
+// The customer's own paid status is no question about paying for the year: a statement that they paid ("I prepaid for the year, when is
+// my next visit?", "we are paid up for the year"), set aside up to the end of its clause or the next pay verb ("we paid monthly last
+// year, can we pay for the year now?"), and their own prepaid plan or visit ("my prepaid plan", "reschedule the prepaid visit").
+// A hypothetical keeps its question ("if I paid for the year up front, how much?").
+const PAID_STATUS = "(?<!\\bif\\s)\\b(?:i|we|he|she|they)(?:['\u2019](?:ve|d|m|re)|\\s+(?:have|has|had|am|are|was|were))?\\s+(?:(?:already|just|also|all)\\s+)?(?:pre-?paid|paid)\\b"
+  + '(?:(?!\\b(?:pay|paying|pre-?pay\\w*)\\b)[^.?!;,]){0,40}'
+  + '|\\b(?:my|our)\\s+(?:\\w+\\s+)?pre-?paid\\b|\\bpre-?paid\\s+(?:visits?|appointments?|services?|treatments?|applications?)\\b';
+const PAID_STATUS_RE = new RegExp(PAID_STATUS, 'i');
+const PAID_STATUS_ALL_RE = new RegExp(PAID_STATUS, 'gi');
+const withoutPaidStatus = (inbound) => inbound.replace(PAID_STATUS_ALL_RE, ' ');
+const asksPrepay = (inbound) => PREPAY_ASK_RE.test(withoutPaidStatus(inbound));
+// The pay words of the prepay question itself ("paid up front for the year", "an annual payment") are no question about what is owed. Only
+// those words are set aside: a service, an invoice or a balance named inside the same phrase still counts.
+const PREPAY_PAY_WORDS_RE = /\b(?:pre-?pa\w*|pay|paid|paying|payments?)\b/gi;
+const withoutPrepayPayWords = (inbound) => inbound.replace(PREPAY_ASK_ALL_RE, (phrase) => phrase.replace(PREPAY_PAY_WORDS_RE, ' '));
+const TOTAL_ASK_RE = /\b(?:annual|yearly|monthly|total|full)\s+(?:total|price|cost|amount)\b|\btotal\b/i;
+const DEPOSIT_ASK_RE = /\bdeposit\b|\bdown payment\b/i;
+const ESTIMATE_SETUP_KINDS = ['estimate_setup_fee', 'estimate_setup_fee_prepay_waived', 'estimate_setup_fee_waived', 'estimate_no_setup_fee'];
+const isSetupFeeSentence = (t) => ESTIMATE_SETUP_KINDS.some((kind) => SHAPES[kind].test(t));
+const isPrepayTotalSentence = (t) => SHAPES.estimate_prepay_total.test(t);
+const isEstimateTermsSentence = (t) => isSetupFeeSentence(t) || isPrepayTotalSentence(t);
+const owedNotEstimate = (inbound) => OWED_ASK_RE.test(inbound) && !NAMES_ESTIMATE_RE.test(inbound);
+// The application line beside a question about another charge: held unless the copies carry the sentence that answers that charge.
+function otherChargeUnanswered(inbound, copied) {
+  if (DEPOSIT_ASK_RE.test(inbound)) return true;
+  // (any words about paying for the year, the customer's own paid status included: the application price is never read as that total)
+  const prepayNamed = PREPAY_ASK_RE.test(inbound);
+  const prepayAnswered = prepayNamed && copied.some((t) => isPrepayTotalSentence(String(t)));
+  if (prepayNamed && !prepayAnswered) return true;
+  if (SETUP_FEE_ASK_RE.test(inbound) && !copied.some((t) => isSetupFeeSentence(String(t)))) return true;
+  return TOTAL_ASK_RE.test(inbound) && !prepayAnswered; // a prepay question's "total" is the pay-for-the-year total
+}
+// A setup sentence answers a setup-fee question (the one that names the prepay waiver also answers a prepay question); the pay-for-the-year
+// total answers a prepay question. Each answers for the service it names: a sentence that names none answers only a question that names none.
+// The fee is the estimate's whatever cadence the customer names; the prepay waiver and the total are the default plan's alone, so a cadence
+// they cannot confirm holds them (in a prepay question "annual" means the payment, never one application a year). None answers what is owed,
+// an invoice or a past charge (unless the estimate is named), or a deposit.
+function estimateTermsOffTarget(t, inbound) {
+  if (DEPOSIT_ASK_RE.test(inbound)) return true;
+  const prepayAsked = asksPrepay(inbound);
+  const total = isPrepayTotalSentence(t);
+  const prepayWaiver = SHAPES.estimate_setup_fee_prepay_waived.test(t);
+  const asked = total ? prepayAsked : SETUP_FEE_ASK_RE.test(inbound) || (prepayWaiver && prepayAsked);
+  const rest = withoutPrepayPayWords(inbound);
+  const cadences = total || prepayWaiver ? PLAN_CADENCES.filter(([, perYear]) => !(prepayAsked && perYear === 1)) : [];
+  return !asked || owedNotEstimate(rest) || planServiceOffTarget(t, rest, cadences);
+}
 const ESTIMATE_ASK_RE = /\b(?:price|prices|pricing|priced|cost|costs|how much|estimate|quote|quoted|charge|charged|rate|per (?:visit|application|treatment))\b/i;
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
@@ -703,7 +800,8 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   return copied.some((sentence) => {
     const t = String(sentence);
     if (SHAPES.prepaid_visits_left.test(t)) return planServiceOffTarget(t, inbound);
-    if (SHAPES.estimate_application_price.test(t)) return !ESTIMATE_ASK_RE.test(inbound) || (OWED_ASK_RE.test(inbound) && !NAMES_ESTIMATE_RE.test(inbound)) || OTHER_CHARGE_ASK_RE.test(inbound) || planServiceOffTarget(t, inbound);
+    if (SHAPES.estimate_application_price.test(t)) return !ESTIMATE_ASK_RE.test(inbound) || owedNotEstimate(inbound) || otherChargeUnanswered(inbound, copied) || planServiceOffTarget(t, inbound);
+    if (isEstimateTermsSentence(t)) return estimateTermsOffTarget(t, inbound);
     // a Zelle offer / unavailability line answers a question about Zelle, or a GENERIC how-to-pay question - never a receipt question
     // (round 75) or a question about another way to pay ("Can I pay by check?", round 78)
     if (isZelleTenderLine(t) && (statusAsked || !(ZELLE_WORD_RE.test(inbound) || inboundIsGenericHowToPay(inbound)))) return true;
@@ -759,12 +857,47 @@ const asksCount = (inbound) => String(inbound ?? '').split(/[?.!;,]|\band\b|\bbu
 const SLOT_REPLY_CUE_RE = /\b(?:(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|openings?|slots?|available|this week|next week)\b/i;
 const isSlotAnswer = (body, inbound) => inbound != null && SLOT_ASK_RE.test(String(inbound)) && !PLAN_WORD_RE.test(String(inbound)) && !PLAN_WORD_RE.test(body) && SLOT_REPLY_CUE_RE.test(body);
 // The estimate's applications a year ("4 applications a year", "six visits per year", "four treatments annually") and a setup / enrollment fee
-// waived (alone or "when you prepay") are terms of the estimate: only the rendered sentence may state the count, and no sentence states a fee
-// waiver (the prepay invoice and the setup fee have their own authority), so a standalone claim of either is held, whatever the question.
+// waived (alone or "when you prepay") are terms of the estimate: only a rendered sentence may state either (the copies are removed before this
+// runs), so a claim in any other wording is held, whatever the question. A waiver is a money promise in any grammar ("we will waive it",
+// "the setup is waived", "setup is on us", "no fee to get started"), so the verb alone, a fee denied and a free setup are held too. So is a
+// saving or a discount for paying the year up front ("prepaying saves you ten percent"): the pay-for-the-year sentence states a total, never
+// what it saves.
 const ESTIMATE_COUNT_RE = new RegExp(`\\b${COUNT_NUM}\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?|services?|times)\\s+(?:a|per|each|every)\\s+year\\b|\\b${COUNT_NUM}\\s+(?:\\w+\\s+)?(?:visits?|applications?|treatments?)\\s+(?:annually|yearly)\\b|\\b(?:visits?|applications?|treatments?)\\s+(?:a|per|each|every)\\s+year\\b|\\b(?:annually|yearly)\\s+(?:${COUNT_NUM}\\s+)?(?:visits?|applications?|treatments?)\\b`, 'i');
-const FEE_WORD = '(?:(?:set-?up|start-?up|initial|one-time|enrollment|activation|sign-?up)\\s+){1,2}(?:service\\s+)?fees?';
+const SETUP_WORD = '(?:set[-\\s]?up|start[-\\s]?up|initial|one[-\\s]?time|enrollment|activation|initiation|sign[-\\s]?up)';
+const FEE_WORD = `(?:${SETUP_WORD}\\s+){1,2}(?:service\\s+)?fees?`;
 const FEE_WAIVER_RE = new RegExp(`\\b${FEE_WORD}\\b[^.?!]{0,60}\\b(?:waive[ds]?|waiver|free|no charge|no cost|comp(?:ed)?|skipped|removed|dropped|forgiven|covered)\\b|\\b(?:waive[ds]?|waiving|waiver|no|without|skip(?:s|ped|ping)?|drop(?:s|ped|ping)?|remove[ds]?)\\s+(?:of\\s+)?(?:the\\s+|your\\s+|a\\s+)?${FEE_WORD}\\b`, 'i');
-const claimsEstimateTerms = (text) => ESTIMATE_COUNT_RE.test(String(text ?? '')) || FEE_WAIVER_RE.test(String(text ?? ''));
+const WAIVE_WORD_RE = /\bwaiv(?:e[ds]?|ing|ers?)\b/i;
+// "no fee", "no extra fees", "without any fee": a fee of no named kind, denied. (Never "no charge": a free re-service is a company fact.)
+const NO_FEE_RE = /\b(?:no|without|zero)\s+(?:(?:extra|additional|added|other|hidden|more|any)\s+)?fees?\b/i;
+// The setup itself (the noun, with no "fee") beside a word for free, in one sentence: "setup is on us", "no charge for setup", "no setup".
+const SETUP_NOUN = '(?:setup|set-up|startup|start-up|enrollment|activation|initiation|signup|sign-up)';
+const SETUP_NOUN_RE = new RegExp(`\\b${SETUP_NOUN}\\b`, 'i');
+const SETUP_FREE_RE = new RegExp(`(?<!\\bfeel\\s)\\bfree\\b|\\bno\\s+(?:charge|cost)\\b|\\bon\\s+(?:us|the\\s+house)\\b|\\bcomplimentary\\b|\\bcomp(?:ed|ing)\\b|\\b(?:won't|will\\s+not|don't|do\\s+not|not|never)\\s+(?:be\\s+)?charg\\w*\\b|\\b(?:no|without)\\s+(?:a\\s+|any\\s+)?${SETUP_NOUN}\\b`, 'i');
+// A saving or a discount beside any talk of paying up front, in full, in advance or by the year.
+const PREPAY_TALK_RE = new RegExp(`${PREPAY_ASK}|\\b${LUMP_WORD}\\b|\\b(?:annual(?:ly)?|yearly)\\b`, 'i');
+const PREPAY_SAVING_RE = /\b(?:sav(?:e|es|ed|ing|ings)|discount\w*|percent|cheaper|less|off)\b|%/i;
+const claimsInOneSentence = (text, one, other) => text.split(SENTENCE_GAP_RE).some((sentence) => one.test(sentence) && other.test(sentence));
+// A question about the setup fee or about paying for the year is answered by copies alone, like a count question: the customer's own words
+// supply the subject, so an answer needs none of the words above ("No.", "It is free.", "Yes, 5% off.", "That saves you a little.").
+// Only inert text (a greeting, thanks) may sit beside the copies; with no sentence to copy, a person answers.
+// The customer's own paid status (PAID_STATUS) is no such question, so a visit question beside it is still answered, unless the text
+// also talks price ("I paid for the year last time, is it cheaper to do that again?").
+// Known limit: a question that names paying for the year only as that status and carries no price word ("I prepaid last year. Can I
+// do that again?", "Can I get prepaid service?") is not read as one, so only the word detectors above judge its reply.
+const namesEstimateTerms = (text) => SETUP_FEE_ASK_RE.test(text) || PREPAY_ASK_RE.test(text);
+const asksEstimateTerms = (inbound) => namesEstimateTerms(withoutPaidStatus(inbound))
+  || (namesEstimateTerms(inbound) && (ESTIMATE_ASK_RE.test(inbound) || PREPAY_SAVING_RE.test(inbound) || WAIVE_WORD_RE.test(inbound) || MONEY_FIGURE_RE.test(inbound)));
+const claimsEstimateTerms = (text, inboundText = null) => {
+  const body = String(text ?? '');
+  if (ESTIMATE_COUNT_RE.test(body) || FEE_WAIVER_RE.test(body) || WAIVE_WORD_RE.test(body) || NO_FEE_RE.test(body)
+    || claimsInOneSentence(body, SETUP_NOUN_RE, SETUP_FREE_RE) || claimsInOneSentence(body, PREPAY_TALK_RE, PREPAY_SAVING_RE)) return true;
+  // (a digit-only clause reads as inert, so any digit counts as text here)
+  return inboundText != null && asksEstimateTerms(String(inboundText)) && (!remainderIsInert(body) || /\d/.test(body));
+};
+// A setup-fee, waiver or pay-for-the-year copy answers ALONE (like the count question): once the copies are removed only inert text (a greeting,
+// thanks) may remain. A pronoun reaches where no word list can ("It is waived if you prepay.", "That is before tax."), and the copied sentence
+// beside it would lend such a claim its subject and its figure.
+const estimateTermsCopyNotAlone = (copied, remainder) => (copied || []).some((t) => isEstimateTermsSentence(String(t))) && !remainderIsInert(remainder);
 const claimsPrepaidCount = (text, inboundText = null) => {
   const body = String(text ?? '');
   if (PREPAID_COUNT_RE.test(body)) return !isSlotAnswer(body, inboundText);
@@ -774,7 +907,7 @@ const claimsPrepaidCount = (text, inboundText = null) => {
 };
 function remainderHasMoney(remainder, inboundText = null) {
   const text = String(remainder ?? '');
-  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text) || claimsPrepaidCount(text, inboundText) || claimsEstimateTerms(text)) return true;
+  if (MONEY_FIGURE_RE.test(text) || ZELLE_WORD_RE.test(text) || claimsPrepaidCount(text, inboundText) || claimsEstimateTerms(text, inboundText)) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
 
@@ -825,7 +958,8 @@ function checkPaymentStatusReply({ reply, sentences, inboundText = null, scopeTe
   if (text.length > MAX_REPLY_CHARS) return { ok: false, copied: [], remainder: canonText(text) };
   const copied = copiedSentences(text, texts);
   const remainder = withoutCompanyPolicyCopies(withoutCopies(text, copied), inboundText);
-  const ok = !copiesOffTarget(copied, inboundText) && !remainderHasMoney(remainder, inboundText) && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
+  const ok = !copiesOffTarget(copied, inboundText) && !estimateTermsCopyNotAlone(copied, remainder) && !remainderHasMoney(remainder, inboundText)
+    && !assertsPaymentStatus(remainder, { inboundText, scopeTexts, scoped });
   return { ok, copied, remainder };
 }
 
@@ -874,6 +1008,8 @@ function autoSendScopeBlock({ reply, inboundText = null, snapshot = null }) {
   if (!scoped) return null;
   const copied = copiedSentences(reply, sentences);
   if (copiesAmbiguousFamily(copied, snapshot) || copiesAnswerNamedSpecifics(copied, inboundText)) return 'payment_status_ambiguous';
+  // a setup fee, a waiver or a pay-for-the-year total is a price term (with or without a figure): like any amount, it goes out only when a person sends it
+  if (copied.some((t) => isEstimateTermsSentence(String(t)))) return 'payment_status_not_auto_sendable';
   // a COMPANY FACTS policy copy is never removed here: a policy answer goes to Agent Review, where a person reads it (Codex #6447 r11)
   return remainderIsInert(withoutCopies(reply, copied)) ? null : 'payment_status_not_auto_sendable';
 }
@@ -1028,6 +1164,7 @@ module.exports = {
   remainderIsInert,
   claimsPrepaidCount,
   claimsEstimateTerms,
+  estimateTermsCopyNotAlone,
   // every module regex, for the adversarial-input timing test
-  REGEXES: { ESTIMATE_COUNT_RE, FEE_WAIVER_RE, PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
+  REGEXES: { SETUP_FEE_ASK_RE, PREPAY_ASK_RE, PAID_STATUS_RE, TOTAL_ASK_RE, DEPOSIT_ASK_RE, WAIVE_WORD_RE, NO_FEE_RE, SETUP_NOUN_RE, SETUP_FREE_RE, PREPAY_TALK_RE, PREPAY_SAVING_RE, ESTIMATE_COUNT_RE, FEE_WAIVER_RE, PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

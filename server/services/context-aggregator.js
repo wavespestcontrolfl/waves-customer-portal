@@ -256,7 +256,7 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
   } catch { return null; }
 }
 
-// Texting AI facts (owner 2026-11-25): the open estimate's per-application price, the customer's prepaid visits left and the prep guide of the
+// Texting AI facts (owner 2026-11-25): the open estimate's per-application price (with its setup fee and pay-for-the-year total, owner 2026-11-26), the customer's prepaid visits left and the prep guide of the
 // booked (else last) visit (sms-staff-facts). Numbers and the guide's own published sentences only (never technician or visit notes); a read that
 // fails is null. OPT IN (`includeSmsStaffFacts`: true = all three, or an object naming the ones a caller needs): only the texting AI's draft and
 // the unanswered-text fingerprint (which hashes the block the draft was written from, guide included) ask for the guide; the send-time payment
@@ -1349,7 +1349,7 @@ class ContextAggregator {
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
-  // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, the prepaid visits left and the booked visit's prep guide,
+  // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, setup fee and pay-for-the-year total, the prepaid visits left and the booked visit's prep guide,
   // for the texting AI's draft, its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +

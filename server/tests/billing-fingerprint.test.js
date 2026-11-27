@@ -27,13 +27,40 @@ describe('billingFingerprint', () => {
       "FROM estimates t WHERE t.customer_id = ? AND t.status IN ('sent', 'viewed') AND t.archived_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())"]) expect(BILLING_FINGERPRINT_SQL).toContain(t);
     // every fragment hashes the row itself (md5(<alias>::text)), never a hand-picked column list
     expect(BILLING_FINGERPRINT_SQL).not.toMatch(/concat_ws\('\|'/);
-    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c)::text\)/g) || []).length).toBe(12);
-    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(15);
+    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c|k|l|m|v)::text\)/g) || []).length).toBe(16);
+    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(21);
+  });
+  // Owner 2026-11-26 (the texting AI answers call-drafted and new-home estimates): those estimates are on the customer's own page only while
+  // the call-side verdict passes, so every row that verdict reads is hashed: a change to one refuses the send, like a change to the estimate.
+  test('the rows the call-side verdict of an open estimate reads: its call, the leads its linkage resolves, its move', () => {
+    const openEstimates = "FROM estimates t WHERE t.customer_id = ? AND t.status IN ('sent', 'viewed') AND t.archived_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())";
+    const uuidOf = (field) => `CASE WHEN (${field}) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' THEN (${field})::uuid END`;
+    const calls = `SELECT ${uuidOf("t.estimate_data #>> '{estimatorEngine,callLogId}'")} ${openEstimates}`;
+    for (const fragment of [
+      `(SELECT string_agg(md5(k::text), ',' ORDER BY k.id) FROM call_log k WHERE k.id IN (${calls}))`,
+      // each lead on the call's sid (a new or deleted one changes the set) and the lead the estimate names
+      `SELECT s.id FROM call_log k JOIN leads s ON s.twilio_call_sid = k.twilio_call_sid WHERE k.id IN (${calls})`,
+      `UNION SELECT ${uuidOf("t.estimate_data ->> 'lead_id'")} ${openEstimates}`,
+      `(SELECT string_agg(md5(m::text), ',' ORDER BY m.id) FROM customer_moves m WHERE m.id IN (SELECT ${uuidOf("t.estimate_data #>> '{move,moveId}'")} ${openEstimates}))`,
+    ]) expect(BILLING_FINGERPRINT_SQL).toContain(fragment);
+    // an id that is not a uuid is never cast (a failed cast would fail the read for every send): each cast sits behind its own shape test
+    expect((BILLING_FINGERPRINT_SQL.match(/::uuid/g) || []).length).toBe((BILLING_FINGERPRINT_SQL.match(/CASE WHEN \(t\.estimate_data [^)]+\) ~\* /g) || []).length);
+    // no SQL comment and no named binding: the statement is sent as written, with one positional binding per ?
+    expect(BILLING_FINGERPRINT_SQL).not.toMatch(/--|\/\*/);
+  });
+  // Owner 2026-11-26 (the setup fee and the pay-for-the-year total): an open estimate is priced against the customer's live plan (member
+  // pricing), and its pay-for-the-year total is stated only to a customer with none. A plan that starts, ends or changes refuses the send.
+  test('the live plan of a customer with an open estimate: the recurring visits not yet finished, by the statuses of the module that owns them', () => {
+    const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+    const openEstimates = "FROM estimates t WHERE t.customer_id = ? AND t.status IN ('sent', 'viewed') AND t.archived_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())";
+    expect(TERMINAL_STATUSES.length).toBeGreaterThan(0);
+    expect(BILLING_FINGERPRINT_SQL).toContain(`(SELECT string_agg(md5(v::text), ',' ORDER BY v.id) FROM scheduled_services v WHERE v.customer_id = ? AND v.is_recurring IS TRUE `
+      + `AND v.status NOT IN (${TERMINAL_STATUSES.map((status) => `'${status}'`).join(', ')}) AND EXISTS (SELECT 1 ${openEstimates}))`);
   });
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
     expect(await billingFingerprint('c1', dbh)).toBe(FP);
-    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(15).fill('c1'));
+    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(21).fill('c1'));
     expect(await billingFingerprint(null, dbh)).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => { throw new Error('down'); } })).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => ({ rows: [] }) })).toBeNull();

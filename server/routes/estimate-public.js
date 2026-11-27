@@ -29335,17 +29335,11 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   };
 }
 
-// The page's acceptance contract (acceptance.mode: whether the slot picker
-// renders at all) and the inputs /data reads alongside it. ONE resolution,
-// shared with the texting AI's estimate offers (estimate-slots-public
-// offerableEstimateSlots), so SMS offers times only where the page would
-// let the customer pick one.
-async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+// The acceptance facts read from the estimate and its bundle alone, with no lookup: all the "What you pay" box needs of
+// the acceptance (whatYouPayForEstimate), so a reader of the box alone pays none of resolveEstimateAcceptance's reads.
+function estimateAcceptanceHolds(estimate, estData, pricingBundle) {
   const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
   const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
-  const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
-    serviceModes: adoptionServiceModesForContract(estimate, estData),
-  }));
   // Narrow low-confidence commercial recurring estimate (the population whose
   // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
   // its accept, whatever the billing mode — invoice-mode holds the first-
@@ -29359,12 +29353,25 @@ async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
       const lc = commercialLowConfidenceRange(estData);
       return lc.hasLowConfidence && !lc.forceSiteQuote;
     })();
-  const commercialNoSlotAccept = siteConfirmationHold;
   // Guarantee-only renewals accept with NO appointment: the acceptance
   // contract tells the React view to skip the slot picker and offer the
   // payment-only (invoice) accept. An existing linked appointment keeps
   // precedence inside the contract — accepting against it works as-is.
   const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estData);
+  return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept };
+}
+
+// The page's acceptance contract (acceptance.mode: whether the slot picker
+// renders at all) and the inputs /data reads alongside it. ONE resolution,
+// shared with the texting AI's estimate offers (estimate-slots-public
+// offerableEstimateSlots), so SMS offers times only where the page would
+// let the customer pick one.
+async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+  const { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept } = estimateAcceptanceHolds(estimate, estData, pricingBundle);
+  const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  }));
+  const commercialNoSlotAccept = siteConfirmationHold;
   // Accept + deposit-intent reject an invoice-mode estimate with no linked
   // customer and no customer phone (nothing to bill / deliver the invoice
   // to) — an email-only renewal must not advertise an accept the server
@@ -32140,6 +32147,24 @@ async function whatYouPayAcceptLookups(estimate) {
   return { monthlyBilled, pendingDeposit };
 }
 
+/**
+ * The "What you pay" box of an estimate row, its pricing bundle and the two live lookups (whatYouPayAcceptLookups): THE one assembly of
+ * whatYouPayForData's inputs, so its two readers (the page payload, and the texting AI's estimate facts in sms-staff-facts.js: the setup
+ * fee and the pay-for-the-year total) can never hand it different ones.
+ */
+function whatYouPayForEstimate(estimate, estData, pricingBundle, lookups) {
+  const { quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept } = estimateAcceptanceHolds(estimate, estData, pricingBundle);
+  return whatYouPayForData({
+    estimate,
+    estData,
+    pricingBundle,
+    invoiceMode: estimate.bill_by_invoice === true || guaranteeOnlyAccept,
+    siteConfirmationHold,
+    ...lookups,
+    quoteRequired: quoteRequirement?.quoteRequired === true,
+  });
+}
+
 function whatYouPayForData(input = {}) {
   try {
     const { estimate, estData, pricingBundle } = input;
@@ -33296,15 +33321,7 @@ async function composeEstimateDataPayload(estimate, {
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       // Read-only: the first visit and each later application as acceptance bills them (see whatYouPayForData).
-      whatYouPay: whatYouPayForData({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        invoiceMode: effectiveInvoiceMode,
-        siteConfirmationHold,
-        ...whatYouPayLookups,
-        quoteRequired: quoteRequirement?.quoteRequired === true,
-      }),
+      whatYouPay: whatYouPayForEstimate(estimate, estimateDataForIntelligence, pricingBundle, whatYouPayLookups),
       cta: {
         // Priced termite trenching is review-before-booking: the price stays visible
         // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
@@ -34045,6 +34062,7 @@ module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmen
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.whatYouPayForData = whatYouPayForData;
 module.exports.whatYouPayAcceptLookups = whatYouPayAcceptLookups;
+module.exports.whatYouPayForEstimate = whatYouPayForEstimate;
 module.exports.estimateMonthlyBillingLaneKnown = estimateMonthlyBillingLaneKnown;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateClosedOnline = estimateClosedOnline;
