@@ -9,17 +9,29 @@ const fs = require('fs');
 const path = require('path');
 
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => undefined) }));
 jest.mock('../models/db', () => {
-  const state = { rows: [], deleted: [], inserted: [], updated: [] };
+  const state = { rows: [], deleted: [], inserted: [], updated: [], insertedRows: [], mergePatches: [], updatePatches: [] };
   const trxFn = (table) => {
     if (table !== 'dashboard_alert_state') throw new Error(`unexpected table ${table}`);
     const q = {
       select: async () => state.rows,
-      insert: (row) => { state.inserted.push(row.alert_id); return { onConflict: () => ({ merge: async () => undefined }) }; },
+      insert: (row) => {
+        state.inserted.push(row.alert_id);
+        state.insertedRows.push(row);
+        return {
+          onConflict: () => ({
+            merge: async (patch) => { state.mergePatches.push({ alert_id: row.alert_id, patch }); },
+          }),
+        };
+      },
       where: (filter) => ({
-        update: async () => { state.updated.push(filter.alert_id); },
+        update: async (patch) => {
+          state.updated.push(filter.alert_id);
+          state.updatePatches.push({ alert_id: filter.alert_id, patch });
+        },
         del: async () => { state.deleted.push(filter.alert_id); },
       }),
     };
@@ -34,6 +46,7 @@ jest.mock('../models/db', () => {
 
 const db = require('../models/db');
 const logger = require('../services/logger');
+const { isEnabled } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const { triggerNotification } = require('../services/notification-triggers');
 const { runDashboardAlertsCheck } = require('../services/dashboard-alerts-cron');
@@ -45,7 +58,8 @@ const row = (alert_id, count = 1) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
-  Object.assign(db.__state, { rows: [], deleted: [], inserted: [], updated: [] });
+  isEnabled.mockReturnValue(false);
+  Object.assign(db.__state, { rows: [], deleted: [], inserted: [], updated: [], insertedRows: [], mergePatches: [], updatePatches: [] });
 });
 
 describe('failed alert reads', () => {
@@ -102,6 +116,49 @@ describe('failed alert reads', () => {
     expect(result.fired).toBe(1);
     expect(triggerNotification).toHaveBeenCalledTimes(1);
     expect(logger.error).not.toHaveBeenCalled();
+  });
+});
+
+describe('bell policy silenced (GATE_ADMIN_BELL_POLICY=true)', () => {
+  test('maintains dashboard_alert_state without stamping fake last_pushed_* or firing silenced dashboard_alert triggers', async () => {
+    isEnabled.mockImplementation((g) => g === 'adminBellPolicy');
+    db.__state.rows = [row('ar_overdue_60', 2), row('stale_draft_invoices', 1)];
+    computeDashboardAlerts.mockResolvedValue({
+      alerts: [
+        { id: 'closeout_gaps_today', label: '2 visits not closed out', severity: 'warn', count: 2, href: '/admin/dispatch' },
+        { id: 'ar_overdue_60', label: '5 invoices overdue', severity: 'critical', count: 5, href: '/admin/invoices' },
+      ],
+      failures: [],
+    });
+
+    const result = await runDashboardAlertsCheck();
+
+    expect(result).toEqual({ fired: 0, cleared: 1, current: 2 });
+    expect(triggerNotification).not.toHaveBeenCalled();
+    expect(db.__state.deleted).toEqual(['stale_draft_invoices']);
+    expect(db.__state.insertedRows).toEqual([
+      expect.objectContaining({
+        alert_id: 'closeout_gaps_today',
+        current_count: 2,
+        last_pushed_count: null,
+        last_pushed_at: null,
+        last_label: '2 visits not closed out',
+      }),
+    ]);
+    expect(db.__state.mergePatches[0].patch).not.toHaveProperty('last_pushed_at');
+    expect(db.__state.mergePatches[0].patch).not.toHaveProperty('last_pushed_count');
+    expect(db.__state.updatePatches).toEqual([
+      {
+        alert_id: 'ar_overdue_60',
+        patch: expect.objectContaining({
+          severity: 'critical',
+          current_count: 5,
+          last_label: '5 invoices overdue',
+        }),
+      },
+    ]);
+    expect(db.__state.updatePatches[0].patch).not.toHaveProperty('last_pushed_at');
+    expect(db.__state.updatePatches[0].patch).not.toHaveProperty('last_pushed_count');
   });
 });
 

@@ -34,6 +34,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { triggerNotification } = require('./notification-triggers');
+const { isBellPolicyEnabled, bellAllowed } = require('./notification-bell-policy');
 
 // Stable advisory-lock key. hashtext() produces an int4 from a string
 // so the value is reproducible across replicas without coordination.
@@ -77,6 +78,78 @@ async function runDashboardAlertsCheck() {
   }
 }
 
+async function isDashboardAlertPushAllowed() {
+  try {
+    if (!isBellPolicyEnabled()) return true;
+    return await bellAllowed({ category: 'alert', triggerKey: 'dashboard_alert' });
+  } catch (err) {
+    logger.warn(`[dashboard-alerts-cron] bell policy check failed: ${err.message}; keeping push behavior`);
+    return true;
+  }
+}
+
+async function syncAlertStateRow(trx, { alert, prev, shouldPush, now }) {
+  if (shouldPush) {
+    // Upsert state FIRST. ON CONFLICT ensures a concurrent tick across
+    // replicas doesn't duplicate the row. State is committed before any
+    // notification fires so a notification failure cannot roll back state.
+    await trx('dashboard_alert_state')
+      .insert({
+        alert_id: alert.id,
+        severity: alert.severity,
+        current_count: alert.count,
+        last_pushed_count: alert.count,
+        first_seen_at: prev ? prev.first_seen_at : now,
+        last_seen_at: now,
+        last_pushed_at: now,
+        last_label: alert.label,
+      })
+      .onConflict('alert_id')
+      .merge({
+        severity: alert.severity,
+        current_count: alert.count,
+        last_pushed_count: alert.count,
+        last_seen_at: now,
+        last_pushed_at: now,
+        last_label: alert.label,
+      });
+    return;
+  }
+  if (!prev) {
+    // Policy-silenced new alert: record state for live overlay incarnation /
+    // outage-floor tracking without stamping fake push fields.
+    await trx('dashboard_alert_state')
+      .insert({
+        alert_id: alert.id,
+        severity: alert.severity,
+        current_count: alert.count,
+        last_pushed_count: null,
+        first_seen_at: now,
+        last_seen_at: now,
+        last_pushed_at: null,
+        last_label: alert.label,
+      })
+      .onConflict('alert_id')
+      .merge({
+        severity: alert.severity,
+        current_count: alert.count,
+        last_seen_at: now,
+        last_label: alert.label,
+      });
+    return;
+  }
+  // Existing alert (unchanged, cooled down, or policy-silenced): heartbeat
+  // state for dismissal / outage-floor logic without touching last_pushed_*.
+  await trx('dashboard_alert_state')
+    .where({ alert_id: alert.id })
+    .update({
+      severity: alert.severity,
+      current_count: alert.count,
+      last_seen_at: now,
+      last_label: alert.label,
+    });
+}
+
 async function runDashboardAlertsCheckInner() {
   // Compute current alerts OUTSIDE the transaction — read-only and
   // potentially slow (other-DB queries, external lookups). Inside-
@@ -94,6 +167,11 @@ async function runDashboardAlertsCheckInner() {
     logger.error(`[dashboard-alerts-cron] computeDashboardAlerts failed: ${err.message}`);
     return { fired: 0, cleared: 0, error: err.message };
   }
+
+  // Check bell policy before Phase 1 so a policy-silenced dashboard_alert
+  // lane still maintains dashboard_alert_state without stamping fake
+  // last_pushed_at / last_pushed_count values or firing silenced triggers.
+  const pushAllowed = await isDashboardAlertPushAllowed();
 
   // Phase 1 — atomic state diff + write inside an advisory-locked
   // transaction. Build the list of notifications to fire after commit.
@@ -121,46 +199,12 @@ async function runDashboardAlertsCheckInner() {
         const cooledDown = !prev || !prev.last_pushed_at
           || (now - new Date(prev.last_pushed_at).getTime()) >= cooldownMs;
         const escalated = prev && alert.count > (prev.last_pushed_count || 0) && cooledDown;
+        const shouldPush = pushAllowed && (isNew || escalated);
 
-        if (isNew || escalated) {
-          // Upsert state FIRST. ON CONFLICT ensures a concurrent
-          // tick across replicas (which the advisory lock above
-          // already prevents — but cheap insurance) doesn't
-          // duplicate the row. State is committed before any
-          // notification fires so a notification failure cannot
-          // roll back the state row and cause a re-fire next tick.
-          await trx('dashboard_alert_state')
-            .insert({
-              alert_id: alert.id,
-              severity: alert.severity,
-              current_count: alert.count,
-              last_pushed_count: alert.count,
-              first_seen_at: prev ? prev.first_seen_at : now,
-              last_seen_at: now,
-              last_pushed_at: now,
-              last_label: alert.label,
-            })
-            .onConflict('alert_id')
-            .merge({
-              severity: alert.severity,
-              current_count: alert.count,
-              last_pushed_count: alert.count,
-              last_seen_at: now,
-              last_pushed_at: now,
-              last_label: alert.label,
-            });
-
-          // Queue the notification for after-commit dispatch.
+        await syncAlertStateRow(trx, { alert, prev, shouldPush, now });
+        if (shouldPush) {
           pendingNotifications.push({ alert });
           fired += 1;
-        } else {
-          // Same alert still active, count hasn't grown — just
-          // heartbeat last_seen_at + current_count so the
-          // dashboard's per-admin dismissal logic can compare
-          // against an up-to-date count.
-          await trx('dashboard_alert_state')
-            .where({ alert_id: alert.id })
-            .update({ current_count: alert.count, last_seen_at: now });
         }
       }
 
