@@ -2432,7 +2432,39 @@ describe('existing-customer lawn/pest callback & structured V2 re-service intent
       coarseServiceLabel: 'Lawn Care',
       v2Extraction: perApplicationV2,
     })?.service_key).toBe('lawn_care_one_time');
-    // Declined or non-final total contradicted by V2 evidence is rejected for BOTH selection and billing.
+    // Accepted per_application price tied to a WaveGuard tier or annual prepay is a plan rate, not a one-time visit charge.
+    const tierPerAppV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: 95,
+        price: { amount_usd: 95, unit: 'per_application', tier_mentioned: 'gold', caller_response: 'accepted', accepted: true },
+      },
+    };
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 95, call_summary: 'Booked a callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: tierPerAppV2,
+    })?.service_key).toBe('lawn_re_service');
+    expect(resolveCallBookingPrice({
+      quotedPrice: 95,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: tierPerAppV2,
+    })).toEqual({ price: null, source: null });
+    // Declined or non-final total contradicted by V2 evidence is rejected for BOTH selection and billing
+    // (and on a fixed-price row, a disputed quote does NOT fall through to auto-invoice the higher catalog list price).
+    const nonFinalV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: { ...LAWN_FOLLOWUP_V2.service_request, quoted_price_usd: 250, price_is_final: false },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: 250,
+      catalogRow: ROACH_ROW,
+      v2Extraction: nonFinalV2,
+    })).toEqual({ price: null, source: null });
     const declinedOnlyV2 = {
       ...LAWN_FOLLOWUP_V2,
       service_request: {
@@ -2494,9 +2526,10 @@ describe('existing-customer lawn/pest callback & structured V2 re-service intent
       reServiceLanes: ['pest'],
       coarseServiceLabel: 'General Pest Control',
     })?.service_key).toBe('pest_general_quarterly');
-    // Negated or already-booked regular-visit phrase does NOT block an explicit re-service request.
+    // Negated or historical regular-visit phrases do NOT block an explicit re-service request.
     expect(hasCallReServiceIntent({ call_summary: "I don't want to schedule my regular quarterly visit yet, I need a re-service." })).toBe(true);
     expect(hasCallReServiceIntent({ call_summary: "I've already booked my next visit, but the ants are back. Please spray again." })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: 'We scheduled my next visit last month. Please spray again.' })).toBe(true);
     // Past reference to a regular visit does NOT block a real callback.
     expect(hasCallReServiceIntent({ call_summary: 'Ants are back after our regular quarterly visit last week.' }, {
       ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general' },

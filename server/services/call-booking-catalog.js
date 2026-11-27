@@ -367,8 +367,10 @@ const EXISTING_SERVICE_FOLLOWUP_INTENTS = new Set(['follow_up_existing_service',
 const REGULAR_PLAN_VISIT_PHRASE = "(?:(?:my|our|the|their|a|her|his)\\s+)?(?:regular|routine|normal|next|scheduled)\\s+(?:(?:quarterly|monthly|bi[-\\s]?monthly|6[-\\s]?week|every\\s+6\\s+weeks?|pest(?:\\s+control)?|lawn(?:\\s+care)?)\\s+){0,2}(?:visit|service|treatment|appointment)";
 const REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|just\\s+(?:want|need)(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'i');
 const NEGATED_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:no|not|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|never|rather\\s+than|instead\\s+of|already|previously)\\s+(?:[\\w'’]+\\s+){0,3}(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|want(?:ed|ing)?|need(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'gi');
+const HISTORICAL_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed)?|scheduled|set\\s+up|confirmed)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b[^.!?\\n]{0,30}\\b(?:last\\s+(?:time|visit|week|month|year)|yesterday|earlier|before|ago)\\b`, 'gi');
 // Recurring cadence units only (matches call-commercial-dictated-booking.js:
-// per_application is a valid per-visit price unit on one-time jobs).
+// per_application is a valid per-visit price unit on one-time jobs unless tied
+// to a WaveGuard tier or annual prepay plan).
 const RECURRING_V2_PRICE_UNITS = new Set(['per_month', 'per_quarter', 'per_year']);
 const REJECTED_V2_PRICE_RESPONSES = new Set(['declined', 'no_response', 'not_at_issue']);
 
@@ -388,31 +390,40 @@ function isRejectedV2Price(entry) {
   return Boolean(entry && (REJECTED_V2_PRICE_RESPONSES.has(entry.caller_response) || entry.accepted === false));
 }
 
-// True when V2's acceptance/finality judgements or matching structured price
-// entries contradict `amount` as an accepted final per-visit charge (declined /
-// unaccepted, non-final, or solely a recurring per_month/per_quarter/per_year
-// rate echoed into quoted_price_usd).
-function isInvalidV2VisitPrice(amount, sr, entries) {
-  if (sr?.price_accepted_by_caller === false || sr?.price_is_final === false) return true;
-  const matching = entries.filter((e) => sanitizeQuotedCallPrice(e.amount_usd) === amount);
-  if (matching.length === 0) return false;
-  const accepted = matching.filter(isAcceptedV2Price);
-  const usable = accepted.length > 0 ? accepted : matching.filter((e) => !isRejectedV2Price(e));
-  return usable.length === 0 || usable.every((e) => RECURRING_V2_PRICE_UNITS.has(e.unit));
+function isPlanRateV2Price(entry) {
+  return Boolean(entry && (
+    RECURRING_V2_PRICE_UNITS.has(entry.unit)
+    || Boolean(entry.tier_mentioned)
+    || entry.prepay_term === 'annual'
+  ));
 }
 
-// Single validated one-time visit price shared by re-service eligibility AND
-// resolveCallBookingPrice: uses ONLY the booked service's quoted total
-// (quoted_price_usd / extracted.quoted_price), never arbitrary sr.price /
-// sr.prices entries (which can carry a plan setup fee or another service's
-// price when quoted_price_usd is null), and rejects recurring plan rates or
-// totals contradicted by acceptance/finality evidence.
-function agreedOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
+// Classify the booked service's quoted total under V2 evidence:
+//   - 'none': no quoted total on the call;
+//   - 'agreed': final, accepted per-visit price (usable for selection & billing);
+//   - 'plan_rate': recurring/tier/annual plan rate echoed into quoted_price_usd
+//     (does not block covered callbacks and is not billed as a one-time quote);
+//   - 'disputed': caller declined or price is non-final (never silently bill
+//     either the disputed number OR a higher fixed catalog list price).
+function classifyOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
   const sr = v2Extraction?.service_request;
   const scalar = sanitizeQuotedCallPrice(sr?.quoted_price_usd)
     ?? sanitizeQuotedCallPrice(extracted?.quoted_price);
-  if (scalar === null) return null;
-  return isInvalidV2VisitPrice(scalar, sr, v2PriceEntries(v2Extraction)) ? null : scalar;
+  if (scalar === null) return { status: 'none', amount: null };
+  if (sr?.price_accepted_by_caller === false || sr?.price_is_final === false) {
+    return { status: 'disputed', amount: null };
+  }
+  const matching = v2PriceEntries(v2Extraction).filter((e) => sanitizeQuotedCallPrice(e.amount_usd) === scalar);
+  if (matching.length === 0) return { status: 'agreed', amount: scalar };
+  const accepted = matching.filter(isAcceptedV2Price);
+  const usable = accepted.length > 0 ? accepted : matching.filter((e) => !isRejectedV2Price(e));
+  if (usable.length === 0) return { status: 'disputed', amount: null };
+  if (usable.every(isPlanRateV2Price)) return { status: 'plan_rate', amount: null };
+  return { status: 'agreed', amount: scalar };
+}
+
+function agreedOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
+  return classifyOneTimeVisitPrice(extracted, v2Extraction).amount;
 }
 
 function requestsRegularPlanVisit(extracted = {}, v2Extraction = null) {
@@ -421,7 +432,10 @@ function requestsRegularPlanVisit(extracted = {}, v2Extraction = null) {
     v2Extraction?.meta?.call_summary,
     v2Extraction?.scheduling?.scheduling_notes_raw,
   ].filter(Boolean).join(' ');
-  return REGULAR_PLAN_VISIT_RE.test(combined.replace(NEGATED_REGULAR_PLAN_VISIT_RE, ' '));
+  const cleaned = combined
+    .replace(NEGATED_REGULAR_PLAN_VISIT_RE, ' ')
+    .replace(HISTORICAL_REGULAR_PLAN_VISIT_RE, ' ');
+  return REGULAR_PLAN_VISIT_RE.test(cleaned);
 }
 
 function v2CategoryLaneForReService(v2Extraction) {
@@ -781,8 +795,11 @@ function resolveCallBookingPrice({ quotedPrice, catalogRow, v2Extraction = null 
   if (!catalogRow || catalogRow.billing_type !== 'one_time') {
     return { price: null, source: null };
   }
-  const quoted = agreedOneTimeVisitPrice({ quoted_price: quotedPrice }, v2Extraction);
-  if (quoted !== null) return { price: quoted, source: 'transcript' };
+  const quoted = classifyOneTimeVisitPrice({ quoted_price: quotedPrice }, v2Extraction);
+  if (quoted.status === 'agreed') return { price: quoted.amount, source: 'transcript' };
+  // A disputed/non-final quote must not silently fall through to a fixed catalog
+  // list price and auto-invoice at completion (leave unpriced for office review).
+  if (quoted.status === 'disputed') return { price: null, source: null };
   const base = Number(catalogRow.base_price);
   if (catalogRow.pricing_type === 'fixed' && Number.isFinite(base) && base > 0) {
     return { price: Math.round(base * 100) / 100, source: 'catalog' };
