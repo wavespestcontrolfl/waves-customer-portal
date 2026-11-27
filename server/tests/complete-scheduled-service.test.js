@@ -1353,8 +1353,19 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
     expect(source).toContain('scheduled_send_at: null');
     expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(svc.id)');
-    expect(source).toContain("where({ invoice_id: heldId, status: 'active' })");
+    expect(source).toContain("where({ invoice_id: heldInv.id, status: 'active' })");
     expect(source).toContain('if (Number(stamped) > 0)');
+    // P0-1 & P0-2 (r7): locks all unpaid visit invoices and neutralizes/reconciles open PaymentIntents.
+    expect(source).toContain("orderBy('id', 'asc')");
+    expect(source).toContain('guardOpenPaymentIntentForPrepaid(heldInv)');
+    expect(source).toContain('StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id)');
+    // P0-1 (r7): /confirm route refuses held invoices too.
+    const payV2Src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
+    expect(payV2Src).toContain('if (invoiceHeldForChemicalReview(invoice))');
+    // P1-1 (r7): releasing a chemical hold resumes ONLY chemical-review paused follow-up sequences.
+    const followupsSrc = require('fs').readFileSync(require.resolve('../services/invoice-followups'), 'utf8');
+    expect(followupsSrc).toContain('function isChemicalReviewPause(existing)');
+    expect(followupsSrc).toContain('if (isChemicalReviewPause(existing))');
     // P1-2: add-on warning logs must never interpolate caller-supplied product text.
     expect(source).not.toContain('add-on actuals warning for ${svc.id}: ${addOnErr.message}');
     expect(source).not.toContain('chemical add-on warning for ${svc.id}: ${item.message}');

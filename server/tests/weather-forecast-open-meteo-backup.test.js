@@ -334,4 +334,23 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(hours[0]).toMatchObject({ rainChance: 75, hasThunder: true, windGustMph: 24, source: 'open-meteo' });
     expect(global.fetch).toHaveBeenCalledTimes(3);
   });
+
+  test('concurrent getOpenMeteoHourlyBackup calls share ONE in-flight request while preserving a shorter caller deadline (P1-3)', async () => {
+    const { getOpenMeteoHourlyBackup } = require('../services/weather-forecast');
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    let releaseOm;
+    global.fetch.mockImplementationOnce(() => new Promise((resolve) => {
+      releaseOm = () => resolve(omOk([65]));
+    }));
+    const p1 = getOpenMeteoHourlyBackup(27.53, -82.53);
+    const p2 = getOpenMeteoHourlyBackup(27.53, -82.53);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(_test._backupInFlight.size).toBe(1);
+    releaseOm();
+    const [h1, h2] = await Promise.all([p1, p2]);
+    expect(h1).toHaveLength(1);
+    expect(h2).toHaveLength(1);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(_test._backupInFlight.size).toBe(0);
+  });
 });

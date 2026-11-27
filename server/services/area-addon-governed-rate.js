@@ -447,11 +447,20 @@ async function requireAddOnActuals(knex, products, tags, { fresh = true } = {}) 
   if (fresh && tags?.unreadable) throw Object.assign(new Error(ADDONS_UNREADABLE_SENTENCE), { statusCode: 503, isOperational: true, code: ADDONS_UNREADABLE_CODE });
   if (!fresh || !tags?.size || !Array.isArray(products)) return;
   const rows = products.filter((p) => p && p.productId && tags.has(productRowKey(p)));
-  const problem = rows.map((p) => ({ p, tag: tags.get(productRowKey(p)), missing: completeActuals(p) })).find((row) => row.missing.length);
-  if (!problem) return;
-  const names = await addOnDisplayNames(knex, [problem.tag]);
-  throw Object.assign(new Error(`${names.get(problem.tag)} add-on: enter the ${problem.missing.join(' and ')} for ${problem.p.name || 'the product'}, then complete the visit.`), {
-    statusCode: 400, isOperational: true, code: ACTUALS_CODE, addOnKey: problem.tag, missing: problem.missing,
+  const problems = rows
+    .map((p) => ({ p, tag: tags.get(productRowKey(p)), missing: completeActuals(p) }))
+    .filter((row) => row.missing.length);
+  if (!problems.length) return;
+  const names = await addOnDisplayNames(knex, [...new Set(problems.map((row) => row.tag))]);
+  const actualsProblems = problems.map(({ p, tag, missing }) => ({
+    addOnKey: tag,
+    name: names.get(tag),
+    missing,
+    message: `${names.get(tag)} add-on: enter the ${missing.join(' and ')} for ${p.name || 'the product'}, then complete the visit.`,
+  }));
+  const first = actualsProblems[0];
+  throw Object.assign(new Error(first.message), {
+    statusCode: 400, isOperational: true, code: ACTUALS_CODE, addOnKey: first.addOnKey, missing: first.missing, problems: actualsProblems,
   });
 }
 

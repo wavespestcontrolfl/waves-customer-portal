@@ -1401,8 +1401,13 @@ router.post('/:token/confirm', async (req, res, next) => {
     // payment for a replayed PI).
     try {
       assertInvoiceNotWithdrawnFromCustomer(invoice);
+      if (invoiceHeldForChemicalReview(invoice)) {
+        const err = new Error('This invoice is held for office billing review of a chemical area add-on');
+        err.code = 'INVOICE_CHEMICAL_ADDON_HOLD';
+        throw err;
+      }
     } catch (err) {
-      return res.status(400).json({ error: err.message });
+      return res.status(400).json({ error: err.message, ...(err.code ? { code: err.code } : {}) });
     }
     if (invoice.stripe_payment_intent_id
       && String(invoice.stripe_payment_intent_id) !== String(paymentIntentId)) {

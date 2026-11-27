@@ -142,13 +142,16 @@ async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor
 }
 
 // Standalone Open-Meteo hourly backup (already-paid flat Standard plan when OPEN_METEO_API_KEY is set).
-// Validates coordinates, shares in-flight dedupe and the property-forecast cache; never throws.
+// Validates coordinates, shares ONE in-flight full-timeout backup read across concurrent jobs while
+// preserving each caller's own deadline via raceDeadline; never throws.
 async function getOpenMeteoHourlyBackup(lat, lng, { timeoutMs = FORECAST_BACKUP_MAX_MS } = {}) {
   if (lat == null || lng == null || lat === '' || lng === '') return null;
   const latNum = Number(lat);
   const lngNum = Number(lng);
   if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
-  return fetchOpenMeteoHours(latNum, lngNum, Date.now(), Math.max(BACKUP_MIN_MS, Number(timeoutMs) || FORECAST_BACKUP_MAX_MS));
+  const callerTimeout = Math.max(BACKUP_MIN_MS, Number(timeoutMs) || FORECAST_BACKUP_MAX_MS);
+  const shared = fetchOpenMeteoHours(latNum, lngNum, Date.now(), Math.max(TOTAL_BUDGET_MS, callerTimeout));
+  return callerTimeout < FORECAST_BACKUP_MAX_MS ? raceDeadline(shared, callerTimeout) : shared;
 }
 
 function raceDeadline(promise, ms) {

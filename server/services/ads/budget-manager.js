@@ -222,19 +222,34 @@ function holdLogReason(hold) {
   return `Hold: ${hold.mode} until ${hold.until} (set in the portal)`;
 }
 
-// Verify under FOR UPDATE that the given timed 'stop' hold itself caused the campaign's
-// current 'stop' throttle and no newer budget change (manual, advisor, or auto) superseded it.
+const STOP_HOLD_LOG_RE = /^Hold: stop until \d{4}-\d{2}-\d{2} \(set in the portal\)/;
+
+// Verify under FOR UPDATE that the given timed 'stop' hold (or an unbroken chain of
+// stop-hold extensions ending at this hold) actually moved the campaign into 'stop'
+// (previous_mode !== 'stop') and that no newer budget change superseded it. If the
+// campaign was already manually stopped before the hold was applied, return false so
+// clearing/expiring the hold preserves that original stop.
 async function holdCausedCurrentThrottle(trx, campaign, hold) {
   if (!hold || hold.mode !== 'stop' || campaign?.budget_mode !== 'stop') return false;
-  const latestLog = await trx('ad_budget_log')
+  const recentLogs = await trx('ad_budget_log')
     .where({ campaign_id: campaign.id })
     .orderBy('created_at', 'desc')
-    .first('new_mode', 'reason', 'created_at');
-  return Boolean(
-    latestLog
-    && latestLog.new_mode === 'stop'
-    && String(latestLog.reason || '').startsWith(holdLogReason(hold)),
-  );
+    .limit(20)
+    .select('previous_mode', 'new_mode', 'reason', 'created_at');
+  if (!Array.isArray(recentLogs) || recentLogs.length === 0) return false;
+  const latest = recentLogs[0];
+  if (latest.new_mode !== 'stop' || !String(latest.reason || '').startsWith(holdLogReason(hold))) {
+    return false;
+  }
+  for (const entry of recentLogs) {
+    if (entry.new_mode !== 'stop' || !STOP_HOLD_LOG_RE.test(String(entry.reason || ''))) {
+      return false;
+    }
+    if (entry.previous_mode && entry.previous_mode !== 'stop') {
+      return true;
+    }
+  }
+  return false;
 }
 
 // Weekday of an ET calendar-date string (0 = Sunday). Noon UTC keeps the

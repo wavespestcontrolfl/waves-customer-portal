@@ -39,6 +39,8 @@ let mockNewerAuditRow = null;
 let mockOwnOpRow = null;
 // Latest ad_budget_log row (orderBy created_at desc) for expired-hold attribution and legacy branded checks.
 let mockLatestBudgetLogRow = null;
+// Ordered history (newest first) for holdCausedCurrentThrottle's limit().select() lookup.
+let mockBudgetLogHistory = null;
 
 const mockDb = jest.fn((table) => {
   if (table === 'ad_campaigns') {
@@ -70,10 +72,16 @@ const mockDb = jest.fn((table) => {
         latestLookup = true;
         return b;
       }),
+      limit: jest.fn(() => b),
       first: jest.fn(() => Promise.resolve(ownOpLookup ? mockOwnOpRow : (latestLookup ? mockLatestBudgetLogRow : mockNewerAuditRow))),
-      // The supersession check selects ALL newer audit rows and inspects
-      // google_ads_updated per row in JS.
-      select: jest.fn(() => Promise.resolve(mockNewerAuditRow ? [mockNewerAuditRow] : [])),
+      // The supersession check selects ALL newer audit rows; holdCausedCurrentThrottle selects ordered history.
+      select: jest.fn(() => {
+        if (latestLookup) {
+          if (Array.isArray(mockBudgetLogHistory)) return Promise.resolve(mockBudgetLogHistory);
+          return Promise.resolve(mockLatestBudgetLogRow ? [mockLatestBudgetLogRow] : []);
+        }
+        return Promise.resolve(mockNewerAuditRow ? [mockNewerAuditRow] : []);
+      }),
     };
     return b;
   }
@@ -111,6 +119,7 @@ describe('BudgetManager live Google Ads push', () => {
     mockNewerAuditRow = null;
     mockOwnOpRow = null;
     mockLatestBudgetLogRow = null;
+    mockBudgetLogHistory = null;
     // 99% utilization → above the default orange max (95) → mode 'stop'
     // (a change from 'base'), so every adjustBudgets test exercises a write.
     jest.spyOn(BudgetManager, 'getCapacityForArea')
@@ -741,6 +750,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     mockNewerAuditRow = null;
     mockOwnOpRow = null;
     mockLatestBudgetLogRow = null;
+    mockBudgetLogHistory = null;
   });
 
   test.each([
@@ -872,7 +882,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     };
     campaignRows = [expiredBranded];
     campaignFirstRow = expiredBranded;
-    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
+    mockLatestBudgetLogRow = { previous_mode: 'base', new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
     mockIsEnabled.mockReturnValue(true);
     mockUpdateBudget.mockResolvedValue({ ok: true });
 
@@ -910,7 +920,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     };
     campaignRows = [expiredBranded];
     campaignFirstRow = expiredBranded;
-    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
+    mockLatestBudgetLogRow = { previous_mode: 'base', new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
     mockIsEnabled.mockReturnValue(false);
     mockIsConfigured.mockReturnValue(true);
     const skippedRes = await BudgetManager.adjustBudgets();
@@ -922,7 +932,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.clearAllMocks();
     campaignRows = [expiredBranded];
     campaignFirstRow = expiredBranded;
-    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
+    mockLatestBudgetLogRow = { previous_mode: 'base', new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
     mockIsEnabled.mockReturnValue(true);
     mockIsConfigured.mockReturnValue(true);
     mockUpdateBudget.mockResolvedValue({ ok: true, previousDailyBudget: 0.4 });
@@ -1034,7 +1044,8 @@ describe('in-lock rechecks (requireLivePush)', () => {
 
     // When the audit log proves the hold itself caused the throttle, clearing restores base.
     jest.clearAllMocks();
-    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2099-01-01 (set in the portal)', trigger: 'manual' };
+    mockBudgetLogHistory = null;
+    mockLatestBudgetLogRow = { previous_mode: 'base', new_mode: 'stop', reason: 'Hold: stop until 2099-01-01 (set in the portal)', trigger: 'manual' };
     mockUpdateBudget.mockResolvedValue({ ok: true });
     const ownedClearRes = await BudgetManager.setMode('c-1', 'base', 'Hold cleared', {
       requireLivePush: true,
@@ -1044,6 +1055,37 @@ describe('in-lock rechecks (requireLivePush)', () => {
     expect(ownedClearRes.noop).toBeUndefined();
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
     expect(mockCampaignUpdate).toHaveBeenCalledWith(expect.objectContaining({ budget_mode: 'base', daily_budget_current: 40 }));
+
+    // P0-3 (r7): stop hold placed on top of an EARLIER manual stop (stop→stop) preserves the manual stop on expiry.
+    jest.clearAllMocks();
+    campaignRows = [expiredBranded];
+    campaignFirstRow = expiredBranded;
+    mockBudgetLogHistory = [
+      { previous_mode: 'stop', new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' },
+      { previous_mode: 'base', new_mode: 'stop', reason: 'Manual stop before hold', trigger: 'manual' },
+    ];
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    const manualPriorRes = await BudgetManager.adjustBudgets();
+    expect(manualPriorRes).toEqual({ evaluated: 0, changed: 0, failed: 0 });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).toHaveBeenCalledTimes(1);
+    expect(mockCampaignUpdate.mock.calls[0][0].budget_mode).toBeUndefined();
+
+    // P0-3 (r7): a hold extension chain (base→stop hold, then stop→stop hold extension) DOES restore base on expiry.
+    jest.clearAllMocks();
+    campaignRows = [expiredBranded];
+    campaignFirstRow = expiredBranded;
+    mockBudgetLogHistory = [
+      { previous_mode: 'stop', new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' },
+      { previous_mode: 'base', new_mode: 'stop', reason: 'Hold: stop until 2019-12-25 (set in the portal)', trigger: 'manual' },
+    ];
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+    const extendedHoldRes = await BudgetManager.adjustBudgets();
+    expect(extendedHoldRes).toEqual({ evaluated: 0, changed: 1, failed: 0 });
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    expect(mockCampaignUpdate).toHaveBeenCalledWith(expect.objectContaining({ budget_mode: 'base', daily_budget_current: 40 }));
+    mockBudgetLogHistory = null;
   });
 
   test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {
@@ -1139,6 +1181,7 @@ describe('rollbackAfterLivePush r9', () => {
     mockNewerAuditRow = null;
     mockOwnOpRow = null;
     mockLatestBudgetLogRow = null;
+    mockBudgetLogHistory = null;
   });
 
   test('a sync mirror of OUR failed push is restored, not treated as superseded', async () => {

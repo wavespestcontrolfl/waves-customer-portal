@@ -901,9 +901,9 @@ reconciliation and collects normally again). CHEMICAL AREA ADD-ON REVIEW HOLD
 (2026-11-26): an unpaid invoice whose visit completed a chemical area add-on
 without a recorded product application carries a `chemical_addon_review:<serviceId>`
 billing hold stamp while awaiting office review (keeping a collectible status
-and a NULL `payer_id`). `/setup`, `/quote`, `/update-amount` and `/finalize`
-refuse such an invoice through the shared collectibility gate
-(`assertInvoiceCollectible`, code `INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance
+and a NULL `payer_id`). `/setup`, `/quote`, `/update-amount`, `/finalize` and
+`/confirm` refuse such an invoice through the shared collectibility gate /
+hold check (code `INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance
 selection (`open-balance.js` / `pay-combined.js`) excludes held siblings and
 refuses any held row under the locked allocation verifier (`verifyAllocationLocked`
 → `409 staleBalance`); and `GET /api/pay/:token` / `payPageZelleVisibility`

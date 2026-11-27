@@ -5610,15 +5610,21 @@ async function completeScheduledService(completionInput, packetContext = null) {
       await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
     } catch (addOnErr) {
       if (addOnErr?.code === areaAddOnGovernedRate.ACTUALS_CODE) {
-        const missingFields = Array.isArray(addOnErr.missing) && addOnErr.missing.length ? addOnErr.missing.join(',') : 'unknown';
-        logger.warn(`[dispatch] non-blocking add-on actuals warning for ${svc.id}: addOnKey=${addOnErr.addOnKey || 'unknown'} missing=${missingFields}`);
-        lawnWarningFindings.push({
-          code: addOnErr.code,
-          limitType: addOnErr.code,
-          productId: null,
-          productName: addOnErr.addOnKey || 'Area add-on',
-          message: addOnErr.message,
-        });
+        const items = Array.isArray(addOnErr.problems) && addOnErr.problems.length
+          ? addOnErr.problems
+          : [{ addOnKey: addOnErr.addOnKey || 'Area add-on', name: addOnErr.addOnKey || 'Area add-on', missing: addOnErr.missing, message: addOnErr.message }];
+        for (const item of items) {
+          const missingFields = Array.isArray(item.missing) && item.missing.length ? item.missing.join(',') : 'unknown';
+          logger.warn(`[dispatch] non-blocking add-on actuals warning for ${svc.id}: addOnKey=${item.addOnKey || 'unknown'} missing=${missingFields}`);
+          lawnWarningFindings.push({
+            code: addOnErr.code,
+            limitType: addOnErr.code,
+            productId: null,
+            productName: item.name || item.addOnKey || 'Area add-on',
+            addOnKey: item.addOnKey || null,
+            message: item.message,
+          });
+        }
       } else {
         throw addOnErr;
       }
@@ -11856,20 +11862,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
       isBackfillCompletion,
       annualPrepayCovered,
     };
-    if (unpaidExistingOnChemicalHold) {
-      // Persist the chemical-review billing hold on any existing/pre-minted unpaid
-      // invoice and pause active follow-up reminders so published invoices cannot
-      // trigger payment reminders or automated collection while the office reviews.
-      const heldIds = [...new Set([
+    let stampedHeldInvoiceIds = [];
+    if (!packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly) {
+      // Lock and hold EVERY non-terminal, non-payer-billed invoice linked to this visit or
+      // service record (not just the newest lookup hit) so an older unpaid invoice for the
+      // same visit cannot remain collectible or keep active reminders. Then neutralize any
+      // open Stripe PaymentIntents (canceling confirmable intents / reconciling in-flight ones).
+      const knownHeldIds = [...new Set([
         existingCompletionInvoice && !['paid', 'prepaid'].includes(existingCompletionInvoice.status) ? existingCompletionInvoice.id : null,
         preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status) ? preMintedInvoice.id : null,
       ].filter(Boolean))];
       try {
         const { chemicalAddonHoldStamp } = require('../services/invoice-helpers');
+        const invoicesToNeutralize = [];
         await db.transaction(async (trx) => {
-          for (const heldId of heldIds) {
+          const visitInvoices = await trx('invoices')
+            .where((q) => {
+              q.where({ scheduled_service_id: svc.id });
+              if (record?.id) q.orWhere({ service_record_id: record.id });
+              if (knownHeldIds.length) q.orWhereIn('id', knownHeldIds);
+            })
+            .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .orderBy('id', 'asc')
+            .forUpdate()
+            .select('id', 'invoice_number', 'status', 'stripe_payment_intent_id');
+          for (const heldInv of visitInvoices) {
             const stamped = await trx('invoices')
-              .where({ id: heldId })
+              .where({ id: heldInv.id })
               .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
               .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
               .update({
@@ -11880,8 +11900,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // Pause ONLY active follow-up sequences in the same transaction after a successful
             // stamp so prior office stops or payment-plan pauses keep their status and reason.
             if (Number(stamped) > 0) {
+              stampedHeldInvoiceIds.push(heldInv.id);
+              if (heldInv.stripe_payment_intent_id) invoicesToNeutralize.push(heldInv);
               await trx('invoice_followup_sequences')
-                .where({ invoice_id: heldId, status: 'active' })
+                .where({ invoice_id: heldInv.id, status: 'active' })
                 .update({
                   updated_at: new Date(),
                   status: 'paused',
@@ -11893,6 +11915,26 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
           }
         });
+        if (invoicesToNeutralize.length) {
+          const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
+          const StripeService = require('../services/stripe');
+          for (const heldInv of invoicesToNeutralize) {
+            const verdict = await guardOpenPaymentIntentForPrepaid(heldInv);
+            if (verdict.ok) {
+              await db('invoices')
+                .where({ id: heldInv.id, stripe_payment_intent_id: heldInv.stripe_payment_intent_id })
+                .update({ stripe_payment_intent_id: null, updated_at: new Date() });
+            } else if (verdict.reason === 'payment_in_flight') {
+              try {
+                await StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id);
+              } catch (reconcileErr) {
+                logger.warn(`[dispatch] chemical hold PI reconciliation for invoice ${heldInv.id} (${verdict.piStatus || 'in_flight'}): ${reconcileErr.message}`);
+              }
+            } else {
+              throw new Error(`Could not neutralize open payment session for held invoice ${heldInv.id}: ${verdict.detail || verdict.reason}`);
+            }
+          }
+        }
       } catch (holdPersistErr) {
         logger.error(`[dispatch] chemical_addon_billing_alert_failed (persist hold failed) for visit ${svc.id} — closeout NOT finalized: ${holdPersistErr.message}`);
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, holdPersistErr);
@@ -11906,6 +11948,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         } });
       }
     }
+    const anyUnpaidHeldOnVisit = unpaidExistingOnChemicalHold || stampedHeldInvoiceIds.length > 0;
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     // Annual-prepay covered visits route their add-on billing hold and held-invoice
     // office alert through reconcileCoveredVisitInvoice below; all other visits raise
@@ -11913,11 +11956,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // shouldAutoInvoiceCompletion check directly ensures out-of-band prepaid backfills
     // (where backfill requires a review invoice despite prepaidCovered) still alert.
     const chemicalAddOnBillingHoldApplies = !packetEffects && unrecordedChemicalAddOnHold
-      && !recapReviewOnly && !alreadyPaid && !autopayCoversVisit
-      && ((unpaidExistingOnChemicalHold && !annualPrepayCovered)
+      && !recapReviewOnly && (!alreadyPaid || stampedHeldInvoiceIds.length > 0) && !autopayCoversVisit
+      && ((anyUnpaidHeldOnVisit && !annualPrepayCovered)
         || (!shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
     if (chemicalAddOnBillingHoldApplies) {
-      logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${unpaidExistingOnChemicalHold ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
+      logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${anyUnpaidHeldOnVisit ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
       // This billing alert is the ONLY durable office work item for a held bill,
       // so fail closed (release for resume + 503) if persistence returns null or throws.
       // The service_record is already committed and the alert is deduplicated by visit id.
