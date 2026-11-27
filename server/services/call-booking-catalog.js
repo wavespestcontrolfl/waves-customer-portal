@@ -366,7 +366,7 @@ const STRUCTURED_RE_SERVICE_CATEGORY_LANE = Object.freeze({
 const EXISTING_SERVICE_FOLLOWUP_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback']);
 const REGULAR_PLAN_VISIT_PHRASE = "(?:(?:my|our|the|their|a|her|his)\\s+)?(?:regular|routine|normal|next|scheduled)\\s+(?:(?:quarterly|monthly|bi[-\\s]?monthly|6[-\\s]?week|every\\s+6\\s+weeks?|pest(?:\\s+control)?|lawn(?:\\s+care)?)\\s+){0,2}(?:visit|service|treatment|appointment)";
 const REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|just\\s+(?:want|need)(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'i');
-const NEGATED_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:no|not|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|never|rather\\s+than|instead\\s+of)\\s+(?:[\\w'’]+\\s+){0,3}(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|want(?:ed|ing)?|need(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'gi');
+const NEGATED_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:no|not|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|never|rather\\s+than|instead\\s+of|already|previously)\\s+(?:[\\w'’]+\\s+){0,3}(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|want(?:ed|ing)?|need(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'gi');
 // Recurring cadence units only (matches call-commercial-dictated-booking.js:
 // per_application is a valid per-visit price unit on one-time jobs).
 const RECURRING_V2_PRICE_UNITS = new Set(['per_month', 'per_quarter', 'per_year']);

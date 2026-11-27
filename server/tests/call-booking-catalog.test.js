@@ -2494,8 +2494,9 @@ describe('existing-customer lawn/pest callback & structured V2 re-service intent
       reServiceLanes: ['pest'],
       coarseServiceLabel: 'General Pest Control',
     })?.service_key).toBe('pest_general_quarterly');
-    // Negated regular-visit phrase does NOT block an explicit re-service request.
+    // Negated or already-booked regular-visit phrase does NOT block an explicit re-service request.
     expect(hasCallReServiceIntent({ call_summary: "I don't want to schedule my regular quarterly visit yet, I need a re-service." })).toBe(true);
+    expect(hasCallReServiceIntent({ call_summary: "I've already booked my next visit, but the ants are back. Please spray again." })).toBe(true);
     // Past reference to a regular visit does NOT block a real callback.
     expect(hasCallReServiceIntent({ call_summary: 'Ants are back after our regular quarterly visit last week.' }, {
       ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general' },
