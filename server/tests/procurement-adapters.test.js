@@ -689,6 +689,19 @@ describe('siteone bot cart + tender rules (fake page)', () => {
     expect(st.placeClicked).toBe(0);
   });
 
+  test('no dryRun option and SITEONE_BOT_DRY_RUN unset or not exactly "false" is a dry run: the Place order click never happens (fail closed)', async () => {
+    const saved = process.env.SITEONE_BOT_DRY_RUN;
+    try {
+      for (const value of [undefined, '', 'true', 'FALSE', 'no']) {
+        if (value === undefined) delete process.env.SITEONE_BOT_DRY_RUN; else process.env.SITEONE_BOT_DRY_RUN = value;
+        const { st, deps } = fakeSiteOne();
+        const r = await s1.place(args({ dryRun: undefined }), deps);
+        expect(r).toMatchObject({ dryRun: true });
+        expect(st.placeClicked).toBe(0);
+      }
+    } finally { if (saved === undefined) delete process.env.SITEONE_BOT_DRY_RUN; else process.env.SITEONE_BOT_DRY_RUN = saved; }
+  });
+
   test('an unexpected extra cart line refuses cart_mismatch with the lines in evidence (r1 P1)', async () => {
     const { st, deps } = fakeSiteOne({ addExtra: { sku: 'OTHER-9', qty: 1 } });
     const err = await s1.place(args(), deps).catch((e) => e);
