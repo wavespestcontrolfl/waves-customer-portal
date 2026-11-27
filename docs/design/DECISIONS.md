@@ -3625,3 +3625,13 @@ Owner 2026-11-27: "once a week look at upcoming appts, and buy for the entire we
 **Branch.** A technician's supply store picks the price row. A row whose branch name, as whole words, is part of the store text wins ("SiteOne Sarasota" matches "Sarasota"); there is no fuzzy matching. With no match the line keeps the usual price and says so.
 
 **Revisit if:** the owner wants the list ordered for him (that is a new, spend-bearing decision), a stock count per technician or per truck replaces the one company count, or the unplanned visit types need their own product plans.
+
+## 2026-11-27 — Restock: "Close, already counted" and a warning before a double receive
+
+**Decision:** The Restock tab gains a "Close, already counted" action, and Receive is refused (409, confirm to override) when an invoice or delivery email already added the product's stock since the order went out.
+
+**Context:** Owner "build fixes" after the automatic-buying audit (finding 3). The invoice reader closes the robot's request only for a whole-order match on the order's PO; a split shipment, back order or unclear result left the request `ordered`, and the only exits were Receive (adds the stock a second time) or a vendor cancellation that never happened. A hand purchase with an open request had the same problem.
+
+**Reasoning:** `close_counted` reuses the existing `received` status (no migration; the CHECK allows only open, ordered, received, cancelled) and records `metadata.lastManualAction.action = 'close_counted'` with who and when (and `closed_by` / `closed_at`). `received` is the status the invoice reader itself writes, and it is what releases the live-order guard and the dispatcher's prior-order check. The ledger row is left as it is, so the order still counts against the monthly cap (the money went out); it is never marked revoked, since `cancelled` would require a vendor cancellation. Ledger bells are retired the way a receive retires them. The receive warning looks at `siteone_invoice` and `amazon_delivery` restock movements since the order's `placed_at` (else the request's `created_at`); hand entries never trigger it.
+
+**Revisit if:** a request needs a reason other than "already counted" to close without stock, or the invoice reader learns to close split shipments itself.

@@ -5459,6 +5459,90 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
   );
 }
 
+// People named on a call ("text my husband Bob too"): visit texts only, no app
+// login. The account holder can stop or restart each one. Holder sessions only;
+// a failed load hides the section.
+function ReminderContactsSection({ property, enabled, savedContactsKey, muted, buttonStyle }) {
+  const profileId = property.customerId || property.id;
+  const [list, setList] = useState([]);
+  const [busyId, setBusyId] = useState(null);
+  // A Stop / Restart bumps this: a read that started before it is dropped, so it never puts back the old state, and
+  // the list then reads again (reloads), so nothing a dropped read carried (such as "also in your contacts") is lost.
+  const readSeq = useRef(0);
+  const [reloads, setReloads] = useState(0);
+  useEffect(() => {
+    if (!enabled || !profileId) { setList([]); return undefined; }
+    let alive = true;
+    const mine = ++readSeq.current;
+    const current = () => alive && readSeq.current === mine;
+    Promise.resolve(api.getReminderContacts(profileId))
+      .then((res) => { if (current()) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
+      .catch((err) => { console.error(err); if (current()) setList([]); });
+    return () => { alive = false; };
+  // savedContactsKey: a count of contact saves, so "also in your contacts" stays current after the editor above saves.
+  }, [enabled, profileId, savedContactsKey, reloads]);
+  if (!enabled || !list.length) return null;
+  const toggle = async (person) => {
+    if (busyId) return;
+    setBusyId(person.id);
+    try {
+      const res = person.stopped
+        ? await api.restartReminderContact(profileId, person.id)
+        : await api.stopReminderContact(profileId, person.id);
+      if (res?.reminderContact) {
+        readSeq.current += 1;
+        setList((prev) => prev.map((x) => (x.id === person.id ? { ...x, ...res.reminderContact } : x)));
+        setReloads((n) => n + 1);
+      }
+    } catch (err) {
+      console.error(err);
+      showCustomerAlert(whenOffline(person.stopped
+        ? 'Could not restart texts. Please try again.'
+        : 'Could not stop texts. Please try again.'));
+    } finally {
+      setBusyId(null);
+    }
+  };
+  return (
+    <div data-testid="reminder-contacts" style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Also gets visit texts</div>
+      <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
+        People named on a call get the booking, reminder and on-the-way texts for every visit. Stop and Restart apply to every address on this profile. Being on this list does not give app access.
+      </div>
+      {list.map((person) => {
+        const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';
+        const busy = busyId === person.id;
+        return (
+          <div key={person.id} style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: 'space-between', padding: '10px 0', borderTop: '1px solid #E7E2D7', marginTop: 10 }}>
+            <div style={{ minWidth: 0, flex: '1 1 160px' }}>
+              <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{name}</div>
+              <div style={{ fontSize: 14, color: muted }}>{formatPhoneDisplay(person.phone)}</div>
+              {person.stopped && <div style={{ fontSize: 14, fontWeight: 700, color: B.orange }}>Stopped</div>}
+              {person.inContacts && (
+                <div style={{ fontSize: 14, color: muted }}>
+                  Also in your contacts above, which has its own text settings.
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                onClick={() => toggle(person)}
+                disabled={!!busyId}
+                aria-label={`${person.stopped ? 'Restart texts' : 'Stop texts'} for ${name}`}
+                className="waves-focus-ring"
+                style={{ ...buttonStyle, position: 'relative', opacity: busy ? 0.6 : 1 }}
+              >
+                {busy ? 'Saving...' : person.stopped ? 'Restart texts' : 'Stop texts'}
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ScheduleTab({ customer, properties = [], activePropertyId: activePropertyIdProp, selectedProperty = null, onRequestVisit, onSelectProperty, onSavedScopeUnavailable, switchingPropertyId }) {
   // The entry this session is scoped to (saved-property key, else the profile
   // id). Falls back to the profile for callers that do not pass one.
@@ -5526,6 +5610,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
+  // Successful contact saves per property: the caller-named list re-reads after each one.
+  const [contactSaves, setContactSaves] = useState({});
   const app = useAppNotifications(prefs?.appPreferencesAvailable === true, customer?.id);
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
@@ -5766,6 +5852,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           }
           : p
       )));
+      setContactSaves(prev => ({ ...prev, [propertyId]: (prev[propertyId] || 0) + 1 }));
     } catch (err) {
       showCustomerAlert(whenOffline('Could not save the on-location contacts. Please try again.'));
       console.error(err);
@@ -6743,6 +6830,13 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                         {prefsLocked[contactLockKey] ? 'Saving...' : contacts.length > 1 ? 'Save contacts' : 'Save contact'}
                       </button>
                     </div>
+                    <ReminderContactsSection
+                      property={property}
+                      enabled={!contactSession}
+                      savedContactsKey={contactSaves[property.id]}
+                      muted={muted}
+                      buttonStyle={secondaryButton}
+                    />
                   </div>
                 </div>
               );

@@ -5,6 +5,7 @@ import ProtocolTankSheet, { directionLines, itemMixWarnings, mixOrderWarnings, s
 import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
+import { tankCoverageLines, tankFillLines } from "./protocolTankOptions";
 import {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
@@ -508,6 +509,12 @@ function LabelLinks({ product, className }) {
   );
 }
 
+// A sprayer number's neutral note (severity note: owner 2026-11-27) shows as plain text; every other warning is an alert.
+function splitWarnings(warnings) {
+  const list = warnings || [];
+  return { notes: list.filter((w) => w.severity === "note"), alerts: list.filter((w) => w.severity !== "note") };
+}
+
 export function ProtocolMixCard({
   plan,
   selectedConditionalIds,
@@ -527,11 +534,12 @@ export function ProtocolMixCard({
     ? `${fmtNumber(plan.equipment.tankCapacityGal, " gal")} tank`
     : "Full tank";
   const items = plan.items || [];
+  const warnings = splitWarnings(plan.warnings);
   // Without calibrated equipment every rate cell is "—"; the columns (and
   // the phone card's rate strip) are dropped in favour of one explanation.
   const hasAnyMix = items.some(
     (item) =>
-      item.jobMix || item.plannedMix || item.fullTankMix || item.plannedFullTankMix,
+      item.jobMix || item.plannedMix || item.fullTankMix || item.plannedFullTankMix || tankFillLines(item).length,
   );
   const rows = items.map((item, idx) => {
     const checked = item.conditional
@@ -657,7 +665,7 @@ export function ProtocolMixCard({
           </div>
         </>
       ) : (
-        dash
+        <TankFillList lines={tankFillLines(item)} numClass={numClass} dash={dash} />
       ),
     };
   });
@@ -680,10 +688,15 @@ export function ProtocolMixCard({
           ))}
         </div>
       )}
-      {plan.warnings?.length > 0 && (
+      {warnings.notes.length > 0 && (
+        <div className="text-14 text-ink-secondary leading-normal">
+          {warnings.notes.map((w, index) => <div key={`${w.code}-${index}`}>{w.message}</div>)}
+        </div>
+      )}
+      {warnings.alerts.length > 0 && (
         <div className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2">
-          {plan.warnings.map((w) => (
-            <div key={w.code} className="text-12 text-alert-fg leading-normal">
+          {warnings.alerts.map((w, index) => (
+            <div key={`${w.code}-${index}`} className="text-12 text-alert-fg leading-normal">
               {" "}
               <span className="font-medium">{w.code.replace(/_/g, " ")}:</span>
               {w.message}
@@ -739,7 +752,7 @@ export function ProtocolMixCard({
                 Tank Coverage
               </div>{" "}
               <div className="u-nums text-16 font-medium text-zinc-900">
-                {fmtNumber(plan.equipment?.tankCoverageSqft, " sq ft")}
+                <TankCoverage equipment={plan.equipment} />
               </div>{" "}
             </div>{" "}
             {!pricingRestricted && (
@@ -997,6 +1010,17 @@ function ProductLabelsCard({ items }) {
   );
 }
 
+// No sprayer picked and the big tanks differ: each tank's full-tank fill or coverage, named (protocolTankOptions.js).
+function TankFillList({ lines, numClass, dash }) {
+  if (!lines.length) return dash;
+  return lines.map((line) => <div key={line} className={numClass}>{line}</div>);
+}
+function TankCoverage({ equipment }) {
+  const lines = tankCoverageLines(equipment);
+  if (!lines.length) return fmtNumber(equipment?.tankCoverageSqft, " sq ft");
+  return lines.map((line) => <div key={line} className="text-12">{line}</div>);
+}
+
 export default function ProtocolReferenceTabV2() {
   const [programs, setPrograms] = useState(null);
   const [catalogError, setCatalogError] = useState(false);
@@ -1114,14 +1138,9 @@ export default function ProtocolReferenceTabV2() {
   useEffect(() => {
     adminFetch("/admin/equipment-systems/calibrations")
       .then((d) => {
-        const rows = d.calibrations || [];
-        setEquipmentOptions(rows);
-        const defaultTank = rows.find((r) => Number(r.tank_capacity_gal) === 110
-          && r.calibration_status === "field_verified"
-          && (!r.expires_at || new Date(r.expires_at) > new Date()))
-          || rows.find((r) => Number(r.tank_capacity_gal) === 110);
-        if (defaultTank?.equipment_system_id)
-          setEquipmentSystemId(defaultTank.equipment_system_id);
+        // No sprayer is picked for the technician (owner 2026-11-27: the big tanks are on different numbers): the sheet then shows
+        // each tank's amount until one is chosen.
+        setEquipmentOptions(d.calibrations || []);
       })
       .catch(() => setEquipmentOptions([]));
   }, []);
@@ -1321,10 +1340,7 @@ export default function ProtocolReferenceTabV2() {
                       Tank Coverage
                     </div>{" "}
                     <div className="u-nums text-14 font-medium text-zinc-900">
-                      {fmtNumber(
-                        mixPlan?.equipment?.tankCoverageSqft,
-                        " sq ft",
-                      )}
+                      <TankCoverage equipment={mixPlan?.equipment} />
                     </div>{" "}
                   </div>{" "}
                 </div>

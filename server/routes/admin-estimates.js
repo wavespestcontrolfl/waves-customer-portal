@@ -936,6 +936,10 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // quote saved before the rule, on a first send and a resend alike.
   const priorWholeHomeSizing = require('../services/estimate-floor-signal-replay').savedLegacyWholeHomeSizingSignal(estimateData).legacyWholeHomeSizing;
   if (typeof priorWholeHomeSizing === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyWholeHomeSizing: priorWholeHomeSizing };
+  // The same for the one lawn price lane (new quotes only, owner 2026-11-26): its own stamp, read before the snapshot is dropped. An
+  // unstamped estimate that kept only its inputs and asks for lawn is a quote saved before the rule, on a first send and a resend alike.
+  const priorLawnOneLane = require('../services/estimate-floor-signal-replay').savedLegacyLawnOneLaneSignal(estimateData).legacyLawnOneLane;
+  if (typeof priorLawnOneLane === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyLawnOneLane: priorLawnOneLane };
   // The one-time pest evidence a prior send froze (the resolved choice, the band verdict, the per-service rule): a snapshot-only quote
   // has no rows to recompute it from, so it rides the rebuild and is never replaced by an absent value. When rows exist the rebuild
   // recomputes them from those rows and its own answer stands.
@@ -996,6 +1000,7 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
     sendSnapshot.legacyOneTimePestBuffer = priorPestBuffer === true;
     sendSnapshot.legacyPestAboveTable = priorPestAboveTable === true;
     sendSnapshot.legacyWholeHomeSizing = priorWholeHomeSizing === true;
+    sendSnapshot.legacyLawnOneLane = priorLawnOneLane === true;
     // Carry the frozen one-time pest evidence onto the new bundle when there were no rows to recompute it from (never frozen -> absent).
     if (!rebuildHasPestRows) {
       for (const [key, value] of Object.entries(priorMarkers)) {

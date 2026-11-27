@@ -286,9 +286,9 @@
     }
   },
   "one_time_lawn": {
-    "outcome": "One targeted lawn application — the treatment you chose, matched to your grass type.",
+    "outcome": "One targeted lawn application — the treatment you chose, matched to your lawn.",
     "includes": [
-      "Application matched to your grass type and the treatment you chose",
+      "Application matched to your lawn and the treatment you chose",
       "Turf condition checked while we're there, with notes on anything else we see",
       "Treatment documented in your service report"
     ],
@@ -434,7 +434,7 @@
       "Power dethatching pass across the lawn",
       "Removal and disposal of thatch debris",
       "Recommendation on top dressing or plugging for damaged areas",
-      "Recommendation on the best window for your grass type, so dethatching does not stress the lawn"
+      "Recommendation on the best window for your lawn, so dethatching does not stress it"
     ],
     "assurance": null,
     "terms": "Pay on service day. No recurring schedule, no tier discount.",

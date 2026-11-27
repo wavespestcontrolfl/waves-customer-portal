@@ -266,7 +266,7 @@ describe('lawn_care guide (revised prep & service guide)', () => {
     };
     walk(rendered, 'content');
     // Promise language only — neutral "before every visit" prep wording is fine.
-    const RECURRING = /9–12|per year|re-service|no charge|comprehensive|your plan|plan is active|lawn program|built into the program|turf-specific program|every visit|each visit|first visit|next visit|summer visits|repeat treatments|lawn-health|frequency|guarantee|callback|Bermuda removal from/i;
+    const RECURRING = /9–12|per year|re-service|no charge|comprehensive|your plan|plan is active|lawn program|built into the program|one program, adjusted|every visit|each visit|first visit|next visit|summer visits|repeat treatments|lawn-health|frequency|guarantee|callback|Bermuda removal from/i;
     const hits = strings.filter(([path, text]) => path !== 'content.estimateUrl' && RECURRING.test(text));
     expect(hits).toEqual([]);
   });
@@ -370,7 +370,7 @@ describe('lawn_care guide (revised prep & service guide)', () => {
   test('new sod stays on the regular program with some products held (owner 2026-10-09: one program, no sod protocol)', () => {
     const sod = SERVICE_DETAILS_COPY.lawn_care.sections.find((sec) => /^New sod you had installed/.test(sec.heading || ''));
     expect(sod.heading).toBe('New sod you had installed (we don’t install sod)');
-    expect(sod.paragraphs[0]).toBe('Tell us the install date, the grass type, and what the installer applied. New sod stays on your regular program. We hold some products while it roots.');
+    expect(sod.paragraphs[0]).toBe('Tell us the install date and what the installer applied. New sod stays on your regular program. We hold some products while it roots.');
     expect(JSON.stringify(SERVICE_DETAILS_COPY.lawn_care)).not.toMatch(/establishment plan/);
   });
 

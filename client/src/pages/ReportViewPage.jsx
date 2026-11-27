@@ -1253,6 +1253,9 @@ function conditionRows(conditions = {}, { weeklyRainIn = null } = {}) {
     });
 }
 
+// The sprayer number's status as the report states it (owner 2026-11-27: the owner's standing number reads "Owner estimate").
+const CALIBRATION_STATUS_LABELS = { field_verified: 'Field verified', owner_estimate: 'Owner estimate' };
+
 function formatEnumLabel(value) {
   const raw = String(value || '').trim();
   if (!raw) return '';
@@ -2406,7 +2409,7 @@ function LawnProtocolCard({ protocol, mode = 'live' }) {
         <div className="sr-cell">
           <div className="sr-cell-label">Calibration</div>
           <div className="sr-cell-value">
-            {calibration.status === 'field_verified' ? 'Field verified' : formatEnumLabel(calibration.status || 'Recorded')}
+            {CALIBRATION_STATUS_LABELS[calibration.status] || formatEnumLabel(calibration.status || 'Recorded')}
           </div>
         </div>
       </div>

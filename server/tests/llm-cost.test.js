@@ -267,6 +267,12 @@ describe('findSpikes', () => {
     const baseline = new Map([['a', { usd: 0, unpricedCalls: 40 }], ['b', { usd: 7, unpricedCalls: 0 }]]);
     expect(llmCost.findSpikes(day, baseline, { minUsd: 5, multiplier: 3, baselineDays: 7 }).map((s) => s.laneId)).toEqual(['b']);
   });
+
+  test('findSkippedUnpriced surfaces lanes clearing minUsd that were skipped due to unpriced baseline calls', () => {
+    const day = new Map([['a', { usd: 12 }], ['b', { usd: 3 }], ['c', { usd: 20 }]]);
+    const baseline = new Map([['a', { usd: 0, unpricedCalls: 2 }], ['b', { usd: 0, unpricedCalls: 5 }], ['c', { usd: 7, unpricedCalls: 0 }]]);
+    expect(llmCost.findSkippedUnpriced(day, baseline, { minUsd: 5 })).toEqual([{ laneId: 'a', usd: 12, unpricedCalls: 2 }]);
+  });
 });
 
 describe('pullPrices', () => {

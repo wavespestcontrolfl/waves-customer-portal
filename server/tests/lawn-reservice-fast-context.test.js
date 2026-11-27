@@ -232,6 +232,45 @@ describe('buildLawnReserviceFastContext', () => {
     ]);
   });
 
+  // Owner 2026-11-26: a line flagged over its product's ceiling is a recorded typo, never offered as the next visit's default.
+  test('a flagged line keeps its product but offers no amount, unit, area or rate; a good duplicate of the product wins', async () => {
+    const ctx = await buildLawnReserviceFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog,
+      'service_records as sr': [{
+        id: 'rec-1', service_type: 'Lawn Care', service_line: 'lawn', service_date: '2026-09-20',
+        structured_notes: { inventoryDeductions: [
+          { status: 'not_deducted_implausible', serviceProductId: 'sp-1', productId: 'celsius', amount: 300, amountUnit: 'oz' },
+          // an older deduction with no service product id: matched by product, unit and amount
+          { status: 'not_deducted_implausible', productId: 'talak', amount: 4000, amountUnit: 'FL_OZ' },
+          // the flagged duplicate of Headway comes FIRST in the rows below: the good line still wins
+          { status: 'not_deducted_implausible', serviceProductId: 'sp-4' },
+        ] },
+      }],
+      service_products: [
+        { id: 'sp-1', product_id: 'celsius', product_name: 'Celsius WG', total_amount: '300', amount_unit: 'oz', application_method: 'spot_treatment', area_value: '1000', area_unit: 'sqft', application_rate: '0.3', rate_unit: 'oz/1000sf' },
+        { id: 'sp-2', product_id: 'talak', product_name: 'Talak 7.9%', total_amount: '4000.000', amount_unit: 'fl_oz', application_method: 'broadcast_spray' },
+        { id: 'sp-4', product_id: 'headway', product_name: 'Headway G', total_amount: '9000', amount_unit: 'lb', application_method: null },
+        { id: 'sp-3', product_id: 'headway', product_name: 'Headway G', total_amount: '25', amount_unit: 'lb', application_method: null },
+      ],
+    }));
+    expect(ctx.lastVisit.products).toEqual([
+      { productId: 'headway', name: 'Headway G', totalAmount: 25, amountUnit: 'lb', method: null, areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+      { productId: 'celsius', name: 'Celsius WG', totalAmount: null, amountUnit: null, method: 'spot_treatment', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+      { productId: 'talak', name: 'Talak 7.9%', totalAmount: null, amountUnit: null, method: 'broadcast_spray', areaValue: null, areaUnit: null, applicationRate: null, rateUnit: null },
+    ]);
+  });
+
+  test('a record with no deduction notes changes nothing (string notes parse, bad notes read as none)', async () => {
+    const run = (notes) => buildLawnReserviceFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog,
+      'service_records as sr': [{ id: 'rec-1', service_type: 'Lawn Care', service_line: 'lawn', service_date: '2026-09-20', structured_notes: notes }],
+      service_products: [{ id: 'sp-1', product_id: 'celsius', product_name: 'Celsius WG', total_amount: '3', amount_unit: 'oz', application_method: null }],
+    }));
+    for (const notes of [null, 'not json', JSON.stringify({ inventoryDeductions: [{ status: 'deducted', serviceProductId: 'sp-1' }] })]) {
+      expect((await run(notes)).lastVisit.products[0]).toMatchObject({ totalAmount: 3, amountUnit: 'oz' });
+    }
+  });
+
   test('the record walk pages past a full page of other lines', async () => {
     const other = Array.from({ length: 50 }, (_, i) => ({ id: `rec-p${i}`, service_type: 'Pest Control Service', service_line: 'pest', service_date: '2026-09-01' }));
     const lawn = [{ id: 'rec-deep', service_type: 'Lawn Care', service_line: 'lawn', service_date: '2026-03-01' }];
