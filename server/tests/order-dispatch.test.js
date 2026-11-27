@@ -1000,10 +1000,10 @@ test('monthly sum counts only placing reservations and dispatched rows', async (
   const dbFn = require('../models/db');
   const seen = [];
   const orig = dbFn.getMockImplementation();
-  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereNotNull: (...b) => { seen.push(['inner', 'orWhereNotNull', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
+  dbFn.mockImplementation((table) => { const q = orig(table); if (table === 'vendor_orders') { q.where = (...a) => { seen.push(a); if (typeof a[0] === 'function') { const inner = { where: (...b) => { seen.push(['inner', ...b]); return inner; }, orWhereRaw: (...b) => { seen.push(['inner', 'orWhereRaw', ...b]); return inner; } }; a[0].call(inner); } return q; }; } return q; });
   try {
     await dispatch.monthlySpentCents(dbFn, { now: new Date(), excludeId: 'x' });
-    expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereNotNull', 'placed_at']]));
+    expect(seen).toEqual(expect.arrayContaining([['inner', 'status', 'placing'], ['inner', 'orWhereRaw', expect.stringMatching(/vendor_orders\.placed_at IS NOT NULL OR split_part\(COALESCE\(vendor_orders\.error, ''\), ':', 1\) IN \('ambiguous_after_submit'/)]]));
   } finally { dbFn.mockImplementation(orig); }
 });
 

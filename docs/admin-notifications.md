@@ -969,7 +969,9 @@ automatic request that stays open a week, whatever stalled it. No `RERING` entry
 The auto-order park alert (`auto-order:<ledger id>:<version>`) of a park BEFORE the buy click (`server/services/procurement/order-dispatch.js`) says
 "The robot stopped before buying: <reason>. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request."
 Nothing retries on its own: only a dry-run park is re-claimed. Cancel is open on such a park. A park after the click ("Do NOT re-order") refuses both
-Mark Ordered and Cancel while its order is unrevoked, judged by the ledger's post-submit reason as well as `placed_at`.
+Mark Ordered and Cancel while its order is unrevoked. One rule decides "an order may be out" everywhere (`maybePlacedSql` / `isMaybePlaced` in order-dispatch.js):
+unrevoked AND (`placed_at` set OR the error is a post-submit reason). It also drives the sweep's hand-off after a gate closes, the claim guards, the month's spend,
+the on-order list, bell re-rings, Record vendor cancellation (service, route and the Restock tab's `order.outstanding`).
 
 ## 7. How to raise one
 

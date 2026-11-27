@@ -78,6 +78,14 @@ describe('Record vendor cancellation', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
   });
 
+  it('a post-submit park without its placed time still offers it (the server marks it outstanding), never Cancel', async () => {
+    const request = { ...ORDERED_REQUEST, status: 'open', order: { ...ORDER, status: 'needs_review', placedAt: null, error: 'ambiguous_after_submit: unknown', outstanding: true } };
+    installFetch({ requests: [request] });
+    mount();
+    expect(await screen.findByRole('button', { name: 'Record vendor cancellation' })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+
   it('Record stays disabled until the vendor cancellation is confirmed, and Keep order sends nothing', async () => {
     installFetch();
     mount();

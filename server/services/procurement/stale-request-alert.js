@@ -13,7 +13,7 @@
  * (a park with its own alert, a manual order never received, an unclaimed request).
  * Called from runVendorOrderDispatch's reconcile step (the server's run), once a day with the 6:10 sweep.
  */
-const { composeAdminAlert } = require('../admin-alert-compose');
+const { composeAdminAlert, breaksAlertRules, MAX_HEADLINE_CHARS } = require('../admin-alert-compose');
 const { fitAction } = require('../admin-alert-names');
 
 const STALE_DAYS = 7;
@@ -28,14 +28,24 @@ function specFor({ request, days }) {
   const since = etParts(new Date(request.created_at));
   // An order may exist that this portal never recorded (an ambiguous or in-flight submit, or one staff placed by
   // hand and never marked), so an open request is never "nothing ordered": it says to check the vendor account.
-  const vendorName = request.vendor_name && request.vendor_name.length <= 30 ? request.vendor_name : 'vendor';
+  // Product and vendor names are catalog text the alert copy rules may refuse ('Bait [12 pack]'): such a name is left
+  // out (generic words) instead of failing the alert, so one bad name never fails the dispatch run.
+  const usable = (text) => (text && !breaksAlertRules(text) ? text : null);
+  const vendorName = usable(request.vendor_name) && request.vendor_name.length <= 30 ? request.vendor_name : 'vendor';
   const state = request.status === 'ordered' ? 'marked ordered, nothing received' : `no order recorded, check the ${vendorName} account`;
+  const product = usable(request.product_name);
+  let action = product ? fitAction('Inventory', product, [(n) => `check the ${n} restock, open ${days} days`, (n) => `${n} restock, open ${days} days`]) : null;
+  if (!action || breaksAlertRules(action)) {
+    const room = MAX_HEADLINE_CHARS - 'Inventory — '.length;
+    action = [`check an automatic restock request, open ${days} days`, `restock request open ${days} days`].find((a) => a.length <= room);
+  }
+  const why = `Open since ${MONTHS[since.month - 1]} ${since.day}; ${state}.`;
   return {
     key,
     spec: {
       area: 'Inventory',
-      action: fitAction('Inventory', request.product_name || 'a product', [(n) => `check the ${n} restock, open ${days} days`, (n) => `${n} restock, open ${days} days`]),
-      why: `Open since ${MONTHS[since.month - 1]} ${since.day}; ${state}.`,
+      action,
+      why: breaksAlertRules(why) ? `Open since ${MONTHS[since.month - 1]} ${since.day}; no order recorded, check the vendor account.` : why,
       severity: 'needs-you',
       link: LINK,
       subject: { type: 'check', id: key },

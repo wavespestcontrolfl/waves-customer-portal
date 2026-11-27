@@ -132,10 +132,12 @@ function restockOrderView(row, showSpend, officeDetail = true) {
     // reason code only.
     error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
     placedAt: row.order_placed_at || null,
+    // An order that may exist (the one outstanding-order rule): the tab offers Record vendor cancellation for it.
+    outstanding: !row.order_revoked_at && require('./procurement/order-dispatch').isMaybePlaced({ placed_at: row.order_placed_at, error: row.order_error }),
     revokedAt: row.order_revoked_at || null,
     // What the order actually bought, in the request's unit (packages round
     // up) — the tab's receive default; a revoked order is not what arrives.
-    orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
+    orderedQuantity: !row.order_revoked_at && require('./procurement/order-dispatch').isMaybePlaced({ placed_at: row.order_placed_at, error: row.order_error }) && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,
     // The order landed after the request was received by hand: the tab
     // offers one more receive (the late order's own) on the received row.
     landedAfterReceive: !!row.order_landed_after_receive,

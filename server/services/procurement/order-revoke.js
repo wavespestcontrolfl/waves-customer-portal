@@ -52,10 +52,10 @@ function revokeBlocker(row) {
   const evidence = parseEvidence(row.evidence);
   if (evidence.revokedAt) return { code: 'already_revoked', message: `Already revoked at ${evidence.revokedAt} — nothing to do.` };
   // A needs_review row is revocable only when its vendor call was DISPATCHED
-  // (placed_at set). Recording the revoke is what lets the office cancel the
+  // (placed_at set, or a post-submit reason: the one outstanding-order rule in order-dispatch). Recording the revoke is what lets the office cancel the
   // request; a pre-submit park (nothing sent) needs no revoke and its request
   // cancels freely.
-  if (row.status === 'needs_review' && !row.placed_at) return { code: 'not_dispatched', message: 'needs_review with nothing dispatched — no vendor order to revoke; cancel the request on the Restock tab.' };
+  if (row.status === 'needs_review' && !require('./order-dispatch').isMaybePlaced(row)) return { code: 'not_dispatched', message: 'needs_review with nothing dispatched — no vendor order to revoke; cancel the request on the Restock tab.' };
   if (row.status === 'failed') return { code: 'not_dispatched', message: 'Row is failed (nothing was ordered) — revoke does not apply.' };
   // The vendor call may be in flight: reopening the request now would let
   // staff order while the dispatcher still lands the original (double
@@ -70,7 +70,7 @@ function revokeBlocker(row) {
 // number, total, latePlacementAt, or any write at all) makes the decision
 // stale: re-read and decide again (Codex r4 P1). Throws the reason.
 function assertRevocableLocked(locked, row) {
-  if (!locked || !(locked.status === 'placed' || (locked.status === 'needs_review' && locked.placed_at))) throw refusal('not_dispatched', `ledger row is ${locked?.status || 'missing'} — not a dispatched order; re-run`);
+  if (!locked || !(locked.status === 'placed' || (locked.status === 'needs_review' && require('./order-dispatch').isMaybePlaced(locked)))) throw refusal('not_dispatched', `ledger row is ${locked?.status || 'missing'} — not a dispatched order; re-run`);
   const lockedEvidence = parseEvidence(locked.evidence);
   if (lockedEvidence.revokedAt) throw refusal('already_revoked', `ledger row was revoked at ${lockedEvidence.revokedAt} by a concurrent run — nothing to do`);
   const same = (a, b) => String(a ?? '') === String(b ?? '');
@@ -101,7 +101,7 @@ function assertRequestInFlight(req, lockedEvidence) {
 // ledger row (vo.* plus vendor_id/adapter). Returns the request's status after.
 async function revokeOrder(row, { actorType = 'system', actorId = null } = {}) {
   return db.transaction(async (trx) => {
-    const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'placed_at', 'evidence', 'external_order_number', 'amount_cents', 'updated_at');
+    const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'error', 'placed_at', 'evidence', 'external_order_number', 'amount_cents', 'updated_at');
     assertRevocableLocked(locked, row);
     const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status', 'metadata');
     assertRequestInFlight(req, parseEvidence(locked.evidence));

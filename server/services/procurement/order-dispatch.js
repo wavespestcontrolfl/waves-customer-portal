@@ -119,6 +119,16 @@ const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_pl
 // opens a fresh request. (Cancel is open on such a park: assertManualActionAllowed refuses it only for an order out.)
 const STOPPED_PHRASE = 'The robot stopped before buying';
 const isPreClickPark = ({ status, reason }) => status === 'needs_review' && !!reason && reason !== 'dry_run' && !POST_SUBMIT_REASONS.has(reason);
+// ONE outstanding-order rule: a ledger row is an outstanding (maybe-placed) order when it is unrevoked AND (placed_at is
+// set OR its error is a post-submit reason). The reason counts as well as the timestamp, so a post-submit park whose
+// placed_at is missing is still an order that may exist. Every guard reads it here: findLiveAutoOrder (the sweep's
+// hand-off after a gate closes, the watchdog), the product-level claim guards, Mark Ordered and Cancel
+// (assertManualActionAllowed), the cap's spend, the on-order list, bell re-rings, and the revoke service and its tab.
+const POST_SUBMIT_REASONS_SQL = [...POST_SUBMIT_REASONS].map((r) => `'${r}'`).join(', ');
+const maybePlacedSql = (alias = 'vo') => `(${alias}.placed_at IS NOT NULL OR split_part(COALESCE(${alias}.error, ''), ':', 1) IN (${POST_SUBMIT_REASONS_SQL}))`;
+const liveOrderSql = (alias = 'vo') => `(NULLIF(${alias}.evidence->>'revokedAt', '') IS NULL AND (${alias}.status = 'placing' OR ${maybePlacedSql(alias)}))`;
+const isMaybePlaced = (row) => !!row?.placed_at || POST_SUBMIT_REASONS.has(String(row?.error || '').split(':')[0]);
+const isOutstandingOrder = (row) => isMaybePlaced(row) && !meta(row.evidence).revokedAt;
 // A received request settles its ledger row — unless the order landed after
 // that receipt (evidence.landedAfterReceive), or the claim is still
 // 'placing' (an older pod received while the call is out: the marker is
@@ -313,8 +323,7 @@ function findLiveAutoOrder(conn, productId) {
     .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('prr.product_id', productId)
     .whereRaw(RECEIVED_SETTLES_SQL)
-    .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
-    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
+    .whereRaw(liveOrderSql('vo'))
     .first('vo.status', 'vo.external_order_number', 'v.name as vendor_name');
 }
 
@@ -355,8 +364,7 @@ async function assertManualActionAllowed(trx, requestId, action) {
   // Mark Ordered too: a post-submit park (an ambiguous submit above all) means an order may exist at the vendor, so
   // the request is reconciled (receive it, or cancel with the vendor and record that), never marked ordered by hand.
   // Judged by the ledger's post-submit reason as well as placed_at, so a row missing its timestamp still blocks.
-  const orderMayBeOut = !!row.placed_at || POST_SUBMIT_REASONS.has(String(row.error || '').split(':')[0]);
-  if (['cancel', 'mark_ordered'].includes(action) && orderMayBeOut && !meta(row.evidence).revokedAt) {
+  if (['cancel', 'mark_ordered'].includes(action) && isOutstandingOrder(row)) {
     refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and then use Record vendor cancellation on the Restock tab, which closes the request.`);
   }
   // Returned so both receive paths can admit ONE more receive on a received
@@ -411,7 +419,7 @@ function settleLandedAfterReceive(trx, requestId) {
 async function orderedQuantityFor(conn, requestId) {
   // A REVOKED order (cancelled with the vendor) is not what arrives — the
   // manual replacement is; its packaged figure must not become the default.
-  const row = await conn('vendor_orders').where({ restock_request_id: requestId }).whereNotNull('placed_at').whereRaw("NULLIF(evidence->>'revokedAt', '') IS NULL").first('request_payload');
+  const row = await conn('vendor_orders').where({ restock_request_id: requestId }).whereRaw(maybePlacedSql('vendor_orders')).whereRaw("NULLIF(evidence->>'revokedAt', '') IS NULL").first('request_payload');
   const q = num(meta(row?.request_payload).orderedQuantity);
   return q && q > 0 ? q : null;
 }
@@ -443,7 +451,7 @@ async function monthlySpentCents(conn, { now = new Date(), excludeId = null } = 
     .whereRaw("NULLIF(evidence->>'revokedAt', '') IS NULL")
     .where('created_at', '>=', monthStart)
     .where('created_at', '<', nextMonthStart)
-    .where(function dispatched() { this.where('status', 'placing').orWhereNotNull('placed_at'); });
+    .where(function dispatched() { this.where('status', 'placing').orWhereRaw(maybePlacedSql('vendor_orders')); });
   if (excludeId) q = q.whereNot('id', excludeId);
   const row = await q.sum({ total: 'amount_cents' }).first();
   return Number(row?.total || 0);
@@ -652,10 +660,10 @@ async function reringPendingBells({ conn = db, notify = null, now = new Date() }
     // request is still open: staff who ordered by hand and marked it ordered
     // must not be told again (hook r27 P1). Dispatched rows (placed_at set)
     // carry reconciliation bells, re-rung in any live state.
-    .whereRaw("(vo.placed_at IS NOT NULL OR prr.status = 'open')")
+    .whereRaw(`(${maybePlacedSql('vo')} OR prr.status = 'open')`)
     .whereRaw("jsonb_exists(vo.evidence, 'bell')")
     .whereRaw("NULLIF(vo.evidence->>'bellAt', '') IS NULL")
-    .select('vo.id', 'vo.evidence', 'vo.placed_at', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name', ...FERTILIZER_COLUMNS.map((c) => `pc.${c}`));
+    .select('vo.id', 'vo.evidence', 'vo.placed_at', 'vo.error', 'prr.id as request_id', 'pc.name as product_name', 'v.name as vendor_name', ...FERTILIZER_COLUMNS.map((c) => `pc.${c}`));
   const rung = [];
   const pending = [];
   const held = [];
@@ -665,7 +673,7 @@ async function reringPendingBells({ conn = db, notify = null, now = new Date() }
     // June 1 - Sept 30: a pre-submit park's "order manually" for N/P
     // fertilizer waits (unsent) for the first run after Sept 30. A dispatched
     // order's reconciliation bell (placed_at set) still goes out.
-    if (!row.placed_at && fertilizerBlackoutHold({ name: row.product_name, ...row }, now)) { held.push(row.id); continue; }
+    if (!isMaybePlaced(row) && fertilizerBlackoutHold({ name: row.product_name, ...row }, now)) { held.push(row.id); continue; }
     const ok = await deliverBell(conn, { notify, ledgerId: row.id, requestId: row.request_id, productName: row.product_name || '?', vendorName: row.vendor_name || '?', title: bell.title, body: bell.body || '', v: bell.v || null });
     (ok ? rung : pending).push(row.id);
   }
@@ -927,9 +935,8 @@ async function lockedProductGuards(trx, { request }) {
     .where('prr.product_id', request.product_id)
     .whereNot('prr.id', request.id)
     // A sibling claim still placing counts too (its request may already be received — Codex r29 P1).
-    .whereRaw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)")
+    .whereRaw(liveOrderSql('vo'))
     .whereRaw(RECEIVED_SETTLES_SQL)
-    .whereRaw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL")
     .first('vo.id');
   if (unreconciled) return { skipped: 'prior_order_unreconciled', ledgerId: unreconciled.id };
   return null;
@@ -1749,6 +1756,10 @@ module.exports = {
   retireRequestBell,
   cancelAtClaim,
   findLiveAutoOrder,
+  maybePlacedSql,
+  liveOrderSql,
+  isMaybePlaced,
+  isOutstandingOrder,
   landedAfterReceiveFor,
   settleLandedAfterReceive,
   runVendorOrderDispatch,

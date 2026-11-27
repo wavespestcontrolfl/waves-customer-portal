@@ -3708,8 +3708,9 @@ function RestockActionCell({
         <span className="text-ink-secondary">Closed</span>
       </TD>
     );
-  // placedAt set means the order exists, so revokedAt needs no ?.
-  const orderOut = !!request.order?.placedAt && !request.order.revokedAt;
+  // `outstanding` is the server's one outstanding-order rule (placed, or a post-submit park even without its
+  // timestamp); an older payload falls back to placedAt.
+  const orderOut = request.order?.outstanding ?? (!!request.order?.placedAt && !request.order.revokedAt);
   return (
     <TD>
       <div className="grid gap-[6px] min-w-[220px]">

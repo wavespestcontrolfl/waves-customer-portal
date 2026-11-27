@@ -153,6 +153,72 @@ jest.setTimeout(60000);
     });
   });
 
+  describe('one outstanding-order rule: unrevoked and (placed_at set or a post-submit reason)', () => {
+    // A post-submit park whose placed_at is missing is still an order that may exist.
+    const noStamp = { reason: 'ambiguous_after_submit', placedAt: null };
+
+    test('a closed gate does not hand a sibling request to the office while such an order may be out, and its alert stays open', async () => {
+      const first = await fixture({ ledger: noStamp, requestOver: { status: 'cancelled' } });
+      const [second] = await mockConn('product_restock_requests').insert({
+        product_id: first.product.id, status: 'open', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id }),
+      }).returning('*');
+      process.env.GATE_AUTO_ORDER = 'false';
+      try {
+        const out = await run(second, adapter());
+        expect(out).toMatchObject({ skipped: 'gated', autoOrderLive: true });
+      } finally { process.env.GATE_AUTO_ORDER = 'true'; }
+      const all = await notes();
+      expect(all.filter((n) => (n.metadata.dedupeKey || '').startsWith('auto-reorder:'))).toEqual([]); // no "order manually"
+      expect(all.find((n) => n.id === first.note.id).done_at).toBeNull();
+      expect(await dispatch.findLiveAutoOrder(mockConn, first.product.id)).toBeTruthy();
+    });
+
+    test('the product guards block a new claim, and a revoked row stops counting', async () => {
+      const first = await fixture({ ledger: noStamp, requestOver: { status: 'cancelled' } });
+      const [second] = await mockConn('product_restock_requests').insert({
+        product_id: first.product.id, status: 'open', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id }),
+      }).returning('*');
+      const a = adapter();
+      expect(await run(second, a)).toMatchObject({ skipped: 'prior_order_unreconciled' });
+      expect(a.place).not.toHaveBeenCalled();
+      await mockConn('vendor_orders').where({ restock_request_id: first.request.id }).update({ evidence: JSON.stringify({ revokedAt: NOW.toISOString() }) });
+      expect(await dispatch.findLiveAutoOrder(mockConn, first.product.id)).toBeUndefined();
+      expect(await run(second, a)).toMatchObject({ status: 'placed' });
+    });
+
+    test('the month\'s spend counts such an order too', async () => {
+      await fixture({ ledger: { ...noStamp, amount: 31400, createdAt: NOW } });
+      await mockConn('vendor_orders').update({ created_at: NOW });
+      expect(await dispatch.monthlySpentCents(mockConn, { now: NOW })).toBe(31400);
+    });
+
+    test('Record vendor cancellation works on it: the row is revoked, the request closes, the alert closes', async () => {
+      const { request, row, note } = await fixture({ ledger: noStamp });
+      const revoke = require('../services/procurement/order-revoke');
+      expect(revoke.revokeBlocker(row)).toBeNull();
+      const out = await revoke.recordVendorCancellation(request.id, { orderId: row.id, version: revoke.versionOf(row), actorId: null });
+      expect(out).toEqual({ requestStatus: 'cancelled' });
+      const saved = await mockConn('vendor_orders').where({ id: row.id }).first();
+      expect(saved.evidence.revokedAt).toBeTruthy();
+      expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('cancelled');
+      expect((await mockConn('notifications').where({ id: note.id }).first()).done_at).not.toBeNull();
+    });
+
+    test('a pre-click park still has nothing to revoke', async () => {
+      const { row } = await fixture({ ledger: { reason: 'item_not_found' } });
+      expect(require('../services/procurement/order-revoke').revokeBlocker(row)).toMatchObject({ code: 'not_dispatched' });
+    });
+
+    test('isMaybePlaced / isOutstandingOrder follow the one rule', () => {
+      expect(dispatch.isMaybePlaced({ placed_at: NOW, error: null })).toBe(true);
+      expect(dispatch.isMaybePlaced({ placed_at: null, error: 'stale_placing: x' })).toBe(true);
+      expect(dispatch.isMaybePlaced({ placed_at: null, error: 'item_not_found: x' })).toBe(false);
+      expect(dispatch.isMaybePlaced({ placed_at: null, error: null })).toBe(false);
+      expect(dispatch.isOutstandingOrder({ placed_at: NOW, evidence: { revokedAt: 'x' } })).toBe(false);
+      expect(dispatch.isOutstandingOrder({ placed_at: null, error: 'no_final_total: x', evidence: {} })).toBe(true);
+    });
+  });
+
   describe('request open over 7 days', () => {
     const sync = (now) => require('../services/procurement/stale-request-alert').syncStaleRequestAlerts({ knex: mockConn, now });
     const alerts = () => mockConn('notifications').whereRaw("metadata->>'dedupeKey' LIKE 'restock-open:%'").orderBy('created_at');
@@ -183,6 +249,21 @@ jest.setTimeout(60000);
         expect(row.body).toContain('no order recorded, check the Sticker Mule account');
         expect(row.body).not.toMatch(/nothing ordered/i);
       }
+    });
+
+    test('a product or vendor name the alert copy rules refuse is left out, never failing the run', async () => {
+      await mockConn('vendors').where({ id: vendor.id }).update({ name: 'Acme Inc. Retry [x]' });
+      const bad = await fixture({ requestOver: { created_at: old(9) } });
+      await mockConn('products_catalog').where({ id: bad.product.id }).update({ name: 'Bait [12 pack]' });
+      const snake = await fixture({ requestOver: { created_at: old(120) } });
+      await mockConn('products_catalog').where({ id: snake.product.id }).update({ name: 'pest_bait_12' });
+      expect(await sync(NOW)).toEqual({ stale: 2, closed: 0 });
+      const rows = await alerts();
+      const badRow = rows.find((r) => r.metadata.dedupeKey.endsWith(bad.request.id));
+      expect(badRow.title).toBe('Inventory — check an automatic restock request, open 9 days');
+      expect(badRow.body).toBe(`Open since ${badRow.body.slice(11, badRow.body.indexOf(';'))}; no order recorded, check the vendor account.`);
+      const longRow = rows.find((r) => r.metadata.dedupeKey.endsWith(snake.request.id));
+      expect(longRow.title).toBe('Inventory — restock request open 120 days');
     });
 
     test('the next day refreshes the same row quietly, and a read row stays read', async () => {
