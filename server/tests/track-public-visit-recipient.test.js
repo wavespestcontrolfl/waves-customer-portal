@@ -75,7 +75,7 @@ function install(row, { holderRow = null } = {}) {
     // Any write through the handle is recorded: a recipient GET must make none.
     for (const m of ['update', 'insert', 'del', 'delete', 'upsert', 'increment']) q[m] = jest.fn(() => { writes.push(`${table}.${m}`); return q; });
     q.where = jest.fn((arg, val) => { if ((arg && arg['s.track_view_token']) || (arg === 's.track_view_token' && val)) byToken = true; return q; });
-    for (const m of ['leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit']) q[m] = jest.fn(() => q);
+    for (const m of ['leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'whereNotExists', 'select', 'limit']) q[m] = jest.fn(() => q);
     // The recipient's final read joins its own row (track-public.js withRecipientRow): the ON pairs and the WHERE are recorded,
     // and `recipientJoinMatches` false is a row deleted or rebound since the permission reads (the join finds nothing).
     let joined = false;
@@ -552,7 +552,7 @@ describe('no route forwards or logs the bearer token when the FIRST query fails'
     mockDb.raw = jest.fn((sql) => sql);
     mockDb.mockImplementation(() => {
       const q = {};
-      for (const m of ['where', 'leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'select', 'limit']) q[m] = jest.fn(() => q);
+      for (const m of ['where', 'leftJoin', 'whereNotNull', 'orderBy', 'whereRaw', 'whereNotExists', 'select', 'limit']) q[m] = jest.fn(() => q);
       q.first = jest.fn(async () => { throw knexLike(token); });
       return q;
     });

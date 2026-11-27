@@ -468,6 +468,7 @@ function compactLineItem(item = {}) {
     ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
     ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
     ...(typeof item.legacyWholeHomeSizing === 'boolean' ? { legacyWholeHomeSizing: item.legacyWholeHomeSizing } : {}),
+    ...(typeof item.legacyLawnOneLane === 'boolean' ? { legacyLawnOneLane: item.legacyLawnOneLane } : {}),
     ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),
     annual: item.annualAfterDiscount ?? item.annual ?? null,
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
@@ -736,6 +737,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
                 : {}),
               ...(typeof estimate.pricingMetadata.legacyWholeHomeSizing === 'boolean'
                 ? { legacyWholeHomeSizing: estimate.pricingMetadata.legacyWholeHomeSizing }
+                : {}),
+              ...(typeof estimate.pricingMetadata.legacyLawnOneLane === 'boolean'
+                ? { legacyLawnOneLane: estimate.pricingMetadata.legacyLawnOneLane }
                 : {}),
               ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
                 ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }

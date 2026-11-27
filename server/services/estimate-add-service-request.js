@@ -258,7 +258,7 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
   // The saved price-rule signals: the rules the estimate was priced with, the services an earlier revision added under
   // the current rules, and the palm minimum a sold palm line carries (a Settings edit never moves an existing line).
   const savedRules = require('./estimate-floor-signal-replay').savedFloorReplaySignals(estData);
-  for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyWdoFlat', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'legacyWholeHomeSizing', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay']) {
+  for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyWdoFlat', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'legacyWholeHomeSizing', 'legacyLawnOneLane', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay']) {
     if (savedRules[key] !== undefined) updatedInputs[key] = savedRules[key];
   }
   // Preserve the original quote's Year-1 prepay decision explicitly (boolean so
@@ -283,7 +283,7 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
     const draftEstimateData = removeSendSnapshotPricingBundle({
       ...estData,
       // The replay-only price-rule keys ride the saved result's stamp, never the stored inputs.
-      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, legacyTwoStoryRoof: _t, legacyWdoFlat: _wf, legacyOneTimePestBuffer: _w, legacyPestAboveTable: _pa, legacyWholeHomeSizing: _wh, legacySpecialty1126: _s, specialty1126CurrentServices: _y, oneTimePestCurrentServices: _o, currentRulesServices: _c, palmMinPerVisitReplay: _p, year1PrepayNoPercent: _yp, ...rest }) => rest)(updatedInputs),
+      inputs: (({ addedServiceKeys: _a, legacyPricingRules: _l, legacyTwoStoryRoof: _t, legacyWdoFlat: _wf, legacyOneTimePestBuffer: _w, legacyPestAboveTable: _pa, legacyWholeHomeSizing: _wh, legacyLawnOneLane: _ll, legacySpecialty1126: _s, specialty1126CurrentServices: _y, oneTimePestCurrentServices: _o, currentRulesServices: _c, palmMinPerVisitReplay: _p, year1PrepayNoPercent: _yp, ...rest }) => rest)(updatedInputs),
       result: legacyResult,
       baseMonthly: newBaseMonthly > 0 ? newBaseMonthly : (estData?.baseMonthly || 0),
       onetimeTotalBase: newOneTime,

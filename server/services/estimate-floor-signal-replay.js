@@ -419,6 +419,38 @@ function savedLegacyWholeHomeSizingSignal(rawEstData) {
   return { legacyWholeHomeSizing: flag };
 }
 
+// One lawn price lane (owner 2026-11-26, new quotes only: a bermuda or zoysia plan reads the St. Augustine rows of the market
+// table, and a one-time lawn treatment is 1.8 x the St. Augustine anchor for every grass, +20% for insect or fungus work). Its own
+// stamp, read by the same reader: true = priced before the rule (each grass's own rows, the Settings multiple and treatment
+// factors, the existing code), false = priced under it. An estimate with priced lines and no stamp predates the rule; one with no
+// priced lines pins nothing. An estimate that kept only its inputs but asks for lawn care, a one-time lawn treatment or the lawn
+// pest knockdown was saved before the rule too, on a first send, a resend and every replay (a fresh draft the engine priced
+// carries its stamp, false). Plan-wide, no per-service marker: a lawn service a revision adds to a legacy estimate stays on the
+// old rule, as pest above the table does.
+function storedRequestsLawn(estData) {
+  const data = normalizeStored(estData);
+  if (!data || typeof data !== 'object') return false;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  // The builder request names its services as tokens (LAWN = the plan, OT_LAWN = the one-time treatment), as it names PEST.
+  if (request && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => ['LAWN', 'OT_LAWN'].includes(String(key || '').toUpperCase()))) return true;
+  // The office form saves its own flags (svcLawn = the plan, svcOnetimeLawn = the one-time treatment and the lawn pest
+  // knockdown), not a services block (pre-push audit P1): an unstamped draft holding them asks for lawn too.
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => carrier && typeof carrier === 'object' && (
+      carrier.svcLawn === true || carrier.svcOnetimeLawn === true
+      || (carrier.services && typeof carrier.services === 'object'
+        && !!(carrier.services.lawn || carrier.services.oneTimeLawn || carrier.services.lawnPestControl))));
+}
+
+function savedLegacyLawnOneLaneSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { flag } = readRuleStamp(estData, 'legacyLawnOneLane');
+  if (flag === undefined && storedRequestsLawn(estData)) return { legacyLawnOneLane: true };
+  return { legacyLawnOneLane: flag };
+}
+
 // Which pest services a stored estimate priced (or asked for), from EVERY shape the estimate page's choice and breakdown readers read
 // (routes/estimate-public.js: oneTimePestChoiceAmountFromResultStats / FromRecurringServices / FromBreakdown, normalizeOneTimeBreakdown,
 // recurringServicesWithSupplements). One list of shapes, kept here so the stamp reader and the page cannot drift (a table test names each).
@@ -529,6 +561,7 @@ const FROZEN_RULE_STAMPS = [
   ['legacyOneTimePestBuffer', (data) => savedLegacyOneTimePestBufferSignal(data).legacyOneTimePestBuffer],
   ['legacyPestAboveTable', (data) => savedLegacyPestAboveTableSignal(data).legacyPestAboveTable],
   ['legacyWholeHomeSizing', (data) => savedLegacyWholeHomeSizingSignal(data).legacyWholeHomeSizing],
+  ['legacyLawnOneLane', (data) => savedLegacyLawnOneLaneSignal(data).legacyLawnOneLane],
   ['legacySpecialty1126', (data) => savedLegacySpecialty1126Signal(data).legacySpecialty1126],
 ];
 
@@ -611,6 +644,7 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLegacyOneTimePestBufferSignal(estData));
   Object.assign(signals, savedLegacyPestAboveTableSignal(estData));
   Object.assign(signals, savedLegacyWholeHomeSizingSignal(estData));
+  Object.assign(signals, savedLegacyLawnOneLaneSignal(estData));
   Object.assign(signals, savedLegacySpecialty1126Signal(estData));
   const currentSpecialty = savedSpecialty1126CurrentServices(estData);
   if (currentSpecialty.length) signals.specialty1126CurrentServices = currentSpecialty;
@@ -642,6 +676,7 @@ module.exports = {
   savedLegacyOneTimePestBufferSignal,
   savedLegacyPestAboveTableSignal,
   savedLegacyWholeHomeSizingSignal,
+  savedLegacyLawnOneLaneSignal,
   savedLegacySpecialty1126Signal,
   savedSpecialty1126CurrentServices,
   savedOneTimePestRuleLegacy,

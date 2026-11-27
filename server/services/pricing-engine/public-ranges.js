@@ -93,7 +93,9 @@ function purchaseGateOn(key) {
 }
 
 // The grass tracks the RECURRING lawn program range sweeps: with GATE_LAWN_V13 on there is no bahia
-// program, so the range no longer prices one. The one-time rows keep every bracket track.
+// program, so the range no longer prices one. A bermuda or zoysia plan reads the St. Augustine market rows (one lawn price
+// lane, owner 2026-11-26) but keeps its own cost, so an armed cost floor can still lift it above them: every track is swept.
+// The one-time rows are one price for every grass (their anchor never takes the floor) and sweep no track.
 function recurringLawnTracks() {
   const { bahiaHasNoProgram } = require('../lawn-program');
   return Object.keys(constants.LAWN_BRACKETS).filter((track) => !bahiaHasNoProgram(track));
@@ -524,21 +526,21 @@ function buildRows() {
       // No lawn plan collects under the minimum after discounts (owner
       // 2026-11-06), so no list price under it is advertised either.
       (r) => Math.max(r.perApp, Number(constants.LAWN_PRICING_V2.minimumPerVisitAfterDiscount) || 0)),
-    notes: `${lawnCadenceText} applications per year by tier; priced by grass type and treatable turf area — larger or more complex lawns price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
+    notes: `${lawnCadenceText} applications per year by tier; priced by treatable turf area — larger or more complex lawns price higher. WaveGuard bundle tiers discount up to ${maxWaveGuardPct}%.`,
   }));
 
   add('one_time_lawn', () => rangeRow({
     key: 'one_time_lawn',
     name: 'One-Time Lawn Treatment',
     unit: 'per treatment',
+    // One price for every grass (one lawn price lane, owner 2026-11-26): the sweep has no grass dimension.
     values: sweepValues(
       TYPICAL_TURF.flatMap((sq) =>
         ['weed', 'fungicide', 'pest', 'fert'].flatMap((treatmentType) =>
-          Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-            LAWN_TIER_KEYS.map((tier) => ({ sq, treatmentType, track, tier }))))),
-      ({ sq, treatmentType, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, tier, isRecurringCustomer: false }),
+          LAWN_TIER_KEYS.map((tier) => ({ sq, treatmentType, tier })))),
+      ({ sq, treatmentType, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, tier, isRecurringCustomer: false }),
       (r) => r.price),
-    notes: 'Priced by treatment type, grass type, and turf area. A recurring lawn plan prices lower.',
+    notes: 'Priced by treatment type and turf area. A recurring lawn plan prices lower.',
   }));
 
   add('lawn_pest_knockdown', () => rangeRow({
@@ -549,10 +551,8 @@ function buildRows() {
     // turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs)
     // priced via the one-time lawn 'pest' multiplier as its own line.
     values: sweepValues(
-      TYPICAL_TURF.flatMap((sq) =>
-        Object.keys(constants.LAWN_BRACKETS).flatMap((track) =>
-          LAWN_TIER_KEYS.map((tier) => ({ sq, track, tier })))),
-      ({ sq, track, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', track, tier, isRecurringCustomer: false }),
+      TYPICAL_TURF.flatMap((sq) => LAWN_TIER_KEYS.map((tier) => ({ sq, tier }))),
+      ({ sq, tier }) => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'pest', tier, isRecurringCustomer: false }),
       (r) => r.price),
     notes: 'Standalone turf-pest treatment (chinch bugs, sod webworms, armyworms, grubs); can be combined with a weed treatment.',
   }));

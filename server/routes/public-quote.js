@@ -3429,6 +3429,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacyWholeHomeSizing === 'boolean'
                 ? { legacyWholeHomeSizing: estimate.pricingMetadata.legacyWholeHomeSizing }
                 : {}),
+              // One lawn price lane (new quotes only, owner 2026-11-26): its own stamp.
+              ...(typeof estimate.pricingMetadata.legacyLawnOneLane === 'boolean'
+                ? { legacyLawnOneLane: estimate.pricingMetadata.legacyLawnOneLane }
+                : {}),
               // Specialty prices (bed bug rooms, mosquito above 2 acres, wasp level; 2026-11-26): ONE stamp.
               ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
                 ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }
@@ -3446,6 +3450,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
             ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
             ...(typeof item.legacyWholeHomeSizing === 'boolean' ? { legacyWholeHomeSizing: item.legacyWholeHomeSizing } : {}),
+            ...(typeof item.legacyLawnOneLane === 'boolean' ? { legacyLawnOneLane: item.legacyLawnOneLane } : {}),
             ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,

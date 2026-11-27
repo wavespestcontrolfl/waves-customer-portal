@@ -479,6 +479,17 @@ const GRASS_TYPE_ALIASES = {
   zoysia: ['C2', 'ZOYSIA', 'zoysia'],
   bahia: ['D', 'BAHIA', 'bahia'],
 };
+// One lawn price lane (owner 2026-11-26, "make these one type of grass"; new quotes only). A new bermuda or zoysia lawn plan reads
+// the `priceTrack` rows of the market table below instead of its own, and a new one-time lawn treatment anchors on those rows for
+// every grass (ONE_TIME.lawn.newRule). The grass stays a real input everywhere else: the program and its products, the cost
+// floor, the cost-plus list, the Bermuda add-ons, the bahia review and the track a line reports. A quote saved before the rule
+// (legacyLawnOneLane stamp) reads its own grass's rows, as it was sold, so the bermuda and zoysia rows below still price those.
+// Bahia plans keep their own rows (they park for review under GATE_LAWN_V13). CODE, not a Setting: no pricing_config row reaches
+// it. (Not frozen: db-bridge snapshots and restores every export of this module in place.)
+const LAWN_ONE_LANE = {
+  priceTrack: 'st_augustine',
+  recurringTracks: ['bermuda', 'zoysia'],
+};
 
 // Bracket tables: [sqft, 6-app, 9-app, 12-app] (basic/4x column removed —
 // owner directive 2026-08-04; the tier is fully retired, see LAWN_TIERS).
@@ -1623,6 +1634,16 @@ const ONE_TIME = {
     // pricing_config.onetime_lawn.recurringPerAppMultiplier (migration
     // 20261104210000 moves a row still at the old 1.50).
     oneTimeMultiplier: 2.20,
+    // New quotes (owner 2026-11-26, one lawn price lane): 1.8 x the St. Augustine 6-visit per-application price for every grass, at
+    // one price for fertilizer and weed work and +20% for insect or fungus work. `oneTimeMultiplier` and `treatmentMultipliers`
+    // above are untouched: they are still the price of every quote saved before the rule (legacyLawnOneLane stamp). `newRule` is
+    // CODE, not a Setting: no pricing_config row, db-bridge or admin save reaches it, so an edit can never move the price on a link
+    // already sent. A future change of these numbers is a new code rule with its own stamp. The $115 `floor` stays the live Setting
+    // for both rules.
+    newRule: Object.freeze({
+      multiplier: 1.8,
+      treatmentMultipliers: Object.freeze({ fert: 1.00, fertilization: 1.00, weed: 1.00, pest: 1.20, fungicide: 1.20 }),
+    }),
   },
   mosquito: {
     // Repriced 2026-07 to sit ~25% under the one-time pest band (quarterly
@@ -2875,7 +2896,7 @@ module.exports = {
   HARDSCAPE, HARDSCAPE_ADDITIONS, BED_DENSITY, BED_AREA_REVIEW_SQFT, TREE_SHRUB_FALLBACK_BED_SQFT, TURF_FACTORS,
   PEST, LAWN_TIERS, LAWN_SOLD_TIERS, LAWN_PRICING_V2, BERMUDA_SUPPRESSION_COST_DEFAULTS, LAWN_BERMUDA_REMOVAL_SPRAYS_PER_YEAR, LAWN_COST_PLUS_LIST_DEFAULTS, LAWN_FREQS, LAWN_TABLE_MAX_SQFT, LAWN_TRACK_DISPLAY,
   LAWN_CADENCE_DISCOUNT, LAWN_ENHANCED_MONTHLY_CAP_RATIO, LAWN_PREMIUM_MONTHLY_CAP_RATIO,
-  GRASS_TYPE_ALIASES, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
+  GRASS_TYPE_ALIASES, LAWN_ONE_LANE, LAWN_BRACKETS, SHADE_N_RATE, SHADE_RULES,
   TREE_SHRUB, COMMERCIAL_LAWN, COMMERCIAL_TREE_SHRUB, COMMERCIAL_PEST,
   COMMERCIAL_MOSQUITO, COMMERCIAL_TERMITE_BAIT, COMMERCIAL_RODENT_BAIT, PALM, MOSQUITO, MOSQUITO_MISTING, MOSQUITO_MISTING_CONVERSION_READY, mosquitoMistingPricingDefaults, TERMITE, RODENT,
   ONE_TIME, AREA_ADDONS, areaAddOnConfig, isAreaAddOnCatalogKey, areaAddOnPricingDefaults, SPECIALTY, BED_BUG, WAVEGUARD, ACH_DISCOUNT,
