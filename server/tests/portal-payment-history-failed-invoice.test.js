@@ -31,13 +31,24 @@ function makeDb(invoiceRows = []) {
     const query = { _statuses: null, _draftIds: null, _ids: null, _numbers: null };
     const subQuery = (isStatusGroup) => {
       const sq = {
+        where: (col, val) => {
+          if (isStatusGroup && col === 'status' && val === 'draft') sq._requireDraft = true;
+          return sq;
+        },
         whereIn: (col, vals) => {
           if (col === 'status') query._statuses = vals;
+          else if (isStatusGroup && col === 'id' && sq._requireDraft) query._draftIds = vals.map(String);
+          return sq;
+        },
+        orWhere: (fn) => {
+          if (typeof fn === 'function') {
+            const nested = subQuery(isStatusGroup);
+            fn.call(nested, nested);
+          }
           return sq;
         },
         orWhereIn: (col, vals) => {
-          if (isStatusGroup && col === 'id') query._draftIds = vals.map(String);
-          else if (col === 'id') query._ids = vals.map(String);
+          if (col === 'id') query._ids = vals.map(String);
           else if (col === 'invoice_number') query._numbers = vals;
           return sq;
         },
@@ -68,7 +79,7 @@ function makeDb(invoiceRows = []) {
       if (table !== 'invoices') return [];
       return invoiceRows.filter((inv) => {
         const statusMatch = query._statuses ? query._statuses.includes(inv.status) : true;
-        const draftMatch = query._draftIds ? query._draftIds.includes(String(inv.id)) : false;
+        const draftMatch = query._draftIds ? (inv.status === 'draft' && query._draftIds.includes(String(inv.id))) : false;
         if (query._statuses && !statusMatch && !draftMatch) return false;
         if (inv.payer_id || inv.payer_statement_id) return false;
         const idMatch = query._ids ? query._ids.includes(String(inv.id)) : false;
@@ -221,6 +232,23 @@ describe('listPortalPayments — failed-row payableInvoice linkage', () => {
     const byId = Object.fromEntries(res.payments.map((p) => [p.id, p]));
     expect(byId['fail-draft-active'].payableInvoice?.payUrl).toBe('/pay/tok-draft-ok');
     expect(byId['fail-draft-superseded'].payableInvoice).toBeNull();
+  });
+
+  test('rejects an invoice in failedDraftIds whose status moved from draft to void or processing', async () => {
+    loadFailedPaymentFacts.mockResolvedValue({
+      rows: [{ id: 'fail-moved-void', metadata: JSON.stringify({ invoice_id: INV_DRAFT_ACTIVE }), retry_count: 1, next_retry_at: null }],
+      failedInvoiceIds: [INV_DRAFT_ACTIVE],
+      balanceCarryingInvoiceIds: new Set(),
+    });
+    db.mockImplementation(makeDb([
+      { id: INV_DRAFT_ACTIVE, token: 'tok-void', invoice_number: 'WV-2012', status: 'void', total: 75, credit_applied: 0, amount_paid: 0 },
+    ]));
+    stripe.getPaymentHistory.mockResolvedValue([
+      { id: 'fail-moved-void', payment_date: '2026-11-20', amount: 75, status: 'failed', description: 'Pest Control', metadata: JSON.stringify({ invoice_id: INV_DRAFT_ACTIVE }) },
+    ]);
+
+    const res = await listPortalPayments('cust-1');
+    expect(res.payments[0].payableInvoice).toBeNull();
   });
 
   test('fails closed and emits no payableInvoice when payer ownership lookup failed', async () => {

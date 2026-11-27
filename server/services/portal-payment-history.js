@@ -154,7 +154,11 @@ async function payableInvoiceIndexFor(customerId, visiblePayments, database = db
       .where({ customer_id: customerId })
       .where(function openOrEligibleDraft() {
         this.whereIn('status', ['sent', 'viewed', 'overdue']);
-        if (draftIds.size) this.orWhereIn('id', [...draftIds]);
+        if (draftIds.size) {
+          this.orWhere(function eligibleDraft() {
+            this.where('status', 'draft').whereIn('id', [...draftIds]);
+          });
+        }
       })
       .whereNull('payer_id')
       .whereNull('payer_statement_id')
@@ -169,7 +173,9 @@ async function payableInvoiceIndexFor(customerId, visiblePayments, database = db
       .select('id', 'status', 'token', 'invoice_number', 'due_date', 'total', 'credit_applied', 'amount_paid', 'scheduled_service_id');
 
     for (const row of rows) {
-      if (!row.token || (row.status === 'draft' && !draftIds.has(String(row.id)))) continue;
+      const statusEligible = ['sent', 'viewed', 'overdue'].includes(row.status)
+        || (row.status === 'draft' && draftIds.has(String(row.id)));
+      if (!row.token || !statusEligible) continue;
       // Live payer re-resolution (fail closed): a payer assigned after invoice
       // creation can live only on scheduled_services or the customer default.
       if (!(await rowIsSelfPayDue(customerId, row, { database }))) continue;

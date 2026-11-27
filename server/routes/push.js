@@ -30,9 +30,17 @@ router.get('/status', async (req, res, next) => {
 
 router.post('/native-subscribe', async (req, res, next) => {
   try {
-    const { platform, token, deviceInfo } = req.body || {};
+    const { platform, token, deviceInfo, disabledChannels: rawDisabledChannels } = req.body || {};
     if (platform !== 'ios' && platform !== 'android') return res.status(400).json({ error: 'unsupported platform' });
     if (!token || typeof token !== 'string') return res.status(400).json({ error: 'device token required' });
+
+    // On Android, record any Waves notification channels the user explicitly
+    // muted in OS settings (IMPORTANCE_NONE) so push-first routing falls back
+    // to SMS for those channels instead of letting FCM accept a suppressed alert.
+    const knownAndroidChannels = new Set(Object.values(require('../services/fcm').ANDROID_CHANNELS || {}));
+    const disabledChannels = platform === 'android' && Array.isArray(rawDisabledChannels)
+      ? [...new Set(rawDisabledChannels.filter((id) => typeof id === 'string' && knownAndroidChannels.has(id)))]
+      : [];
 
     // deviceInfo is optional client metadata — only trust it if it's a string,
     // else fall back to the user-agent. Guards against a non-string (e.g. a JSON
@@ -44,9 +52,13 @@ router.post('/native-subscribe', async (req, res, next) => {
       role: 'customer',
       platform,
       device_token: token,
-      // subscription_data is NOT NULL on the table; store the token as JSON so
-      // the constraint holds without a schema change for the web column.
-      subscription_data: JSON.stringify({ token }),
+      // subscription_data is NOT NULL on the table; store the token (plus any
+      // user-disabled Android channel IDs) as JSON so the constraint holds
+      // without a schema change for the web column.
+      subscription_data: JSON.stringify({
+        token,
+        ...(disabledChannels.length ? { disabledChannels } : {}),
+      }),
       device_info: safeDeviceInfo.slice(0, 100),
       active: true,
       // Whose device this is (contact login, GATE_CONTACT_LOGIN): the

@@ -6,5 +6,6 @@ export const PushNotifications = {
   removeAllListeners: async () => {},
   checkPermissions: async () => ({ receive: 'denied' }),
   createChannel: async () => {},
+  listChannels: async () => ({ channels: [] }),
 };
 export default { PushNotifications };

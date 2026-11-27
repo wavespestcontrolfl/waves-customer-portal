@@ -100,9 +100,17 @@ describe('POST /api/push/native-subscribe — account deletion race serializatio
       return cb(trx);
     });
 
-    const res = await invokeRoute('POST', '/native-subscribe', { platform: 'android', token: 'fcm-token-456' });
+    const res = await invokeRoute('POST', '/native-subscribe', {
+      platform: 'android',
+      token: 'fcm-token-456',
+      disabledChannels: ['waves_billing', 'unknown_channel'],
+    });
     expect(lockedForUpdate).toBe(true);
     expect(insertedRow).toMatchObject({ customer_id: 'cust-1', platform: 'android', device_token: 'fcm-token-456', active: true });
+    expect(JSON.parse(insertedRow.subscription_data)).toEqual({
+      token: 'fcm-token-456',
+      disabledChannels: ['waves_billing'],
+    });
     expect(res).toEqual({ status: 200, body: { ok: true, id: 'sub-ok' } });
   });
 });

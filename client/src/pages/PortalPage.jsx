@@ -52,7 +52,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import useAppNotifications from '../hooks/useAppNotifications';
 import { isNativeApp, nativePlatform } from '../native/platform';
-import { dismissVisibleDialog, registerBackButtonHandler } from '../native/nativeBackButton';
+import { dismissVisibleDialog, minimizeOrExitAndroidApp, registerBackButtonHandler } from '../native/nativeBackButton';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
@@ -19036,7 +19036,11 @@ export default function PortalPage() {
       switchTab(homeTab);
       return true;
     }
-    return false;
+    // Already at the resolved home tab (including ?tab=visits / ?tab=plan for
+    // cancelled or contact sessions): minimize cleanly instead of falling back
+    // to window.history.back(), which can ping-pong back to a previous tab.
+    void minimizeOrExitAndroidApp();
+    return true;
   }), [showReportIssue, showChat, showWavesChat, showPhotoId, showMoreSheet, showMenu, activeTab, homeTab]);
 
   if (!customer) return null;

@@ -72,6 +72,23 @@ function authToken() {
   return localStorage.getItem('waves_token') || '';
 }
 
+async function readDisabledAndroidChannels() {
+  if (nativePlatform() !== 'android') return [];
+  try {
+    const { PushNotifications } = await pushPlugin();
+    if (typeof PushNotifications?.listChannels !== 'function') return [];
+    const res = await PushNotifications.listChannels();
+    const list = Array.isArray(res?.channels) ? res.channels : [];
+    const known = new Set(ANDROID_NOTIFICATION_CHANNELS.map((c) => c.id));
+    return list
+      .filter((ch) => known.has(ch?.id) && Number(ch?.importance) === 0)
+      .map((ch) => ch.id)
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 async function postToken(token) {
   rememberToken(token);
   const jwt = authToken();
@@ -85,11 +102,17 @@ async function postToken(token) {
   // token here.) Default to 'ios' for anything non-Android (this only runs on a
   // native platform — initNativePush gates on isNativeApp).
   const platform = nativePlatform() === 'android' ? 'android' : 'ios';
+  const disabledChannels = platform === 'android' ? await readDisabledAndroidChannels() : [];
   try {
     if (inflightDeactivation) await inflightDeactivation;
     await api.request('/push/native-subscribe', {
       method: 'POST',
-      body: JSON.stringify({ platform, token, deviceInfo: `${platform} · WavesApp` }),
+      body: JSON.stringify({
+        platform,
+        token,
+        deviceInfo: `${platform} · WavesApp`,
+        ...(disabledChannels.length ? { disabledChannels } : {}),
+      }),
     });
     if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
     pendingToken = null;

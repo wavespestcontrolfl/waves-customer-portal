@@ -379,3 +379,34 @@ it('creates Android notification channels on Android startup using system defaul
     expect(ch.sound).toBeUndefined();
   }
 });
+
+it('reports Android channels disabled by the user (importance 0) when registering the push token', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => ({
+    channels: [
+      { id: 'waves_service_updates', importance: 4 },
+      { id: 'waves_billing', importance: 0 },
+      { id: 'waves_messages', importance: 4 },
+    ],
+  }));
+  localStorage.setItem('waves_token', 'jwt-android');
+  api.request.mockResolvedValueOnce({ ok: true, id: 'sub-a1' });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  await nativeMocks.state.listeners.registration({ value: 'fcm-device-token' });
+
+  expect(api.request).toHaveBeenCalledWith(
+    '/push/native-subscribe',
+    expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        platform: 'android',
+        token: 'fcm-device-token',
+        deviceInfo: 'android · WavesApp',
+        disabledChannels: ['waves_billing'],
+      }),
+    }),
+  );
+});

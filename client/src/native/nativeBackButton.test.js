@@ -130,4 +130,21 @@ describe('nativeBackButton (Android hardware/gesture Back)', () => {
     expect(await handleAndroidBackButton({ canGoBack: false }, App)).toBe('minimized');
     expect(App.exitApp).toHaveBeenCalledTimes(1);
   });
+
+  it('minimizes cleanly when PortalPage is already on a query-string home tab (cancelled/contact)', async () => {
+    window.history.replaceState({}, '', '/?tab=visits');
+    const backSpy = vi.spyOn(window.history, 'back').mockImplementation(() => {});
+    const unregister = registerBackButtonHandler(() => {
+      void App.minimizeApp();
+      return true;
+    });
+    try {
+      expect(await handleAndroidBackButton({ canGoBack: true }, App)).toBe('handled');
+      expect(App.minimizeApp).toHaveBeenCalledTimes(1);
+      expect(backSpy).not.toHaveBeenCalled();
+    } finally {
+      unregister();
+      backSpy.mockRestore();
+    }
+  });
 });

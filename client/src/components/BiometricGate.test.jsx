@@ -155,6 +155,33 @@ it('expires biometric grace and re-prompts when the device clock moves backward'
   await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
 });
 
+it('prevents a backward wall-clock adjustment from reviving an expired grace window', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-27T12:00:00Z'));
+  const { authenticateBiometric } = await import('../native/biometric');
+  authenticateBiometric.mockResolvedValue(true);
+
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+
+  await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  // Advance 10 minutes (past the 5-minute grace window on both wall & monotonic clocks).
+  await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+  platformState.listeners.forEach((fn) => fn({ isActive: false }));
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+  // Move wall clock backward into the original 5-minute window (12:02, +2 min after unlock).
+  // Monotonic elapsed time is still 10 minutes, so the lock MUST re-prompt.
+  vi.setSystemTime(new Date('2026-11-27T12:02:00Z'));
+  platformState.listeners.forEach((fn) => fn({ isActive: true }));
+  await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
+});
+
 it('minimizes the app on Android Back while locked instead of dismissing the lock', async () => {
   platformState.platform = 'android';
   const { App } = await import('@capacitor/app');

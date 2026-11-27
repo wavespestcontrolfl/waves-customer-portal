@@ -97,7 +97,9 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
   const suppressStateRef = useRef(false);  // ignore app-state churn our own prompt causes
   const lockedRef = useRef(false);         // latest lock state for the stable listener closure
   const needsPhoneCodeRef = useRef(false); // latest phone-code fallback state
-  const lastUnlockedAtRef = useRef(0);     // wall-clock timestamp of last successful unlock
+  const lastUnlockedAtRef = useRef(0);     // wall-clock timestamp of last successful unlock (covers sleep)
+  const lastUnlockedMonoRef = useRef(null); // monotonic timestamp of last unlock (guards against clock rollbacks)
+  const graceTimerRef = useRef(null);      // invalidates unlock anchors as soon as graceMs elapses
   const suppressTimerRef = useRef(null);   // pending timer that clears suppressStateRef
   // Our own camera / photo picker (the native camera sheet or an <input type="file">,
   // e.g. Photo ID) covers the
@@ -150,7 +152,23 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
       setNeedsPhoneCode(phoneCode);
       needsPhoneCodeRef.current = phoneCode;
       const unlocked = ok === true && stillForeground;
-      if (unlocked) lastUnlockedAtRef.current = Date.now();
+      if (graceTimerRef.current) { clearTimeout(graceTimerRef.current); graceTimerRef.current = null; }
+      if (unlocked) {
+        lastUnlockedAtRef.current = Date.now();
+        lastUnlockedMonoRef.current = typeof performance !== 'undefined' && typeof performance.now === 'function'
+          ? performance.now()
+          : null;
+        if (graceMs > 0) {
+          graceTimerRef.current = setTimeout(() => {
+            lastUnlockedAtRef.current = 0;
+            lastUnlockedMonoRef.current = null;
+            graceTimerRef.current = null;
+          }, graceMs);
+        }
+      } else {
+        lastUnlockedAtRef.current = 0;
+        lastUnlockedMonoRef.current = null;
+      }
       setLocked(!unlocked);
       lockedRef.current = !unlocked;
       // Keep ignoring app-state changes briefly to swallow the trailing foreground
@@ -163,7 +181,7 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
         suppressTimerRef.current = null;
       }, 700);
     }
-  }, []);
+  }, [graceMs]);
 
   // Phone code fallback: sign out (the saved credentials go first, so the
   // reload cannot land back on this lock), then open the code sign-in.
@@ -197,9 +215,31 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
     if (!isNativeApp()) return undefined;
     attempt();
     const withinGrace = () => {
-      if (graceMs <= 0 || needsPhoneCodeRef.current || lastUnlockedAtRef.current <= 0) return false;
-      const elapsed = Date.now() - lastUnlockedAtRef.current;
-      return elapsed >= 0 && elapsed < graceMs;
+      const monoNow = typeof performance !== 'undefined' && typeof performance.now === 'function'
+        ? performance.now()
+        : null;
+      const wallElapsed = Date.now() - lastUnlockedAtRef.current;
+      const monoElapsed = monoNow !== null && lastUnlockedMonoRef.current !== null
+        ? monoNow - lastUnlockedMonoRef.current
+        : -1;
+      // Require BOTH clocks to agree and stay inside graceMs: wall clock covers
+      // device sleep where performance.now() may pause, while monotonic clock
+      // prevents a backward wall-clock adjustment from reviving an expired window.
+      // Fail closed if elapsed time is uncertain or rolled back, and clear both
+      // anchors permanently once expired so later clock edits cannot revive grace.
+      const ok = graceMs > 0
+        && !needsPhoneCodeRef.current
+        && lastUnlockedAtRef.current > 0
+        && monoElapsed >= 0
+        && wallElapsed >= 0
+        && wallElapsed < graceMs
+        && monoElapsed < graceMs
+        && (wallElapsed + 2000) >= monoElapsed;
+      if (!ok) {
+        lastUnlockedAtRef.current = 0;
+        lastUnlockedMonoRef.current = null;
+      }
+      return ok;
     };
     // Clear the app-switcher privacy cover immediately when returning within
     // the grace window; otherwise require fresh biometric auth.
@@ -299,6 +339,7 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
       document.removeEventListener('cancel', onPickerDone, true);
       document.removeEventListener(NATIVE_PICKER_EVENT, onNativePicker);
       clearTimeout(graceTimer);
+      if (graceTimerRef.current) { clearTimeout(graceTimerRef.current); graceTimerRef.current = null; }
       try { listener?.remove?.(); } catch { /* noop */ }
     };
   }, [attempt, graceMs]);
