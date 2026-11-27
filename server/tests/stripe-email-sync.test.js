@@ -3,13 +3,13 @@
  * linked Stripe customer, under the customer row lock, never onto a Stripe id another row shares.
  */
 describe('stripe-email-sync processJob', () => {
-  let state; let locks; let updateEmail; let raiseAdminAlert;
+  let state; let locks; let updateEmail; let raiseAdminAlert; let readOwner;
 
-  function load({ job = {}, customers = [], stripeResult = 'updated', lockedCustomers = [] } = {}) {
+  function load({ job = {}, customers = [], stripeResult = 'updated', lockedCustomers = [], owner } = {}) {
     jest.resetModules();
     locks = [];
     state = {
-      jobs: [{ id: 'job-1', customer_id: 'c1', email: 'new@example.test', status: 'pending', attempts: 0, due: true, updated_at: 'v1', ...job }],
+      jobs: [{ id: 'job-1', customer_id: 'c1', email: 'new@example.test', status: 'pending', attempts: 0, not_linked_checks: 0, due: true, updated_at: 'v1', ...job }],
       customers,
       cards: [],
       journal: [],
@@ -57,7 +57,11 @@ describe('stripe-email-sync processJob', () => {
       if (stripeResult instanceof Error) throw stripeResult;
       return stripeResult;
     });
-    jest.doMock('../services/stripe', () => ({ updateCustomerEmail: updateEmail }));
+    // By default each Stripe profile names the customer row that links it.
+    readOwner = jest.fn(async (sid) => (owner === undefined
+      ? { deleted: false, customerId: (state.customers.find((c) => c.stripe_customer_id === sid) || {}).id || null, payerId: null }
+      : owner));
+    jest.doMock('../services/stripe', () => ({ updateCustomerEmail: updateEmail, readCustomerOwner: readOwner }));
     raiseAdminAlert = jest.fn(async () => ({ id: 'n1' }));
     jest.doMock('../services/admin-alert-compose', () => ({ raiseAdminAlert }));
     return require('../services/stripe-email-sync');
@@ -127,6 +131,25 @@ describe('stripe-email-sync processJob', () => {
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
     await expect(sync.drainDue({ limit: 1 })).resolves.toEqual({ busy: 1, updated: 1 });
     expect(updateEmail).toHaveBeenCalledWith('cus_2', 'new@example.test', expect.any(Object));
+  });
+
+  test("the Stripe profile's own record must name this customer, or the office decides (payer, other, blank, deleted)", async () => {
+    for (const owner of [{ customerId: 'c9' }, { customerId: null }, { customerId: 'c1', payerId: 'p1' }, { customerId: 'c1', deleted: true }]) {
+      const sync = load({ customers: [cust()], owner: { deleted: false, payerId: null, ...owner } });
+      await expect(sync.processJob('job-1')).resolves.toBe('stripe_owner');
+      expect(updateEmail).not.toHaveBeenCalled();
+      expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    }
+    const ok = load({ customers: [cust()] });
+    await expect(ok.processJob('job-1')).resolves.toBe('updated');
+    expect(readOwner).toHaveBeenCalledWith('cus_1', { timeout: 10000, maxNetworkRetries: 0 });
+  });
+
+  test('the alert-only retry re-checks ownership first: a profile that became shared gets the shared alert instead', async () => {
+    const sync = load({ job: { attempts: 6 }, customers: [cust(), cust({ id: 'c2' })] });
+    await expect(sync.processJob('job-1')).resolves.toBe('shared');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(readOwner).not.toHaveBeenCalled();
   });
 
   test('a third-party payer on the same Stripe profile counts as shared: never written, office alerted', async () => {
@@ -230,7 +253,7 @@ describe('stripe-email-sync processJob', () => {
   });
 
   test('no Stripe key on this process leaves the job untouched (no attempt, same schedule), and drainDue claims nothing', async () => {
-    const sync = load({ customers: [cust()], stripeResult: 'not_configured' });
+    const sync = load({ customers: [cust()], owner: null });
     await expect(sync.processJob('job-1')).resolves.toBe('not_configured');
     expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 0 });
     expect(state.jobs[0].next_attempt_at).toBeUndefined();

@@ -824,6 +824,15 @@ const StripeService = {
   // The one Stripe write of the email sync (services/stripe-email-sync.js), with a short per-request timeout and NO SDK
   // retries because the caller holds the customer row lock through it (the durable job retries after the lock is
   // released). 'not_configured' when this process has no Stripe key.
+  // Who the Stripe profile itself says it belongs to (the metadata ensureStripeCustomer / ensurePayerStripeCustomer
+  // write). Same short timeout and no SDK retries as updateCustomerEmail. null when this process has no Stripe key.
+  async readCustomerOwner(stripeCustomerId, { timeout = 10000, maxNetworkRetries = 0 } = {}) {
+    const stripe = getStripe();
+    if (!stripe) return null;
+    const c = await stripe.customers.retrieve(stripeCustomerId, {}, { timeout, maxNetworkRetries });
+    return { deleted: Boolean(c.deleted), customerId: c.metadata?.waves_customer_id || null, payerId: c.metadata?.waves_payer_id || null };
+  },
+
   async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000, maxNetworkRetries = 0 } = {}) {
     const stripe = getStripe();
     if (!stripe) return 'not_configured';

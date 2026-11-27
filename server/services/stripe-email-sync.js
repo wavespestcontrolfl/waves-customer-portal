@@ -9,7 +9,8 @@
  *    confirmed; it is written only while the locked record still holds that address. A merge or its undo must lock this
  *    customer row to move its Stripe id, so nothing moves between the checks and the write.
  *  - Skipped with an office alert: a Stripe id another record also holds, another record's saved card uses, or a
- *    third-party payer holds; a record whose own saved cards point at another Stripe profile; and any
+ *    third-party payer holds; a record whose own saved cards point at another Stripe profile; a Stripe profile whose
+ *    own record (metadata) does not name this customer; and any
  *    record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office sorts
  *    those out by hand instead of the app guessing.
  *  - No Stripe profile yet: re-checked over about an hour (2, 4, 8, 16, 32 minutes), then finished. A profile being
@@ -52,6 +53,10 @@ const OFFICE_COPY = {
   card_conflict: {
     why: "This record's saved cards use a different Stripe profile, so the app left Stripe alone.",
     next: 'Check which Stripe profile is right for this customer, then fix its email by hand only if it is wrong.',
+  },
+  stripe_owner: {
+    why: 'The Stripe profile linked to this record does not name it as the owner, so the app left it alone.',
+    next: 'Check which customer the Stripe profile belongs to and fix the link first. Change its email by hand only after that.',
   },
   merged: {
     why: 'This record was part of a customer merge, so the app left its Stripe email alone.',
@@ -138,6 +143,8 @@ async function claim(trx, jobId) {
 }
 
 const normEmail = (v) => String(v || '').trim().toLowerCase();
+// The Stripe profile's own record names this customer, and nobody else (no payer, not deleted).
+const ownsProfile = (owner, customer) => !owner.deleted && !owner.payerId && String(owner.customerId) === String(customer.id);
 
 async function processJob(jobId) {
   return db.transaction(async (trx) => {
@@ -159,22 +166,30 @@ async function processJob(jobId) {
     // since) is left alone, before any other check, so a stale job never raises an alert.
     const email = String(job.email || '').trim();
     if (!email || normEmail(customer.email) !== normEmail(email)) return end('done', 'superseded');
-    // A job whose Stripe tries ran out earlier but whose office alert could not be written: retry only the alert.
-    if (job.attempts >= MAX_ATTEMPTS) return giveUp(trx, job, customer);
     // Unlinked: the card check still runs (cards on a profile the record does not link), then re-checks for a link.
     const linked = Boolean(customer.stripe_customer_id);
     const problem = await firstOwnershipProblem(trx, customer, linked ? ['card_conflict', 'merged', 'shared'] : ['card_conflict']);
     if (problem) return end('skipped', problem, true);
+    // A job whose Stripe tries ran out earlier but whose office alert could not be written: retry only the alert
+    // (after the ownership checks above, so the alert never tells the office to edit a profile that became unsafe).
+    if (job.attempts >= MAX_ATTEMPTS) return giveUp(trx, job, customer);
     if (!linked) {
-      const rechecks = job.not_linked_checks || 0;
+      const rechecks = job.not_linked_checks; // NOT NULL DEFAULT 0
       if (rechecks >= NOT_LINKED_RECHECKS) return end('done', 'not_linked');
       await later(2 ** (rechecks + 1), { not_linked_checks: rechecks + 1 });
       return 'recheck';
     }
 
+    const StripeService = require('./stripe');
+    const opts = { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 };
     let outcome;
     try {
-      outcome = await require('./stripe').updateCustomerEmail(customer.stripe_customer_id, email, { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 });
+      // The Stripe profile's own record must name this customer (not a payer, not another customer, not deleted,
+      // not blank): a stale local link that no other local row shares still cannot redirect someone else's profile.
+      const owner = await StripeService.readCustomerOwner(customer.stripe_customer_id, opts);
+      if (!owner) return 'not_configured'; // untouched: a process with a key takes it (drainDue)
+      if (!ownsProfile(owner, customer)) return end('skipped', 'stripe_owner', true);
+      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email, opts);
     } catch (err) {
       const attempts = job.attempts + 1;
       const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
