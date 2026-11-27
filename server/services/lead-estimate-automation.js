@@ -142,6 +142,14 @@ function interestManualScopeReason(text, wants) {
   if (wants(/\baeration\b|\bplugging\b|\blawn plug\b|\bcore plug\b/)) {
     return 'lawn_aeration_plugging_requires_manual_scope';
   }
+  // German cockroach infestations require cleanout/initial-roach scoping, never plain general pest pricing.
+  if (wants(/\bgerman\s+(?:cock)?roach(?:es)?\b/)) {
+    return 'german_roach_requires_manual_scope';
+  }
+  // Bees and hornets require species-specific removal/relocation scoping rather than paper-wasp defaults.
+  if (wants(/\b(?:carpenter\s+bees?|honey\s*bees?|bees?|hornets?)\b/)) {
+    return 'stinging_species_requires_manual_scope';
+  }
   if (!wants(TREE_SHRUB_INTEREST)) return null;
   // Trimming, pruning and removal OF the plants is arborist work the T&S
   // program does not price. Phrase-level and negation-aware, so "wasp nest
@@ -268,8 +276,9 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     review.push('flea_treatment_defaulted');
   }
 
-  if (wants(/\bwasps?\b|\bhornets?\b|\bstinging\b|\bbees?\b/)) {
-    services.stinging = { species: 'PAPER_WASP', tier: 2, removal: 'NONE' };
+  if (wants(/\bwasps?\b|\byellow\s*jackets?\b|\bstinging\b/)) {
+    const species = wants(/\byellow\s*jackets?\b/) ? 'YELLOW_JACKET' : 'PAPER_WASP';
+    services.stinging = { species, tier: 2, removal: 'NONE' };
     review.push('stinging_insect_defaults_used');
   }
 
@@ -717,6 +726,16 @@ function mapServiceKeyToEstimateServices(serviceKey, { instant = null } = {}) {
   return { services, supported: true, unsupportedReason: null, review: [] };
 }
 
+function resolveQuoteRequiredReason({ homeSizeAboveLimit, zeroTurfLawn, manualQuoteLines, typeUnresolved, fieldVerifyRequired, parkingFieldVerifyFlags }) {
+  if (homeSizeAboveLimit) return HOME_SIZE_ABOVE_LIMIT_REASON;
+  if (zeroTurfLawn) return 'zero_turf_verified';
+  const lineReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0];
+  if (lineReason) return lineReason;
+  if (typeUnresolved) return 'property_type_unresolved';
+  if (fieldVerifyRequired) return parkingFieldVerifyFlags[0];
+  return null;
+}
+
 // `measurements`: county-assessed { homeSqFt, lotSqFt } or null, read by the
 // caller (the webhook reads the cache before its phone lock; the background
 // lookup passes its own; lead-draft-measurements.js). Left undefined, the
@@ -834,11 +853,14 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
       };
     }
     // The size bound and verified zero-turf hold name the hold first: a line's own review reason on that draft is the lesser fact.
-    automation.quoteRequiredReason = (engineInput.homeSizeAboveLimit ? HOME_SIZE_ABOVE_LIMIT_REASON : null)
-      || (zeroTurfLawn ? 'zero_turf_verified' : null)
-      || manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
-      || (typeUnresolved ? 'property_type_unresolved' : null)
-      || (fieldVerifyRequired ? parkingFieldVerifyFlags[0] : null);
+    automation.quoteRequiredReason = resolveQuoteRequiredReason({
+      homeSizeAboveLimit: engineInput.homeSizeAboveLimit,
+      zeroTurfLawn,
+      manualQuoteLines,
+      typeUnresolved,
+      fieldVerifyRequired,
+      parkingFieldVerifyFlags,
+    });
 
     return {
       automation,

@@ -783,6 +783,18 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     let createdEstimateId = null;
     let createdEstimateServiceInterest = serviceInterest || null;
     let automatedDraftEstimate = null;
+    // Only link priced/held drafts to leads.estimate_id; unpriced empty web-form
+    // shells stay unlinked so untouchedWebFormShells can still supersede them if
+    // the visitor completes the website quote wizard later.
+    const linkableLeadEstimateId = () => {
+      if (!createdEstimateId) return null;
+      const auto = automatedDraftEstimate?.automation;
+      if (auto?.generated || auto?.quoteRequired || auto?.provisionalTotals) return createdEstimateId;
+      if ((automatedDraftEstimate?.monthly || 0) > 0 || (automatedDraftEstimate?.annual || 0) > 0 || (automatedDraftEstimate?.oneTimeTotal || 0) > 0) {
+        return createdEstimateId;
+      }
+      return null;
+    };
     // The live catalog verdict rides with the key: a cadence edit or the
     // termite rental gate can turn an instant product into quote-on-
     // request after the map was written, and the draft must follow the
@@ -934,7 +946,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (attached) {
         leadRecord = attached;
         attachedCallLead = true;
-        await linkLeadToDraftEstimate(leadRecord, createdEstimateId);
+        await linkLeadToDraftEstimate(leadRecord, linkableLeadEstimateId());
       }
 
       if (!leadRecord) {
@@ -960,7 +972,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           first_contact_channel: 'form',
           status: 'new',
           customer_id: customer.id,
-          estimate_id: createdEstimateId,
+          estimate_id: linkableLeadEstimateId(),
           gclid: gclid || null,
           wbraid: wbraid || null,
           gbraid: gbraid || null,
@@ -988,7 +1000,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     if (handoff) await notePriceHandoff(leadRecord.id);
     else if (quizPriceAsk) {
       await createLeadDraftEstimate();
-      await linkLeadToDraftEstimate(leadRecord, createdEstimateId);
+      await linkLeadToDraftEstimate(leadRecord, linkableLeadEstimateId());
     }
 
     // Enroll in the local new_lead automation sequence (SendGrid-backed).

@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useLocation } from 'react-router-dom';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LeadsSection } from './LeadsTabs';
@@ -100,10 +100,16 @@ describe('LeadsSection 1-tap draft quote actions', () => {
       return { ok: true, json: async () => body };
     }));
 
-    render(<MemoryRouter initialEntries={['/admin/pipeline']}><LeadsSection /></MemoryRouter>);
+    function LocationSpy() {
+      const loc = useLocation();
+      return <div data-testid="loc">{`${loc.pathname}${loc.search}`}</div>;
+    }
+    render(<MemoryRouter initialEntries={['/admin/pipeline']}><LeadsSection /><LocationSpy /></MemoryRouter>);
     expect(await screen.findByText('Draft review · $48/mo')).toBeInTheDocument();
     expect(screen.getByText(/Large pool cage/)).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Send Quote' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Review' })).toBeInTheDocument();
+    const reviewBtn = screen.getByRole('button', { name: 'Review' });
+    fireEvent.click(reviewBtn);
+    await waitFor(() => expect(screen.getByTestId('loc')).toHaveTextContent('/admin/pipeline?tab=new&editEstimateId=est-draft-1'));
   });
 });

@@ -430,8 +430,8 @@ describe('the lead webhook reads the cache before its lock and schedules the ste
     const triage = src.indexOf('const triageDraftEstimate = await buildAutomatedLeadDraftEstimate({');
     expect(triage).toBeGreaterThan(caught);
     expect(src.slice(triage, src.indexOf('});', triage))).toContain('measurements: await pendingLeadMeasurements(createdEstimateId),');
-    // The webhook links the lead row to its draft estimate on creation.
-    expect(src).toContain('estimate_id: createdEstimateId,');
+    // The webhook links priced/held lead drafts to leads.estimate_id while leaving unpriced shells unlinked.
+    expect(src).toContain('estimate_id: linkableLeadEstimateId(),');
   });
 });
 
@@ -474,6 +474,12 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
 
     const sat = countyMeasurements(lookupOf(countyRecord({ _propertyTypeSource: 'satellite' })));
     expect(sat.propertyType).toBeUndefined();
+
+    // Flagged squareFootage or lotSize must reject countyMeasurements even when propertyType is confirmed.
+    const flaggedSqft = countyMeasurements(lookupOf(countyRecord(), { fieldVerifyFlags: [{ field: 'squareFootage', priority: 'HIGH' }] }));
+    expect(flaggedSqft).toBeNull();
+    const flaggedLot = countyMeasurements(lookupOf(countyRecord(), { fieldVerifyFlags: [{ field: 'lotSize', priority: 'HIGH' }] }));
+    expect(flaggedLot).toBeNull();
   });
 
   test('record-backed pool cages price Medium (<600 sf) and hold Large/Oversized (>=601 sf) under GATE_CAGE_TWO_SIZES', async () => {
@@ -670,6 +676,17 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(antsInFrontLawn.services).toHaveProperty('oneTimePest');
     expect(antsInFrontLawn.services).not.toHaveProperty('lawn');
     expect(antsInFrontLawn.services).not.toHaveProperty('oneTimeLawn');
+    // German cockroaches and bee/hornet requests require manual scoping (never mispriced as general pest or paper wasp).
+    expect(mapServiceInterestToEstimateServices('Quarterly service for German cockroaches')).toMatchObject({
+      supported: false, unsupportedReason: 'german_roach_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Carpenter bees on deck')).toMatchObject({
+      supported: false, unsupportedReason: 'stinging_species_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Baldfaced hornets nest')).toMatchObject({
+      supported: false, unsupportedReason: 'stinging_species_requires_manual_scope',
+    });
+    expect(mapServiceInterestToEstimateServices('Yellow jackets in yard').services.stinging).toMatchObject({ species: 'YELLOW_JACKET' });
     const oneTimePestAndLawn = mapServiceInterestToEstimateServices('One-time pest and lawn');
     expect(oneTimePestAndLawn.services).toHaveProperty('oneTimePest');
     expect(oneTimePestAndLawn.services).toHaveProperty('oneTimeLawn');

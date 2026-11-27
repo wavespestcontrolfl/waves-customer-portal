@@ -117,7 +117,7 @@ function LeadDraftActionStrip({ lead, openEstimateSend, navigate, onSent }) {
           type="button"
           size="sm"
           variant="secondary"
-          onClick={() => navigate(`/admin/estimates?estimateId=${encodeURIComponent(lead.estimate_id)}`)}
+          onClick={() => navigate(`/admin/pipeline?tab=new&editEstimateId=${encodeURIComponent(lead.estimate_id)}`)}
         >
           Review
         </Button>

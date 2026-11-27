@@ -104,6 +104,16 @@ function wholeHomeAddress(address) {
   return !unitAnywhereOnLine(address);
 }
 
+function hasBlockingDimensionFlag(enriched, fieldName) {
+  if (hasGlobalVerifyFlag(enriched)) return true;
+  const flags = Array.isArray(enriched?.fieldVerifyFlags) ? enriched.fieldVerifyFlags : [];
+  const target = String(fieldName || '').toLowerCase();
+  return flags.some((flag) => {
+    const field = String(flag?.field || '').toLowerCase();
+    const priority = String(flag?.priority || '').toUpperCase();
+    return field === target && priority !== 'LOW';
+  });
+}
 function normalizedPhotoWord(value, allowed) {
   const word = String(value || '').trim().toLowerCase();
   return allowed.includes(word) ? word : null;
@@ -220,7 +230,11 @@ function countyMeasurements(lookup) {
   if (!SINGLE_FAMILY_LABEL.test(String(propertyRecord.propertyType || '').trim())) return null;
   const facts = resolvePropertyFacts({ extraction: null, propertyRecord, customer: null, isCommercial: false });
   if (facts.newConstruction) return null;
-  if ([facts.home, facts.lot].some((f) => f?.source !== SQFT_SOURCES.COUNTY_ASSESSED)) return null;
+  if (facts.home?.source !== SQFT_SOURCES.COUNTY_ASSESSED || facts.lot?.source !== SQFT_SOURCES.COUNTY_ASSESSED) return null;
+  // Require both county dimensions to be free of blocking (MEDIUM/HIGH) verify flags:
+  // flagged squareFootage or lotSize must not ride alongside a trusted propertyType into a send-ready draft.
+  if (hasBlockingDimensionFlag(lookup.enriched, 'squareFootage')
+    || hasBlockingDimensionFlag(lookup.enriched, 'lotSize')) return null;
   const homeSqFt = Math.round(Number(facts.home.value));
   const lotSqFt = Math.round(Number(facts.lot.value));
   if (!inRange(homeSqFt, HOME_SQFT_RANGE) || !inRange(lotSqFt, LOT_SQFT_RANGE)) return null;
