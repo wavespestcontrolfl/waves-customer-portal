@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, ScanStrip, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
-import ProtocolTankSheet, { mixOrderIds, neverLinesFor, tankMixWarnings } from "./ProtocolTankSheet";
+import ProtocolTankSheet, { directionLines, itemMixWarnings, mixOrderIds, tankMixWarnings } from "./ProtocolTankSheet";
 import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
@@ -565,6 +565,10 @@ export function ProtocolMixCard({
             <div className="text-11 text-ink-secondary leading-normal mt-1">
               {item.raw}
             </div>
+            {/* The same lines as the tank card, under a protocol line that names a partner its pair rule warns about. */}
+            {directionLines(itemMixWarnings(item, plan), { productId: item.product?.id, text: item.raw, byMember: false, verdicts: ["never", "caution"] }).map((text) => (
+              <div key={text} className="text-11 font-medium text-alert-fg leading-normal mt-1">{text}</div>
+            ))}
             <div className="mt-1 flex gap-1.5 flex-wrap">
               {(item.fieldHold || item.conditional) && (
                 <Badge tone="neutral">{item.fieldHold ? "On hold" : checked ? "Selected" : "Optional"}</Badge>
@@ -889,33 +893,28 @@ export function ProtocolMixCard({
 }
 
 // One tank's mixing order, its verdicts from the sheet's one path (tankMixWarnings, /lawn-mix mixCheck). Every non-Yes line
-// (Do not mix, Caution, jar test, no rule) comes before the steps. A Never pair also drops the step numbers, so nothing reads
-// as an order to combine them, and puts its "Do not mix" line directly under each step it concerns. Step text, every product
-// and its amount line stay as sent (owner 2026-11-26: warnings only).
+// (Do not mix, Caution, jar test, no rule) comes before the steps, and a "Do not mix" line also sits directly under each step
+// it concerns. The steps, their numbers and text, every product and its amount line stay as sent (owner 2026-11-26).
 function MixOrderSteps({ steps, mixCheck, nameClass, textClass }) {
   const warnings = tankMixWarnings(mixOrderIds(steps), mixCheck);
-  const hasNever = warnings.some((warning) => warning.replacesLine);
   const ordered = [...warnings.filter((warning) => warning.replacesLine), ...warnings.filter((warning) => !warning.replacesLine)];
   return (
     <>
       {ordered.map((warning) => (
         <div key={warning.text} className={`${textClass} ${warning.replacesLine ? "font-medium text-alert-fg" : warning.verdict === "unknown" ? "text-zinc-700" : "text-alert-fg"}`}>{warning.text}</div>
       ))}
-      {hasNever && <div className={`${textClass} text-alert-fg`}>Not one tank: mix these separately. The amounts below stay for reference.</div>}
       {steps.map((step) => (
         <div
           key={`${step.step}-${step.productId}`}
           className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
         >
-          {!hasNever && (
-            <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
-              {step.step}
-            </div>
-          )}
+          <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
+            {step.step}
+          </div>
           <div>
             <div className={`${nameClass} font-medium text-zinc-900`}>{step.productName}</div>
             <div className={`${textClass} text-ink-secondary leading-normal mt-1`}>{step.instruction}</div>
-            {neverLinesFor(warnings, { productId: step.productId, text: step.instruction }).map((text) => (
+            {directionLines(warnings, { productId: step.productId, text: step.instruction }).map((text) => (
               <div key={text} className={`${textClass} font-medium text-alert-fg mt-1`}>{text}</div>
             ))}
           </div>

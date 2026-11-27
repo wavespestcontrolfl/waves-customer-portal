@@ -1090,7 +1090,8 @@ async function sheetMixCheck(items) {
     };
   } catch (err) {
     logger.warn(`[admin-protocols] lawn-mix mix check failed: ${err.message}`);
-    return null;
+    // The sheet says so in one line; products and amounts still show.
+    return { status: 'unavailable', pairs: [] };
   }
 }
 

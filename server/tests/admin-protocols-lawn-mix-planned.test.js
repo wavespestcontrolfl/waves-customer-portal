@@ -398,11 +398,11 @@ describe('lawn-mix mixCheck', () => {
     check.mockRestore();
   });
 
-  test('a failed check leaves mixCheck out, logs, and the sheet still renders', async () => {
+  test('a failed check returns the unavailable status, logs, and the sheet still renders', async () => {
     const check = jest.spyOn(mixRules, 'checkMix').mockRejectedValue(new Error('product_mix_rules is missing'));
     const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
     const body = await lawnMix();
-    expect(body.mixCheck).toBeNull();
+    expect(body.mixCheck).toEqual({ status: 'unavailable', pairs: [] });
     expect(body.items).toHaveLength(3);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('product_mix_rules is missing'));
     check.mockRestore();

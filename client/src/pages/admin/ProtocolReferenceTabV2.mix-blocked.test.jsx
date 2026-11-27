@@ -88,7 +88,7 @@ it("a bermuda backpack mix order shows as its own block beside the base order, o
   expect(screen.queryByText("Bermuda backpack mix")).not.toBeInTheDocument();
 });
 
-it("a Never pair in a mixing order shows Do not mix first and drops the step numbers; every product and amount line stays", () => {
+it("a Never pair in a mixing order names only its pair and says to ask the office; the steps, numbers and amounts stay", () => {
   const bermudaMixingOrder = [
     { step: 1, productId: null, productName: "Water", instruction: "Fill the backpack sprayer about half full with clean water." },
     { step: 2, productId: "rec", productName: "Recognition", instruction: "Add 0.1 oz Recognition." },
@@ -104,15 +104,16 @@ it("a Never pair in a mixing order shows Do not mix first and drops the step num
     { productAId: "pot", productAName: "Fixture potassium", productBId: "fe", productBName: "Fixture iron", verdict: "never", reason: "Fixture rule." },
   ] };
   renderCard(plan({ mixingOrder, bermudaMixingOrder, mixCheck }));
-  // Once before the steps and once under each step of the pair.
-  expect(screen.getAllByText("Do not mix: Label bars it. (Recognition + Surfactant)")).toHaveLength(3);
-  expect(screen.getAllByText("Do not mix: Fixture rule.")).toHaveLength(3);
-  expect(screen.getAllByText("Not one tank: mix these separately. The amounts below stay for reference.")).toHaveLength(2);
+  // Once before the steps and once under each step of the pair; never a "mix separately" instruction.
+  expect(screen.getAllByText("Do not mix: Recognition + Surfactant. Label bars it. Ask the office before you mix this tank.")).toHaveLength(3);
+  expect(screen.getAllByText("Do not mix: Fixture potassium + Fixture iron. Fixture rule. Ask the office before you mix this tank.")).toHaveLength(3);
+  expect(screen.queryByText(/separately/)).not.toBeInTheDocument();
   for (const step of [...bermudaMixingOrder, ...mixingOrder]) {
     expect(screen.getByText(step.productName)).toBeInTheDocument();
     expect(screen.getByText(step.instruction)).toBeInTheDocument();
   }
-  for (const n of ["1", "2", "3", "4"]) expect(screen.queryByText(n, { selector: ".u-nums" })).not.toBeInTheDocument();
+  expect(screen.getAllByText("2", { selector: ".u-nums" })).toHaveLength(2);
+  expect(screen.getByText("4", { selector: ".u-nums" })).toBeInTheDocument();
 });
 
 it("a mixing order shows its Caution and jar-test lines before the steps, keeps its step numbers and shows no Do not mix line", () => {
@@ -144,11 +145,30 @@ it("a step whose text adds a product a Never rule forbids shows Do not mix direc
   ];
   const mixCheck = { pairs: [{ productAId: "cel", productAName: "Celsius WG", productBId: "nis", productBName: "Synthetic surfactant", verdict: "never", reason: "Label: no surfactant." }] };
   renderCard(plan({ mixingOrder, mixCheck }));
-  const line = "Do not mix: Label: no surfactant. (Celsius WG + Synthetic surfactant)";
+  const line = "Do not mix: Celsius WG + Synthetic surfactant. Label: no surfactant. Ask the office before you mix this tank.";
   const stepBox = (instruction) => screen.getByText(instruction).parentElement;
   // The potassium step is not in the pair, but its text adds the surfactant.
   expect(within(stepBox("Add 2 oz potassium, then the Synthetic surfactant.")).getByText(line)).toBeInTheDocument();
   expect(within(stepBox("Add 0.12 oz Celsius WG.")).getByText(line)).toBeInTheDocument();
   expect(within(stepBox("Add 1 fl oz surfactant last.")).getByText(line)).toBeInTheDocument();
   expect(within(stepBox("Add 1 oz iron.")).queryByText(line)).not.toBeInTheDocument();
+});
+
+it("the detailed product view puts the pair's line under a protocol line that names a forbidden partner; the line stays as written", () => {
+  const mixItem = (id, name, raw, extra = {}) => ({ raw, matched: true, selected: true, conditional: false, product: { id, name },
+    tankAmounts: { application: "spray", ...extra }, jobMix: null, plannedMix: null });
+  const cel = mixItem("cel", "Celsius WG", "Celsius WG — broadleaf weeds");
+  const nis = mixItem("nis", "Synthetic surfactant", "Synthetic surfactant in the Celsius weed mix", { mixWith: "Celsius WG" });
+  const pot = mixItem("pot", "Fixture potassium", "Fixture potassium — every visit", { mixWith: "Celsius WG" });
+  const mixCheck = { pairs: [
+    { productAId: "cel", productAName: "Celsius WG", productBId: "nis", productBName: "Synthetic surfactant", verdict: "never", reason: "Label: no surfactant." },
+    { productAId: "cel", productAName: "Celsius WG", productBId: "pot", productBName: "Fixture potassium", verdict: "caution", reason: "Fixture caution." },
+  ] };
+  renderCard(plan({ items: [cel, nis, pot], selectedItems: [cel, nis, pot], mixCheck }));
+  for (const raw of [cel.raw, nis.raw, pot.raw]) expect(screen.getAllByText(raw).length).toBeGreaterThan(0);
+  // Only the surfactant line names its partner (Celsius); the Celsius and potassium lines name none.
+  const never = screen.getAllByText("Do not mix: Celsius WG + Synthetic surfactant. Label: no surfactant. Ask the office before you mix this tank.");
+  expect(never.length).toBeGreaterThan(0);
+  for (const node of never) expect(node.previousElementSibling).toHaveTextContent(nis.raw);
+  expect(screen.queryByText(/^Caution: Fixture caution\./)).not.toBeInTheDocument();
 });
