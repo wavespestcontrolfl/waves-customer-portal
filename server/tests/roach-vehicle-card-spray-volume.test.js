@@ -166,7 +166,7 @@ describe('a label rate per gallon is bound to its spray volume', () => {
     }
     expect(out.serviceAmounts.map((row) => row.amount)).toEqual([220, 72.6]);
     expect(out.warnings.filter((w) => /sprays 2/.test(w))).toHaveLength(2);
-    expect(out.warnings[0]).toMatch(/^German Roach Cleanout: The card's rate is for 1 gal/);
+    expect(out.warnings.some((w) => /^German Roach Cleanout: The card's rate is for 1 gal/.test(w))).toBe(true);
     // With no rig named nothing is compared: the rows carry the card-volume coverage only.
     const none = await mix(home, 110, { addons: flea });
     expect(none.serviceAmounts.every((row) => row.labelCoversSqft === undefined && row.coversSqft === 110000)).toBe(true);

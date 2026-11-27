@@ -2062,7 +2062,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       return jobCard.mixForProduct('ar', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
     };
     const bermuda = await run({ tierSqFt: 1000, grassType: 'bermuda' });
-    expect(bermuda).toMatchObject({ amount: null, ratePer1000: 0.147, unit: 'oz', rateSource: 'governed', rateText: expect.stringContaining('4 gal of water per 1,000 sq ft') });
+    expect(bermuda).toMatchObject({ amount: null, ratePer1000: 0.147, unit: 'oz', rateSource: 'governed' });
+    expect(bermuda.governedRates[0].text).toContain('4 gal of water per 1,000 sq ft');
     // The label's own area basis, limit and safety line ride beside the rate, as on the card.
     expect(bermuda.governedRates).toEqual([expect.objectContaining({ service: 'Lawn Insect Spot Treatment', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') })]);
     expect(bermuda.warnings).toContain('Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
