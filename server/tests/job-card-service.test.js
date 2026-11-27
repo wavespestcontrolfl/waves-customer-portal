@@ -1115,6 +1115,25 @@ describe('PR review r5', () => {
     expect(verified.amountNote).toBeNull();
   });
 
+  // Owner 2026-11-27: every lawn granular card shows its LESCO spreader number (spreader-settings.js) at the plan's rate.
+  test('a lawn granular card shows its spreader number; a sprayed card and a pest granular with no row show none', async () => {
+    const build = (facts, line) => jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04', ...facts }, lines: [line], verdicts: [], packSizes: {} });
+    const bag = { id: 'f', name: 'LESCO 10-0-22 50% PolyPlus OPTI45 Turfgrass Granular Fertilizer', rate_unit: 'lb', default_rate_per_1000: 4, label_verified_at: '2026-08-01' };
+    const raw = 'LESCO 10-0-22 50% PolyPlus OPTI45 Turfgrass Granular Fertilizer — 4.5 lb per 1,000 sq ft (0.45 lb N), spreader';
+    const [planned] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: bag, planMix: { amount: 45, amountUnit: 'lb', ratePer1000: 4.5, rateUnit: 'lb' } });
+    expect(planned.spreader).toMatchObject({ setting: 12, text: 'Spreader: LESCO #12 (field tested)' });
+    // No plan mix: the line's own 4.5 lb, not the catalog's 4 lb.
+    const [unplanned] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: bag });
+    expect(unplanned.spreader.setting).toBe(12);
+    // A rate the rows do not cover: no number, a weigh test; the amount stays.
+    const [halved] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: bag, planMix: { amount: 22.5, amountUnit: 'lb', ratePer1000: 2.25, rateUnit: 'lb' } });
+    expect(halved).toMatchObject({ spreader: { setting: null, text: 'No spreader number for this rate: weigh test.' }, planned: { amount: 22.5 } });
+    const [sprayed] = await build({ isLawn: true }, { raw: 'Celsius WG — weed spots', role: 'base', selected: true, product: { id: 'c', name: 'Celsius WG', rate_unit: 'oz', label_verified_at: '2026-08-01' } });
+    expect(sprayed.spreader).toBeNull();
+    const [pest] = await build({ isLawn: false }, { raw: 'Synthetic ant bait granule', role: 'base', selected: true, product: { id: 'a', name: 'Synthetic ant bait granule', rate_unit: 'lb', label_verified_at: '2026-08-01' } });
+    expect(pest.spreader).toBeNull();
+  });
+
   test('rotation history covers MOA-only products (P2)', async () => {
     const seen = [];
     const dbh = (table) => {

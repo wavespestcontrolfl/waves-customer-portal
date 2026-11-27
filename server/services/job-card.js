@@ -57,6 +57,7 @@ const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = 
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
 const { labelUseRate, labelRateCarrier, labelRateHoldText } = require('../utils/protocol-label-rate');
+const spreaderSettings = require('./spreader-settings');
 
 // Office fallback when a property has no coordinates — the same point the
 // day feed's current-conditions call uses (routes/admin-schedule.js).
@@ -1260,6 +1261,18 @@ function isTankMixable(product = {}) {
   return true;
 }
 
+// The LESCO spreader number for a granular line (spreader-settings.js), at the rate the plan puts down (else the line's own lb
+// rate, else the catalog rate): every lawn granular, and another service's granular only when a row names its product.
+function spreaderForCard(facts, line, product) {
+  if (isTankMixable(product)) return null;
+  const names = [product.name, String(line.raw || '').split(' \u2014 ')[0]];
+  if (!facts.isLawn && !spreaderSettings.rowsFor(names).length) return null;
+  let rate = {};
+  if (line.planMix?.ratePer1000 > 0) rate = { rate: line.planMix.ratePer1000, rateUnit: line.planMix.rateUnit };
+  else if (!spreaderSettings.lineLbPer1000(line.raw)) rate = { rate: product.default_rate_per_1000, rateUnit: product.rate_unit };
+  return spreaderSettings.spreaderForLine({ productName: product.name, raw: line.raw, ...rate });
+}
+
 function precautionText(product) {
   // The product-specific pet / child guidance carries the actionable detail
   // (bait stations, keep pets off treated turf) the generic summary omits.
@@ -1903,6 +1916,7 @@ async function buildProductCards({ facts, lines, verdicts, packSizes, blocked = 
       labelUrl: p.label_url || null,
       sdsUrl: p.sds_url || null,
       rotation,
+      spreader: spreaderForCard(facts, line, p),
       order: packSizes ? orderFor(p, packSizes[p.id], short ? inventory.plannedAmountInventoryUnit - onHand : null, { includePricing }) : null,
     });
   }

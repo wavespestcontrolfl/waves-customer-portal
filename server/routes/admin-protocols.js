@@ -62,6 +62,12 @@ const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCo
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
 const { tankReference, sprayerTestWarning } = require('../services/lawn-tank-reference');
+const { spreaderForLine } = require('../services/spreader-settings');
+
+// Only a spreader card (not a hand-shaker bait, a sprayed product or a SKIP line) gets a spreader number.
+const spreaderForTankLine = (product, line, amounts) => (amounts?.application === 'spreader' && amounts.applicator === 'spreader'
+  ? spreaderForLine({ productName: product.name, raw: line.raw, rate: amounts.ratePer1000, rateUnit: amounts.rateUnit })
+  : null);
 const { completionRateFields } = require('../utils/protocol-label-rate');
 const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -1278,6 +1284,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       };
       const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
       const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
+      const tankAmounts = tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack });
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
@@ -1294,7 +1301,9 @@ router.get('/lawn-mix', async (req, res, next) => {
         plannedFullTankMix,
         // The tank sheet's per-fill amounts (100 gal, full tank, 4 gal FlowZone): shown for every matched product, with the plan's
         // state as a warning beside them, never in place of them. No job amount or cost reads these.
-        tankAmounts: tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack }),
+        tankAmounts,
+        // The LESCO spreader number for a line that goes on with the spreader (spreader-settings.js), at the rate the sheet shows.
+        spreader: spreaderForTankLine(product, line, tankAmounts),
       };
     });
     const items = bermuda.decorate(builtItems);

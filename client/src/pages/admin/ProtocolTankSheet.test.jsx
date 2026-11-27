@@ -117,6 +117,23 @@ describe("110-gallon tank reference", () => {
     expect(within(container).queryByText("Tank mixing not set in the app. Check the label.")).not.toBeInTheDocument();
   });
 
+  it("a spreader card shows the server's LESCO spreader number, on screen and in print, beside its rate", () => {
+    const plan = fixture();
+    const bag = (id, spreader) => ({ selected: true, product: { id, name: `Synthetic granular ${id}`, labelVerifiedAt: "2026-01-01" }, spreader,
+      tankAmounts: { application: "spreader", applicator: "spreader", ratePer1000: 3.125, rateUnit: "lb", per100Gal: null, fullTank: null, backpack4Gal: null } });
+    plan.items = [
+      bag("a", { setting: 9.5, basis: "start", text: "Spreader: LESCO #9½, start number. Weigh test at first use." }),
+      bag("b", { setting: null, text: "No spreader number for this rate: weigh test." }),
+      bag("c", null),
+    ];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Spreader: LESCO #9½, start number. Weigh test at first use.")).toBeInTheDocument();
+      expect(within(surface).getByText("No spreader number for this rate: weigh test.")).toBeInTheDocument();
+      expect(within(surface).getAllByText("3.125 lb / 1,000 sq ft")).toHaveLength(3);
+    }
+  });
+
   it("an overdue or estimated sprayer test shows the server's one warning line and keeps every amount", () => {
     const plan = fixture();
     plan.equipment.expiresAt = new Date(Date.now() - 60000).toISOString();

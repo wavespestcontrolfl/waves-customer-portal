@@ -199,6 +199,8 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             <p className="mt-2 font-medium">{applicationMethod(item, products, plan.bermudaMixingOrder)}</p>
             <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
+            {/* The LESCO spreader number for a spreader card (server: spreader-settings.js), or why it has none. */}
+            {item.spreader?.text && <p className="mt-2 font-medium">{item.spreader.text}</p>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
             <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
