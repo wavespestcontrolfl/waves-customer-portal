@@ -35,6 +35,25 @@ const { AREAS } = require('./admin-alert-compose');
 const { isFullAccessEmail } = require('./intelligence-bar/ib-access');
 
 const CLAIM_PREFIX = 'morning_banner:';
+// Mirrors estimate-call-today-push.js: pre-handoff throws and unconfigured
+// push providers never reached a device, so the audience claim is released;
+// ambiguous device failures (push.failed > 0 / retryable > 0 / push_dispatch)
+// may have reached a phone, so the claim stays and the outcome is uncertain.
+const PRE_HANDOFF_FAILURES = new Set(['recipient_lookup', 'before_handoff']);
+const PROVIDER_NOT_CONFIGURED = new Set(['apns_not_configured', 'fcm_not_configured', 'push_not_configured']);
+const PRE_SEND_SKIPS = new Set(['claude_queue', 'bell_policy', 'superseded_before_push']);
+
+function providerNotConfigured(push) {
+  return Array.isArray(push?.results) && push.results.some((r) => r?.skipped && PROVIDER_NOT_CONFIGURED.has(r.reason));
+}
+
+function isRecognizedNoDelivery(push) {
+  if (push === null) return true;
+  if (!push || typeof push !== 'object' || push.sent !== 0) return false;
+  if (Number(push.retryable) > 0 || (push.failed !== undefined && push.failed !== 0)) return false;
+  if (typeof push.skipped === 'string') return PRE_SEND_SKIPS.has(push.skipped);
+  return push.failed === 0;
+}
 
 function isOwnerOnlyRow(row) {
   let meta = row?.metadata;
@@ -103,25 +122,28 @@ async function splitAdminIdsByOwnerAccess() {
 }
 
 function classifyDelivery(result) {
-  if (!result || result.error || result.prefsUnavailable
-    || result.pushFailed === 'recipient_lookup'
-    || result.pushFailed === 'before_handoff') {
-    return 'failed';
+  if (!result || typeof result !== 'object') {
+    return { status: 'uncertain', release: false, reason: 'no dispatch result' };
   }
-  if (result.pushFailed) return 'uncertain';
-  const sent = Number(result.push?.sent) || 0;
-  const failed = Number(result.push?.failed) || 0;
-  if (sent > 0) return 'sent';
-  if (failed > 0) return 'failed';
-  return 'skipped';
-}
-
-function deliveryFailureReason(result) {
-  if (result?.error) return 'dispatch error';
-  if (result?.prefsUnavailable) return 'preferences unavailable';
-  if (result?.pushFailed) return result.pushFailed;
-  if (result?.push?.failed > 0) return 'all devices failed';
-  return 'no result';
+  if (PRE_HANDOFF_FAILURES.has(result.pushFailed)) {
+    return { status: 'dispatch_failed', release: true, reason: result.pushFailed };
+  }
+  if (result.pushFailed) {
+    return { status: 'uncertain', release: false, reason: String(result.pushFailed) };
+  }
+  if (result.error || result.prefsUnavailable) {
+    return { status: 'dispatch_failed', release: true, reason: result.error ? 'dispatch error' : 'preferences unavailable' };
+  }
+  if (Number(result.push?.sent) > 0) {
+    return { status: 'sent', release: false, reason: null };
+  }
+  if (isRecognizedNoDelivery(result.push)) {
+    if (providerNotConfigured(result.push)) {
+      return { status: 'dispatch_failed', release: true, reason: 'push_not_configured' };
+    }
+    return { status: 'skipped', release: true, reason: 'no_push_delivered' };
+  }
+  return { status: 'uncertain', release: false, reason: 'delivery_uncertain' };
 }
 
 async function sendClaimedAudience({ key, payload, triggerOptions }) {
@@ -136,22 +158,22 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
   try {
     const { triggerNotification } = require('./notification-triggers');
     const result = await triggerNotification('waiting_summary', payload, triggerOptions);
-    const verdict = classifyDelivery(result);
-    if (verdict === 'failed') {
-      await releaseKey(key);
-      logger.error(`[morning-banner] ${key}: banner not sent (${deliveryFailureReason(result)})`);
-      return { status: 'dispatch_failed' };
+    const outcome = classifyDelivery(result);
+    if (outcome.release) await releaseKey(key);
+    if (outcome.status === 'dispatch_failed') {
+      logger.error(`[morning-banner] ${key}: banner not sent (${outcome.reason})`);
+      return { status: 'dispatch_failed', errorCode: outcome.reason === 'push_not_configured' ? 'push_not_configured' : 'dispatch_failed' };
     }
-    if (verdict === 'uncertain') {
-      logger.warn(`[morning-banner] ${key}: banner delivery uncertain (${result.pushFailed}); keeping claim to avoid duplicates`);
-    } else if (verdict === 'skipped') {
-      logger.info(`[morning-banner] ${key}: no device accepted banner (opted out or no active subscription)`);
+    if (outcome.status === 'uncertain') {
+      logger.warn(`[morning-banner] ${key}: banner delivery uncertain (${outcome.reason}); keeping claim to avoid duplicates`);
+    } else if (outcome.status === 'skipped') {
+      logger.info(`[morning-banner] ${key}: no device accepted banner (opted out or no active subscription); claim released`);
     }
-    return { status: verdict, result };
+    return { status: outcome.status, result };
   } catch (err) {
     await releaseKey(key);
     logger.error(`[morning-banner] ${key}: banner failed: ${err?.message || 'error'}`);
-    return { status: 'dispatch_failed' };
+    return { status: 'dispatch_failed', errorCode: 'dispatch_failed' };
   }
 }
 
@@ -177,7 +199,8 @@ function buildAudiences(day, ownerSummary, sharedSummary, { ownerIds, otherAdmin
 function summarizeOutcomes(day, ownerSummary, outcomes) {
   const byStatus = (s) => outcomes.find((o) => o.status === s);
   if (byStatus('claim_failed')) return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
-  if (byStatus('dispatch_failed')) return { count: ownerSummary.count, sent: false, error: 'dispatch_failed' };
+  const failed = byStatus('dispatch_failed');
+  if (failed) return { count: ownerSummary.count, sent: false, error: failed.errorCode || 'dispatch_failed' };
   const uncertain = byStatus('uncertain');
   if (uncertain) return { count: ownerSummary.count, sent: false, uncertain: true, result: uncertain.result };
   const sent = byStatus('sent');
@@ -217,7 +240,7 @@ async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
   }
 
   const outcomes = await Promise.all(audiences.map(sendClaimedAudience));
-  const keptStatuses = new Set(['sent', 'uncertain', 'skipped', 'already_claimed']);
+  const keptStatuses = new Set(['sent', 'uncertain', 'already_claimed']);
   if (gate.reservedHere && !outcomes.some((o) => keptStatuses.has(o.status))) {
     try {
       await releaseScopedDay(legacyKey, markerKey);

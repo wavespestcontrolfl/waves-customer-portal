@@ -194,13 +194,24 @@ describe('once per ET day', () => {
     mockTrigger.mockRejectedValueOnce(new Error('boom'));
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
     expect(claimed.size).toBe(0);
-    // All devices failed (sent=0, failed>0) releases the claim so retry can run.
-    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 2, subscriptions: 2 } });
-    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
+    // Missing push credentials (skipped with apns_not_configured / push_not_configured)
+    // is a delivery failure, NOT a routine skip — releases the claim so retry works once configured.
+    mockTrigger.mockResolvedValueOnce({
+      bellWritten: false,
+      push: { sent: 0, failed: 0, skipped: 1, subscriptions: 1, results: [{ sent: false, skipped: true, reason: 'apns_not_configured' }] },
+    });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'push_not_configured' });
     expect(claimed.size).toBe(0);
-    // Opt-outs / empty subscriptions (sent=0, failed=0) report skipped, not sent: true.
+    // Opt-outs / empty subscriptions (sent=0, failed=0, no config error) report skipped and release claim.
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 0, subscriptions: 0 } });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'no_delivery' });
+    expect(claimed.size).toBe(0);
+    // Per-device failure after handoff (push.failed > 0) may have had its ack lost ->
+    // treat as uncertain and KEEP the claim so a rerun never sends a duplicate banner.
+    mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 2, subscriptions: 2 } });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, uncertain: true });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
     claimed.clear();
     // Provider handoff may already have happened -> keep both claims to avoid duplicates,
     // but report uncertain delivery instead of claiming sent: true.
