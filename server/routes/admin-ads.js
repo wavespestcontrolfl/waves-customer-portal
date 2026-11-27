@@ -236,10 +236,22 @@ router.get('/campaigns', async (req, res, next) => {
     const enriched = campaigns.map(c => {
       const p7 = perf7.filter(p => p.campaign_id === c.id);
       const p30 = perf30.filter(p => p.campaign_id === c.id);
+      const last7d = aggregate(p7);
+      const last30d = aggregate(p30);
+      const pmaxPresent = c.platform === 'google_lsa' && metadataObject(c.metadata).performance_max_present === true;
+      if (pmaxPresent) {
+        last7d.cpa = null;
+        last30d.cpa = null;
+      }
       return {
         ...c,
-        last7d: aggregate(p7),
-        last30d: aggregate(p30),
+        last7d,
+        last30d,
+        ...(pmaxPresent ? {
+          performanceMaxPresent: true,
+          cpaUnavailable: true,
+          cpaUnavailableReason: 'Performance Max ran alongside Local Services — standalone CPA is unavailable',
+        } : {}),
       };
     });
 
@@ -461,11 +473,32 @@ function gapDecisionText(decision, win, settings) {
 // GET /api/admin/ads/gap-rule
 router.get('/gap-rule', async (req, res, next) => {
   try {
-    const mode = requireGapRule(res);
-    if (!mode) return undefined;
     const BudgetManager = getBudgetManager();
     const now = new Date();
     const today = etDateString(now);
+    const mode = gapRuleMode();
+    if (mode === 'off') {
+      // Cron honors active stored holds even when GATE_ADS_GAP_RULE is off, so
+      // expose active holds (read-only + release) while keeping 404 gap_rule_off
+      // when no hold is active.
+      const rows = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+      const heldCampaigns = rows
+        .map((c) => {
+          const hold = BudgetManager.activeBudgetHold(c.metadata, today);
+          if (!hold) return null;
+          return {
+            id: c.id,
+            campaign_name: c.campaign_name,
+            budget_mode: c.budget_mode,
+            daily_budget_current: c.daily_budget_current,
+            daily_budget_base: c.daily_budget_base,
+            hold: { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null },
+          };
+        })
+        .filter(Boolean);
+      if (heldCampaigns.length === 0) return res.status(404).json({ error: 'gap_rule_off' });
+      return res.json({ mode: 'off', settings: null, window: null, decision: null, campaigns: heldCampaigns, last_run: null });
+    }
     const targets = await db('ad_targets').first();
     const ev = await BudgetManager.evaluateGapRule(now, targets);
     const campaigns = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');

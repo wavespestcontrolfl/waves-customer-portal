@@ -816,6 +816,32 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.restoreAllMocks();
   });
 
+  test('setBudget refuses pushing an over-cap effective budget in spent mode (P0-2)', async () => {
+    const overCapSpent = { ...baseCampaign(), budget_mode: 'spent', daily_budget_base: '100', daily_budget_current: String(BudgetManager.MAX_DAILY_BUDGET + 500) };
+    campaignFirstRow = overCapSpent;
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setBudget('c-1', 100, 'test', { requireLivePush: true }))
+      .rejects.toMatchObject({ code: 'budget_cap_exceeded' });
+    await expect(BudgetManager.setBudget('c-1', 100, 'test'))
+      .rejects.toMatchObject({ code: 'budget_cap_exceeded' });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('adjustBudgets rechecks branded eligibility under FOR UPDATE lock and skips newly-branded campaign (P1-3)', async () => {
+    campaignRows = [baseCampaign()];
+    campaignFirstRow = { ...baseCampaign(), is_branded: true };
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    jest.spyOn(BudgetManager, 'getCapacityForArea').mockResolvedValue({ utilizationPct: 99, booked: 8, slots: 8, techs: 1 });
+
+    await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
+  });
+
   test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {
     campaignFirstRow = baseCampaign(); // base 40, current 40 (strings parse to 40)
     mockIsConfigured.mockReturnValue(true);

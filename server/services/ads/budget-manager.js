@@ -228,6 +228,12 @@ function etDateWeekday(dateStr) {
   return new Date(`${dateStr}T12:00:00Z`).getUTCDay();
 }
 
+function isCapacityEligibleCampaign(c) {
+  if (!c || c.status !== 'active' || c.platform !== 'google_ads') return false;
+  if (!SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? ''))) return false;
+  return c.is_branded !== true && String(c.intent_type || '').toLowerCase() !== 'branded';
+}
+
 class BudgetManager {
   /**
    * The active Google campaigns the capacity rule may change: non-branded Search
@@ -248,7 +254,7 @@ class BudgetManager {
       const names = branded.map((c) => c.campaign_name).join(', ');
       logger.info(`Budget adjust: left ${branded.length} branded campaign(s) alone: ${names}`);
     }
-    return rows.filter((c) => !nonSearch.includes(c) && !branded.includes(c));
+    return rows.filter((c) => isCapacityEligibleCampaign(c));
   }
 
   /**
@@ -359,7 +365,7 @@ class BudgetManager {
           // held (capacity math above can take a while — a writer committing
           // during it is already reflected in this locked snapshot).
           const lockAcquiredAt = new Date();
-          if (!campaign || campaign.status !== 'active') return;
+          if (!isCapacityEligibleCampaign(campaign)) return;
 
           // Holds and the live gap rule decide from the LOCKED row, so a hold set
           // or cleared (or a mode changed) since the list read is what they see.
@@ -1383,6 +1389,7 @@ class BudgetManager {
           }
 
           const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+          assertBudgetWithinCap(effectiveBudget, campaign.campaign_name);
           const linked = Boolean(campaign.platform_campaign_id);
           let googleAdsUpdated = false;
           if (linked) {
@@ -1477,6 +1484,7 @@ class BudgetManager {
       // like setMode and the capacity cron. In 'base' mode this is the new base
       // itself; 'spent' stays frozen at daily_budget_current; 'stop' recomputes 1%.
       const effectiveBudget = this.calculateBudget({ ...campaign, daily_budget_base: base }, campaign.budget_mode);
+      assertBudgetWithinCap(effectiveBudget, campaign.campaign_name);
 
       // Push FIRST so daily_budget_current only ever records a budget Google is
       // actually running: if Google rejects the change (shared budget, API error)

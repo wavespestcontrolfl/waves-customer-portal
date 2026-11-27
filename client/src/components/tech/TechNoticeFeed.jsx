@@ -100,6 +100,14 @@ const WATERING_NOTE_TYPES = new Set(['lawn_watering_tech_note']);
 // behaviour (marked read on the 5-minute clock) so it cannot sit unread
 // and eat the 20-row feed. Only rendered cards wait to be seen.
 const TIMED_RENDERED_TYPES = new Set(['storm_watch_alert', 'weather_safety_advisory']);
+const timedNoticeKey = (n) => {
+  const base = `${n.type}:${n.payload?.job_id || n.id}`;
+  if (n.type !== 'weather_safety_advisory') return base;
+  const cats = Array.isArray(n.payload?.advisories)
+    ? n.payload.advisories.map((a) => a?.category || a?.event).filter(Boolean).sort().join(',')
+    : '';
+  return cats ? `${base}:${cats}` : base;
+};
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES, ...WATERING_NOTE_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
@@ -240,7 +248,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       if (inlineScheduleChanges && VISIT_TYPES.has(n.type)) continue;
       if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
       if (!TIMED_RENDERED_TYPES.has(n.type)) { otherCards.push(n); continue; }
-      const jobKey = `${n.type}:${n.payload?.job_id || n.id}`;
+      const jobKey = timedNoticeKey(n);
       const prev = stormByJob.get(jobKey);
       if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
         stormByJob.set(jobKey, n);
@@ -294,7 +302,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
     const newestByJob = new Map();
     for (const n of active) {
       if (!TIMED_RENDERED_TYPES.has(n.type)) continue;
-      const jobKey = `${n.type}:${n.payload?.job_id || n.id}`;
+      const jobKey = timedNoticeKey(n);
       const prev = newestByJob.get(jobKey);
       if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
         newestByJob.set(jobKey, n);
@@ -302,7 +310,7 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
     }
     for (const n of active) {
       if (!TIMED_RENDERED_TYPES.has(n.type)) continue;
-      const jobKey = `${n.type}:${n.payload?.job_id || n.id}`;
+      const jobKey = timedNoticeKey(n);
       if (newestByJob.get(jobKey)?.id !== n.id) removeCard(n.id, { silent: true });
     }
   }, [active]);

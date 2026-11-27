@@ -220,12 +220,12 @@ function laterStarts(row, ctx) {
  * True when a later same-day start that is free for the visit has an hour with no reading and no hour read wet: the day
  * could not be called without a dry hour. (A reading at or above DRY_PCT settles that start as not dry.)
  */
-function laterHourUnread(row, hourly, ctx) {
+function laterHourUnread(row, hourly, ctx, alerts = []) {
   const { day, taken } = ctx;
   return laterStarts(row, ctx).some((c) => {
     if (ctx.occupied(row.visit, day, c.start, c.end) || clashes(taken, techOf(row), day, c.start, c.end)) return false;
-    const rain = rainPass.spanRain(hourly, day, c.start, c.end);
-    return !rain.complete && !(rain.peak >= DRY_PCT);
+    const storm = rainPass.spanStorm(hourly, day, c.start, c.end, alerts, { thunderMinPct: rainPass.THUNDER_DRY_PCT });
+    return !storm.complete && !storm.wetByStorm && !(storm.peak >= DRY_PCT);
   });
 }
 
@@ -291,7 +291,7 @@ async function proposeFor(row, ctx) {
   // over the cap is `cap` only when a valid move exists, else it keeps its true reason.
   if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   // A later hour with no reading could still have been dry: unread, never a move or a call.
-  if (laterHourUnread(row, hourly, ctx)) return { ...base, decision: 'none', reason: 'unread_forecast' };
+  if (laterHourUnread(row, hourly, ctx, alerts)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   const { target, unread, exhausted, date } = await dryDayFor(row, hourly, ctx, alerts);
   // A scan with no work day in it is unresolved, never a call list: the day is not frozen on it (see planDay).
   if (exhausted) return { ...base, decision: 'none', reason: 'no_work_day_in_scan' };

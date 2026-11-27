@@ -78,9 +78,9 @@ const cand = (date, technician_id = 't1', start_time = '09:00') => ({
 });
 const freshEval = () => ({ kind: 'no_change', audit: { constraints: { lock_boundary: '2026-11-28' } } });
 
-async function stateWith(read) {
+async function stateWith(read, extra = {}) {
   process.env[ENV] = 'shadow';
-  return rainTerm.start(run, { read });
+  return rainTerm.start(run, { read, readBackup: async () => null, readAlerts: async () => [], ...extra });
 }
 
 let prevEnv;

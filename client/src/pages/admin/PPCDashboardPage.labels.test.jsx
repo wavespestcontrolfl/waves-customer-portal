@@ -87,3 +87,21 @@ it("keeps a paused campaign's 7-day spend in the totals and leaves its budget ou
   // $0.30 active + $20.00 paused spend, against the active campaign's $5 x 7 base budget.
   expect(await screen.findByText(/\$20\.30 of \$35\.00 base\s+budget/)).toBeInTheDocument();
 });
+
+it("suppresses distorted CPL/CPA when an LSA campaign has performance_max_present (P1-4)", async () => {
+  mount([
+    campaign({
+      id: 9,
+      platform: "google_lsa",
+      campaign_type: "google_lsa",
+      campaign_name: "Local Service Ads",
+      performanceMaxPresent: true,
+      cpaUnavailable: true,
+      last7d: { spend: 100, conversionValue: 0, conversions: 5, clicks: 0, impressions: 0, cpa: null },
+      last30d: { spend: 300, conversionValue: 0, conversions: 15, cpa: null },
+    }),
+  ]);
+  expect(await screen.findByText("unavailable — LSA includes PMax")).toBeInTheDocument();
+  expect(screen.queryByText("$20.00")).not.toBeInTheDocument();
+  expect(screen.queryByText("$--")).not.toBeInTheDocument();
+});

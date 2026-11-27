@@ -1136,5 +1136,15 @@ describe('audit fixes', () => {
     });
     expect(heatOut.proposals[0]).toMatchObject({ decision: 'none', reason: 'forecast_dry' });
     expect(heatOut.proposals[0].advisories).toEqual([{ event: 'Heat Advisory', category: 'heat_advisory' }]);
+
+    // P1-6: Tropical Storm Warning covering Wednesday with a missing afternoon hourly reading
+    // still settles today as unsafe and moves the visit to dry Thursday instead of returning unread_forecast.
+    n = 0;
+    const partialWed = hoursFor({}).filter((h) => !h.startTime.startsWith(`${WED}T14`));
+    const partialTsOut = await run({
+      now: TUE_CUTOFF, conn: fakeConn(), deps: deps([stop()], { activeAlerts: jest.fn(async () => [tsAlert]) }),
+      read: jest.fn(async () => partialWed),
+    });
+    expect(partialTsOut.proposals[0]).toMatchObject({ decision: 'day_move', to_date: THU, storm_hazard: 'Tropical Storm Warning' });
   });
 });

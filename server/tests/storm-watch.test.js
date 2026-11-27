@@ -45,7 +45,7 @@ function hourlyAt(chance, when = NOON_ET) {
 // resolves a row only when the queried technician_id is in the set.
 // A second scheduled_services read is the visit-member lookup (rain-fit outdoorStopRows):
 // the grouped stops themselves plus `outside` members the list did not carry, or an error.
-function wireDb({ stops = [], alertedTechIds = [], addOns = [], outside = [], membersError = null } = {}) {
+function wireDb({ stops = [], alertedTechIds = [], advisoryRows = [], addOns = [], outside = [], membersError = null } = {}) {
   const notifInsert = jest.fn().mockResolvedValue();
   const dedupeWhere = jest.fn();
   const whereIn = jest.fn().mockReturnThis();
@@ -68,14 +68,19 @@ function wireDb({ stops = [], alertedTechIds = [], addOns = [], outside = [], me
     }
     if (table === 'tech_notifications') {
       let queriedTechId = null;
+      let queriedType = null;
       const builder = {
         where: jest.fn((args) => {
           dedupeWhere(args);
-          if (args && typeof args === 'object') queriedTechId = args.technician_id;
+          if (args && typeof args === 'object') {
+            queriedTechId = args.technician_id;
+            queriedType = args.type;
+          }
           return builder;
         }),
         whereRaw: jest.fn().mockReturnThis(),
         first: jest.fn(async () => (alertedTechIds.includes(queriedTechId) ? { id: 'n-1' } : undefined)),
+        select: jest.fn(async () => (queriedType === 'weather_safety_advisory' ? advisoryRows : [])),
         insert: notifInsert,
       };
       return builder;
@@ -355,5 +360,29 @@ describe('storm-watch sweep', () => {
     const res = await StormWatch.sweep(NOON_ET);
     expect(res).toEqual({ checked: 1, alerted: 0 });
     expect(notifInsert).not.toHaveBeenCalled();
+  });
+
+  test('P1-7: multiple active advisories name every hazard, and a second hazard category arriving later notifies independently', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{ startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(), rainChance: 10, hasThunder: false }]);
+    getNwsActiveAlerts.mockResolvedValue([
+      { event: 'Heat Advisory', category: 'heat_advisory', moveTrigger: false, onset: new Date(NOON_ET.getTime() - 3600_000).toISOString(), expires: new Date(NOON_ET.getTime() + 4 * 3600_000).toISOString() },
+      { event: 'Wind Advisory', category: 'wind_advisory', moveTrigger: false, onset: new Date(NOON_ET.getTime() - 3600_000).toISOString(), expires: new Date(NOON_ET.getTime() + 4 * 3600_000).toISOString() },
+    ]);
+
+    const both = await StormWatch.sweep(NOON_ET);
+    expect(both).toEqual({ checked: 1, alerted: 0, advisories: 1 });
+    expect(notifInsert.mock.calls[0][0].message).toContain('Heat Advisory & Wind Advisory');
+
+    // Later sweep when Heat Advisory was already sent earlier today and Wind Advisory just arrived:
+    jest.clearAllMocks();
+    const { notifInsert: secondInsert } = wireDb({
+      stops: [stop()],
+      advisoryRows: [{ payload: JSON.stringify({ advisories: [{ event: 'Heat Advisory', category: 'heat_advisory' }] }) }],
+    });
+    const later = await StormWatch.sweep(NOON_ET);
+    expect(later).toEqual({ checked: 1, alerted: 0, advisories: 1 });
+    expect(secondInsert.mock.calls[0][0].message).toContain('Wind Advisory');
+    expect(secondInsert.mock.calls[0][0].message).not.toContain('Heat Advisory');
   });
 });

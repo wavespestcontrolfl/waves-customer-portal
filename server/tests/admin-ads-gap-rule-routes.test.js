@@ -134,6 +134,15 @@ describe('gate off', () => {
   test('DELETE /campaigns/:id/hold still clears an active stored hold even when GATE_ADS_GAP_RULE is off (P1-5)', async () => {
     mockGapMode = 'off';
     campaignRow.metadata = { keep: 'me', budget_hold: { mode: 'base', until: inDays(3) } };
+    const getRes = await call('GET', '/gap-rule');
+    expect(getRes.status).toBe(200);
+    expect(getRes.body).toMatchObject({
+      mode: 'off',
+      settings: null,
+      window: null,
+      campaigns: [{ id: CAMPAIGN_ID, hold: { mode: 'base', until: inDays(3) } }],
+    });
+
     const res = await call('DELETE', `/campaigns/${CAMPAIGN_ID}/hold`);
     expect(res.status).toBe(200);
     expect(res.body.hold).toBeNull();

@@ -220,6 +220,37 @@ async function alreadyAlertedToday(jobId, technicianId, todayStr, type = NOTIFIC
   return !!existing;
 }
 
+// Track advisory hazard categories already sent today for this (job, tech) so
+// both Heat Advisory and Wind Advisory can notify independently when a second
+// hazard appears later in the day.
+async function sentAdvisoryCategoriesToday(jobId, technicianId, todayStr) {
+  const query = db('tech_notifications')
+    .where({ type: ADVISORY_NOTIFICATION_TYPE, technician_id: technicianId })
+    .whereRaw("payload->>'job_id' = ?", [String(jobId)])
+    .whereRaw('created_at >= ?::date', [todayStr]);
+  const rows = typeof query.select === 'function'
+    ? await query.select('payload')
+    : ((await query.first('id', 'payload')) ? [await query.first('id', 'payload')] : []);
+  const seen = new Set();
+  for (const row of rows || []) {
+    if (!row) continue;
+    let payload = row.payload;
+    if (typeof payload === 'string') {
+      try { payload = JSON.parse(payload); } catch { payload = null; }
+    }
+    if (Array.isArray(payload?.advisories) && payload.advisories.length) {
+      for (const a of payload.advisories) {
+        if (a?.category) seen.add(String(a.category));
+      }
+    } else if (payload?.category) {
+      seen.add(String(payload.category));
+    } else {
+      seen.add('__legacy__');
+    }
+  }
+  return seen;
+}
+
 async function readActiveAlertsSafe(lat, lng, cache) {
   if (typeof weatherForecast.getNwsActiveAlerts !== 'function') return null;
   const key = `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
@@ -301,28 +332,36 @@ async function sweep(now = new Date(), { readFawn } = {}) {
       } catch (err) {
         logger.error(`[storm-watch] notification insert failed for job ${job.id}: ${err.message}`);
       }
-    } else if (signal.advisories.length > 0 && !(await alreadyAlertedToday(job.id, job.technician_id, todayStr, ADVISORY_NOTIFICATION_TYPE))) {
+    } else if (signal.advisories.length > 0) {
       // Heat / wind advisories are alert-only safety banners — NEVER a rain-out reschedule prompt.
-      const adv = signal.advisories[0];
-      try {
-        await db('tech_notifications').insert({
-          technician_id: job.technician_id,
-          type: ADVISORY_NOTIFICATION_TYPE,
-          message: `⚠️ ${adv.event} near your ${timeLabel ? `${timeLabel} ` : ''}${where} — safety advisory only (no schedule move).`,
-          payload: JSON.stringify({
-            job_id: job.id,
-            customer_id: job.customer_id,
-            service_type: job.service_type,
-            window_start: job.window_start,
-            window_end: job.window_end,
-            advisory_only: true,
-            advisories: signal.advisories.map((a) => ({ event: a.event, category: a.category })),
-            city: job.customer_city || null,
-          }),
-        });
-        advisoriesSent += 1;
-      } catch (err) {
-        logger.error(`[storm-watch] advisory insert failed for job ${job.id}: ${err.message}`);
+      // Dedupe per hazard category so both Heat Advisory and Wind Advisory notify independently
+      // (either combined in one card when both are active, or separately if the second arrives later).
+      const sentCategories = await sentAdvisoryCategoriesToday(job.id, job.technician_id, todayStr);
+      const unseenAdvisories = sentCategories.has('__legacy__')
+        ? []
+        : signal.advisories.filter((a) => !sentCategories.has(String(a.category || a.event)));
+      if (unseenAdvisories.length > 0) {
+        const eventsLabel = unseenAdvisories.map((a) => a.event).join(' & ');
+        try {
+          await db('tech_notifications').insert({
+            technician_id: job.technician_id,
+            type: ADVISORY_NOTIFICATION_TYPE,
+            message: `⚠️ ${eventsLabel} near your ${timeLabel ? `${timeLabel} ` : ''}${where} — safety advisory only (no schedule move).`,
+            payload: JSON.stringify({
+              job_id: job.id,
+              customer_id: job.customer_id,
+              service_type: job.service_type,
+              window_start: job.window_start,
+              window_end: job.window_end,
+              advisory_only: true,
+              advisories: unseenAdvisories.map((a) => ({ event: a.event, category: a.category })),
+              city: job.customer_city || null,
+            }),
+          });
+          advisoriesSent += 1;
+        } catch (err) {
+          logger.error(`[storm-watch] advisory insert failed for job ${job.id}: ${err.message}`);
+        }
       }
     }
   }

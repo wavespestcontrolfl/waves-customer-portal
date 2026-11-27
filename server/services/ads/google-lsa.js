@@ -332,21 +332,29 @@ async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDa
   const existingMeta = existing?.metadata && typeof existing.metadata === 'object'
     ? existing.metadata
     : (typeof existing?.metadata === 'string' ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })() : {});
-  const nextMeta = { ...existingMeta, [ACCOUNT_KEY]: account };
-  if (pmaxPresent) nextMeta.performance_max_present = true;
-  else delete nextMeta.performance_max_present;
+  const insertMeta = { ...existingMeta, [ACCOUNT_KEY]: account };
+  if (pmaxPresent) insertMeta.performance_max_present = true;
+  else delete insertMeta.performance_max_present;
   const metaChanged = Boolean(existingMeta.performance_max_present) !== pmaxPresent;
-  const state = {
+  const baseState = {
     ...accountState(campaigns),
     campaign_type: CAMPAIGN_TYPE,
-    ...(existing ? (metaChanged ? { metadata: JSON.stringify(nextMeta) } : {}) : { metadata: JSON.stringify(nextMeta) }),
     updated_at: new Date(),
   };
   let written = 0;
   await db.transaction(async (trx) => {
     let campaignId = existing?.id;
     if (existing) {
-      await trx('ad_campaigns').where({ id: campaignId }).update(state);
+      // Atomic jsonb key merge/remove so concurrent admin metadata edits are never clobbered.
+      const updateState = {
+        ...baseState,
+        ...(metaChanged ? {
+          metadata: pmaxPresent
+            ? db.raw("COALESCE(metadata, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ performance_max_present: true })])
+            : db.raw("COALESCE(metadata, '{}'::jsonb) - 'performance_max_present'"),
+        } : {}),
+      };
+      await trx('ad_campaigns').where({ id: campaignId }).update(updateState);
     } else {
       campaignId = uuidv4();
       await trx('ad_campaigns').insert({
@@ -354,7 +362,8 @@ async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDa
         platform: PLATFORM,
         platform_campaign_id: account,
         campaign_name: DISPLAY_NAME,
-        ...state,
+        ...baseState,
+        metadata: JSON.stringify(insertMeta),
         created_at: new Date(),
       });
     }

@@ -11683,6 +11683,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Default OFF = behaviour identical to before.
     // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
     // with only the terminal flag cleared (deciding-reason check).
+    const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))
+      .some((f) => f && f.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE);
+    const unpaidPreMintedOnChemicalHold = !packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly
+      && Boolean(preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status));
+    const unpaidExistingOnChemicalHold = unpaidPreMintedOnChemicalHold
+      || (!packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly
+        && Boolean(existingCompletionInvoice && !['paid', 'prepaid'].includes(existingCompletionInvoice.status)));
     const completionInvoiceGateInput = {
       issuedInvoiceCloseout: neverMints,
       recapReviewOnly,
@@ -11704,8 +11711,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // invoice minted between the two reads appears only in
       // preMintedInvoice, and the hold and beside-branch must agree.
       unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !terminalCompletionInvoice && !existingCompletionInvoice && !preMintedInvoice,
-      unrecordedChemicalAddOnHold: (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))
-        .some((f) => f && f.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE),
+      unrecordedChemicalAddOnHold,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -11740,15 +11746,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
       annualPrepayCovered,
     };
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
-    if (!packetEffects && completionInvoiceGateInput.unrecordedChemicalAddOnHold && !shouldInvoice
-      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })) {
-      logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — invoice held for office billing review`);
+    const chemicalAddOnBillingHoldApplies = !packetEffects && unrecordedChemicalAddOnHold
+      && !recapReviewOnly && !alreadyPaid && !prepaidCovered && !autopayCoversVisit
+      && (unpaidExistingOnChemicalHold
+        || (!shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
+    if (chemicalAddOnBillingHoldApplies) {
+      logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${unpaidExistingOnChemicalHold ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
+      // This billing alert is the ONLY durable office work item for a held bill,
+      // so fail closed (release for resume + 503) if persistence returns null or throws.
+      // The service_record is already committed and the alert is deduplicated by visit id.
+      let holdAlert = null;
+      let holdAlertError = null;
       try {
         const { raiseAdminAlert } = require('../services/admin-alert-compose');
-        await raiseAdminAlert('billing', {
+        holdAlert = await raiseAdminAlert('billing', {
           area: 'Billing',
           action: 'review held invoice for unverified chemical add-on',
-          why: 'A chemical area add-on was completed without a recorded product application, so automatic invoicing was held.',
+          why: unpaidExistingOnChemicalHold
+            ? 'A chemical area add-on had no recorded application, so collection on the open invoice was held.'
+            : 'A chemical area add-on was completed without a recorded product application, so automatic invoicing was held.',
           severity: 'needs-you',
           who: 'person',
           link: `/admin/customers?customerId=${svc.customer_id}`,
@@ -11758,10 +11774,29 @@ async function completeScheduledService(completionInput, packetContext = null) {
           bell: true,
           dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`,
           detail: `Visit ${svc.id} (${svc.service_type || 'service'}) completed with a chemical add-on warning (no product application recorded). Confirm with the technician whether the add-on was applied before issuing or collecting the invoice.`,
-          metadata: { scheduledServiceId: svc.id, serviceRecordId: record?.id || null, customerId: svc.customer_id, reason: areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE },
+          metadata: {
+            scheduledServiceId: svc.id,
+            serviceRecordId: record?.id || null,
+            customerId: svc.customer_id,
+            heldInvoiceId: preMintedInvoice?.id || existingCompletionInvoice?.id || null,
+            reason: areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE,
+          },
         });
       } catch (holdAlertErr) {
-        logger.error(`[dispatch] unrecorded chemical add-on billing alert failed (non-blocking): ${holdAlertErr.message}`);
+        holdAlertError = holdAlertErr;
+      }
+      if (!holdAlert) {
+        const err = holdAlertError || new Error('chemical_addon_billing_alert_not_recorded');
+        logger.error(`[dispatch] chemical_addon_billing_alert_failed for visit ${svc.id} — closeout NOT finalized: ${err.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, err);
+        return ({ status: 503, body: {
+          error: released
+            ? 'This visit\'s chemical add-on billing review alert could not be saved — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+            : `This visit's chemical add-on billing review alert could not be saved — the closeout is saved but NOT finalized. Retry in about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes.`,
+          code: 'chemical_addon_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
       }
     }
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
@@ -13893,15 +13928,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
           updated_at: new Date(),
         });
       } catch (e) { logger.warn(`[dispatch] Could not back-link invoice to service_record: ${e.message}`); }
-      preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
-      invoice = preMintedInvoice;
-      payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
-        kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
-        codePrefix: invoiceShortCodePrefix(invoice),
-      });
-      // Treat already-paid / prepaid pre-mint as the same SMS branch.
-      if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
-      else invoiceCreated = true;
+      if (unpaidPreMintedOnChemicalHold) {
+        // Unverified chemical add-on hold: keep the pre-minted unpaid invoice
+        // linked to the service_record, but withhold credit application,
+        // autopay collection, and pay-link delivery until office review.
+        logger.warn(`[dispatch] visit ${svc.id}: held collection/delivery on pre-minted invoice ${preMintedInvoice.id} pending chemical add-on billing review`);
+      } else {
+        preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
+        invoice = preMintedInvoice;
+        payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
+          kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        });
+        // Treat already-paid / prepaid pre-mint as the same SMS branch.
+        if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
+        else invoiceCreated = true;
+      }
     }
 
     // The FIRST PERFORMED visit carries a queued setup fee (scheduled_services

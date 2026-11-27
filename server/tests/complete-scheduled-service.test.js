@@ -1198,9 +1198,17 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     expect(shouldAutoInvoiceCompletion({ ...base, unrecordedChemicalAddOnHold: true })).toBe(false);
   });
 
-  test('completionInvoiceGateInput wires unrecordedChemicalAddOnHold resume-safely and raises a billing alert when held', () => {
+  test('completionInvoiceGateInput wires unrecordedChemicalAddOnHold resume-safely, holds unpaid pre-minted invoices, and fails closed if billing alert cannot be saved (P0-1 + P1-1)', () => {
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
-    expect(source).toContain('unrecordedChemicalAddOnHold: (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))');
+    expect(source).toContain('const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))');
     expect(source).toContain('dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`');
+    expect(source).toContain("code: 'chemical_addon_billing_alert_failed'");
+    expect(source).toContain('if (unpaidPreMintedOnChemicalHold) {');
+    const preMintAt = source.indexOf('} else if (preMintedInvoice) {');
+    const holdAt = source.indexOf('if (unpaidPreMintedOnChemicalHold) {', preMintAt);
+    const creditAt = source.indexOf('applyPrepaidCreditToInvoice(preMintedInvoice)', preMintAt);
+    expect(preMintAt).toBeGreaterThan(-1);
+    expect(holdAt).toBeGreaterThan(preMintAt);
+    expect(creditAt).toBeGreaterThan(holdAt);
   });
 });

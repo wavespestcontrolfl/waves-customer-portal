@@ -388,4 +388,14 @@ describe('notices stay until seen', () => {
     expect(screen.queryByTestId('weather-advisory-notice')).not.toBeInTheDocument();
     expect(posts(calls, '/n-adv/read')).toHaveLength(1);
   });
+
+  it('P1-7: distinct weather advisory categories on the same stop render together without superseding each other', async () => {
+    const heat = n('n-heat', 'weather_safety_advisory', { job_id: 'job-9', advisories: [{ category: 'heat_advisory', event: 'Heat Advisory' }] }, 'Heat Advisory — no schedule move.');
+    const wind = n('n-wind', 'weather_safety_advisory', { job_id: 'job-9', advisories: [{ category: 'wind_advisory', event: 'Wind Advisory' }] }, 'Wind Advisory — no schedule move.');
+    stubFeed([heat, wind]);
+    mount();
+    expect(await screen.findByText(/Heat Advisory/)).toBeInTheDocument();
+    expect(screen.getByText(/Wind Advisory/)).toBeInTheDocument();
+    expect(screen.getAllByTestId('weather-advisory-notice')).toHaveLength(2);
+  });
 });
