@@ -31,10 +31,10 @@
  *      rule 2 or a sent estimate may answer it, so the model can never close it.
  * The facts are computed here and handed to the model as fixed inputs. The model names the timeline event that answers the alert;
  * CODE then checks that event is in this alert's timeline, later than the alert, and a person's or a real record (never automated,
- * never a draft). A miss is still_owed. A bare "ok" or "yes" to an offered time is answered only by the booking or held staff move the
- * model names as its proof, on every path: no plain rule closes it, and the model judges the offered day and time from the offer
- * and reply it is shown. With no booking or staff move after the yes, a rule keeps it owed and no model call is made. A bare yes to
- * any other message is the model's too (no plain rule closes it), except on an owed alert, which never goes to the model.
+ * never a draft). A miss is still_owed. No plain rule closes a bare "ok" or "yes": the model reads the message it answers (whole,
+ * with its send time) and says whether it accepts an offered day or time. When it does, only the booking or held staff move the model
+ * names as its proof answers it, and the model judges the offered day and time. On an owed alert, which never goes to the model, a
+ * bare yes stays owed.
  * Any error, refusal, timeout or unreadable reply is still_owed (fail safe), logged with no message text.
  *
  * Proof and fingerprint are computed over EVERY eligible row after the alert (to a safety cap); only the excerpts sent to the model
@@ -97,9 +97,6 @@ const OWED_RULE_PROOFS = [...RULE_PROOFS, 'estimate_sent'];
 const OWED_DONE_WHEN = new Set(['promise_fulfilled']);
 const OWED_TITLE_RE = /we still owe/i;
 const BARE_YES_RE = /^\s*(ok(ay)?|yes|yep|yeah|sure|y|k|sounds good|that works)\W*$/i;
-// A message that MAY offer a time: it switches on the code-enforced booking requirement (guardBareYes), so it leans to matching;
-// a miss is not a close, since no plain rule closes any bare yes the model can judge (ruleVerdict).
-const OFFER_RE = /\b(mon|tues?|wed(nes)?|thu(rs)?|fri|sat(ur)?|sun)(day)?\b|\b\d{1,2}(:\d{2})?\s?(am|pm)\b|\b\d{1,2}\/\d{1,2}\b|\b\d{1,2}(:\d{2})?\s?(-|–|to|and)\s?\d{1,2}(:\d{2})?\b|\b(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\bthe \d{1,2}(st|nd|rd|th)\b|tomorrow|next week|work for you|does .{0,30} work|availab|opening|come (out|by)/i;
 // Rows a reservation or an error left behind are looked at again after an hour.
 const RETRY_RULES = new Set(['ai_error', 'ai_reserved']);
 // Part of every fingerprint. Bumped when a rule or a proof definition changes, so each open alert gets one fresh look under it.
@@ -121,9 +118,10 @@ Rules:
 - The FIXED FACTS are computed by Waves code. Do not question them.
 - "proof" is the id (E1, E2...) of the one AFTER event that answers the alert. It is required for "answered". It must be a delivered staff text, a sent staff email, a call a person answered, a booking, a visit move by Waves staff that the visit still holds, or a sent estimate. An automated text (reminder, en route, receipt, link), an unsent Waves DRAFT, a customer message, an expired link, or a visit move by the customer or an automatic job never answers anything.
 - A staff visit move answers a request to move the visit only when its new day and time fit what the customer asked.
-- "Ok" or "yes" to an offered time (the item then shows the last Waves message, when it was sent, and the reply; visit lines give each day with its weekday and the arrival window the customer is told) is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
+- When the customer's message is a bare "ok" or "yes", the item shows the last Waves message, when it was sent, and the reply. Set "yes_to_offer" to true when that yes accepts a new day or time Waves offered or asked about, and false when it accepts nothing new (a reminder of a visit already booked, a note, a bill). When unsure, set true.
+- "Ok" or "yes" to an offered time (visit lines give each day with its weekday and the arrival window the customer is told) is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
 - Never return nothing_to_answer for a question, a request, or a promise Waves made.
-Reply with ONLY this JSON object, no code fence: {"outcome": "answered" | "nothing_to_answer" | "still_owed", "why": "<${MAX_WHY_WORDS} words or fewer>", "proof": "<event id or null>"}`;
+Reply with ONLY this JSON object, no code fence: {"outcome": "answered" | "nothing_to_answer" | "still_owed", "why": "<${MAX_WHY_WORDS} words or fewer>", "proof": "<event id or null>", "yes_to_offer": true | false}`;
 
 // ---------------------------------------------------------------------------------------------------------------------------
 // Small helpers
@@ -363,7 +361,9 @@ function callsAfter(conn, anchor, key, ownCallId) {
       conn.raw(`(cl.direction = 'outbound' AND cl.status = 'completed' AND ${personCallBackSql('cl')}) as person_back`),
       conn.raw("(cl.direction = 'inbound' AND cl.status = 'completed' AND cl.answered_by = 'human') as human_in"));
   if (ownCallId) q.whereNot('cl.id', ownCallId);
-  return scopeToContact(q, key, { customerColumn: 'cl.customer_id', phoneColumns: ['cl.from_phone', 'cl.to_phone'] });
+  // A bridged form callback rings the staff cell first: the caller's number is only in metadata.leadPhone (missed-call-bell.js
+  // whereCallOfNumber reads the same three legs), so a call back to the number is never missed.
+  return scopeToContact(q, key, { customerColumn: 'cl.customer_id', phoneColumns: ['cl.from_phone', 'cl.to_phone', "cl.metadata->>'leadPhone'"] });
 }
 
 // The inbound texts the unified inbox holds (the SMS webhook writes it first; the text log is best effort): the same contact
@@ -739,34 +739,26 @@ function ruleVerdict(alert, timeline, owed, now) {
     if (quiet) return quiet;
   }
   const kinds = owed ? OWED_RULE_PROOFS : RULE_PROOFS;
-  // A bare yes to an offered time: no plain rule closes it (guardBareYes). With no booking or held staff move after it, nothing can,
-  // so it stays owed here and no model is paid; with one, the model judges whether it is the offered day and time.
-  // A bare yes to any other message: what it answers is language (an offer the word list missed, or a plain "ok"), so no plain rule
-  // closes it either; the model reads the message whole. An owed alert never goes to the model, so there such a yes keeps rule 2.
-  const toOffer = bareYesToOffer(timeline);
-  if (toOffer && !timeline.events.some((e) => ANSWERS_A_YES.includes(e.proof) && e.at > timeline.alertAt)) {
-    return verdict('still_owed', 'rule', 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move after it');
-  }
-  const held = toOffer || (!owed && bareYes(timeline));
-  const hit = held ? null : timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
+  // A bare "ok" or "yes": whether it accepts an offered time, or needs nothing, is language, so no plain rule closes it. The model
+  // judges it, shown the message it answers (guardBareYes). An owed alert never goes to the model, so there it stays owed.
+  const hit = bareYes(timeline) ? null : timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
   if (hit) return answeredBy(hit, hit.proof);
   if (owed) return verdict('still_owed', 'rule', 'owed_open', 'we owe this and nothing answers it yet');
   return null;
 }
 
-// "Ok" or "yes" to an offered time is answered only by the booking, or the held staff move, that the model names as its proof: on
-// EVERY path. No plain rule closes that yes (ruleVerdict), and a text, an email, a call, an estimate or a "nothing to answer" never
-// answers it. Whether the record is on the offered day and time is language (the offer is free text; no offer is stored as data, and
-// word lists over offers kept missing phrasings), so the model judges it from the offer and the reply (shown to it whole, as the
-// context lines may not reach back to the offer) and lines that state each record's day and time. Code checks only what records
-// prove: a real booking (never a visit waiting for the customer to pick a time) or a staff move the visit still holds.
+// A bare "ok" or "yes". Whether it accepts a day or time Waves offered, and whether a record is on that day and time, is language:
+// offers are free text, no offer is stored as data, and word lists over offers both missed offers and caught plain date mentions
+// ("your invoice is due 12/4"). So the model judges both, from the message shown whole with its send time and lines that state each
+// record's day and arrival window, and says which in "yes_to_offer" (a reply without that field counts as a yes to an offer). When
+// it is one, only the booking or held staff move the model names as its proof answers it: a text, an email, a call, an estimate or
+// a "nothing to answer" never does. No plain rule closes any bare yes (ruleVerdict). Code checks only what records prove (a real
+// booking, never a visit waiting for the customer to pick a time; a staff move the visit still holds) and holds the model to its
+// own reading.
 const ANSWERS_A_YES = ['booking', 'date_change'];
 const bareYes = (timeline) => !!timeline.reply && BARE_YES_RE.test(timeline.reply.lastBody);
-function bareYesToOffer(timeline) {
-  return bareYes(timeline) && OFFER_RE.test(timeline.reply.prevOutbound);
-}
 function guardBareYes(v, timeline) {
-  if (v.outcome === 'still_owed' || !bareYesToOffer(timeline)) return v;
+  if (v.outcome === 'still_owed' || !bareYes(timeline) || v.yesToOffer === false) return v;
   const named = v.outcome === 'answered' && v.proofId ? timeline.events.find((e) => e.type === v.proofType && e.id === v.proofId) : null;
   if (named && ANSWERS_A_YES.includes(named.proof)) return v;
   return verdict('still_owed', v.source, 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move named as the answer', { model: v.model });
@@ -818,7 +810,7 @@ function judgeInput(alert, timeline, facts) {
     // offer's "tomorrow" is read from when it was sent.
     ...(bareYes(timeline) && timeline.reply.prevOutbound ? [
       'THE YES AND THE MESSAGE IT ANSWERS (the last message Waves sent before the reply, then the reply):',
-      `- WAVES MESSAGE${timeline.reply.prevAt ? ` (sent ${instantText(timeline.reply.prevAt)})` : ''}: ${clean(timeline.reply.prevOutbound, 600)}`,
+      `- WAVES MESSAGE${timeline.reply.prevAt ? ` (sent ${instantText(timeline.reply.prevAt)})` : ''}: ${clean(timeline.reply.prevOutbound, 1500)}`,
       `- CUSTOMER REPLY (${instantText(timeline.alertAt)}): ${clean(timeline.reply.lastBody, 300)}`,
     ] : []),
     'AFTER THE ALERT (id | time | what):',
@@ -834,7 +826,8 @@ function parseJudgeReply(raw) {
   if (!obj || typeof obj !== 'object' || Array.isArray(obj) || !OUTCOMES.includes(obj.outcome)) return null;
   const why = clean(String(obj.why || '').split(/\s+/).slice(0, MAX_WHY_WORDS).join(' '), 140);
   const proof = typeof obj.proof === 'string' && obj.proof.trim() && !/^null$/i.test(obj.proof.trim()) ? obj.proof.trim().toUpperCase() : null;
-  return { outcome: obj.outcome, why, proof };
+  // Only an explicit false says a bare yes accepts no offered time: a missing or odd value keeps the booking requirement.
+  return { outcome: obj.outcome, why, proof, yesToOffer: obj.yes_to_offer !== false };
 }
 
 class NoKeyError extends Error {}
@@ -885,7 +878,7 @@ function guardSilentCall(v, alert, timeline, now) {
 }
 
 function settleAiReply(reply, timeline) {
-  const keep = (outcome, rule, why, extra = {}) => verdict(outcome, 'ai', rule, why, { model: reply.model, ...extra });
+  const keep = (outcome, rule, why, extra = {}) => verdict(outcome, 'ai', rule, why, { model: reply.model, yesToOffer: reply.yesToOffer !== false, ...extra });
   if (reply.outcome !== 'answered') return keep(reply.outcome, null, reply.why);
   const event = checkedProof(reply, timeline);
   if (!event) return keep('still_owed', 'proof_rejected', 'the named proof is not a real answer after the alert');

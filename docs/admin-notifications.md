@@ -316,7 +316,7 @@ customer's message by this rule.
    closes, edits and rings no bell and sends no text, email or call; the verdicts are scored against what staff did for a week before
    any live mode is built. It reads what came before the bell and every record created after it (texts, calls, visits, estimates,
    email-thread messages). Plain rules go first: an unknown missed call with no voicemail, 24 hours of silence and no call from
-   Waves to the number is `nothing_to_answer` when the text-back for that call reached the caller (its claim says sent, or the
+   Waves to the number (a bridged form callback counts by its `metadata.leadPhone`) is `nothing_to_answer` when the text-back for that call reached the caller (its claim says sent, or the
    provider's receipt says delivered; a bounced or cancelled one did not), or the caller failed the
    press-1 screen (a robocall; the bell's robodialer pattern markers alone do not count); a repeat call that the one-per-number
    text-back skipped stays open; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
@@ -324,13 +324,12 @@ customer's message by this rule.
    (title "we still owe", or `doneWhen: 'promise_fulfilled'`) is closed only by that rule or a sent estimate, never by the model.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
-   a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time closes
-   only when the model names the booking or held staff move that puts the visit at the offered day and time (no plain rule closes
-   it, and the day-and-time match is the model's: offers are free text, so the model is shown the offer, when it was sent, and the
-   reply, and each visit's day with its weekday and the arrival window the customer is told; a visit waiting for the customer to
-   pick a time is no booking; with no booking or staff move after the yes, it stays owed and no model call is made). A bare "ok" or
-   "yes" to any other message is the model's to judge too (no plain rule closes it; an owed bell, which never goes to the model,
-   keeps the plain rule), and a finished visit never answers a question about its result. A visit move (a new day or a new start)
+   a real record (never an automated text, an expired link or an unsent Gmail draft). No plain rule closes a bare "ok" or "yes":
+   the model is shown the message it answers (whole, with when it was sent) and says whether the yes accepts an offered day or
+   time (`yes_to_offer`; a reply without it counts as yes). When it does, the bell closes only when the model names the booking or
+   held staff move that puts the visit at the offered day and time (the match is the model's: offers are free text, and each
+   visit line gives the day with its weekday and the arrival window the customer is told; a visit waiting for the customer to pick
+   a time is no booking). An owed bell with a bare yes stays owed. A finished visit never answers a question about its result. A visit move (a new day or a new start)
    answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
    customer, a hand-off for the customer to pick a time (no time is booked), or a move on a visit that now waits for the
    customer's pick, is never an answer.

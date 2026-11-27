@@ -428,6 +428,16 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const waved = await timelineFor(await missedCall(phone(63), { missed_call_spam_wave: 'block_quiet' }));
     expect(waved.call.robocall).toBeNull();
     expect(agent.ruleVerdict({ category: 'missed_call' }, waved, false, day)).toBeNull();
+
+    // A bridged form callback rings the staff cell first, so the caller's number is only in metadata.leadPhone. Waves called the
+    // number back: rule 1 stays off, as for any call from Waves to it.
+    const calledBack = phone(64);
+    const calledBackCall = await missedCall(calledBack, { preconnect_screen: 'failed' });
+    const [bridge] = await db('call_log').insert({ from_phone: '+15550003333', to_phone: '+15550009999', direction: 'outbound', status: 'completed', created_at: at(30), duration_seconds: 40, metadata: JSON.stringify({ leadPhone: calledBack }) }).returning('id');
+    made.calls.push(bridge.id);
+    const bridged = await timelineFor(calledBackCall);
+    expect(bridged.events.find((e) => e.id === String(bridge.id))).toMatchObject({ type: 'call', inbound: false });
+    expect(agent.ruleVerdict({ category: 'missed_call' }, bridged, false, day)).toBeNull();
   });
 
   test('an inbound call that went from hold to voicemail answers only up to the hold', async () => {

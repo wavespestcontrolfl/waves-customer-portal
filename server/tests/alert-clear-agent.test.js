@@ -241,8 +241,7 @@ describe('the model verdict and the proof check', () => {
   test('a bare yes to an offered time closes only when the model names the booking as the answer', async () => {
     const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' };
     const none = await runWith([], { outcome: 'nothing_to_answer', why: 'customer said yes', proof: null }, { reply });
-    expect(none.row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
-    expect(none.deps.judge).not.toHaveBeenCalled();
+    expect(none.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
     // A booking exists, but "nothing to answer" names no record: the model never said the booking is the answer.
     const unnamed = await runWith([booking], { outcome: 'nothing_to_answer', why: 'yes to a booked time', proof: null }, { reply });
     expect(unnamed.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
@@ -536,16 +535,23 @@ describe('the booking requirement holds on every path', () => {
     expect(row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
   });
 
-  // Nothing after the yes could answer it, so a model call could only say still_owed: it is never paid for, and a used-up cap
-  // still leaves a verdict.
-  test('a bare yes with no booking or staff move after it stays owed by rule, with no model call, even with the cap used up', async () => {
-    const { deps, row } = await run([staffText()], {}, judgeNames('E1'));
-    expect(deps.judge).not.toHaveBeenCalled();
-    expect(deps.reserve).not.toHaveBeenCalled();
-    expect(row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
-    const capped = makeDeps({ timeline: async () => timelineOf([staffText()], { reply }), aiCountToday: async () => 100000 });
-    await agent.runAlertClearAgent({ now: NOW, deps: capped });
-    expect(saved(capped)[0]).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+  // Whether a yes accepts an offered time is the model's reading ("yes_to_offer"); code holds the model to it. A reply that leaves
+  // the field out keeps the booking requirement.
+  test('the model says whether a bare yes accepts an offered time, and code holds it to that reading', async () => {
+    const reads = (yesToOffer) => jest.fn(async () => ({ outcome: 'answered', why: 'staff replied', proof: 'E1', model: 'm', ...(yesToOffer === undefined ? {} : { yesToOffer }) }));
+    const offered = await run([staffText()], {}, reads(true));
+    expect(offered.deps.judge).toHaveBeenCalledTimes(1);
+    expect(offered.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
+    expect((await run([staffText()], {}, reads(undefined))).row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+    expect((await run([staffText()], {}, reads(false))).row).toMatchObject({ outcome: 'answered', source: 'ai', proof_id: 'sms-9' });
+  });
+
+  test('only an explicit false in the reply lifts the booking requirement', () => {
+    const parse = (tail) => agent.parseJudgeReply(`{"outcome":"nothing_to_answer","why":"ok to a bill","proof":null${tail}}`);
+    expect(parse(',"yes_to_offer":false').yesToOffer).toBe(false);
+    expect(parse(',"yes_to_offer":true').yesToOffer).toBe(true);
+    expect(parse('').yesToOffer).toBe(true);
+    expect(parse(',"yes_to_offer":"false"').yesToOffer).toBe(true);
   });
 
   // The offer comes from its own query and can be older than the context lines (3 days, 12 texts; 4 thread emails), so the model is
@@ -562,25 +568,30 @@ describe('the booking requirement holds on every path', () => {
     expect(coded).not.toMatch(/4821/);
     const plain = agent.judgeInput(alertRow(), timelineOf([staffMove], { reply: { lastBody: 'Can you come later?', prevOutbound: 'Friday at 10 am?' } }), agent.computeFacts(timelineOf()));
     expect(plain).not.toMatch(/THE YES AND THE MESSAGE/);
+    // The whole message as read (up to 1,500 characters), so a time corrected late in a long text is seen.
+    const long = `${'Thanks for bearing with us on the schedule this week. '.repeat(12)}Correction: we can come Friday at 2 pm instead.`;
+    expect(long.length).toBeGreaterThan(600);
+    expect(agent.judgeInput(alertRow(), tl(long), agent.computeFacts(tl('x')))).toMatch(/Correction: we can come Friday at 2 pm instead\.$/m);
     const fp = (prevOutbound, prevAt) => agent.fingerprintOf(alertRow(), tl(prevOutbound, prevAt), NOW);
     expect(fp('We could come Friday at 10 am?')).not.toBe(fp('We could come Tuesday at 2 pm?'));
     expect(fp('We could come tomorrow at 10 am?')).not.toBe(fp('We could come tomorrow at 10 am?', new Date('2026-11-24T20:10:00Z')));
     expect(fp('We could come Friday at 10 am?')).toBe(fp('We could come Friday at 10 am?'));
   });
 
-  // The audit's case: a numeric offer, a yes, and an unrelated staff reply. The word list now reads M/D dates, hour ranges, month
-  // days and ordinals, so the booking requirement is enforced in code; with nothing that could answer it, no model is paid.
-  test.each([
-    'Can we visit 12/4 between 9 and 11?', 'We have 9-11 open on the 4th, ok?', 'How about Dec 4, 1 to 3?',
-  ])('a yes to "%s" with only a staff reply after it stays owed by rule', async (prevOutbound) => {
-    const { deps, row } = await run([staffText()], { reply: { lastBody: 'yes', prevOutbound } }, judgeNames('E1'));
-    expect(deps.judge).not.toHaveBeenCalled();
-    expect(row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+  // The audits' two cases. A numeric offer, a yes and an unrelated staff reply: never closed by the staff reply. An "OK" to a bill
+  // that names a date: the model sees the exchange and may find nothing to answer; no word list decides it first.
+  test('a yes to a numeric offer is held to a booking; an ok to a dated bill can be nothing to answer', async () => {
+    const numeric = await run([staffText()], { reply: { lastBody: 'yes', prevOutbound: 'Can we visit 12/4 between 9 and 11?' } }, judgeNames('E1'));
+    expect(numeric.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
+    const bill = jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'ok to an invoice note', proof: null, model: 'm', yesToOffer: false }));
+    const dated = await run([], { reply: { lastBody: 'OK', prevOutbound: 'Your invoice is due 12/4.' } }, bill);
+    expect(bill.mock.calls[0][0]).toMatch(/- WAVES MESSAGE: Your invoice is due 12\/4\.$/m);
+    expect(dated.row).toMatchObject({ outcome: 'nothing_to_answer', source: 'ai' });
   });
 
-  // An offer the word list misses is language, so the model judges it, shown the message: a staff reply never closes the yes by
-  // rule. A reply that is not a bare yes still closes by the staff reply.
-  test('a bare yes to a message the word list does not read as an offer goes to the model, not to a plain rule', async () => {
+  // What a bare yes answers is language, so the model judges it, shown the message: a staff reply never closes the yes by rule.
+  // A reply that is not a bare yes still closes by the staff reply.
+  test('a bare yes goes to the model, shown the message it answers, never to a plain rule', async () => {
     const missed = { lastBody: 'Yes', prevOutbound: 'Shall we pencil you in for early next month?' };
     const judge = jest.fn(async () => ({ outcome: 'still_owed', why: 'yes to a proposed visit, nothing booked', proof: null, model: 'm' }));
     const { deps, row } = await run([staffText()], { reply: missed }, judge);
@@ -591,12 +602,13 @@ describe('the booking requirement holds on every path', () => {
     expect(asked.row).toMatchObject({ outcome: 'answered', source: 'rule', rule: 'staff_text' });
   });
 
-  test('an owed alert never goes to the model, so a staff text still closes a bare yes to a message that offers no time', async () => {
+  // An owed alert never goes to the model, and no plain rule reads a bare yes, so it stays for the office.
+  test('an owed alert with a bare yes stays owed', async () => {
     const owed = alertRow({ title: 'Pat texted back — we still owe a quote' });
     const deps = makeDeps({ candidates: async () => [owed], timeline: async () => timelineOf([staffText()], { reply: { lastBody: 'ok', prevOutbound: 'We will send your quote.' } }) });
     await agent.runAlertClearAgent({ now: NOW, deps });
     expect(deps.judge).not.toHaveBeenCalled();
-    expect(saved(deps)[0]).toMatchObject({ outcome: 'answered', rule: 'staff_text' });
+    expect(saved(deps)[0]).toMatchObject({ outcome: 'still_owed', rule: 'owed_open' });
   });
 
   test('the booking or the held staff move the model names answers it', async () => {
