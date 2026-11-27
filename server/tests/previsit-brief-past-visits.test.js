@@ -73,7 +73,7 @@ function fakeDbh({ visits = VISITS, marksThrow = false, otherCustomerIds = [] } 
 const facts = (svc = SVC, opts = {}) => {
   const visits = opts.visits || VISITS;
   mockHistory.mockImplementation(async () => ({ services: visits.map(({ mark, ...row }) => row), total: visits.length }));
-  return deterministicVisitFacts(svc, fakeDbh({ ...opts, visits }));
+  return deterministicVisitFacts(svc, fakeDbh({ ...opts, visits }), { pastVisits: true });
 };
 
 beforeEach(() => mockHistory.mockReset());
@@ -115,6 +115,12 @@ describe('deterministicVisitFacts past_visits', () => {
     const { past_visits: list } = await facts(SVC, { visits, otherCustomerIds: ['other'] });
     expect(JSON.stringify(list)).not.toContain('Another home');
     expect(list).toHaveLength(5);
+  });
+
+  test('a caller that does not ask gets no past_visits and no history read', async () => {
+    const out = await deterministicVisitFacts(SVC, fakeDbh());
+    expect(out).not.toHaveProperty('past_visits');
+    expect(mockHistory).not.toHaveBeenCalled();
   });
 
   test('an unreadable scheduled_date omits the key instead of listing everything', async () => {
@@ -173,12 +179,14 @@ describe('deterministicVisitFacts past_visits', () => {
         ],
       }),
       visit('n2', '2026-11-13', 'Palm Fertilization (125 dollars)'),
+      visit('n3', '2026-11-12', 'Palm Treatment - $125–150'),
     ];
     const { past_visits: list } = await facts(SVC, { visits });
     expect(JSON.stringify(list)).not.toMatch(/\$|125|150|2\.18|USD/);
     expect(list[0].type).toBe('Palm Treatment');
     expect(list[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', 'Example Bait', 'Example Dust', `${long} A`, `${long} B`]);
     expect(list[1].type).toBe('Palm Fertilization');
+    expect(list[2].type).toBe('Palm Treatment');
   });
 
   test('a visit lists every distinct product name: no cap of eight', async () => {
@@ -213,7 +221,7 @@ describe('deterministicVisitFacts past_visits', () => {
 
   test('history read outage: no throw, key omitted, the other facts still answer', async () => {
     mockHistory.mockRejectedValue(new Error('history outage'));
-    const out = await deterministicVisitFacts(SVC, fakeDbh());
+    const out = await deterministicVisitFacts(SVC, fakeDbh(), { pastVisits: true });
     expect(out).not.toHaveProperty('past_visits');
     expect(out).toHaveProperty('access');
   });

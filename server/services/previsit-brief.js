@@ -200,7 +200,8 @@ async function loadPastVisits(dbh, svc) {
         return {
           date: calendarDay(v.date),
           // The label recorded for that visit, only its duration/price suffixes stripped: never re-labelled.
-          type: pastVisitLabel(briefServiceIdentity(v.type), 120),
+          // Money goes first: the suffix strip would take one end of a price range and leave the other.
+          type: pastVisitLabel(briefServiceIdentity(String(v.type || '').replace(NOTE_MONEY_RE, '')), 120),
           notes: previewText(pastVisitNoteText(v.notes)),
           products: pastVisitProductNames(v.products),
           callback: isReserviceVisit({ is_callback: mark.is_callback === true, service_key: pastVisitServiceKey(mark) }),
@@ -216,7 +217,8 @@ async function loadPastVisits(dbh, svc) {
 // valid cached brief), this is a read-path convenience with no cached
 // artifact to protect — every lookup is FAIL-SOFT and a partial answer
 // beats a 500. The route omits the key entirely if this still throws.
-async function deterministicVisitFacts(svc, dbh = db) {
+// pastVisits: only the Visit Brief route shows them, so only it asks for the read.
+async function deterministicVisitFacts(svc, dbh = db, { pastVisits: wantPastVisits = false } = {}) {
   let prefs = null;
   let prefsUnavailable = false;
   try {
@@ -271,7 +273,7 @@ async function deterministicVisitFacts(svc, dbh = db) {
       logger.warn(`[previsit-brief] visit-facts customerFlagged unreadable for service ${svc.id}: ${err.message}`);
     }
   }
-  const pastVisits = await loadPastVisits(dbh, svc);
+  const pastVisits = wantPastVisits ? await loadPastVisits(dbh, svc) : null;
   // history_unavailable: the service-history read failed, so a null last_visit
   // means "unknown", never "no earlier visit" (readers must not claim one).
   // past_visits is additive and absent on a read failure (readers fall back to last_visit).
