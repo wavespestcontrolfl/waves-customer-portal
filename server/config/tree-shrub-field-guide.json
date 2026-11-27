@@ -75,9 +75,9 @@
         {
           "product": "LESCO 8-0-12 #511542",
           "where": "Palms, beds, trees and larger shrubs",
-          "dose": "Palms: lb per palm from the canopy chart. Beds: 1 to 1½ lb per 100 sq ft. Trees and larger shrubs: ½ to 1 lb per inch of trunk diameter.",
+          "dose": "Palms: lb per palm from the canopy chart. Beds: 1 to 1¼ lb per 100 sq ft (Waves cap: 1¼ lb is 1 lb nitrogen per 1,000 sq ft, the county limit; the bag's 1½ lb is over it). Trees and larger shrubs: ½ to 1 lb per inch of trunk diameter.",
           "note": "Granular: spread by hand (LESCO handheld) or with the LESCO push spreader. No tank.",
-          "limit": "Up to 4 times a year. Spread over the whole canopy circle, not a ring."
+          "limit": "Up to 4 times a year. Spread over the whole canopy circle, not a ring. Never more than 1¼ lb per 100 sq ft of the area under a tree or shrub."
         }
       ]
     },
@@ -215,9 +215,9 @@
             "amountMax": 0.08
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "100-1543",
           "limit": "Label: 2 to 8 fl oz per 100 gal for pests other than aphids. No more than 32 fl oz per acre per year; 7 days between sprays."
@@ -266,9 +266,9 @@
             "amountMax": 0.16
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "100-1489",
           "limit": "At 16 fl oz per 100 gal, at most 2.3 gal of mix per 1,000 sq ft (0.37 fl oz of product per 1,000 sq ft per spray)."
@@ -323,12 +323,12 @@
             "amountMax": 0.08
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "59639-96",
-          "limit": "5 gal of mix per 1,000 sq ft (100 gal treats 20,000 sq ft). One spray at 8 fl oz per 100 gal a year, or 6 then 6 at least 21 days apart. Scale and mealybug: on hold, call the office."
+          "limit": "5 gal of mix per 1,000 sq ft (100 gal treats 20,000 sq ft). One spray at 8 fl oz per 100 gal a year, or 6 fl oz followed by 6 fl oz 21 to 28 days later. Scale and mealybug: on hold, call the office."
         }
       ]
     },
@@ -394,11 +394,11 @@
             "unit": "fl oz"
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
-          "epa": "8033-106",
+          "epa": "8033-106-1001",
           "limit": "At most 4 sprays a year, 7 days apart."
         },
         {
@@ -409,11 +409,11 @@
             "unit": "fl oz"
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
-          "epa": "8033-106",
+          "epa": "8033-106-1001",
           "limit": "At most 4 sprays a year, 7 days apart."
         },
         {
@@ -425,11 +425,11 @@
             "amountMax": 0.165
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
-          "epa": "8033-106",
+          "epa": "8033-106-1001",
           "limit": "At most 4 sprays a year, 7 days apart. At 16.5 fl oz per 100 gal, at most 3.5 gal of mix per 1,000 sq ft."
         }
       ]
@@ -476,9 +476,9 @@
             "unit": "fl oz"
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "48813-1",
           "limit": "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl or dimethoate. Do not spray during drought."
@@ -524,9 +524,9 @@
             "amountMax": 0.08
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "70506-537",
           "limit": "At most 2 sprays a year. At 8 fl oz per 100 gal, at most 4.5 gal of mix per 1,000 sq ft."
@@ -616,9 +616,9 @@
             "amountMax": 0.6666666666666666
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "83416-1",
           "limit": "2 to 4 tsp per gal. Repeat at 14 to 21 days as needed."
@@ -664,9 +664,9 @@
             "unit": "fl oz"
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "62719-291",
           "limit": "Other targets (thrips, leafminers, mites) use other label rows: check the label. Label maximum 0.2 fl oz per gal."
@@ -713,9 +713,9 @@
             "amountMax": 0.16
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "73049-39",
           "limit": "½ to 1 lb per 100 gal (weigh the oz)."
@@ -778,9 +778,9 @@
             "amountMax": 0.16
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "2217-937",
           "limit": "No more than 78.9 fl oz per acre per year; at most 3 applications."
@@ -835,9 +835,9 @@
             "unit": "fl oz"
           },
           "sprayers": [
-            "bg_1_gal",
-            "flowzone_4_gal",
-            "rig_100_gal"
+            "bg",
+            "flowzone",
+            "rig"
           ],
           "epa": "48813-1",
           "limit": "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl or dimethoate. Do not spray during drought."

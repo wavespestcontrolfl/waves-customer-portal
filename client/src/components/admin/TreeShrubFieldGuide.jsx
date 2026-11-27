@@ -106,8 +106,9 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
       </label>}
     </header>
     {guide.decision && <p className="mb-5 text-ink-secondary">{guide.decision}</p>}
-    {/* The month's label-rate amounts for each sprayer (B&G 1 gal, FlowZone 4 gal, rig 100 gal); granular and per-plant doses as written. */}
-    <ProtocolMixTable mixRates={guide.mixRates} />
+    {/* The month's label-rate amounts for each of the card's tanks (the same TANKS as the product grid: rig 110 gal); granular and
+        per-plant doses as written. */}
+    <ProtocolMixTable mixRates={guide.mixRates} sprayers={TANKS.map(t => ({ key: t.id, label: guide.equipment[t.id]?.name || t.id, gallons: t.gallons }))} />
     {[['routine', 'Routine when due'], ['conditional', 'If you find']].map(([section, title]) => guide[section].length > 0 && <section key={section} className="mb-6">
       <h3 className={`${labelClass} mb-2`}>{title}</h3>
       {!tech && <div className="hidden md:grid grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] gap-3 py-2 border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200 text-14 text-ink-tertiary">

@@ -115,18 +115,24 @@ test('no palm-type table when the visit carries none', () => {
   expect(screen.queryByTestId('palm-types')).toBeNull();
 });
 
-test("the month's Mix Amounts table shows each sprayer's label amount, granular and drench doses as written, and no amount without a label rate", () => {
-  // The server's month payload (tree-shrub-field-guide.js): each product's rows, routine first.
-  const visit = protocols.tree_shrub.visits[0];
-  const keys = [...new Set([...visit.fieldGuide.routine, ...visit.fieldGuide.conditional].map(row => row.key))];
-  render(<TreeShrubFieldGuide guide={{ ...guide, mixRates: keys.flatMap(key => reference.products[key].mixRates) }} />);
-  // The Mix Amounts table (the palm-types table is another).
-  const table = screen.getByText('Mix Amounts').parentElement.querySelector('table');
-  expect(within(table).getAllByRole('columnheader').map(cell => cell.textContent)).toEqual(['Product', 'B&G 1 gal', 'FlowZone 4 gal', 'Rig 100 gal', 'Spray volume, placement, limit']);
+// The server's month payload (tree-shrub-field-guide.js): each visit line's rows, routine first, with the line's condition.
+const monthGuide = (index) => {
+  const visit = protocols.tree_shrub.visits[index];
+  const lines = [...visit.fieldGuide.routine.map(line => ['Routine when due', line]), ...visit.fieldGuide.conditional.map(line => ['If you find', line])];
+  return { ...visit.fieldGuide, month: visit.month, ...reference,
+    mixRates: lines.flatMap(([title, line]) => reference.products[line.key].mixRates.map(row => ({ ...row, condition: `${title}: ${line.where}` }))) };
+};
+const mixTableOf = () => screen.getByText('Mix Amounts').parentElement.querySelector('table');
+
+test("the month's Mix Amounts table sizes each tank from the card's equipment, shows doses as written and each line's condition", () => {
+  render(<TreeShrubFieldGuide guide={monthGuide(0)} />);
+  const table = mixTableOf();
+  // The card's own tanks: the rig column is the 110 gal rig, the same as the product grid.
+  expect(within(table).getAllByRole('columnheader').map(cell => cell.textContent)).toEqual(['Product', 'B&G · 1 gal', 'FlowZone · 4 gal', 'Rig · 110 gal', 'Spray volume, placement, limit']);
   const row = (where) => within(table).getByText(where).closest('tr');
-  // TriStar by target: per gallon, per 4 gal and per 100 gal from one label rate.
-  expect(within(row('Aphids')).getAllByRole('cell').slice(0, 3).map(cell => cell.textContent)).toEqual(['0.04 fl oz (1.2 mL)', '0.16 fl oz (4.7 mL)', '4 fl oz']);
-  expect(within(row('Whiteflies or soft scales (higher rate for high pressure)')).getAllByRole('cell')[2].textContent).toBe('8.5 to 16.5 fl oz');
+  // TriStar aphids: one label rate (4 fl oz per 100 gal) times 1, 4 and 110 gal.
+  expect(within(row('Aphids')).getAllByRole('cell').slice(0, 3).map(cell => cell.textContent)).toEqual(['0.04 fl oz (1.2 mL)', '0.16 fl oz (4.7 mL)', '4.4 fl oz']);
+  expect(within(row('Aphids')).getByText('If you find: Whitefly, mealybug, aphid or soft scale, live finds')).toBeTruthy();
   // Merit: a soil drench by trunk or shrub size, never a tank amount.
   const merit = row('Soil drench, FlowZone soil injector');
   expect(within(merit).getAllByRole('cell').slice(0, 3).map(cell => cell.textContent)).toEqual(['—', '—', '—']);
@@ -134,8 +140,16 @@ test("the month's Mix Amounts table shows each sprayer's label amount, granular 
   // Snapshot and the palm fertilizer: a rate per area or plant and the hand-spread note.
   expect(within(row('Planting beds, before weeds germinate')).getByText(/2\.3, 3\.45 or 4\.6 lb per 1,000 sq ft/)).toBeTruthy();
   expect(within(row('Palms, beds, trees and larger shrubs')).getByText(/spread by hand/)).toBeTruthy();
-  // Sequestar: no verified label rate, so no amount at all.
-  const sequestar = row('Iron chlorosis');
-  expect(within(sequestar).getByText('Label rate not on file')).toBeTruthy();
-  expect(within(sequestar).queryByText(/oz|lb/)).toBeNull();
+  // Sequestar: its verified label dose, never "Label rate not on file".
+  const sequestar = row('Iron chlorosis only: root zone, then irrigate in');
+  expect(within(sequestar).getByText(/up to 2 oz per inch of trunk diameter/)).toBeTruthy();
+  expect(within(sequestar).queryByText('Label rate not on file')).toBeNull();
+});
+
+test('a product with no verified label rate (June copper) shows "Label rate not on file" and no amount', () => {
+  render(<TreeShrubFieldGuide guide={monthGuide(5)} />);
+  const copper = within(mixTableOf()).getByText('Disease, only with the exact product').closest('tr');
+  expect(within(copper).getByText('Label rate not on file')).toBeTruthy();
+  expect(within(copper).getAllByRole('cell').slice(0, 3).map(cell => cell.textContent)).toEqual(['—', '—', '—']);
+  expect(within(copper).queryByText(/\d+(\.\d+)? (fl oz|oz|lb)/)).toBeNull();
 });

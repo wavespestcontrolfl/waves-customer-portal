@@ -7,7 +7,8 @@ const guide = require('../config/tree-shrub-field-guide.json');
 const protocols = require('../config/protocols.json');
 const { treeShrubFieldGuide } = require('../services/tree-shrub-field-guide');
 
-const SPRAYERS = ['bg_1_gal', 'flowzone_4_gal', 'rig_100_gal'];
+// The card's own tanks (field-guide equipment ids): the table sizes each from the card's TANKS (rig 110 gal).
+const SPRAYERS = ['bg', 'flowzone', 'rig'];
 const products = Object.entries(guide.products);
 const rowsOf = (key) => guide.products[key].mixRates;
 const perGallon = (key, where) => rowsOf(key).find((row) => row.perGallon && (!where || row.where === where)).perGallon;
@@ -23,7 +24,8 @@ describe('tree & shrub mix rates', () => {
           expect([at, row.perGallon.amount > 0, ['fl oz', 'oz'].includes(row.perGallon.unit)]).toEqual([at, true, true]);
           if (row.perGallon.amountMax != null) expect([at, row.perGallon.amountMax > row.perGallon.amount]).toEqual([at, true]);
           expect([at, row.sprayers]).toEqual([at, SPRAYERS]);
-          expect([at, /^\d+-\d+$/.test(row.epa)]).toEqual([at, true]);
+          // A registration, or a distributor sub-registration (TriStar 8033-106-1001).
+          expect([at, /^\d+-\d+(-\d+)?$/.test(row.epa)]).toEqual([at, true]);
         } else if (row.dose) {
           expect([at, row.sprayers]).toEqual([at, undefined]);
         } else {
@@ -102,11 +104,35 @@ describe('tree & shrub mix rates', () => {
     expect(rowsOf('snapshot')[0].dose).toMatch(/^2\.3, 3\.45 or 4\.6 lb per 1,000 sq ft/);
   });
 
-  test("each month's guide carries its products' rows in order, routine first, once each", () => {
+  test('bed doses stay at or under the 1 lb nitrogen per 1,000 sq ft limit the guide states', () => {
+    // [product, the bed dose's top lb per 100 sq ft, nitrogen share]: lb per 100 sq ft x 10 x N = lb N per 1,000 sq ft.
+    for (const [key, top, n] of [['f8012', '1¼', 0.08], ['f13013', '0.75', 0.13]]) {
+      const { dose } = rowsOf(key)[0];
+      expect([key, dose.includes(`${top} lb per 100 sq ft`)]).toEqual([key, true]);
+      expect(Number(top.replace('1¼', '1.25')) * 10 * n).toBeLessThanOrEqual(1);
+    }
+    // The 8-0-12 bag's 1½ lb top is named as over the limit, never given as the dose.
+    expect(rowsOf('f8012')[0].dose).toMatch(/Beds: 1 to 1¼ lb per 100 sq ft \(Waves cap.*the bag's 1½ lb is over it\)/);
+  });
+
+  test("the card's own label limits stay: Distance's repeat window and TriStar's distributor registration", () => {
+    expect(rowsOf('distance')[0].limit).toContain('6 fl oz followed by 6 fl oz 21 to 28 days later');
+    expect(guide.products.distance.limits.some((line) => line.includes('21 to 28 days later'))).toBe(true);
+    expect(guide.products.tristar.source).toContain('EPA 8033-106-1001');
+    for (const row of rowsOf('tristar')) expect(row.epa).toBe('8033-106-1001');
+  });
+
+  test("each month's table carries every visit line's rows, routine first, each with that line's own condition", () => {
     for (const visit of protocols.tree_shrub.visits.filter((v) => v.fieldGuide)) {
       const payload = treeShrubFieldGuide(visit);
-      const keys = [...new Set([...visit.fieldGuide.routine, ...visit.fieldGuide.conditional].map((row) => row.key))];
-      expect([visit.month, payload.mixRates]).toEqual([visit.month, keys.flatMap((key) => rowsOf(key))]);
+      const expected = [
+        ...visit.fieldGuide.routine.map((line) => ['Routine when due', line]),
+        ...visit.fieldGuide.conditional.map((line) => ['If you find', line]),
+      ].flatMap(([title, line]) => rowsOf(line.key).map((row) => ({ ...row, condition: `${title}: ${line.where}` })));
+      expect([visit.month, payload.mixRates]).toEqual([visit.month, expected]);
     }
+    // August: TriTek only on live finds before 9 AM, never just "ornamentals".
+    const aug = treeShrubFieldGuide(protocols.tree_shrub.visits.find((v) => v.month === 'Aug'));
+    expect(aug.mixRates.find((row) => row.product === 'TriTek 1%').condition).toBe('If you find: Live scale crawlers, nymphs or mites, before 9 AM');
   });
 });
