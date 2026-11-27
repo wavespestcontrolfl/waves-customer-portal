@@ -99,6 +99,8 @@ function staleOverrideCandidate(row, approvedSet, usageRows = []) {
   const manualCost = numberOrNull(row.cost_per_unit);
   if (manualCost == null) return { status: 'skip' };
   if (isCountBasedProduct(row)) return { status: 'count_item' };
+  // Preserve overrides used by automatic supply deductions (supplies-consumption.js reads cost_per_unit directly).
+  if (numberOrNull(row.per_completion_usage) > 0) return { status: 'skip' };
   // Empty cost_unit applies cost_per_unit in each usage row's own unit (e.g. bottle);
   // never clear an implicit-unit override unless an explicit measured cost_unit exists.
   if (!String(row.cost_unit || '').trim()) return { status: 'skip' };
@@ -154,10 +156,23 @@ function explicitSingleContainerMatch(product, best) {
   return Boolean(costUnit && countUnitsCompatible(vendorPack.unit, costUnit));
 }
 
-function measureFamilyCompatible(product, vendorQuantity) {
+const WEIGHT_UNITS = new Set(['lb', 'lbs', 'pound', 'pounds', 'g', 'gram', 'grams', 'kg', 'kilogram', 'kilograms']);
+const VOLUME_UNITS = new Set(['fl_oz', 'floz', 'gal', 'gallon', 'gallons', 'qt', 'quart', 'quarts', 'pt', 'pint', 'pints', 'ml', 'l', 'liter', 'liters']);
+
+function unitMeasureFamily(unit) {
+  const u = normalizeUnit(unit);
+  if (WEIGHT_UNITS.has(u)) return 'weight';
+  if (VOLUME_UNITS.has(u)) return 'volume';
+  return null;
+}
+
+function measureFamilyCompatible(product, bestRow) {
   const prodMeasure = packageMeasure(product);
-  const vendorMeasure = packageMeasure({ container_size: vendorQuantity });
-  if (prodMeasure && vendorMeasure && prodMeasure !== vendorMeasure) return false;
+  if (!prodMeasure) return true;
+  const normMeasure = unitMeasureFamily(bestRow?.unit_normalized);
+  if (normMeasure && normMeasure !== prodMeasure) return false;
+  const qtyMeasure = packageMeasure({ container_size: bestRow?.quantity });
+  if (qtyMeasure && qtyMeasure !== prodMeasure) return false;
   return true;
 }
 
@@ -168,9 +183,9 @@ function previewBestVendorLink(product, rows, scoreVendorRows) {
   if (!best) return null;
   const countScalable = mode === 'count';
   const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
-  // Verify weight vs volume measure compatibility so a pound quote can never
-  // populate a gallon liquid catalog price (both return perOz from scoreVendorRows).
-  if (mode === 'oz' && !measureFamilyCompatible(product, best.row?.quantity)) return null;
+  // Verify weight vs volume measure compatibility on both unit_normalized and
+  // quantity so a pound quote (even labeled '1 case') can never price a gallon liquid.
+  if (mode === 'oz' && !measureFamilyCompatible(product, best.row)) return null;
   // Require a package that scales to the catalog container (oz or count) OR
   // explicitly matches one unmeasured container, so an unscalable multi-unit
   // case price can never populate a single container's best_price (even when
@@ -210,11 +225,14 @@ function planMissingVendorLinks(unlinkedProducts, eligibleVendorRows, { scoreVen
   return planned;
 }
 
-const MULTIPACK_CONTAINER_RE = /\b(?:case|pack|box|kit)\b|\b[2-9]\d*\s*x\s*|\b\d{2,}\s*x\s*|\b[2-9]\d*\s+(?:bottles?|jugs?|gallons?|gal|quarts?|qt)\b/i;
+const MULTIPACK_CONTAINER_RE = /\b(?:case|pack|box|kit|carton|flat|tray)\b|\b(?:[2-9]|\d{2,})\s*x\b|\b(?:[2-9]|\d{2,})\s+(?:bottles?|jugs?|gallons?|gal|quarts?|qt|pints?|pt|containers?|cans?)\b/i;
 
 function isMultipackContainer(containerSize) {
   const raw = String(containerSize || '').trim();
-  return Boolean(raw && MULTIPACK_CONTAINER_RE.test(raw));
+  if (!raw) return false;
+  if (MULTIPACK_CONTAINER_RE.test(raw)) return true;
+  const pack = parsePackCount(raw);
+  return Boolean(pack && pack.count > 1);
 }
 
 function brokenLiquidBottleCandidate(row) {
@@ -267,7 +285,7 @@ async function buildCleanupPlan(dbc, helpers = {}) {
     dbc('products_catalog')
       .where('active', true)
       .whereNotNull('cost_per_unit')
-      .select('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'best_vendor_pricing_id'),
+      .select('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'best_vendor_pricing_id', 'per_completion_usage'),
     eligibleVendorPricing(dbc('vendor_pricing'))
       .leftJoin('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
       .select('vendor_pricing.*', 'vendors.name as vendor_name'),
@@ -313,7 +331,7 @@ async function applyStaleOverrideClear(trx, item) {
   const fresh = await trx('products_catalog')
     .where({ id: item.id })
     .forUpdate()
-    .first('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'best_vendor_pricing_id');
+    .first('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'best_vendor_pricing_id', 'per_completion_usage');
   if (!fresh || numberOrNull(fresh.cost_per_unit) !== item.currentCostPerUnit) return 0;
   if (!fresh.best_vendor_pricing_id) return 0;
   const [approved, productUsages] = await Promise.all([

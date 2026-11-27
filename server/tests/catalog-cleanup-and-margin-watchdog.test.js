@@ -35,6 +35,8 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       { id: 'p-fresh', name: 'Accurate Herbicide', active: true, cost_per_unit: 1.02, cost_unit: 'fl_oz', best_price: 64.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-4' },
       // Fallback usage row in 'bottle' would break if override cleared -> MUST be skipped!
       { id: 'p-bottle-dep', name: 'Bottle Dependent', active: true, cost_per_unit: 2.0, cost_unit: 'oz', best_price: 50.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-6' },
+      // Automatic supply deduction uses cost_per_unit directly -> MUST be preserved!
+      { id: 'p-supply-deduct', name: 'Auto Deduct Supply', active: true, cost_per_unit: 2.0, cost_unit: 'oz', best_price: 50.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-6', per_completion_usage: 1.5 },
     ];
     const usageByProduct = new Map([
       ['p-espoma', [{ usage_amount: 4, usage_unit: 'oz' }]],
@@ -61,6 +63,8 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       { id: 'p-case-only', name: 'Liquid Concentrate', active: true, unit_size_oz: 64, container_size: '64 fl oz', best_price: null, best_vendor_pricing_id: null },
       // Liquid product whose only quote is in pounds (weight vs volume clash): MUST SKIP!
       { id: 'p-clash', name: 'Liquid Gal Chem', active: true, unit_size_oz: 128, container_size: '1 gal', best_price: null, best_vendor_pricing_id: null },
+      // Liquid product whose only quote is '1 case' with unit_normalized='lb' (weight vs volume clash via normalized unit): MUST SKIP!
+      { id: 'p-norm-clash', name: 'Liquid Gal Normalized Clash', active: true, unit_size_oz: 128, container_size: '1 gal', best_price: null, best_vendor_pricing_id: null },
       // Count item with valid existing single-station price ($8.69) and unscalable pack row ($86.94 / "1 box"): MUST NOT overwrite!
       { id: 'p-hexpro', name: 'HexPro Station', active: true, unit_size_oz: null, container_size: '1 station', best_price: 8.69, best_vendor_pricing_id: null },
       // Unmeasured count product with null best_price and explicit 1-station match: allowed!
@@ -72,6 +76,7 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       { id: 'vp-lo', product_id: 'p-lesco', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 42.25, quantity: '50 lb', shipping_cost: 0 },
       { id: 'vp-case', product_id: 'p-case-only', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 480.00, quantity: '1 case', shipping_cost: 0 },
       { id: 'vp-clash', product_id: 'p-clash', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 12.00, quantity: '1 lb', shipping_cost: 0 },
+      { id: 'vp-norm-clash', product_id: 'p-norm-clash', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 20.00, quantity: '1 case', unit_normalized: 'lb', normalized_unit_price: 20.00, shipping_cost: 0 },
       { id: 'vp-pack', product_id: 'p-hexpro', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 86.94, quantity: '1 box', shipping_cost: 0 },
       { id: 'vp-single', product_id: 'p-single', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 9.50, quantity: '1 station', shipping_cost: 0 },
     ];
@@ -110,10 +115,14 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
         id: 'u-area', service_type: 'Liquid Barrier', product_id: 'p-taurus', product_name: 'Taurus SC',
         usage_amount: 0, usage_per_1000sf: 0.25, usage_unit: 'bottle', unit_size_oz: 78, container_size: '78 fl oz', best_price: 86.00,
       },
-      // Multipack liquid case ("4 x 1 gal" with unit_size_oz = 512) -> MUST skip so 1 bottle never becomes 512 fl_oz!
+      // Multipack liquid case ("4 x 1 gal" or "12 bottles / 16 fl oz") -> MUST skip so 1 bottle never becomes the whole case!
       {
         id: 'u-multipack', service_type: 'Liquid Barrier', product_id: 'p-case', product_name: '4x1 Gal Case',
         usage_amount: 1, usage_per_1000sf: null, usage_unit: 'bottle', unit_size_oz: 512, container_size: '4 x 1 gal', best_price: 240.00,
+      },
+      {
+        id: 'u-12pack', service_type: 'Liquid Barrier', product_id: 'p-12pack', product_name: '12 Bottle Case',
+        usage_amount: 1, usage_per_1000sf: null, usage_unit: 'bottle', unit_size_oz: 192, container_size: '12 bottles / 16 fl oz', best_price: 180.00,
       },
       // Dry weight bottle (container_size '16 lb') -> NEVER relabel to fl_oz!
       {
@@ -245,6 +254,7 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { id: 'p-switched', name: 'Demand CS', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-cut-after-spike', name: 'Suspend PolyZone', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-expired-ignored', name: 'Temprid FX', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
+      { id: 'p-expired-spike', name: 'Transport Mikron', active: true, best_price: 160.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-small-bump', name: 'Alpine WSG', active: true, best_price: 84.00, unit_size_oz: 17.6, container_size: '500 g' },
     ];
     const vendorRows = [
@@ -256,6 +266,8 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { id: 'vp-6', product_id: 'p-cut-after-spike', vendor_id: 'v-1', price_amount: 130.00, quantity: '32 fl oz' },
       // Expired v-old quoted $100 earlier, while eligible v-2 dropped $150 -> $130: MUST NOT fake a spike!
       { id: 'vp-7', product_id: 'p-expired-ignored', vendor_id: 'v-2', price_amount: 130.00, quantity: '32 fl oz' },
+      // Expired v-old won at $100 while eligible v-2 rose $150 -> $160: MUST catch the +60% jump vs $100!
+      { id: 'vp-8', product_id: 'p-expired-spike', vendor_id: 'v-2', price_amount: 160.00, quantity: '32 fl oz' },
       { id: 'vp-4', product_id: 'p-small-bump', vendor_id: 'v-1', price_amount: 84.00, quantity: '500 g' },
     ];
     const priceHistory = [
@@ -273,11 +285,15 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { product_id: 'p-expired-ignored', vendor_id: 'v-2', price: 130.00, quantity: '32 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
       { product_id: 'p-expired-ignored', vendor_id: 'v-2', price: 150.00, quantity: '32 fl oz', recorded_at: '2026-11-01T00:00:00Z' },
       { product_id: 'p-expired-ignored', vendor_id: 'v-old', price: 100.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-expired-spike', vendor_id: 'v-2', price: 160.00, quantity: '32 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-expired-spike', vendor_id: 'v-2', price: 150.00, quantity: '32 fl oz', recorded_at: '2026-11-01T00:00:00Z' },
+      { product_id: 'p-expired-spike', vendor_id: 'v-old', price: 100.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
       { product_id: 'p-small-bump', vendor_id: 'v-1', price: 84.00, quantity: '500 g', recorded_at: '2026-11-20T00:00:00Z' },
       { product_id: 'p-small-bump', vendor_id: 'v-1', price: 80.00, quantity: '500 g', recorded_at: '2026-10-01T00:00:00Z' },
     ];
     const spikes = detectVendorCostSpikes(catalog, vendorRows, priceHistory);
-    expect(spikes.map((s) => s.productId)).toEqual(['p-termidor', 'p-switched']);
+    expect(spikes.map((s) => s.productId)).toEqual(['p-termidor', 'p-switched', 'p-expired-spike']);
+    expect(spikes[2]).toMatchObject({ productId: 'p-expired-spike', pctIncrease: 60 });
     expect(spikes[0]).toMatchObject({
       productId: 'p-termidor',
       productName: 'Termidor SC',

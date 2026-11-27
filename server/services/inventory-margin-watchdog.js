@@ -222,16 +222,19 @@ function priorNormalizedCostForProduct(prod, winner, mode, historyRows, scoreVen
   if (!(currentCost > 0)) return null;
   const events = chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows, winner?.row || null);
   if (!events.length) return null;
-  // Prefer consecutive winning costs among currently eligible vendors so an
-  // expired vendor's old quote never turns a current vendor's price cut into a
-  // false spike; fall back to all-vendor history only when eligible vendors have
-  // no prior price transition (which catches a cheaper vendor expiring).
+  const allPrior = priorCostFromSequence(winningSequenceFromEvents(events), currentCost);
+  // Prefer consecutive winning costs among currently eligible vendors when they
+  // show a price cut (so an expired vendor's old quote never turns a current
+  // vendor's price cut into a false spike); otherwise fall back to the lower
+  // market-wide prior winner so an expired cheaper vendor still catches the jump.
   if (eligibleVendorIds && eligibleVendorIds.size > 0) {
     const eligibleEvents = events.filter((ev) => eligibleVendorIds.has(ev.vendorKey));
     const eligiblePrior = priorCostFromSequence(winningSequenceFromEvents(eligibleEvents), currentCost);
+    if (eligiblePrior != null && currentCost < eligiblePrior) return eligiblePrior;
+    if (allPrior != null && allPrior < (eligiblePrior ?? Infinity)) return allPrior;
     if (eligiblePrior != null) return eligiblePrior;
   }
-  return priorCostFromSequence(winningSequenceFromEvents(events), currentCost);
+  return allPrior;
 }
 
 function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRows = [], { scoreVendorRows } = {}) {
