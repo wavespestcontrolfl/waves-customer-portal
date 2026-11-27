@@ -148,14 +148,14 @@ const LANE_RUNTIME = {
   // call (2026-09-26): csr_coach, signal_detector, retention_drafts, ads_advisor and wiki_qa had moved onto the adapter
   // and now pass laneId; wdo_history and tax_advisor wrap their direct SDK call in ledgerCall. All were direct_sdk after
   // the Codex r12 sweep; expense_categorize left that list in #3821.
-  // offline (Codex r14): contact_pass, lead_synopsis, contact_dictation, address_recovery and tech_dictation each
+  // offline (Codex r14): contact_pass, lead_synopsis, address_recovery and tech_dictation each
   // run one provider and degrade to null / a review path / typed notes — no cross-provider answer. lead_synopsis wraps its direct SDK call in ledgerCall.
-  // contact_dictation rides dispatchWithFallback with laneId: 'contact_dictation';
+  // contact_dictation rides dispatchWithFallback (Gemini -> OpenAI) with laneId: 'contact_dictation' (interactive fallback);
   // address_recovery is still a raw Gemini fetch (address-validation/recovery.js).
   csr_coach: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: null },
   // Spoken staff notes (GATE_CALL_SPOKEN_NOTES): one Haiku read per finished live call that has a trigger phrase on the staff side; a miss saves nothing.
   live_call_spoken_notes: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 5_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
-  contact_dictation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'transcription_contact' },
+  contact_dictation: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'transcription_contact' },
   address_recovery: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'direct_sdk', fallback_class: 'offline', eval_family: 'structured_extraction' },
   tech_dictation: { side_effect_class: 'internal_write', ledger: 'unrecordable', unrecordable_reason: 'audio', fallback_class: 'offline', eval_family: 'transcription_contact' },
   // Speech to text for Fast Complete voice fill: one provider, no stored output (the words live only inside the request).

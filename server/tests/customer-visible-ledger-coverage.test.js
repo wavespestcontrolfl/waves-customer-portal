@@ -21,6 +21,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
     for (const id of ['voice_relay_collections', 'pest_id', 'lawn_assess', 'tree_shrub', 'lawn_diag_writer', 'contact_dictation']) {
       expect(policyFor(id).ledger).toBe('call');
     }
+    expect(policyFor('contact_dictation').fallback_class).toBe('interactive');
   });
 
   describe('pest_id Gemini leg + schema rejection', () => {
@@ -412,8 +413,13 @@ describe('customer_visible direct_sdk ledger closure', () => {
       ledgerCallRejected(oaiRefusal, 'invalid_json');
 
       // Non-object HTTP 200 envelopes (e.g. JSON null) and malformed envelopes
-      // whose parser throws (e.g. OpenAI {"output":{}}) must record as failed rows.
+      // whose parser throws (e.g. OpenAI {"output":{}} or Gemini non-array parts)
+      // must record as failed rows.
       await ledgerCall('gemini', 'gemini-3.8-flash', async () => null, { laneId: 'pest_id' });
+      await ledgerCall('gemini', 'gemini-3.8-flash', async () => ({
+        responseId: 'gem_bad_parts',
+        candidates: [{ finishReason: 'STOP', content: { parts: {} } }],
+      }), { laneId: 'pest_id' });
       await ledgerCall('openai', 'gpt-5.5', async () => null, { laneId: 'lawn_diag_writer' });
       await ledgerCall('openai', 'gpt-5.5', async () => ({ id: 'resp_bad_output', output: {} }), { laneId: 'lawn_diag_writer' });
 
@@ -424,6 +430,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
         { ok: false, error_code: 'openai_incomplete', provider_ref: 'resp_inc' },
         { ok: false, error_code: 'openai_refusal', provider_ref: 'resp_ref' },
         { ok: false, error_code: 'invalid_response', provider_ref: null },
+        { ok: false, error_code: 'invalid_response', provider_ref: 'gem_bad_parts' },
         { ok: false, error_code: 'invalid_response', provider_ref: null },
         { ok: false, error_code: 'invalid_response', provider_ref: 'resp_bad_output' },
       ]);

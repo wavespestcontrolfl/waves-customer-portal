@@ -574,10 +574,15 @@ function anthropicResponseErrorCode(value) {
 function geminiResponseErrorCode(value) {
   if (!value || typeof value !== 'object') return 'invalid_response';
   let geminiVerdict;
-  try { ({ geminiVerdict } = require('./llm/call')); } catch { return null; }
+  let geminiText;
+  try { ({ geminiVerdict, geminiText } = require('./llm/call')); } catch { return null; }
   if (typeof geminiVerdict !== 'function') return null;
   try {
-    return geminiVerdict(value, value.candidates?.[0] || {}, null) || null;
+    if (value.candidates !== undefined && !Array.isArray(value.candidates)) return 'invalid_response';
+    const verdict = geminiVerdict(value, value.candidates?.[0] || {}, null);
+    if (verdict) return verdict;
+    if (typeof geminiText === 'function') geminiText(value);
+    return null;
   } catch { return 'invalid_response'; }
 }
 
