@@ -2579,6 +2579,35 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out).toMatchObject({ amount: null, unit: 'oz', ratePer1000: 0.113, reason: 'No carrier rate on file' });
   });
 
+  // Owner 2026-11-26: an "if needed" tank use and a booked area rate of the same product show side by side, each under its own service.
+  test('a Tree & Shrub visit with conditional Acelepryn and a yearly lawn insect preventive add-on shows both', async () => {
+    const acelepryn = { id: 'ac', name: 'Acelepryn Insecticide', default_rate: '0.02-0.16', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const protocols = {
+      tree_shrub: { visits: [{ visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal', secondary: 'Acelepryn Insecticide: 2 fl oz/100 gal for leaf-feeding caterpillars, live finds only; no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year; at least 1 gal of mix per 1,000 sq ft; at least 7 days between sprays ($5.66)' }] },
+      area_addon: require('../config/protocols.json').area_addon,
+    };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [acelepryn], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Yearly Lawn Insect Preventive', category: 'lawn_care', service_key: 'area_addon_lawn_insect_preventive' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('ac', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: expect.any(Number), context: { line: null, conditional: true } });
+    expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Yearly Lawn Insect Preventive' })]);
+    // The conditional use keeps its numeric limits and carrier floor; the owner-only price goes.
+    const applies = out.warnings.find((w) => w.startsWith('Applies to: '));
+    expect(applies).toMatch(/no more than 0\.37 fl oz per 1,000 sq ft in one spray/);
+    expect(applies).toMatch(/at least 1 gal of mix per 1,000 sq ft/);
+    expect(applies).not.toMatch(/\$5\.66/);
+  });
+
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },

@@ -2550,7 +2550,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
-      ...(h.hit.selected === false ? { useText: clean(describeLine(h.hit.raw), 420) } : {}),
+      ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 420) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
     };
@@ -2560,8 +2560,11 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // (a Tree & Shrub visit's own Snapshot beside a Bed Pre-Emergent add-on) keeps its tank amount, and each add-on's booked rate and
     // grass restriction ride under its service name (governedRows). Only when every selected line is an area add-on is the dose governed.
     const tankHits = selectedHits.filter((h) => !h.hit.governed);
-    const lead = tankHits[0] || selected;
-    const rateHits = tankHits.length ? tankHits : selectedHits;
+    // With no selected tank line, an "if needed" tank line of the same product still leads the amount (marked for confirmation), and the
+    // booked area rate rides beside it under its service name.
+    const conditionalTankHits = hits.filter(({ hit }) => hit.selected === false && !hit.governed);
+    const lead = tankHits[0] || conditionalTankHits[0] || selected;
+    const rateHits = tankHits.length ? tankHits : (lead === selected ? selectedHits : [lead]);
     const governedRows = selectedHits.filter((h) => h.hit.governed).map((h) => ({ service: h.c.name, ...governedRateOf(h.hit.governed, h.c.scope) })).filter((row) => row.ratePer1000);
     // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
     // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
@@ -2579,7 +2582,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     const heldHit = selectedHits.find((h) => h.hit.labelHold);
     const held = heldHit ? { labelHold: heldHit.hit.labelHold } : {};
     const governed = Boolean(lead.hit.governed);
-    return found({ addon: lead.c.addon, selected: true, ...lineOf(lead), governed, ...(governed && governedRows[0] ? { governedRate: governedRows[0] } : {}), governedRows, ...held, ...ratesDisagree }, owners);
+    return found({ addon: lead.c.addon, selected: lead.hit.selected !== false, ...lineOf(lead), governed, ...(governed && governedRows[0] ? { governedRate: governedRows[0] } : {}), governedRows, ...held, ...ratesDisagree }, owners);
   }
   // A conditional ("if needed") line keeps its own rate, so the search shows the card's rate with the selection warning beside it.
   const [conditional] = hits;
