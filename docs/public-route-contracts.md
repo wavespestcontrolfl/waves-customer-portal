@@ -1306,6 +1306,11 @@ rounds a year and a customer move stays inside the round the visit sits in:
   "I will call you when ready" call, so the move ends the hold and commits as
   usual. The route's request and response shapes do not change, and a customer
   never reads `VISIT_ON_HOLD` here. Gate off: no key is passed.
+- **Held visit on the appointment page (`GATE_VISIT_HOLD`).** `GET /api/public/appointment/:token` answers
+  `state: 'on_hold'` for a visit the customer asked us to hold: no date, no window, and the page says "We will call
+  to set a time". The calendar file answers 404, and `POST /:token/confirm` answers its existing 409
+  `NOT_CONFIRMABLE` (any state but `upcoming`). The authenticated app's `POST /api/schedule/:id/confirm` answers the
+  same 404 as an unknown appointment. No new text or email. Gate off: no key is read and nothing changes.
 - A series re-anchor keeps each later visit in its own round: a visit keeps its
   distance in rounds from the moved visit, so a skipped or cancelled round stays
   empty, and a date exception stays in the round of its own place in the

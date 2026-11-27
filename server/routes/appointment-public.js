@@ -171,6 +171,9 @@ function pageState(svc, now = new Date()) {
   const status = String(svc.status || '').toLowerCase();
   if (status === 'completed') return { state: 'completed' };
   if (status === 'cancelled' || status === 'canceled') return { state: 'cancelled' };
+  // GATE_VISIT_HOLD: a visit the customer asked us to hold shows no date and cannot be confirmed (the confirm route
+  // answers its existing NOT_CONFIRMABLE 409 for any state but 'upcoming').
+  if (require('../services/visit-hold').rowIsHeld(svc)) return { state: 'on_hold' };
   // Same page state, but the phase matters to the copy: "on the way" is
   // stale — and reads as wrong to someone looking at the tech in their
   // driveway — once the status is on_site.
@@ -252,6 +255,7 @@ async function loadByToken(token, conn = db) {
       // c.first_name is deliberately NOT selected — see the payload comment:
       // this token is shared with whoever the notification reached, so the
       // account holder's name must not travel with it.
+      ...require('../services/visit-hold').heldColumn('s.'),
       'c.deleted_at as customer_deleted_at',
       // The stamped visit address and the home address, for lawnPrepField's at-home test (same columns the
       // pet-name line reads; this query aliases the visit as `s`).
@@ -472,6 +476,7 @@ function calendarEligible(svc, visitInfo, now = new Date()) {
   // from, so link and file can never drift; codex #3609 uncapped audit
   // P1). The token row's own terminal/unknown states still outrank the
   // stop, exactly as pageStateForGroup ranked them.
+  if (require('../services/visit-hold').rowIsHeld(svc)) return false;
   if (!visitInfo?.visit) return calendarIcsAvailable(svc, now);
   if (!UPCOMING_STATUSES.has(String(svc?.status || '').toLowerCase())) return false;
   return !groupedIcsVerdict(visitInfo.members, now).blocked;
@@ -803,7 +808,8 @@ router.get('/:token', async (req, res, next) => {
       // (visitInfo is resolved above the payload so rescheduleToken can key
       // off it too.)
       service: { type: await resolveServiceLabel(svc), ...visitInfo },
-      appointment: {
+      // A held visit shows no date or window: the old ones would read as booked.
+      appointment: state === 'on_hold' ? { date: null } : {
         date: apptDateStr(svc.scheduled_date),
         // windowStart stays the ROW's own start — it pins the slot the
         // confirm POST proves (slotMatchesShown). The arrival promise is

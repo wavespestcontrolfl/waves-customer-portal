@@ -502,4 +502,97 @@ postgres('visit on hold on PostgreSQL', () => {
       expect((await row(held)).status).toBe('confirmed');
     });
   });
+
+  describe('round 3: grouped visits, customer links, picker, cadence', () => {
+    test('a visit that shares a stop with another service cannot be held', async () => {
+      const visitId = randomUUID();
+      await trx('service_visits').insert({ id: visitId, customer_id: customerId, scheduled_date: ymdOffset(5), stop_base_key: `k-${visitId}`, created_by: 'test' });
+      const id = await visit({ visit_id: visitId });
+      await expect(hold.putVisitOnHold({ visitId: id })).rejects.toMatchObject({
+        status: 409, code: 'not_holdable_grouped', message: 'This visit shares a stop with another service. Reschedule it instead.',
+      });
+      expect((await row(id)).held_at).toBeNull();
+    });
+
+    test('release checks interviews too', async () => {
+      const occupancy = require('../services/scheduling/occupancy');
+      const id = await visit({ scheduled_date: ymdOffset(8) });
+      await hold.putVisitOnHold({ visitId: id });
+      const spy = jest.spyOn(occupancy, 'findConflictingVisits');
+      try {
+        await hold.releaseVisitHold({ visitId: id });
+        expect(spy).toHaveBeenCalledWith(expect.objectContaining({ includeInterviews: true }));
+      } finally { spy.mockRestore(); }
+    });
+
+    test('the successor is found in cadence order: an earlier occurrence moved past the held date is not the successor', async () => {
+      const { held, next: earlier } = await seriesOf(ymdOffset(-40), ymdOffset(60));
+      // `earlier` keeps cadence position BEFORE the held visit but its date moved far later, then comes due... it is not due: future date
+      await trx('scheduled_services').where({ id: held }).update({ held_at: new Date(Date.now() - 2 * 86400000), scheduled_date: ymdOffset(-20), date_exception_cadence_date: ymdOffset(-20) });
+      await trx('scheduled_services').where({ id: earlier }).update({ scheduled_date: ymdOffset(-1), date_exception: true, date_exception_cadence_date: ymdOffset(-60) });
+      await hold.runVisitHoldSweep({ conn: trx });
+      expect((await row(held)).held_at).not.toBeNull();
+      expect((await row(held)).status).toBe('confirmed');
+      // a real later position that is due does close it
+      await trx('scheduled_services').where({ id: earlier }).update({ date_exception: false, date_exception_cadence_date: null, scheduled_date: ymdOffset(0) });
+      await hold.runVisitHoldSweep({ conn: trx });
+      expect((await row(held)).status).toBe('skipped');
+    });
+
+    test('the office list says a booster never closes on its own', async () => {
+      const { held } = await seriesOf(ymdOffset(-5), ymdOffset(60));
+      const booster = await visit({ is_recurring: false, recurring_parent_id: held });
+      await hold.putVisitOnHold({ visitId: booster });
+      await hold.putVisitOnHold({ visitId: held });
+      const list = await hold.listHeldVisits({ conn: trx });
+      expect(list.find((r) => r.id === booster).inSeries).toBe(false);
+      expect(list.find((r) => r.id === held).inSeries).toBe(true);
+    });
+
+    test('a held visit packs no day for the estimate picker', async () => {
+      const { stopDatesInRange } = require('../services/estimate-slot-availability')._internals;
+      const date = ymdOffset(9);
+      const id = await visit({ scheduled_date: date, window_start: '09:00', window_end: '11:00' });
+      expect((await stopDatesInRange(date, date)).size).toBe(1);
+      await hold.putVisitOnHold({ visitId: id });
+      expect((await stopDatesInRange(date, date)).size).toBe(0);
+    });
+
+    describe('the public appointment link', () => {
+      let server;
+      let base;
+      const token = () => require('node:crypto').randomBytes(32).toString('hex');
+      beforeEach(async () => {
+        process.env.GATE_APPOINTMENT_PAGE = 'true';
+        await trx('customers').where({ id: customerId }).update({ active: true });
+        const express = require('express');
+        const app = express();
+        app.use(express.json());
+        app.use('/api/public/appointment', require('../routes/appointment-public'));
+        await new Promise((resolve) => { server = app.listen(0, resolve); });
+        base = `http://127.0.0.1:${server.address().port}/api/public/appointment`;
+      });
+      afterEach(async () => {
+        delete process.env.GATE_APPOINTMENT_PAGE;
+        await new Promise((resolve) => server.close(resolve));
+      });
+
+      test('a held visit shows no date, offers no calendar file and cannot be confirmed; a normal one still can', async () => {
+        const heldToken = token();
+        const normalToken = token();
+        const heldId = await visit({ status: 'pending', reschedule_token: heldToken, scheduled_date: ymdOffset(5) });
+        await visit({ status: 'pending', reschedule_token: normalToken, scheduled_date: ymdOffset(5), window_start: '14:00', window_end: '16:00' });
+        await hold.putVisitOnHold({ visitId: heldId });
+        const page = await (await fetch(`${base}/${heldToken}`)).json();
+        expect(page.state).toBe('on_hold');
+        expect(JSON.stringify(page)).not.toContain(ymdOffset(5));
+        expect((await fetch(`${base}/${heldToken}/calendar.ics`)).status).toBe(404);
+        const confirm = await fetch(`${base}/${heldToken}/confirm`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        expect(confirm.status).toBe(409);
+        expect((await confirm.json()).code).toBe('NOT_CONFIRMABLE');
+        expect((await row(heldId)).status).toBe('pending');
+        expect((await (await fetch(`${base}/${normalToken}`)).json()).state).toBe('upcoming');
+      });
+    });
+  });
 });

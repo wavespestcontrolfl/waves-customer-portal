@@ -2035,9 +2035,10 @@ function dateHasStop(stopDates, slot) {
 async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
   if (!dateFrom || !dateTo) return new Set();
   try {
-    let query = db('scheduled_services')
+    // GATE_VISIT_HOLD: a held visit packs no day (gate off: no clause).
+    let query = require('./visit-hold').excludeHeld(db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
-      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
       .whereNotNull('window_start')
       // Same rule as the collision filter: a staff-booked visit stays a stop.
       .where(bookedVisitOrLiveHold);

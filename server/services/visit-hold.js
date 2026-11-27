@@ -37,9 +37,10 @@ function visitHoldLive() {
   return require('../config/feature-gates').visitHoldLive?.() === true;
 }
 
-// Builder helper: skip held rows. `alias` is the table or alias the builder reads scheduled_services as.
-function excludeHeld(builder, alias = 'scheduled_services') {
-  if (visitHoldLive()) builder.whereNull(`${alias}.held_at`);
+// Builder helper: skip held rows. `alias` is the table or alias the builder reads scheduled_services as; `applies` false
+// leaves the builder untouched (a caller that must still see a held visit passes its own condition here).
+function excludeHeld(builder, alias = 'scheduled_services', applies = true) {
+  if (applies && visitHoldLive()) builder.whereNull(`${alias}.held_at`);
   return builder;
 }
 
@@ -108,7 +109,7 @@ async function putVisitOnHold({ visitId, note, heldBy = null, scopeReq = null, n
   const cleaned = cleanNote(note);
   return conn.transaction(async (trx) => {
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
-      .first('id', 'status', 'held_at', 'customer_id', 'scheduled_date', 'reservation_expires_at');
+      .first('id', 'status', 'held_at', 'customer_id', 'scheduled_date', 'reservation_expires_at', 'visit_id');
     if (!row) throw holdError(404, 'not_found', 'Scheduled service not found');
     if (scopeReq) {
       const { technicianLiveVisitFilter } = require('./technician-visit-scope');
@@ -117,6 +118,11 @@ async function putVisitOnHold({ visitId, note, heldBy = null, scopeReq = null, n
       if (!owned) throw holdError(404, 'not_found', 'Scheduled service not found');
     }
     if (row.held_at) return { changed: false, visitId: row.id, heldAt: row.held_at };
+    // A visit that shares a stop with another service (a grouped visit, created before grouping was retired) cannot be held:
+    // the stop moves, notifies and completes as one unit, and no grouping writer remains that could join a held row.
+    if (row.visit_id) {
+      throw holdError(409, 'not_holdable_grouped', 'This visit shares a stop with another service. Reschedule it instead.');
+    }
     // An unclaimed estimate slot reservation (no customer, a reservation expiry) is not a customer's visit: holding it
     // would hand its reserved hour to another booking. A real address-only visit has no expiry and can be held.
     if (!row.customer_id && row.reservation_expires_at) {
@@ -182,6 +188,7 @@ async function releaseVisitHold({ visitId, now = new Date(), reason = 'released'
       } catch { windowEnd = '23:59'; }
       const clash = await occupancy.findConflictingVisits({
         db: trx, date: dateStr, windowStart: row.window_start, windowEnd, excludeServiceIds: [visitId], technicianId: row.technician_id,
+        includeInterviews: true,
       });
       if (clash.length) throw holdError(409, 'SLOT_TAKEN', 'That time was booked while the visit was on hold. Reschedule the visit to release the hold.');
     }
@@ -255,7 +262,8 @@ async function listHeldVisits({ conn = db, limit = 200 } = {}) {
     heldByName: r.held_by_name || null,
     holdNote: r.hold_note || null,
     daysOnHold: daysBetweenET(r.held_at, now),
-    inSeries: !!(r.is_recurring || r.recurring_parent_id),
+    // Same predicate the sweep closes on: a recurring plan visit (a booster month never closes by itself).
+    inSeries: r.is_recurring === true,
   }));
 }
 
@@ -276,11 +284,14 @@ function daysBetweenET(heldAt, now = new Date()) {
 async function nextSeriesVisitReached(held, todayEt, conn = db, { lock = false } = {}) {
   if (held.is_recurring !== true) return null;
   const parentId = held.recurring_parent_id || held.id;
+  // Series order is the cadence position (a date exception moves a visit's date, not its place in the plan); the
+  // successor's own date then says whether it is due.
+  const heldPosition = dateOnlyString(held.date_exception_cadence_date || held.scheduled_date);
   const query = conn('scheduled_services as n')
     .where(function () { this.where('n.recurring_parent_id', parentId).orWhere('n.id', parentId); })
     .where('n.is_recurring', true)
     .whereNot('n.id', held.id)
-    .where('n.scheduled_date', '>', held.scheduled_date)
+    .whereRaw('COALESCE(n.date_exception_cadence_date, n.scheduled_date) > ?::date', [heldPosition])
     .whereNull('n.held_at')
     .where(function () {
       this.where('n.status', 'completed')
@@ -288,7 +299,7 @@ async function nextSeriesVisitReached(held, todayEt, conn = db, { lock = false }
           this.whereIn('n.status', ['pending', 'confirmed', 'en_route', 'on_site']).where('n.scheduled_date', '<=', todayEt);
         });
     })
-    .orderBy('n.scheduled_date', 'asc');
+    .orderByRaw('COALESCE(n.date_exception_cadence_date, n.scheduled_date) asc');
   if (lock) query.forUpdate();
   return query.first('n.id', 'n.status', 'n.scheduled_date');
 }
@@ -303,7 +314,7 @@ async function closeHeldVisitAsSkipped(held, todayEt, { now = new Date(), conn =
   const { transitionJobStatus } = require('./job-status');
   const next = await conn.transaction(async (trx) => {
     const fresh = await trx('scheduled_services').where({ id: held.id }).forUpdate()
-      .first('id', 'status', 'held_at', 'scheduled_date', 'is_recurring', 'recurring_parent_id');
+      .first('id', 'status', 'held_at', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'date_exception_cadence_date');
     if (!fresh || !fresh.held_at || !HOLDABLE_STATUSES.includes(String(fresh.status))) return null;
     if (held.held_at && new Date(fresh.held_at).getTime() !== new Date(held.held_at).getTime()) return null;
     const successor = await nextSeriesVisitReached(fresh, todayEt, trx, { lock: true });
@@ -327,7 +338,7 @@ async function closeExpiredSeriesHolds({ now = new Date(), conn = db } = {}) {
     .whereNotNull('held_at')
     .whereIn('status', HOLDABLE_STATUSES)
     .where('is_recurring', true)
-    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'held_at');
+    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'held_at', 'date_exception_cadence_date');
   const closed = [];
   for (const row of held) {
     try {

@@ -227,7 +227,7 @@ router.get('/', async (req, res, next) => {
     applyPropertyPredicate(upcomingQuery, scope);
     // GATE_VISIT_HOLD: a held visit is not an upcoming appointment. The plan-coverage read (allProperties) keeps it: it is
     // still a plan visit, and hiding it would make the plan look short.
-    if (!allProperties) require('../services/visit-hold').excludeHeld(upcomingQuery, 'scheduled_services');
+    require('../services/visit-hold').excludeHeld(upcomingQuery, 'scheduled_services', !allProperties);
     const listRows = await upcomingQuery
       .whereIn('scheduled_services.status', allProperties ? [...VISIT_LIST_STATUSES, ...VISIT_IN_PROGRESS_STATUSES] : VISIT_LIST_STATUSES)
       // A call-created follow-up (visit 2) is dispatch-owned until the office
@@ -483,6 +483,8 @@ router.post('/:id/confirm', async (req, res, next) => {
     const serviceQuery = db('scheduled_services')
       .where({ id: req.params.id, customer_id: req.customerId });
     applyPropertyPredicate(serviceQuery, scope);
+    // GATE_VISIT_HOLD: a held visit is not confirmable (the same 404 as an unknown appointment).
+    require('../services/visit-hold').excludeHeld(serviceQuery, 'scheduled_services');
     // 'confirmed' too: the office books most visits straight to 'confirmed'
     // with customer_confirmed false, and the app offers Confirm on every row
     // the customer has not confirmed. Refusing those rows 404'd the button.
@@ -980,7 +982,7 @@ router.get('/next', async (req, res, next) => {
     const nextQuery = db('scheduled_services')
       .where({ 'scheduled_services.customer_id': req.customerId });
     applyPropertyPredicate(nextQuery, scope);
-    if (!allProperties) require('../services/visit-hold').excludeHeld(nextQuery, 'scheduled_services');
+    require('../services/visit-hold').excludeHeld(nextQuery, 'scheduled_services', !allProperties);
     const nextService = await nextQuery
       .whereIn('scheduled_services.status', ['pending', 'confirmed'])
       // Same dispatch-owned guard as the list above: a still-pending,
