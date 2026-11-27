@@ -818,6 +818,98 @@ describe('paymentStatusSendBlockReason - the estimate price sentence', () => {
   });
 });
 
+// Owner 2026-11-26: the estimate's setup fee, its waiver and its pay-for-the-year total are re-rendered at send from the estimate page's own
+// answer (estimateFacts.terms). They are their own read: it can fail (retryable) while the price lines beside it were read.
+describe('paymentStatusSendBlockReason - the estimate setup fee and pay-for-the-year sentences', () => {
+  const PRICE = 'Your estimate lists Pest Control at $125.00 per application, 4 applications a year.';
+  const WAIVED = 'The setup fee is waived on your estimate for Pest Control.';
+  const FEE_PREPAY = 'Your estimate for Pest Control lists a one-time setup fee of $99.00, waived when you pay for the year up front.';
+  const TOTAL = 'Paid up front for the year, the total on your estimate for Pest Control is $500.00, 4 applications a year.';
+  const ctx = (estimateFacts) => ({ billing: { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, hasDepositActivity: false }, estimateFacts });
+  const facts = (terms) => ({ perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }], terms });
+  const run = (body, { sentences = [body], inboundMessage, ...extra } = {}) => paymentStatusSendBlockReason({ customerId: 'c1', body, snapshot: { customer_id: 'c1', sentences }, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage, ...extra });
+  const ON_RECORD = { setupFee: { cents: 0, waived: true, label: 'Pest Control' }, prepayTotal: null };
+  const PREPAY = { setupFee: { cents: 9900, prepayWaives: true, label: 'Pest Control' }, prepayTotal: { label: 'Pest Control', cents: 50000, applications: 4 } };
+
+  test('a waiver copy goes out only while the estimate still renders it; a waiver that was removed is payment_status_changed; an unread one is retryable', async () => {
+    const ask = { inboundMessage: 'Is the setup fee waived?' };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(ON_RECORD)));
+    await expect(run(WAIVED, ask)).resolves.toBeNull();
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenCalledWith({ id: 'c1' }, { includeSmsStaffFacts: { estimate: true } });
+    // staff took the waiver off, re-priced the estimate so the fee applies again, or added a second service (the sentence no longer names one)
+    for (const setupFee of [{ cents: 0, waived: false, label: 'Pest Control' }, { cents: 9900, prepayWaives: false, label: 'Pest Control' }, { cents: 0, waived: true, label: null }, null]) {
+      ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts({ setupFee, prepayTotal: null })));
+      await expect(run(WAIVED, ask)).resolves.toBe('payment_status_changed');
+    }
+    // the page could not be read (terms null), or the estimate could not (facts null): an outage, never "no longer true"
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(null)));
+    await expect(run(WAIVED, ask)).resolves.toBe('payment_status_recheck_failed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(null));
+    await expect(run(WAIVED, ask)).resolves.toBe('payment_status_recheck_failed');
+    // the price line does not need the terms: it still goes out beside a failed terms read
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(null)));
+    await expect(run(PRICE, { inboundMessage: 'How much is the estimate?' })).resolves.toBeNull();
+  });
+
+  test('the pay-for-the-year total goes out only while it is still the rendered figure, for a prepay question, with nothing added', async () => {
+    const ask = { inboundMessage: 'How much if I pay for the year up front?', sentences: [PRICE, FEE_PREPAY, TOTAL] };
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(PREPAY)));
+    await expect(run(TOTAL, ask)).resolves.toBeNull();
+    await expect(run(`Hi Dana, ${TOTAL} ${FEE_PREPAY}`, ask)).resolves.toBeNull();
+    // a hostile addition beside the copy, a claim in the model's own words, and a question the copy does not answer
+    for (const body of [`${TOTAL} That is before tax.`, `${TOTAL} The setup fee is included.`, `${FEE_PREPAY} We can waive it either way.`, 'It is $500 for the year if you prepay.']) {
+      expect({ body, r: await run(body, ask) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    await expect(run(TOTAL, { ...ask, inboundMessage: 'How much is each application?' })).resolves.toBe('payment_status_unauthorized');
+    // the estimate was re-priced, or the bill gained a line (a deposit, a one-time charge), so no total renders now
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts({ ...PREPAY, prepayTotal: { label: 'Pest Control', cents: 52000, applications: 4 } })));
+    await expect(run(TOTAL, ask)).resolves.toBe('payment_status_changed');
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts({ ...PREPAY, prepayTotal: null })));
+    await expect(run(TOTAL, ask)).resolves.toBe('payment_status_changed');
+    // the autonomous rung never sends one
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(PREPAY)));
+    await expect(run(TOTAL, { ...ask, autoSend: true })).resolves.toBe('payment_status_not_auto_sendable');
+  });
+
+  test('an answer in other words to a setup-fee or pay-for-the-year question is unauthorized at send; the customer\'s own "I paid" beside a visit question is not', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(PREPAY)));
+    const sentences = [PRICE, FEE_PREPAY, TOTAL];
+    for (const [inboundMessage, body] of [['Is there a setup fee?', 'No.'], ['Is there a setup fee?', 'It is included.'], ['Do I get a discount if I pay for the year up front?', 'Yes, 5% off.'],
+      ['Can I prepay?', 'Yes. It works out cheaper that way.'], ['I paid for the year last time is it cheaper to do that again', 'Yes, a little.']]) {
+      expect({ body, r: await run(body, { sentences, inboundMessage }) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    await expect(run('Your next visit is Tuesday.', { sentences, inboundMessage: 'I paid for the year already, when is my next visit?' })).resolves.toBeNull();
+    await expect(run(`Hi Dana, ${FEE_PREPAY}`, { sentences, inboundMessage: 'Is there a setup fee?' })).resolves.toBeNull();
+  });
+
+  test('a copy that does not answer the question asked is unauthorized at send: another billing sentence for a terms question, an estimate sentence for a card or six-month question', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(PREPAY)));
+    const INVOICE = 'Invoice WPC-2026-0100 for $150.00 is paid.';
+    const sentences = [PRICE, FEE_PREPAY, TOTAL, INVOICE];
+    for (const [inboundMessage, body] of [['Is there a setup fee?', INVOICE], ['How much if I pay for the year up front?', `Hi Dana, ${INVOICE}`],
+      ['What will I pay if I prepay with my credit card?', TOTAL], ['Is there a setup fee if I pay by debit?', FEE_PREPAY], ['How much is it per visit with a credit card?', PRICE],
+      ['Can I prepay for six months?', TOTAL], ['How much to prepay the next visit?', TOTAL],
+      // a one-time service, the prepay waiver alone for what the year costs, a receipt question that names the prepayment
+      ['Is there a setup fee for one-time pest control?', FEE_PREPAY], ['How much if I prepay for the year?', FEE_PREPAY], ['Did my prepayment go through?', TOTAL]]) {
+      expect({ body, r: await run(body, { sentences, inboundMessage }) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    // the year itself, in other words, is still answered
+    await expect(run(TOTAL, { sentences, inboundMessage: 'How much if I prepay for one year?' })).resolves.toBeNull();
+    // ...and the waiver beside the total answers what the year costs
+    await expect(run(`${TOTAL} ${FEE_PREPAY}`, { sentences, inboundMessage: 'How much if I prepay for the year?' })).resolves.toBeNull();
+  });
+
+  test('a staff-edited body that keeps a waiver copy is still re-rendered', async () => {
+    const stale = (body) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, humanEditedBody: true, paymentStatusSnapshot: { customer_id: 'c1', sentences: [WAIVED] }, dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(ON_RECORD)));
+    await expect(stale(`Hi Dana! ${WAIVED}`)).resolves.toMatchObject({ stale: false });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts({ setupFee: { cents: 9900, prepayWaives: false, label: 'Pest Control' }, prepayTotal: null })));
+    await expect(stale(`Hi Dana! ${WAIVED}`)).resolves.toEqual({ stale: true, reason: 'payment_status_changed' });
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(null)));
+    await expect(stale(`Hi Dana! ${WAIVED}`)).resolves.toMatchObject({ stale: true });
+  });
+});
+
 describe('paymentStatusVerdict - Zelle and plan-price sentences are re-rendered at send time', () => {
   let priorZelle;
   const RECIPIENT = 'payments@wavespestcontrol.com';
@@ -1054,5 +1146,91 @@ describe('outgoingAmountsStale - the REPORT DELIVERY sentences are rechecked at 
   test('a body with no report sentence reads nothing for it', async () => {
     await expect(run('See you Tuesday!')).resolves.toEqual({ stale: false });
     expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
+
+// PHOTO CHECK (texting AI gap 6): a body copying the photo checker's sentence is re-rendered from a fresh read of the customer's stored photo
+// readings at send. The readings are stubbed (sms-photo-fact.loadPhotoChecks); the sentences are the real renderer's.
+describe('outgoingAmountsStale - the PHOTO CHECK sentences are rechecked at send', () => {
+  const photoFact = require('../services/sms-photo-fact');
+  const ROACH = 'From your photo, it looks like a German cockroach. Your technician will confirm at the visit.';
+  const reading = (over = {}) => ({ smsLogId: 'log-1', assessmentId: 'a-1', identification: { slug: 'german-roach', confidence: 'high', category: 'insect', ...over } });
+  const billing = { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+  const live = (checks, { upcoming = [{ type: 'Quarterly Pest Control' }] } = {}) => {
+    jest.spyOn(photoFact, 'loadPhotoChecks').mockResolvedValue(checks);
+    ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, upcomingServices: upcoming });
+  };
+  // the customers row (loadCustomerContext) and the inbound sms_log row (its media flag) by table
+  const photoDb = (inbound = { metadata: { media: [{ key: 'sms-media/x.jpg' }] } }) => dbWithTables({ customers: { id: 'c1' }, sms_log: inbound });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: photoDb(), inboundMessage: 'what is this bug?', inboundSmsLogId: 'log-1', ...extra });
+  afterEach(() => jest.restoreAllMocks());
+
+  test("the recheck reads only the reading of the decision's own inbound text; with none to bind to it fails closed", async () => {
+    live([reading()]);
+    await run(ROACH);
+    expect(photoFact.loadPhotoChecks).toHaveBeenCalledWith('c1', expect.objectContaining({ smsLogId: 'log-1' }));
+    // another photo text's reading (the loader returns nothing for this inbound) does not authorize the sentence
+    photoFact.loadPhotoChecks.mockImplementation(async (_c, { smsLogId }) => (smsLogId === 'log-2' ? [reading({ smsLogId: 'log-2' })] : []));
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    await expect(run(ROACH, { inboundSmsLogId: null })).resolves.toEqual({ stale: true, reason: 'photo_check_no_inbound' });
+  });
+
+  test('an unchanged sentence passes and is not judged as a payment status', async () => {
+    live([reading()]);
+    await expect(run(`Thanks for the photo! ${ROACH}`)).resolves.toEqual({ stale: false });
+    expect(bodyNeedsPaymentRecheck(ROACH)).toBe(true);
+    expect(bodyNeedsBillingBoundaryCheck(ROACH)).toBe(false);
+  });
+
+  test('a reading that changed refuses as photo_check_changed (archived or rejected = gone, the visit cancelled, a lower confidence)', async () => {
+    live([]);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    live([reading()], { upcoming: [] });
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    live([reading({ confidence: 'low' })]);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    // an AI body that starts a photo sentence with its own species
+    live([reading()]);
+    await expect(run('From your photo, it looks like a Formosan termite. Your technician will confirm at the visit.')).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+  });
+
+  test('a failed read refuses as photo_check_recheck_failed (retryable); no customer fails closed', async () => {
+    live(null);
+    await expect(run(ROACH)).resolves.toEqual({ stale: true, reason: 'photo_check_recheck_failed' });
+    await expect(outgoingAmountsStale({ customerId: null, body: ROACH, promptVersion: V12 })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    const { blockReasonIsBillingInfrastructure } = require('../services/agent-decision-send-checks');
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (photo_check_recheck_failed)')).toBe(true);
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (photo_check_changed)')).toBe(false);
+  });
+
+  test('an AI body that says what a photo shows in its own words is held; a staff edit keeps its own wording', async () => {
+    live([reading()]);
+    await expect(run('From the picture, those look like fire ants.')).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run(`${ROACH} The picture shows they are harmless roaches.`)).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run('From the picture, those look like fire ants.', { humanEditedBody: true })).resolves.toEqual({ stale: false });
+    // a staff edit that keeps a rendered sentence no longer live is held
+    live([]);
+    await expect(run(`Hi! ${ROACH}`, { humanEditedBody: true })).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
+    // plain photo wording with no identification passes without a read
+    await expect(run('Thanks for the photo! Your technician will take a look.')).resolves.toEqual({ stale: false });
+  });
+
+  test("the linked inbound's media flag decides the photo-text rule at send", async () => {
+    live([reading()]);
+    // a photo text: an identification or a safety judgment with no photo word is held
+    await expect(run('Those look like ghost ants.')).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run("It's harmless.")).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    // a text with no photo: the same words are not a photo claim
+    const noPhoto = photoDb({ metadata: { media: [] } });
+    await expect(run('Those look like ghost ants.', { dbh: noPhoto })).resolves.toEqual({ stale: false });
+    // the inbound row cannot be read: fail closed, retryable
+    await expect(run('Those look like ghost ants.', { dbh: photoDb(new Error('db down')) })).resolves.toEqual({ stale: true, reason: 'photo_check_recheck_failed' });
+  });
+
+  test('the read-free pre-screen selects own-words photo replies, so a queued one is rechecked at fire time', () => {
+    expect(bodyNeedsPaymentRecheck('From the picture, those look like fire ants.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('Those look like ghost ants.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('See you Tuesday morning.')).toBe(false);
+    expect(bodyNeedsBillingBoundaryCheck('From the picture, those look like fire ants.')).toBe(false);
   });
 });

@@ -24879,10 +24879,14 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a new exposure surface. Computed AFTER the single ownership-scoped
     // fetch above, so the reassignment protection covers it; fail-soft —
     // a facts outage omits the key, never 500s the brief read.
+    // "Customer asked" words are read for THIS visit date (portal messages' window, reschedule notes): finalRecheck binds the visit's
+    // scheduled_date too when they ride the answer, as GET /:id/visit-texts does.
+    let customerAskedBound = false;
     const withFacts = async (payload) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
-        const facts = await PrevisitBrief.deterministicVisitFacts(svc, undefined, { pastVisits: true });
+        const facts = await PrevisitBrief.deterministicVisitFacts(svc, undefined, { pastVisits: true, customerAsked: true });
+        if (facts.customer_asked) customerAskedBound = true;
         // Re-verify the assignment AFTER the facts queries (Codex P1 on
         // #3638): they run outside the atomic ownership-scoped fetch
         // above, so a dispatch reassignment during them would otherwise
@@ -24944,6 +24948,8 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
       return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
     };
+    // GATE_TECH_VISIT_TEXTS: tells the Visit Brief to ask GET /:id/visit-texts. A flag only (no read), so gate off adds nothing.
+    const withVisitTexts = (payload) => (require('../config/feature-gates').techVisitTextsLive() ? { ...payload, visitTexts: true } : payload);
     // "About this home" (services/home-note.js): the customer's one staff note rides every answer, so the tech's Visit Brief
     // shows it at the top with no request of its own. `homeNote` is the note or null (no note yet); the key is left out when
     // the visit has no customer, so that answer is exactly as before. The read is covered by finalRecheck (below), which also
@@ -24972,6 +24978,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
+          .modify((q) => (customerAskedBound ? q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date)) : q))
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
         return stillOwned ? payload : { brief: null };
@@ -24980,7 +24987,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return { brief: null };
       }
     };
-    const answer = async (payload) => res.json(await finalRecheck(await withHomeNote(await withAwayWatch(await withAccessFlags(await withFacts(payload))))));
+    const answer = async (payload) => res.json(await finalRecheck(withVisitTexts(await withHomeNote(await withAwayWatch(await withAccessFlags(await withFacts(payload)))))));
     if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -25139,6 +25146,36 @@ router.get('/:id/visit-prep-photos', async (req, res, next) => {
       .first('scheduled_services.id');
     if (!stillOwned) return res.status(404).json({ error: 'Not found' });
     res.json({ photos });
+  } catch (err) { next(err); }
+});
+
+// GET /:id/visit-texts
+// The Visit Brief's "Customer texts · last 7 days" (owner 2026-11-26): the visit customer's sms_log rows from 7 ET days
+// before the visit date up to now, photos included as short-lived signed links, money texts held back and counted
+// (services/tech-visit-texts.js). Gate off (GATE_TECH_VISIT_TEXTS) = 404 {enabled:false} and nothing is read. Read-only,
+// no call words, no model call. Authorization is GET /:id/visit-brief's own model: one ownership-scoped fetch plus a
+// reassignment recheck after the signing work; a technician not assigned the visit gets the same 404 that route gives.
+router.get('/:id/visit-texts', async (req, res, next) => {
+  try {
+    if (!require('../config/feature-gates').techVisitTextsLive()) return res.status(404).json({ enabled: false });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.*');
+    if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
+    // The screen names the customer and visit date it is showing; texts are read only when they are still this visit's.
+    const { customerId, scheduledDate } = req.query;
+    if (typeof customerId !== 'string' || typeof scheduledDate !== 'string' || !customerId || !scheduledDate) return res.status(400).json({ error: 'customerId and scheduledDate are required' });
+    if (String(svc.customer_id) !== customerId || dateOnly(svc.scheduled_date) !== scheduledDate) return res.status(404).json({ error: 'Scheduled service not found' });
+    const { texts, hidden, since, unavailable } = await require('../services/tech-visit-texts').visitTexts(db, svc, { withPhotos: require('../config/feature-gates').techVisitTextPhotosLive() });
+    // Bound to the customer and the visit date the texts were read for: a merge or undo that moved the visit to another customer,
+    // or a reschedule that moved the window, mid-read withholds the answer, as visit-brief's finalRecheck does for the customer.
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id, 'scheduled_services.scheduled_date': dateOnly(svc.scheduled_date) })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return res.status(404).json({ error: 'Scheduled service not found' });
+    res.json({ enabled: true, texts, hidden, ...(since ? { since } : {}), ...(unavailable ? { unavailable: true } : {}) });
   } catch (err) { next(err); }
 });
 

@@ -30,6 +30,10 @@ const AMOUNT_BLOCK_NOTES = {
   payment_status_recheck_failed: 'The payment-status recheck for this scheduled reply could not be completed',
   report_delivery_changed: 'The service report delivery this scheduled reply states no longer matches the records',
   report_delivery_recheck_failed: 'The service report delivery recheck for this scheduled reply could not be completed',
+  photo_check_changed: 'The photo reading this scheduled reply states no longer matches the records',
+  photo_check_unverified: 'This scheduled reply describes a photo in words the photo check did not give',
+  photo_check_recheck_failed: 'The photo reading recheck for this scheduled reply could not be completed',
+  photo_check_no_inbound: 'This scheduled reply states a photo reading but the text it answers is not known',
 };
 // The fire-time amount / Zelle / payment-status recheck for one claimed
 // scheduled reply (extracted from the send loop so the pre-screen and the
@@ -38,7 +42,7 @@ const AMOUNT_BLOCK_NOTES = {
 async function recheckScheduledSmsAmounts({ msg, claimMeta }) {
   const recheck = require('./sms-amount-recheck');
   const { parseInputSnapshot, bodyIsStaffEdited } = require('./agent-decision-send-checks');
-  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message');
+  const loadDecision = () => db('agent_decisions').where({ id: claimMeta.agent_decision_id }).first('prompt_version', 'input_snapshot', 'customer_id', 'suggested_message', 'sms_log_id');
   const pre = await prescreenScheduledSmsRecheck({ msg, claimMeta, recheck, bodyIsStaffEdited, loadDecision });
   if (pre.failed) return { stale: true, reason: 'amount_recheck_failed' };
   if (!pre.needs) return { stale: false, reason: null };
@@ -109,6 +113,8 @@ function scheduledSmsStaleArgs({ msg, claimMeta, decision, snapshot, staffEdited
     inboundMessage: snapshot?.sms?.body || null,
     // The payment-status sentences the draft copied: the only status wording this body may carry, each re-rendered from live data.
     paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // The customer's inbound text the decision answers: a copied PHOTO CHECK sentence is rechecked against THAT text's photo reading.
+    inboundSmsLogId: decision?.sms_log_id || null,
     // A human edit trusts only the OWED-amount half, never a Zelle offer or a payment status (round-4 finding 3).
     trustOwedAmounts: claimMeta.human_authored === true,
     humanEditedBody: staffEdited,
@@ -1031,6 +1037,19 @@ function initScheduledJobs() {
   // token, so overlapping deploy instances never push the same cards, and no
   // lock is held across a push (owner ruling 2026-09-30, #5421).
   // =========================================================================
+  // =========================================================================
+  // EVERY MIN — Stripe email sync (stripe-email-sync.js, owner 2026-11-27 "build"). Drains the durable jobs a customer
+  // email change wrote, so Stripe's copy of the email follows. Before the GATE_CRON_JOBS return: it finishes work a
+  // confirmed change already started. No runExclusive: each job is claimed FOR UPDATE SKIP LOCKED.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./stripe-email-sync').drainDue();
+    } catch (err) {
+      logger.error(`[stripe-email-sync] drain failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('* * * * *', async () => {
     try {
       await require('./tech-visit-notifications').flushBundledPushes();
@@ -1219,8 +1238,7 @@ function initScheduledJobs() {
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
   // bookings confirm across a whole window (the July slot_sig outage ran 8
-  // days unnoticed exactly because this signal had no alarm). Dark until
-  // GATE_BOOKING_FUNNEL_CANARY=true (feature-gates registry); read-only on
+  // days unnoticed exactly because this signal had no alarm). Read-only on
   // booking_intents.
   const bookingFunnelCanaryTick = async () => {
     try {
@@ -3340,11 +3358,10 @@ function initScheduledJobs() {
 
   // EVERY 15 MIN — the new-referral bell (owner 2026-10-29 "ok go"): one admin row per card waiting in
   // Referrals → Queue, with Confirm / Not a referral buttons; a row whose card was answered or left the list
-  // closes. Dark behind GATE_REFERRAL_INBOUND_BELL, read at each tick. The lease keeps one sweep at a time;
+  // closes. The lease keeps one sweep at a time;
   // each card's row is written under its own advisory lock. Logs counts only, never a name.
   cron.schedule('12,27,42,57 * * * *', async () => {
     try {
-      if (!require('../config/feature-gates').referralInboundBellLive()) return;
       const result = await runExclusive('referral-inbound-bell', () => require('./referral-inbound-bell').syncReferralInboundBells());
       if (result && (result.raised || result.closed || result.failed)) logger.info(`[referral-inbound-bell] ${JSON.stringify(result)}`);
     } catch (err) {
@@ -11038,15 +11055,15 @@ function initScheduledJobs() {
   // extraction confirmed a concrete appointment slot that never became a
   // scheduled_services row
   // (outbound skip / v2 routing block / missing fields all park silently in
-  // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
+  // triage otherwise).
   // See server/services/call-booking-miss-watchdog.js.
   // =========================================================================
   cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
-      if (!result.skipped && (result.misses > 0 || result.alerted > 0 || result.repeated > 0)) {
-        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted} repeated=${result.repeated || 0}`);
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);

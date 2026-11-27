@@ -1455,7 +1455,11 @@ async function lockedPairAutoEligibility(trx, winner, loser) {
 // Geocode reviews describe one customer's primary-address snapshot. Keep the
 // retired account's evidence attached to it: inheriting it would assert a new
 // verification, and two singleton rows must not abort an ordinary merge.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews']);
+// The every-visit list of people a call named (customer_reminder_contacts, call-visit-recipient.js) stays on the account
+// the call was about: a merge never moves a texting grant onto another account, and an undo has nothing to restore. The
+// merged account lists nobody until a call names the person again; the list's copies that move with their visits stand
+// only while the visit's customer lists the number, so they send nothing.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews', 'customer_reminder_contacts']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert

@@ -24,6 +24,7 @@ jest.mock('../models/db', () => {
     q.forUpdate = () => { if (!mockState.raws.some((r) => /pg_advisory_xact_lock/.test(r))) throw new Error('row lock taken before the pricing advisory lock'); mockState.locked = true; return q; };
     q.first = async () => {
       if (table === 'product_restock_requests') return mockState.existing;
+      if (table === 'vendor_orders') return mockState.ledgerRow || null; // any ledger row of the request
       if (table === 'notifications') return mockState.heldBell || null; // a bell a fertilizer hold closed
       if (table === 'vendors') return mockState.vendorRow === undefined ? { name: 'Gemplers', active: true } : mockState.vendorRow;
       if (table === 'vendor_pricing') {
@@ -65,6 +66,8 @@ jest.mock('../services/procurement/order-dispatch', () => ({
   // A pre-submit park's ledger bell is settled before the generic hand-off re-rings (Codex r31 P2).
   settleRequestLedgerBells: jest.fn(async () => { if (mockState.ledgerBellThrows) throw new Error('ledger bell lost connection'); mockState.ledgerBellsSettled = (mockState.ledgerBellsSettled || 0) + 1; }),
   retireRequestBell: jest.fn(async (_conn, requestId) => { (mockState.retiredBells = mockState.retiredBells || []).push(requestId); }),
+  // The real cancel (status, metadata, bell retirement) runs in order-dispatch's own suites; here only that the sweep calls it.
+  cancelAtClaim: jest.fn(async (_trx, { request, ineligible }) => { (mockState.cancelled = mockState.cancelled || []).push({ id: request.id, ineligible }); return { skipped: ineligible, cancelled: true }; }),
 }));
 
 const { runSuppliesAutoReorderSweep, sweepFailureError } = require('../services/procurement/auto-reorder');
@@ -91,6 +94,9 @@ beforeEach(() => {
   mockState.pricingThrows = false;
   mockState.vendorRow = undefined;
   mockState.heldBell = null;
+  mockState.ledgerRow = null;
+  mockState.cancelled = [];
+  mockState.liveAutoOrder = null;
 });
 afterAll(() => { delete process.env.GATE_AUTO_REORDER; });
 
@@ -571,3 +577,94 @@ describe('fertilizer blackout', () => {
   });
 });
 
+
+describe('an open automatic request closes when stock is back above the limit (any vendor gate state)', () => {
+  const recovered = { ...lowSign, inventory_on_hand: '300' }; // a hand purchase lifted stock above the 100 limit
+  const openAuto = { id: 'req-auto', status: 'open', source: 'auto_reorder', metadata: { vendorId: 'vend-gemplers' } };
+  const run = async (extra = {}) => {
+    mockState.candidates = [recovered];
+    mockState.existing = openAuto;
+    mockState.fresh = { name: recovered.name, inventory_on_hand: '300', low_stock_threshold: '100', ...extra };
+    const notify = jest.fn(async () => ({}));
+    const res = await runSuppliesAutoReorderSweep({ notify });
+    return { res, notify };
+  };
+
+  test('stock back above the limit: request cancelled as stock_no_longer_low, nothing rung, no bell for the request', async () => {
+    const { res, notify } = await run();
+    expect(mockState.cancelled).toEqual([{ id: 'req-auto', ineligible: 'stock_no_longer_low' }]);
+    expect(res.cancelled).toEqual([{ productId: 'prod-sign', name: recovered.name, requestId: 'req-auto', reason: 'stock_no_longer_low' }]);
+    expect(notify).not.toHaveBeenCalled();
+    expect(res.renotified).toHaveLength(0);
+  });
+
+  test('takes the pricing advisory lock before the row locks (same lock order as refreshOpenRequest)', async () => {
+    await run(); // the mock throws if a row lock is taken first
+    expect(mockState.raws.some((r) => /pg_advisory_xact_lock/.test(r))).toBe(true);
+    expect(mockState.cancelled).toHaveLength(1);
+  });
+
+  test('still low: left alone (existing re-ring path)', async () => {
+    mockState.candidates = [lowSign];
+    mockState.existing = openAuto;
+    const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+    expect(mockState.cancelled).toHaveLength(0);
+    expect(res.cancelled).toHaveLength(0);
+  });
+
+  test('the locked re-read wins over the scan: scan says recovered, locked row is low again', async () => {
+    await run({ inventory_on_hand: '80' });
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test('an ordered request is never cancelled', async () => {
+    mockState.candidates = [recovered];
+    mockState.existing = { ...openAuto, status: 'ordered' };
+    await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test('an open request of another source is never cancelled', async () => {
+    mockState.candidates = [recovered];
+    mockState.existing = { ...openAuto, source: 'manual' };
+    await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test('a live automatic order for the product: left alone', async () => {
+    mockState.liveAutoOrder = { status: 'needs_review', external_order_number: 'S1-9', vendor_name: 'SiteOne' };
+    await run();
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test('a request with a ledger row (parked or placed) is owned by the ledger: left alone', async () => {
+    mockState.ledgerRow = { id: 'vo-1' };
+    await run();
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test.each([
+    ['null stock', { inventory_on_hand: null }],
+    ['null limit', { low_stock_threshold: null }],
+  ])('%s is unknown, not "no longer low"', async (_label, extra) => {
+    mockState.candidates = [{ ...recovered, ...(extra.inventory_on_hand === null ? { inventory_on_hand: null } : {}), ...(extra.low_stock_threshold === null ? { low_stock_threshold: null } : {}) }];
+    mockState.existing = openAuto;
+    mockState.fresh = { name: recovered.name, inventory_on_hand: '300', low_stock_threshold: '100', ...extra };
+    await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})) });
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test('unknown on the locked row also stops it (scan said recovered)', async () => {
+    await run({ inventory_on_hand: null });
+    expect(mockState.cancelled).toHaveLength(0);
+  });
+
+  test('June 1 - Sept 30 N/P fertilizer hold path: not cancelled here', async () => {
+    mockState.candidates = [recovered];
+    mockState.existing = openAuto;
+    mockState.fresh = { name: recovered.name, inventory_on_hand: '300', low_stock_threshold: '100', category: 'fertilizer', product_type: 'fertilizer', fertilizer_analysis: '10-10-10', analysis_n: 10, analysis_p: 10 };
+    const res = await runSuppliesAutoReorderSweep({ notify: jest.fn(async () => ({})), now: new Date('2026-07-15T12:00:00Z') });
+    expect(mockState.cancelled).toHaveLength(0);
+    expect(res.held.length).toBeGreaterThan(0);
+  });
+});

@@ -101,6 +101,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // field overrides; the Field Estimator UI is admin-only). Codex #5568 r3.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/protocols(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/protocols\/job-card(\/.*)?$/ },
+  // Mix safety rules (owner 2026-11-27): the tech reads them for the tank (no customer data). Writes are requireAdmin.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/product-mix-rules(\/check)?$/ },
   // Neighborhood gate codes from a visit (owner 2026-10-03): add a code that
   // worked, or report one wrong. The router pins both to a visit on the
   // technician's own route; the directory itself stays admin-only.
@@ -169,7 +171,7 @@ const TECHNICIAN_ALLOW_LIST = [
 
   // Documents, pay and growth.
   { bucket: 'documents', methods: ANY, pattern: /^\/api\/tech\/staff-documents(\/.*)?$/ },
-  // A technician's own finalized pay stubs (GATE_TECH_PAY_STUBS, owner 2026-10-28; inside "pay and growth" of the
+  // A technician's own finalized pay stubs (owner 2026-10-28; inside "pay and growth" of the
   // 2026-10-02 ruling). The router scopes both reads to req.technicianId. Pay runs, W-4s and tax forms stay admin-only.
   { bucket: 'pay-growth', methods: READ, pattern: /^\/api\/tech\/payroll\/checks(\/[^/]+\/stub)?$/ },
   // A technician's own rewards scoreboard (GATE_TECH_REWARDS_SCOREBOARD, owner 2026-11-20, Tech Rewards Plan D5-4). The router

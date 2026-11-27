@@ -206,11 +206,11 @@ function buildRows() {
     // Typical scope: 1-3 rooms, light/moderate severity, chemical method,
     // ready prep, single-family occupancy — the auto-priced typical job.
     values: sweepValues(
-      TYPICAL_FOOTPRINTS.flatMap((footprint) =>
+      TYPICAL_HOMES.flatMap((homeSqFt) =>
         [1, 2, 3].flatMap((rooms) =>
-          ['light', 'moderate'].map((severity) => ({ footprint, rooms, severity })))),
-      ({ footprint, rooms, severity }) => sp.priceBedBugTreatment(
-        { footprint, stories: 1 },
+          ['light', 'moderate'].map((severity) => ({ homeSqFt, rooms, severity })))),
+      ({ homeSqFt, rooms, severity }) => sp.priceBedBugTreatment(
+        { homeSqFt, stories: 1 },
         { rooms, method: 'CHEMICAL', severity, prepStatus: 'ready', occupancyType: 'singleFamily' }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
     notes: '1-3 rooms; priced by rooms, severity, and home size (the first room is priced with those factors; each room after it adds a flat $349). More rooms, heavier infestations, larger or multi-story homes, in-house heat/hybrid treatment, apartment occupancy, and under-prepared jobs price higher or are quoted after inspection.',

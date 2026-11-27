@@ -210,7 +210,7 @@ describe('gate off — a recurring series stays ambiguous (Codex #6172 r1 P1)', 
     expect(mockIdentity.prompts.join('\n')).not.toMatch(/, 20\d\d\)/);
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
     expect(drafter.currentPromptVersion()).toBe(drafter.REAL_ANSWERS_PROMPT_VERSION);
-    expect(drafter.REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers77_n');
+    expect(drafter.REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers93_n');
     const client = makeClient(plainReply());
     const r = await drafter.generateGroundedDraft(argsFor(client, context));
     expect(oldFinder).not.toHaveBeenCalled();
@@ -352,10 +352,10 @@ describe('gate on — an upcoming visit is offered through the reschedule link p
   test('gate on: the effective prompt version is the next-of-series cohort, with or without category tags (Codex r2 P1)', () => {
     const drafter = freshDrafter();
     process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers78_n');
-    expect(drafter.NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers78_n');
+    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers94_n');
+    expect(drafter.NEXT_OF_SERIES_PROMPT_VERSION).toBe('house_voice_v12_real_answers94_n');
     process.env.GATE_SMS_AGENT_COMPLAINTS = 'true';
-    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers78_n+c');
+    expect(drafter.currentPromptVersion()).toBe('house_voice_v12_real_answers94_n+c');
     delete process.env.GATE_SMS_AGENT_COMPLAINTS;
   });
 
@@ -594,7 +594,7 @@ describe('scheduler path has its own, longer deadline', () => {
       await jest.advanceTimersByTimeAsync(9900);
       expect(settled).toBe(false);
       await jest.advanceTimersByTimeAsync(200);
-      await expect(promise).resolves.toEqual({ block: null, days: [] });
+      await expect(promise).resolves.toEqual({ block: null, days: [], withheld: 'fetch_failed' });
     } finally {
       jest.useRealTimers();
     }
@@ -624,7 +624,7 @@ describe('scheduler path has its own, longer deadline', () => {
       const fetched = drafter.fetchOpenTimesData({ city: 'Venice', customerId: 'cust-9', schedulingIntent: true });
       await jest.advanceTimersByTimeAsync(3100);
       await expect(recheck).resolves.toEqual({ ok: false, reason: 'open_times_recheck_failed' });
-      await expect(fetched).resolves.toEqual({ block: null, days: [] });
+      await expect(fetched).resolves.toEqual({ block: null, days: [], withheld: 'fetch_failed' });
     } finally {
       jest.useRealTimers();
     }

@@ -1,5 +1,5 @@
 /**
- * Tree & Shrub neonicotinoid yearly caps (GATE_TS_NEONIC_CAP, owner 2026-10-09).
+ * Tree & Shrub neonicotinoid yearly caps (owner 2026-10-09).
  *
  * A label limit per ACRE of treated landscape per calendar YEAR, written in each
  * product's own unit. A property's yearly amount is that figure scaled to its

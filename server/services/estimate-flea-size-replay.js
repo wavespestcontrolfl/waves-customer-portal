@@ -26,13 +26,20 @@ const isFleaPackageRow = (row) => isRecord(row)
   && (row.service === 'flea_package' || row.serviceKey === 'flea' || row.service === 'flea'
     || (!row.service && !row.serviceKey && row.name === 'Flea (2-visit)'));
 
-function fleaRowsIn(container) {
+// The other lines that record the whole-home size they priced on (owner 2026-11-26 "whole home"): the engine's bed bug treatment
+// and rodent guarantee (the cockroach treatment prices on the ground-floor footprint again, owner 2026-11-27). Their legacy basis
+// is the estimate's own stamp (estimate-floor-signal-replay savedLegacyWholeHomeSizingSignal), not this module; this module only
+// restores a lookup-measured home from their rows.
+const WHOLE_HOME_ROW_SERVICES = new Set(['bed_bug', 'rodent_guarantee']);
+const isWholeHomeSizedRow = (row) => isRecord(row) && WHOLE_HOME_ROW_SERVICES.has(row.service);
+
+function rowsIn(container, isRow) {
   const nested = container.results && container.results.oneTime;
   return [
     container.oneTime && container.oneTime.items, container.oneTime && container.oneTime.specItems,
     nested && nested.items, nested && nested.specItems,
     container.specItems, container.quoteRequiredItems, container.lineItems,
-  ].filter(Array.isArray).flat().filter(isFleaPackageRow);
+  ].filter(Array.isArray).flat().filter(isRow);
 }
 
 function parseStored(raw) {
@@ -40,24 +47,27 @@ function parseStored(raw) {
   try { const parsed = JSON.parse(raw); return isRecord(parsed) ? parsed : null; } catch { return null; }
 }
 
-// Every stored flea row, by the merged-line rules of estimate-result-container.js (resolveEstimateLines): the authoritative
+// Every stored row of one kind (isRow picks it; the notes below say flea, the rule is the same for any kind), by the merged-line
+// rules of estimate-result-container.js (resolveEstimateLines): the authoritative
 // container's rows first (a stale engineResult left by a revision is never read while the revision's own result prices
 // flea); a flea line only the OTHER container priced is the legitimate mixed shape (recurring lines in result, the flea line
 // in engineResult.lineItems) and is read too, unless a SERVER reprice rewrote result (then the other container's unmatched
 // rows are removed or re-priced services, never extras).
-function storedFleaRows(estData) {
+function storedRows(estData, isRow) {
   const data = parseStored(estData);
   if (!data) return [];
   const containers = [data.result, data.engineResult].filter(isRecord);
-  if (containers.length && !containers.some((container) => fleaRowsIn(container).length)) return [];
+  if (containers.length && !containers.some((container) => rowsIn(container, isRow).length)) return [];
   const chosen = storedEstimateContainer(data) || data;
-  const rows = fleaRowsIn(chosen);
+  const rows = rowsIn(chosen, isRow);
   if (rows.length) return rows;
   const other = [data.result, data.engineResult].find((container) => isRecord(container) && container !== chosen);
   const serverRepriced = String(data.pricingAuthorityAtLock || '').toUpperCase() === 'SERVER'
     && isRecord(data.result) && data.result !== data.engineResult;
-  return other && !serverRepriced ? fleaRowsIn(other) : [];
+  return other && !serverRepriced ? rowsIn(other, isRow) : [];
 }
+
+const storedFleaRows = (estData) => storedRows(estData, isFleaPackageRow);
 
 // Does the stored data ask for a flea package in its replayable inputs?
 function inputsRequestFlea(inputs) {
@@ -82,14 +92,24 @@ function fleaSizeBasisSignalForReplay(estData) {
 }
 
 // The measured whole home a website quote priced with when it had no posted home size (public-quote.js sets fleaMeasuredHomeSqFt +
-// homeSqFtIsDefault from the SERVER lookup). The save path's identity sanitizer strips both from every replay, so the replay restores
-// them from the stored flea ROW, the only record: the engine stamps footprintSource 'lookup_measured_home' and the measured area in
-// footprintUsed on every row it priced with it, and the compact wizard writers carry both. A browser-supplied copy in any stored
-// input carrier is never read. Only while every stored flea row is stamped whole-home.
+// homeSqFtIsDefault from the SERVER lookup, for flea, the bed bug treatment and the rodent guarantee). The save path's identity sanitizer
+// strips both from every replay, so the replay restores them from a stored ROW, the only record: the engine stamps footprintSource
+// 'lookup_measured_home' and the measured area in footprintUsed on every row it priced with it, and the compact wizard writers carry
+// both. A browser-supplied copy in any stored input carrier is never read. A flea row backs it only while every stored flea row is
+// stamped whole-home; a bed bug or rodent guarantee row carries that source only when it was priced on the whole home.
+// Each whole-home service is read on its own (storedRows per service), so the merged-line rule holds per SERVICE: the authoritative
+// container's row wins for a service both containers hold, and a service only the other retained container priced (a rodent
+// guarantee row in engineResult beside a bed bug row in result) still supplies its measurement.
+function storedMeasuredHomeRow(estData) {
+  const fleaRows = storedFleaRows(estData);
+  const backing = [
+    ...(fleaRows.every((row) => row.fleaSizeBasis === 'total_living_area') ? fleaRows : []),
+    ...[...WHOLE_HOME_ROW_SERVICES].flatMap((service) => storedRows(estData, (row) => isRecord(row) && row.service === service)),
+  ];
+  return backing.find((row) => row.footprintSource === 'lookup_measured_home' && Number(row.footprintUsed) > 0) || null;
+}
 function storedMeasuredHomeForReplay(estData) {
-  const rows = storedFleaRows(estData);
-  if (!rows.length || !rows.every((row) => row.fleaSizeBasis === 'total_living_area')) return {};
-  const fromRow = rows.find((row) => row.footprintSource === 'lookup_measured_home' && Number(row.footprintUsed) > 0);
+  const fromRow = storedMeasuredHomeRow(estData);
   return fromRow ? { fleaMeasuredHomeSqFt: Math.round(Number(fromRow.footprintUsed)), homeSqFtIsDefault: true } : {};
 }
 
@@ -142,27 +162,30 @@ function fleaPriceRecord(estimateRow, estData, { translate, nextAddress } = {}) 
     priorAddress: addressKeyOf(estimateRow && estimateRow.address),
     nextAddress: addressKeyOf(nextAddress === undefined ? (estimateRow && estimateRow.address) : nextAddress),
   };
+  // A website quote priced on the server lookup's measured whole home (its flea, bed bug or rodent guarantee row is the record).
+  const measuredRow = storedMeasuredHomeRow(data);
+  if (measuredRow) {
+    return {
+      ...common, basis: 'measured_home', measuredHomeSqFt: Math.round(Number(measuredRow.footprintUsed)),
+      postedHomeSqFt: Number(measuredRow.fleaPostedHomeSqFt) > 0 ? Math.round(Number(measuredRow.fleaPostedHomeSqFt)) : null,
+    };
+  }
   const row = storedFleaRows(data)[0];
   if (!row) {
     // A delivered quote with no priced row (inputs-only, or a request-only Admin V2 save): its basis is the replay's legacy reading
     // of what it stored, and the stored inputs size the home the way it was quoted.
     return delivered && fleaSizeBasisSignalForReplay(data) === 'ground_floor' ? { ...common, basis: 'ground_floor', footprintUsed: null } : null;
   }
-  const wholeHome = row.fleaSizeBasis === 'total_living_area';
-  const measured = wholeHome && row.footprintSource === 'lookup_measured_home' && Number(row.footprintUsed) > 0;
-  if (measured) {
-    return {
-      ...common, basis: 'measured_home', measuredHomeSqFt: Math.round(Number(row.footprintUsed)),
-      postedHomeSqFt: Number(row.fleaPostedHomeSqFt) > 0 ? Math.round(Number(row.fleaPostedHomeSqFt)) : null,
-    };
-  }
   // A whole-home row prices deterministically from its inputs; a legacy row is kept only once delivered.
-  if (wholeHome || !delivered) return null;
+  if (row.fleaSizeBasis === 'total_living_area' || !delivered) return null;
   return { ...common, basis: 'ground_floor', footprintUsed: Number(row.footprintUsed) > 0 ? Math.round(Number(row.footprintUsed)) : null };
 }
 
 const fleaLineOf = (estimate) => (estimate && Array.isArray(estimate.lineItems) ? estimate.lineItems : [])
   .find((line) => line && line.service === 'flea_package');
+// The first line that reports the whole-home size it priced on (flea, bed bug or rodent guarantee; they share one resolver).
+const wholeHomeSizedLineOf = (estimate) => (estimate && Array.isArray(estimate.lineItems) ? estimate.lineItems : [])
+  .find((line) => line && (line.service === 'flea_package' || isWholeHomeSizedRow(line)) && Number(line.footprintUsed) > 0);
 
 // Runs the engine for a revision or its preview. With no record it is a plain run (today's rule). With a record it prices the retained
 // line on the sizing it was sent with, and falls back to today's rule when the operator changed the home size (or, for a measured
@@ -170,16 +193,18 @@ const fleaLineOf = (estimate) => (estimate && Array.isArray(estimate.lineItems) 
 function generateWithFleaRecord(generateEstimate, v1Input, record) {
   const fresh = generateEstimate(v1Input);
   if (!record) return fresh;
-  const freshLine = fleaLineOf(fresh);
-  if (!freshLine) return fresh;
   if (record.basis === 'measured_home') {
     // The verified area belongs to the property it measured, and to the posted size it replaced.
+    const sizedLine = wholeHomeSizedLineOf(fresh);
+    if (!sizedLine) return fresh;
     if (record.priorAddress && record.nextAddress && record.priorAddress !== record.nextAddress) return fresh;
-    if (record.postedHomeSqFt && Number(freshLine.footprintUsed) === record.postedHomeSqFt) {
+    if (record.postedHomeSqFt && Number(sizedLine.footprintUsed) === record.postedHomeSqFt) {
       return generateEstimate({ ...v1Input, fleaMeasuredHomeSqFt: record.measuredHomeSqFt, homeSqFtIsDefault: true });
     }
     return fresh;
   }
+  const freshLine = fleaLineOf(fresh);
+  if (!freshLine) return fresh;
   // Legacy ground-floor sizing: compare the stored quote's size (living area, footprint, stories) with the revised one.
   const nextSize = sizeKeyOf(v1Input);
   if (record.priorSize && nextSize && !sameSize(record.priorSize, nextSize)) return fresh;

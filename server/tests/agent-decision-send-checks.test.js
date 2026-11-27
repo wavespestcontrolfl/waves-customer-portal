@@ -73,7 +73,7 @@ test('parseInputSnapshot: string, object, malformed, absent', () => {
 test('everything passes → null; the recheck carries the snapshot lookup including serviceType', async () => {
   await expect(agentDecisionSendBlockReason({ decision: decision(), outgoingBody: 'How about Tuesday 9:00 AM - 11:00 AM?' })).resolves.toBeNull();
   expect(drafter.openTimesStillOffered).toHaveBeenCalledWith(expect.objectContaining({ city: 'Venice', customerId: 'c1', serviceType: 'Lawn Care' }));
-  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers41_n', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, humanEditedBody: false, trustOwedAmounts: false });
+  expect(outgoingAmountsStale).toHaveBeenCalledWith({ customerId: 'c1', body: 'How about Tuesday 9:00 AM - 11:00 AM?', promptVersion: 'house_voice_v12_real_answers41_n', zelleInvoiceId: null, inboundMessage: null, paymentStatusSnapshot: null, inboundSmsLogId: null, humanEditedBody: false, trustOwedAmounts: false });
 });
 
 // Pre-push audit P1 (finding 2): the invoice the drafter's Zelle fact was
@@ -560,8 +560,8 @@ describe('infrastructure failures are retryable at every wrapper, never permanen
   const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
 
   test('the exported set names both codes; verdicts about the message are not in it', () => {
-    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_claim_recompute_unavailable', 'eta_recheck_failed']);
-    for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today']) {
+    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_claim_recompute_unavailable', 'eta_recheck_failed', 'route_status_recheck_failed']);
+    for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today', 'route_status_changed', 'route_status_unbound']) {
       expect(isEtaInfrastructureFailure(verdict)).toBe(false);
     }
     expect(Object.isFrozen(ETA_INFRASTRUCTURE_FAILURE_REASONS)).toBe(true);
@@ -704,7 +704,7 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
     expect(typeof check.afterMarker).toBe('function');
     const dbi = dbiWith('fp-1');
     await expect(check({ dbi })).resolves.toEqual({ ok: true });
-    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments t WHERE t.customer_id = ?'), Array(15).fill('c1'));
+    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments t WHERE t.customer_id = ?'), Array(22).fill('c1'));
   });
   test('a payment landing after the recheck (fingerprint changed), an unreadable fingerprint, or none taken => retryable refusal', async () => {
     const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: `fp-1@${require('../utils/datetime-et').etDateString()}` }, getBody: () => decision.suggested_message });
@@ -973,6 +973,45 @@ describe('open-loop commitments recheck', () => {
         nowFacts(changed);
         await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBe('visit_status_changed');
       }
+    });
+
+    test('SCHEDULE CHANGES: a draft carrying `schedule` is rebuilt with them; a move, skip or cancel recorded since refuses', async () => {
+      const move = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false };
+      const drew = { moves: [move], stopped: [] };
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: facts.scheduleChangesSignature(drew), scheduleVisits: [{ id: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }, { id: 'v2', date: '2026-12-09', start: null, window: null, dayOnly: true }] } }) });
+      nowFacts({ ...drafted, scheduleChanges: drew });
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
+      // the rebuild asks about the same listed visits, in the same order
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true, withScheduleChanges: true, upcomingServices: [{ scheduledServiceId: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }, { scheduledServiceId: 'v2', date: '2026-12-09', start: null, window: null, dayOnly: true }] }));
+      for (const changed of [
+        { moves: [], stopped: [] },
+        { moves: [{ ...move, logId: 'rl-2', toDate: '2026-12-05' }], stopped: [] },
+        { moves: [move], stopped: [{ visitIds: ['v2'], type: 'Lawn Care', date: '2026-12-10', lastDate: '2026-12-10', status: 'skipped', count: 1 }] },
+      ]) {
+        spy.mockRestore();
+        nowFacts({ ...drafted, scheduleChanges: changed });
+        await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('schedule_changed');
+      }
+      // drafted beside no change at all: a move recorded since refuses too
+      const none = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: '' } }) });
+      spy.mockRestore();
+      nowFacts({ ...drafted, scheduleChanges: drew });
+      await expect(openLoopsBlockReason({ decision: none })).resolves.toBe('schedule_changed');
+      // drafted when the read failed ('unread'): never matches a rebuild, so it refuses
+      const unread = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: 'unread' } }) });
+      spy.mockRestore();
+      nowFacts({ ...drafted, scheduleChanges: { moves: [], stopped: [] } });
+      await expect(openLoopsBlockReason({ decision: unread })).resolves.toBe('schedule_changed');
+      // a failed rebuild is retryable, never "changed"
+      spy.mockRestore();
+      spy = jest.spyOn(facts, 'loadVisitLoops').mockRejectedValue(new Error('db down'));
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('open_loops_recheck_failed');
+    });
+
+    test('a draft from before SCHEDULE CHANGES (no `schedule` key) is not asked about them', async () => {
+      nowFacts({ ...drafted, scheduleChanges: { moves: [{ logId: 'rl-9', visitId: 'v1' }], stopped: [] } });
+      await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBeNull();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ withScheduleChanges: false }));
     });
 
     test('a null signature (section rendered, nothing time-sensitive) is still rechecked: a delay that appeared refuses', async () => {

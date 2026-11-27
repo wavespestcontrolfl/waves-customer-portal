@@ -2058,6 +2058,10 @@ export function calculateEstimate(inputs) {
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
+  // The bed bug treatment sizes on the home's TOTAL living area, not the ground-floor footprint (owner ruling 2026-11-26
+  // "whole home"; mirrors the server's resolveWholeHomeSize for a plain living-area input). The cockroach treatment stays on
+  // the ground-floor footprint (owner 2026-11-27).
+  const wholeHomeSqFt = homeSqFt > 0 ? Math.round(homeSqFt) : 0;
   const treeNum = treeDensity === 'HEAVY' ? 2 : treeDensity === 'MODERATE' ? 1 : 0;
   const estimateHardscape = () => {
     const pt = (propertyType || '').toLowerCase();
@@ -2158,6 +2162,10 @@ export function calculateEstimate(inputs) {
     // zero and the fallback is the new rule (false). Above it with pest requested the fallback priced the flat top, so it does not
     // claim the new rule (the stamp is left MISSING). The server refuses that save by the home size (409) and prices it itself.
     ...((svcPest || svcOnetimePest) && footprint > 5500 ? {} : { legacyPestAboveTable: false }),
+    // Whole-home sizing (2026-11-26): this fallback sizes the bed bug treatment on total living area, as the server does, and
+    // says so. It is the preview's own record only: the server never stores a browser-priced bed bug or rodent guarantee row
+    // (409), and writes its own reading of this stamp on a save it could not price.
+    legacyWholeHomeSizing: false,
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback
     // quote at the minimum it was priced with, never the live global at
@@ -3748,8 +3756,8 @@ export function calculateEstimate(inputs) {
       let cp = Math.round((mpr * rm + LABOR * (lv1 / 60) + mpr * rm * 0.5 + LABOR * (lv2 / 60)) / 0.35 * 100) / 100;
       const fl = 400 + (rm - 1) * 250;
       if (cp < fl) cp = fl;
-      if (footprint > 2500) cp = Math.round(cp * 1.10);
-      else if (footprint > 1800) cp = Math.round(cp * 1.05);
+      if (wholeHomeSqFt > 2500) cp = Math.round(cp * 1.10);
+      else if (wholeHomeSqFt > 1800) cp = Math.round(cp * 1.05);
       specItems.push({ name: 'Bed Bug Chemical', price: bedBugP(cp), det: rm + ' room' + (rm > 1 ? 's' : '') + ', 2 visits' });
     }
     if (meth === 'HEAT') {
@@ -3761,8 +3769,8 @@ export function calculateEstimate(inputs) {
         const equipCost = 150 + (rm - 1) * 75; // heater rental/depreciation + fans + monitors
         hp += equipCost;
       }
-      if (footprint > 2500) hp = Math.round(hp * 1.10);
-      else if (footprint < 1200) hp = Math.round(hp * 0.95);
+      if (wholeHomeSqFt > 2500) hp = Math.round(hp * 1.10);
+      else if (wholeHomeSqFt < 1200) hp = Math.round(hp * 0.95);
       const fp = bedBugP(hp);
       specItems.push({ name: 'Bed Bug Heat', price: fp, det: rm + ' room' + (rm > 1 ? 's' : '') + ' — ' + fmtInt(fp / rm) + '/room' + (bedbugEquipment === 'INHOUSE' ? ' (in-house)' : '') });
     }

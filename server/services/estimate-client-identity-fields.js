@@ -60,6 +60,8 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'legacyOneTimePestBuffer',
   // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): server-derived from its own stamp, same rule.
   'legacyPestAboveTable',
+  // Whole-home sizing stamp (bed bug, rodent guarantee on total living area; 2026-11-26): server-derived, same rule.
+  'legacyWholeHomeSizing',
   // Specialty prices stamp (bed bug rooms, mosquito above 2 acres, wasp level; 2026-11-26): server-derived from its own stamp, same rule.
   'legacySpecialty1126',
   'specialty1126CurrentServices',

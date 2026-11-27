@@ -51,7 +51,13 @@ const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
 jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
 const mockApplyEmail = jest.fn();
 jest.mock('../services/customer-email-write', () => ({ applyOperatorCustomerEmail: (...a) => mockApplyEmail(...a) }));
-const mockDb = { transaction: jest.fn(async (fn) => fn(Object.assign((table) => mockTrxBuilder(table), { fn: { now: () => 'NOW' }, raw: (sql) => sql }))) };
+// A savepoint (trx.transaction) runs on the same mock handle, flagged so a test can see the alert used it.
+const mockMakeTrx = () => {
+  const trx = Object.assign((table) => mockTrxBuilder(table), { fn: { now: () => 'NOW' }, raw: (sql) => sql });
+  trx.transaction = jest.fn(async (fn) => fn(Object.assign((table) => mockTrxBuilder(table), { fn: trx.fn, raw: trx.raw, isSavepoint: true })));
+  return trx;
+};
+const mockDb = { transaction: jest.fn(async (fn) => fn(mockMakeTrx())) };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockAudit = jest.fn(async () => 1);
@@ -76,6 +82,11 @@ jest.mock('../services/customer-email-change-code', () => ({
 }));
 const mockSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: (...a) => mockSend(...a) }));
+// The real composer (its rules throw in tests), with the bell write captured.
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+const mockEnqueueStripeSync = jest.fn(async () => {});
+jest.mock('../services/stripe-email-sync', () => ({ enqueue: (...a) => mockEnqueueStripeSync(...a) }));
 
 const express = require('express');
 const auth = require('../middleware/auth');
@@ -386,6 +397,9 @@ describe('PUT /api/customer/profile', () => {
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(1);
     expectGenericNotice(mockSend.mock.calls[0][0], OLD_EMAIL);
+    // The office alert is for an EMAIL change only.
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockEnqueueStripeSync).not.toHaveBeenCalled();
   });
 
   test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
@@ -496,6 +510,73 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(JSON.stringify(toOld)).not.toContain(NEW_EMAIL);
     expect(JSON.stringify(toNew)).not.toContain(OLD_EMAIL);
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
+  });
+
+  // Owner 11-27: the office hears about every confirmed email change.
+  test('a confirmed change raises one office alert with the old and new address', async () => {
+    mockNotifyAdmin.mockClear();
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => changed());
+    expect((await confirm('123456')).status).toBe(200);
+    await flush();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(category).toBe('customer');
+    expect(title).toBe('Customers — Email changed in the app');
+    expect(body).toContain(OLD_EMAIL);
+    expect(body).toContain(NEW_EMAIL);
+    expect(opts).toMatchObject({
+      bell: true,
+      link: `/admin/customers?customerId=${CUSTOMER_ID}`,
+      dedupeKey: `profile_email_change:${CUSTOMER_ID}:req-1`,
+      metadata: expect.objectContaining({ oldEmail: OLD_EMAIL, newEmail: NEW_EMAIL, severity: 'needs-you', doneWhen: 'email_change_reviewed' }),
+    });
+    // Written in the change's own transaction, so the two commit together.
+    expect(typeof opts.trx).toBe('function');
+    // Stripe's copy follows: a durable job queued on the same transaction handle.
+    expect(mockEnqueueStripeSync).toHaveBeenCalledWith(opts.trx, CUSTOMER_ID, NEW_EMAIL, 'app_email_change');
+    expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
+    expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
+  });
+
+  test('an address the alert copy rules refuse (an underscore) still raises the alert, with a fixed sentence', async () => {
+    mockNotifyAdmin.mockClear();
+    mockCode.checkCode.mockResolvedValue(okCheck('first_last@example.test'));
+    mockApplyEmail.mockImplementation(async () => changed());
+    expect((await confirm('123456', 'first_last@example.test')).status).toBe(200);
+    await flush();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [, , body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(body).toBe('A customer changed their email, and both addresses are in the details.');
+    expect(opts.detail).toContain('New email: first_last@example.test');
+  });
+
+  test('a failed alert write fails the whole confirm (nothing commits), so the same code works on the retry', async () => {
+    for (const failure of [() => mockNotifyAdmin.mockRejectedValueOnce(new Error('bell down')), () => mockNotifyAdmin.mockResolvedValueOnce(null)]) {
+      mockNotifyAdmin.mockClear();
+      failure();
+      mockCode.checkCode.mockResolvedValue(okCheck());
+      mockApplyEmail.mockImplementation(async () => changed());
+      const res = await confirm('123456');
+      expect(res.status).toBe(500);
+      // The transaction callback threw: the mock db rejects, as Postgres would roll the change and the consume back.
+      await expect(mockDb.transaction.mock.results[mockDb.transaction.mock.results.length - 1].value).rejects.toBeTruthy();
+      await flush();
+      expect(mockSend).not.toHaveBeenCalled();
+      mockSend.mockClear();
+    }
+  });
+
+  test('an unchanged address and a wrong code raise no alert', async () => {
+    mockNotifyAdmin.mockClear(); mockEnqueueStripeSync.mockClear();
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => ({ outcome: 'unchanged', before: { ...mockRow } }));
+    await confirm('123456');
+    mockCode.checkCode.mockResolvedValue({ outcome: 'wrong', attemptsLeft: 3 });
+    await confirm('123456');
+    await flush();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockEnqueueStripeSync).not.toHaveBeenCalled();
   });
 
   test('the rowAllowed it hands the writer refuses an inactive row and a row on another account', async () => {

@@ -565,11 +565,12 @@ function cardOwnedIds(guide, checks) {
     .flatMap((card) => [...cardAllIds(card), ...(card.heldProductIds || []), ...card.items.map((item) => item.productId)]));
 }
 
-// What the guide governs for this visit, and what the LATEST decision does with it. ONE invariant:
-// a product that belongs to a guide-governed kind (the weed group, the chinch rungs, and the month's
-// fungicide, caterpillar and dry-spot picks) may be ON the sheet only if the latest decision offers
-// it. The entry or card the latest decision offers adds the program's own row; the search adds a plain
-// row of any governed product that is not blocked (owner 2026-10-09). A yearly limit is a warning, never a block
+// What the guide governs for this visit, and what the LATEST decision does with it. A product that belongs
+// to a guide-governed kind (the weed group, the chinch rungs, and the month's fungicide, caterpillar and
+// dry-spot picks) is SUGGESTED only if the latest decision offers it, but it is never refused: owner
+// 2026-11-26, "everything should only be warned, never blocked from using, for now". A held product is
+// reachable from the search and its row carries HELD_ROW_NOTE. The entry or card the latest decision offers
+// adds the program's own row; the search adds a plain row of any governed product (owner 2026-10-09). A yearly limit is a warning, never a block
 // (owner 2026-10-30): a product at a limit is offered, kept on the sheet, and carries `limitWarned` words. The latest
 // decision is the fresh guide answer, or, when the read failed, the context's own decisions.
 //   governed  every such product            offered  what the latest decision lets onto the sheet
@@ -585,7 +586,7 @@ function cardOwnedIds(guide, checks) {
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', limitWarned: new Map(), weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), held: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', limitWarned: new Map(), weedOffered: new Set(), chinchOffered: new Set() };
 
 // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
 function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
@@ -600,10 +601,11 @@ function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
 }
 
 // The month's take-all fungicide ids (the fresh guide's, else the context's) and the ones the search may
-// reach: once the decision is in, all but those a limit that was READ forbids.
-function takeAllReach({ ctx, guide, settled, blocked }) {
+// reach: once the decision is in, every one of them. A held one (the Group 11 hold) carries HELD_ROW_NOTE:
+// owner 2026-11-26, "everything should only be warned, never blocked from using, for now".
+function takeAllReach({ ctx, guide, settled }) {
   const takeAll = lowerIds(guide?.takeAllProductIds ?? ctx.takeAllProductIds);
-  return { takeAll, searchOnly: settled ? takeAll.filter((id) => !blocked.includes(id)) : [] };
+  return { takeAll, searchOnly: settled ? takeAll : [] };
 }
 
 // The governed ids kept out of the add-ons list: not released to the generic list, or a card owns
@@ -654,25 +656,29 @@ const limitRowNote = (gov, productId) => {
   return words ? `${words} ${LIMIT_WARNING_TAIL}` : '';
 };
 
-// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches every governed product
-// that is not blocked, whether or not an entry or a card also offers it. A limit never blocks (owner 2026-10-30): a product at a
-// limit is listed, and its row carries the limit's words. The row it opens is a plain row; the entry and the card still add the
-// program's own rows. A blocked pick (a city hold, the Group 11 hold) and a product a check-only card holds (take-all found:
-// check, do not treat) stay out.
-function searchReach({ governed, settled, blockedPicks, cardHeld }) {
-  if (!settled) return [];
-  const forbidden = [...blockedPicks, ...cardHeld];
-  return governed.filter((id) => !forbidden.includes(id));
+// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches every governed product,
+// whether or not an entry or a card also offers it. A limit never blocks (owner 2026-10-30), and neither does a hold (owner
+// 2026-11-26, "everything should only be warned, never blocked from using, for now"): a blocked pick (a city hold, the Group 11
+// hold, a label prohibition) and a product a check-only card holds are listed, and the row carries HELD_ROW_NOTE. The row it
+// opens is a plain row; the entry and the card still add the program's own rows. They are still never suggested.
+function searchReach({ governed, settled }) {
+  return settled ? governed : [];
 }
+
+// The products the latest decision holds (never suggested), lower-case: their rows carry HELD_ROW_NOTE.
+const HELD_ROW_NOTE = 'Not suggested for this lawn today. You can still use it and complete; the visit record keeps it.';
+// A row also carries it when the latest decision no longer offers it (isStaleGuideRow); the row stays.
+const heldRowNote = (gov, row) => (gov.held?.has(String(row.productId).toLowerCase()) || (gov.enabled && !gov.locked && isStaleGuideRow(row, gov)) ? HELD_ROW_NOTE : '');
 
 function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) {
-    // The guide is off: no cards, no decision. The Group 11 rows the plan passed over are still held (out of the list and the search).
+    // The guide is off: no cards, no decision. The Group 11 rows the plan passed over stay off the add-ons list but are in the
+    // search with HELD_ROW_NOTE (owner 2026-11-26: a warning, never a block).
     const held = new Set(lowerIds(ctx.group11HeldProductIds));
     // A capped weed or chinch product is in the search with the guide off too; the context's own decisions give its warning.
     const limitWarned = limitWarnings({ guide: null, weedMix: ctx.weedMix, chinch: ctx.chinch });
     if (!held.size && !limitWarned.size) return NO_GOVERNANCE;
-    return { ...NO_GOVERNANCE, limitWarned, ...(held.size ? { governed: held, hidden: held } : {}) };
+    return { ...NO_GOVERNANCE, limitWarned, ...(held.size ? { governed: held, hidden: held, searchable: held, offered: held, held } : {}) };
   }
   const answered = status === 'answered' && !!guide;
   const settled = answered || status === 'failed';
@@ -696,7 +702,7 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // released to the plain list, and no tap offers it. Once the decision is in, it is reachable by the
   // search alone, the deliberate way to record it for a known mapped lawn, unless a limit that was READ
   // forbids it. The row it opens carries TAKE_ALL_ROW_NOTE.
-  const { takeAll, searchOnly } = takeAllReach({ ctx, guide: fresh, settled, blocked });
+  const { takeAll, searchOnly } = takeAllReach({ ctx, guide: fresh, settled });
   // Held from the generic list: a check-only card's product, and every take-all product.
   const cardHeld = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
   const held = [...cardHeld, ...takeAll];
@@ -707,7 +713,7 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // The answer's blocked list judges the picks only: for the weed group and the chinch rungs it follows one place and the entry's mode.
   const entryIds = [...weedGroup, ...lowerIds(chinch?.rungIds)];
   const blockedPicks = blocked.filter((id) => !entryIds.includes(id));
-  const searchable = [...searchReach({ governed, settled, blockedPicks, cardHeld }), ...searchOnly];
+  const searchable = [...searchReach({ governed, settled }), ...searchOnly];
   return {
     enabled: true,
     locked: !settled,
@@ -717,8 +723,10 @@ function guideGovernance({ ctx, guide, status, checks }) {
     hidden: new Set(hiddenIds({ governed, searchOnly, free, unreadable, owned })),
     // What the search lists of the governed products (searchReach).
     searchable: new Set(searchable),
-    // Before the decision: what the search lists held (the context's Group 11 holds stay out, as they will after it).
-    waiting: new Set(settled ? [] : governed.filter((id) => !blocked.includes(id))),
+    // Before the decision: what the search lists held, waiting for the guide.
+    waiting: new Set(settled ? [] : governed),
+    // Never suggested, but usable from the search with HELD_ROW_NOTE (owner 2026-11-26).
+    held: new Set(settled ? [...blockedPicks, ...cardHeld] : []),
     takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
@@ -729,50 +737,32 @@ function guideGovernance({ ctx, guide, status, checks }) {
   };
 }
 
-// The rows on the sheet the latest decision does not offer: a governed product it does not offer, or
-// a row an entry opened (weeds, chinch) that its entry no longer offers.
-function staleGuideRows(rows, gov) {
-  return rows.filter((row) => {
-    const id = String(row.productId).toLowerCase();
-    // An unreadable product cannot be called forbidden: its row stays. A yearly limit is a warning, never a block: so does its row.
-    if (gov.unreadable.has(id) || gov.limitWarned.has(id)) return false;
-    return (gov.governed.has(id) && !gov.offered.has(id))
-      || (row.guided === 'weeds' && !gov.weedOffered.has(id))
-      || (row.guided === 'chinch' && !gov.chinchOffered.has(id));
-  });
+// A row on the sheet the latest decision does not offer: a governed product it does not offer, or a row an entry
+// (weeds, chinch) opened that its entry no longer offers. Owner 2026-11-26, "everything should only be warned, never
+// blocked from using, for now": such a row is never dropped and never holds Complete (the visit record keeps what was
+// applied); it carries HELD_ROW_NOTE. Whatever the tech chose stays on the sheet.
+function isStaleGuideRow(row, gov) {
+  const id = String(row.productId).toLowerCase();
+  // An unreadable product cannot be called forbidden, and a yearly limit has its own warning: neither is a held row.
+  if (gov.unreadable.has(id) || gov.limitWarned.has(id)) return false;
+  return (gov.governed.has(id) && !gov.offered.has(id))
+    || (row.guided === 'weeds' && !gov.weedOffered.has(id))
+    || (row.guided === 'chinch' && !gov.chinchOffered.has(id));
 }
 
-// The governance of the latest decision, and its reconciliation. Whenever a decision replaces an
-// earlier one (answered to answered, answered to failed, failed to answered, and after a retake),
-// every row the new decision does not offer is dropped and the tech is told (`removed`). A failed
-// refresh falls back to the context's decisions, so what the context does not offer goes too. The
-// first decision reconciles nothing: the taps were locked until it came.
-function useGuideGovernance({ ctx, guide, status, checks, products }) {
+// The governance of the latest decision. It only ever judges: no row is dropped when a new decision replaces an earlier
+// one (answered to answered, answered to failed, failed to answered, after a retake); a row the new decision does not
+// offer keeps its place and carries the held warning (heldRowNote). The taps were locked until the first decision came.
+function useGuideGovernance({ ctx, guide, status, checks }) {
   const gov = useMemo(() => guideGovernance({ ctx, guide, status, checks }), [ctx, guide, status, checks]);
-  const [removed, setRemoved] = useState({ names: [], why: '' });
-  const decided = useRef(false);
-  const latest = useRef({});
-  latest.current = { rows: products.rows, removeRows: products.removeRows, gov };
-  useEffect(() => {
-    if (status !== 'answered' && status !== 'failed') return;
-    if (decided.current) {
-      const stale = staleGuideRows(latest.current.rows, latest.current.gov);
-      latest.current.removeRows(stale.map((row) => row.productId));
-      setRemoved({ names: stale.map((row) => row.name), why: status === 'failed' ? 'The limits could not be checked.' : 'The limits changed.' });
-    }
-    decided.current = true;
-  }, [guide, status]);
-  return { gov, removed };
+  return { gov };
 }
 
-// Complete is held while the guide is still reading (the rows are judged against its answer), and
-// by a governed row the latest decision does not offer (it should be impossible after the
-// reconciliation; the sheet never completes with one).
-function guideHoldReason({ gov, status, rows }) {
+// Complete is held only while the guide is still reading (the rows are judged against its answer). A governed row the
+// latest decision does not offer only warns (isStaleGuideRow).
+function guideHoldReason({ gov, status }) {
   if (!gov.enabled) return '';
-  if (status === 'pending') return 'Wait for the lawn guide to finish.';
-  const stale = staleGuideRows(rows, gov)[0];
-  return stale ? `Remove ${stale.name}: it is not offered for this lawn right now.` : '';
+  return status === 'pending' ? 'Wait for the lawn guide to finish.' : '';
 }
 
 // ── products ────────────────────────────────────────────────────────────────
@@ -1233,6 +1223,48 @@ function limitWarningsOf(rows) {
   return [...new Set(lines)];
 }
 
+// A place the maps do not take for a row (a take-all card row on an unmapped place) is a warning too (owner 2026-11-26): one line
+// per row, naming the places picked, above the Complete button. The visit keeps the place the tech recorded.
+const HELD_PLACE_TAIL = 'You can still complete. The visit record keeps the place.';
+const TETRINO_WARNING_TAIL = 'You can still complete.';
+// Tetrino above this rate (fl oz per 1,000 sq ft) is the high rate: it wants high current chinch pressure on the record.
+const TETRINO_HIGH_RATE = 0.367;
+// The rate the row will be recorded at (fl oz per 1,000 sq ft): the plan's own, else the typed amount (read in fl oz) over the area the
+// body submits (a spot row's own area, else the whole-lawn one), else 0.
+const FL_OZ_PER_GAL = 128;
+function tetrinoRateOf(row, lawnSqft) {
+  if (!row) return 0;
+  const planned = Number(rateOf(row)?.rate);
+  if (planned > 0) return planned;
+  const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
+  const flOz = { fl_oz: Number(totalAmount), gal: Number(totalAmount) * FL_OZ_PER_GAL }[amountUnit];
+  const area = row.spotRule && row.spotArea > 0 ? row.spotArea : areaOf(row, lawnSqft);
+  return hasAmount(row) && flOz > 0 && area > 0 ? (flOz / area) * 1000 : 0;
+}
+// The May scout warnings above the Complete button: the record is missing, the recorded decision's product is not on the sheet, or
+// the high rate is on the sheet without high chinch pressure recorded. None holds Complete (owner 2026-11-26).
+function tetrinoWarningsOf({ scout, decision, recorded, onSheet, rows, lawnSqft }) {
+  if (!scout) return [];
+  const lines = [];
+  if (!recorded) lines.push('Record the May insect scouting decision.');
+  else if (decision.target !== 'none' && !onSheet) lines.push('Update the plan with the recorded Tetrino decision.');
+  const row = rows.find((other) => sameId(other.productId, scout.productId));
+  // A scout-only decision does not cover an application: Tetrino on the sheet beside it is flagged, and still recorded.
+  if (recorded && decision.target === 'none' && row) lines.push('The recorded scout-only decision does not cover Tetrino. Record what you found, or take Tetrino off.');
+  const highRate = tetrinoRateOf(row, lawnSqft) > TETRINO_HIGH_RATE;
+  const highPressure = recorded && decision.target === 'chinch' && String(decision.currentObservations || '').trim() && decision.pressure === 'high';
+  if (highRate && !highPressure) lines.push('The high Tetrino rate needs high current chinch pressure recorded on this visit.');
+  return lines.map((line) => `${line} ${TETRINO_WARNING_TAIL}`);
+}
+function heldPlaceWarningsOf(rows) {
+  const lines = [];
+  for (const row of rows.filter((other) => other.placeRule && other.placeBlock)) {
+    const labels = (row.places || []).filter((id) => row.placeHolds?.[id]).map((id) => areaLabelOf(row, id));
+    lines.push(`${row.name}, ${labels.join(', ')}: ${row.placeBlock} ${HELD_PLACE_TAIL}`);
+  }
+  return [...new Set(lines)];
+}
+
 // The server flags a visit whose planned products are ALL held by the new sod; only then may the
 // sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
 const noProductOkOf = (newSod) => newSod?.noProductAllowed === true && typeof newSod.noProductNote === 'string' && !!newSod.noProductNote;
@@ -1243,35 +1275,34 @@ const noProductNoteJoined = (note, rows, newSod) => {
   return text.includes(newSod.noProductNote) ? text : [text, newSod.noProductNote].filter(Boolean).join(' ');
 };
 
-function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, tetrinoHold = '', lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ sodWait = '', tetrinoBusy, noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
-  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. Only a hold on the place (a take-all row on an unmapped place) closes
-  // it here; a yearly limit is a warning on the footer (limitWarningsOf).
-  const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
+  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. A missing place holds Complete; a place the maps do not take (a take-all
+  // card row on an unmapped place) and a yearly limit are warnings on the footer (heldPlaceWarningsOf, limitWarningsOf).
   const missingPlace = rows.find((row) => row.placeRule && !row.places?.length);
   const [, reason = ''] = [
     // The rooted tick is being saved, or the holds could not be read again after it.
     [sodWait, sodWait],
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
+    // The scout decision is saving and the plan is being read again: Complete would send the old rows.
+    [tetrinoBusy, 'Wait for the scout decision to save.'],
     [assessmentReady === false, 'Wait for the lawn check to finish.'],
     [unusable, unusableMessage(ctx.assessment?.unusableReason)],
     [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
-    [tetrinoHold, tetrinoHold],
     // The server says the new sod holds every planned product, so an empty list is honest.
     [!rows.length && !noProductOk, ADD_PRODUCTS],
-    // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
+    // The guide is still reading.
     [guideHold, guideHold],
     [areaHold, areaHold],
     [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
     // A spot row needs the amount used, or the area sprayed (which figures it) (spot rules).
     [missingSpot, missingSpot && `Enter the amount used for ${missingSpot.name}.`],
-    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace, closedPlace.placeBlockPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
     [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
@@ -1342,7 +1373,8 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
         currentObservations: tetrinoScout.currentObservations,
         pressure: tetrinoScout.pressure || '',
         grubTimingEvidence: tetrinoScout.grubTimingEvidence || '',
-        tetrinoApplied: tetrinoScout.applied === true,
+        // What the visit applied, from the final product list (not the state the decision was saved in): the record never contradicts the ledger.
+        tetrinoApplied: !!ctx.tetrinoScout && rows.some((row) => sameId(row.productId, ctx.tetrinoScout.productId)),
       } } : {}),
       ...sodEcho(newSod),
     },
@@ -1924,8 +1956,8 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const [clearedPlaces, setClearedPlaces] = useState([]);
   const { guide: rawGuide, status: guideStatus, guideChecks, onGuideCheck } = useTreatmentGuideState({ base, request, enabled: ctx.treatmentGuide, assessmentId, unusable, refreshKey: placeTick + sodRereads, planKey: sodRereads, idsRef: searchedIds });
   const guide = useMemo(() => withClearedTakeAll(rawGuide, { known: placeCtx.troubleAreas?.known, clearedIds: clearedAreas, clearedPlaces }), [rawGuide, placeCtx, clearedAreas, clearedPlaces]);
-  // What the latest decision lets onto the sheet (one invariant), and the rows it dropped.
-  const { gov, removed: removedByGuide } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks, products });
+  // What the latest decision offers and holds (it only warns: owner 2026-11-26).
+  const { gov } = useGuideGovernance({ ctx: placeCtx, guide, status: guideStatus, checks: guideChecks });
   // The one Weed spots decision on screen (the guide's fresh read once it has answered).
   const weedMix = effectiveWeedMix(guide, placeCtx);
   // The whole-lawn area: this visit property's recorded lawn area (or the area
@@ -1995,9 +2027,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
-  // Every lawn product is in the search (owner 2026-10-09). The search leaves out only a governed product that
-  // is blocked (a city hold, the Group 11 hold) and, before the guide has answered, every governed product:
-  // the taps wait, and so does the search. A yearly limit only warns (owner 2026-10-30).
+  // Every lawn product is in the search (owner 2026-10-09). Before the guide has answered the governed products
+  // wait (listed with CONFIRM_FIRST); after it, all are listed. A yearly limit and a hold only warn (owner 2026-10-30,
+  // 2026-11-26).
   const searchCatalog = useMemo(() => {
     const hidden = (product) => {
       const id = String(product.id).toLowerCase();
@@ -2028,17 +2060,17 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
     inline: true,
   });
 
-  const guideHold = guideHoldReason({ gov, status: guideStatus, rows });
+  const guideHold = guideHoldReason({ gov, status: guideStatus });
   const tetrinoRecorded = !sheetCtx.tetrinoScout || tetrinoScoutSaved === tetrinoScoutSignature;
   const tetrinoOnSheet = !sheetCtx.tetrinoScout || rows.some((row) => sameId(row.productId, sheetCtx.tetrinoScout.productId));
   const tetrinoScoutOnly = tetrinoRecorded && tetrinoScout.target === 'none';
-  const tetrinoHold = !sheetCtx.tetrinoScout ? ''
-    : !tetrinoRecorded ? 'Record the May insect scouting decision.'
-      : tetrinoScout.target !== 'none' && !tetrinoOnSheet ? 'Update the plan with the recorded Tetrino decision.' : '';
+  // The May scout record only warns (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"):
+  // the prompt stays, the server accepts Tetrino without it, and Complete is not held.
+  const tetrinoWarnings = tetrinoWarningsOf({ scout: sheetCtx.tetrinoScout, decision: tetrinoScout, recorded: tetrinoRecorded, onSheet: tetrinoOnSheet, rows, lawnSqft });
   // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
-  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, tetrinoHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ sodWait, tetrinoBusy: tetrinoScoutBusy, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
-  const limitWarnings = limitWarningsOf(rows);
+  const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...tetrinoWarnings];
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   usePrepareRecommendations({ base, request, ctx: sheetCtx, missingReason, locked, assessmentId, rows });
   const submit = async () => {
@@ -2106,7 +2138,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
               locked={locked || dictationPending}
             />
           )}
-          <ProductsSection ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} removedByGuide={removedByGuide} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
+          <ProductsSection ctx={sheetCtx} newSod={newSod} weedMix={weedMix} chinch={chinchDecision} areas={areas} onClearArea={clearArea} onWeedPlace={(placeId) => setWeedPlaces([placeId])} onWeedPlaces={setWeedPlaces} gov={gov} rows={rows} products={products} catalog={catalog} lawnSqft={lawnSqft} weedArea={weedArea} onWeedArea={setWeedArea} guide={guide} guideChecks={guideChecks} onGuideCheck={onGuideCheck} chinchTap={chinchTap} onChinchTap={onChinchTap} locked={locked || dictationPending} other={picker.button} popover={picker.popover} inlineSearch={picker.inlineSearch} />
           <PropertyServiceAreas
             request={request}
             serviceId={service?.id}
@@ -2160,7 +2192,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
         submission={wrapUp.lock(submission)}
         {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
-        warnings={limitWarnings}
+        warnings={footerWarnings}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (
@@ -2177,7 +2209,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 // Each product on the sheet: the plan's, or one the tech added. The method and
 // the amount can change and any product can go (a removed plan product is
 // recorded as skipped). No area and no rate box.
-function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, onWeedPlaces, gov, removedByGuide = { names: [] }, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
+function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, onClearArea, onWeedPlace, onWeedPlaces, gov, rows, products, catalog, lawnSqft, weedArea, onWeedArea, guide = null, guideChecks = {}, onGuideCheck, chinchTap = null, onChinchTap, locked, other, popover, inlineSearch }) {
   const { updateRow, removeRow, addProduct } = products;
   // The weed mix's one area control sits under its first row.
   const areaHost = rows.find((row) => row.weedGroup && row.spotRule);
@@ -2206,6 +2238,7 @@ function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, on
               // A row on a place takes that place's verdict (a limit there is on the footer, limitWarningsOf); the guide's
               // lawn-wide words follow one place and are only for a row with no place yet.
               row.placeRule && row.place ? '' : limitRowNote(gov, row.productId),
+              heldRowNote(gov, row),
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
@@ -2222,7 +2255,6 @@ function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, on
       ))}
       {areas && <KnownTroubleAreas known={areas.known} unavailable={areas.knownUnavailable} locked={locked} clear={onClearArea} />}
       <TreatmentGuide newSod={newSod} guide={guide} checks={guideChecks} onCheck={onGuideCheck} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} areas={areas} onWeedPlace={onWeedPlace} />
-      {removedByGuide.names.length > 0 && <p className="tech-visit-muted" role="status">{`Removed: ${removedByGuide.names.join(', ')}. ${removedByGuide.why}`}</p>}
       <HeldLines items={splitHeldPlanned(uniquePlanned(ctx.planned), newSod).held} newSod={newSod} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} />
       <ProtocolAddOns newSod={newSod} addOns={ctx.addOns} month={ctx.addOnsMonth} weedMix={weedMix} chinch={chinch} areas={areas} onWeedPlace={onWeedPlace} guideCards={guideCardsOf(guide)} guideChecks={guideChecks} gov={gov} rows={rows} catalog={catalog} locked={locked} onAdd={addProduct} markChinch={ctx.lawnReportTies ? { tapped: chinchTap, onTap: onChinchTap } : null} />
       {inlineSearch || <OtherProductButton {...other} popover={popover} />}

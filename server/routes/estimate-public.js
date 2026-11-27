@@ -9831,13 +9831,13 @@ async function handleEstimateView(req, res, next) {
         logger.warn(`[estimate-view] phone-park routing check failed, forcing the React view: ${e.message}`);
       }
     }
-    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE) lives ONLY in the React page (the notice card and the
+    // Florida consumer notice lives ONLY in the React page (the notice card and the
     // accept hold). The legacy server-HTML page has no notice step, so its accept would end in a refused 409
     // consumer_notice_required with no way forward. An accept-active estimate with a termite line therefore always
     // gets the React view, exactly like the acceptance-terms force above (holdback excluded, the /api/estimates
-    // mount redirects). Gate-tied, so the kill switch restores today's routing. A failed check fails toward React.
+    // mount redirects). A failed check fails toward React.
     let consumerNoticeForcesReactView = false;
-    if (featureGates.estimateConsumerNoticeLive() && isEstimateAcceptActive(estimate)) {
+    if (isEstimateAcceptActive(estimate)) {
       try {
         consumerNoticeForcesReactView = require('../services/estimate-consumer-notice').estimateNeedsConsumerNotice(estimate);
       } catch (e) {
@@ -10562,11 +10562,11 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
       }
       return res.status(409).json({ error: staffChangedQuote.message, code: staffChangedQuote.code });
     }
-    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE, Rule 5E-14.105(1)): an estimate with a termite line is not
+    // Florida consumer notice (Rule 5E-14.105(1)): an estimate with a termite line is not
     // accepted until the customer has the signed FDACS-13692 on file. It follows the one blocking-state decision above and
     // the Bermuda gate, and stays ahead of everything that validates, writes or charges (contact fills, the accept
     // transaction, cards, holds, bookings), so a refusal writes nothing. A read error fails the accept closed.
-    if (featureGates.estimateConsumerNoticeLive()) {
+    {
       const consumerNotice = require('../services/estimate-consumer-notice');
       if (await consumerNotice.consumerNoticeBlocksAccept(estimate)) {
         return res.status(409).json({ error: consumerNotice.REQUIRED_MESSAGE, code: 'consumer_notice_required' });
@@ -12475,10 +12475,10 @@ router.put('/:token/accept', logAcceptRefusals, acceptDeclineLimiter, async (req
           err.isOperational = true;
           throw err;
         }
-        // Florida consumer notice at the commit (GATE_ESTIMATE_CONSUMER_NOTICE): the live gate and the notice are judged
-        // again on the estimate row locked above, so an accept that waited on payment checks or locks while the gate was
-        // turned on (or while a termite line arrived) cannot commit without the signed FDACS-13692.
-        if (featureGates.estimateConsumerNoticeLive()) {
+        // Florida consumer notice at the commit: the notice is judged again on the estimate row locked above, so an
+        // accept that waited on payment checks or locks while a termite line arrived cannot commit without the signed
+        // FDACS-13692.
+        {
           const consumerNotice = require('../services/estimate-consumer-notice');
           const lockedForNotice = { ...estimate, estimate_data: freshLinkRow?.estimate_data, customer_id: freshLinkRow?.customer_id };
           if (await consumerNotice.consumerNoticeBlocksAccept(lockedForNotice, trx)) {
@@ -19893,39 +19893,36 @@ router.post('/:token/first-visit', firstVisitBookLimiter, async (req, res, next)
   }
 });
 
-// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE, owner 2026-10-25, Rule 5E-14.105(1)): the same contract as
-// commercial-agreement above, so its privacy-header stamp is reused. Gate-aware limiter: a dark gate answers the generic 404
-// on every probe, never a 429.
+// Florida consumer notice (owner 2026-10-25, Rule 5E-14.105(1)): the same contract as
+// commercial-agreement above, so its privacy-header stamp is reused.
 const consumerNoticeLimiter = rateLimit({
   windowMs: 60 * 60 * 1000,
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  skip: () => !featureGates.estimateConsumerNoticeLive(),
   keyGenerator: require('../middleware/rate-limit-key').rateLimitKey,
   message: { error: 'Too many requests. Please call our office and we’ll get you sorted.' },
 });
 
 // Mounted in server/index.js on /api/estimates BEFORE the global /api/ limiter, like commercialAgreementPreGuard: the
-// privacy headers and the dark gate's generic 404 land ahead of any limiter. POST only.
+// privacy headers land ahead of any limiter. POST only.
 const CONSUMER_NOTICE_PATH_RE = /^\/[^/]+\/consumer-notice\/?$/i;
 function consumerNoticePreGuard(req, res, next) {
   if (req.method !== 'POST' || !CONSUMER_NOTICE_PATH_RE.test(req.path || '')) return next();
   stampCommercialAgreementHeaders(res);
-  if (!featureGates.estimateConsumerNoticeLive()) return res.status(404).json({ error: 'Estimate not found' });
   return next();
 }
 
 // POST /api/estimates/:token/consumer-notice — the estimate page's "Read and sign the notice" tap. Issues, or re-opens,
 // the FDACS-13692 consumer notice for the estimate's customer and returns its public signing URL. The estimate is never
-// changed. The generic 404 covers a dark gate, an unknown token, an estimate that is not open, a staff preview and an
+// changed. The generic 404 covers an unknown token, an estimate that is not open, a staff preview and an
 // estimate with no termite line; the distinct 409s (a plan quote staff changed, no account, no representative, already
 // signed) come only after the token has cleared every check.
 router.post('/:token/consumer-notice', consumerNoticeLimiter, async (req, res, next) => {
   stampCommercialAgreementHeaders(res);
   const notFound = () => res.status(404).json({ error: 'Estimate not found' });
   try {
-    if (!featureGates.estimateConsumerNoticeLive() || req.query.adminPreview === '1') return notFound();
+    if (req.query.adminPreview === '1') return notFound();
     const estimate = await db('estimates').where({ token: req.params.token }).first();
     if (!estimate) return notFound();
     if (await callSideBlockForEstimateData(db, parseEstimateDataSafe(estimate), { estimateStatus: estimate?.status })) return notFound();
@@ -29336,17 +29333,11 @@ function finalizePricingBundle(payload = {}, estimate = {}, estData = {}, opts =
   };
 }
 
-// The page's acceptance contract (acceptance.mode: whether the slot picker
-// renders at all) and the inputs /data reads alongside it. ONE resolution,
-// shared with the texting AI's estimate offers (estimate-slots-public
-// offerableEstimateSlots), so SMS offers times only where the page would
-// let the customer pick one.
-async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+// The acceptance facts read from the estimate and its bundle alone, with no lookup: all the "What you pay" box needs of
+// the acceptance (whatYouPayForEstimate), so a reader of the box alone pays none of resolveEstimateAcceptance's reads.
+function estimateAcceptanceHolds(estimate, estData, pricingBundle) {
   const defaultServiceMode = defaultServiceModeForEstimate(estData, estimate);
   const quoteRequirement = resolveEstimateQuoteRequirement(pricingBundle);
-  const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
-    serviceModes: adoptionServiceModesForContract(estimate, estData),
-  }));
   // Narrow low-confidence commercial recurring estimate (the population whose
   // price renders as a "$X–$Y/mo, confirmed on site" range). NO money moves at
   // its accept, whatever the billing mode — invoice-mode holds the first-
@@ -29360,12 +29351,25 @@ async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
       const lc = commercialLowConfidenceRange(estData);
       return lc.hasLowConfidence && !lc.forceSiteQuote;
     })();
-  const commercialNoSlotAccept = siteConfirmationHold;
   // Guarantee-only renewals accept with NO appointment: the acceptance
   // contract tells the React view to skip the slot picker and offer the
   // payment-only (invoice) accept. An existing linked appointment keeps
   // precedence inside the contract — accepting against it works as-is.
   const guaranteeOnlyAccept = isRodentGuaranteeOnlyEstimate(estimate, estData);
+  return { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept };
+}
+
+// The page's acceptance contract (acceptance.mode: whether the slot picker
+// renders at all) and the inputs /data reads alongside it. ONE resolution,
+// shared with the texting AI's estimate offers (estimate-slots-public
+// offerableEstimateSlots), so SMS offers times only where the page would
+// let the customer pick one.
+async function resolveEstimateAcceptance(estimate, estData, pricingBundle) {
+  const { defaultServiceMode, quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept } = estimateAcceptanceHolds(estimate, estData, pricingBundle);
+  const linkedAppointment = await withDayOnlyDisplay(await findLinkedUpcomingAppointment(estimate, estData, {
+    serviceModes: adoptionServiceModesForContract(estimate, estData),
+  }));
+  const commercialNoSlotAccept = siteConfirmationHold;
   // Accept + deposit-intent reject an invoice-mode estimate with no linked
   // customer and no customer phone (nothing to bill / deliver the invoice
   // to) — an email-only renewal must not advertise an accept the server
@@ -32147,6 +32151,24 @@ async function whatYouPayAcceptLookups(estimate) {
   return { monthlyBilled, pendingDeposit };
 }
 
+/**
+ * The "What you pay" box of an estimate row, its pricing bundle and the two live lookups (whatYouPayAcceptLookups): THE one assembly of
+ * whatYouPayForData's inputs, so its two readers (the page payload, and the texting AI's estimate facts in sms-staff-facts.js: the setup
+ * fee and the pay-for-the-year total) can never hand it different ones.
+ */
+function whatYouPayForEstimate(estimate, estData, pricingBundle, lookups) {
+  const { quoteRequirement, siteConfirmationHold, guaranteeOnlyAccept } = estimateAcceptanceHolds(estimate, estData, pricingBundle);
+  return whatYouPayForData({
+    estimate,
+    estData,
+    pricingBundle,
+    invoiceMode: estimate.bill_by_invoice === true || guaranteeOnlyAccept,
+    siteConfirmationHold,
+    ...lookups,
+    quoteRequired: quoteRequirement?.quoteRequired === true,
+  });
+}
+
 function whatYouPayForData(input = {}) {
   try {
     const { estimate, estData, pricingBundle } = input;
@@ -32569,13 +32591,12 @@ async function composeEstimateDataPayload(estimate, {
         picker: commercialFirstVisitOpen && !isPdfRenderPass,
       })
       : null;
-    // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): an open estimate with a termite line asks for the signed
-    // FDACS-13692 before it can be accepted. Nothing is read or added with the gate off; never a staff preview, a draft
+    // Florida consumer notice: an open estimate with a termite line asks for the signed
+    // FDACS-13692 before it can be accepted. Never a staff preview, a draft
     // preview or the headless document render.
     // Nor a refused plan quote (staffChangedQuoteForData): the accept refuses it first, so the page offers no form
     // to sign for it (codex pre-push P1).
-    const consumerNoticeCta = featureGates.estimateConsumerNoticeLive()
-      && terminalState === null && !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass
+    const consumerNoticeCta = terminalState === null && !adminDraftPreview && !verifiedStaffPreview && !isPdfRenderPass
       && isEstimateAcceptActive(estimate) && !staffChangedQuoteForData
       ? await require('../services/estimate-consumer-notice').consumerNoticeCtaFor(estimate)
       : null;
@@ -33303,15 +33324,7 @@ async function composeEstimateDataPayload(estimate, {
         defaultServiceMode: pricingBundle.defaultServiceMode || defaultServiceMode,
       },
       // Read-only: the first visit and each later application as acceptance bills them (see whatYouPayForData).
-      whatYouPay: whatYouPayForData({
-        estimate,
-        estData: estimateDataForIntelligence,
-        pricingBundle,
-        invoiceMode: effectiveInvoiceMode,
-        siteConfirmationHold,
-        ...whatYouPayLookups,
-        quoteRequired: quoteRequirement?.quoteRequired === true,
-      }),
+      whatYouPay: whatYouPayForEstimate(estimate, estimateDataForIntelligence, pricingBundle, whatYouPayLookups),
       cta: {
         // Priced termite trenching is review-before-booking: the price stays visible
         // (NOT quoteRequired) but self-accept/self-book is suppressed on the React
@@ -34052,6 +34065,7 @@ module.exports.assertExistingAppointmentUpdateApplied = assertExistingAppointmen
 module.exports.isEstimateAcceptActive = isEstimateAcceptActive;
 module.exports.whatYouPayForData = whatYouPayForData;
 module.exports.whatYouPayAcceptLookups = whatYouPayAcceptLookups;
+module.exports.whatYouPayForEstimate = whatYouPayForEstimate;
 module.exports.estimateMonthlyBillingLaneKnown = estimateMonthlyBillingLaneKnown;
 module.exports.isEstimateCustomerViewable = isEstimateCustomerViewable;
 module.exports.estimateClosedOnline = estimateClosedOnline;

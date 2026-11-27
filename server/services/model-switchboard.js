@@ -80,6 +80,8 @@ const SELECTORS = [
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'LIVE_CALL', env: 'MODEL_LIVE_CALL', description: 'Live-call upset-caller check (owner 2026-11-16: Haiku 5.5; dark behind GATE_LIVE_CALL_UPSET_ALERT)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'DEAL_END_DATE', env: 'MODEL_DEAL_END_DATE', description: 'SiteOne deals bell offer end date (owner 2026-11-19: Haiku 5.5; dark behind GATE_SITEONE_DEAL_AI_END_DATE)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  // deep: true — its only call site (email/email-classifier.js, TEXT_POLICIES.emailClassify) goes through llm/call.js.
+  { key: 'EMAIL_CLASSIFY', env: 'MODEL_EMAIL_CLASSIFY', description: 'Inbound email classification (owner 2026-11-27: Opus 5.5 after a replay on 286 real emails)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'ALERT_CLEAR', env: 'MODEL_ALERT_CLEAR', description: 'Alert clear-up agent (owner 2026-11-26: Sonnet 5.5 on the paid API; shadow only behind GATE_ALERT_CLEAR_AGENT)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
@@ -109,6 +111,9 @@ const SELECTORS = [
   // deep: true — its only call site (report-ask-ai.js, TEXT_POLICIES.reportAsk)
   // goes through llm/call.js, same as NEWSLETTER above.
   { key: 'REPORT_ASK', env: 'MODEL_REPORT_ASK', description: 'Service report Ask Waves answers (owner 2026-10-05: Sonnet 5.5; dark behind GATE_REPORT_ASK_AI)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  // deep: true — its only call site (sms-operational-extractor.js, TEXT_POLICIES.smsOperationalActions)
+  // goes through llm/call.js.
+  { key: 'SMS_OPERATIONAL_ACTIONS', env: 'MODEL_SMS_OPERATIONAL_ACTIONS', description: 'SMS operational extraction, text channel (2026-11-27 replay test: Sonnet 5.5; before that Opus 5.5)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; dark behind GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true, cap 'vision' — same rationale as PLANT_ID_REFEREE above: its
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
@@ -180,7 +185,9 @@ const POLICY_SELECTOR = {
   routineAnswer: { primary: 'ROUTINE', fallback: 'OPENAI_REPORT_WRITER' },
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   reportAsk: { primary: 'REPORT_ASK', fallback: 'OPENAI_REPORT_WRITER' },
+  smsOperationalActions: { primary: 'SMS_OPERATIONAL_ACTIONS', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
+  emailClassify: { primary: 'EMAIL_CLASSIFY', fallback: 'OPENAI_FAST' },
   fastStructuredInteractive: { primary: 'OPENAI_FAST_INTERACTIVE', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
@@ -384,12 +391,13 @@ const LANES = [
   // ── Fast text ──
   L('lead_triage', 'Lead triage classification', 'lead-triage.js', 'fastText', R('leadClassify'), T('FAST'), { inbound: true }),
   L('churn_classify', 'Churn-reason classification', 'churn-classifier.js', 'fastText', R('churnClassify'), T('FAST'), { inbound: true }),
-  L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('emailClassify', 'primary'), P('emailClassify', 'fallback'), { inbound: true }),
   L('sms-commitment-fulfillment', 'SMS completion verification', 'sms-commitment-fulfillment.js', 'deep', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms-commitment-thread-close', 'SMS follow-up closed by a later text', 'sms-commitment-thread-close.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call-commitment-contact-check', 'Call promise kept-by-contact check', 'call-commitment-contact-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call-promise-later-text-check', 'Call promise later-text check', 'call-promise-later-text-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
-  L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
+  L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('smsOperationalActions', 'primary'), P('smsOperationalActions', 'fallback'), { inbound: true }),
+  L('access-code-capture', 'Access code capture (texts, calls, emails)', 'access-code-capture.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('email-operational-actions', 'Email operational extraction (asks + staff promises)', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('visit_voice_facts', 'Fast Complete voice fill (where treated, pests named)', 'visit-voice-facts.js', 'fastText', P('fastStructuredInteractive', 'primary'), P('fastStructuredInteractive', 'fallback'), { inbound: true, note: 'GATE_FAST_COMPLETE_REPORT, dark' }),
@@ -864,6 +872,7 @@ const LANE_DESCRIBE = {
   'call-commitment-contact-check': 'Judges whether a person\'s later text or call back delivered what Waves promised on a call (PROMISE_CONTACT_CHECK)',
   'call-promise-later-text-check': 'Decides whether a later text says a call promise the AI found kept was not kept',
   'sms-operational-actions': 'Captures operational facts from customer texts for the profile',
+  'access-code-capture': 'Captures gate, door and lockbox codes from customer texts, calls and emails for the profile',
   'email-operational-actions': 'Captures customer asks and staff promises from email',
   sms_intent: 'Works out what an inbound text is asking for',
   sms_service_identity: 'Picks which visit or service a reply\'s open times are for',

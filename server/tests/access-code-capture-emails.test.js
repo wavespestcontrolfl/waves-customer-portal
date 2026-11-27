@@ -249,7 +249,7 @@ describe('the email prompt and the read', () => {
     const out = await readEmailAccessCodes({ message: emailAsMessage(email(), null) });
     expect(out.items).toHaveLength(1);
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ promptVersion: EMAIL_VERSION, laneId: 'sms-operational-actions' });
+    expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ promptVersion: EMAIL_VERSION, laneId: 'access-code-capture' });
   });
 
   test('a provider failure or a malformed answer throws a code, never the body', async () => {

@@ -517,11 +517,23 @@ describe('invoice tax: residential is not taxed, commercial is, for every add-on
     return TaxCalculator.calculateTax('c1', serviceType, 100, { database: conn });
   }
 
-  test.each(Object.values(AREA_ADDONS.items).map((cfg) => [cfg.name]))('%s: a residential customer pays no tax and a commercial customer pays the county rate', async (name) => {
+  // Lawn and landscape work is never taxed, even for a commercial account (FL Rule 12A-1.009(6); TaxCalculator.isGroundsTreatment).
+  const GROUNDS_ADDONS = new Set([
+    'Bed Pre-Emergent Weed Control', 'Fire Ant Yard Treatment', 'Lawn Insect Spot Treatment',
+    'Shell, Rock & Paver Weed Control', 'Yearly Lawn Insect Preventive',
+  ]);
+
+  test('the lawn add-ons are the grounds treatments, and only those', () => {
+    const names = Object.values(AREA_ADDONS.items).map((cfg) => cfg.name);
+    expect(names.filter((name) => TaxCalculator.isGroundsTreatment(name)).sort()).toEqual([...GROUNDS_ADDONS].sort());
+  });
+
+  test.each(Object.values(AREA_ADDONS.items).map((cfg) => [cfg.name]))('%s: a residential customer pays no tax; a commercial customer pays the county rate unless it is lawn work', async (name) => {
     const residential = await taxFor(name, 'single_family');
     expect(residential).toMatchObject({ taxable: false, rate: 0, amount: 0 });
     const commercial = await taxFor(name, 'commercial');
-    expect(commercial).toMatchObject({ taxable: true, rate: 0.07, amount: 7 });
+    if (GROUNDS_ADDONS.has(name)) expect(commercial).toMatchObject({ taxable: false, rate: 0, amount: 0 });
+    else expect(commercial).toMatchObject({ taxable: true, rate: 0.07, amount: 7 });
   });
 });
 

@@ -650,7 +650,7 @@ app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 // Commercial proposal signing (GATE_COMMERCIAL_PROPOSAL_SIGN): same reason. Privacy headers and the dark gate's generic 404 land before the global limiter.
 app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
-// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): same reason, same shape.
+// Florida consumer notice: same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Commercial first visit picker: same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
@@ -1119,6 +1119,7 @@ app.use('/api/webhooks/twilio', validateTwilioSignature, twilioVoiceWebhookRoute
 // GATE_VOICE_LATE_PAYMENT is exactly 'true'.
 app.use('/api/webhooks/twilio', validateTwilioSignature, require('./routes/collections-voice-webhook'));
 app.use('/api/admin/protocols', require('./routes/admin-protocols'));
+app.use('/api/admin/product-mix-rules', require('./routes/admin-product-mix-rules'));
 app.use('/api/admin/revenue', require('./routes/admin-revenue'));
 app.use('/api/admin/cost-cards', require('./routes/admin-cost-cards'));
 app.use('/api/admin/schedule/find-time', require('./routes/admin-schedule-find-time'));

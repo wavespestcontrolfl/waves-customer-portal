@@ -905,6 +905,10 @@ describe('recordCallCommitments keeps the deterministic seeds when the model leg
 describe('recordCallCommitments fixes the promised-link activation boundary atomically with the commitment write (codex #4293 P2 r4)', () => {
   const { recordCallCommitments } = require('../services/call-commitments');
   const { gates } = require('../config/feature-gates');
+  // The fake connections below model the boundary write only; the callback-card
+  // preparation that follows a commitment write has its own suites.
+  beforeEach(() => { jest.spyOn(require('../services/callback-cards'), 'prepareCallbackCards').mockResolvedValue(0); });
+  afterEach(() => { jest.restoreAllMocks(); });
 
   // upsertCommitments now calls recordLiveActivation FIRST INSIDE its own
   // write transaction (not ahead of it), so the boundary write and the

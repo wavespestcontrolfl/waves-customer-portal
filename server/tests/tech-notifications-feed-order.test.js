@@ -87,7 +87,7 @@ test('tracking notices are served only while GATE_NOSHOW_DETECTOR is on', async 
   delete process.env.GATE_NOSHOW_DETECTOR;
 });
 
-describe('customer_visit_photos cards follow the visit-prep gates at request time', () => {
+describe('customer_visit_photos cards follow the visit-prep photos gate at request time', () => {
   function run() {
     const chain = {};
     for (const m of ['where', 'whereNull', 'whereNot', 'orWhereRaw', 'orWhereExists', 'select', 'from', 'whereRaw', 'whereNotIn', 'orWhere', 'join', 'whereIn', 'orderByRaw', 'orderBy', 'limit']) {
@@ -103,19 +103,16 @@ describe('customer_visit_photos cards follow the visit-prep gates at request tim
   const hidesPhotos = ({ chain }) => chain.whereNot.mock.calls.some(([arg]) => arg?.type === 'customer_visit_photos');
 
   afterEach(() => {
-    delete process.env.GATE_VISIT_PREP_TECH_ALERTS;
     delete process.env.GATE_VISIT_PREP_PHOTOS;
   });
 
-  test('either gate off → photo cards are filtered out entirely', async () => {
-    process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
+  test('photos gate off → photo cards are filtered out entirely', async () => {
     const out = await run();
     expect(hidesPhotos(out)).toBe(true);
     expect(out.chain.orWhereExists).not.toHaveBeenCalled();
   });
 
-  test('both gates on → photo cards are served, but only while their visit is live for this tech', async () => {
-    process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
+  test('photos gate on → photo cards are served, but only while their visit is live for this tech', async () => {
     process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     const { chain } = await run();
     // Not blanket-hidden: "not a photo card OR its visit is live" — the

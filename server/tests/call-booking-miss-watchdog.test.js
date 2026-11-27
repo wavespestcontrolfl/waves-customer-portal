@@ -12,7 +12,6 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({})) }));
 
 const {
-  runCallBookingMissWatchdog,
   computeBookingMisses,
   extractConfirmedSlot,
   confirmedWallClockET,
@@ -354,26 +353,26 @@ describe('a visit the call agent held', () => {
   // step names no Dispatch control (rounds 12 to 15: Done, the held row's Dismiss and the call's
   // cards each had a state where it was the wrong one).
   test('a held bell says review and why, and asks to check the call; an unheld miss keeps "book" and "nothing is on the calendar"', () => {
-    const text = bookItAlert(heldMiss(), false);
+    const text = bookItAlert(heldMiss());
     expect(text.action).toBe("review Pat Sample's Waves Assessment");
     expect(text.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the address is not confirmed.');
     expect(text.detail).toContain('The call agent held this visit and did not book it, because the address is not confirmed.');
     expect(text.detail.endsWith(HELD_STEP)).toBe(true);
     expect(text.detail).not.toContain('Book it in dispatch');
-    const cancel = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['cancellation_request'] })), false);
+    const cancel = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['cancellation_request'] })));
     expect(cancel.why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; held because the caller asked to cancel.');
     expect(cancel.detail.endsWith(HELD_STEP)).toBe(true);
     const [plain] = missesOf([call()]);
-    expect(bookItAlert(plain, false).action).toBe("book Pat Sample's Waves Assessment");
-    expect(bookItAlert(plain, false).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
-    expect(bookItAlert(plain, false).detail).toContain('Book it in dispatch or call back to reset expectations.');
+    expect(bookItAlert(plain).action).toBe("book Pat Sample's Waves Assessment");
+    expect(bookItAlert(plain).why).toBe('Confirmed Sat Aug 1 at 12:00 PM on a call; nothing is on the calendar.');
+    expect(bookItAlert(plain).detail).toContain('Book it in dispatch or call back to reset expectations.');
   });
 
   // Pre-push P1s (2026-11-18): a bell that names an opt-out or a missing number must not ask
   // staff to call back.
   test('a hold that limits contact names it first, and the held step never asks for a call', () => {
     for (const [flag, reason] of [['do_not_contact_requested', 'the caller asked not to be contacted'], ['caller_phone_missing', 'the call has no callback number']]) {
-      const text = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['address_unverified', flag] })), false);
+      const text = bookItAlert(heldMiss({}, decision({ blocked_reasons: ['address_unverified', flag] })));
       expect(text.why).toBe(`Confirmed Sat Aug 1 at 12:00 PM on a call; held because ${reason}.`);
       expect(text.detail.endsWith(HELD_STEP)).toBe(true);
       expect(text.detail).not.toContain('call back');
@@ -405,27 +404,11 @@ describe('a visit the call agent held', () => {
   test('every reason fits the why rules behind the longest prefix and slot', () => {
     const slot = { dateET: '2026-09-30', minutes: 12 * 60, name: 'Pat Sample', service: 'Waves Assessment' };
     for (const holdReason of [...HOLD_REASONS.map(([, phrase]) => phrase), ...HOLD_REASONS_BY_ROUTING.values(), HOLD_REASON_FALLBACK]) {
-      for (const repeat of [false, true]) {
-        const text = bookItAlert({ call: call(), slot, holdReason }, repeat);
-        expect(() => composeAdminAlert({
-          area: 'Schedule', action: text.action, why: text.why, severity: 'needs-you', link: text.link,
-          subject: { type: 'call', id: 'call-1' }, doneWhen: 'visit_booked', who: 'person',
-        })).not.toThrow();
-      }
+      const text = bookItAlert({ call: call(), slot, holdReason });
+      expect(() => composeAdminAlert({
+        area: 'Schedule', action: text.action, why: text.why, severity: 'needs-you', link: text.link,
+        subject: { type: 'call', id: 'call-1' }, doneWhen: 'visit_booked', who: 'person',
+      })).not.toThrow();
     }
-  });
-});
-
-describe('runCallBookingMissWatchdog — gate', () => {
-  const OLD_GATE = process.env.GATE_CALL_BOOKING_MISS_WATCHDOG;
-  afterEach(() => {
-    if (OLD_GATE === undefined) delete process.env.GATE_CALL_BOOKING_MISS_WATCHDOG;
-    else process.env.GATE_CALL_BOOKING_MISS_WATCHDOG = OLD_GATE;
-  });
-
-  test('gated off (default) → no-op, no DB access', async () => {
-    delete process.env.GATE_CALL_BOOKING_MISS_WATCHDOG;
-    const result = await runCallBookingMissWatchdog({ now: NOW });
-    expect(result).toEqual({ skipped: true, reason: 'gated_off' });
   });
 });

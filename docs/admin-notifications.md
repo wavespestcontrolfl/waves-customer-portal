@@ -123,7 +123,7 @@ Done fence). A changed row, a second tap or a refusal by the step answers 409 wi
 and the bell reloads its list.
 
 Kinds today:
-- `referral_inbound` (`server/services/referral-inbound-bell.js`, `GATE_REFERRAL_INBOUND_BELL`): the
+- `referral_inbound` (`server/services/referral-inbound-bell.js`): the
   row for a card in Referrals → Queue, with **Confirm <referrer>** and **Not a referral**, the
   Queue's own `confirmInboundReferral` and `dismissInboundReferral`. Confirm is offered only for one
   sure referrer (the link code's owner, or the one customer whose first and last name match the name
@@ -266,7 +266,7 @@ customer's message by this rule.
    `ringSmsCustomerBell` in `server/services/sms-operational-actions.js`). The row lists its promises
    in `metadata.commitment_ids` (and `itemKeys`), the promises of the text that rang last first. A promise joins
    when its own overdue check rings, together with the other open promises from its text. The row
-   rings exactly when the row of one text rang before the fold (`GATE_ALERT_RING_ONCE` on): when it
+   rings exactly when the row of one text rang before the fold: when it
    first appears and again, unread and moved to the top, when a promise joins from a text that has
    no promise on the row. A text with a promise on the open row never rings it again (owner
    2026-10-22: one text, one ring). A promise that is done, dismissed, expired or held by a booked
@@ -315,15 +315,33 @@ customer's message by this rule.
    minutes, records in `alert_clear_verdicts` whether each open one is `answered`, `nothing_to_answer` or `still_owed`. SHADOW ONLY: it
    closes, edits and rings no bell and sends no text, email or call; the verdicts are scored against what staff did for a week before
    any live mode is built. It reads what came before the bell and every record created after it (texts, calls, visits, estimates,
-   email-thread messages). Plain rules go first: an unknown missed call with no voicemail, a text-back already sent and 24 hours of
-   silence is `nothing_to_answer`; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
+   email-thread messages). Plain rules go first: an unknown missed call with no voicemail, 24 hours of silence and no call from
+   Waves to the number (a bridged form callback counts by its `metadata.leadPhone`) is `nothing_to_answer` when the text-back for that call reached the caller (its claim says sent, or the
+   provider's receipt says delivered; a bounced or cancelled one did not), or the caller failed the
+   press-1 screen (a robocall; the bell's robodialer pattern markers alone do not count); a repeat call that the one-per-number
+   text-back skipped stays open; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
    definitions above (never `message_type` manual or seconds alone), after the bell is `answered`, proof = that record. A bell that says we owe a quote, a callback or a promise
    (title "we still owe", or `doneWhen: 'promise_fulfilled'`) is closed only by that rule or a sent estimate, never by the model.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
-   a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time needs a
-   booking after it, and a finished visit never answers a question about its result. Any doubt, error or refusal is `still_owed`.
-   A bell is judged again only when a new record appears after it.
+   a real record (never an automated text, an expired link or an unsent Gmail draft). No plain rule closes a bare "ok" or "yes":
+   the model is shown the message it answers (whole, with when it was sent; for a text, the last one sent from the Waves line
+   the yes came to, to the number it came from (both numbers by the canonical address rule: the text's own text-log row
+   first), never an app push notice; a bell with no message id takes the newest text in from either message store, shows it to the model
+   with the time it came, and looks for the offer by that text's own numbers; for an email, the last Waves email sent to the address the reply came from, read from its HTML when it stored no
+   text, never a forward to staff) and says whether the yes accepts an offered day or time (`yes_to_offer`; a reply without it
+   counts as yes). An email reply is cut at quoted history and signatures first, so "Yes" over "Sent from my iPhone" is a bare yes.
+   A yes whose message was not shown whole (cut short, no words, or none found; a send whose Cc or Bcc was never captured stops
+   the look) stays owed by rule, with no model call: no reading and no booking can be checked against it. When the yes accepts an offer, the bell closes only when the
+   model names the booking or held staff move that puts the visit at the offered day and time (the match is the model's: offers
+   are free text, and each visit line gives the day with its weekday and the arrival window the customer is told; a visit waiting
+   for the customer to pick a time is no booking, and a visit the customer is told only the day of states its day alone, so it
+   proves no offered time; a failed read of what the customer was told skips the alert until the next sweep; a visit that has
+   since run is not read, and keeps the slot it ran in). An owed bell with a bare yes stays owed. A finished visit never answers a question about its result. A visit move (a new day or a new start)
+   answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
+   customer, a hand-off for the customer to pick a time (no time is booked), or a move on a visit that now waits for the
+   customer's pick, is never an answer.
+   Any doubt, error or refusal is `still_owed`. A bell is judged again only when a new record appears after it or the rules change.
    A complaint-call bell (`Comms — call <name> about a complaint`, `doneWhen: 'complaint_answered'`, dedupe key
    `call-complaint:<call id>`) rings once per call, right after the call gets the final label `complaint_escalated`,
    for a known customer (never a test customer or a sandbox call) and only for a call that ended in the last 24 hours.
@@ -587,7 +605,7 @@ the other order (a two-part one, from a panel left open across a deploy) restart
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 | The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced: the customer line always; "What to do" while `GATE_ALERT_EXPLAINER` is on (dark by default) |
 | Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from the bell with an optional note, and un-sent for 10 seconds (`POST /api/admin/notifications/:id/unsend-from-claude`, while no Mac tab has started on it); fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` gives each alert's customer id and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | live (no explainer gate); `needs-me` adds customer ids |
-| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
+| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced (`referral_inbound` always; `call_back` while `GATE_ALERT_CALL_BUTTON` is on, dark by default, the one kind that leaves its row open) |
 
 Alert sounds (owner 2026-11-03): a Waves Admin iPhone push plays a sound per alert type. The map from
 trigger key to sound file lives in `server/services/alert-sounds.js`; `triggerNotification` and the

@@ -89,7 +89,8 @@ describe('loadVisitLoops basics', () => {
   test('no today visit and no history: every field empty', async () => {
     const conn = fakeConn({});
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [{ isToday: false, scheduledServiceId: 'x' }], now: NOW, conn });
-    expect(out).toEqual(emptyVisitLoops());
+    // SCHEDULE CHANGES were read (none): not the unread null; the listed visit the db no longer has is unverified
+    expect(out).toEqual({ ...emptyVisitLoops(), scheduleChanges: { moves: [], stopped: [], listed: [{ id: 'x', unverified: true }] } });
   });
 
   test('strict skips commitments unless withCommitments (the gratitude boundary needs them)', async () => {

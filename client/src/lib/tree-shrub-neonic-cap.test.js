@@ -1,4 +1,4 @@
-// GATE_TS_NEONIC_CAP rules (pure). Synthetic data only; the same numbers as the server's
+// Neonicotinoid cap rules (pure). Synthetic data only; the same numbers as the server's
 // tree-shrub-neonic-ledger.test.js (a quarter acre of bed: Zylam 19.725 fl oz, Safari 10.8 oz, Merit 6.4 fl oz a year).
 import { describe, expect, test } from 'vitest';
 import { convertAmount, evaluateNeonicCap, formatEntered, formatLeft } from './tree-shrub-neonic-cap';

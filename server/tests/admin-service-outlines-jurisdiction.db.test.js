@@ -23,7 +23,7 @@ postgres('service outline regeneration against PostgreSQL', () => {
   beforeAll(async () => {
     const url = new URL(process.env.DATABASE_URL);
     if (!['localhost', '127.0.0.1', ''].includes(url.hostname)) throw new Error('Use a local test database');
-    for (const gate of ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_TS_OUTLINE']) {
+    for (const gate of ['GATE_LAWN_V13', 'GATE_TS_OUTLINE']) {
       savedGates[gate] = process.env[gate];
       process.env[gate] = 'true';
     }

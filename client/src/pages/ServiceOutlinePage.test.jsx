@@ -275,7 +275,7 @@ describe('ServiceOutlinePage drawn sections', () => {
     expect(screen.queryByText('Turf type')).not.toBeInTheDocument();
   });
 
-  // GATE_LAWN_OUTLINE_DETAIL: the month list replaces the year chart; a tile may carry the ET day it stops showing.
+  // The detailed outline: the month list replaces the year chart; a tile may carry the ET day it stops showing.
   it('draws the detailed month list: open months show the visit text and the at-home line, the rest open on a tap', async () => {
     const content = v13Content();
     const year = content.sections.find((s) => s.key === 'program_year');

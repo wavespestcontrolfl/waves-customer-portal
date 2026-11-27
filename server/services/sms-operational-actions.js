@@ -1585,7 +1585,7 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
   const customerName = await require('./admin-alert-names').lookupCustomerName(trx, message.customer_id);
   const { spec, detail } = overdueBellCopy({ row, message, verdict, customerName, channelWord: sourceIdField === 'email_id' ? 'email' : 'text', promises });
   const ringOpts = {
-    trx, bell: true, dedupeKey, dedupeWindowMs: 24 * 60 * 60 * 1000, refreshOnDedupe: true, detail,
+    trx, bell: true, dedupeKey, refreshOnDedupe: true, detail,
     metadata: { triggerKey, customerId: message.customer_id,
       [sourceIdField]: message.id, commitment_id: row.id, kind: row.kind, verification: verdict.late ? 'kept_late' : verdict.verdict,
       // itemKeys: the alert service's ring-on-change stamp, so a change of promises always rewrites the open row.
@@ -1594,22 +1594,18 @@ async function ringOverdueBell(trx, { row, message, verdict, dedupeKey, sourceId
       // A refresh merges over the standing row: a row that is no longer call-back only must drop Called back,
       // or a tap would settle promises that are not call-backs.
       ...(spec.buttons ? {} : { buttons: null }) } };
-  // GATE_ALERT_RING_ONCE (owner 2026-10-14): a promise rings once. The probe
+  // A promise rings once (owner 2026-10-14). The probe
   // looks only at OPEN rows, at any age: an open row is refreshed without a
   // ring (read state, done state and push stay), so a later check never makes
   // a new row. With no open row (first time, or a person marked it done and
   // the promise is still overdue) the insert is fresh: one new row, one bell.
   // The one ring an open row can get: a promise joins from a text that has no promise on it (`joins`).
-  const ringOnce = require('../config/feature-gates').alertRingOnceLive?.();
   // promise: a follow-up we owe the customer (it already rings through bell: true).
-  const notification = await raiseAdminAlert('alert', { ...spec, promise: true }, ringOnce || refreshOnly
-    ? { ...ringOpts, dedupeWindowMs: undefined, dedupeOpenOnly: true, ringOnRefresh: () => joins && !refreshOnly, bumpOnRefresh: true }
-    : ringOpts);
+  const notification = await raiseAdminAlert('alert', { ...spec, promise: true },
+    { ...ringOpts, dedupeOpenOnly: true, ringOnRefresh: () => joins && !refreshOnly, bumpOnRefresh: true });
   if (!notification?.id && !notification?.suppressed) throw new Error('sms_operations_bell_not_persisted');
-  // The 24h window rolls from created_at, so a promise still overdue after a
-  // day gets a NEW row and the old one stayed open: one promise piled up four
-  // to six unread rows (prod 2026-10-05). The daily re-ring stays; only the
-  // newest row for this key may stay open. Runs for a deduped result too, so
+  // Only the newest row for this key may stay open (a promise once piled up four
+  // to six unread rows, prod 2026-10-05). Runs for a deduped result too, so
   // rows an older build left behind close on the next ring. openToCloser: a
   // row a person marked done is taken over too (their Reopen would bring an
   // obsolete duplicate back); a row a system component closed is left alone.
@@ -1701,15 +1697,13 @@ const SHADOW_FULFILLMENT_ACTION = 'sms_commitment.fulfillment.shadow';
 const SHADOW_ON_TRACK_ACTION = 'sms_commitment.on_track.shadow';
 // Extra model calls per refresh run in shadow mode.
 const SHADOW_MODEL_CALLS_PER_RUN = 10;
-const alertRingOnce = () => require('../config/feature-gates').alertRingOnceLive?.() === true;
 // The text's other open promises that still need its shared alert: every one
 // rule 3 does not hold (findOnTrackVisit; a failed read holds nothing, so that
-// promise keeps the alert). Only in 'true' mode with GATE_ALERT_RING_ONCE on,
-// the one setup where a hold closes an alert; otherwise every promise keeps
-// it. The ring, the hold and a settle all read this list, so the alert's
+// promise keeps the alert). Only in 'true' mode, the one setup where a
+// hold closes an alert; otherwise every promise keeps it. The ring, the hold and a settle all read this list, so the alert's
 // promises do not depend on which one a run scanned last (Codex #6974 r3).
 async function notOnTrack(conn, promises, message, now) {
-  if (!promises.length || promiseRecordMode() !== 'true' || !alertRingOnce()) return promises;
+  if (!promises.length || promiseRecordMode() !== 'true') return promises;
   const kept = [];
   for (const item of promises) {
     if ((await findOnTrackVisit(conn, item, message, now))?.mode !== 'true') kept.push(item);
@@ -1948,17 +1942,14 @@ async function refreshSmsCommitment(conn, row, now, verify, verifyThread = verif
     // Rule 3 ('true'): an overdue alert that rang before the visit was booked
     // closes while the visit is ahead, through the usual closer (open rows
     // only; the customer's alert keeps the other promises that still need
-    // it). Only with
-    // GATE_ALERT_RING_ONCE on: its open-only probe lets the ring after the
+    // it). The ring's open-only probe lets the ring after the
     // window raise a fresh alert (or ring the customer's open alert again, when
     // the text has no promise left on it), and the ring's supersede step leaves a
-    // system close alone. Without it a closed row would absorb that ring for a day.
+    // system close alone.
     if (holdBell) {
-      if (alertRingOnce()) {
-        await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true, now },
+      await closeSmsCommitmentAlerts(trx, { commitmentId: row.id, smsLogId: source.id, openOnly: true, now },
         require('./notification-service')._private.doneColumns({ by: 'sms-commitments',
           resolution: `On track: a visit is booked until ${etShortDateTime(onTrack.window_end)} ET`, at: now, keepExisting: true, conn: trx }));
-      }
       return;
     }
     if (deadlinePassed) {

@@ -44,6 +44,8 @@ const { isLaterPackageVisit } = require('../services/protocol-package-stage');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
 const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
+const mixRules = require('../services/product-mix-rules');
+const logger = require('../services/logger');
 const featureGates = require('../config/feature-gates');
 
 const { gateEnvValue } = featureGates;
@@ -61,6 +63,13 @@ const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/
 const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../services/protocol-reader');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
+const { tankReference, sprayerTestWarning } = require('../services/lawn-tank-reference');
+const { spreaderForLine } = require('../services/spreader-settings');
+
+// Only a spreader card (not a hand-shaker bait, a sprayed product or a SKIP line) gets a spreader number.
+const spreaderForTankLine = (product, line, amounts) => (amounts?.application === 'spreader' && amounts.applicator === 'spreader'
+  ? spreaderForLine({ productName: product.name, raw: line.raw, rate: amounts.ratePer1000, rateUnit: amounts.rateUnit, substituted: Boolean(line.substitution) })
+  : null);
 const { completionRateFields } = require('../utils/protocol-label-rate');
 const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -157,9 +166,17 @@ function actionScopeForLine(line, product) {
   return scopeFromText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
 }
 
+// A line that forbids or withholds work ("Do not apply the growth regulator again at this visit", "Avoid repellent spray on
+// active trails"). Ticking it records no treatment, and it carries no product, so it never adds one to Products applied.
+function isForbiddingLine(line) {
+  return /^(do not|don t|never|no|not|avoid)\b/.test(normalizeText(line?.raw || ''));
+}
+
 function actionTreatmentApplied(kind, line) {
   if (kind === 'inspection') return false;
   const text = normalizeText(line?.raw || '');
+  // A line that forbids or withholds work is a limit, not an application: ticking it records no treatment.
+  if (isForbiddingLine(line)) return false;
   if (/\b(declin|no access|not treated|unavailable|skip|skipped|customer not home)\b/.test(text)) return false;
   return true;
 }
@@ -635,6 +652,10 @@ async function validateLawnProtocolForPublish(knex, protocolId) {
   };
 }
 
+function forbidsWithItsProduct(meta, line) {
+  return meta?.treatmentApplied !== true && isForbiddingLine(line);
+}
+
 function buildCompletionActions({ lines, products, programKey, visit, addonHints = new Set() }) {
   // De-branded pest visits keep primary/secondary as plain strings (so every
   // existing string consumer — protocol UI tabs, /match — still works) and
@@ -648,9 +669,10 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
       ? { ...line, catalogProductHints: meta.catalogProductHints }
       : line;
     // A line flagged exactCatalogName (an injection label's own bottle) takes that row or none: a near name is another formulation.
-    const product = meta?.exactCatalogName
+    // A forbidding line names a product only to withhold it (isForbiddingLine): no product attaches, unless its lineMeta says it applies one.
+    const product = forbidsWithItsProduct(meta, line) ? null : (meta?.exactCatalogName
       ? resolveCatalogProductForName(meta.catalogProductHints?.[0], products, { exactOnly: true })
-      : matchCatalogProduct(lineForMatch, products);
+      : matchCatalogProduct(lineForMatch, products));
     // Its bottle is not in the catalog: no action to pick. Picked, it would record an injection with no product on the materials record.
     if (meta?.exactCatalogName && meta.treatmentApplied !== false && !product) return [];
     const kind = actionKindForLine(line, product);
@@ -744,6 +766,26 @@ async function getActiveCalibration(equipmentSystemId) {
 
   if (equipmentSystemId) query.where('ec.equipment_system_id', equipmentSystemId);
   return query.first().catch(() => null);
+}
+
+// The 4 gal FlowZone backpack's active calibration, for the tank sheet's "FlowZone 4 gal" amounts (lawn-tank-reference.js): the
+// sprayer is found by what it is (an active backpack system, 4 gal, named FlowZone), never by name order. With more than one, a field
+// verified test first, then the newest test. A FlowZone picked as the rig (`selected`) sizes its own fill. null when none is on file.
+const isFlowZone4Gal = (row) => row.system_type === 'backpack' && Number(row.tank_capacity_gal) === 4 && /flow\s*zone/i.test(row.system_name || '');
+const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - (a.calibration_status === 'field_verified')
+  || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
+async function getBackpackCalibration(selected) {
+  if (selected && isFlowZone4Gal(selected)) return selected;
+  const rows = await db('equipment_calibrations as ec')
+    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+    .where('ec.active', true)
+    .where('es.active', true)
+    .where('es.system_type', 'backpack')
+    .where('es.tank_capacity_gal', 4)
+    .where('es.name', 'ilike', '%flow%zone%')
+    .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
+    .catch(() => []);
+  return (rows || []).filter(isFlowZone4Gal).sort(newestTestFirst)[0] || null;
 }
 
 // GET /api/admin/protocols/photos/relevant — context-aware photo references
@@ -842,6 +884,10 @@ async function bookedAddonHints(req, protocols) {
 // viewer may see): its catalog service key decides the program before its name does, and a visit booked as a follow-up of a finished
 // visit (its name is a copy of that visit's) gets the program's follow-up card, as does a later visit of a package booked up front
 // (protocol-package-stage.js). With no visit, the name alone decides, as before.
+// What a service with no card shows (owner pick D18, 2026-11-25; protocol-matcher.js reason no_protocol).
+// The Waves Assessment's catalog key (protocol-matcher.js assessment rule).
+const ASSESSMENT_KEY = 'lawn_inspection';
+const NO_CARD_NOTE = 'Inspection only, no product: this service has no protocol card.';
 async function matchForBookedVisit(req, protocols, serviceType) {
   const id = String(req.query.visitId || '');
   const visit = UUID_RE.test(id)
@@ -857,6 +903,23 @@ async function matchForBookedVisit(req, protocols, serviceType) {
   return followupVisitMatch(match, visit?.followup_source_service_id != null || await isLaterPackageVisit(db, visit, { protocols }));
 }
 
+// A lawn name sends a close-out to the lawn month's applications, except a booked Waves Assessment: its catalog key
+// (lawn_inspection) gives it the Assessment card under any lawn name ("Lawn Inspection", the row's name before its rename,
+// or a visit renamed by hand). The close-out keys the same visit off the lawn flow (SchedulePage.jsx lineTypeFor). A lawn
+// close-out with a visit costs one key read; with no visit the name decides.
+async function takesLawnApplications(req, serviceType) {
+  const name = normalizeText(serviceType);
+  if (!name.includes('lawn') && !name.includes('turf')) return false;
+  const id = String(req.query.visitId || req.query.scheduledServiceId || '');
+  if (!UUID_RE.test(id)) return true;
+  // A failed read fails the request, as the lawn close-out's own visit read does: the close-out shows the actions as
+  // unavailable and can retry, never a lawn application list for a visit that may be an assessment.
+  const row = await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
+    .leftJoin('services', 'scheduled_services.service_id', 'services.id')
+    .first('scheduled_services.service_key_snapshot', 'services.service_key');
+  return (row?.service_key_snapshot || row?.service_key) !== ASSESSMENT_KEY;
+}
+
 // GET /api/admin/protocols/match — best service template plus full program fallback.
 router.get('/match', async (req, res, next) => {
   try {
@@ -867,6 +930,10 @@ router.get('/match', async (req, res, next) => {
     // visit, never default to today's month.
     const result = await matchForBookedVisit(req, protocols, serviceType);
 
+    // A service with no card (owner pick D18): an answer, not a failed read. The panel shows no service protocol.
+    if (result.reason === 'no_protocol') {
+      return res.json({ serviceType, programKey: null, program: null, matchedVisit: null, matched: false, reason: result.reason, note: NO_CARD_NOTE });
+    }
     if (!result.program) return res.status(404).json({ error: 'Protocol program not found' });
 
     res.json(protocolCatalogForViewer(req, {
@@ -970,6 +1037,8 @@ function lawnMixRig(calibration) {
     tankCapacityGal: tankCapacity || null,
     tankCoverageSqft: tankCoverageSqft ? Math.round(tankCoverageSqft) : null,
     expiresAt: calibration.expires_at || null,
+    calibratedAt: calibration.calibrated_at || null,
+    calibrationStatus: calibration.calibration_status || null,
   } : null;
   return { carrier, tankCoverageSqft, equipment };
 }
@@ -977,14 +1046,21 @@ function lawnMixRig(calibration) {
 // The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
 // selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
 // the restriction on every gated row), then the cadence and limit warnings.
-function lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
+function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
   const warnings = [];
   if (!calibration) {
     warnings.push({
       code: 'missing_calibration',
-      message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
+      message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.',
     });
   }
+  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide).
+  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated' });
+  if (rigWarning) warnings.push(rigWarning);
+  const usesBackpackTest = items.some((item) => item.tankAmounts?.backpack4Gal?.carrierSource === 'calibration');
+  const backpackWarning = usesBackpackTest && backpack?.equipment_system_id !== calibration?.equipment_system_id
+    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated' }) : null;
+  if (backpackWarning) warnings.push(backpackWarning);
   const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
   if (unmatchedPricedLines.length) {
     warnings.push({
@@ -1004,7 +1080,47 @@ function lawnMixWarnings({ calibration, items, selectedItems, municipality, cade
 // ProtocolReferenceTabV2.jsx rendered the now-absent materialCostSummary as "0/N lines priced", a
 // stripped-for-role response looking identical to a genuinely-unpriced one; viewerRole lets the
 // client tell the difference and hide the Material Cost card and column instead of a fabricated zero).
-function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck, mixable = () => true, mixInput = null, bermudaOrder = {}, extraBlocks = [] }) {
+// The mix safety table's answer for every pair of sprayed products on the sheet (services/product-mix-rules.js checkMix:
+// one headline per pair). The sheet's one mix-line helper (ProtocolTankSheet.jsx applicationMethod) decides which products
+// share a tank and shows the pairs of that tank. A warning only: it never hides or holds a product or an amount (owner
+// 2026-11-26), and a failed check is left out (logged) so the sheet still renders.
+// The program's tankMixWith names ("Celsius WG", "Recognition and Fusilade II"), resolved to catalog products the way the v13
+// migrations resolve a recipe name: the exact catalog name, else one exact alias; the protocol's short names (NIS) by an explicit
+// map to the catalog name. Never a fuzzy or partial match, so a seller word such as LESCO ties to nothing. The tank sheet ties a
+// mix and its mix check by these ids only (a product not on the sheet: no tank); a name that resolves to nothing gives [] and the
+// sheet says "No rule on file".
+const MIX_WITH_ALIASES = { nis: 'LESCO 90/10 Nonionic Surfactant' };
+function resolveMixWithName(name, products) {
+  return resolveCatalogProductForName(MIX_WITH_ALIASES[name.toLowerCase()] || name, products, { exactOnly: true });
+}
+function resolveMixWith(items, products) {
+  return items.map((item) => {
+    const mixWith = item.tankAmounts?.mixWith;
+    if (!mixWith) return item;
+    const ids = String(mixWith).split(/\s+and\s+|\s*\+\s*|\s*,\s*/i).map((name) => name.trim()).filter(Boolean)
+      .map((name) => resolveMixWithName(name, products)?.id).filter((id) => id != null && String(id) !== String(item.product?.id));
+    return { ...item, tankAmounts: { ...item.tankAmounts, mixWithProductIds: [...new Set(ids.map(String))] } };
+  });
+}
+
+async function sheetMixCheck(items) {
+  const ids = [...new Set(items.filter((item) => item.product && item.tankAmounts?.application !== 'spreader').map((item) => String(item.product.id)))];
+  if (ids.length < 2) return null;
+  try {
+    const { pairs } = await mixRules.checkMix(ids, { max: ids.length });
+    return {
+      pairs: pairs.map(({ productAId, productAName, productBId, productBName, verdict, reason, jarTestRequired }) => ({
+        productAId, productAName, productBId, productBName, verdict, reason, jarTestRequired,
+      })),
+    };
+  } catch (err) {
+    logger.warn(`[admin-protocols] lawn-mix mix check failed: ${err.message}`);
+    // The sheet says so in one line; products and amounts still show.
+    return { status: 'unavailable', pairs: [] };
+  }
+}
+
+function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck, mixable = () => true, mixInput = null, bermudaOrder = {}, extraBlocks = [], mixCheck = null }) {
   const view = seesPricing ? (list) => list : (list) => list.map(stripLawnMixItemPricing);
   const payload = {
     track: { key: trackKey, name: track.name },
@@ -1029,6 +1145,7 @@ function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment
     ...bermudaOrder,
     warnings,
     blocks: [...blocks, ...limitCheck.blocks, ...extraBlocks],
+    mixCheck,
   };
   return seesPricing ? payload : deepStripPriceTokens(payload);
 }
@@ -1101,6 +1218,7 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
+    const backpack = await getBackpackCalibration(calibration);
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
@@ -1209,6 +1327,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       };
       const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
       const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
+      const tankAmounts = tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack });
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
@@ -1223,9 +1342,14 @@ router.get('/lawn-mix', async (req, res, next) => {
         fullTankMix,
         plannedMix,
         plannedFullTankMix,
+        // The tank sheet's per-fill amounts (100 gal, full tank, 4 gal FlowZone): shown for every matched product, with the plan's
+        // state as a warning beside them, never in place of them. No job amount or cost reads these.
+        tankAmounts,
+        // The LESCO spreader number for a line that goes on with the spreader (spreader-settings.js), at the rate the sheet shows.
+        spreader: spreaderForTankLine(product, line, tankAmounts),
       };
     });
-    const items = bermuda.decorate(builtItems);
+    const items = resolveMixWith(bermuda.decorate(builtItems), products);
     const selectedItems = items.filter((item) => item.selected);
     // A mixing-order input: the line's recipe text, its catalog product, and the step marks.
     const mixInput = (item) => ({
@@ -1239,13 +1363,14 @@ router.get('/lawn-mix', async (req, res, next) => {
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
+    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
 
     res.json(lawnMixResponse({
       seesPricing: viewerSeesPricing(req),
       trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck,
       // The bermuda step: its lines stay out of the base mixing order, its own order and its blocks ride beside.
       mixable: bermuda.mixable, mixInput, bermudaOrder: bermuda.mixOrderField(items.map(mixInput), blocks.length > 0), extraBlocks: settled.blocks,
+      mixCheck: await sheetMixCheck(items),
     }));
   } catch (err) { next(err); }
 });
@@ -1296,7 +1421,7 @@ router.get('/completion-actions', async (req, res, next) => {
     // The appointment's own month (real date): Bermuda removal's eligibility and rows follow it, not the round's recipe month.
     let appointmentMonth = null;
 
-    if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
+    if (await takesLawnApplications(req, serviceType)) {
       programKey = 'lawn';
       // Celsius and Blindside are not labeled for bahiagrass, so under v13 a bahia lawn (any of its
       // spellings, in any of the three inputs) gets no chips, never another grass's: decided on the raw
@@ -1324,10 +1449,13 @@ router.get('/completion-actions', async (req, res, next) => {
       }
     } else {
       // Raw month (see /match): an unusable value keeps the rule visit.
-      const matched = await matchForBookedVisit(req, protocols, serviceType);
+      // The lawn close-out sends its visit as scheduledServiceId: a booked assessment under a lawn name is matched by it too.
+      const matched = await matchForBookedVisit({ ...req, query: { ...req.query, visitId: req.query.visitId || req.query.scheduledServiceId } }, protocols, serviceType);
       programKey = matched.programKey;
       program = matched.program;
-      visit = matched.matchedVisit || program?.visits?.[0] || null;
+      visit = matched.matchedVisit || program?.visits?.[0];
+      // A service with no card (owner pick D18) has no actions and no products to offer: the close-out says so.
+      if (matched.reason === 'no_protocol') return res.json({ serviceType, programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
     }
 
     if (!program || !visit) return res.status(404).json({ error: 'Protocol actions not found' });
@@ -2084,6 +2212,7 @@ router._internals = {
   isPricedProtocolLine,
   loadWindowSopPayload,
   renderWindowSopMarkdown,
+  resolveMixWith,
 };
 
 module.exports = router;

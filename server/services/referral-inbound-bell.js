@@ -18,11 +18,10 @@ const crypto = require('crypto');
 // The Queue can pick any other referrer. The row closes when the card is answered in the bell, the Queue or a
 // script (referral-inbound.js calls closeReferralInboundBell), and the sweep closes a row whose card left the
 // list for another reason. It rings once per card; a card that leaves the list and comes back rings again.
-// Dark behind GATE_REFERRAL_INBOUND_BELL.
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { referralInboundBellLive, isEnabled } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { composeAdminAlert, raiseAdminAlert, cutAtWord, MAX_WHY_CHARS, MAX_BUTTON_LABEL_CHARS } = require('./admin-alert-compose');
 const { fitAction, shortDateET, tidyName } = require('./admin-alert-names');
 const episodes = require('./admin-alert-episodes');
@@ -260,11 +259,10 @@ async function syncCard(customerId, { now = new Date(), deferred = true } = {}) 
 }
 
 /**
- * Fifteen-minute cron entry point. Returns { skipped } when the gate is off, else a tally of the cards and open
+ * Fifteen-minute cron entry point. Returns a tally of the cards and open
  * rows it went through: raised, unchanged, closed, failed. One card's failure is logged and never stops the rest.
  */
 async function syncReferralInboundBells({ now = new Date() } = {}) {
-  if (!referralInboundBellLive()) return { skipped: 'disabled' };
   const open = await episodes.openAdminAlertKeys(db, KEY_PREFIX);
   const tally = { raised: 0, unchanged: 0, closed: 0, failed: 0 };
   // Every listed card, plus every open row: a row whose card is gone (or past the list's first 50) is read alone.
@@ -283,8 +281,7 @@ async function syncReferralInboundBells({ now = new Date() } = {}) {
   return tally;
 }
 
-// referral-inbound.js calls this after a confirm or a dismiss commits. Gate-free: a closed gate may leave rows
-// open, and an answer still closes them. Returns the number of rows closed.
+// referral-inbound.js calls this after a confirm or a dismiss commits, and an answer closes the row. Returns the number of rows closed.
 async function closeReferralInboundBell(customerId, outcome, { now = new Date() } = {}) {
   const dedupeKey = keyFor(customerId);
   return db.transaction(async (trx) => {
@@ -368,7 +365,7 @@ async function runButton({ row, item, technicianId }) {
 }
 
 const buttonHandler = {
-  live: () => referralInboundBellLive(),
+  live: () => true,
   run: runButton,
 };
 

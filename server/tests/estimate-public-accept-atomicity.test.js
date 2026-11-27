@@ -446,8 +446,12 @@ async function putAccept(token, body = {}) {
   return { status: res.status, data: await res.json() };
 }
 
+// The Florida consumer notice is always on: this suite's termite fixtures are not about the notice, so it reads as signed
+// here. The suites that test the notice spy on it again.
+let noticeSpy;
 beforeEach(() => {
   jest.clearAllMocks();
+  noticeSpy = jest.spyOn(require('../services/estimate-consumer-notice'), 'consumerNoticeBlocksAccept').mockResolvedValue(false);
   // clearAllMocks keeps queued *Once values: a test whose accept is refused
   // before conversion would otherwise hand its queued conversion to the next
   // test. convertEstimate has no default implementation, so a reset only
@@ -460,6 +464,8 @@ beforeEach(() => {
     ok: true, payUrl: null, sms: { ok: true }, email: { ok: true },
   }));
 });
+
+afterEach(() => { noticeSpy.mockRestore(); });
 
 describe('FIX 1 — standard recurring conversion is atomic with acceptance', () => {
   test('busy deposit ledger rolls back standard acceptance before its invoice mint', async () => {
@@ -2600,20 +2606,13 @@ describe('C4 codex GH r4 P1 — plan-restart accept revalidation runs inside the
         if (table !== 'estimates' || db.__state.txDepth === 0 || storedEstimate().bill_by_invoice) return;
         storedEstimate().bill_by_invoice = true;
       };
-      const priorGate = process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-      process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true';
-      try {
-        const res = await putAccept('tok-restart-20-x012345678', body);
-        expect(res.status).toBe(409);
-        expect(res.data.code).toBe('RESTART_STATE_CHANGED');
-        expect(blocks).toHaveBeenCalledTimes(1);
-        // The verified capture the page drops is retired, as on the plan re-check.
-        expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-20' }), setupIntentId: 'si_cof_9' });
-        expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
-      } finally {
-        if (priorGate === undefined) delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-        else process.env.GATE_ESTIMATE_CONSUMER_NOTICE = priorGate;
-      }
+      const res = await putAccept('tok-restart-20-x012345678', body);
+      expect(res.status).toBe(409);
+      expect(res.data.code).toBe('RESTART_STATE_CHANGED');
+      expect(blocks).toHaveBeenCalledTimes(1);
+      // The verified capture the page drops is retired, as on the plan re-check.
+      expect(retire).toHaveBeenCalledWith({ estimate: expect.objectContaining({ id: 'est-restart-20' }), setupIntentId: 'si_cof_9' });
+      expect(EstimateConverter.convertEstimate).not.toHaveBeenCalled();
     });
 
     test('a retirement Stripe cannot confirm under that lock answers 503 and accepts nothing (codex pre-push P1)', async () => {

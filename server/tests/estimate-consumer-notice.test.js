@@ -1,5 +1,5 @@
 /**
- * The Florida consumer notice on the estimate page (GATE_ESTIMATE_CONSUMER_NOTICE, Rule 5E-14.105(1)): which
+ * The Florida consumer notice on the estimate page (Rule 5E-14.105(1)): which
  * estimates need the FDACS-13692, the customer's state, and the issuer that puts the form in front of them.
  * Invariants: any termite-family line counts (a pest plan with a Bora-Care add-on too); signed wins over awaiting;
  * one open notice per customer (a repeat returns it with a fresh link, unless it would read differently now); the
@@ -161,10 +161,8 @@ const openNotice = (extra = {}) => ({
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true';
   findConsumerNotice.mockResolvedValue(null);
 });
-afterAll(() => { delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE; });
 
 describe('consumerNoticeState', () => {
   test('signed when a notice is on file dated on or before today (Eastern)', async () => {
@@ -377,15 +375,6 @@ describe('ensureEstimateConsumerNotice', () => {
     const { database, state } = makeDb({ technicians: [TECH] });
     const result = await ensureEstimateConsumerNotice({ estimate: termite, req, conn: database });
     expect(result).toMatchObject({ ok: false, status: 409, code: 'already_signed' });
-    expect(state.writes).toEqual([]);
-  });
-
-  test('the gate is read again after the last lock: a kill switch thrown mid-request writes nothing', async () => {
-    const { database, state } = makeDb({ technicians: [TECH] });
-    const pending = ensureEstimateConsumerNotice({ estimate: termite, req, conn: database });
-    delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-    const result = await pending;
-    expect(result).toMatchObject({ ok: false, status: 404 });
     expect(state.writes).toEqual([]);
   });
 

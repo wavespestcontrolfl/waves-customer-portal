@@ -4,7 +4,7 @@
 // stand-in database and read the writes it makes. All fixture identities are
 // synthetic.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true), alertRingOnceLive: jest.fn(() => true) }));
+jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => true) }));
 jest.mock('../utils/cron-lock', () => ({ runExclusive: jest.fn((_name, fn) => fn()) }));
 
 const mockState = { calls: [], booked: [], customers: [], open: [], tasks: [], updates: [], inserts: [], failClose: false, notificationFilters: [], callLogSelects: [] };

@@ -8,13 +8,10 @@
  * PushService.sendToAdminUser(technicianId) — with one new type,
  * `customer_visit_photos`, rather than building a parallel delivery path.
  *
- * Its own gate, GATE_VISIT_PREP_TECH_ALERTS (visitPrepTechAlertsLive()),
- * is strict opt-in and DELIBERATELY INDEPENDENT of
- * GATE_TECH_VISIT_NOTIFICATIONS (off in production): this can be the
- * first tech visit card to go live, reusing that mechanism's plumbing
- * without depending on its own kill switch. It ALSO requires
- * visitPrepPhotosLive() — the photos feature itself must be on, or there
- * is nothing to alert about.
+ * It is DELIBERATELY INDEPENDENT of GATE_TECH_VISIT_NOTIFICATIONS (off in
+ * production): it reuses that mechanism's plumbing without depending on its
+ * kill switch. It requires visitPrepPhotosLive() — the photos feature
+ * itself must be on, or there is nothing to alert about.
  *
  * Called post-commit, fire-and-forget, from visit-prep.js's
  * createVisitPrepSubmission — the ONE place a submission is created, so
@@ -40,7 +37,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { visitPrepPhotosLive, visitPrepTechAlertsLive } = require('../config/feature-gates');
+const { visitPrepPhotosLive } = require('../config/feature-gates');
 const { isAssignable, applyAssignable } = require('./technician-eligibility');
 const { JOIN_INELIGIBLE_STATUSES } = require('./visit-context/statuses');
 const { dateOnlyString } = require('../utils/datetime-et');
@@ -58,7 +55,7 @@ const OFF_ROUTE_STATUSES = JOIN_INELIGIBLE_STATUSES;
 const PUSH_TITLE = 'A customer sent photos for a visit on your route';
 
 function enabled() {
-  return visitPrepTechAlertsLive() && visitPrepPhotosLive();
+  return visitPrepPhotosLive();
 }
 
 // The visit row, read under FOR SHARE inside the card's own transaction

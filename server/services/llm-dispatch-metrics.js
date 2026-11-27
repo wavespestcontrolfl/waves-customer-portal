@@ -121,7 +121,8 @@ const BACKUP_ONLY_POLICIES = new Set(['callExtractionV1Backup']);
 // alarm, not this one. callResearch mines the day before's new calls each
 // night: on 11-23 ET its 03:05 run (job_health success) had the 0 calls of
 // 11-22 to mine and alarmed "ZERO calls yesterday"; 11-24 made 10 calls.
-const EVENT_DRIVEN_POLICIES = new Set(['imageScreen', 'visionAnalysis', 'callExtraction', 'callResearch']);
+// smsOperationalActions: runs only when a customer texts, so one quiet day is normal.
+const EVENT_DRIVEN_POLICIES = new Set(['imageScreen', 'visionAnalysis', 'callExtraction', 'callResearch', 'smsOperationalActions']);
 
 // Silence is expected for both lists above; absence detection reads them as
 // one set.

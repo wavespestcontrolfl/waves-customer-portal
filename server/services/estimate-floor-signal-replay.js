@@ -389,6 +389,36 @@ function savedLegacyPestAboveTableSignal(rawEstData) {
   return { legacyPestAboveTable: flag };
 }
 
+// Whole-home sizing (owner 2026-11-26 "whole home": the bed bug treatment and the yearly rodent guarantee size on the home's TOTAL
+// living area, as flea does), new quotes only. The cockroach treatment went back to the ground-floor footprint (owner 2026-11-27
+// "skip the cockroach"; no quote was ever priced on its whole-home basis), so a cockroach request is no evidence here. Its own
+// stamp, read by the same reader: true = priced before the rule (the ground-floor footprint, the existing code), false = priced
+// under it. An estimate with priced lines and no stamp predates the rule; one with no priced lines pins nothing. An estimate that
+// kept only its inputs but asks for one of the two was saved before the rule too, on a first send, a resend and every replay (a
+// fresh draft the engine priced carries its stamp, false). Plan-wide, no per-service marker: a service a revision adds to a legacy
+// estimate stays on the old rule, so a replay never raises a sold price (the whole home is never smaller than its ground floor).
+function storedRequestsWholeHomeSizing(estData) {
+  const data = normalizeStored(estData);
+  if (!data || typeof data !== 'object') return false;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  // The builder request names its services as tokens: BEDBUG and RODENT_GUARANTEE.
+  const tokens = request && Array.isArray(request.selectedServices)
+    ? request.selectedServices.map((key) => String(key || '').toUpperCase())
+    : [];
+  if (tokens.some((key) => ['BEDBUG', 'RODENT_GUARANTEE'].includes(key))) return true;
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
+      && !!(carrier.services.bedBug || carrier.services.rodentGuarantee));
+}
+
+function savedLegacyWholeHomeSizingSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { flag } = readRuleStamp(estData, 'legacyWholeHomeSizing');
+  if (flag === undefined && storedRequestsWholeHomeSizing(estData)) return { legacyWholeHomeSizing: true };
+  return { legacyWholeHomeSizing: flag };
+}
+
 // Which pest services a stored estimate priced (or asked for), from EVERY shape the estimate page's choice and breakdown readers read
 // (routes/estimate-public.js: oneTimePestChoiceAmountFromResultStats / FromRecurringServices / FromBreakdown, normalizeOneTimeBreakdown,
 // recurringServicesWithSupplements). One list of shapes, kept here so the stamp reader and the page cannot drift (a table test names each).
@@ -498,6 +528,7 @@ const FROZEN_RULE_STAMPS = [
   ['legacyWdoFlat', (data) => savedLegacyWdoFlatSignal(data).legacyWdoFlat],
   ['legacyOneTimePestBuffer', (data) => savedLegacyOneTimePestBufferSignal(data).legacyOneTimePestBuffer],
   ['legacyPestAboveTable', (data) => savedLegacyPestAboveTableSignal(data).legacyPestAboveTable],
+  ['legacyWholeHomeSizing', (data) => savedLegacyWholeHomeSizingSignal(data).legacyWholeHomeSizing],
   ['legacySpecialty1126', (data) => savedLegacySpecialty1126Signal(data).legacySpecialty1126],
 ];
 
@@ -569,6 +600,7 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLegacyWdoFlatSignal(estData));
   Object.assign(signals, savedLegacyOneTimePestBufferSignal(estData));
   Object.assign(signals, savedLegacyPestAboveTableSignal(estData));
+  Object.assign(signals, savedLegacyWholeHomeSizingSignal(estData));
   Object.assign(signals, savedLegacySpecialty1126Signal(estData));
   const currentSpecialty = savedSpecialty1126CurrentServices(estData);
   if (currentSpecialty.length) signals.specialty1126CurrentServices = currentSpecialty;
@@ -598,6 +630,7 @@ module.exports = {
   savedLegacyWdoFlatSignal,
   savedLegacyOneTimePestBufferSignal,
   savedLegacyPestAboveTableSignal,
+  savedLegacyWholeHomeSizingSignal,
   savedLegacySpecialty1126Signal,
   savedSpecialty1126CurrentServices,
   savedOneTimePestRuleLegacy,

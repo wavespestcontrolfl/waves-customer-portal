@@ -18,6 +18,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const drafter = require('./sms-shadow-drafter');
 const paymentStatus = require('./payment-status-contract');
+const photoFact = require('./sms-photo-fact');
 
 // The amount forms and the payment-acknowledgement grammar are the
 // draft-time guard's own (one definition for both amount guards): every
@@ -176,8 +177,9 @@ function bodyHasPaymentStatusVocabulary(body) {
 function bodyNeedsMoneyRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
   const text = String(body || '');
   if (!text) return false;
-  // a prepaid visit count (the rendered sentence or the model's own words) is judged and fingerprinted like an amount, whatever the customer asked
-  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text) || paymentStatus.claimsPrepaidCount(text, inboundMessage) || paymentStatus.claimsEstimateTerms(text)) return true;
+  // a prepaid visit count (the rendered sentence or the model's own words) is judged and fingerprinted like an amount, whatever the customer asked;
+  // so is a term of the estimate (a waiver, a saving), and any answer to a question about the setup fee or paying for the year
+  if (bodyAmountCents(text).length || ZELLE_WORD_RE.test(text) || paymentStatus.claimsPrepaidCount(text, inboundMessage) || paymentStatus.claimsEstimateTerms(text, inboundMessage)) return true;
   if (statusVocabulary && strictForVersion(promptVersion)
       && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
@@ -198,7 +200,9 @@ const REPORT_SENTENCE_RE = new RegExp(`The service report for your [^\\n]{1,80}?
 const flatText = (text) => String(text || '').replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
 const claimsReportDelivery = (text) => flatText(text).includes(REPORT_SENTENCE_START);
 function bodyNeedsPaymentRecheck(body, options = {}) {
-  return claimsReportDelivery(body) || bodyNeedsMoneyRecheck(body, options);
+  // (a photo identification in the AI's own words too, read-free with the stricter photo-text rule: the full recheck reads the inbound's media)
+  return claimsReportDelivery(body) || photoFact.claimsPhotoCheck(body) || photoFact.photoClaimInOwnWords(body, { inboundHasPhoto: true })
+    || bodyNeedsMoneyRecheck(body, options);
 }
 async function reportDeliveryStale({ customerId, text, humanEditedBody = false, dbh = db }) {
   const flat = flatText(text);
@@ -220,6 +224,68 @@ async function reportDeliveryStale({ customerId, text, humanEditedBody = false, 
   }
 }
 
+// ---- PHOTO CHECK (texting AI gap 6) --------------------------------------------------------------------------------------------------
+// A body that copies a PHOTO CHECK sentence (sms-photo-fact.js: the photo checker's stored reading of a customer's photo text) is rechecked
+// at send against the reading of the ONE inbound text the decision answers (its sms_log_id): the sentence must still be the one a fresh read
+// of that reading renders (the assessment not archived or relinked, its photo_triage draft not rejected, a visit still booked). Changed ->
+// photo_check_changed; no inbound text to bind to -> photo_check_no_inbound; a read that failed -> photo_check_recheck_failed (retryable). An AI body may say what a photo shows only through a live sentence: after the live sentences are
+// removed, a photo identification in its own words -> photo_check_unverified. A staff edit keeps its own wording: only a sentence of the
+// rendered forms is held to the live readings then.
+// The PHOTO CHECK sentences a fresh read renders for this inbound text (the drafter's own renderer over a fresh context); null = a read failed.
+async function livePhotoSentences(customerId, inboundSmsLogId, dbh) {
+  const [checks, context] = await Promise.all([photoFact.loadPhotoChecks(customerId, { db: dbh, smsLogId: inboundSmsLogId }), loadCustomerContext(customerId, dbh)]);
+  return checks && context ? [...new Set(checks.map((check) => photoFact.sentenceForContext(context, check)).filter(Boolean))] : null;
+}
+// Whether the inbound text the decision answers carried a photo (sms_log.metadata.media, as the webhook stores it). No inbound text to read,
+// or no media list on it: assumed it did (the stricter own-words rule). A read that fails throws: the caller refuses as photo_check_recheck_failed.
+async function inboundCarriedPhoto(inboundSmsLogId, dbh) {
+  if (!inboundSmsLogId) return true;
+  const row = await dbh('sms_log').where({ id: inboundSmsLogId }).first('metadata');
+  if (!row) throw new Error(`inbound sms_log ${inboundSmsLogId} not found`);
+  // (an unknown media list - null metadata, no media key - counts as a photo: the stricter rule)
+  return require('./sms-gratitude-context').mediaCountFromMetadata(row.metadata) !== 0;
+}
+// An AI body's own photo wording, judged with the linked inbound text's media flag. null = none (or not an AI body).
+async function ownPhotoWordsReason({ rest, judge, inboundSmsLogId, dbh }) {
+  if (!judge || !photoFact.photoClaimInOwnWords(rest, { inboundHasPhoto: true })) return null;
+  const inboundHasPhoto = await inboundCarriedPhoto(inboundSmsLogId, dbh);
+  return photoFact.photoClaimInOwnWords(rest, { inboundHasPhoto }) ? 'photo_check_unverified' : null;
+}
+// The copied PHOTO CHECK sentences against the live reading of the decision's inbound text: { reason } or { rest } (live sentences removed).
+async function copiedPhotoSentences({ flat, customerId, inboundSmsLogId, humanEditedBody, dbh }) {
+  if (!customerId) return { reason: 'amount_recheck_no_customer' };
+  if (!inboundSmsLogId) return { reason: 'photo_check_no_inbound' };
+  const live = await livePhotoSentences(customerId, inboundSmsLogId, dbh);
+  if (!live) return { reason: 'photo_check_recheck_failed' };
+  // an AI body: every photo sentence it starts must be a live one, whole; a staff edit: only the rendered forms it carries
+  const forms = humanEditedBody === true ? photoFact.allRenderableSentences().filter((sentence) => flat.includes(sentence)) : null;
+  const rest = live.reduce((acc, sentence) => acc.split(sentence).join(' '), flat);
+  const unverified = forms ? forms.some((sentence) => !live.includes(sentence)) : photoFact.claimsPhotoCheck(rest);
+  return unverified ? { reason: 'photo_check_changed' } : { rest };
+}
+async function photoCheckStale({ customerId, inboundSmsLogId = null, text, humanEditedBody = false, aiBody = false, dbh = db }) {
+  const flat = flatText(text);
+  const claimed = photoFact.claimsPhotoCheck(flat);
+  const judge = aiBody && humanEditedBody !== true;
+  if (!claimed && !(judge && photoFact.photoClaimInOwnWords(flat, { inboundHasPhoto: true }))) return { stale: false, rest: String(text || '') };
+  try {
+    const copied = claimed ? await copiedPhotoSentences({ flat, customerId, inboundSmsLogId, humanEditedBody, dbh }) : { rest: flat };
+    const reason = copied.reason || await ownPhotoWordsReason({ rest: copied.rest, judge, inboundSmsLogId, dbh });
+    return reason ? { stale: true, reason } : { stale: false, rest: copied.rest };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] photo check recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'photo_check_recheck_failed' };
+  }
+}
+
+// The copied fact sentences that are about no money (REPORT DELIVERY, PHOTO CHECK): each is rechecked against a fresh read and removed
+// before the money rules judge the rest. (an AI body = a prompt version on the decision, as for the Zelle rule)
+async function factSentencesStale({ customerId, inboundSmsLogId, body, promptVersion, humanEditedBody, dbh }) {
+  const report = await reportDeliveryStale({ customerId, text: body, humanEditedBody, dbh });
+  if (report.stale) return report;
+  return photoCheckStale({ customerId, inboundSmsLogId, text: report.rest, humanEditedBody, aiBody: Boolean(promptVersion), dbh });
+}
+
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
 // context is a failed read, not an empty account.
 // `staffFacts` ({ prepaid: true }, { estimate: true }): also the facts a copied texting-AI sentence is rendered from, so it is re-rendered from live rows.
@@ -227,11 +293,15 @@ async function loadCustomerContext(customerId, dbh = db, staffFacts = null) {
   const customerRow = await dbh('customers').where({ id: customerId }).first();
   return customerRow ? require('./context-aggregator').getContextForCustomer(customerRow, staffFacts ? { includeSmsStaffFacts: staffFacts } : {}) : null;
 }
-// The staff facts (sms-staff-facts) a copied sentence is rendered from: the option that reads them, the context key and the sentence shape.
-// Only the facts a copy needs are read at send, and a read that FAILED (null) is an outage.
+// The staff facts (sms-staff-facts) a copied sentence is rendered from: the option that reads them, where they sit in the context and the
+// sentence shape. Only the facts a copy needs are read at send, and a read that FAILED (null) is an outage. The estimate's setup fee and
+// pay-for-the-year total are their own read (estimateFacts.terms): it can fail while the price lines beside it were read.
+const estimateTermsOf = (context) => (context.estimateFacts == null ? null : context.estimateFacts.terms);
 const STAFF_FACT_SENTENCES = [
-  { option: 'prepaid', key: 'prepaidPlans', shape: 'prepaid_visits_left' },
-  { option: 'estimate', key: 'estimateFacts', shape: 'estimate_application_price' },
+  { option: 'prepaid', read: (context) => context.prepaidPlans, shape: 'prepaid_visits_left' },
+  { option: 'estimate', read: (context) => context.estimateFacts, shape: 'estimate_application_price' },
+  ...['estimate_setup_fee', 'estimate_setup_fee_prepay_waived', 'estimate_setup_fee_waived', 'estimate_no_setup_fee', 'estimate_prepay_total']
+    .map((shape) => ({ option: 'estimate', read: estimateTermsOf, shape })),
 ];
 const staffFactsFor = (copied) => STAFF_FACT_SENTENCES.filter(({ shape }) => copied.some((t) => paymentStatus.SHAPES[shape].test(t)));
 
@@ -256,7 +326,8 @@ async function paymentStatusVerdict({ customerId, body, snapshot = null, inbound
   const remainder = autoSend || text.length > paymentStatus.MAX_REPLY_CHARS ? afterCopies : paymentStatus.withoutCompanyPolicyCopies(afterCopies, inboundMessage);
   const inboundText = inboundMessage == null ? null : String(inboundMessage);
   const scoped = snapshot?.scoped === true || authorized.length > 0;
-  if (paymentStatus.remainderHasMoney(remainder, inboundText) || paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped })) {
+  if (paymentStatus.remainderHasMoney(remainder, inboundText) || paymentStatus.assertsPaymentStatus(remainder, { inboundText, scoped })
+      || paymentStatus.estimateTermsCopyNotAlone(copied, remainder)) {
     return { reason: 'payment_status_unauthorized', zelle: null };
   }
   // a copied sentence about a different record than the one the customer named answers nothing (Codex round-59 P2)
@@ -293,7 +364,7 @@ async function copiedSentencesStillRendered({ customerId, copied, snapshot, ctx,
     // Codex round-75 P2: the aggregator reports an inner read failure as billing.unavailable (not a throw) - an outage, retryable,
     // never "the sentence is no longer true"; so is a staff-fact lookup that failed (null), where a successful read that no longer
     // renders the sentence is "changed"
-    if (!context || context.billing?.unavailable === true || needs.some(({ key }) => context[key] == null)) return { reason: 'payment_status_recheck_failed', zelle: null };
+    if (!context || context.billing?.unavailable === true || needs.some(({ read }) => read(context) == null)) return { reason: 'payment_status_recheck_failed', zelle: null };
     const copiesZelle = copied.some((t) => ZELLE_WORD_RE.test(t));
     const zelle = copiesZelle ? await liveZelleFacts({ customerId, invoiceId: snapshot?.zelle?.invoice_id || null, dbh }) : null;
     // Codex round-71 P2: an UNREADABLE Zelle state (a target invoice whose eligibility could not be verified) is an outage, not a change -
@@ -385,10 +456,12 @@ async function outgoingAmountsStale({
   paymentStatusSnapshot = null,
   // Owner ruling 2026-10-01: the body is a STAFF EDIT of the AI draft (callers compare it with the stored draft; auto-send never sets this).
   humanEditedBody = false,
+  // The inbound sms_log row the decision answers (agent_decisions.sms_log_id): a copied PHOTO CHECK sentence is bound to its reading.
+  inboundSmsLogId,
 } = {}) {
-  const report = await reportDeliveryStale({ customerId, text: body, humanEditedBody, dbh });
-  if (report.stale) return report;
-  const text = report.rest;
+  const verified = await factSentencesStale({ customerId, inboundSmsLogId, body, promptVersion, humanEditedBody, dbh });
+  if (verified.stale) return verified;
+  const text = verified.rest;
   if (strictForVersion(promptVersion) && humanEditedBody !== true) {
     const verdict = await paymentStatusVerdict({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
     return verdict.reason ? { stale: true, reason: verdict.reason } : { stale: false, ...(verdict.zelle ? { zelle: verdict.zelle } : {}) };
@@ -410,4 +483,5 @@ module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible, liveZelleFacts,
   paymentStatusVerdict, paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary, bodyNeedsBillingBoundaryCheck,
   reportDeliveryStale,
+  photoCheckStale,
 };
