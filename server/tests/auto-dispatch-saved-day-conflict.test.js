@@ -128,4 +128,33 @@ describe('customer_blackout conflict (current-conflict.js)', () => {
     notice.collectUnmoved(bucket, { id: 'v1', scheduled_date: MON }, 'NO_VALID_SLOT', { kind: 'customer_blackout', date: MON });
     expect([...bucket.values()][0]).toMatchObject({ problem: 'customer_blackout', kind: 'no_slot' });
   });
+
+  test('apply-time destination check refuses landing inside customer blackout dates (FOR SHARE) for pest and lawn visits alike', async () => {
+    const preferences = require('../services/auto-dispatch/preferences');
+    const { makeMoveGuard } = require('../services/auto-dispatch/apply');
+    const refuse = (id, why) => Object.assign(new Error(`service ${id} ${why}`), { statusCode: 409, code: 'REFUSED' });
+    const locks = [];
+    const prefTrx = (prefRow) => jest.fn((name) => {
+      const c = {};
+      ['where', 'whereNot', 'whereNotIn', 'whereIn', 'orWhere', 'leftJoin', 'orderBy'].forEach((m) => { c[m] = () => c; });
+      c.forShare = () => { locks.push(name); return c; };
+      c.select = async () => [];
+      c.first = async () => (name === 'property_preferences' ? prefRow : null);
+      return c;
+    });
+    // Destination inside blackout range (string and Date columns) -> refused under FOR SHARE
+    await expect(preferences.assertDestinationClear(prefTrx(OFF), SERVICE, '2026-08-03', refuse, [PEST]))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('blackout dates') });
+    expect(locks).toContain('property_preferences');
+    await expect(preferences.assertDestinationClear(
+      prefTrx({ blackout_start: new Date('2026-08-01T00:00:00Z'), blackout_end: new Date('2026-08-04T00:00:00Z') }),
+      SERVICE, '2026-08-04', refuse, [PEST],
+    )).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('blackout dates') });
+    // Destination outside blackout range -> passes
+    await expect(preferences.assertDestinationClear(prefTrx(OFF), SERVICE, WED, refuse, [PEST])).resolves.toBeUndefined();
+    // makeMoveGuard enforces blackout even for a non-lawn (pest) visit
+    const guard = makeMoveGuard({ service: SERVICE, best: { date: '2026-08-02', start_time: '09:00', technician_id: 't1' } });
+    await expect(guard({ trx: prefTrx(OFF), technicianId: 't1' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'VISIT_AUTO_DISPATCH_CAPABILITY_GUARD', message: expect.stringContaining('blackout dates') });
+  });
 });
