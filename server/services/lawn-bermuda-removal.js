@@ -500,7 +500,7 @@ async function bermudaAreaViolation(knex, submittedEntries, { serviceId } = {}) 
 
 // Completion check, beside the pair check (fresh attempts only): a step spray on a
 // step visit that would be the 3rd this calendar year or fewer than 42 days after the
-// last one at that property is refused with the limit's own message. Judged through
+// last one at that property answers the limit's own message (the completion records it as a warning and alerts the office, owner 2026-11-26; a not-configured answer is still a refusal). Judged through
 // the same checkLimits path and program as the plan, bounded at the visit's date and
 // leaving this visit's own rows out. Returns the message, or null. Gate off, another
 // visit or no step product submitted: always null.
@@ -528,7 +528,7 @@ async function capViolation(knex, visit, sprayed) {
       wholeYear: true,
       ...(product.proposed ? { proposed: product.proposed } : {}),
     });
-    if (result.blocks.length) return `${result.blocks[0].message} Bermuda removal cannot be recorded on this visit.`;
+    if (result.blocks.length) return result.blocks[0].message;
   }
   return null;
 }
@@ -545,8 +545,11 @@ async function capViolation(knex, visit, sprayed) {
 // code lawn_bermuda_limit_reached and the transaction rolls back. The preflight
 // (bermudaLimitViolation, before any write) stays; this closes the race after it.
 // A fresh attempt only (the caller skips a resume). Gate off or no step: nothing.
+// `capsAreWarnings` (the completion's call, owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED"): a cap
+// breach is returned as the message for the completion to record and alert instead of throwing. The pair rule and the
+// not-configured refusal still throw (data entry and setup, not a cap). Returns the cap message, or nothing.
 const LOCK_NAMESPACE = 'bermuda-removal-step';
-async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {}) {
+async function enforceStepLimitsInTransaction(trx, products, { serviceId, capsAreWarnings = false } = {}) {
   if (!bermudaRemovalLive()) return;
   const { recognition, fusilade, unconfigured } = await submittedStepProducts(trx, products);
   if (!recognition && !fusilade) return;
@@ -568,7 +571,8 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
   const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
-  if (message) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
+  if (message && (!capsAreWarnings || message === NOT_CONFIGURED_MESSAGE)) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
+  return message || undefined;
 }
 
 // The pest recap is not a place to record the bermuda removal spray: it takes no treated area
@@ -1001,5 +1005,5 @@ module.exports = {
   bermudaRemovalLive, bermudaRemovalVisit, accountWantsBermudaRemoval, profileTrack, profilePropertyScope, stepAddOn, cultivarState,
   markStepLines, isStepLine,
   selectStepAtomically, settleStep, projectBermudaStep, openStep, addTestPatchNote, effectivePropertyId, stepProductIds, inMixingOrder, mixOrderField, optionNotes, stepOptionFields, EXCLUDED_CULTIVAR_WARNING,
-  excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, rateAdvisories,
+  excludedCultivarSql, stepForVisit, BERMUDA_GROUP, bermudaPairViolation, bermudaLimitViolation, enforceStepLimitsInTransaction, rateAdvisories, NOT_CONFIGURED_MESSAGE,
 };

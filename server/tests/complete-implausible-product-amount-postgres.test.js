@@ -165,6 +165,11 @@ postgres('technician implausible product amount', () => {
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
       expect(await nutrientRows(f)).toBe(0);
       expect(await savedDeductions(f)).toEqual([expect.objectContaining({ status: 'not_deducted_implausible', amount: 50000 })]);
+      // The annual nutrient fallback (service products with no ledger row) must not count the flagged line as 10,000 lb N.
+      const { calculateNutrientLedger } = require('../services/waveguard-plan-engine');
+      const catalogRows = await mockPg('products_catalog').where({ id: f.productId }).select('*');
+      const annual = await calculateNutrientLedger(mockPg, f.customerId, catalogRows, 1000, new Date(), { strict: true });
+      expect(annual).toMatchObject({ totalN: 0, nApplied: 0 });
     } finally { await cleanup(f); }
   });
 

@@ -756,6 +756,15 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id }))).rejects.toMatchObject({ code: 'lawn_bermuda_limit_reached' });
       });
 
+      test('the completion\'s call (capsAreWarnings) returns the cap message instead of throwing (owner 2026-11-26); the not-configured refusal still throws', async () => {
+        setGates();
+        const f = await asService(await lawn({ date: '2026-04-14', bermuda: true }), 'Pest Control Quarterly');
+        await spray(f, '2026-03-01');
+        await spray(f, '2026-03-02');
+        await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id, capsAreWarnings: true })))
+          .resolves.toEqual(expect.stringMatching(/LIMIT REACHED|min 42/));
+      });
+
       test('a lawn visit pinned to 2026.05 is not a step visit; pinned to v13 or unpinned it is, and is enforced', async () => {
         setGates();
         const old = await asService(await lawn({ date: '2026-04-14', bermuda: true }), 'Lawn fixture', '2026.05');

@@ -75,7 +75,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, completionLaneFlags, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
-const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
+const lawnProhibited = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
@@ -1914,7 +1914,6 @@ async function deductProductInventory(trx, {
   serviceProduct,
   serviceRecord,
   scheduledService,
-  allowNegative = false,
   overCeiling,
 }) {
   const lockedProduct = await trx('products_catalog')
@@ -1973,21 +1972,10 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
-  // allowNegative is passed ONLY for an advisory-stock completion
-  // (isStockAdvisoryCompletion): a lawn closeout (WaveGuard since the owner
-  // directive 2026-08-03), a pest or a tree & shrub visit (owner 2026-10-20). The deduction proceeds,
-  // inventory_on_hand goes negative, and the movement/snapshot below record the
-  // insufficient-stock state for audit (a shortfall also alerts the office:
-  // notifyOfficeOfStockShortfalls). Every other completion keeps the hard
-  // failure — this shared helper runs for palm/mosquito/termite/rodent visits
-  // too, which have no advisory lane to record the shortfall (codex P1 r1 on #3179).
-  if (insufficient && !allowNegative) {
-    const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
-    err.statusCode = 400;
-    err.isOperational = true;
-    err.code = 'waveguard_inventory_lockout';
-    throw err;
-  }
+  // Stock below zero never stops a completion, on any visit type (owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER
+  // BLOCKED FROM USING, FOR NOW"; the lawn directive 2026-08-03 and the pest/tree & shrub ruling 2026-10-20 already did this for
+  // those visits): a stale stock count must not trap the tech. The deduction proceeds, inventory_on_hand goes negative, the
+  // movement and snapshot below record the shortfall, and notifyOfficeOfStockShortfalls alerts the office for any visit type.
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
     deductedAmount,
@@ -2487,6 +2475,21 @@ for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annu
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
 
+// The two completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn, and a bermuda removal
+// step past its yearly or 42-day limit. Each is the application-limit finding shape, so it takes the same advisory line and office alert.
+const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
+const bermudaStepFinding = (message) => ({
+  code: 'application_limit_exceeded',
+  limitType: BERMUDA_STEP_LIMIT_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal went past its limit: ${message} The visit was recorded and the office was told.`,
+});
+FINDING_WHY[lawnProhibited.LIMIT_TYPE] = (name) => `${name} was recorded on a home lawn, and its label prohibits residential use.`;
+FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past its yearly or 42-day limit.';
+FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
+FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit past its limit: ${f.reason} The visit was recorded. Review it and report it if needed.`;
+
 const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
@@ -2507,7 +2510,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const dedupeKey = limitFindingDedupeKey(record, finding);
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
+        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : finding.limitType === lawnProhibited.LIMIT_TYPE ? `review ${name} label use` : over ? `review ${name} over its limit` : 'review product limits not checked',
         why,
         severity: 'needs-you',
         who: 'person',
@@ -2569,10 +2572,9 @@ function stockAlertWords(fullName, wordsFor, plain) {
 // A line flagged for an implausible amount (deductProductInventory; technician or admin, owner 2026-11-26) moved no stock: the
 // office checks the amount entered, one open alert for each record and product, instead of restocking.
 async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
-  const stockVisitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
-  // The shortfall alert is for the advisory-stock visits only. An amount no visit uses is flagged on every visit type
-  // (owner 2026-11-26: a product ceiling warns, never blocks), so the amount alert has a plain label for the others.
-  const visitLabel = stockVisitLabel || 'service';
+  // Every visit type may take stock below zero and every one alerts the office (owner 2026-11-26), so a type with no name of its
+  // own reads "service".
+  const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)] || 'service';
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
   const { stockShortfallKey } = require('../services/inventory-operations');
   let notes = record?.structured_notes || {};
@@ -2619,7 +2621,7 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
     });
   };
   const kinds = [
-    ...(stockVisitLabel ? [{ status: 'deducted_insufficient_stock', label: 'shortfall', send: sendShortfall }] : []),
+    { status: 'deducted_insufficient_stock', label: 'shortfall', send: sendShortfall },
     { status: 'not_deducted_implausible', label: 'amount', send: sendAmount },
   ];
   for (const { status, label, send } of kinds) {
@@ -3841,6 +3843,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // crossed: an advisory in the response and one dispatch alert. The work is done;
     // the completion is never blocked.
     let applicationLimitAdvisory = null;
+    // Findings a fresh lawn closeout WARNS about instead of refusing (owner 2026-11-26): oxadiazon on a home lawn (the label
+    // prohibits residential use) and a bermuda removal step past its yearly or 42-day limit. Recorded on the visit's advisory
+    // and sent to the office with the other application-limit findings, after the record is saved.
+    const lawnWarningFindings = [];
     // The names of the products this completion submitted (the payload's own, then the catalog's once it is read inside the record
     // transaction): the only evidence of a 13-0-13 if the post-save read of the record's rows fails (tsOrnamental.flagOrnamentalFertilizer).
     let submittedProductNames = payloadProductNames(products);
@@ -5496,15 +5502,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return outcomeBlock;
       }
     }
-    // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed; judged on the visit's linked property): a fresh lawn closeout that lists one is refused
-    // before any write. A same-key replay or resume of a committed completion is left alone.
+    // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed; judged on the visit's linked property). The label prohibits
+    // residential use, but the closeout only warns (owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING,
+    // FOR NOW"): the visit is recorded, flagged, and the office is alerted with the other limit findings below. A fresh closeout only.
     // Only while GATE_LAWN_V13 is on (the check reads the gate at call time).
     if (claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn') {
-      const prohibited = await lawnCloseoutProhibitedBlocks(db, svc, products);
-      if (prohibited.length) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
-        return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });
-      }
+      const prohibited = await lawnProhibited.lawnCloseoutProhibitedBlocks(db, svc, products);
+      lawnWarningFindings.push(...prohibited.map(lawnProhibited.lawnProhibitedProductFinding));
     }
 
     // A row tagged to a chemical area add-on is that add-on's application record, so a fresh closeout must carry its rate,
@@ -5625,16 +5629,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
       }
       // A recorded step spray states its treated area (or a rate): a spot mix has no catalog-derived amount.
-      if (bermudaAreaMessage && !bermudaLimitMessage) {
+      if (bermudaAreaMessage) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_area_required'), db);
         return { status: 400, body: { error: bermudaAreaMessage, code: 'lawn_bermuda_area_required' } };
       }
-      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after
-      // the last one at that property), judged the way the plan judges them.
-      if (bermudaLimitMessage) {
+      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after the last one at that property),
+      // judged the way the plan judges them, are a WARNING (owner 2026-11-26): recorded on the visit and sent to the office.
+      // The pair and area checks above are data entry and stay refusals; so does "its limits are not loaded" (setup, not a cap).
+      if (bermudaLimitMessage === require('./lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
         return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };
       }
+      if (bermudaLimitMessage) lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
         await CompletionAttempts.markCompletionAttemptFailed(
@@ -9109,9 +9115,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
-              // Advisory inventory posture: a pest, lawn or tree & shrub visit
-              // (isStockAdvisoryCompletion).
-              allowNegative: isStockAdvisoryCompletion(svc),
               overCeiling,
             });
             inventoryDeductions.push(deduction);
@@ -9132,7 +9135,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // on this transaction, before the application rows are written (a fresh attempt
         // only; the preflight above cannot see a spray a concurrent completion commits).
         if (!resumingCommittedCompletion && insertedServiceProducts.length) {
-          await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+          // The cap re-check under the customer lock stays, but a breach is a warning (owner 2026-11-26), once per completion.
+          const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id, capsAreWarnings: true });
+          if (capWarning && !lawnWarningFindings.some((finding) => finding.limitType === BERMUDA_STEP_LIMIT_TYPE)) lawnWarningFindings.push(bermudaStepFinding(capWarning));
         }
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
@@ -9228,13 +9233,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // authoritative counts — stock can move between the unlocked read
             // and the lock in either direction, so preflight numbers must
             // never survive a locked result (codex P2 r3+r4 on #3179).
+            // A line flagged over the ceiling (owner 2026-11-26) moved no stock, so a provisional shortfall for its product
+            // is refuted too; a genuine shortfall on another line of the product is added back from its own deduction below.
             // Non-stock blocks (inactive product) and preflight blocks for
             // products the deduction never quantified are kept.
             const keptBlocks = (waveguardInventoryAdvisory?.blocks || []).filter(
               (block) => !(
                 block.code === 'actual_inventory_insufficient_stock'
                 && block.productId != null
-                && ['deducted', 'deducted_insufficient_stock', 'not_deducted_counted'].includes(
+                && ['deducted', 'deducted_insufficient_stock', 'not_deducted_counted', 'not_deducted_implausible'].includes(
                   deductionStatusByProductId.get(String(block.productId)),
                 )
               ),
@@ -10427,7 +10434,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (deduped per record, so a retry or a resume rings once). Never blocks.
     if (record?.id && !issuedInvoiceCloseout) {
       // addOnRows: false when no row of this closeout is tagged to an add-on (the duplicate-application read is then skipped); a tag read that failed (a replay or resume) is not "none", so the read runs; the audit never asks the gate.
-      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db, addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags) });
+      const limitFindings = [
+        ...lawnWarningFindings,
+        ...await recordedProductLimitFindings({ svc, record, database: db, addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags) }),
+      ];
       if (limitFindings.length) {
         applicationLimitAdvisory = withLimitAdvisoryBlocks(applicationLimitAdvisory, limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId })));
         await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });

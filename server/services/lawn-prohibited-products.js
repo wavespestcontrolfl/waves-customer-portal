@@ -1,6 +1,8 @@
 'use strict';
 
-// Products the label bars from home lawns, checked by the lawn plan and the lawn closeout.
+// Products the label bars from home lawns, checked by the lawn plan and the lawn closeout. The plan shows a block; the
+// closeout only WARNS (owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"): the visit
+// is recorded and the office is alerted (lawnProhibitedProductFinding), never refused.
 //
 // Oxadiazon (Ronstar G, EPA 432-886, and the LESCO Ronstar fertilizer combos such as the 20-1-20)
 // reads "Not for Use in Turfgrass on Residential Properties" / "Not for use on home lawns". It
@@ -63,12 +65,12 @@ async function lawnProhibitedProductBlocks(database, submittedProducts = [], { p
   const list = Array.isArray(submittedProducts) ? submittedProducts : [];
   const blocks = [];
   const seen = new Set();
-  const push = (block) => { if (block && !seen.has(block.productName)) { seen.add(block.productName); blocks.push(block); } };
+  const push = (block, productId = null) => { if (block && !seen.has(block.productName)) { seen.add(block.productName); blocks.push(productId ? { ...block, productId } : block); } };
   for (const submitted of list) push(lawnProhibitedProductBlock({ productName: submitted?.productName || submitted?.name }));
   const ids = [...new Set(list.map((entry) => entry?.productId).filter(Boolean))];
   if (ids.length) {
     const rows = await database('products_catalog').whereIn('id', ids).select('id', 'name', 'display_name', 'active_ingredient');
-    for (const row of rows) push(lawnProhibitedProductBlock(row));
+    for (const row of rows) push(lawnProhibitedProductBlock(row), row.id);
   }
   return blocks;
 }
@@ -99,19 +101,22 @@ async function treatedPropertyType(database, { propertyId, customerId, fallback 
   } catch (err) { return failed('customers', err); }
 }
 
-// The 400 body a fresh lawn closeout returns for those blocks.
-function lawnProhibitedProductsBlockPayload(blocks) {
+// The finding a fresh lawn closeout records for one block (owner 2026-11-26): the application-limit advisory line for the
+// tech and the office alert, in the shape notifyOfficeOfLimitFindings reads. The visit still completes.
+const LIMIT_TYPE = 'label_prohibits_residential';
+function lawnProhibitedProductFinding(block) {
   return {
-    error: 'A product on this lawn visit is not for home lawns',
-    code: CODE,
-    details: blocks.map((block) => block.message),
-    blocks,
+    code: 'application_limit_exceeded',
+    limitType: LIMIT_TYPE,
+    productId: block.productId || null,
+    productName: block.productName,
+    message: `${block.productName}: the label prohibits residential use (oxadiazon is not for use on home lawns). The visit was recorded and the office was told.`,
   };
 }
 
 // The lawn closeout's check, in one place: only while GATE_LAWN_V13 is live (read at call time, like the
 // plan-side check; gate off is the pre-v13 closeout, byte for byte), for a lawn visit that lists products.
-// Returns the blocks to refuse the closeout with, [] when the closeout may go on.
+// Returns the blocks the closeout warns about, [] when there are none.
 async function lawnCloseoutProhibitedBlocks(database, svc, products) {
   if (require('../config/feature-gates').lawnV13Live?.() !== true) return [];
   if (!Array.isArray(products) || !products.length) return [];
@@ -119,4 +124,4 @@ async function lawnCloseoutProhibitedBlocks(database, svc, products) {
   return lawnProhibitedProductBlocks(database, products, { propertyType });
 }
 
-module.exports = { lawnCloseoutProhibitedBlocks, treatedPropertyType, isCommercialProperty, lawnProhibitedProductsBlockPayload, CODE, isProhibitedOnHomeLawns, lawnProhibitedProductBlock, lawnProhibitedProductBlocks };
+module.exports = { lawnCloseoutProhibitedBlocks, treatedPropertyType, isCommercialProperty, lawnProhibitedProductFinding, LIMIT_TYPE, CODE, isProhibitedOnHomeLawns, lawnProhibitedProductBlock, lawnProhibitedProductBlocks };

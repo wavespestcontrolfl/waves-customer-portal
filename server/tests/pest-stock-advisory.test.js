@@ -41,7 +41,7 @@ describe('which completions may take stock below zero', () => {
   });
 });
 
-describe('the deduction a pest visit now makes with allowNegative', () => {
+describe('the deduction a visit makes when stock is short (every visit type, owner 2026-11-26)', () => {
   // The row lock finds no row, so the deduction uses the passed-in product; the writes are recorded.
   // Every history-style read the helper makes is recorded in trx.reads (the limit is fixed, so there are none).
   const fakeTrx = (history = []) => {
@@ -71,7 +71,7 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
 
   test('goes below zero and records the shortfall instead of refusing', async () => {
     const trx = fakeTrx();
-    const result = await deductProductInventory(trx, { ...args, allowNegative: true });
+    const result = await deductProductInventory(trx, args);
     expect(result).toMatchObject({ status: 'deducted_insufficient_stock', stockBefore: 1, stockAfter: -3, deductedAmount: 4, inventoryUnit: 'fl_oz' });
     expect(trx.writes).toEqual([
       { table: 'products_catalog', update: expect.objectContaining({ inventory_on_hand: -3 }) },
@@ -79,14 +79,8 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
     ]);
   });
 
-  test('without it the same deduction is still refused, and nothing is written', async () => {
-    const trx = fakeTrx();
-    await expect(deductProductInventory(trx, args)).rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
-    expect(trx.writes).toEqual([]);
-  });
-
   describe('an amount no visit uses', () => {
-    const overdraw = (productInput, product = args.product) => ({ ...args, product, productInput, allowNegative: true });
+    const overdraw = (productInput, product = args.product) => ({ ...args, product, productInput});
     const refusedWith = (result, trx) => {
       expect(trx.writes).toEqual([]);
       expect(result).toMatchObject({ status: 'not_deducted_implausible', productId: args.product.id, stockBefore: 1, remainingStock: 1 });
@@ -152,11 +146,11 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
       expect(trx.reads).toEqual([]);
     });
 
-    test('406 lb on 500 on hand, for a visit that may or may not go negative: flagged, stock and movements untouched', async () => {
+    test('406 lb on 500 on hand: flagged, stock and movements untouched', async () => {
       const lb = { ...args.product, inventory_on_hand: '500', inventory_unit: 'lb' };
-      for (const allowNegative of [true, false]) {
+      {
         const trx = fakeTrx();
-        const result = await deductProductInventory(trx, { ...args, product: lb, productInput: { totalAmount: 406, amountUnit: 'lb' }, allowNegative });
+        const result = await deductProductInventory(trx, { ...args, product: lb, productInput: { totalAmount: 406, amountUnit: 'lb' } });
         expect(trx.writes).toEqual([]);
         expect(result).toMatchObject({ status: 'not_deducted_implausible', stockBefore: 500, remainingStock: 500, amount: 406, amountUnit: 'lb' });
         expect(result.movementId).toBeUndefined();
@@ -172,7 +166,7 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
         ['the unit will not convert to the stock unit', { inventory_on_hand: '500', inventory_unit: 'each' }],
       ])('%s', async (_name, productFields) => {
         const trx = fakeTrx();
-        const result = await deductProductInventory(trx, { ...args, product: { ...args.product, ...productFields }, productInput: over, allowNegative: true });
+        const result = await deductProductInventory(trx, { ...args, product: { ...args.product, ...productFields }, productInput: over});
         expect(trx.writes).toEqual([]);
         expect(result).toMatchObject({ status: 'not_deducted_implausible', productId: args.product.id, amount: 406, amountUnit: 'lb' });
       });
@@ -182,7 +176,7 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
         const hold = jest.spyOn(guard, 'stockHoldFor').mockResolvedValue({ countedAt: new Date(), countMovementId: 'count-1' });
         try {
           const trx = fakeTrx();
-          const result = await deductProductInventory(trx, { ...args, product: { ...args.product, inventory_on_hand: '500', inventory_unit: 'lb' }, productInput: over, allowNegative: true });
+          const result = await deductProductInventory(trx, { ...args, product: { ...args.product, inventory_on_hand: '500', inventory_unit: 'lb' }, productInput: over});
           expect(trx.writes).toEqual([]);
           expect(result.status).toBe('not_deducted_implausible');
         } finally { hold.mockRestore(); }
@@ -190,23 +184,23 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
 
       test('an ordinary amount on the same untracked product is untouched by the check', async () => {
         const trx = fakeTrx();
-        const result = await deductProductInventory(trx, { ...args, product: { ...args.product, inventory_on_hand: null }, productInput: { totalAmount: 4, amountUnit: 'fl_oz' }, allowNegative: true });
+        const result = await deductProductInventory(trx, { ...args, product: { ...args.product, inventory_on_hand: null }, productInput: { totalAmount: 4, amountUnit: 'fl_oz' }});
         expect(result.status).toBe('not_deducted');
       });
     });
 
-    test('a visit that may not go negative: an amount no visit uses is flagged, not refused (owner 2026-11-26)', async () => {
+    test('an amount no visit uses is flagged, not refused, on any visit type (owner 2026-11-26)', async () => {
       const trx = fakeTrx();
       const result = await deductProductInventory(trx, { ...args, productInput: { totalAmount: 1000000, amountUnit: 'fl_oz' } });
       refusedWith(result, trx);
       expect(trx.reads).toEqual([]);
     });
 
-    test('a visit that may not go negative still keeps the hard lockout for an ordinary shortfall', async () => {
+    test('an ordinary shortfall is deducted into the negative and recorded: there is no lockout', async () => {
       const trx = fakeTrx();
-      await expect(deductProductInventory(trx, { ...args, productInput: { totalAmount: 100, amountUnit: 'fl_oz' } }))
-        .rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
-      expect(trx.writes).toEqual([]);
+      const result = await deductProductInventory(trx, { ...args, productInput: { totalAmount: 100, amountUnit: 'fl_oz' } });
+      expect(result).toMatchObject({ status: 'deducted_insufficient_stock', stockBefore: 1, stockAfter: -99 });
+      expect(trx.writes).toHaveLength(2);
     });
   });
 });
@@ -355,8 +349,8 @@ describe('the office alert for an amount no visit uses', () => {
     expect(() => compose.composeAdminAlert(spec)).not.toThrow();
   });
 
-  test('a visit type with no stock alert still alerts for an amount no visit uses, in plain words (owner 2026-11-26)', async () => {
-    await run({ id: 'visit-1', customer_id: 'customer-1', service_type: 'Termite Bait Station' }, [refused(), { productId: 'prod-2', productName: 'Talak', status: 'deducted_insufficient_stock', stockAfter: -3 }]);
+  test('a visit type with no name of its own still alerts for an amount no visit uses, in plain words (owner 2026-11-26)', async () => {
+    await run({ id: 'visit-1', customer_id: 'customer-1', service_type: 'Termite Bait Station' }, [refused()]);
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
     expect(compose.raiseAdminAlert.mock.calls[0][1]).toMatchObject({ action: 'check Taurus SC amount', why: 'Taurus SC amount looks too big for a service visit, so stock was not changed.' });
   });
@@ -414,10 +408,10 @@ describe('the office alert for a lawn or tree & shrub visit', () => {
     expect(compose.raiseAdminAlert.mock.calls[0][1].why).toBe('Taurus SC went below zero in stock after a lawn visit.');
   });
 
-  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('a %s record never alerts', async (serviceType) => {
+  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('a %s record alerts too, with "service" for the visit (owner 2026-11-26: stock below zero never blocks any visit)', async (serviceType) => {
     const database = catalog({ 'prod-1': '-3' });
     await notifyOfficeOfStockShortfalls({ svc: { id: 'visit-1', service_type: serviceType }, record, database });
-    expect(database.transaction).not.toHaveBeenCalled();
-    expect(compose.raiseAdminAlert).not.toHaveBeenCalled();
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(compose.raiseAdminAlert.mock.calls[0][1].why).toBe('Taurus SC went below zero in stock after a service visit.');
   });
 });
