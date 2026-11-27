@@ -47,7 +47,7 @@ const GROUPS = [
   { key: 'copper', label: 'Copper', test: (p) => /copper/.test(text(p)) },
   { key: 'pyrethroid', label: 'Pyrethroid (bifenthrin and others)', test: (p) => iracCodes(p).has('3a') || PYRETHROIDS.test(text(p)) },
   { key: 'neonic', label: 'Neonic (imidacloprid and others)', test: (p) => ['4', '4a'].some((code) => iracCodes(p).has(code)) || NEONICS.test(text(p)) },
-  { key: 'granular', label: 'Granular product', test: (p) => /granul/.test(`${lower(p.formulation)} ${lower(p.name)}`) },
+  { key: 'granular', label: 'Granular product (spreader)', test: (p) => isSpreaderGranule(p) },
   { key: 'herbicide', label: 'Herbicide', test: (p) => lower(p.category) === 'herbicide' },
   { key: 'insecticide', label: 'Insecticide', test: (p) => lower(p.category) === 'insecticide' },
   { key: 'fungicide', label: 'Fungicide', test: (p) => lower(p.category) === 'fungicide' },
@@ -56,7 +56,7 @@ const GROUP_KEYS = GROUPS.map((g) => g.key);
 const GROUP_BY_KEY = new Map(GROUPS.map((g) => [g.key, g]));
 const SEVERITY = { never: 3, caution: 2, ok: 1 };
 
-const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'mixing_order_category', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes'];
+const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'application_method', 'mixing_order_category', 'requires_surfactant', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes'];
 
 function validationError(message) {
   const err = new Error(message);
@@ -81,10 +81,33 @@ function asList(value) {
 function catalogNotes(product) {
   const notes = asList(product.do_not_tank_mix_with)
     .map((item) => String(item || '').trim()).filter(Boolean)
-    .map((item) => ({ verdict: 'caution', reason: `Label: do not tank mix with ${item}`, source: 'catalog' }));
+    .map((item) => ({ verdict: 'caution', reason: `${product.name} label: do not tank mix with ${item}`, source: 'catalog' }));
   const compat = String(product.compatibility_notes || '').trim();
-  if (compat) notes.push({ verdict: 'caution', reason: `Label note: ${compat}`, source: 'catalog' });
+  // The note belongs to one product: its name leads, so it never reads as advice about the partner.
+  if (compat) notes.push({ verdict: 'caution', reason: `${product.name} label note: ${compat}`, source: 'catalog' });
   return notes.map((note) => ({ ...note, productId: product.id, productName: product.name }));
+}
+
+// Dry granules for a spreader (formulation granular / G / GR, granular bait, or a granular broadcast). Water-soluble
+// and water-dispersible granules (WSG, WDG, WG, SG, DF, "soluble granule") go in a spray tank and are not in the group.
+const SPRAY_GRANULE = /\b(wsg|wdg|wg|sg|df|soluble|dispersible|dry flowable)\b/;
+function isSpreaderGranule(p) {
+  const formulation = lower(p.formulation).trim();
+  if (SPRAY_GRANULE.test(formulation)) return false;
+  if (/^(granular|granules?|g|gr)( bait)?$/.test(formulation)) return true;
+  if (lower(p.application_method) === 'granular_broadcast') return true;
+  return !formulation && /\bgranul/.test(lower(p.name)) && !SPRAY_GRANULE.test(lower(p.name));
+}
+
+// One product's label needs a surfactant (requires_surfactant) and the other's forbids one (allows_surfactant = false).
+function surfactantConflict(x, y) {
+  const [needs, forbids] = x.requires_surfactant === true && y.allows_surfactant === false ? [x, y]
+    : y.requires_surfactant === true && x.allows_surfactant === false ? [y, x] : [null, null];
+  if (!needs) return null;
+  return {
+    kind: 'catalog', ruleId: null, jarTestRequired: false, verdict: 'never', source: 'catalog',
+    reason: `Label: ${needs.name} needs a surfactant, and ${forbids.name} does not allow one.`, productId: forbids.id, productName: forbids.name,
+  };
 }
 
 // The label field allows_surfactant = false, checked against a surfactant in the same tank. Only an explicit false
@@ -288,7 +311,7 @@ function evaluatePair(x, y, rules, notesById) {
   const groupRules = rules.filter((r) => r.group_b && (
     (String(r.product_a_id).toLowerCase() === xid && inGroup(y, r.group_b))
     || (String(r.product_a_id).toLowerCase() === yid && inGroup(x, r.group_b))));
-  const restrictions = [surfactantRestriction(x, y), surfactantRestriction(y, x)].filter(Boolean);
+  const restrictions = [surfactantRestriction(x, y), surfactantRestriction(y, x), surfactantConflict(x, y)].filter(Boolean);
   const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => ({ kind: 'catalog', ruleId: null, jarTestRequired: false, ...note }));
   const groupEntries = groupRules.map((r) => ruleEntry(r, 'group'));
   const entries = [...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupEntries, ...restrictions, ...catalog];
@@ -307,10 +330,11 @@ function headline(lead, entries) {
   };
 }
 
-// A pair where one product is not in the catalog: only the known product's apply-alone ('any') rules can answer it.
+// A pair where one product is not in the catalog: only the known product's apply-alone ('any') prohibition can answer
+// it. Anything weaker reads unknown: nothing is known about the missing product's own label.
 function applyAloneOnly(known, rules) {
   const kid = known ? String(known.id).toLowerCase() : null;
-  const entries = kid ? rules.filter((r) => r.group_b === 'any' && String(r.product_a_id).toLowerCase() === kid).map((r) => ruleEntry(r, 'group')) : [];
+  const entries = kid ? rules.filter((r) => r.group_b === 'any' && r.verdict === 'never' && String(r.product_a_id).toLowerCase() === kid).map((r) => ruleEntry(r, 'group')) : [];
   return headline(worst(entries), entries);
 }
 

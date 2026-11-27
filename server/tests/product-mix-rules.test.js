@@ -99,8 +99,8 @@ describe('checkMix', () => {
     expect(result.pairs[0].verdict).toBe('caution');
     expect(result.pairs[0].entries.map((e) => e.source)).toEqual(['catalog', 'catalog']);
     expect(result.catalogNotes.map((n) => n.reason)).toEqual([
-      'Label: do not tank mix with Additives that alter spray-solution pH below 5 or above 8.',
-      'Label note: Compatible with most insecticides and IGRs.',
+      'SpeedZone Southern EW label: do not tank mix with Additives that alter spray-solution pH below 5 or above 8.',
+      'Demand CS label note: Compatible with most insecticides and IGRs.',
     ]);
   });
 
@@ -166,6 +166,48 @@ describe('label fields and IRAC codes', () => {
     expect(mix.inGroup({ category: 'insecticide', irac_group: '28+3A' }, 'pyrethroid')).toBe(true);
     expect(mix.inGroup({ category: 'insecticide', moa_group: 'Group 3A + 4A' }, 'neonic')).toBe(true);
     expect(mix.inGroup({ category: 'fungicide', moa_group: 'Group 11 + 3' }, 'pyrethroid')).toBe(false);
+  });
+});
+
+describe('audit round 3', () => {
+  test('a product that needs a surfactant with one whose label forbids it reads Never and names both', async () => {
+    const DISMISS = { id: id(12), name: 'Dismiss NXT', category: 'herbicide', requires_surfactant: true };
+    const XTRA = { id: id(13), name: 'Acelepryn Xtra', category: 'insecticide', allows_surfactant: false };
+    mockTables.products_catalog.push(DISMISS, XTRA);
+    for (const order of [[DISMISS.id, XTRA.id], [XTRA.id, DISMISS.id]]) {
+      expect((await mix.checkMix(order)).pairs[0]).toMatchObject({
+        verdict: 'never', source: 'catalog', reason: 'Label: Dismiss NXT needs a surfactant, and Acelepryn Xtra does not allow one.',
+      });
+    }
+  });
+
+  test('an apply-alone Yes with a product not in the catalog reads unknown', async () => {
+    mockTables.product_mix_rules.push(rule(11, { product_a_id: DEMAND.id, group_b: 'any', verdict: 'ok', reason: 'Owner: mixes with anything.' }));
+    expect((await mix.checkMix([DEMAND.id, id(997)])).pairs[0]).toMatchObject({ verdict: 'unknown', entries: [] });
+  });
+
+  test.each([
+    [{ formulation: 'granular' }, true],
+    [{ formulation: 'G' }, true],
+    [{ formulation: 'GR' }, true],
+    [{ formulation: 'granular bait' }, true],
+    [{ formulation: '', application_method: 'granular_broadcast' }, true],
+    [{ formulation: null, name: 'Topchoice Granular Insecticide' }, true],
+    [{ formulation: 'soluble granule', name: 'Sedgehammer Plus' }, false],
+    [{ formulation: 'WSG', name: 'Atticus Antapex WSG' }, false],
+    [{ formulation: 'WDG' }, false],
+    [{ formulation: 'WG', name: 'Celsius WG' }, false],
+    [{ formulation: 'SG' }, false],
+    [{ formulation: 'DF' }, false],
+    [{ formulation: null, name: 'Some Water Dispersible Granule' }, false],
+  ])('granular group (spreader only): %j -> %s', (product, expected) => {
+    expect(mix.inGroup({ name: 'x', ...product }, 'granular')).toBe(expected);
+  });
+
+  test('every catalog note names the product it belongs to', async () => {
+    const result = await mix.checkMix([SPEEDZONE.id, DEMAND.id]);
+    expect(result.pairs[0].reason.startsWith('SpeedZone Southern EW label')).toBe(true);
+    for (const entry of result.pairs[0].entries) expect(entry.reason.startsWith(entry.productName)).toBe(true);
   });
 });
 

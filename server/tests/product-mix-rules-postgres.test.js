@@ -45,7 +45,7 @@ const mix = require('../services/product-mix-rules');
       CREATE TABLE products_catalog (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(150) NOT NULL, category varchar(30),
         subcategory varchar(100), active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
-        mixing_order_category varchar(50), allows_surfactant boolean,
+        application_method varchar(50), mixing_order_category varchar(50), requires_surfactant boolean, allows_surfactant boolean,
         do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true
       );
     `);
