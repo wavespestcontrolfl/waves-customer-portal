@@ -247,8 +247,8 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
 
   test('source pin: all 4 combined-refund sites queue post-commit raiseAdminAlert with bell:true and no-show hold sites use raiseAdminAlert with bell:true', () => {
     const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
-    expect(stripeSrc).toMatch(/for \(const combinedAlert of combinedRefundAlerts\) await alertCombinedRefund\(combinedAlert\);/);
-    expect(stripeSrc).toMatch(/async function alertCombinedRefund\(\{ spec, opts \}\)[\s\S]*?raiseAdminAlert\('billing', spec, opts\)/);
+    expect(stripeSrc).toMatch(/await emitCombinedRefundAlerts\(combinedRefundAlerts\);/);
+    expect(stripeSrc).toMatch(/async function emitCombinedRefundAlerts\(alerts\)[\s\S]*?raiseAdminAlert\('billing', spec, opts\)/);
     for (const key of [
       'combined-partial-refund:',
       'combined-cumulative-refund:',

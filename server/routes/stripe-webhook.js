@@ -4181,7 +4181,7 @@ async function handleChargeRefunded(charge) {
   // Stripe kept (the refund.failed handler already notified the office).
   if (feeRefundFencedInLock) return;
   for (const mixed of mixedRefunds) await alertMixedRefund(mixed, { chargeId, refundId });
-  for (const combinedAlert of combinedRefundAlerts) await alertCombinedRefund(combinedAlert);
+  await emitCombinedRefundAlerts(combinedRefundAlerts);
   if (refundedPayment?.customer_id) {
     PaymentLifecycleEmail.sendRefundIssued({
       customerId: refundedPayment.customer_id,
@@ -7436,11 +7436,14 @@ async function alertMixedRefund({ invoiceId, handCents }, { chargeId, refundId }
   }
 }
 
-async function alertCombinedRefund({ spec, opts }) {
-  try {
-    const { raiseAdminAlert } = require('../services/admin-alert-compose');
-    await raiseAdminAlert('billing', spec, opts);
-  } catch { /* non-critical */ }
+async function emitCombinedRefundAlerts(alerts) {
+  if (!alerts.length) return;
+  const { raiseAdminAlert } = require('../services/admin-alert-compose');
+  for (const { spec, opts } of alerts) {
+    try {
+      await raiseAdminAlert('billing', spec, opts);
+    } catch { /* non-critical */ }
+  }
 }
 
 // The facts the remove compares the locked invoice against, or null when this
