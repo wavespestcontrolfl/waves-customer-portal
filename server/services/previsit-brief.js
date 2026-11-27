@@ -70,6 +70,7 @@ const { compilePropertyAlerts } = require('./nextstop-alerts');
 const { redactAccessCodes, customerSafeVisitNotes } = require('./context-aggregator');
 const { normalizeServiceType, stripServiceSuffixes, detectServiceCategory, hasCompletedVisit } = require('../utils/service-normalizer');
 const { etDateString, etCalendarDayOf, parseETDateTime } = require('../utils/datetime-et');
+const { previewText } = require('../utils/visit-notes');
 
 // Exact stored type strings. WDO_BRIEF_TYPE mirrors
 // appointment-tagger.js triggerWDOPrep (pre_service_brief_type:
@@ -114,6 +115,47 @@ function briefGateEnabled() {
 // tech-ownership-scoped the route already is.
 function visitFactsGateEnabled() {
   return process.env.GATE_VISIT_FACTS === 'true';
+}
+
+// The customer's newest completed visits of EVERY service line (owner 2026-11-26,
+// "ALL REC"): date, service name, the technician's note (the day payload's own
+// previewText cut, same as lastLineServiceNotes), product NAMES only (no rates,
+// no money) and a free re-service mark. The visit being viewed is left out.
+// Fail-soft: a read failure returns null so the key is omitted and the client
+// keeps its single-visit section; a product read failure only empties names.
+const PAST_VISITS_LIMIT = 5;
+async function loadPastVisits(dbh, svc) {
+  try {
+    const { isReserviceVisit } = require('./reservice-asks');
+    const rows = await dbh('service_records')
+      .where({ customer_id: svc.customer_id, status: 'completed' })
+      // whereNot alone drops NULL rows: a record with no scheduled visit stays.
+      .where(function notThisVisit() {
+        this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', svc.id);
+      })
+      .orderBy('service_date', 'desc')
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(PAST_VISITS_LIMIT)
+      .select('id', 'service_type', 'service_date', 'technician_notes', 'is_callback');
+    let productRows = [];
+    try {
+      productRows = await loadProductHistory(dbh, rows.map((r) => r.id));
+    } catch (err) {
+      logger.warn(`[previsit-brief] visit-facts past-visit products unreadable for customer ${svc.customer_id}: ${err.message}`);
+    }
+    return rows.map((r) => ({
+      date: calendarDay(r.service_date),
+      type: cleanText(normalizeServiceType(r.service_type) || r.service_type, 120),
+      notes: previewText(r.technician_notes),
+      products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)))
+        .map((p) => ({ name: p.name })),
+      callback: isReserviceVisit({ is_callback: r.is_callback === true }),
+    }));
+  } catch (err) {
+    logger.warn(`[previsit-brief] visit-facts past visits unreadable for customer ${svc.customer_id}: ${err.message}`);
+    return null;
+  }
 }
 
 // Unlike brief GENERATION (strict-fail so an outage never overwrites a
@@ -175,11 +217,14 @@ async function deterministicVisitFacts(svc, dbh = db) {
       logger.warn(`[previsit-brief] visit-facts customerFlagged unreadable for service ${svc.id}: ${err.message}`);
     }
   }
+  const pastVisits = await loadPastVisits(dbh, svc);
   // history_unavailable: the service-history read failed, so a null last_visit
   // means "unknown", never "no earlier visit" (readers must not claim one).
+  // past_visits is additive and absent on a read failure (readers fall back to last_visit).
   return {
     access,
     last_visit: lastVisit,
+    ...(pastVisits ? { past_visits: pastVisits } : {}),
     ...(history.available ? {} : { history_unavailable: true }),
     ...(customerFlagged ? { customerFlagged } : {}),
     ...(animalWarnings.length ? { labelAnimalWarnings: animalWarnings } : {}),
