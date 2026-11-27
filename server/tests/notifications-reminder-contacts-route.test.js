@@ -138,3 +138,13 @@ test('a signed-in profile staff turned off reaches nothing on its account', asyn
   expect((await call('POST', `/reminder-contacts/${SIBLING}/${REMINDER}/stop`)).status).toBe(403);
   expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
 });
+
+test('a profile id in capital letters is the same profile', async () => {
+  const UPPER = 'AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA';
+  const lower = UPPER.toLowerCase();
+  mockProfiles.current = {
+    [OWN]: { id: OWN, active: true, deleted_at: null, owner_account: OWN },
+    [lower]: { id: lower, active: true, deleted_at: null, owner_account: OWN },
+  };
+  expect((await call('GET', `/reminder-contacts/${UPPER}`)).status).toBe(200);
+});

@@ -1267,15 +1267,16 @@ async function profileOnAccount(req, customerId, { conn = db, lock = false } = {
   if (!accountId || !customerId || !selfId) return false;
   // Both rows, in id order (a stable lock order): the target profile, and the signed-in profile itself, which must
   // still be on the account the session names (a profile moved away after sign-in reaches nothing).
-  const ids = [...new Set([String(customerId), String(selfId)])].sort();
+  const key = (v) => String(v).toLowerCase();
+  const ids = [...new Set([key(customerId), key(selfId)])].sort();
   const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc')
     .select('id', 'active', 'deleted_at', conn.raw('COALESCE(account_id, id) AS owner_account'));
   if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
   const rows = await q;
-  const byId = new Map(rows.map((r) => [String(r.id), r]));
+  const byId = new Map(rows.map((r) => [key(r.id), r]));
   // Both rows active, undeleted and on the session's account (staff turning off the signed-in profile ends its reach).
-  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && String(r.owner_account) === String(accountId);
-  return onAccount(byId.get(String(customerId))) && onAccount(byId.get(String(selfId)));
+  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && key(r.owner_account) === key(accountId);
+  return onAccount(byId.get(key(customerId))) && onAccount(byId.get(key(selfId)));
 }
 
 const UUID_PARAM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

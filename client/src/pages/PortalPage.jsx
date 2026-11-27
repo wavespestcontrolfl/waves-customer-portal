@@ -5507,7 +5507,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
     <div data-testid="reminder-contacts" style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Also gets visit texts</div>
       <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
-        People named on a call get the booking, reminder and on-the-way texts for every visit. Being on this list does not give app access.
+        People named on a call get the booking, reminder and on-the-way texts for every visit. Stop and Restart apply to every address on this profile. Being on this list does not give app access.
       </div>
       {list.map((person) => {
         const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';

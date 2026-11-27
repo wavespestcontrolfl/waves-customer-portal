@@ -58,7 +58,7 @@ describe('Also gets visit texts (named on a call)', () => {
     setup();
     const section = await screen.findByTestId('reminder-contacts');
     expect(within(section).getByText('Also gets visit texts')).toBeInTheDocument();
-    expect(within(section).getByText(/People named on a call get the booking, reminder and on-the-way texts for every visit\. Being on this list does not give app access\./)).toBeInTheDocument();
+    expect(within(section).getByText(/People named on a call get the booking, reminder and on-the-way texts for every visit\. Stop and Restart apply to every address on this profile\. Being on this list does not give app access\./)).toBeInTheDocument();
     expect(within(section).getByText('Bob Example')).toBeInTheDocument();
     expect(api.getReminderContacts).toHaveBeenCalledWith('c1');
   });
