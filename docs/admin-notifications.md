@@ -315,8 +315,9 @@ customer's message by this rule.
    minutes, records in `alert_clear_verdicts` whether each open one is `answered`, `nothing_to_answer` or `still_owed`. SHADOW ONLY: it
    closes, edits and rings no bell and sends no text, email or call; the verdicts are scored against what staff did for a week before
    any live mode is built. It reads what came before the bell and every record created after it (texts, calls, visits, estimates,
-   email-thread messages). Plain rules go first: an unknown missed call with no voicemail and 24 hours of silence is
-   `nothing_to_answer` when the text-back for that call reached the caller (a bounced one did not), or the caller failed the
+   email-thread messages). Plain rules go first: an unknown missed call with no voicemail, 24 hours of silence and no call from
+   Waves to the number is `nothing_to_answer` when the text-back for that call reached the caller (its claim says sent, or the
+   provider's receipt says delivered; a bounced or cancelled one did not), or the caller failed the
    press-1 screen (a robocall; the bell's robodialer pattern markers alone do not count); a repeat call that the one-per-number
    text-back skipped stays open; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
    definitions above (never `message_type` manual or seconds alone), after the bell is `answered`, proof = that record. A bell that says we owe a quote, a callback or a promise
@@ -326,7 +327,7 @@ customer's message by this rule.
    a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time needs a
    booking after it, and a finished visit never answers a question about its result. A visit move (a new day or a new start)
    answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
-   customer is never an answer.
+   customer, or a hand-off for the customer to pick a time (no time is booked), is never an answer.
    Any doubt, error or refusal is `still_owed`. A bell is judged again only when a new record appears after it or the rules change.
    A complaint-call bell (`Comms — call <name> about a complaint`, `doneWhen: 'complaint_answered'`, dedupe key
    `call-complaint:<call id>`) rings once per call, right after the call gets the final label `complaint_escalated`,

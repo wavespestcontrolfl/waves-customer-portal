@@ -745,11 +745,14 @@ describe('the model never closes a silent missed call early', () => {
       expect(row).toMatchObject({ outcome: 'still_owed', rule: 'silent_call_wait' });
       return row.why;
     };
-    const unknown = { customerId: null, hasVoicemail: false, textBackSent: false, textBackBounced: false, robocall: null };
+    const unknown = { customerId: null, hasVoicemail: false, textBackSent: false, textBackUnsent: false, robocall: null };
     expect(await why(unknown)).toBe('no text-back went out for this call');
-    expect(await why({ ...unknown, textBackBounced: true })).toBe('the text-back for this call did not deliver');
+    expect(await why({ ...unknown, textBackUnsent: true })).toBe('the text-back for this call has not reached the caller');
     const again = ev({ type: 'call', id: 'c2', key: 'call:c2', inbound: true, line: 'CALL inbound' });
     expect(await why({ ...unknown, textBackSent: true }, { events: [again] })).toBe('the number called or texted again after the alert');
+    // A call from Waves that reached no one is Waves' call, never the caller calling again.
+    const callBack = ev({ type: 'call', id: 'c3', key: 'call:c3', inbound: false, line: 'CALL outbound' });
+    expect(await why({ ...unknown, textBackSent: true }, { events: [callBack] })).toBe('Waves called the number after the alert');
     expect(await why({ ...unknown, textBackSent: true }, { now: NOW })).toBe('under 24 hours since the call');
     expect(await why({ ...unknown, customerId: 'c1' })).toBe('a customer left no voicemail: only a real answer closes it');
   });
@@ -795,20 +798,25 @@ describe('the text-back for this call', () => {
     };
     return { conn: null, read, labels };
   };
+  const CALL = { id: 'call-1', created_at: ALERT_AT };
   test.each([
-    ['a sent claim and a delivered text', 'sent', 'delivered', { sent: true, bounced: false, state: 'sent:delivered' }],
-    ['a sent claim with no text row yet', 'sent', null, { sent: true, bounced: false, state: 'sent:none' }],
-    ['a sent claim whose text bounced', 'sent', 'undelivered', { sent: false, bounced: true, state: 'sent:undelivered' }],
-    ['a sent claim whose text failed', 'sent', 'failed', { sent: false, bounced: true, state: 'sent:failed' }],
-    ['a claim still dispatching', 'dispatching', 'sent', { sent: false, bounced: false, state: 'dispatching:sent' }],
+    ['a sent claim and a delivered text', 'sent', 'delivered', { sent: true, unsent: false, state: 'sent:delivered' }],
+    ['a sent claim with no text row yet', 'sent', null, { sent: true, unsent: false, state: 'sent:none' }],
+    ['a sent claim whose text bounced', 'sent', 'undelivered', { sent: false, unsent: true, state: 'sent:undelivered' }],
+    ['a sent claim whose text failed', 'sent', 'failed', { sent: false, unsent: true, state: 'sent:failed' }],
+    ['a sent claim whose text was cancelled', 'sent', 'canceled', { sent: false, unsent: true, state: 'sent:canceled' }],
+    ['an uncertain claim whose text the provider delivered', 'uncertain', 'delivered', { sent: true, unsent: false, state: 'uncertain:delivered' }],
+    ['an uncertain claim whose text has no receipt', 'uncertain', 'sent', { sent: false, unsent: false, state: 'uncertain:sent' }],
+    ['an uncertain claim whose text bounced', 'uncertain', 'undelivered', { sent: false, unsent: true, state: 'uncertain:undelivered' }],
+    ['a claim still dispatching', 'dispatching', 'sent', { sent: false, unsent: false, state: 'dispatching:sent' }],
   ])('%s', async (_n, claim, text, expected) => {
-    expect(await agent.textBackWasSent(reader(claim, text), 'call-1', '+19415550100')).toMatchObject(expected);
+    expect(await agent.textBackWasSent(reader(claim, text), CALL, '+19415550100')).toMatchObject(expected);
   });
 
   // The send pipeline keeps no call id on the text row: the number's text-back is this call's only when this call holds the claim.
   test('with no claim for this call, the number\'s text-back (an earlier call\'s) is not read and does not count', async () => {
     const r = reader(null, 'delivered');
-    expect(await agent.textBackWasSent(r, 'call-2', '+19415550100')).toMatchObject({ sent: false, bounced: false, state: 'none:none' });
+    expect(await agent.textBackWasSent(r, { ...CALL, id: 'call-2' }, '+19415550100')).toMatchObject({ sent: false, unsent: false, state: 'none:none' });
     expect(r.labels).toEqual(['text-back-claim']);
   });
 });
@@ -844,6 +852,14 @@ describe('a visit move answers only when Waves staff made it and the visit still
     expect(agent.rescheduleEvent(move({ new_window: null })).proof).toBe('date_change');
     expect(agent.rescheduleEvent(move({ new_window: null, visit_date: day('2026-11-28') })).proof).toBeNull();
     expect(agent.rescheduleEvent(move({ visit_date: null })).proof).toBeNull();
+  });
+
+  test('a hand-off for the customer to pick a time books nothing: never a proof, whoever handed it off', () => {
+    for (const initiatedBy of ['admin', 'tech', 'rain_out']) {
+      const e = agent.rescheduleEvent(move({ initiated_by: initiatedBy, pick_handoff: true, new_window: null, window_start: null, window_end: null }));
+      expect(e.proof).toBeNull();
+      expect(e.line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by .+ after the alert \(admin_series\), from 2026-11-23 09:00-10:00; no time is booked, so this is no answer$/);
+    }
   });
 
   test('a Quick Move by a tech, an Intelligence Bar move and a Schedule bulk move are a person\'s', () => {

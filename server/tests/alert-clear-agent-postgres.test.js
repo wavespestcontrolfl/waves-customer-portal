@@ -284,11 +284,14 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     // The same window written another way, and a new end alone: no move at all.
     await move({ original_date: '2027-01-12', original_window: '15:00:00-16:00:00', new_date: '2027-01-12', new_window: '15:00-16:00', initiated_by: 'admin' });
     await move({ original_date: '2027-01-12', original_window: '15:00-16:00', new_date: '2027-01-12', new_window: '15:00-17:00', initiated_by: 'admin_bulk' });
+    // A staff hand-off for the customer to pick a time (the row rain-out.js writes: due day, no time, its marker in notes).
+    const handoff = await move({ new_date: '2027-01-12', new_window: null, initiated_by: 'admin', notes: require('../services/rain-out').PICK_LOG_MARKER });
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const moves = (await agent.buildTimeline(row)).events.filter((e) => e.type === 'reschedule');
-    expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since].sort());
+    expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since, handoff].sort());
     expect(moves.filter((e) => e.proof === 'date_change').map((e) => e.id).sort()).toEqual([held, sameDay].sort());
     expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now: the visit has moved since, to 2027-01-12 15:00-16:00$/);
+    expect(moves.find((e) => e.id === handoff).line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by Waves staff .*no time is booked, so this is no answer$/);
   });
 
   test('a known customer keeps a person\'s text to the resolved number even when that row has no customer id (number not shared)', async () => {
@@ -365,8 +368,23 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await db('missed_call_text_claims').insert({ phone: bouncedNumber, outcome: 'sent', call_log_id: bouncedCall });
     await sms({ direction: 'outbound', to_phone: bouncedNumber, message_type: 'missed_call_text_back', status: 'undelivered', twilio_sid: `SM${tag}k`, message_body: 'Sorry we missed your call', created_at: at(1), metadata: { template_key: 'missed_call_text_back' } });
     const bounced = await timelineFor(bouncedCall);
-    expect(bounced.call).toMatchObject({ textBackSent: false, textBackBounced: true, robocall: null, textBackState: 'sent:undelivered' });
+    expect(bounced.call).toMatchObject({ textBackSent: false, textBackUnsent: true, robocall: null, textBackState: 'sent:undelivered' });
     expect(agent.ruleVerdict({ category: 'missed_call' }, bounced, false, day)).toBeNull();
+
+    // A cancelled text never went out, though the claim says sent. The shared text base hides cancelled rows; this read sees them.
+    const textBackCall = async (n, claim, status, sentAt, suffix) => {
+      const number = phone(n);
+      const callId = await missedCall(number);
+      await db('missed_call_text_claims').insert({ phone: number, outcome: claim, call_log_id: callId });
+      await sms({ direction: 'outbound', to_phone: number, message_type: 'missed_call_text_back', status, twilio_sid: `SM${tag}${suffix}`, message_body: 'Sorry we missed your call', created_at: sentAt });
+      return (await timelineFor(callId)).call;
+    };
+    const cancelled = await textBackCall(66, 'sent', 'cancelled', at(1), 'tb1');
+    expect(cancelled).toMatchObject({ textBackSent: false, textBackUnsent: true, textBackState: 'sent:cancelled' });
+    // An unclear provider reply left the claim uncertain, then the provider's receipt said delivered: the text reached the caller.
+    expect(await textBackCall(67, 'uncertain', 'delivered', at(1), 'tb2')).toMatchObject({ textBackSent: true, textBackUnsent: false, textBackState: 'uncertain:delivered' });
+    // Only a text written after this call began is this call's: an older delivered text-back to the number is not.
+    expect(await textBackCall(68, 'uncertain', 'delivered', at(-600), 'tb3')).toMatchObject({ textBackSent: false, textBackState: 'uncertain:none' });
 
     // The same number calls again: the lane holds its one claim on the first call, so the delivered or bounced text is not this call's.
     const repeatNumber = phone(65);
@@ -374,7 +392,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const repeatCall = await missedCall(repeatNumber);
     await db('missed_call_text_claims').insert({ phone: repeatNumber, outcome: 'sent', call_log_id: firstCall });
     await sms({ direction: 'outbound', to_phone: repeatNumber, message_type: 'missed_call_text_back', status: 'delivered', twilio_sid: `SM${tag}m`, message_body: 'Sorry we missed your call', created_at: at(-598) });
-    expect((await timelineFor(repeatCall)).call).toMatchObject({ textBackSent: false, textBackBounced: false, textBackState: 'none:none' });
+    expect((await timelineFor(repeatCall)).call).toMatchObject({ textBackSent: false, textBackUnsent: false, textBackState: 'none:none' });
 
     // A failed press-1 screen: a robocall, closed after 24 hours although no text-back went out.
     const screened = await timelineFor(await missedCall(phone(62), { preconnect_screen: 'failed' }));

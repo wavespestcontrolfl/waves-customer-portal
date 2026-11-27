@@ -233,17 +233,23 @@ function moveStillHolds(row) {
 // alone is no move, so it is never read as one.
 const realMove = (row) => dateOnlyString(row.new_date) !== dateOnlyString(row.original_date)
   || startOfWindow(row.new_window) !== startOfWindow(row.original_window);
+// A hand-off (`pick_handoff`: the log row carries rain-out.js PICK_LOG_MARKER) parks the visit on its due day with no time while the
+// customer picks one: it books nothing, so it is never a proof, whoever handed it off.
 function rescheduleEvent(row) {
-  const answers = isStaffMove(row) && moveStillHolds(row);
+  const answers = !row.pick_handoff && isStaffMove(row) && moveStillHolds(row);
   const [oldStart, oldEnd] = String(row.original_window || '').split('-');
   const [newStart, newEnd] = String(row.new_window || '').split('-');
+  const from = slotText(row.original_date, oldStart, oldEnd);
+  const reason = row.reason_code || 'moved';
   let note = 'the visit still holds that time';
   if (!isStaffMove(row)) note = 'not an answer from Waves';
   else if (!answers) note = `not an answer now: the visit has moved since, to ${slotText(row.visit_date, row.window_start, row.window_end)}`;
+  const line = row.pick_handoff
+    ? `VISIT HANDED TO THE CUSTOMER TO PICK A TIME by ${moverText(row)} after the alert (${reason}), from ${from}; no time is booked, so this is no answer`
+    : `VISIT MOVED by ${moverText(row)} after the alert (${reason}), from ${from} to ${slotText(row.new_date, newStart, newEnd)}; ${note}`;
   return {
     type: 'reschedule', id: String(row.id), key: `reschedule:${row.id}`, at: toDate(row.created_at), inbound: false,
-    proof: answers ? 'date_change' : null, draft: false,
-    line: `VISIT MOVED by ${moverText(row)} after the alert (${row.reason_code || 'moved'}), from ${slotText(row.original_date, oldStart, oldEnd)} to ${slotText(row.new_date, newStart, newEnd)}; ${note}`,
+    proof: answers ? 'date_change' : null, draft: false, line,
   };
 }
 
@@ -395,7 +401,8 @@ async function customerRecordsAfter(r, anchor, customerId) {
       .whereRaw('COALESCE(s.status, \'\') NOT IN (' + VISIT_NEVER_RAN_STATUSES.map(() => '?').join(', ') + ')', VISIT_NEVER_RAN_STATUSES)
       .orderBy('rl.created_at', 'asc').limit(ROW_CAP)
       .select('rl.id', 'rl.created_at', 'rl.reason_code', 'rl.initiated_by', 'rl.original_date', 'rl.new_date', 'rl.original_window', 'rl.new_window',
-        's.scheduled_date as visit_date', 's.window_start', 's.window_end')),
+        's.scheduled_date as visit_date', 's.window_start', 's.window_end',
+        conn.raw('COALESCE(rl.notes = ?, false) AS pick_handoff', [require('./rain-out').PICK_LOG_MARKER]))),
   ]);
   const handed = estimates.map((row) => ({ row, at: witnessAt(row, anchor) })).filter((x) => x.at).map((x) => estimateEvent(x.row, x.at));
   return [...booked.map(visitEvent), ...done.map(doneVisitEvent), ...handed, ...moves.filter(realMove).map(rescheduleEvent)];
@@ -531,23 +538,27 @@ async function loadCall(r, callId) {
   return rows[0] || null;
 }
 
-// The missed-call text-back sent for THIS call: the lane's own claim names the originating call (missed_call_text_claims.call_log_id,
-// outcome sent). Never "some text to the number a minute later", and never the number's earlier text-back: a later call the lane
-// skipped (one text per number ever) holds no claim of its own. The send pipeline keeps no call id on the text row, so the text is the
-// number's one text-back row, read only when this call holds the claim. A text the provider bounced reached no one whatever the
-// claim says (the lane's own unsent list, auto-text-holds.js UNSENT_STATUSES).
-async function textBackWasSent(r, callId, phone) {
+// The missed-call text-back sent for THIS call: the lane's own claim names the originating call (missed_call_text_claims.call_log_id).
+// Never "some text to the number a minute later", and never the number's earlier text-back: a later call the lane skipped (one text
+// per number ever) holds no claim of its own. The send pipeline keeps no call id on the text row, so the text is the number's newest
+// text-back row written after this call began, read only when this call holds the claim, and read from sms_log itself: the shared
+// text base hides cancelled rows. It went out when the claim says sent, or when the provider's receipt says delivered or read (a claim
+// an unclear provider reply left uncertain). A text the provider bounced, or one never sent (the lane's own unsent list,
+// auto-text-holds.js UNSENT_STATUSES), reached no one whatever the claim says.
+const TEXT_BACK_RECEIPTS = ['delivered', 'read'];
+async function textBackWasSent(r, call, phone) {
   const { CLAIM, MESSAGE_TYPE } = require('./missed-call-text-back');
   const { UNSENT_STATUSES } = require('./messaging/auto-text-holds');
-  const claims = await r.read('text-back-claim', () => r.conn('missed_call_text_claims').where({ call_log_id: callId }).limit(1).select('outcome'));
+  const claims = await r.read('text-back-claim', () => r.conn('missed_call_text_claims').where({ call_log_id: call.id }).limit(1).select('outcome'));
   const claim = claims[0]?.outcome || 'none';
   const peer = phoneIdentityKey(phone);
-  const texts = claims.length && peer ? await r.read('text-back', () => smsBase(r.conn).where('os.direction', 'outbound').where('os.message_type', MESSAGE_TYPE)
-    .whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [peer]).orderBy('os.created_at', 'desc').limit(1).select('os.status')) : [];
-  const text = texts[0]?.status || 'none';
-  const bounced = UNSENT_STATUSES.includes(text);
+  const texts = claims.length && peer ? await r.read('text-back', () => r.conn('sms_log as os').where('os.direction', 'outbound').where('os.message_type', MESSAGE_TYPE)
+    .whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [peer]).where('os.created_at', '>=', toDate(call.created_at))
+    .orderBy('os.created_at', 'desc').limit(1).select('os.status')) : [];
+  const text = String(texts[0]?.status || 'none').toLowerCase();
+  const unsent = UNSENT_STATUSES.includes(text);
   // `state` rides in the fingerprint: a claim that moves (dispatching to sent) or a text that settles or bounces is a new look.
-  return { sent: claim === CLAIM.SENT && !bounced, bounced, state: `${claim}:${text}` };
+  return { sent: !unsent && (claim === CLAIM.SENT || TEXT_BACK_RECEIPTS.includes(text)), unsent, state: `${claim}:${text}` };
 }
 
 // A robocall: the caller failed the press-1 screen (missed-call-text-back.js failedPreconnectScreen; owner ruling 2026-10-24: a real
@@ -602,14 +613,14 @@ async function callTimeline(r, alert, bellAt) {
   const ctx = [`CALLER: ${clean(alert.title, 120)}. Rang ${call.duration_seconds || 0} sec. ${voicemailNote(call, hasVoicemail)}`];
   const events = await eventsAfter(r, anchor, await trustedContact(r, customerId, phone, anchor), { ownCallId: call.id });
   const unknownMissed = alert.category === 'missed_call' && !customerId;
-  const textBack = unknownMissed ? await textBackWasSent(r, call.id, phone) : { sent: false, bounced: false, state: '' };
+  const textBack = unknownMissed ? await textBackWasSent(r, call, phone) : { sent: false, unsent: false, state: '' };
   const robocall = unknownMissed && isRobocall(call) ? 'screen_failed' : null;
   // The trigger carries the call's voicemail evidence and customer link: a late transcript or a late link is a new look.
   const trigger = `call:${callId}:vm${hasVoicemail ? 1 : 0}:t${call.transcription_status || ''}:c${customerId || ''}`;
   return timelineOf(anchor, bellAt, trigger, {
     customerKnown: !!customerId, ctx, events,
     // The robocall mark rides in the fingerprint with the text-back state.
-    call: { customerId, hasVoicemail, textBackSent: textBack.sent, textBackBounced: textBack.bounced, robocall, textBackState: [textBack.state, robocall].filter(Boolean).join(':') },
+    call: { customerId, hasVoicemail, textBackSent: textBack.sent, textBackUnsent: textBack.unsent, robocall, textBackState: [textBack.state, robocall].filter(Boolean).join(':') },
   });
 }
 
@@ -659,8 +670,11 @@ function fingerprintOf(alert, timeline, now) {
 const verdict = (outcome, source, rule, why, extra = {}) => ({ outcome, source, rule, why, proofType: null, proofId: null, model: null, ...extra });
 const answeredBy = (event, rule) => verdict('answered', 'rule', rule, `${event.proof.replace(/_/g, ' ')} after the alert`, { proofType: event.type, proofId: event.id });
 
-// Contact from the number after the alert: a text in, or any later call. Either one means the caller is not silent.
-const contactAgain = (timeline) => timeline.events.some((e) => e.inbound || e.type === 'call');
+// Contact after the alert keeps a silent call from rule 1: the number reaching out again (a text or a call in), or a call from Waves
+// to it (a person tried; the model reads it). The reason names which one.
+const reachedOutAgain = (timeline) => timeline.events.some((e) => e.inbound);
+const wavesCalled = (timeline) => timeline.events.some((e) => e.type === 'call' && !e.inbound);
+const contactAgain = (timeline) => reachedOutAgain(timeline) || wavesCalled(timeline);
 
 // Rule 1: an unknown missed call that left nothing, texted back for this call or a robocall, with 24 hours of silence from that number.
 function quietMissedCall(alert, timeline, now) {
@@ -788,8 +802,9 @@ function silentCallWhy(timeline, now) {
   const call = timeline.call;
   if (call.customerId) return 'a customer left no voicemail: only a real answer closes it';
   const why = [];
-  if (contactAgain(timeline)) why.push('the number called or texted again after the alert');
-  if (!call.textBackSent && !call.robocall) why.push(call.textBackBounced ? 'the text-back for this call did not deliver' : 'no text-back went out for this call');
+  if (reachedOutAgain(timeline)) why.push('the number called or texted again after the alert');
+  if (wavesCalled(timeline)) why.push('Waves called the number after the alert');
+  if (!call.textBackSent && !call.robocall) why.push(call.textBackUnsent ? 'the text-back for this call has not reached the caller' : 'no text-back went out for this call');
   if (now - timeline.alertAt < DAY_MS) why.push('under 24 hours since the call');
   return why.join('; ') || 'a silent missed call closes only by the 24-hour rule';
 }
