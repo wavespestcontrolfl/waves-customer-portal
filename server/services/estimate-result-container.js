@@ -103,10 +103,10 @@ function storedMistingRows(estimateData, options = {}) {
 // one-time item, its quote-required copy and the raw engine line, from the same authoritative container. Each keeps the product
 // it quoted and what it priced that product with. The deprecated client engine (client/src/lib/estimateEngine.js calculateEstimate)
 // wrote the same rows with a name and no service, 'Pre-Slab' and 'Trenching': a row of that shape is the line too.
-const PRE_SLAB_ROWS = { services: new Set(['pre_slab_termiticide', 'pre_slab_termidor']), clientName: 'Pre-Slab' };
-const TRENCHING_ROWS = { services: new Set(['trenching']), clientName: 'Trenching' };
-const BORA_CARE_ROWS = { services: new Set(['bora_care']), clientName: 'Bora-Care' };
-const isLineRow = (row, line) => isRecord(row) && (line.services.has(row.service) || (!row.service && row.name === line.clientName));
+const PRE_SLAB_ROWS = { services: new Set(['pre_slab_termiticide', 'pre_slab_termidor']), clientNames: new Set(['Pre-Slab']) };
+const TRENCHING_ROWS = { services: new Set(['trenching']), clientNames: new Set(['Trenching']) };
+const BORA_CARE_ROWS = { services: new Set(['bora_care']), clientNames: new Set(['Bora-Care', 'Bora-Care Wood Treatment Service']) };
+const isLineRow = (row, line) => isRecord(row) && (line.services.has(row.service) || (!row.service && line.clientNames.has(row.name)));
 function termiticideRowsIn(container, line) {
   const nested = container.results && container.results.oneTime;
   return [

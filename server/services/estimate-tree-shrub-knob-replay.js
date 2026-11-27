@@ -396,6 +396,31 @@ const PRE_SNAKE_CASE_BORACARE_KNOBS = Object.freeze({
   laborRate: 35,
 });
 
+function boraCareStoredScope(row, estData) {
+  if (row.atticSqFt !== undefined || row.surfaceSqFt !== undefined) {
+    const a = storedFigure(row.atticSqFt);
+    const s = storedFigure(row.surfaceSqFt);
+    return {
+      pinnedAtticSqFt: Number.isFinite(a) && a > 0 ? a : null,
+      pinnedSurfaceSqFt: Number.isFinite(s) && s > 0 ? s : null,
+    };
+  }
+  const storedInputs = estData?.inputs || estData?.engineInputs || null;
+  if (!storedInputs || typeof storedInputs !== 'object') return {};
+  const svc = storedInputs.services?.boraCare || storedInputs.services?.bora_care;
+  const opts = svc && typeof svc === 'object' ? svc : {};
+  const { resolveBoraCareSqFt, resolveBoraCareSurfaceSqFt } = require('./pricing-engine/service-pricing');
+  const attic = resolveBoraCareSqFt(storedInputs, opts);
+  const surface = resolveBoraCareSurfaceSqFt(storedInputs, {
+    ...opts,
+    surfaceLinearFt: opts.surfaceLinearFt ?? opts.wallLinearFt ?? storedInputs.boraCareSurfaceLinearFt ?? storedInputs.boraCareWallLinearFt,
+    surfaceHeightFt: opts.surfaceHeightFt ?? opts.wallHeightFt ?? storedInputs.boraCareSurfaceHeightFt ?? storedInputs.boraCareWallHeightFt,
+  });
+  const pinnedAtticSqFt = attic.value !== null ? attic.value : null;
+  const pinnedSurfaceSqFt = surface.surfaceSqFt > 0 ? surface.surfaceSqFt : null;
+  return pinnedAtticSqFt !== null || pinnedSurfaceSqFt !== null ? { pinnedAtticSqFt, pinnedSurfaceSqFt } : {};
+}
+
 function boraCareKnobSignalForReplay(estData = {}) {
   const { storedBoraCareRows } = require('./estimate-result-container');
   const rows = storedBoraCareRows(estData);
@@ -410,6 +435,25 @@ function boraCareKnobSignalForReplay(estData = {}) {
         && Number.isFinite(marginDivisor) && marginDivisor > 0) {
         return { ...PRE_SNAKE_CASE_BORACARE_KNOBS, ...k };
       }
+    }
+  }
+  // Unstamped historical Bora-Care rows could have been priced with pre-fix
+  // camelCase DB overrides (marginDivisor, minJobPrice, etc.) OR code defaults.
+  // Pin their stored base price on unchanged scope so revising or adding
+  // another service never shifts a sent quote's Bora-Care price.
+  for (const row of rows) {
+    if (row.quoteRequired || row.requiresCustomQuote) continue;
+    const storedBase = storedFigure(row.priceBeforeDiscount);
+    const storedNet = storedFigure(row.price);
+    const pinnedPrice = Number.isFinite(storedBase) && storedBase > 0
+      ? storedBase
+      : (Number.isFinite(storedNet) && storedNet > 0 ? storedNet : null);
+    if (pinnedPrice !== null) {
+      return {
+        ...PRE_SNAKE_CASE_BORACARE_KNOBS,
+        pinnedPrice: Math.round(pinnedPrice),
+        ...boraCareStoredScope(row, estData),
+      };
     }
   }
   return { ...PRE_SNAKE_CASE_BORACARE_KNOBS };

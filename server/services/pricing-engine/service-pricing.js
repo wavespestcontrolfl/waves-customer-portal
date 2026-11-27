@@ -7691,8 +7691,8 @@ function priceTrenching(property = {}, options = {}, replay) {
   };
 }
 
-function resolveBoraCareBasis(knobs) {
-  const k = knobs && typeof knobs === 'object' ? knobs : null;
+function resolveBoraCareBasis(options) {
+  const k = options && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
   const pick = (key, live, allowZero = false) => {
     const v = k ? Number(k[key]) : NaN;
     return Number.isFinite(v) && (allowZero ? v >= 0 : v > 0) ? v : live;
@@ -7705,6 +7705,26 @@ function resolveBoraCareBasis(knobs) {
     minJobPrice: pick('minJobPrice', SPECIALTY.boraCare.minJobPrice, true),
     surfaceLaborSqFtPerHour: pick('surfaceLaborSqFtPerHour', SPECIALTY.boraCare.surfaceLaborSqFtPerHour),
     laborRate: pick('laborRate', GLOBAL.LABOR_RATE),
+  };
+}
+
+function finalizeBoraCarePrice(options, { atticSqFt, surfaceSqFt, surfaceOnly, basis, rawPrice }) {
+  const k = options && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
+  const pinned = k ? Number(k.pinnedPrice) : NaN;
+  if (Number.isFinite(pinned) && pinned > 0) {
+    const atticMatch = k.pinnedAtticSqFt === undefined || k.pinnedAtticSqFt === atticSqFt;
+    const surfaceMatch = k.pinnedSurfaceSqFt === undefined || k.pinnedSurfaceSqFt === surfaceSqFt;
+    if (atticMatch && surfaceMatch) {
+      const price = Math.round(pinned);
+      return {
+        price,
+        pricingKnobs: { ...basis, pinnedPrice: price, pinnedAtticSqFt: atticSqFt, pinnedSurfaceSqFt: surfaceSqFt },
+      };
+    }
+  }
+  return {
+    price: surfaceOnly ? Math.max(basis.minJobPrice, rawPrice) : rawPrice,
+    pricingKnobs: basis,
   };
 }
 
@@ -7785,7 +7805,7 @@ function priceBoraCare(input, options = {}) {
   // the attic-access overhead the floors were built for, so it prices on actual
   // gallons + actual labor and is floored at minJobPrice instead. Attic jobs
   // (attic-only or attic+surface) keep the proven 3-gallon / 2-hour floors.
-  const basis = resolveBoraCareBasis(options?.knobs);
+  const basis = resolveBoraCareBasis(options);
   const surfaceOnly = !hasAttic;
   const gallonsFloor = surfaceOnly ? 1 : 3;
   const gallons = Math.max(gallonsFloor, Math.ceil(totalSqFt / basis.coverage));
@@ -7797,7 +7817,7 @@ function priceBoraCare(input, options = {}) {
       : Math.min(6, Math.max(2, 1.5 + totalSqFt / 1000));
   const cost = gallons * basis.galCost + laborHrs * basis.laborRate + basis.equipCost;
   const rawPrice = Math.round(cost / basis.marginDivisor);
-  const price = surfaceOnly ? Math.max(basis.minJobPrice, rawPrice) : rawPrice;
+  const { price, pricingKnobs } = finalizeBoraCarePrice(options, { atticSqFt, surfaceSqFt, surfaceOnly, basis, rawPrice });
 
   return {
     ...baseResult,
@@ -7807,7 +7827,7 @@ function priceBoraCare(input, options = {}) {
     cost: Math.round(cost),
     price,
     quoteRequired: false,
-    pricingKnobs: basis,
+    pricingKnobs,
   };
 }
 
@@ -11238,6 +11258,7 @@ module.exports = {
   // The migration 20261119020000 reads a Crosscheck Plus name by this same rule (pre-push audit at the sixteenth push).
   namesCrosscheckPlus,
   resolveBoraCareSqFt,
+  resolveBoraCareSurfaceSqFt,
   resolvePreSlabSqFt,
   normalizePreSlabTermiticideProduct,
   BIFENTHRIN_LABEL_BOTTLE,

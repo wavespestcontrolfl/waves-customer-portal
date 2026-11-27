@@ -322,6 +322,23 @@ function withPreSlabReplayCost(options, knobs, legacyWrapper = false) {
   return replayed;
 }
 
+// Server-owned Bora-Care replay knobs + surface measurement fallbacks. Always
+// overwrites `knobs` (undefined when no replay knobs were supplied) so client-
+// supplied `services.boraCare.knobs` can never override live or replayed pricing.
+function withBoraCareReplayOptions(boraCareOptions, input) {
+  const knobs = input.boraCarePricingKnobs && typeof input.boraCarePricingKnobs === 'object' && !Array.isArray(input.boraCarePricingKnobs)
+    ? input.boraCarePricingKnobs
+    : undefined;
+  return {
+    ...boraCareOptions,
+    knobs,
+    surfaceLinearFt: boraCareOptions.surfaceLinearFt ?? boraCareOptions.wallLinearFt
+      ?? input.boraCareSurfaceLinearFt ?? input.boraCareWallLinearFt,
+    surfaceHeightFt: boraCareOptions.surfaceHeightFt ?? boraCareOptions.wallHeightFt
+      ?? input.boraCareSurfaceHeightFt ?? input.boraCareWallHeightFt,
+  };
+}
+
 function uniqueStrings(values = []) {
   return [...new Set((values || []).filter(Boolean))];
 }
@@ -2385,19 +2402,8 @@ function generateEstimate(input) {
   }
   const boraCareService = services.boraCare || services.bora_care;
   if (boraCareService && !useCommercialManualQuote(boraCareService, 'pest_control', { scopedOneTime: true })) {
-    const boraCareOptions = serviceOptions(boraCareService);
-    // Surface-treatment measurements may arrive via service options (route path)
-    // or at the top level of the estimate input (direct generateEstimate
-    // callers). The property profile does not carry them, so merge the top-level
-    // fields into the options the engine reads. Legacy wall* keys still accepted.
-    const result = priceBoraCare(property, {
-      ...boraCareOptions,
-      ...(input.boraCarePricingKnobs && typeof input.boraCarePricingKnobs === 'object' ? { knobs: input.boraCarePricingKnobs } : {}),
-      surfaceLinearFt: boraCareOptions.surfaceLinearFt ?? boraCareOptions.wallLinearFt
-        ?? input.boraCareSurfaceLinearFt ?? input.boraCareWallLinearFt,
-      surfaceHeightFt: boraCareOptions.surfaceHeightFt ?? boraCareOptions.wallHeightFt
-        ?? input.boraCareSurfaceHeightFt ?? input.boraCareWallHeightFt,
-    });
+    const boraCareOptions = withBoraCareReplayOptions(serviceOptions(boraCareService), input);
+    const result = priceBoraCare(property, boraCareOptions);
     lineItems.push(result);
   }
   const canonicalPreSlabService = services.preSlabTermiticide || services.pre_slab_termiticide || services.preSlab;

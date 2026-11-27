@@ -685,4 +685,132 @@ describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates
       Object.assign(constants.SPECIALTY.boraCare, origBora);
     }
   });
+
+  test('ignores client-supplied services.boraCare.knobs and preserves mapped pricingKnobs across revisions', async () => {
+    const origBora = { ...constants.SPECIALTY.boraCare };
+    const { mapV1ToLegacyShape } = require('../services/pricing-engine/v1-legacy-mapper');
+    try {
+      // 1) Client-supplied services.boraCare.knobs must NEVER alter live pricing.
+      const clean = generateEstimate({ ...PROPERTY, services: { boraCare: { atticSqFt: 1500 } } });
+      const forged = generateEstimate({
+        ...PROPERTY,
+        services: { boraCare: { atticSqFt: 1500, knobs: { galCost: 1, marginDivisor: 1, pinnedPrice: 10 } } },
+      });
+      const cleanLine = clean.lineItems.find((l) => l.service === 'bora_care');
+      const forgedLine = forged.lineItems.find((l) => l.service === 'bora_care');
+      expect(forgedLine.price).toBe(cleanLine.price);
+
+      // 2) Freshly mapped Bora-Care quote with nondefault costs keeps pricingKnobs on result.oneTime.specItems
+      //    and replays identically even after DB settings change.
+      constants.SPECIALTY.boraCare.galCost = 115;
+      constants.SPECIALTY.boraCare.equipCost = 35;
+      const nonDefaultEst = generateEstimate({ ...PROPERTY, services: { boraCare: { atticSqFt: 1500 } } });
+      const nonDefaultLine = nonDefaultEst.lineItems.find((l) => l.service === 'bora_care');
+      const mapped = mapV1ToLegacyShape(nonDefaultEst, PROPERTY);
+      const mappedBora = mapped.oneTime.specItems.find((item) => item.service === 'bora_care');
+      expect(mappedBora?.pricingKnobs?.galCost).toBe(115);
+      expect(mappedBora?.pricingKnobs?.equipCost).toBe(35);
+
+      const savedMappedOnly = {
+        estimate_data: {
+          inputs: { ...PROPERTY, services: { boraCare: { atticSqFt: 1500 } } },
+          result: mapped,
+        },
+        monthly_total: 0,
+        annual_total: 0,
+        onetime_total: nonDefaultLine.price,
+        waveguard_tier: 'Bronze',
+      };
+      constants.SPECIALTY.boraCare.galCost = 160;
+      const rev = await buildEstimateServiceRevisionDraft(savedMappedOnly, 'lawn_care');
+      expect(rev.status).toBe('priced');
+      const revisedBora = rev.draftEstimateData.result?.oneTime?.specItems?.find((item) => item.service === 'bora_care');
+      expect(revisedBora.price).toBe(nonDefaultLine.price);
+    } finally {
+      Object.assign(constants.SPECIALTY.boraCare, origBora);
+    }
+  });
+
+  test('unstamped legacy Bora-Care rows (including name-only client rows and camelCase overrides) preserve quoted base price on unchanged scope and unpin on scope edit', async () => {
+    const origBora = { ...constants.SPECIALTY.boraCare };
+    const { boraCareKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    try {
+      // Unstamped row priced under a historical camelCase DB override (e.g. $1,375 instead of default).
+      const camelCaseSaved = {
+        estimate_data: {
+          inputs: { ...PROPERTY, services: { boraCare: { atticSqFt: 1500 } } },
+          result: {
+            oneTime: {
+              items: [],
+              specItems: [{ name: 'Bora-Care Wood Treatment Service', price: 1375 }],
+            },
+          },
+        },
+        monthly_total: 0,
+        annual_total: 0,
+        onetime_total: 1375,
+        waveguard_tier: 'Bronze',
+      };
+      constants.SPECIALTY.boraCare.galCost = 150;
+      const rev = await buildEstimateServiceRevisionDraft(camelCaseSaved, 'lawn_care');
+      expect(rev.status).toBe('priced');
+      const revisedBora = rev.draftEstimateData.result?.oneTime?.specItems?.find((item) => item.service === 'bora_care');
+      expect(revisedBora.price).toBe(1375);
+
+      // If staff changes the attic scope during revision, the pinned price unpins cleanly.
+      const signal = boraCareKnobSignalForReplay(camelCaseSaved.estimate_data);
+      const resized = generateEstimate({
+        ...PROPERTY,
+        services: { boraCare: { atticSqFt: 3000 } },
+        boraCarePricingKnobs: signal,
+      });
+      const resizedLine = resized.lineItems.find((l) => l.service === 'bora_care');
+      expect(resizedLine.price).not.toBe(1375);
+      expect(resizedLine.price).toBeGreaterThan(1375);
+    } finally {
+      Object.assign(constants.SPECIALTY.boraCare, origBora);
+    }
+  });
+
+  test('public estimate prepay eligibility hides prepay on stamped 0% quotes without a setup waiver while keeping unwaived solo pest and termite annual plans', () => {
+    const { annualPrepayHasSellableIncentive } = require('../routes/estimate-public');
+    process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT = 'true';
+    const stampedLawn = generateEstimate({ ...PROPERTY, services: { lawn: { grassType: 'st_augustine', tier: 'enhanced', turfSqFt: 5000 } } });
+    const stampedSoloPest = generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } });
+
+    // Stamped lawn-only (no setup waiver, 0% prepay): hides annual prepay on /data.
+    expect(annualPrepayHasSellableIncentive(
+      { annual_total: 720 },
+      { result: stampedLawn },
+      {},
+    )).toBe(false);
+
+    // Stamped solo pest WITH setup waiver still owed ($99): keeps annual prepay on /data.
+    expect(annualPrepayHasSellableIncentive(
+      { annual_total: 480 },
+      { result: stampedSoloPest },
+      {},
+    )).toBe(true);
+
+    // Stamped solo pest with operator-waived setup fee (One-Time->Plan): hides annual prepay.
+    expect(annualPrepayHasSellableIncentive(
+      { annual_total: 480 },
+      { result: stampedSoloPest, operatorPriceAdjustment: { waiveSetupFee: true } },
+      {},
+    )).toBe(false);
+
+    // Stamped mandatory-prepay Subterranean Termite annual plan: keeps 5% & prepay eligibility.
+    const termiteAnnualData = {
+      pricingMetadata: { year1PrepayNoPercent: true },
+      result: {
+        results: { tmBait: { plan: 'annual_protection', annual: 1000 } },
+        recurring: { services: [{ service: 'termite_bait', plan: 'annual_protection', annual: 1000 }] },
+      },
+    };
+    expect(annualPrepayHasSellableIncentive(
+      { annual_total: 1000 },
+      termiteAnnualData,
+      {},
+    )).toBe(true);
+  });
 });
