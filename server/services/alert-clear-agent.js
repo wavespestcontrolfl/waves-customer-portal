@@ -550,7 +550,10 @@ async function smsContext(r, anchor, key, trigger) {
     : await latestReplyIn(r, anchor, key);
   if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
   const lastAt = lastIn ? toDate(lastIn.created_at) : null;
-  const offer = lastAt ? await lastDeliveredText(r, lastAt, key, lastIn.from_phone, lastIn.to_phone) : { body: '', at: null, whole: false };
+  // A thread bell's contact names no number (no message id resolved one): the offer is looked up with the reply's own sender, by the
+  // same shared-phone check as every contact (trustedContact), so a text Waves sent to that number with no customer id is not skipped.
+  const offerKey = lastIn && !hasTrigger ? await trustedContact(r, key.customerId, lastIn.from_phone, anchor) : key;
+  const offer = lastAt ? await lastDeliveredText(r, lastAt, offerKey, lastIn.from_phone, lastIn.to_phone) : { body: '', at: null, whole: false };
   return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer.body, prevAt: offer.at, whole: offer.whole } : null };
 }
 

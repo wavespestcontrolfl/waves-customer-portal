@@ -699,6 +699,19 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Waves here. Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
   });
 
+  // A thread bell names no number, so its offer is looked up with the reply's own sender (the shared-phone check kept): a text Waves
+  // sent to that number with no customer id is the offer, never an older bill tied to the customer. The number's last three digits
+  // sit above the random customer phones (0-899), so no other test customer can share it.
+  test('a thread bell finds the offer sent to the reply\'s number with no customer id', async () => {
+    const cid = await customer();
+    const number = phone(951);
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-100) });
+    await sms({ customer_id: null, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'Yes', created_at: at(-5), status: 'received' });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+  });
+
   test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {
     const cid = await customer();
     const sid = `SM${tag}v1`;
