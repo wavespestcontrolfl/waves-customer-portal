@@ -121,7 +121,7 @@ function addressesOf(value) {
     .map(normalizeAddress);
 }
 
-const SMS_LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+/gi;
+const SMS_LINK_RE = /(?:https?:\/\/|www\.)[^\s<>()]+|(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:com|net|org|io|co|us|gov|edu|app|ly|me|link|info|biz|ai|dev|page|site|gl)\/[^\s<>()]+/gi;
 
 function stripSmsLinks(text) {
   return String(text || '').replace(SMS_LINK_RE, '(link omitted)');

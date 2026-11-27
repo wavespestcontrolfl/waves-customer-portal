@@ -84,9 +84,11 @@ suite('email reply context PostgreSQL contract', () => {
 
   test('thread selection excludes other participants, drafts, and future replies before limiting', async () => {
     const base = { gmail_thread_id: inbound.gmail_thread_id, received_at: new Date(now - 60000),
-      from_address: customer.email, to_address: mailboxAddress, customer_id: customer.id };
+      from_address: customer.email, to_address: mailboxAddress, customer_id: customer.id,
+      authentication_results: inbound.authentication_results };
     await mockDb('emails').insert([
       { ...base, gmail_id: randomUUID(), body_text: 'Valid earlier question', label_ids: JSON.stringify(['INBOX']) },
+      { ...base, gmail_id: randomUUID(), authentication_results: 'mx.google.com; dkim=fail header.d=example.test', body_text: 'SPOOFED EARLIER', label_ids: JSON.stringify(['INBOX']) },
       { ...base, gmail_id: randomUUID(), from_address: mailboxAddress, to_address: customer.email, body_text: 'Valid earlier answer', label_ids: JSON.stringify(['SENT']) },
       { ...base, gmail_id: randomUUID(), from_address: 'other@example.test', body_text: 'OTHER CUSTOMER SECRET', label_ids: JSON.stringify(['INBOX']) },
       { ...base, gmail_id: randomUUID(), body_text: 'UNSENT DRAFT', label_ids: JSON.stringify(['DRAFT']) },
@@ -98,7 +100,7 @@ suite('email reply context PostgreSQL contract', () => {
     expect(text).toContain('Valid earlier question');
     expect(text).toContain('Valid earlier answer');
     expect(text).toContain('When is our next service?');
-    for (const secret of ['OTHER CUSTOMER SECRET', 'UNSENT DRAFT', 'FUTURE REPLY']) expect(text).not.toContain(secret);
+    for (const secret of ['SPOOFED EARLIER', 'OTHER CUSTOMER SECRET', 'UNSENT DRAFT', 'FUTURE REPLY']) expect(text).not.toContain(secret);
     expect(await mockDb('emails').where('id', inbound.id).first('is_read', 'auto_action')).toEqual({ is_read: false, auto_action: null });
   });
 

@@ -423,7 +423,7 @@ describe('assembleEmailReplyContext', () => {
         getContextForCustomer: jest.fn(async () => aggregatorContext({
           smsHistory: [{
             direction: 'outbound',
-            body: 'Manage your visit at https://wavespestcontrol.com/reschedule/secret-bearer-token-999 anytime.',
+            body: 'Manage your visit at https://wavespestcontrol.com/reschedule/secret-bearer-token-999 or wavespestcontrol.com/r/bare-secret-token-777 anytime.',
             date: '2026-09-09T15:00:00Z',
           }],
         })),
@@ -434,6 +434,7 @@ describe('assembleEmailReplyContext', () => {
     expect(result.factsBlock).not.toContain('Private group-thread note');
     expect(result.factsBlock).not.toContain('Spoofed prior inbound');
     expect(result.factsBlock).not.toContain('secret-bearer-token-999');
+    expect(result.factsBlock).not.toContain('bare-secret-token-777');
     expect(result.factsBlock).toContain('(link omitted)');
   });
 });
