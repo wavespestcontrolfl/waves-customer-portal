@@ -2038,6 +2038,36 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out.warnings).toContain('Area add-on — apply the label rate on the card over the area sold; no tank amount');
   });
 
+  // Owner 2026-11-26: the tank search carries the booked rate's own words and its grass restriction, as the card does.
+  test('the Arena lawn insect spot add-on in the tank search keeps its St. Augustine restriction and carrier words', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const arena = { id: 'ar', name: 'Arena 50 WDG', default_rate_per_1000: 0.3, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' };
+    const run = async (scope) => {
+      const rows = { scheduled_services: [visit], products_catalog: [arena], equipment_calibrations: [live], product_aliases: [],
+        scheduled_service_addons: [{ service_name: 'Lawn Insect Spot Treatment', category: 'lawn_care', service_key: 'area_addon_lawn_insect_spot', ...(scope ? { area_addon_scope: JSON.stringify(scope) } : {}) }] };
+      const dbh = (t) => {
+        const table = String(t).split(' as ')[0];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+        chain.first = async () => (rows[table] || [])[0] ?? null;
+        chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+        return chain;
+      };
+      dbh.raw = (sql) => sql;
+      const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
+      return jobCard.mixForProduct('ar', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    };
+    const bermuda = await run({ tierSqFt: 1000, grassType: 'bermuda' });
+    expect(bermuda).toMatchObject({ amount: null, ratePer1000: 0.147, unit: 'oz', rateSource: 'governed', rateText: expect.stringContaining('4 gal of water per 1,000 sq ft') });
+    expect(bermuda.warnings).toContain('Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
+    expect(bermuda.warnings.join(' ')).toContain('Booked rate: 0.147 oz per 1,000 sq ft');
+    expect((await run(null)).warnings).toContain('Grass on the estimate is not on this visit (the rate is St. Augustine only)');
+    const ok = await run({ tierSqFt: 1000, grassType: 'st_augustine' });
+    expect(ok.warnings.join(' ')).not.toMatch(/Grass on the estimate/);
+  });
+
   // Owner 2026-11-26: a granular area add-on has no tank amount, and the rate beside the warning is the BOOKED add-on rate, not the catalog default.
   test('a granular area add-on shows its booked rate and unit in the tank search, never the catalog default', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
@@ -2335,6 +2365,29 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     }
     // The right registration with a weaker catalog band keeps that band.
     expect(await mix({ ...tekko, default_rate: '0.5' }, antapex)).toMatchObject({ amount: 1, ratePerGallon: { lo: 0.5, hi: 0.5 }, rateSource: 'catalog' });
+  });
+
+  // Owner 2026-11-26: two services that each declare their own tank rate (Antapex 20 g on a bed bug card, 10 g on the flea card)
+  // are a conflict like two label rates: one labeled amount per service.
+  test('a bed bug visit with a flea add-on shows one Antapex amount per service', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Bed Bug Treatment Service', service_category: 'specialty', service_key: 'bed_bug_treatment' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out.amount).toBeNull();
+    expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.unit, row.fromCard])).toEqual([['Bed Bug Treatment Service', 40, 'g', true], ['Flea Control Service', 20, 'g', true]]);
+    expect(out.warnings.join(' ')).toMatch(/different rate on each service/);
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {

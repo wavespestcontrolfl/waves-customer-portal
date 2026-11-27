@@ -7195,7 +7195,7 @@ function JobCardRequired({ title, notes, D }) {
 // `pending`: a "Use" tick is being read again; the amounts on this card belong to the old selection, so none shows.
 function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
   const amount = pending ? null : fmtAmount(p.planned?.amount, p.planned?.unit);
-  // The shortage line names the plan's requirement even while the dose is withheld.
+  // The shortage line names the plan's requirement even when no dose amount is stated.
   const demand = pending ? null : fmtAmount(p.demand?.amount, p.demand?.unit) || amount;
   const short = p.short && !pending;
   const right = (
@@ -7224,7 +7224,7 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
           <div style={{ color: "#C8312F" }}>
             {demand
               ? `On hand ${fmtAmount(p.onHand, p.onHandUnit)} vs ${demand} planned.`
-              : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount (withheld).`}
+              : `On hand ${fmtAmount(p.onHand, p.onHandUnit)} — short of the planned amount.`}
           </div>
         )}
         {!short && !pending && p.onHand != null && (
@@ -7418,7 +7418,7 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
               <div style={{ display: "grid", gap: 6 }}>
                 {mix.serviceAmounts.map((row) => (
                   <div key={row.service} style={{ fontSize: 16, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                    {row.service}: {row.amount != null ? formatMeasuredRange(row.amount, row.amountMax, row.unit) : "no amount"} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{row.sprayVolumeGalPer1000 ? ` · spray ${row.sprayVolumeGalPer1000} gal per 1,000 sq ft` : ""}{row.coversSqft ? ` · covers ${row.coversSqft.toLocaleString()} sq ft` : ""}{row.fromCard ? "" : " · label rate, not this service's card rate"}</span>
+                    {row.service}: {row.amount != null ? formatMeasuredRange(row.amount, row.amountMax, row.unit) : "no amount"} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{row.sprayVolumeGalPer1000 ? ` · card spray ${row.sprayVolumeGalPer1000} gal per 1,000 sq ft` : ""}{row.coversSqft ? ` · covers ${row.coversSqft.toLocaleString()} sq ft` : ""}{row.labelCoversSqft ? ` (${mix.rig?.name || "this rig"} sprays ${row.rigSprayGalPer1000} gal per 1,000 sq ft; at the card's volume it would cover ${row.labelCoversSqft.toLocaleString()} sq ft)` : ""}{row.fromCard ? "" : " · label rate, not this service's card rate"}</span>
                   </div>
                 ))}
               </div>
@@ -7439,6 +7439,7 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
                 {[...(mix.warnings || []), ...(mix.rotationWarnings || [])].map((warning, i) => <div key={i}>Warning: {warning}</div>)}
               </div>
             )}
+            {mix?.rateText && <div style={{ fontSize: 12, color: D.muted }}>Booked rate: {mix.rateText}</div>}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}
@@ -7595,7 +7596,7 @@ export function JobCardTab({ card, loading, error, D, lawn = null }) {
       )}
       {!lawn?.pending && card.planBlocks?.length > 0 && (
         <div style={{ border: "1px solid #C8312F", borderRadius: 2, padding: "10px 12px", margin: "14px 0 0", fontSize: 14, color: D.text }}>
-          <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan blocked — amounts withheld</div>
+          <div style={{ fontWeight: 500, color: "#C8312F", marginBottom: 4 }}>Lawn plan warnings — amounts shown, check these first</div>
           {card.planBlocks.map((b, i) => <div key={b.code || i}>{b.message}</div>)}
           {lawn?.onOpenPlan && (
             <button

@@ -273,8 +273,9 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     tables.products_catalog = other;
     const mosquitoFirst = await mix();
-    expect(mosquitoFirst.amount).not.toBeNull();
-    expect(mosquitoFirst.serviceAmounts).toBeUndefined();
+    // The mosquito card declares Tekko Pro at 1 fl oz per gallon and the flea line holds: two services, two tanks, a row each.
+    expect(mosquitoFirst.serviceAmounts).toHaveLength(2);
+    expect(mosquitoFirst.serviceAmounts.every((row) => row.amount != null)).toBe(true);
     expect(mosquitoFirst.warnings.join(' ')).toContain('53883-335');
     // The flea visit with a mosquito add-on.
     tables.scheduled_services = [{ ...visit, service_type: 'Flea Treatment', service_key: 'flea_tick' }];

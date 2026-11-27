@@ -1731,7 +1731,7 @@ function linesFromProtocolText(visit, catalog) {
 }
 
 // Dosing values never ride in the descriptive line text: a rate shown there
-// would survive every withhold (unverified, held, blocked). Rates come only
+// would survive every warning (unverified, held, blocked). Rates come only
 // from the resolved, permitted mix (`planned`). A range goes whole, hyphenated or
 // written with "to" ("0.3 to 0.5 oz per 1,000 sq ft", the v13 protocol's form).
 const RATE_TOKEN_RE = /\b\d+(?:[.,]\d+)?(?:(?:\s*[-–]\s*|\s+to\s+)\d+(?:[.,]\d+)?)?\s*(?:(?:fl\.?\s?oz|oz|lbs?|pounds?|gal(?:lons?)?|ml|l|g|kg|pts?|qts?|tsp|tbsp|cc)\b\.?)(?:\s*(?:\/|per)\s*(?:\d[\d,]*\s*)?(?:sq\.?\s?ft|k|m|gal(?:lons?)?|acre|1,?000|100)\b)?/gi;
@@ -1810,6 +1810,16 @@ function soldLine(governed, scope) {
 }
 
 const GRASS_NAMES = { st_augustine: 'St. Augustine' };
+// The grass restriction on a governed rate (the Arena 2(ee) rate is St. Augustine only), or null when it holds or the line has none.
+// One text for the card and the tank search (owner 2026-11-26: a warning, never a block).
+function governedGrassWarning(governed, scope) {
+  const required = governed?.requiresGrass;
+  if (!required) return null;
+  const grass = scope?.grassType || null;
+  if (grass === required) return null;
+  const name = GRASS_NAMES[required] || required;
+  return grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${name} (this rate is ${name} only)` : `Grass on the estimate is not on this visit (the rate is ${name} only)`;
+}
 function governedForCard(governed, verdict, product = {}, scope = null) {
   if (!governed) return undefined;
   // ratePer1000 and rateUnit are the completion form's numbers (area-addon-governed-rate.js), not card text.
@@ -1822,8 +1832,7 @@ function governedForCard(governed, verdict, product = {}, scope = null) {
   const reasons = [
     verdict.verdict === 'hold' && `Spray check: ${verdict.reason}`,
     !product.label_verified_at && 'Label rate not yet verified',
-    requiresGrass && grass !== requiresGrass
-      && (grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${grassName} (this rate is ${grassName} only)` : `Grass on the estimate is not on this visit (the rate is ${grassName} only)`),
+    governedGrassWarning(governed, scope),
   ].filter(Boolean);
   const withheldReason = reasons.length ? reasons.join(' · ') : null;
   return {
@@ -2217,7 +2226,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         .where('ss.id', serviceId)
         .select(
           'ss.customer_id', 'ss.scheduled_date', 'ss.service_type', 'ss.assigned_equipment_system_id', 'ss.assigned_calibration_id', 'ss.window_start',
-          'ss.followup_source_service_id', 'ss.recurring_parent_id', 'ss.recurring_ongoing',
+          'ss.followup_source_service_id', 'ss.recurring_parent_id', 'ss.recurring_ongoing', 'ss.area_addon_scope',
           // The primary line's catalog identity, by the card's own rule.
           dbh.raw('COALESCE(ss.service_category_snapshot, s.category) as service_category'),
           dbh.raw('COALESCE(ss.service_key_snapshot, s.service_key) as service_key'),
@@ -2237,10 +2246,10 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // product: an add-on's product is judged under that add-on's protocol,
   // not the primary lawn plan (an off-protocol / blackout block of the lawn
   // plan says nothing about a pest or tree & shrub mix), and a line the
-  // protocol lists as "if needed" is withheld exactly as the card does.
+  // protocol lists as "if needed" warns exactly as the card does.
   const { line: addonLine, treatment, primaryIsLawn, lawnAddon, owners } = await protocolLineForProduct(dbh, serviceId, svc, product, etCalendarDayOf(svc.scheduled_date || now), deps);
-  // A lawn visit's plan governs the search too: its blocks withhold the dose
-  // exactly as they withhold the card's amounts, and a product the plan
+  // A lawn visit's plan governs the search too: its blocks warn beside the dose
+  // exactly as they warn beside the card's amounts (owner 2026-11-26), and a product the plan
   // already resolved (substitution rate override, nutrient-target rate)
   // is dosed at the plan's rate, never the catalog default.
   // Same rule as the card: no plan at a non-primary address.
@@ -2292,11 +2301,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   //     volume gets no amount: the same mix would put down more than the label amount (more water per area) or less than it
   //     (less water). With no rig named, `tank` is whichever calibration is on file and says nothing of the sprayer in the
   //     tech's hand, so it is not judged.
-  const lineCarrier = protocolPerGallon && protocolLine?.labelUse && Number(protocolLine.carrier) > 0 ? Number(protocolLine.carrier) : null;
+  const lineCarrier = lineCarrierOf(protocolPerGallon, protocolLine);
   const namedRig = Boolean(pickedRig || rigAssignment(svc).equipmentSystemId || rigAssignment(svc).calibrationId);
   const rigCarrier = namedRig && tank.source === 'rig' && Number(tank.carrierGalPer1000) > 0 ? Number(tank.carrierGalPer1000) : null;
-  // No tolerance: the card's volume is the one volume at which the mix is the label amount (the difference guard is for float noise only).
-  const rigOffVolume = Boolean(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9);
   // Plan-wide blocks first; then THIS product through the same guards the
   // closeout applies (manager approvals: off-protocol, unselected
   // conditional, PGR on stressed turf, label max rate, rotation) plus the
@@ -2315,7 +2322,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
         serviceDate: etCalendarDayOf(svc.scheduled_date || now),
         // strict: the engine's own reads (catalog, rotation, turf profile)
         // throw instead of reading as "nothing to block" — a failed safety
-        // lookup withholds the dose.
+        // lookup warns beside the dose.
         strict: true,
       }).catch((err) => { logger.warn(`[job-card] approval check failed: ${err.message}`); return { blocks: [APPROVALS_UNAVAILABLE] }; })).blocks.map((b) => ({ code: b.code || null, message: clean(b.message, 200) })),
     ]
@@ -2344,30 +2351,29 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   // withhold the dose is now a warning beside it, in the old guard order; the amount is always worked out. Only a
   // dose with no number to show (no carrier, no rate, no tank volume) comes back with `amount: null` and buildMixAmount's
   // own reason, and the warnings still ride with it.
-  const warnings = mixWarnings({
-    svc, protocolLine, treatment, primaryIsLawn, lawnAddon, planWide, productBlocks, product, tankMixable, sprayCheck,
-    rigOffVolume, lineCarrier, rigCarrier, pickedRig, tank, labelPerGallon,
-  });
   // No tank amount EXISTS for a product that is not a tank mix (a granular is spread by area) or for an area add-on (its dose is the
   // card's rate over the area sold, never a tank amount off the catalog default): that is not a withhold, so the warning stands
   // with no number. The booked add-on's own rate (governedRate, per 1,000 sq ft) shows beside it, never the catalog default.
   const governedRate = protocolLine?.governedRate || null;
   const noTankAmount = !tankMixable || Boolean(protocolLine?.governed);
-  const tankAmount = () => (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
+  const rigCtx = { rigCarrier, rigName: pickedRig?.name || tank.systemName || 'This rig', rigGalPer1000: tank.carrierGalPer1000 };
+  // Two services, two rates: one amount for each, named by service, never one headline from the first (owner 2026-11-26). Each row is
+  // worked out by the same function as the single dose (perGallonDose), so its coverage and rig comparison cannot drift from it.
+  const serviceAmounts = !noTankAmount && protocolLine?.conflictLines ? conflictAmounts(protocolLine.conflictLines, labelPerGallon, volume, rigCtx) : null;
+  const splitByService = Boolean(serviceAmounts?.some((row) => row.amount != null));
+  const single = noTankAmount || splitByService ? null : (perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
+  const warnings = mixWarnings({
+    svc, protocolLine, treatment, primaryIsLawn, lawnAddon, planWide, productBlocks, product, tankMixable, sprayCheck,
+    rigWarning: splitByService ? null : rigVolumeWarning({ lineCarrier, ...rigCtx }), labelPerGallon,
+    serviceWarnings: splitByService ? serviceAmounts.flatMap((row) => row.warnings.map((w) => `${row.service}: ${w}`)) : [],
+  });
   let mix;
   if (noTankAmount) {
     mix = { amount: null, unit: governedRate?.rateUnit || rateUnit || null, reason: warnings.find((w) => /^(Not a tank mix|Area add-on)/.test(w)) || null };
+  } else if (splitByService) {
+    mix = { amount: null, unit: perGallon?.unit || rateUnit || null, gallons: volume, reason: 'Each service on this visit has its own amount, see below', serviceAmounts: serviceAmounts.map(({ warnings: _w, ...row }) => row) };
   } else {
-    mix = tankAmount();
-    // Two services, two rates: one amount for each, named by service, never one headline from the first (owner 2026-11-26).
-    const serviceAmounts = protocolLine?.conflictLines ? conflictAmounts(protocolLine.conflictLines, labelPerGallon, volume) : null;
-    if (serviceAmounts?.some((row) => row.amount != null)) {
-      mix = { amount: null, unit: perGallon?.unit || rateUnit || null, gallons: volume, reason: 'Each service on this visit has its own amount, see below', serviceAmounts };
-    } else if (rigOffVolume && mix.coversSqft != null && rigCarrier > 0) {
-      // coversSqft is the area at the CARD's spray volume. The picked rig sprays another volume, so the area its tank covers is
-      // its own: the two figures ride separately and neither is read as the other's.
-      mix = { ...mix, labelCoversSqft: mix.coversSqft, coversSqft: Math.round((volume / rigCarrier) * 1000), rigSprayGalPer1000: rigCarrier };
-    }
+    mix = single;
   }
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate rides with the amount; with no number to show (see above) there is no rate to pair with it.
@@ -2377,6 +2383,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     name: product.name,
     ratePer1000: governedRate ? governedRate.ratePer1000 : ((permitted || !tankMixable) && ratePer1000 != null ? Number(ratePer1000) : null),
     ratePerGallon: mix.amount != null ? perGallon : null,
+    ...(governedRate?.text ? { rateText: governedRate.text } : {}),
     rateSource: governedRate ? 'governed' : (planned ? 'plan' : (protocolPerGallon ? 'protocol' : 'catalog')),
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
@@ -2397,23 +2404,50 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   };
 }
 
+// The spray volume (gal per 1,000 sq ft) a card's own label rate is stated over, or null when the band is not the card's.
+const lineCarrierOf = (band, line) => (band && line?.labelUse && Number(line.carrier) > 0 ? Number(line.carrier) : null);
+
+// The warning when the picked or assigned rig sprays another volume than the card's rate holds at. No tolerance: the card's volume is
+// the one volume at which the mix is the label amount (the difference guard is for float noise only).
+function rigVolumeWarning({ lineCarrier, rigCarrier, rigName, rigGalPer1000 }) {
+  if (!(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9)) return null;
+  return `The card's rate is for ${fmtGal(lineCarrier)} gal per 1,000 sq ft. ${rigName} sprays ${fmtGal(rigGalPer1000)}: the same mix would put down ${rigCarrier > lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`;
+}
+
+// One per-gallon dose: the amount, the area the tank covers at the CARD's volume, and, when the rig sprays another volume, the area the
+// rig's tank really covers as a separate figure (coversSqft is the rig's, labelCoversSqft the card volume's, neither read as the other's).
+// The single dose and each conflicting service's row both come through here.
+function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
+  const dose = buildPerGallonAmount(band, volume, lineCarrier);
+  const off = Boolean(lineCarrier && rigCarrier && Math.abs(rigCarrier - lineCarrier) > 1e-9);
+  if (!off || dose.coversSqft == null) return dose;
+  return { ...dose, labelCoversSqft: dose.coversSqft, coversSqft: Math.round((Number(volume) / rigCarrier) * 1000), rigSprayGalPer1000: rigCarrier };
+}
+
 // The amount for each service that names the product at its own rate (owner 2026-11-26). A service whose rate passes the label
 // check uses it; one that does not ("see its card") falls back to the label band, so each row still has a number when one exists.
-function conflictAmounts(conflictLines, labelPerGallon, volume) {
+function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
   return conflictLines.map((line) => {
     const band = protocolBand(labelPerGallon, line);
     const used = band || labelPerGallon;
-    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false };
-    const carrier = line.labelUse && Number(line.carrier) > 0 ? Number(line.carrier) : null;
-    const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft } = buildPerGallonAmount(used, volume, carrier);
-    return { service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band), ...(sprayVolumeGalPer1000 ? { sprayVolumeGalPer1000, coversSqft } : {}) };
+    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [] };
+    const lineCarrier = lineCarrierOf(band, line);
+    const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
+    const warning = rigVolumeWarning({ lineCarrier, ...rigCtx });
+    const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
+    return {
+      service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
+      ...(sprayVolumeGalPer1000 ? { sprayVolumeGalPer1000, coversSqft } : {}),
+      ...(labelCoversSqft ? { labelCoversSqft, rigSprayGalPer1000 } : {}),
+      warnings: warning ? [warning] : [],
+    };
   });
 }
 
 // The checks that used to withhold a searched product's dose, in the old guard order, as warning text (owner 2026-11-26:
 // warned, never blocked). A chemical-group repeat is not here: it rides as rotationWarnings (owner 2026-10-09).
 function mixWarnings(c) {
-  const { protocolLine, productBlocks, product, sprayCheck, pickedRig, tank } = c;
+  const { protocolLine, productBlocks, product, sprayCheck } = c;
   const lineFacts = protocolLine || {};
   const otherBlocks = productBlocks.filter((block) => !isRotationWarning(block)).map((block) => clean(block.message, 160));
   return [
@@ -2425,9 +2459,13 @@ function mixWarnings(c) {
     [c.planWide.length > 0, 'Lawn plan blocked — check the plan blocks'],
     ...otherBlocks.map((message) => [Boolean(message), message]),
     [Boolean(lineFacts.labelHold), lineFacts.labelHold],
-    [c.rigOffVolume, `The card's rate is for ${fmtGal(c.lineCarrier)} gal per 1,000 sq ft. ${pickedRig?.name || tank.systemName || 'This rig'} sprays ${fmtGal(tank.carrierGalPer1000)}: the same mix would put down ${c.rigCarrier > c.lineCarrier ? 'more' : 'less'} than the label amount. Use a sprayer at the card's volume`],
+    [Boolean(c.rigWarning), c.rigWarning],
+    ...c.serviceWarnings.map((text) => [true, text]),
     // An area add-on dose follows the treated area sold: this tank amount is the catalog rate, not the sold-area rate.
     [Boolean(lineFacts.governed), 'Area add-on — apply the label rate on the card over the area sold; no tank amount'],
+    // The booked rate's own words (its carrier instruction) and its grass restriction (owner 2026-11-26: warned, never blocked).
+    [Boolean(lineFacts.governedRate?.text), lineFacts.governedRate?.text ? `Booked rate: ${lineFacts.governedRate.text}` : null],
+    ...(lineFacts.governedWarnings || []).map((text) => [true, text]),
     [lineFacts.selected === false, `Listed as "if needed" on ${lineFacts.addon || "this visit's protocol"} — confirm the call before mixing`],
     [!c.tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
@@ -2463,7 +2501,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const treatment = primaryKey !== null;
   const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
   const addons = (await loadAddons(dbh, serviceId))
-    .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols, a.serviceKey), serviceKey: a.serviceKey }));
+    .map((a) => ({ addon: a.name, name: a.name, programKey: addonProgramKey(a.category, a.name, protocols, a.serviceKey), serviceKey: a.serviceKey, scope: a.areaAddOnScope || null }));
   // A lawn add-on has no plan of its own on this visit (the plan engine keys
   // on the appointment's service type) — the search must not dose lawn
   // products off the catalog past the plan's guards.
@@ -2472,7 +2510,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   // The card's own follow-up rule (loadJobCardFacts): a booked follow-up, or a later visit of a package booked up front.
   const isFollowup = svc.followup_source_service_id != null || await isLaterPackageVisit(dbh, { ...svc, id: serviceId }, { protocols: deps.protocols });
   const candidates = [
-    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup }] : []),
+    ...(primaryKey !== null && !primaryIsLawn ? [{ addon: null, name: svc.service_type, programKey: primaryKey || null, serviceKey: svc.service_key || null, isFollowup, scope: soldScopeOf(svc.area_addon_scope) }] : []),
     ...addons.filter((a) => a.programKey && a.programKey !== 'lawn'),
   ];
   if (!candidates.length) return found(null);
@@ -2497,22 +2535,23 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // same label check a single dose does (conflictText).
     const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}) });
     const rates = new Set(selectedHits.map((h) => JSON.stringify(rateOf(h))));
-    // Only a card that carries its label's rate (labelUseRate) can disagree: another product's lines keep the first card's rate
+    // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
     // narrowed by the label band, as before.
-    const ratesDisagree = rates.size > 1 && selectedHits.some((h) => h.hit.labelUseRate) ? { conflictLines: selectedHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
+    const ratesDisagree = rates.size > 1 && selectedHits.some((h) => h.hit.labelUseRate || h.hit.declaredRate) ? { conflictLines: selectedHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
     // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
     // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
     const heldHit = selectedHits.find((h) => h.hit.labelHold);
     const held = heldHit ? { labelHold: heldHit.hit.labelHold } : {};
-    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...governedRateOf(selected.hit.governed), ...held, ...ratesDisagree }, owners);
+    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...governedRateOf(selected.hit.governed, selected.c.scope), ...held, ...ratesDisagree }, owners);
   }
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
 }
 
-// The booked add-on's own rate (protocols.json area_addon labelFacts: per 1,000 sq ft, in its unit) for a governed line.
-const governedRateOf = (governed) => (Number(governed?.ratePer1000) > 0 && governed.rateUnit
-  ? { governedRate: { ratePer1000: Number(governed.ratePer1000), rateUnit: String(governed.rateUnit) } } : {});
+// The booked add-on's own rate (protocols.json area_addon labelFacts: per 1,000 sq ft, in its unit) for a governed line, with the
+// label's own wording (its carrier instruction) and the grass restriction against the sold scope (owner 2026-11-26: a warning).
+const governedRateOf = (governed, scope) => (Number(governed?.ratePer1000) > 0 && governed.rateUnit
+  ? { governedRate: { ratePer1000: Number(governed.ratePer1000), rateUnit: String(governed.rateUnit), text: governed.rate ? clean(governed.rate, 240) : null }, governedWarnings: [governedGrassWarning(governed, scope)].filter(Boolean) } : {});
 
 // The per-gallon band the matched card line gives the mix, or null (the label band stands). A rate read from the line's text is clipped
 // to the label band. A rate the card DECLARES governs when it is on the label's unit and not above the label band's top: a card may mix
@@ -2576,7 +2615,7 @@ const fmtGal = (value) => String(Math.round(Number(value) * 100) / 100);
 // "Floramite SC") while the catalog carries the full name ("Mainspring GNL
 // Insecticide", "Floramite SC/LS 8 oz"). When the exact lookup misses, reuse
 // the row this visit's protocol lines already resolved, but only when exactly
-// one of them begins with the guide label. Anything else stays withheld.
+// one of them begins with the guide label. Anything else stays unresolved (and warns).
 function fieldGuideLineProduct(name, products) {
   const label = String(name || '').trim().toLowerCase();
   if (!label) return null;

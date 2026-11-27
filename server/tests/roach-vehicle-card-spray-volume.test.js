@@ -120,8 +120,8 @@ describe('a label rate per gallon is bound to its spray volume', () => {
   const hand = { id: 'cal-2', equipment_system_id: 'sys-2', system_type: 'backpack', system_name: 'Hand sprayer', carrier_gal_per_1000: 1, calibration_status: 'field_verified', tank_capacity_gal: '1.00' };
   const systems = [{ id: 'sys-1', name: 'Tank #1', system_type: 'tank', tank_capacity_gal: '110.00' }, { id: 'sys-2', name: 'Hand sprayer', system_type: 'backpack', tank_capacity_gal: '1.00' }];
   const home = { customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'German Roach Cleanout', service_category: 'pest_control', service_key: 'cockroach_control' };
-  const mix = (visit, gallons, { equipmentSystemId = null, calibrations = [truck, hand] } = {}) => {
-    const rows = { scheduled_services: [visit], products_catalog: [tekko, gel], equipment_calibrations: calibrations, equipment_systems: systems, scheduled_service_addons: [], product_aliases: [] };
+  const mix = (visit, gallons, { equipmentSystemId = null, calibrations = [truck, hand], addons = [] } = {}) => {
+    const rows = { scheduled_services: [visit], products_catalog: [tekko, gel], equipment_calibrations: calibrations, equipment_systems: systems, scheduled_service_addons: addons, product_aliases: [] };
     const dbh = (t) => {
       const table = String(t).split(' as ')[0];
       const chain = {};
@@ -153,6 +153,23 @@ describe('a label rate per gallon is bound to its spray volume', () => {
     expect(out).toMatchObject({ coversSqft: 55000, rigSprayGalPer1000: 2, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1 });
     expect(out.warnings).toContain("The card's rate is for 1 gal per 1,000 sq ft. Tank #1 sprays 2: the same mix would put down more than the label amount. Use a sprayer at the card's volume");
     expect(out.ratePerGallon).toEqual({ lo: 2, hi: 2, unit: 'fl_oz' });
+  });
+
+  // Owner 2026-11-26: each service's row is worked out like the single dose, so the rig comparison and both coverage figures ride on every row.
+  test('roach plus flea: each service row carries the rig coverage and the card-volume coverage', async () => {
+    const flea = [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }];
+    const out = await mix(home, null, { equipmentSystemId: 'sys-1', addons: flea });
+    expect(out.amount).toBeNull();
+    expect(out.serviceAmounts).toHaveLength(2);
+    for (const row of out.serviceAmounts) {
+      expect(row).toMatchObject({ coversSqft: 55000, labelCoversSqft: 110000, rigSprayGalPer1000: 2, sprayVolumeGalPer1000: 1 });
+    }
+    expect(out.serviceAmounts.map((row) => row.amount)).toEqual([220, 72.6]);
+    expect(out.warnings.filter((w) => /sprays 2/.test(w))).toHaveLength(2);
+    expect(out.warnings[0]).toMatch(/^German Roach Cleanout: The card's rate is for 1 gal/);
+    // With no rig named nothing is compared: the rows carry the card-volume coverage only.
+    const none = await mix(home, 110, { addons: flea });
+    expect(none.serviceAmounts.every((row) => row.labelCoversSqft === undefined && row.coversSqft === 110000)).toBe(true);
   });
 
   test('a rig assigned to the visit is named too', async () => {
