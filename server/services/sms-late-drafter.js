@@ -75,14 +75,6 @@ function isAiNumber(to) {
   return digits === '18559260203' || digits === '8559260203';
 }
 
-function mediaCount(metadata) {
-  let meta = metadata;
-  if (typeof meta === 'string') {
-    try { meta = JSON.parse(meta); } catch { meta = null; }
-  }
-  return Array.isArray(meta?.media) ? meta.media.length : 0;
-}
-
 // The webhook's own sender match (twilio-webhook.js findSingleCustomerByPhone): one active
 // customer for the phone, shared-phone rules included. Lazy: it pulls the whole route module.
 function defaultFindCustomer(phone) {
@@ -160,7 +152,8 @@ async function draftOne(row, customer) {
     intent: triage,
     schedulingIntent: hasSchedulingIntent(body),
     source: SOURCE,
-    hasMedia: mediaCount(row.metadata) > 0,
+    // unknown media (no media list on the row) counts as a photo: such a reply never auto-sends (texting AI gap 6)
+    hasMedia: require('./sms-gratitude-context').mediaCountFromMetadata(row.metadata) !== 0,
     asOf: new Date(row.created_at),
     liveEta: false,
   });

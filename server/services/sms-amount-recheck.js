@@ -235,14 +235,14 @@ async function livePhotoSentences(customerId, inboundSmsLogId, dbh) {
   const [checks, context] = await Promise.all([photoFact.loadPhotoChecks(customerId, { db: dbh, smsLogId: inboundSmsLogId }), loadCustomerContext(customerId, dbh)]);
   return checks && context ? [...new Set(checks.map((check) => photoFact.sentenceForContext(context, check)).filter(Boolean))] : null;
 }
-// Whether the inbound text the decision answers carried a photo (sms_log.metadata.media, as the webhook stores it). No inbound text to read:
-// assumed it did (the stricter own-words rule). A read that fails throws: the caller refuses as photo_check_recheck_failed.
+// Whether the inbound text the decision answers carried a photo (sms_log.metadata.media, as the webhook stores it). No inbound text to read,
+// or no media list on it: assumed it did (the stricter own-words rule). A read that fails throws: the caller refuses as photo_check_recheck_failed.
 async function inboundCarriedPhoto(inboundSmsLogId, dbh) {
   if (!inboundSmsLogId) return true;
   const row = await dbh('sms_log').where({ id: inboundSmsLogId }).first('metadata');
   if (!row) throw new Error(`inbound sms_log ${inboundSmsLogId} not found`);
-  const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {});
-  return Array.isArray(metadata.media) && metadata.media.length > 0;
+  // (an unknown media list - null metadata, no media key - counts as a photo: the stricter rule)
+  return require('./sms-gratitude-context').mediaCountFromMetadata(row.metadata) !== 0;
 }
 // An AI body's own photo wording, judged with the linked inbound text's media flag. null = none (or not an AI body).
 async function ownPhotoWordsReason({ rest, judge, inboundSmsLogId, dbh }) {

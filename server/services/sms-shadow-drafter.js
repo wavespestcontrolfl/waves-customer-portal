@@ -6878,10 +6878,11 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // offer came from a booking picker: then a card, never a send), and
     // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
-    // PHOTO CHECK (texting AI gap 6): a reply that copies the photo sentence goes to a person (never auto-send); one that says what a photo
-    // shows in its own words stays a shadow row (replyHasUnverifiedPhotoClaim below). Gate off: neither applies.
+    // PHOTO CHECK (texting AI gap 6): a reply to a text that carried a photo (or whose media state is unknown: callers pass true then) goes
+    // to a person, never auto-send, gate on or off (claimAutoSend refuses it again at the claim). A reply that states a photo reading the facts
+    // did not give stays a shadow row (photoReply.held, gate on).
     const photoReply = photoFact.replyPhotoVerdict({ reply: parsed.reply, context, photoCheck, inboundHasPhoto: hasMedia });
-    const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft) || photoReply.copies;
+    const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft) || Boolean(hasMedia);
     // Only an ANSWER may leave the silent shadow lane (owner 2026-11-25). An ACK is the fixed acknowledgement and an ABSTAIN has no text:
     // routing sees an empty reply for both (deliverableReply), which is never eligible, so they stay shadow rows for the judge whatever the
     // suggest and auto-send gates say, and no card and no send can come from them.
@@ -7057,7 +7058,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // revision budget is never shown to a human OR sent to a customer; it
     // stays a shadow row the judge still covers.
     let deliveredAs = SHADOW_STATUS;
-    if (row?.id && converged && !replyHasPlaceholder && !replyHasUngroundedAmount && !photoReply.ownWords) {
+    if (row?.id && converged && !replyHasPlaceholder && !replyHasUngroundedAmount && !photoReply.held) {
       if (deliveryMode === suggestMode.AUTO_SEND_MODE && lint.pass) {
         const result = await require('./sms-auto-send').maybeAutoSend({
           draftId: row.id,

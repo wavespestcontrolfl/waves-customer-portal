@@ -87,6 +87,19 @@ describe('photoClaimInOwnWords - the model may not describe a photo itself', () 
     }
     expect(photoFact.photoClaimInOwnWords("It's harmless.")).toBe(false);
   });
+  test('on a photo text a singular declaration is held too', () => {
+    for (const text of ["It's a German cockroach.", "That's a termite.", 'This is a wasp.']) {
+      expect([text, photoFact.photoClaimInOwnWords(text, { inboundHasPhoto: true })]).toEqual([text, true]);
+    }
+    expect(photoFact.photoClaimInOwnWords("It's a great day for your ant visit.", { inboundHasPhoto: true })).toBe(false);
+  });
+  test('label-facts wording (the sanctioned "safe once dry" idiom, a LABEL FACTS sentence) is not a photo judgment', () => {
+    const idiom = "It's safe once dry, and your technician will confirm the timing at the visit.";
+    expect(photoFact.photoClaimInOwnWords(idiom, { inboundHasPhoto: true })).toBe(false);
+    const label = 'For the products applied at your Nov 20 visit, the label says to keep people and pets off treated areas until dry.';
+    expect(photoFact.photoClaimInOwnWords(`${label} Totally safe.`, { inboundHasPhoto: true })).toBe(true);
+    expect(photoFact.photoClaimInOwnWords(label, { inboundHasPhoto: true })).toBe(false);
+  });
 });
 
 // A chainable stand-in for the two reads loadPhotoChecks makes.
@@ -123,9 +136,21 @@ describe('replyPhotoVerdict - both checks read the same flattened reply', () => 
     const photoCheck = { smsLogId: 'log-1', assessmentId: 'a-1', ...ident('german-roach') };
     const reply = 'Thanks!\nFrom your photo, it looks like a German cockroach.\nYour technician will confirm at the visit.';
     expect(photoFact.replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto: true }))
-      .toEqual({ copies: true, ownWords: false, snapshot: { photo_check: { sms_log_id: 'log-1', assessment_id: 'a-1' } } });
+      .toEqual({ copies: true, held: false, snapshot: { photo_check: { sms_log_id: 'log-1', assessment_id: 'a-1' } } });
     process.env.GATE_SMS_REAL_ANSWERS = 'false';
-    expect(photoFact.replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto: true })).toEqual({ copies: false, ownWords: false, snapshot: {} });
+    expect(photoFact.replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto: true })).toEqual({ copies: false, held: false, snapshot: {} });
+  });
+
+  test('a photo sentence form the facts did not render for this inbound text is held (no reading, no visit, another species)', () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const stock = 'Your technician will check what is in your photo at the visit.';
+    const roach = 'From your photo, it looks like a German cockroach. Your technician will confirm at the visit.';
+    const visit = { upcomingServices: [{ type: 'Quarterly Pest Control' }] };
+    const roachCheck = { smsLogId: 'log-1', assessmentId: 'a-1', ...ident('german-roach') };
+    expect(photoFact.replyPhotoVerdict({ reply: stock, context: visit, photoCheck: null, inboundHasPhoto: true }).held).toBe(true);
+    expect(photoFact.replyPhotoVerdict({ reply: roach, context: { upcomingServices: [] }, photoCheck: roachCheck, inboundHasPhoto: true }).held).toBe(true);
+    expect(photoFact.replyPhotoVerdict({ reply: stock, context: visit, photoCheck: roachCheck, inboundHasPhoto: true }).held).toBe(true);
+    expect(photoFact.replyPhotoVerdict({ reply: roach, context: visit, photoCheck: roachCheck, inboundHasPhoto: true }).held).toBe(false);
   });
 });
 

@@ -161,7 +161,9 @@ async function draftPhotoCheck({ hasMedia, smsLogId, customer, db }) {
 // to a text that carried a photo, in any sentence). "Thanks for the photo" or "send us a picture of the bugs" carry no cue and pass.
 const PHOTO_NOUN_RE = /\b(?:photos?|pictures?|pics?|images?|snapshots?|screenshots?)\b/i;
 const ID_CUE_RE = /\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\b(?:shows?|showing|showed|pictured)\b|\bis\s+an?\b|\bidentif\w*|\b(?:it|that|this|these|those|they)(?:'s|’s|'re|’re|\s+is|\s+are|\s+was|\s+were)\b|\b(?:harmless|dangerous|venomous|poisonous|safe|nothing\s+to\s+worry)\b/i;
-const STRONG_CUE_RE = /\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\b(?:shows?|showing|showed|pictured)\b|\bidentif\w*|\b(?:harmless|dangerous|venomous|poisonous|nothing\s+to\s+worry)\b|\b(?:those|these|they)(?:'re|\s+are)\s+(?:definitely\s+|probably\s+|likely\s+)?(?:an?\s+|some\s+)?(?:[a-z]+\s+)?(?:bugs?|insects?|roach(?:es)?|cockroach(?:es)?|ants?|termites?|swarmers?|spiders?|wasps?|bees?|fleas?|ticks?|beetles?|grubs?)\b/i;
+// A direct declaration of a pest ("those are fire ants", "it's a German cockroach", "that's a termite"), plural or singular.
+const DECLARED_PEST = String.raw`(?:definitely\s+|probably\s+|likely\s+)?(?:an?\s+|some\s+)?(?:[a-z]+\s+)?(?:bugs?|insects?|roach(?:es)?|cockroach(?:es)?|ants?|termites?|swarmers?|spiders?|wasps?|bees?|fleas?|ticks?|beetles?|grubs?)\b`;
+const STRONG_CUE_RE = new RegExp(String.raw`\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\b(?:shows?|showing|showed|pictured)\b|\bidentif\w*|\b(?:harmless|dangerous|venomous|poisonous|nothing\s+to\s+worry)\b|\b(?:those|these|they)(?:'re|\s+are)\s+${DECLARED_PEST}|\b(?:it|that|this)(?:'s|\s+is|\s+was)\s+${DECLARED_PEST}`, 'i');
 const PEST_WORD_RE = /\b(?:bugs?|insects?|pests?|roach(?:es)?|cockroach(?:es)?|palmetto|ants?|termites?|swarmers?|spiders?|widow|recluse|wasps?|hornets?|bees?|yellow ?jackets?|mosquito(?:e?s)?|fleas?|ticks?|bed ?bugs?|rodents?|rats?|mouse|mice|droppings|beetles?|weevils?|silverfish|earwigs?|millipedes?|centipedes?|stink ?bugs?|whitefl(?:y|ies)|aphids?|scale|grubs?|webworms?|armyworms?|chinch|caterpillars?|moths?|fl(?:y|ies)|gnats?|larva[e]?|scorpions?|snakes?|lizards?|frogs?|nests?|mounds?|frass|fungus|disease|mold|mildew|weeds?|damage|species)\b/i;
 
 // A safety judgment on its own ("It's harmless.", "Totally safe."): on a photo text it is a judgment of the photo even with no pest word.
@@ -169,6 +171,17 @@ const SAFETY_JUDGMENT_RE = /\b(?:harmless|safe|dangerous|nothing\s+to\s+worry\s+
 // The one text form both reply checks read: whitespace flattened, curly apostrophes straightened.
 function flatReply(text) {
   return String(text || '').replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
+}
+
+// The label-facts wording a reply may carry on any text (a LABEL FACTS re-entry or rainfast sentence, the sanctioned "safe once dry" +
+// technician idiom) is not a judgment of a photo: it is removed before the photo checks read the reply. The label-facts module's own
+// sentence forms and idiom rule decide what counts (sms-label-facts.labelSentencesIn / sanctionSafeOnceDry).
+function withoutLabelWording(text) {
+  const labelFacts = require('./sms-label-facts');
+  return sentencesOf(labelFacts.sanctionSafeOnceDry(text))
+    .filter((sentence) => !labelFacts.labelSentencesIn(`- ${sentence}`).length)
+    .join(' ')
+    .replace(/\bSANCTIONED_IDIOM\b/g, ' ');
 }
 
 function sentencesOf(text) {
@@ -180,7 +193,7 @@ function sentencesOf(text) {
  * `inboundHasPhoto`: the text it answers carried a photo, so an identification with no photo word counts too.
  */
 function photoClaimInOwnWords(text, { allowed = [], inboundHasPhoto = false } = {}) {
-  let rest = flatReply(text);
+  let rest = withoutLabelWording(flatReply(text));
   for (const sentence of allowed.filter(Boolean)) rest = rest.split(sentence).join(' ');
   // with no photo word in the sentence, only a strong cue counts ("it's on Friday" in a reply about an ant visit is not an identification)
   return sentencesOf(rest).some((sentence) => (inboundHasPhoto && SAFETY_JUDGMENT_RE.test(sentence)) || (PEST_WORD_RE.test(sentence)
@@ -188,18 +201,21 @@ function photoClaimInOwnWords(text, { allowed = [], inboundHasPhoto = false } = 
 }
 
 /**
- * The drafter's verdict on a reply (gate on only; gate off = nothing): `copies` = it carries the rendered sentence (a person reviews it,
- * never auto-send), `ownWords` = it says what a photo shows in its own words (kept a shadow row), `snapshot` = the intended_actions key
- * naming the reading the facts rendered ({} = none).
+ * The drafter's verdict on a reply (gate on only; gate off = nothing): `held` = it says what a photo shows in its own words, or carries a
+ * PHOTO CHECK sentence form this draft's facts did not render for this inbound text (kept a shadow row); `copies` = it carries the rendered
+ * sentence; `snapshot` = the intended_actions key naming the reading the facts rendered ({} = none). Whether the draft may auto-send is not
+ * decided here: a reply to a text with a photo (or an unknown media state) never auto-sends (the drafter's review rule and claimAutoSend).
  */
 function replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto }) {
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { copies: false, ownWords: false, snapshot: {} };
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { copies: false, held: false, snapshot: {} };
   const sentence = sentenceForContext(context, photoCheck);
-  const ownWords = photoClaimInOwnWords(reply, { allowed: [sentence], inboundHasPhoto: Boolean(inboundHasPhoto) });
-  if (ownWords) logger.warn(`[sms-photo-fact] draft describes a photo in its own words — kept shadow (customer=${context?.customer?.id || 'unknown'})`);
+  const flat = flatReply(reply);
+  const unbacked = claimsPhotoCheck(sentence ? flat.split(sentence).join(' ') : flat);
+  const held = unbacked || photoClaimInOwnWords(reply, { allowed: [sentence], inboundHasPhoto: Boolean(inboundHasPhoto) });
+  if (held) logger.warn(`[sms-photo-fact] draft states a photo reading the facts did not give — kept shadow (customer=${context?.customer?.id || 'unknown'})`);
   return {
-    copies: Boolean(sentence) && flatReply(reply).includes(sentence),
-    ownWords,
+    copies: Boolean(sentence) && flat.includes(sentence),
+    held,
     snapshot: sentence ? { photo_check: { sms_log_id: photoCheck.smsLogId, assessment_id: photoCheck.assessmentId } } : {},
   };
 }
