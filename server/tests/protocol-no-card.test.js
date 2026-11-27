@@ -323,3 +323,40 @@ describe('a card line that forbids work is not a treatment', () => {
     expect(treated.length).toBeGreaterThan(0);
   });
 });
+
+describe('the defaults read: a no-card answer only on a key it read', () => {
+  const { resolveCompletionProductDefaults } = require('../services/completion-product-defaults');
+  function fakeDb(tables, failing = []) {
+    const dbFn = (name) => {
+      const table = String(name).split(' as ')[0];
+      if (failing.includes(table)) {
+        const fail = () => Promise.reject(Object.assign(new Error('read failed'), { code: 'ECONNRESET' }));
+        const q = { where: () => q, first: fail, select: () => q, then: (resolve, reject) => fail().then(resolve, reject) };
+        return q;
+      }
+      const rows = tables[table] || [];
+      const q = {
+        where: () => q, orWhereNull: () => q, whereIn: () => q, whereNotNull: () => q, leftJoin: () => q, andWhere: () => q,
+        select: () => q, first: () => Promise.resolve(rows[0]), catch: () => q,
+        then: (resolve, reject) => Promise.resolve(rows).then(resolve, reject),
+      };
+      return q;
+    };
+    dbFn.raw = (sql) => sql;
+    return dbFn;
+  }
+  const visit = { id: 's', service_id: 'svc-1', service_type: 'Service Visit', service_key_snapshot: null, scheduled_date: '2026-12-01' };
+
+  test('a key read that fails answers key_unread, never no_protocol', async () => {
+    const db = fakeDb({ scheduled_services: [visit], products_catalog: [], product_aliases: [], scheduled_service_addons: [] }, ['services']);
+    const result = await resolveCompletionProductDefaults({ db, serviceId: 's', protocols });
+    expect(result.matchedVisit?.reason).toBe('key_unread');
+  });
+
+  test('a key read that finds no rule answers no_protocol', async () => {
+    const db = fakeDb({ scheduled_services: [visit], services: [{ service_key: 'web_sweep' }], products_catalog: [], product_aliases: [], scheduled_service_addons: [] });
+    const result = await resolveCompletionProductDefaults({ db, serviceId: 's', protocols });
+    expect(result.matchedVisit?.reason).toBe('no_protocol');
+  });
+});
+

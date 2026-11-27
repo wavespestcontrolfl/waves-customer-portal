@@ -300,16 +300,19 @@ it('a draft restored on a no-card visit drops its automatic house-mix rows and k
     selectedProducts: [
       { productId: 'm1', name: 'Taurus SC', totalAmount: 1.6, amountUnit: 'fl_oz', pestDefaultMixProduct: true, areaValue: '', areaUnit: '' },
       { productId: 'c3', name: 'Advion Cockroach Gel Bait', totalAmount: 1, amountUnit: 'g', applicationMethod: 'bait_placement', areaValue: '', areaUnit: '' },
+      // A seeded row the tech edited is his record: it stays.
+      { productId: 'm2', name: 'LESCO Crosscheck Plus', totalAmount: 1.2, amountUnit: 'fl_oz', pestDefaultMixProduct: true, techEdited: true, areaValue: '', areaUnit: '' },
     ],
   }));
   stubFetchWithActions({ serviceType: 'Courtesy Visit', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
-  const catalog = [...cockroachCatalog, { id: 'm1', name: 'Taurus SC', category: 'Insecticide' }];
+  const catalog = [...cockroachCatalog, { id: 'm1', name: 'Taurus SC', category: 'Insecticide' }, { id: 'm2', name: 'LESCO Crosscheck Plus', category: 'Insecticide' }];
   await act(async () => {
     render(<CompletionPanel service={visit} products={catalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
   });
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   expect(await screen.findByText('Advion Cockroach Gel Bait')).toBeTruthy();
   await waitFor(() => expect(screen.queryByText('Taurus SC')).toBeNull());
+  expect(screen.getByText('LESCO Crosscheck Plus')).toBeTruthy();
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
 });
 

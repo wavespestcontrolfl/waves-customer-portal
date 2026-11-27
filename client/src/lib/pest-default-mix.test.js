@@ -72,3 +72,10 @@ describe('isPestDefaultMixVisit: a semi-annual name follows the server card by k
     expect(isPestDefaultMixVisit({ serviceType: 'Gutter Semi-Annual Service' })).toBe(false);
   });
 });
+
+describe('isPestDefaultMixVisit: a booked Waves Assessment', () => {
+  it('gets no house mix under any name', () => {
+    expect(isPestDefaultMixVisit({ serviceType: 'Quarterly Service', completionProfile: { serviceKey: 'lawn_inspection' } })).toBe(false);
+    expect(isPestDefaultMixVisit({ serviceType: 'Re-Service', serviceKey: 'lawn_inspection', isCallback: true })).toBe(false);
+  });
+});

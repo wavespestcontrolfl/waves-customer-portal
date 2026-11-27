@@ -14368,10 +14368,12 @@ export function CompletionPanel({
   // rows from before that answer: they are dropped, so nothing automatic submits under the "Inspection only, no product"
   // note. A product row the tech added by hand stays (owner 2026-11-26: a check never stops him recording what he
   // applied). Card action ticks and their note markers are dropped at submit (reconcileProtocolActions).
+  // A seeded row the tech edited (techEdited) is his and stays.
   useEffect(() => {
     if (!noCardConfirmed) return;
-    if (!selectedProducts.some((p) => p.protocolDefaultProduct || p.pestDefaultMixProduct)) return;
-    setSelectedProducts((current) => current.filter((p) => !p.protocolDefaultProduct && !p.pestDefaultMixProduct));
+    const automatic = (p) => (p.protocolDefaultProduct || p.pestDefaultMixProduct) && !p.techEdited;
+    if (!selectedProducts.some(automatic)) return;
+    setSelectedProducts((current) => current.filter((p) => !automatic(p)));
   }, [noCardConfirmed, selectedProducts]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
@@ -17183,7 +17185,8 @@ export function CompletionPanel({
     // r4: an edit to a 6th caption, or beyond the 200-char cap, must not
     // invalidate the draft — it was never part of the submitted set).
     const { captions: reportPhotoCaptions, summary: reportPhotoSummary } = reportPhotoInputs();
-    const actionsCompleted = activeSelectedLabels(selectedProtocolActionLabels);
+    // A confirmed no-card visit reports no card action, as its submit records none (reconcileProtocolActions).
+    const actionsCompleted = noCardConfirmed ? [] : activeSelectedLabels(selectedProtocolActionLabels);
     // Free text is the input surface now; restored older drafts can still
     // carry chip-label selections, so both merge into the same arrays.
     const observations = [
@@ -17839,7 +17842,9 @@ export function CompletionPanel({
       // over them (pre-push audit P1). Idempotent while an owner remains.
       return promoteTankOwner(prev.map((p) => {
         if (productRowId(p) !== rowId) return propagateTank ? followTank(p, value) : p;
-        const next = { ...p, [field]: value };
+        // techEdited: the tech changed this row by hand, so it is his record and never an automatic seed (a no-card visit's
+        // cleanup keeps it; noCardConfirmed).
+        const next = { ...p, [field]: value, techEdited: true };
         // Leaving a per-gallon rate retires the tank with it, on every lane —
         // a pest perimeter or tree/shrub row never reaches the rate-unit
         // branch below, so a hidden volume would survive the round-trip back.

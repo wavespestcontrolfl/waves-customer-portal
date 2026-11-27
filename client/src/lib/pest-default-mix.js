@@ -99,6 +99,8 @@ export function isPestDefaultMixVisit(service) {
       || service?.service_key_snapshot
       || "",
   ).toLowerCase();
+  // A booked Waves Assessment (key lawn_inspection) is a walk with no product under any name, "Quarterly Service" too.
+  if (key === "lawn_inspection") return false;
   // A re-service counts as the server's general pest card does (protocol-matcher.js): its name says pest, or its key is a
   // general pest service, or the WHOLE name is a bare "Re-Service" / "Callback" with no key at all. A callback booking whose
   // name and key say nothing ("Courtesy Visit"), or a bare "Re-Service" under another service's key, has no card on the
