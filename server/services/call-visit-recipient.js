@@ -103,6 +103,12 @@ const messageTypeFor = (kind) => KINDS[kind].messageType;
 function eligibleEntries(v2Extraction, { excludePhones = [] } = {}) {
   const taken = new Set(excludePhones.map(lastTen).filter(Boolean));
   const raw = [v2Extraction?.secondary_contact, ...(Array.isArray(v2Extraction?.secondary_contacts) ? v2Extraction.secondary_contacts : [])];
+  // A "this_visit" limit on ANY copy of a number (the singleton and its array mirror, in either order) wins for that number.
+  const visitOnlyKeys = new Set();
+  for (const rawEntry of raw) {
+    const mapped = mapSecondaryContactToLegacy(rawEntry);
+    if (mapped && appointmentTextsScope(rawEntry && rawEntry.appointment_texts_scope) === 'this_visit') visitOnlyKeys.add(lastTen(mapped.phone));
+  }
   const out = [];
   for (const rawEntry of raw) {
     const entry = mapSecondaryContactToLegacy(rawEntry);
@@ -119,7 +125,7 @@ function eligibleEntries(v2Extraction, { excludePhones = [] } = {}) {
       role: role && role !== 'unknown' ? role.slice(0, 30) : null,
       // "this_visit": the caller limited the texts to the booked visit, so the person is not put on the customer's list.
       // Anything else (ongoing, unspecified, missing) is every visit (owner 2026-11-24 PM).
-      thisVisitOnly: appointmentTextsScope(rawEntry && rawEntry.appointment_texts_scope) === 'this_visit',
+      thisVisitOnly: visitOnlyKeys.has(key),
     });
   }
   return out;

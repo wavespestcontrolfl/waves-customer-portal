@@ -36,6 +36,11 @@ exports.up = async function up(knex) {
   });
 };
 
+// A recorded stop is the only record that a person asked not to be texted: never drop it. Rolling back with any stop on file
+// refuses; turn GATE_CALL_GIVEN_VISIT_TEXTS off first and carry the stops forward by hand.
 exports.down = async function down(knex) {
-  await knex.schema.dropTableIfExists('customer_reminder_contacts');
+  if (!(await knex.schema.hasTable('customer_reminder_contacts'))) return;
+  const stop = await knex('customer_reminder_contacts').whereNotNull('stopped_at').first('id');
+  if (stop) throw new Error('customer_reminder_contacts holds recorded stops; refusing to drop them (turn GATE_CALL_GIVEN_VISIT_TEXTS off and keep the stops first)');
+  await knex.schema.dropTable('customer_reminder_contacts');
 };

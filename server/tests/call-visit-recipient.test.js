@@ -106,6 +106,13 @@ describe('eligibleEntries: one rule, judged on the V2 entry alone', () => {
     for (const scope of ['ongoing', 'unspecified', undefined, null, 'This_Visit', 7]) expect(only(scope)).toBe(false);
   });
 
+  test('a "this_visit" limit on either copy of the same number wins, in both orders', () => {
+    const limited = entry({ appointment_texts_scope: 'this_visit' });
+    expect(eligible({ secondary_contact: entry(), secondary_contacts: [limited] })[0].thisVisitOnly).toBe(true);
+    expect(eligible({ secondary_contact: limited, secondary_contacts: [entry()] })[0].thisVisitOnly).toBe(true);
+    expect(eligible({ secondary_contact: entry(), secondary_contacts: [entry({ appointment_texts_scope: 'ongoing' })] })[0].thisVisitOnly).toBe(false);
+  });
+
   test('a report-only request (wants_notifications) or a presence-only flag (on_site) is NOT a request to text them', () => {
     expect(eligible({ secondary_contacts: [entry({ wants_appointment_texts: false, wants_notifications: true })] })).toEqual([]);
     expect(eligible({ secondary_contacts: [entry({ wants_appointment_texts: false, on_site: true })] })).toEqual([]);
