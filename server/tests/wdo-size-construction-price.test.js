@@ -522,13 +522,13 @@ describe('a profile with no verdict flag and no evidence', () => {
 
   test('only a stamp true or field-specific non-satellite evidence is trusted; old, record-only and source-less profiles are not', () => {
     const base = { constructionMaterial: 'WOOD_FRAME', foundationType: 'CRAWLSPACE' };
-    const untrusted = { constructionTrusted: false, foundationTrusted: false };
+    const untrusted = { constructionTrusted: false, foundationTrusted: false, homeSizeTrusted: true };
     expect(structuralTrustVerdicts(base)).toEqual(untrusted);
     expect(structuralTrustVerdicts({ ...base, dataSources: { propertyRecord: true } })).toEqual(untrusted);
     expect(structuralTrustVerdicts({ ...base, dataSources: { propertyRecord: false, satellite: true } })).toEqual(untrusted);
     expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: { sourceType: 'satellite', fieldVerify: false } } })).toEqual(untrusted);
-    expect(structuralTrustVerdicts({ ...base, constructionTrusted: true, foundationTrusted: true })).toEqual({ constructionTrusted: true, foundationTrusted: true });
-    expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: COUNTY } })).toEqual({ constructionTrusted: true, foundationTrusted: false });
+    expect(structuralTrustVerdicts({ ...base, constructionTrusted: true, foundationTrusted: true })).toEqual({ constructionTrusted: true, foundationTrusted: true, homeSizeTrusted: true });
+    expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: COUNTY } })).toEqual({ constructionTrusted: true, foundationTrusted: false, homeSizeTrusted: true });
     expect(structuralTrustVerdicts({ ...base, fieldEvidence: { constructionMaterial: { sourceType: 'verified', fieldVerify: false } } }).constructionTrusted).toBe(true);
     // fieldVerify beats a true stamp; a false stamp beats evidence.
     expect(structuralTrustVerdicts({ ...base, constructionTrusted: true, fieldEvidence: { constructionMaterial: { ...COUNTY, fieldVerify: true } } }).constructionTrusted).toBe(false);
@@ -553,6 +553,22 @@ describe('a profile with no verdict flag and no evidence', () => {
     }
     // a value a person typed still wins
     expect(structuralTrustVerdicts({ ...base, _manualFields: ['foundationType'], _fieldEvidence: { foundationType: [{ sourceType: 'model_inference' }] } }).foundationTrusted).toBe(true);
+  });
+
+  test('the lookup stamps a record value trusted only with field evidence from an accepted source: a value with none is untrusted', () => {
+    const { structuralFactIsRecordBacked } = require('../services/lookup-confidence');
+    for (const _fieldEvidence of [undefined, {}, { foundationType: [] }, { foundationType: null }]) {
+      expect(structuralFactIsRecordBacked({ record: { foundationType: 'RAISED', _source: 'listing', _fieldEvidence }, field: 'foundationType' })).toBe(false);
+    }
+    expect(structuralFactIsRecordBacked({ record: { foundationType: 'RAISED', _fieldEvidence: { foundationType: { sourceType: 'county' } } }, field: 'foundationType' })).toBe(true);
+    // The reported case, rebuilt by the lookup's own profile build: a cached listing record with an inferred raised foundation and
+    // no field evidence. The stamp is false, so the WDO prices the slab cell ($175 at 3,000 sq ft) with the note, not the crawl $225.
+    const { buildEnrichedProfile, translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const enriched = buildEnrichedProfile({ squareFootage: 3000, lotSize: 9000, yearBuilt: 2004, constructionMaterial: 'CBS', foundationType: 'RAISED', _source: 'listing' }, null, 27.1, -82.4);
+    expect(enriched.foundationTrusted).toBe(false);
+    const line = wdoLine(generateEstimate(translateV2CallToV1Input({ ...enriched, homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St' }, ['WDO'], { urgency: 'ROUTINE' })));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeTruthy();
   });
 
   test('through the translator: an AI-inferred raised foundation on block walls prices the slab cell with the note', () => {
@@ -641,27 +657,96 @@ describe('a wrong-premise lookup makes machine readings untrusted; a person typi
   const wrongPremise = [{ field: 'address', reason: 'geocoder snapped to a different parcel', priority: 'HIGH' }];
 
   test('the address wrong-premise flag distrusts stamped and evidenced machine readings', () => {
-    expect(structuralTrustVerdicts(trustedProfile)).toEqual({ constructionTrusted: true, foundationTrusted: true });
-    expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: wrongPremise })).toEqual({ constructionTrusted: false, foundationTrusted: false });
+    expect(structuralTrustVerdicts(trustedProfile)).toEqual({ constructionTrusted: true, foundationTrusted: true, homeSizeTrusted: true });
+    expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: wrongPremise })).toEqual({ constructionTrusted: false, foundationTrusted: false, homeSizeTrusted: false });
     // Operational risk flags on the same field are not distrust (a wood-frame note is a risk notice, not a doubt).
     expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: [{ field: 'constructionMaterial', reason: 'Wood frame construction' }] }))
-      .toEqual({ constructionTrusted: true, foundationTrusted: true });
+      .toEqual({ constructionTrusted: true, foundationTrusted: true, homeSizeTrusted: true });
   });
 
   test('a manually typed field still wins over the wrong-premise flag; the other field stays untrusted', () => {
     expect(structuralTrustVerdicts({ ...trustedProfile, fieldVerifyFlags: wrongPremise, _manualFields: ['constructionMaterial'] }))
-      .toEqual({ constructionTrusted: true, foundationTrusted: false });
+      .toEqual({ constructionTrusted: true, foundationTrusted: false, homeSizeTrusted: false });
+  });
+
+  test("a technician's saved confirmation for this address survives the flag; it vouches only for the value it carries", () => {
+    const { applyVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
+    // The cache applies the override to the record; the profile carries the record's field evidence (fieldEvidence).
+    const record = applyVerifiedOverrides({ constructionMaterial: 'CBS', foundationType: 'SLAB', _fieldEvidence: { foundationType: COUNTY } }, { foundationType: { value: 'RAISED' } });
+    const profile = { constructionMaterial: record.constructionMaterial, foundationType: record.foundationType, constructionTrusted: true, foundationTrusted: true, fieldEvidence: record._fieldEvidence, fieldVerifyFlags: wrongPremise };
+    expect(structuralTrustVerdicts(profile)).toMatchObject({ constructionTrusted: false, foundationTrusted: true });
+    // Another value than the one confirmed, or a confirmation marked for a check, is not vouched for.
+    expect(structuralTrustVerdicts({ ...profile, foundationType: 'CRAWLSPACE' }).foundationTrusted).toBe(false);
+    expect(structuralTrustVerdicts({ ...profile, fieldEvidence: { foundationType: { ...record._fieldEvidence.foundationType, fieldVerify: true } } }).foundationTrusted).toBe(false);
+    // Through the translator, on a size a person typed: the confirmed raised foundation prices the crawl column ($225 at 3,000 sq ft).
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const line = wdoLine(generateEstimate(translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', _homeSqFtManuallyEdited: true, ...profile }, ['WDO'], { urgency: 'ROUTINE' })));
+    expect(line.price).toBe(225);
+    expect(line.requiresManualReview).toBe(false);
   });
 
   test('through the translator: a wrong-premise wood frame prices block + the note; typed in, it prices frame', () => {
     const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
-    const translate = (extra) => translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', ...trustedProfile, fieldVerifyFlags: wrongPremise, ...extra }, ['WDO'], { urgency: 'ROUTINE' });
+    // The size is typed in (a wrong-premise size alone is no size: see the next group), so only the construction verdict moves the price.
+    const translate = (extra) => translateV2CallToV1Input({ homeSqFt: 3000, lotSqFt: 9000, address: '1 Test St', _homeSqFtManuallyEdited: true, ...trustedProfile, fieldVerifyFlags: wrongPremise, ...extra }, ['WDO'], { urgency: 'ROUTINE' });
     const machine = wdoLine(generateEstimate(translate({})));
     expect(machine.price).toBe(175);
     expect(staffNote(machine)).toBeTruthy();
     const typed = wdoLine(generateEstimate(translate({ _manualFields: ['constructionMaterial'] })));
     expect(typed.price).toBe(200);
     expect(staffNote(typed)).toBeUndefined();
+  });
+});
+
+describe("a wrong-premise lookup's home size is no size until a person confirms it", () => {
+  const { structuralTrustVerdicts } = require('../services/lookup-confidence');
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const wrongPremise = [{ field: 'address', reason: 'geocoder snapped to a different parcel', priority: 'HIGH' }];
+  // The reported case: the record describes a neighbouring 4,500 sq ft block home; the customer's own home is 1,800 sq ft.
+  const neighbour = { homeSqFt: 4500, squareFootage: 4500, lotSqFt: 9000, address: '1 Test St', constructionMaterial: 'CBS', foundationType: 'SLAB', fieldEvidence: { squareFootage: { sourceType: 'county', fieldVerify: false } }, fieldVerifyFlags: wrongPremise };
+  const translate = (extra = {}) => translateV2CallToV1Input({ ...neighbour, ...extra }, ['WDO'], { urgency: 'ROUTINE' });
+  const sizeNote = (line) => (line.warnings || []).some((w) => typeof w === 'string' && w.startsWith(MARK) && /address needs confirmation/.test(w));
+
+  test('the looked-up size and the footprint from it do not price: the smallest size, sent to review with a note', () => {
+    const input = translate();
+    expect(input.homeSizeTrusted).toBe(false);
+    const line = wdoLine(generateEstimate(input));
+    expect(line.price).toBe(150);
+    expect(line.sizeUsed).toBeNull();
+    expect(line.requiresManualReview).toBe(true);
+    expect(line.manualReviewReasons).toContain('wdo_home_size_unconfirmed');
+    expect(sizeNote(line)).toBe(true);
+    // The footprint fallback (no living area on the input, a footprint from the same parcel) does not price either.
+    const footprintOnly = wdoLine(generateEstimate({ ...input, homeSqFt: undefined, footprintSqFt: 4500 }));
+    expect(footprintOnly.price).toBe(150);
+    expect(footprintOnly.requiresManualReview).toBe(true);
+  });
+
+  test('a size a person confirmed prices off the table, with no review', () => {
+    // Typed into the estimator's Home Sq Ft box: 2,600 sq ft on block walls = $175.
+    const typed = wdoLine(generateEstimate(translate({ homeSqFt: 2600, _homeSqFtManuallyEdited: true })));
+    expect(typed.price).toBe(175);
+    expect(typed.requiresManualReview).toBe(false);
+    expect(sizeNote(typed)).toBe(false);
+    // A technician's saved confirmation of the living area, for the size it confirmed: 4,500 sq ft on block walls = $225.
+    const verified = { fieldEvidence: { squareFootage: { value: 4500, sourceType: 'verified', fieldVerify: false } } };
+    expect(structuralTrustVerdicts({ ...neighbour, ...verified }).homeSizeTrusted).toBe(true);
+    expect(wdoLine(generateEstimate(translate(verified))).price).toBe(225);
+    expect(structuralTrustVerdicts({ ...neighbour, ...verified, homeSqFt: 3000 }).homeSizeTrusted).toBe(false);
+  });
+
+  test('no flag, no change; the call-draft builder never sees a flagged lookup; a legacy quote keeps its flat price', () => {
+    const { fieldVerifyFlags: _flags, ...clean } = neighbour;
+    expect(structuralTrustVerdicts(clean).homeSizeTrusted).toBe(true);
+    expect(wdoLine(generateEstimate(translateV2CallToV1Input(clean, ['WDO'], { urgency: 'ROUTINE' }))).price).toBe(225);
+    const { buildEngineInput } = require('../services/estimator-engine/draft-builder');
+    const { SQFT_SOURCES } = require('../services/estimator-engine/source-arbitration');
+    const facts = { home: { value: 3000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] }, lot: { value: 9000, source: SQFT_SOURCES.COUNTY_ASSESSED, confidence: 'high', rejected: [] }, newConstruction: false, tenant: false };
+    const intent = { decision: 'draft', category: 'RESIDENTIAL', is_commercial: false, services: { wdo: {} }, address: '1 Test St' };
+    const drafted = buildEngineInput({ intent, propertyFacts: facts, context: {}, lookupEnriched: neighbour });
+    expect(drafted.homeSizeTrusted).toBe(true);
+    expect(wdoLine(generateEstimate(drafted)).price).toBe(175);
+    expect(wdo({ homeSqFt: 4500, footprint: 4500, homeSizeTrusted: false }, { legacyWdoFlat: true }).price).toBe(LEGACY);
   });
 });
 
@@ -729,6 +814,26 @@ describe('one shared normalizer at every entry', () => {
       })
       .map((file) => path.relative(serverDir, file));
     expect(offenders).toEqual([]);
+  });
+
+  test('text that denies or doubts a feature never reads as its premium: a denied clause is dropped, a premium left beside it is unknown', () => {
+    for (const [text, reading] of [
+      ['concrete slab, no crawl space', 'SLAB'], ['slab (no crawl)', 'SLAB'], ['monolithic slab, no basement', 'SLAB'],
+      ['crawl space: none', undefined], ['crawl space, none', undefined], ['crawl space (none)', undefined], ['crawl space not present', undefined],
+      ['possible crawl space', undefined], ['crawl space ruled out', undefined], ['former crawl space', undefined], ['no slab, crawl space', undefined],
+      ["isn't raised", undefined], ['raised?', undefined], ['N/A', undefined], ['UNKNOWN', undefined],
+    ]) expect([text, normalizeFoundation(text)]).toEqual([text, reading]);
+    for (const [text, reading] of [
+      ['CBS, not wood frame', 'CBS'], ['block, no wood', 'CBS'], ['metal building, no wood', 'METAL'],
+      ['non-wood frame', undefined], ['wood frame, not CBS', undefined], ['probably wood frame', undefined],
+    ]) expect([text, normalizeConstruction(text)]).toEqual([text, reading]);
+    // The reported case: a technician enters it for a 3,000 sq ft block home. The slab cell, $175, not the crawl column's $225.
+    const cache = require('../services/property-lookup/lookup-cache');
+    expect(cache.sanitizeVerifiedValue('foundationType', 'concrete slab, no crawl space')).toBe('SLAB');
+    const line = wdoLine(estimate({ homeSqFt: 3000, constructionMaterial: 'CBS', services: { wdo: { foundationType: 'concrete slab, no crawl space' } } }));
+    expect(line.price).toBe(175);
+    expect(staffNote(line)).toBeUndefined();
+    expect(price({ homeSqFt: 3000, services: { wdo: { constructionType: 'CBS, not wood frame', foundationType: 'crawl space (none)' } } })).toBe(175);
   });
 
   test('both normalizers agree with the verified-entry wrappers', () => {

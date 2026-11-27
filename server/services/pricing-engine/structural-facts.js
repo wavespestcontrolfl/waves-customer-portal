@@ -5,6 +5,21 @@
 // non-test file in server/ keeps its own text matcher for these two fields.
 //
 // One ordered rule list per field, most specific first: the first rule that matches wins.
+//
+// A person's text can deny or doubt a feature: "concrete slab, no crawl space", "CBS, not wood frame", "possible crawl space".
+// Text with no such word reads exactly as before. Text with one is read clause by clause (split on , ; . ( ) | and line breaks):
+// a clause that denies or doubts is dropped, and the rest may give a base reading only (slab or basement; block, brick or metal).
+// A premium reading left in the rest (crawl space, raised, wood frame, mixed) makes the reading unknown, so text that denies or
+// doubts something never raises a price.
+const DOUBT = /\b(NO|NOT|NON|NONE|NOR|NEITHER|NEVER|WITHOUT|W\/O|N\/A|ABSENT|FORMER|FORMERLY|PREVIOUS|PREVIOUSLY|REMOVED|FILLED|CONVERTED|RULED|POSSIBLE|POSSIBLY|MAYBE|MIGHT|PROBABLY|LIKELY|PERHAPS|UNSURE|UNKNOWN|UNCONFIRMED|UNVERIFIED|SUSPECTED|POTENTIAL)\b|N['\u2019]T\b|\?/;
+const CLAUSE_BREAK = /[,;.()|\r\n]+/;
+
+function readAffirmed(raw, read, baseReadings) {
+  const s = String(raw || '').toUpperCase();
+  if (!DOUBT.test(s)) return read(s);
+  const reading = read(s.split(CLAUSE_BREAK).filter((clause) => !DOUBT.test(clause)).join(', '));
+  return baseReadings.includes(reading) ? reading : undefined;
+}
 
 // "Steel/metal frame" is metal, never wood frame, so those words are lifted out before the frame test.
 const STEEL_FRAME = /(STEEL|METAL)[\s_-]*FRAM(E|ED|ING)/g;
@@ -20,8 +35,7 @@ const CONSTRUCTION_RULES = [
   ['WOOD_FRAME', (s, f) => f.wood],
 ];
 
-function normalizeConstruction(raw) {
-  const s = String(raw || '').toUpperCase();
+function readConstruction(s) {
   const withoutSteelFrame = s.replace(STEEL_FRAME, ' ');
   const flags = {
     wood: /WOOD|FRAME|TIMBER/.test(withoutSteelFrame),
@@ -31,6 +45,7 @@ function normalizeConstruction(raw) {
   const rule = CONSTRUCTION_RULES.find(([, test]) => test(withoutSteelFrame, flags));
   return rule ? rule[0] : undefined;
 }
+const normalizeConstruction = (raw) => readAffirmed(raw, readConstruction, ['CBS', 'BRICK', 'METAL']);
 
 // Foundation enums: CRAWLSPACE, RAISED, BASEMENT, SLAB. A raised or crawl-space read is named before any "concrete" word can make it
 // a slab (concrete piers and concrete pilings are raised), and a stem wall is a raised foundation.
@@ -41,11 +56,11 @@ const FOUNDATION_RULES = [
   ['SLAB', /SLAB|MONOLITHIC|ON[\s_-]*GRADE|CONCRETE/],
 ];
 
-function normalizeFoundation(raw) {
-  const s = String(raw || '').toUpperCase();
+function readFoundation(s) {
   const rule = FOUNDATION_RULES.find(([, test]) => test.test(s));
   return rule ? rule[0] : undefined;
 }
+const normalizeFoundation = (raw) => readAffirmed(raw, readFoundation, ['SLAB', 'BASEMENT']);
 
 // The WDO price column of a normalized construction: block-class walls, frame-class walls, or null (unknown, metal: not in the table).
 function wdoWallColumn(construction) {

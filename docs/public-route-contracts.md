@@ -6679,8 +6679,8 @@ of the sweep). Exact per-property pricing stays on POST
 The `wdo_inspection` row (owner ruling 2026-11-26, $150-$275 by home size and construction): its range comes from the code
 table `SPECIALTY.wdo.sizeTable` (`server/services/pricing-engine/constants.js`), not from a `pricing_config` row. `low`/`high` are the
 table's floor and ceiling ($150-$275, the sweep widens them if a value ever falls outside) and `notes` ends "Price by home size and
-construction." The row's shape and key are unchanged; only its numbers moved (it read $150-$350). The staff-only construction note on a
-WDO estimate line is never part of this payload. The lawn row publishes no 6x column (that tier is retired for new sales).
+construction." The row's shape and key are unchanged; only its numbers moved (it read $150-$350). The staff-only notes on a
+WDO estimate line (construction, foundation, an unconfirmed home size) are never part of this payload. The lawn row publishes no 6x column (that tier is retired for new sales).
 The `tree_shrub_care` row contracted with the Light tier's retirement
 (2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
 from the tier sweep the same way the lawn row above dropped its retired

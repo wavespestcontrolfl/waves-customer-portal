@@ -1253,9 +1253,11 @@ function generateEstimate(input) {
     yearBuilt: input.yearBuilt,
     constructionMaterial: input.constructionMaterial,
     foundationType: input.foundationType,
-    // The lookup's trust verdict on those two (false = the record's own evidence marks the value weak): only the WDO price reads it.
+    // The lookup's trust verdict on those two (false = the record's own evidence marks the value weak), and on the home size (false =
+    // a wrong-premise lookup's size no person confirmed): only the WDO price reads them.
     constructionTrusted: input.constructionTrusted,
     foundationTrusted: input.foundationTrusted,
+    homeSizeTrusted: input.homeSizeTrusted,
     roofType: input.roofType,
     nearWater: input.nearWater,
     waterDistance: input.waterDistance,

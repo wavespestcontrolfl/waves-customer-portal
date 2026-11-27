@@ -8606,11 +8606,13 @@ function priceBedBug(rooms, method = 'CHEMICAL', footprint = 2000) {
 const wdoLivingArea = (property) => positiveFiniteNumber(property.homeSqFt) ?? positiveFiniteNumber(property.livingAreaSqFt);
 
 // Size = the home's living area, from the engine's own living-area inputs (homeSqFt, then livingAreaSqFt, the order the flea
-// pricer reads them); a quote with none prices on the footprint the legacy path reads.
+// pricer reads them); a quote with none prices on the footprint the legacy path reads. A wrong-premise lookup's sizes describe a
+// neighbouring parcel (homeSizeTrusted false, lookup-confidence): no size at all, so the smallest tier (`unconfirmed`).
 function wdoSizeTier(property, footprint) {
   const tiers = SPECIALTY.wdo.sizeTable.tiers;
+  if (property.homeSizeTrusted === false) return { size: null, tier: tiers[0], unconfirmed: true };
   const size = wdoLivingArea(property) || footprint;
-  return { size, tier: tiers.find((t) => size <= t.maxSqFt) || tiers[tiers.length - 1] };
+  return { size, tier: tiers.find((t) => size <= t.maxSqFt) || tiers[tiers.length - 1], unconfirmed: false };
 }
 
 // Walls: whatever text arrives is normalized by the shared normalizer (structural-facts.js), and a reading counts only when it is
@@ -8671,16 +8673,21 @@ function priceWDO(input, options = {}) {
     const bracket = brackets.find((b) => footprint <= b.maxSqFt) || brackets[brackets.length - 1];
     return { ...base, price: bracket.price, bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}` };
   }
-  const { size, tier } = wdoSizeTier(property, footprint);
+  const { size, tier, unconfirmed } = wdoSizeTier(property, footprint);
   const wallClass = wdoWallClass(property, options);
   const { crawl, dropped } = wdoFoundation(property, options);
   const column = wdoTableColumn(crawl, wallClass);
   const wallsKnown = wallClass !== null;
-  const tiers = SPECIALTY.wdo.sizeTable.tiers;
-  const note = wdoStaffNote({ tier, column, wallsKnown, crawl, dropped });
+  const { tiers, staffNoteMarker } = SPECIALTY.wdo.sizeTable;
+  // An unconfirmed size sends the line to review, as a quote with no size does, with a note that says why.
+  const notes = [
+    unconfirmed ? `${staffNoteMarker} priced at the smallest size ($${tier[column]}): the address needs confirmation, so the looked-up home size is not used. Confirm the home size before sending.` : null,
+    wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }),
+  ].filter(Boolean);
   return {
     ...base,
-    ...(note ? { warnings: [...(base.warnings || []), note] } : {}),
+    ...(unconfirmed ? { requiresManualReview: true, manualReviewReasons: [...base.manualReviewReasons, 'wdo_home_size_unconfirmed'] } : {}),
+    warnings: [...(base.warnings || []), ...notes],
     price: tier[column],
     sizeUsed: size,
     bracketLabel: tier.maxSqFt === Infinity ? `>${tiers[tiers.length - 2].maxSqFt}` : `<=${tier.maxSqFt}`,

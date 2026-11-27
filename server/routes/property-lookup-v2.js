@@ -6355,6 +6355,7 @@ function translateV2CallToV1Input(profile, selectedServices, options) {
     constructionMaterial: p.constructionMaterial,
     foundationType: p.foundationType,
     // The trust verdicts the WDO price reads: a posted true stamp, or field-specific evidence from a non-satellite source; else untrusted.
+    // With them the size verdict: under a wrong-premise flag the looked-up size is no size until a person confirms it.
     ...structuralTrustVerdicts(p),
     roofType: p.roofType,
     nearWater: p.nearWater,

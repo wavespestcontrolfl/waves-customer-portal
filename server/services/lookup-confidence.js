@@ -332,16 +332,15 @@ function structuralFactIsTrustworthy({ record, field }) {
 
 // The verdict the WDO price reads (owner 2026-11-26: unknown or untrusted construction prices as block plus a staff note): is this
 // structural fact on the merged profile backed by the property RECORD with no weak/conflicting-merge evidence? A value that came
-// only from the satellite photo, or one the record's own evidence marks fieldVerify, is not trusted. Only the false verdict is
-// carried to the pricer (an absent verdict reads as trusted, like palmCountTrusted).
+// only from the satellite photo, or one the record's own evidence marks fieldVerify, is not trusted. The lookup stamps this verdict
+// on the enriched profile (constructionTrusted / foundationTrusted).
 function structuralFactIsRecordBacked({ record, field }) {
   const value = record?.[field];
   const known = value != null && String(value).trim() !== '' && String(value).trim().toUpperCase() !== 'UNKNOWN';
   if (!known || !structuralFactIsTrustworthy({ record, field })) return false;
-  // Field evidence, when present, must come from an accepted source: an AI-reported "county" claim (model_inference),
-  // a listing or a generic web page does not back the price premium.
-  const evidence = firstStructuralEvidence(record?._fieldEvidence?.[field]);
-  return !evidence || evidenceSourceIsAccepted(evidence);
+  // Field evidence from an accepted source is required. A value with none (an older cached record, a listing record) does not
+  // back the price premium, and neither does an AI-reported "county" claim (model_inference), a listing or a generic web page.
+  return evidenceSourceIsAccepted(firstStructuralEvidence(record?._fieldEvidence?.[field]));
 }
 
 // The trust verdict the WDO price reads for one structural field of a PROFILE (the enriched lookup profile the estimator posts back,
@@ -360,14 +359,24 @@ function firstStructuralEvidence(stored) {
   if (Array.isArray(stored)) return stored.find((e) => e && typeof e === 'object') || null;
   return stored && typeof stored === 'object' ? stored : null;
 }
+// A technician's saved confirmation of a value: the lookup cache's verified override writes the value and this evidence, and the
+// override is keyed by the requested address, so it describes the customer's home even when the record describes a neighbour's.
+// It vouches only for the value it carries.
+function technicianConfirmed(stored, value) {
+  const evidence = firstStructuralEvidence(stored);
+  return evidence?.sourceType === 'verified' && evidence.fieldVerify !== true
+    && String(evidence.value ?? '').trim().toUpperCase() === String(value ?? '').trim().toUpperCase();
+}
+const fieldEvidenceOf = (profile, field) => profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
 function profileStructuralFactIsTrusted(profile, { field, flag }) {
   // A value a staff member or tech typed in (the estimator's manual-field list) is a person confirming it: trusted, even over a
-  // stale machine stamp from the lookup that was there before the edit.
+  // stale machine stamp from the lookup that was there before the edit. So is a technician's saved confirmation of the value.
   if (Array.isArray(profile?._manualFields) && profile._manualFields.includes(field)) return true;
+  const stored = fieldEvidenceOf(profile, field);
+  if (technicianConfirmed(stored, profile?.[field])) return true;
   // A wrong-premise lookup (the geocoder snapped to a neighbouring parcel) makes every machine reading untrusted, stamp or not.
   if (hasWrongPremiseFlag(profile)) return false;
   if (profile?.[flag] === false) return false;
-  const stored = profile?.fieldEvidence?.[field] ?? profile?._fieldEvidence?.[field];
   const evidence = firstStructuralEvidence(stored);
   if (Array.isArray(stored) ? stored.some((e) => e?.fieldVerify) : evidence?.fieldVerify) return false;
   // Evidence from a source outside the allowlist overrides a machine stamp true (the stamp was computed from that evidence).
@@ -379,11 +388,20 @@ const WDO_STRUCTURAL_FIELDS = Object.freeze({
   construction: { field: 'constructionMaterial', flag: 'constructionTrusted' },
   foundation: { field: 'foundationType', flag: 'foundationTrusted' },
 });
-// { constructionTrusted, foundationTrusted }: always both, true or false; the pricer reads only a true as trusted.
+// The home size the WDO price reads. A wrong-premise lookup describes a neighbouring parcel, so its living area, and the footprint
+// taken from it, are no size until a person confirms the size: typed into the estimator (_homeSqFtManuallyEdited), or a
+// technician's saved confirmation of the living area the profile carries.
+function profileHomeSizeIsTrusted(profile) {
+  if (!hasWrongPremiseFlag(profile) || profile?._homeSqFtManuallyEdited === true) return true;
+  return technicianConfirmed(fieldEvidenceOf(profile, 'squareFootage'), profile?.homeSqFt || profile?.squareFootage);
+}
+// { constructionTrusted, foundationTrusted, homeSizeTrusted }: always all three, true or false. The pricer reads a construction or
+// foundation verdict only when it is true, and the size verdict only when it is false.
 function structuralTrustVerdicts(profile) {
   return {
     constructionTrusted: profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.construction),
     foundationTrusted: profileStructuralFactIsTrusted(profile, WDO_STRUCTURAL_FIELDS.foundation),
+    homeSizeTrusted: profileHomeSizeIsTrusted(profile),
   };
 }
 
