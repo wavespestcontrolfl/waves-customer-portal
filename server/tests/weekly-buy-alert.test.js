@@ -171,6 +171,11 @@ describe('held lines, partial totals and a check-only list', () => {
     expect(detailFor(group, listOf([group]))).toMatch(/Synthetic Supply, price not from the store's branch \(/);
   });
 
+  test('a line with no pack or price still says its price is not from the store\'s branch', () => {
+    const group = entry({ items: [item({ packs: null, packLabel: null, estCostCents: null, otherBranch: true })], estTotalCents: null, unpricedLines: 1 });
+    expect(detailFor(group, listOf([group]))).toContain("no pack or price on file from Synthetic Supply, price not from the store's branch (");
+  });
+
   test('a held line that is new does not ring a recheck; a held-only list still raises its check alert once', async () => {
     const group = entry({ items: [item(), held()] });
     expect(growth(group, [{ productId: 'p1', packs: 1, shortQty: 1.9 }])).toBe(false);

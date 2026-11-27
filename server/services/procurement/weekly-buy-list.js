@@ -184,7 +184,7 @@ function addPlannedDemand(g, v, { line, mix, planned }) {
   if (line === 'lawn') {
     g.hasLawn = true;
     if (!planned && !idle) g.unplanned += 1;
-  } else if (isPestHouseMixVisit(v)) {
+  } else if (!idle && isPestHouseMixVisit(v)) {
     g.mixVisit = true;
     for (const m of mix.matched) {
       // The close-out drops Taurus SC where the home's label limit is reached or its history is unknown.
@@ -364,7 +364,7 @@ function itemOf(l, cents) {
   return {
     productId: l.pid, name: l.product.name, needQty: l.need, unit: l.product.unit,
     onHand: Math.max(0, l.product.onHand ?? 0), onOrder: l.product.onOrder, shortQty: l.short,
-    packs: l.packs, packLabel: l.label, estCostCents: cents, plusShipping: Boolean(cents != null && l.product.plusShipping), otherBranch: Boolean(cents != null && l.product.otherBranch),
+    packs: l.packs, packLabel: l.label, estCostCents: cents, plusShipping: Boolean(cents != null && l.product.plusShipping), otherBranch: Boolean(l.product.picked?.row && l.product.otherBranch),
     vendorName: l.product.picked?.row?.vendor_name || l.product.picked?.vendorName || null, reasons: l.reasons,
   };
 }
@@ -623,7 +623,9 @@ async function readWeek(conn, { now, fromDate, weekEnd }) {
   const { buildWaveGuardInventoryForecast } = require('../waveguard-inventory-forecast');
   const forecast = await buildWaveGuardInventoryForecast({ knex: conn, startDate: fromDate, endDate: weekEnd, limit: FORECAST_VISIT_LIMIT, narrow: { excludeStatuses: FINISHED_STATUSES, bookedOnly: true } });
 
-  const mixCandidates = await conn('products_catalog').where('active', true).orderBy('name').orderBy('id').select('id', 'name', 'inventory_unit');
+  // In the close-out's own catalog order (category, then name: admin-dispatch products/catalog, pest-recap): where several rows match a mix
+  // identity, the first one wins, the same row the close-out picks (id only breaks a tie).
+  const mixCandidates = await conn('products_catalog').where('active', true).orderBy('category').orderBy('name').orderBy('id').select('id', 'name', 'inventory_unit');
   const mix = resolveHouseMix(mixCandidates);
   const kit = await conn('products_catalog').where('active', true).where('per_completion_usage', '>', 0)
     .select('id', 'per_completion_usage', 'per_completion_service_lines', 'inventory_unit');

@@ -106,6 +106,17 @@ describe('demand per technician', () => {
     expect(out.warnings).toEqual(['1 lawn visit has no lawn plan']);
   });
 
+  test('an internal-only visit is excluded before the pest mix is classified: no mix, no gap, no Taurus ask', () => {
+    const catalog = [{ id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' }];
+    const groups = deriveDemand({
+      visits: [visit('q1', 'a', 'Quarterly Pest Control', '2026-12-07', { internal_only: true }), visit('q2', 'a', 'Quarterly Pest Control')],
+      forecast: { products: [], serviceIds: [] }, mix: resolveHouseMix(catalog), kit: [],
+    });
+    expect(groups.get('a').demand.get('cross')).toMatchObject({ qty: 2.5 }); // only q2
+    expect(groups.get('a').unplanned).toBe(0);
+    expect(require('../services/procurement/pest-house-mix').isPestHouseMixVisit({ service_type: 'Quarterly Pest Control', internal_only: true })).toBe(false);
+  });
+
   test('pest mix: each booked general-pest visit adds the three-product mix, in each product\'s stock unit', () => {
     const catalog = [
       { id: 'taurus', name: 'Taurus SC', inventory_unit: 'gal' },
@@ -434,6 +445,11 @@ describe('stock, packs and cost', () => {
       expect(listFor('Sarasotan Supply', rows).items[0]).toMatchObject({ estCostCents: 8000, otherBranch: true }); // a part of a word is not a match
     });
 
+    test('the branch note stays when the fallback pack has no delivered price', () => {
+      const unpriced = [rowOf({ branch_name: 'Bradenton', hazmat_fee_estimate: '5', is_best_price: true })];
+      expect(listFor('SiteOne Venice', unpriced).items[0]).toMatchObject({ estCostCents: null, otherBranch: true });
+    });
+
     test('no store: the current pick and no note', () => {
       expect(listFor(null, rows).items[0]).toMatchObject({ estCostCents: 8000, otherBranch: false });
       expect(listFor('   ', rows).items[0]).toMatchObject({ estCostCents: 8000, otherBranch: false });
@@ -745,6 +761,9 @@ describe('buildWeeklyBuyList read wiring', () => {
     const opened = knex.transaction.mock.invocationCallOrder[0];
     expect(Math.min(...knex.mock.invocationCallOrder)).toBeGreaterThan(opened);
     expect(knex.calls[0].table).toBe('scheduled_services as ss');
+    // the house-mix candidates are read in the close-out's catalog order (category, name), so the same row wins
+    const mixRead = knex.calls.find((c) => c.table === 'products_catalog' && c.chain.orderBy.mock.calls.length);
+    expect(mixRead.chain.orderBy.mock.calls.map((c) => c[0])).toEqual(['category', 'name', 'id']);
     expect(forecastModule.buildWaveGuardInventoryForecast.mock.calls.at(-1)[0].knex).toBe(knex);
     expect(forecastModule.buildWaveGuardInventoryForecast.mock.invocationCallOrder.at(-1)).toBeGreaterThan(opened);
     const own = fakeKnex(results());

@@ -40,9 +40,10 @@ function itemLine(item) {
   const stock = `need ${num(item.needQty)} ${item.unit}, on hand ${num(item.onHand)} ${item.unit}${ordered}`;
   const from = item.vendorName ? ` from ${item.vendorName}` : '';
   if (item.packs === 0) return `HOLD ${item.name}: short ${num(item.shortQty)} ${item.unit} (${stock}); N/P fertilizer blackout, not bought`;
-  if (item.packs == null) return `${item.name}: buy about ${num(item.shortQty)} ${item.unit}, no pack or price on file${from} (${stock})`;
+  const branch = item.otherBranch ? ', price not from the store\'s branch' : '';
+  if (item.packs == null) return `${item.name}: buy about ${num(item.shortQty)} ${item.unit}, no pack or price on file${from}${branch} (${stock})`;
   const spare = item.reasons.includes('spare_floor') ? ', includes one extra pack so one pack of it is left after the week' : '';
-  return `${item.packs} x ${item.packLabel || 'pack'} ${item.name}${from}${item.plusShipping ? ', plus shipping' : ''}${item.otherBranch ? ', price not from the store\'s branch' : ''} (${stock}${spare})`;
+  return `${item.packs} x ${item.packLabel || 'pack'} ${item.name}${from}${item.plusShipping ? ', plus shipping' : ''}${branch} (${stock}${spare})`;
 }
 
 function detailFor(group, list) {
