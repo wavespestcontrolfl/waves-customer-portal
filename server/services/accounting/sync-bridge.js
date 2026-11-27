@@ -2836,11 +2836,53 @@ async function syncPayrollRuns(conn, from, to, ctx) {
   }
 }
 
+function matchesSettlementKeyBase(entryKey, keyBase) {
+  if (!entryKey || !keyBase) return false;
+  return entryKey === keyBase || entryKey.startsWith(`${keyBase}:rev-`);
+}
+
+/**
+ * Pure: determine whether a bank_transactions debit matched to a payroll check must be
+ * excluded from the bank-fallback settlement writer because Mercury owns the paycheck
+ * (settled, in-flight, or returned/failed without a genuinely separate subsequent paper check).
+ */
+function isBankCheckSupersededByMercury(bt, paymentRows) {
+  if (!Array.isArray(paymentRows) || !paymentRows.length) return false;
+  if (paymentRows.some((p) => p.state === 'sent')) return true;
+  const ordered = [...paymentRows].sort((a, b) => Number(a.attempt || 0) - Number(b.attempt || 0));
+  const latest = ordered[ordered.length - 1];
+  if (latest.state !== 'paper') return true;
+  const hasPriorNonPaper = ordered.slice(0, -1).some((p) => p.state !== 'paper');
+  if (!hasPriorNonPaper) return false;
+  const checkNum = String(latest.check_number || '').trim();
+  if (checkNum && String(bt?.description || '').includes(checkNum)) return false;
+  const btDay = dateCellText(bt?.txn_date);
+  const paperDay = timestampToEtDate(latest.created_at);
+  return Boolean(btDay && paperDay && btDay < paperDay);
+}
+
+async function postOrRepostSettlement(trx, { keyBase, buildEntry, ctx, bucket }) {
+  const existingRows = await trx('gl_journal_entries')
+    .where('status', 'posted')
+    .where((q) => {
+      q.where('idempotency_key', keyBase)
+        .orWhere('idempotency_key', 'like', `${keyBase}:rev-%`);
+    })
+    .select('id', 'idempotency_key', 'reversed_by_entry_id');
+
+  if (existingRows.some((r) => !r.reversed_by_entry_id)) {
+    ctx.stats[bucket].skipped += 1;
+    return false;
+  }
+  const revKey = existingRows.length === 0 ? keyBase : `${keyBase}:rev-${existingRows.length}`;
+  return postOrPreview(buildEntry(revKey), ctx, bucket, { connOverride: trx });
+}
+
 async function applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx) {
   let reversedBt = false;
   if (pp.bt_id) {
     const priorBt = await trx('gl_journal_entries')
-      .where({ idempotency_key: `payroll-settle:net_pay:bt:${pp.bt_id}`, status: 'posted' })
+      .where({ source_type: 'payroll_remittance', source_id: `bt-check:${pp.bt_id}`, status: 'posted' })
       .whereNull('reversed_by_entry_id')
       .first('id', 'reversed_by_entry_id', trx.raw('entry_date::text as entry_date'));
     if (priorBt) {
@@ -2953,6 +2995,60 @@ async function syncMercuryPayrollPayments(conn, from, to, ctx, plaidGlLookup, ba
   await reconcileRevokedMercuryPayrollPayments(conn, from, to, ctx);
 }
 
+async function loadPayrollPaymentsByCheck(conn, checkIds) {
+  const byCheck = new Map();
+  if (!checkIds.length) return byCheck;
+  const rows = await conn('payroll_payments')
+    .whereIn('check_id', checkIds)
+    .select('id', 'check_id', 'attempt', 'state', 'check_number', conn.raw('posted_on::text as posted_on'), 'created_at');
+  for (const r of rows) {
+    const k = String(r.check_id);
+    const list = byCheck.get(k) || [];
+    list.push(r);
+    byCheck.set(k, list);
+  }
+  return byCheck;
+}
+
+async function reconcileUnlinkedBankPayrollChecks(conn, from, to, ctx, hasPayrollPayments) {
+  const booked = await conn('gl_journal_entries as e')
+    .leftJoin('bank_transactions as bt', conn.raw("e.source_id = 'bt-check:' || bt.id::text"))
+    .leftJoin('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
+    .where({ 'e.source_type': 'payroll_remittance', 'e.status': 'posted' })
+    .where('e.source_id', 'like', 'bt-check:%')
+    .whereNull('e.reversed_by_entry_id')
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("bt.updated_at IS NOT NULL AND DATE(bt.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select(
+      'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+      'bt.id as bt_id', 'bt.matched_payroll_check_id', conn.raw('bt.txn_date::text as txn_date'),
+      'bt.description', 'bt.updated_at', 'pc.status as check_status',
+    );
+  if (!booked.length) return;
+
+  const checkIds = [...new Set(booked.map((r) => r.matched_payroll_check_id).filter(Boolean))];
+  const ppByCheck = hasPayrollPayments ? await loadPayrollPaymentsByCheck(conn, checkIds) : new Map();
+  const today = etDateString(new Date());
+
+  for (const row of booked) {
+    const superseded = row.bt_id && row.matched_payroll_check_id
+      ? isBankCheckSupersededByMercury(row, ppByCheck.get(String(row.matched_payroll_check_id)))
+      : false;
+    const shouldReverse = !row.bt_id || !row.matched_payroll_check_id || row.check_status === 'voided' || superseded;
+    if (!shouldReverse) continue;
+
+    const entryDay = dateCellText(row.entry_date);
+    const fallbackRevDate = today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay);
+    const revDate = row.updated_at ? latestAdjustmentDate(entryDay, [row.updated_at]) : fallbackRevDate;
+    const reason = row.check_status === 'voided'
+      ? 'Payroll paycheck voided'
+      : (superseded ? 'Payroll check owned by Mercury transfer' : 'Bank payroll check link removed');
+    await reverseOrPreview(row, revDate, reason, ctx, 'payroll_settlements');
+  }
+}
+
 async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, bankCaps) {
   if (!bankCaps.hasCheckMatch || !(await conn.schema.hasTable('payroll_checks'))) return;
   const hasPayrollPayments = await conn.schema.hasTable('payroll_payments');
@@ -2967,10 +3063,15 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
         .orWhereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
     });
   if (hasPayrollPayments) {
-    q = q.whereNotExists(function noSentMercuryPayment() {
+    q = q.whereNotExists(function mercuryAttemptOwnsCheck() {
       this.select(conn.raw('1'))
         .from('payroll_payments as pp')
-        .whereRaw("pp.check_id = bt.matched_payroll_check_id AND pp.state = 'sent'");
+        .whereRaw("pp.check_id = bt.matched_payroll_check_id AND pp.state <> 'paper'")
+        .whereNotExists(function laterPaperAttempt() {
+          this.select(conn.raw('1'))
+            .from('payroll_payments as p2')
+            .whereRaw("p2.check_id = pp.check_id AND p2.state = 'paper' AND p2.attempt > pp.attempt");
+        });
     });
   }
   const cols = [
@@ -2987,9 +3088,10 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
 
     const bankAcct = resolveBankTxnGlAccount(bt, plaidGlLookup, SYSTEM_CODES.CHECKING_PAYROLL);
     const serviceLine = String(bt.employee_role || '').toLowerCase() === 'admin' ? 'admin' : 'field';
-    const entry = rules.buildPayrollSettlementEntry({
+    const keyBase = `payroll-settle:net_pay:bt:${bt.id}`;
+    const buildEntry = (idempotencyKey) => rules.buildPayrollSettlementEntry({
       sourceId: `bt-check:${bt.id}`,
-      idempotencyKey: `payroll-settle:net_pay:bt:${bt.id}`,
+      idempotencyKey,
       settlementDate,
       kind: 'net_pay',
       amountCents,
@@ -3002,15 +3104,15 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
 
     const applyCheck = async (trx) => {
       if (hasPayrollPayments) {
-        const sent = await trx('payroll_payments')
-          .where({ check_id: bt.matched_payroll_check_id, state: 'sent' })
-          .first('id');
-        if (sent) {
+        const ppRows = await trx('payroll_payments')
+          .where({ check_id: bt.matched_payroll_check_id })
+          .select('id', 'attempt', 'state', 'check_number', trx.raw('posted_on::text as posted_on'), 'created_at');
+        if (isBankCheckSupersededByMercury(bt, ppRows)) {
           ctx.stats.payroll_settlements.skipped += 1;
           return;
         }
       }
-      await postOrPreview(entry, ctx, 'payroll_settlements', { connOverride: trx });
+      await postOrRepostSettlement(trx, { keyBase, buildEntry, ctx, bucket: 'payroll_settlements' });
     };
 
     if (ctx.dryRun) {
@@ -3020,34 +3122,13 @@ async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, 
     }
   }
 
-  const unlinked = await conn('gl_journal_entries as e')
-    .leftJoin('bank_transactions as bt', conn.raw("e.idempotency_key = 'payroll-settle:net_pay:bt:' || bt.id::text"))
-    .leftJoin('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
-    .where({ 'e.source_type': 'payroll_remittance', 'e.status': 'posted' })
-    .where('e.idempotency_key', 'like', 'payroll-settle:net_pay:bt:%')
-    .whereNull('e.reversed_by_entry_id')
-    .whereRaw("(bt.id IS NULL OR bt.matched_payroll_check_id IS NULL OR pc.status = 'voided')")
-    .where((win) => {
-      win.whereBetween('e.entry_date', [from, to])
-        .orWhereRaw("bt.updated_at IS NOT NULL AND DATE(bt.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
-    })
-    .select('e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'), 'bt.updated_at', 'pc.status as check_status');
-
-  const today = etDateString(new Date());
-  for (const row of unlinked) {
-    const entryDay = dateCellText(row.entry_date);
-    const revDate = row.updated_at
-      ? latestAdjustmentDate(entryDay, [row.updated_at])
-      : (today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay));
-    const reason = row.check_status === 'voided' ? 'Payroll paycheck voided' : 'Bank payroll check link removed';
-    await reverseOrPreview(row, revDate, reason, ctx, 'payroll_settlements');
-  }
+  await reconcileUnlinkedBankPayrollChecks(conn, from, to, ctx, hasPayrollPayments);
 }
 
-function buildTaxFilingSettlementEntry(bt, cls, settlementDate, amountCents, plaidGlLookup) {
+function buildTaxFilingSettlementEntry(bt, cls, settlementDate, amountCents, plaidGlLookup, idempotencyKeyOverride = null) {
   const fallbackCode = cls.kind === 'sales_tax' ? SYSTEM_CODES.CHECKING_PRIMARY : SYSTEM_CODES.CHECKING_PAYROLL;
   const bankAcct = resolveBankTxnGlAccount(bt, plaidGlLookup, fallbackCode);
-  const idempotencyKey = settlementKeyForTaxFiling(bt.id, cls);
+  const idempotencyKey = idempotencyKeyOverride || settlementKeyForTaxFiling(bt.id, cls);
   if (cls.kind === 'sales_tax') {
     return rules.buildSalesTaxRemittanceEntry({
       sourceId: `bt-filing:${bt.id}`,
@@ -3100,7 +3181,7 @@ async function reconcileRemovedTaxFilingSettlements(conn, from, to, ctx, hasSour
     const currentKey = row.bt_id && row.matched_tax_filing_id
       ? settlementKeyForTaxFiling(row.bt_id, classifyTaxFilingSettlement(row))
       : null;
-    if (currentKey && currentKey === row.idempotency_key) continue;
+    if (currentKey && matchesSettlementKeyBase(row.idempotency_key, currentKey)) continue;
     const entryDay = dateCellText(row.entry_date);
     const fallbackRevDate = today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay);
     const revDate = row.updated_at ? latestAdjustmentDate(entryDay, [row.updated_at]) : fallbackRevDate;
@@ -3136,8 +3217,20 @@ async function syncBankMatchedTaxFilings(conn, from, to, ctx, plaidGlLookup, ban
     const settlementDate = dateCellText(bt.txn_date);
     const amountCents = dollarsToCents(bt.amount);
     if (!settlementDate || !amountCents || amountCents <= 0) continue;
-    const entry = buildTaxFilingSettlementEntry(bt, cls, settlementDate, amountCents, plaidGlLookup);
-    await postOrPreview(entry, ctx, 'payroll_settlements');
+
+    const keyBase = settlementKeyForTaxFiling(bt.id, cls);
+    const buildEntry = (idempotencyKey) => buildTaxFilingSettlementEntry(
+      bt, cls, settlementDate, amountCents, plaidGlLookup, idempotencyKey,
+    );
+    const applyFiling = (trx) => postOrRepostSettlement(trx, {
+      keyBase, buildEntry, ctx, bucket: 'payroll_settlements',
+    });
+
+    if (ctx.dryRun) {
+      await applyFiling(ctx.conn);
+    } else {
+      await withEntitySyncLock(ctx.conn, `gl-sync-bt-filing:${bt.id}`, applyFiling);
+    }
   }
 
   await reconcileRemovedTaxFilingSettlements(conn, from, to, ctx, hasSourceKey);
@@ -3225,6 +3318,8 @@ module.exports = {
   extractStripeDisputeTokens,
   resolveBankTxnGlAccount,
   classifyTaxFilingSettlement,
+  isBankCheckSupersededByMercury,
+  matchesSettlementKeyBase,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,

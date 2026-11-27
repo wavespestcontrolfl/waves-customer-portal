@@ -42,6 +42,8 @@ const {
   postJournalEntry,
   linkJournalEntryVendor,
   resolveOpeningBalanceItems,
+  defaultNormalBalanceFor,
+  parseNewAccountInput,
 } = require('../services/accounting/ledger');
 const rules = require('../services/accounting/posting-rules');
 const {
@@ -89,6 +91,8 @@ const {
   buildInvoiceDeltaEntry,
   resolveBankTxnGlAccount,
   classifyTaxFilingSettlement,
+  isBankCheckSupersededByMercury,
+  matchesSettlementKeyBase,
   timestampToUtcDate,
 } = require('../services/accounting/sync-bridge');
 const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
@@ -1995,5 +1999,120 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     const kpis = summarizeBalanceSheetKpis(bs);
     expect(kpis.cash_total_cents).toBe(1800000);
     expect(kpis.credit_cards_cents).toBe(120000);
+  });
+
+  test('Codex R4: returned Mercury transfers stay excluded from bank fallback, restored matches repost, and custom contra accounts get contra normal balances', async () => {
+    // 1. Returned / failed / sent Mercury transfers are excluded from bank fallback; separate subsequent paper check is allowed
+    const mercuryDebit = { txn_date: '2026-11-06', description: 'MERCURY ACH PAYROLL' };
+    expect(isBankCheckSupersededByMercury(mercuryDebit, [])).toBe(false);
+    expect(isBankCheckSupersededByMercury(mercuryDebit, [{ attempt: 1, state: 'sent' }])).toBe(true);
+    expect(isBankCheckSupersededByMercury(mercuryDebit, [{ attempt: 1, state: 'returned', posted_on: '2026-11-06' }])).toBe(true);
+    expect(isBankCheckSupersededByMercury(mercuryDebit, [{ attempt: 1, state: 'failed' }])).toBe(true);
+    // Attempt 1 returned Nov 6, attempt 2 paper check #1042 issued Nov 10 -> old Nov 6 debit still excluded, Nov 12 paper check allowed
+    const retThenPaper = [
+      { attempt: 1, state: 'returned', posted_on: '2026-11-06', created_at: '2026-11-05T15:00:00Z' },
+      { attempt: 2, state: 'paper', check_number: '1042', created_at: '2026-11-10T15:00:00Z' },
+    ];
+    expect(isBankCheckSupersededByMercury(mercuryDebit, retThenPaper)).toBe(true);
+    expect(isBankCheckSupersededByMercury({ txn_date: '2026-11-12', description: 'Check #1042' }, retThenPaper)).toBe(false);
+
+    // 2. Restored bank tax-filing match whose prior settlement JE was reversed reposts under :rev-1 instead of being skipped forever
+    const baseKey = 'sales-tax-remit:bt:00000000-0000-4000-8000-00000000b099';
+    expect(matchesSettlementKeyBase(baseKey, baseKey)).toBe(true);
+    expect(matchesSettlementKeyBase(`${baseKey}:rev-1`, baseKey)).toBe(true);
+    expect(matchesSettlementKeyBase('payroll-settle:tax_remit:bt:00000000-0000-4000-8000-00000000b099', baseKey)).toBe(false);
+
+    const accounts = makeSyntheticAccounts();
+    const btId = '00000000-0000-4000-8000-00000000b099';
+    const buildSyncConn = (priorJeRows) => {
+      const conn = (table) => {
+        const state = { joinTable: null, whereKey: null };
+        const chain = {
+          leftJoin: () => chain,
+          join: (t) => { state.joinTable = t; return chain; },
+          where: (a) => { if (a && typeof a === 'object' && a.idempotency_key) state.whereKey = a.idempotency_key; return chain; },
+          whereIn: () => chain,
+          whereNotIn: () => chain,
+          whereNull: () => chain,
+          whereNotNull: () => chain,
+          whereBetween: () => chain,
+          whereRaw: () => chain,
+          whereNot: () => chain,
+          whereExists: () => chain,
+          whereNotExists: () => chain,
+          orWhere: () => chain,
+          orWhereIn: () => chain,
+          orWhereRaw: () => chain,
+          orderBy: () => chain,
+          select: () => {
+            if (table === 'gl_accounts') return Promise.resolve(accounts);
+            if (table === 'bank_transactions as bt' && state.joinTable === 'tax_filing_calendar as tfc') {
+              return Promise.resolve([{
+                id: btId, txn_date: '2026-11-18', amount: '70.00', description: 'FL DOR DR-15',
+                account_label: 'Checking', account_type: 'bank', plaid_account_id: null,
+                matched_tax_filing_id: 'tfc-1', filing_type: 'dr15_sales_tax',
+                filing_title: 'FL Sales Tax Return (DR-15)', filing_period_label: 'Oct 2026', filing_source_key: null,
+              }]);
+            }
+            if (table === 'gl_journal_entries') return Promise.resolve(priorJeRows);
+            return Promise.resolve([]);
+          },
+          first: () => {
+            if (table === 'gl_journal_entries' && state.whereKey) {
+              return Promise.resolve(priorJeRows.find((r) => r.idempotency_key === state.whereKey) || null);
+            }
+            return Promise.resolve(null);
+          },
+        };
+        return chain;
+      };
+      conn.raw = (sql) => sql;
+      conn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+      return conn;
+    };
+
+    // Original JE was reversed -> restored link must repost under :rev-1 (would_post = 1)
+    const repostPreview = await syncSubledgersToGl({
+      fromDate: '2026-11-01',
+      toDate: '2026-11-30',
+      dryRun: true,
+      conn: buildSyncConn([{ id: 'je-old', idempotency_key: baseKey, reversed_by_entry_id: 'je-rev' }]),
+    });
+    expect(repostPreview.payroll_settlements.would_post).toBe(1);
+    expect(repostPreview.payroll_settlements.errors).toEqual([]);
+
+    // Active :rev-1 JE already exists -> subsequent sync skips cleanly (would_post = 0)
+    const idempotentPreview = await syncSubledgersToGl({
+      fromDate: '2026-11-01',
+      toDate: '2026-11-30',
+      dryRun: true,
+      conn: buildSyncConn([
+        { id: 'je-old', idempotency_key: baseKey, reversed_by_entry_id: 'je-rev' },
+        { id: 'je-new', idempotency_key: `${baseKey}:rev-1`, reversed_by_entry_id: null },
+      ]),
+    });
+    expect(idempotentPreview.payroll_settlements.would_post).toBe(0);
+    expect(idempotentPreview.payroll_settlements.skipped).toBe(1);
+
+    // 3. Custom contra accounts default to their contra normal balance
+    expect(defaultNormalBalanceFor('asset', 'accum_depreciation')).toBe('credit');
+    expect(defaultNormalBalanceFor('equity', 'owner_draws')).toBe('debit');
+    expect(defaultNormalBalanceFor('equity', 'owner_draw')).toBe('debit');
+    expect(defaultNormalBalanceFor('revenue', 'contra_revenue')).toBe('debit');
+    expect(defaultNormalBalanceFor('asset', 'checking')).toBe('debit');
+
+    const accumInput = parseNewAccountInput({ code: '1595', name: 'Accum Depr — Trailers', accountType: 'asset', subType: 'accum_depreciation' });
+    const drawsInput = parseNewAccountInput({ code: '3110', name: 'Partner Draws', accountType: 'equity', subType: 'owner_draws' });
+    const contraRevInput = parseNewAccountInput({ code: '4095', name: 'Warranty Allowances', accountType: 'revenue', subType: 'contra_revenue' });
+    expect(accumInput.normal_balance).toBe('credit');
+    expect(drawsInput.normal_balance).toBe('debit');
+    expect(contraRevInput.normal_balance).toBe('debit');
+
+    // Positive $1,000 opening balance on custom accum_depreciation credits 1595 (reducing fixed assets)
+    const openJe = rules.buildOpeningBalanceEntry({
+      asOfDate: '2026-01-01',
+      items: [{ accountCode: '1595', balanceCents: 100000, normalBalance: accumInput.normal_balance }],
+    });
+    expect(openJe.lines[0]).toMatchObject({ accountCode: '1595', debitCents: 0, creditCents: 100000 });
   });
 });

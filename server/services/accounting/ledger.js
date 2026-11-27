@@ -625,6 +625,26 @@ const DEFAULT_SUBTYPE_BY_TYPE = {
   expense: 'operating_expense',
 };
 
+const CONTRA_NORMAL_BALANCE_BY_SUBTYPE = {
+  accum_depreciation: 'credit',
+  contra_asset: 'credit',
+  contra_liability: 'debit',
+  owner_draw: 'debit',
+  owner_draws: 'debit',
+  contra_equity: 'debit',
+  contra_revenue: 'debit',
+  contra_cogs: 'credit',
+  contra_expense: 'credit',
+};
+
+function defaultNormalBalanceFor(accountType, subType) {
+  const cleanSub = String(subType || '').trim().toLowerCase();
+  if (cleanSub && CONTRA_NORMAL_BALANCE_BY_SUBTYPE[cleanSub]) {
+    return CONTRA_NORMAL_BALANCE_BY_SUBTYPE[cleanSub];
+  }
+  return NORMAL_BALANCE_BY_TYPE[accountType];
+}
+
 function parseNewAccountInput(input = {}) {
   const code = String(input.code || '').trim();
   const name = String(input.name || '').trim();
@@ -636,7 +656,10 @@ function parseNewAccountInput(input = {}) {
   if (!ACCOUNT_TYPES.includes(accountType)) {
     throw new AccountingError(400, `accountType must be one of ${ACCOUNT_TYPES.join(', ')}`);
   }
-  const normalBalance = pickKey(input, 'normalBalance', 'normal_balance', NORMAL_BALANCE_BY_TYPE[accountType]);
+  const defaultSubType = DEFAULT_SUBTYPE_BY_TYPE[accountType] || 'operating_expense';
+  const subType = optionalText(pickKey(input, 'subType', 'sub_type', defaultSubType), 40) || defaultSubType;
+  const defaultNormal = defaultNormalBalanceFor(accountType, subType);
+  const normalBalance = pickKey(input, 'normalBalance', 'normal_balance', defaultNormal);
   if (!['debit', 'credit'].includes(normalBalance)) {
     throw new AccountingError(400, 'normalBalance must be debit or credit');
   }
@@ -644,12 +667,11 @@ function parseNewAccountInput(input = {}) {
   if (!Number.isInteger(deductiblePct) || deductiblePct < 0 || deductiblePct > 100) {
     throw new AccountingError(400, 'deductiblePct must be an integer between 0 and 100');
   }
-  const defaultSubType = DEFAULT_SUBTYPE_BY_TYPE[accountType] || 'operating_expense';
   return {
     code,
     name,
     account_type: accountType,
-    sub_type: optionalText(pickKey(input, 'subType', 'sub_type', defaultSubType), 40) || defaultSubType,
+    sub_type: subType,
     normal_balance: normalBalance,
     parent_account_id: assertOptionalUuid(pickKey(input, 'parentAccountId', 'parent_account_id'), 'parentAccountId'),
     plaid_account_id: assertOptionalUuid(pickKey(input, 'plaidAccountId', 'plaid_account_id'), 'plaidAccountId'),
@@ -961,6 +983,8 @@ module.exports = {
   linkJournalEntryVendor,
   loadEntryWithLines,
   listAccounts,
+  defaultNormalBalanceFor,
+  parseNewAccountInput,
   createAccount,
   updateAccount,
   listJournalEntries,
