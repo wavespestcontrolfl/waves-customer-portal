@@ -602,6 +602,84 @@ describe('customerAskedFacts: this appointment\'s reschedule requests do not dep
   });
 });
 
+describe('customerAskedFacts: every screen runs on the full text, before the 280-character cut', () => {
+  const filler = `${'The ants keep coming in by the back door. '.repeat(8)}`; // well past 280 characters
+  const withPriceLate = `${filler}They quoted 149 per application last time.`;
+  const withLinkLate = `${filler}Photos are at photos.example.dev/yard`;
+
+  test('a price after the cut: a typed request is reduced to its subject, other kinds are dropped', async () => {
+    const row = formRow({ subject: 'Ants at the back door', description: withPriceLate, metadata: { writer: 'portal_form' } });
+    mockGather.mockResolvedValue(asks([askItem({ id: 'text:1', text: withPriceLate })]));
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const svc = { ...SVC, self_booking_id: 'sb-1', scheduled_date: '2026-11-27', notes: `Self-booked. Notes: ${withPriceLate}` };
+    const facts = await customerAskedFacts(svc, fakeDbh({ rows: [row], booking: { customer_notes: withPriceLate, source: 'direct' }, messages: [{ body: withPriceLate, created_at: '2026-11-24T15:00:00.000Z' }] }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(facts.items.map((i) => i.text)).toEqual(['Ants at the back door']);
+  });
+
+  test('a link after the cut drops the item', async () => {
+    const row = formRow({ subject: 'Ants', description: withLinkLate, metadata: { writer: 'portal_form' } });
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: `Self-booked. Notes: ${withLinkLate}` };
+    const facts = await customerAskedFacts(svc, fakeDbh({ rows: [row], booking: { customer_notes: withLinkLate, source: 'direct' } }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Ants']);
+  });
+});
+
+describe('customerAskedFacts: the link screen is the texts screen, on every kind', () => {
+  const LINKS = ['bit.ly/abc', 'is.gd/x1', 'rb.gy/zz', 'photos.example.dev/yard', 'see example.dev', 'www.example.com', 'https://example.org/x'];
+
+  test.each(LINKS)('a bare or shortened link (%s) drops an item of every kind', async (link) => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const words = `Ants are back, details at ${link}`;
+    mockGather.mockResolvedValue(asks([
+      askItem({ id: 'booking:svc-1', source: 'request_form', text: words }),
+      askItem({ id: 'text:1', text: words }),
+    ]));
+    const rows = [
+      formRow({ subject: 'Ants', description: words, metadata: { writer: 'portal_form' } }),
+      formRow({ subject: 'Reschedule', source: 'customer_portal_reschedule', description: `Appointment svc-1: Pest on 2026-12-01\nCustomer notes: ${words}` }),
+    ];
+    const svc = { ...SVC, self_booking_id: 'sb-1', scheduled_date: '2026-11-27', notes: `Self-booked. Notes: ${words}` };
+    const facts = await customerAskedFacts(svc, fakeDbh({ rows, booking: { customer_notes: words, source: 'direct' }, messages: [{ body: words, created_at: '2026-11-24T15:00:00.000Z' }] }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    // Only the typed request's subject survives; every item carrying the link is gone.
+    expect(facts.items.map((i) => i.text)).toEqual(['Ants']);
+  });
+
+  test('ordinary sentences are not links', async () => {
+    mockGather.mockResolvedValue(asks([askItem({ id: 'text:1', text: 'Ants are back. Thanks, see you Tuesday.' })]));
+    expect((await customerAskedFacts(SVC, fakeDbh())).items).toHaveLength(1);
+  });
+});
+
+describe('customerAskedFacts: one copy per wording within a scope, the newest kept', () => {
+  test('words that are the booking note and also an account-wide message both show', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const svc = { ...SVC, self_booking_id: 'sb-1', scheduled_date: '2026-11-27', notes: 'Self-booked. Notes: Please text first' };
+    const facts = await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: 'Please text first', source: 'direct' }, messages: [{ body: 'Please text first', created_at: '2026-11-24T15:00:00.000Z' }] }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(facts.items.map((i) => i.kind).sort()).toEqual(['booking_note', 'portal_message']);
+  });
+
+  test('within the account scope the newest copy wins whatever the source order', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const rows = [formRow({ subject: 'Dog is in the yard', description: 'Dog is in the yard', metadata: { writer: 'portal_form' }, created_at: '2026-11-20T10:00:00.000Z' })];
+    const facts = await customerAskedFacts({ ...SVC, scheduled_date: '2026-11-27' }, fakeDbh({ rows, messages: [{ body: 'Dog is in the yard', created_at: '2026-11-25T15:00:00.000Z' }] }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(facts.items).toHaveLength(1);
+    expect(facts.items[0]).toMatchObject({ kind: 'portal_message', at: '2026-11-25T15:00:00.000Z' });
+  });
+
+  test('a reschedule note and the same words said account-wide both show', async () => {
+    const rows = [
+      formRow({ subject: 'Move it', source: 'customer_portal_reschedule', created_at: '2026-11-21T10:00:00.000Z', description: 'Appointment svc-1: Pest on 2026-12-01\nCustomer notes: Friday works' }),
+      formRow({ subject: 'Friday works', description: 'Friday works', metadata: { writer: 'portal_form' }, created_at: '2026-11-22T10:00:00.000Z' }),
+    ];
+    const facts = await customerAskedFacts(SVC, fakeDbh({ rows }));
+    expect(facts.items).toHaveLength(2);
+  });
+});
+
 describe('customerAskedFacts: account-wide re-service messages', () => {
   test('the account-wide flag is kept, on the texts that carry it only', async () => {
     mockGather.mockResolvedValue(asks([

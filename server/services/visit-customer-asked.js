@@ -70,6 +70,9 @@ function requireCustomer(svc) {
   if (!svc?.customer_id) throw new Error('customer_id required');
 }
 
+// Return reason, booking note and reschedule note are about this appointment; the rest is the customer's, account-wide.
+const belongsToAppointment = (item) => item.kind === 'reservice_reason' || item.kind === 'booking_note' || item.appointment === true;
+
 const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
 const compact = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 
@@ -83,11 +86,20 @@ const iso = (value) => {
   return value == null || Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
-// Every item of every kind passes the money-amount screen: an item with a price in its words is dropped.
+// The one link screen for every item kind: the screen the texts to a technician use (tech-visit-texts.js hasLink: a scheme, www,
+// a listed public suffix on any host, a shortener on any host). Loaded on first use.
+let linkScreen = null;
+const hasLink = (text) => {
+  if (!linkScreen) linkScreen = require('./tech-visit-texts').hasLink;
+  return linkScreen(text);
+};
+
+// Every item of every kind passes the money-amount screen and the link screen, on the FULL text (a price or a link past
+// the 280-character cut must not slip through because the cut hid it): an item that fails is dropped.
 function entry(kind, at, text, extra = {}) {
   const when = iso(at);
-  const words = clip(text);
-  return when && words && moneyFree(words) ? { kind, at: when, text: words, ...extra } : null;
+  const full = compact(text);
+  return when && full && moneyFree(full) && !hasLink(full) ? { kind, at: when, text: clip(full), ...extra } : null;
 }
 
 async function safely(name, read) {
@@ -309,7 +321,8 @@ function requestRowText(row) {
   if (row.source) return subject;
   const description = compact(row.description);
   const writer = metaOf(row)?.writer;
-  const shown = writer === 'portal_form' ? moneyFree(description) : writer !== 'portal_flow' && moneyWordFree(description);
+  const screened = writer === 'portal_form' ? moneyFree(description) : writer !== 'portal_flow' && moneyWordFree(description);
+  const shown = screened && !hasLink(description);
   if (!description || !shown) return subject;
   return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
 }
@@ -355,7 +368,6 @@ function pickItems(items) {
 // never read. A message about money, a link or a number run is left out, as is an office-only message (a refund, a
 // complaint). The portal names no home: on an account that may have several, it may be about another one.
 const PORTAL_MESSAGE_WINDOW_DAYS = 7;
-const LINK_RE = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|net|org|co|io|app|link|us|info|biz|me)\b/i;
 const NUMBER_RUN_RE = /\d{3,}/;
 
 function messageWindow(svc, now = new Date()) {
@@ -366,7 +378,7 @@ function messageWindow(svc, now = new Date()) {
   return { since, until: dayEnd < now ? dayEnd : now };
 }
 
-const safeMessage = (text) => moneyWordFree(text) && !LINK_RE.test(text) && !NUMBER_RUN_RE.test(text)
+const safeMessage = (text) => moneyWordFree(text) && !hasLink(text) && !NUMBER_RUN_RE.test(text)
   && !require('./reservice-office-only').officeOnlyReason(text);
 
 async function portalMessageItems(svc, dbh, singleSoon) {
@@ -403,10 +415,13 @@ async function customerAskedFacts(svc, dbh) {
     safely('portal requests', () => portalItems(svc, dbh, single)),
     safely('portal messages', () => portalMessageItems(svc, dbh, single)),
   ]);
+  // One copy per wording within a scope, the newest kept. An item about this appointment (the return reason, the booking
+  // note, a reschedule note) is a different thing from the same words said account-wide, so each scope dedupes alone.
   const seen = new Set();
-  const items = lists.flat().filter(Boolean).filter((item) => {
-    const key = item.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-    if (!key || seen.has(key)) return false;
+  const items = lists.flat().filter(Boolean).sort(newestFirst).filter((item) => {
+    const words = item.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const key = `${belongsToAppointment(item) ? 'appointment' : 'account'}|${words}`;
+    if (!words || seen.has(key)) return false;
     seen.add(key);
     return true;
   });
