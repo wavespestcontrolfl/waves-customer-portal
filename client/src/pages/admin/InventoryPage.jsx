@@ -3353,25 +3353,23 @@ function RestockRequestsTab({
         }),
       });
       setAlreadyCounted(null);
-      if (action === "receive") {
-        showToast("Stock received.");
-      } else {
-        showToast(
-          {
-            mark_ordered: "Marked ordered",
-            close_counted: "Closed. Stock was not changed.",
-          }[action] || "Request cancelled",
-        );
-      }
+      showToast(
+        {
+          receive: "Stock received.",
+          mark_ordered: "Marked ordered",
+          close_counted: "Closed. Stock was not changed.",
+        }[action] || "Request cancelled",
+      );
       await load();
       onUpdate && onUpdate();
     } catch (err) {
+      const said = err.details?.error || err.message;
       if (err.code === "already_counted_by_receipt") {
-        setAlreadyCounted({ request, message: err.details?.error || err.message, fingerprint: err.details?.receiptFingerprint || null });
+        setAlreadyCounted({ request, message: said, fingerprint: err.details?.receiptFingerprint });
       } else if (err.code === "receipts_changed") {
         // Every listed receipt was undone while the dialog was open: nothing is counted any more.
         setAlreadyCounted(null);
-        showToast(err.details?.error || err.message);
+        showToast(said);
         await load();
       } else {
         showToast(`Failed: ${err.message}`);
