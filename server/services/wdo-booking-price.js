@@ -55,8 +55,9 @@ function serviceAddressText(address) {
 //   the booked home by. It also says when the stored records call the place commercial.
 //   A service address with no saved property (a phone booking at an address the call gave, a new caller with no customer
 //   yet): that address as written. With a saved property (a phone booking whose address key-matched it): the property must
-//   still be at that address.
-async function bookedHome({ customer, customerId, propertyId, serviceAddress, conn }) {
+//   still be at that address. `customerAddress`: a linked estimate quoted the customer's own address, so no other
+//   property stands in for it.
+async function bookedHome({ customer, customerId, propertyId, serviceAddress, customerAddress = false, conn }) {
   const row = customer || (customerId ? await conn('customers').where({ id: customerId }).first() : null);
   const serviceRow = serviceAddress?.line1
     ? { address_line1: serviceAddress.line1, address_line2: serviceAddress.line2 || null, city: serviceAddress.city, zip: serviceAddress.zip }
@@ -68,8 +69,9 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, co
   const { addressKey } = require('./customer-properties');
   // No property named: a booking stamps the customer's sole active property when there is exactly one
   // (customer-properties soleActivePropertyId), so that property is the home priced, even one not marked primary
-  // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
-  const activeRows = propertyId || written ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
+  // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row. A booking whose linked
+  // estimate quoted the customer's own address is that address, never a lone other property (pre-push audit P0).
+  const activeRows = propertyId || written || customerAddress ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
   const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
   const at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
@@ -144,10 +146,10 @@ function staffNoteFor(line) {
 // response or a log line with it (wdoTableStillApplies).
 const pricedHomes = new WeakMap();
 
-async function wdoBookingPrice({ customer = null, customerId = null, propertyId = null, serviceAddress = null, conn = db } = {}) {
+async function wdoBookingPrice({ customer = null, customerId = null, propertyId = null, serviceAddress = null, customerAddress = false, conn = db } = {}) {
   const who = `customer ${customer?.id || customerId || 'none (booked by address)'}`;
   try {
-    const home = await bookedHome({ customer, customerId, propertyId, serviceAddress, conn });
+    const home = await bookedHome({ customer, customerId, propertyId, serviceAddress, customerAddress, conn });
     if (home.refusal) return noTablePrice(who, home.refusal);
     const { strictCacheOnlyPropertyLookup } = require('./service-report/start-offer-lookup');
     const lookup = home.address ? await strictCacheOnlyPropertyLookup(home.address) : null;
@@ -169,9 +171,9 @@ async function wdoBookingPrice({ customer = null, customerId = null, propertyId 
  * rather than book that home's price (pre-push audit P0). Reads the customer's property rows on `conn`, never the
  * property record. No answer (null: the catalog price) always holds.
  */
-async function wdoTableStillApplies(table, { customer, propertyId = null, conn }) {
+async function wdoTableStillApplies(table, { customer, propertyId = null, customerAddress = false, conn }) {
   if (!table) return true;
-  const home = await bookedHome({ customer, propertyId, conn });
+  const home = await bookedHome({ customer, propertyId, customerAddress, conn });
   return !home.refusal && pricedHomes.has(table) && pricedHomes.get(table) === home.address;
 }
 

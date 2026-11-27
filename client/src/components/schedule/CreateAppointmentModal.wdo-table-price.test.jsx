@@ -16,7 +16,7 @@ vi.mock('../../hooks/useDiscountStacking', () => ({
   ensureStackingFresh: vi.fn(async () => ({ enabled: false, known: true })),
 }));
 import CreateAppointmentModal, {
-  newCallerBookBlockReason, wdoLineHintText, wdoQuoteAnswer, wdoQuoteBody, wdoQuoteQuery, wdoSubmitGate,
+  newCallerBookBlockReason, saveFormMoved, wdoLineHintText, wdoQuoteAnswer, wdoQuoteBody, wdoQuoteQuery, wdoSubmitGate,
 } from './CreateAppointmentModal.jsx';
 import modalSource from './CreateAppointmentModal.jsx?raw';
 
@@ -383,9 +383,44 @@ describe('a WDO line in the modal', () => {
     expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a' });
   });
 
+  it('Save counts the form as changed when a line, the property, the price question, the day, the arrival time or the tech moved', () => {
+    const services = [{ lineId: 'a' }];
+    const atClick = { services, selectedPropertyId: '', wdoQuoteKey: 'customerId=c', apptDate: '2026-12-01', windowStart: '09:00', techMode: 'auto', techId: '' };
+    expect(saveFormMoved({ ...atClick, handleSubmit: () => {} }, atClick)).toBe(false);
+    for (const [field, value] of [['services', [...services]], ['selectedPropertyId', 'p-2'], ['wdoQuoteKey', 'customerId=c&estimateId=e'],
+      ['apptDate', '2026-12-02'], ['windowStart', '10:00'], ['techMode', 'choose'], ['techId', 't-1']]) {
+      expect(saveFormMoved({ ...atClick, [field]: value }, atClick)).toBe(true);
+    }
+  });
+
+  it('a day changed while Save re-reads the WDO price books nothing; the next save books the new day', async () => {
+    let holdReads = false;
+    const releases = [];
+    const fetcher = installFetch({
+      quote: () => (holdReads ? new Promise((resolve) => { releases.push(() => resolve(FRAME_2600)); }) : FRAME_2600),
+    });
+    mount();
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    holdReads = true;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(releases).toHaveLength(1));
+    // The office moves the visit to the next day while the price is re-read.
+    fireEvent.change(document.getElementById('new-appt-date'), { target: { value: futureDate(31) } });
+    releases.forEach((release) => release());
+    expect(await screen.findByText(/The booking changed while the WDO price was checked/)).toBeTruthy();
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+    holdReads = false;
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', scheduledDate: futureDate(31) });
+  });
+
   it('Save compares the form after its last read (the address re-read), just before its first POST', () => {
     const lastRead = modalSource.indexOf('? await recheckAddressAskAtSubmit({');
-    const compare = modalSource.indexOf('|| latestForm.wdoQuoteKey !== wdoQuoteKey)) {');
+    const compare = modalSource.indexOf('&& saveFormMoved(latestSaveRef.current, { services, selectedPropertyId, wdoQuoteKey, apptDate, windowStart, techMode, techId })) {');
     const firstPost = modalSource.indexOf('const groups = groupServicesForAppointmentSubmit(services);', lastRead);
     expect(lastRead).toBe(modalSource.lastIndexOf('? await recheckAddressAskAtSubmit({'));
     expect(lastRead).toBeGreaterThan(0);

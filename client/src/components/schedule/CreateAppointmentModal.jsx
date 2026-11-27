@@ -1683,6 +1683,12 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
+// What a Save posts that can change while it re-reads a price: the lines, the property, the WDO price question (customer,
+// property, linked estimate), the day, the arrival time and the tech (pre-push audit P1). `latest` is the form now,
+// `atClick` the form the save was pressed with.
+const SAVE_FORM_FIELDS = ['services', 'selectedPropertyId', 'wdoQuoteKey', 'apptDate', 'windowStart', 'techMode', 'techId'];
+export const saveFormMoved = (latest, atClick) => SAVE_FORM_FIELDS.some((field) => latest?.[field] !== atClick[field]);
+
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
@@ -4530,12 +4536,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         }, 4000);
         return;
       }
-      // A line, the property or the linked estimate changed while the WDO price or the address was re-read (above): this
-      // save would post the form as it was at the click, so it posts nothing (pre-push audit P1; Book checks its whole body
-      // the same way). Checked after the last read, just before the first POST.
-      const latestForm = latestSaveRef.current;
-      if (unsavedBlankWdoLines > 0 && (latestForm.services !== services || latestForm.selectedPropertyId !== selectedPropertyId
-        || latestForm.wdoQuoteKey !== wdoQuoteKey)) {
+      // The form changed while the WDO price or the address was re-read (above): this save would post the form as it was at
+      // the click, so it posts nothing (pre-push audit P1; Book checks its whole body the same way). Checked after the last
+      // read, just before the first POST.
+      if (unsavedBlankWdoLines > 0
+        && saveFormMoved(latestSaveRef.current, { services, selectedPropertyId, wdoQuoteKey, apptDate, windowStart, techMode, techId })) {
         setToast('The booking changed while the WDO price was checked — check it, then save again');
         setTimeout(() => setToast(''), 3200);
         return;
@@ -5528,7 +5533,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
   const latestSaveRef = useRef(null);
-  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine, services, selectedPropertyId, wdoQuoteKey };
+  latestSaveRef.current = {
+    handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine,
+    services, selectedPropertyId, wdoQuoteKey, apptDate, windowStart, techMode, techId,
+  };
   useEffect(() => {
     if (!pendingQuickAddSave) return undefined;
     if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {

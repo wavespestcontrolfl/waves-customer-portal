@@ -223,6 +223,25 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).toHaveBeenCalledTimes(1);
   });
 
+  test('a booking from an estimate that quotes the customer\'s own address is priced at that address, never at a lone other property', async () => {
+    const { assertWdoTableHomeUnchanged } = adminSchedule._test;
+    lookup.mockResolvedValue(record(1600, 'block'));
+    const ESTIMATE_ID = 'f7a8b9c0-4444-4d5e-8f6a-8b9c0d1e2f3a';
+    wireDb({
+      customers: HOME,
+      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
+      // The customer's one active property is a rental at another address.
+      customer_properties: (cond) => (cond.id ? [RENTAL].find((property) => property.id === cond.id) : (cond.is_primary ? undefined : [RENTAL])),
+    });
+    const pricing = await bookBlankWdo({ refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } });
+    expect(pricing.finalPrice).toBe(150);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+    // The save's own check reads that same home, so it goes on.
+    await expect(assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock }))
+      .resolves.toBeUndefined();
+  });
+
   test('the office save runs that check inside its transaction, right after it stamps the sole active property', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const stamp = source.indexOf('.soleActivePropertyId(customerId, trx);');
