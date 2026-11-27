@@ -157,12 +157,17 @@ function actionScopeForLine(line, product) {
   return scopeFromText(`${line?.raw || ''} ${product?.name || ''} ${product?.category || ''}`);
 }
 
+// A line that forbids or withholds work ("Do not apply the growth regulator again at this visit", "Avoid repellent spray on
+// active trails"). Ticking it records no treatment, and it carries no product, so it never adds one to Products applied.
+function isForbiddingLine(line) {
+  return /^(do not|don t|never|no|not|avoid)\b/.test(normalizeText(line?.raw || ''));
+}
+
 function actionTreatmentApplied(kind, line) {
   if (kind === 'inspection') return false;
   const text = normalizeText(line?.raw || '');
-  // A line that forbids or withholds work ("Do not apply the growth regulator again at this visit", "Avoid repellent spray on
-  // active trails") is a limit, not an application: ticking it records no treatment.
-  if (/^(do not|don t|never|no|not|avoid)\b/.test(text)) return false;
+  // A line that forbids or withholds work is a limit, not an application: ticking it records no treatment.
+  if (isForbiddingLine(line)) return false;
   if (/\b(declin|no access|not treated|unavailable|skip|skipped|customer not home)\b/.test(text)) return false;
   return true;
 }
@@ -638,6 +643,10 @@ async function validateLawnProtocolForPublish(knex, protocolId) {
   };
 }
 
+function forbidsWithItsProduct(meta, line) {
+  return meta?.treatmentApplied !== true && isForbiddingLine(line);
+}
+
 function buildCompletionActions({ lines, products, programKey, visit, addonHints = new Set() }) {
   // De-branded pest visits keep primary/secondary as plain strings (so every
   // existing string consumer — protocol UI tabs, /match — still works) and
@@ -651,9 +660,10 @@ function buildCompletionActions({ lines, products, programKey, visit, addonHints
       ? { ...line, catalogProductHints: meta.catalogProductHints }
       : line;
     // A line flagged exactCatalogName (an injection label's own bottle) takes that row or none: a near name is another formulation.
-    const product = meta?.exactCatalogName
+    // A forbidding line names a product only to withhold it (isForbiddingLine): no product attaches, unless its lineMeta says it applies one.
+    const product = forbidsWithItsProduct(meta, line) ? null : (meta?.exactCatalogName
       ? resolveCatalogProductForName(meta.catalogProductHints?.[0], products, { exactOnly: true })
-      : matchCatalogProduct(lineForMatch, products);
+      : matchCatalogProduct(lineForMatch, products));
     // Its bottle is not in the catalog: no action to pick. Picked, it would record an injection with no product on the materials record.
     if (meta?.exactCatalogName && meta.treatmentApplied !== false && !product) return [];
     const kind = actionKindForLine(line, product);
@@ -846,6 +856,8 @@ async function bookedAddonHints(req, protocols) {
 // visit (its name is a copy of that visit's) gets the program's follow-up card, as does a later visit of a package booked up front
 // (protocol-package-stage.js). With no visit, the name alone decides, as before.
 // What a service with no card shows (owner pick D18, 2026-11-25; protocol-matcher.js reason no_protocol).
+// The Waves Assessment's catalog key (protocol-matcher.js assessment rule).
+const ASSESSMENT_KEY = 'lawn_inspection';
 const NO_CARD_NOTE = 'Inspection only, no product: this service has no protocol card.';
 async function matchForBookedVisit(req, protocols, serviceType) {
   const id = String(req.query.visitId || '');
@@ -860,6 +872,21 @@ async function matchForBookedVisit(req, protocols, serviceType) {
     : null;
   const match = matchServiceProtocol(protocols, serviceType, { serviceKey: visit?.service_key || null, month: req.query.month || null });
   return followupVisitMatch(match, visit?.followup_source_service_id != null || await isLaterPackageVisit(db, visit, { protocols }));
+}
+
+// A lawn name sends a close-out to the lawn month's applications, except a booked Waves Assessment: its catalog key
+// (lawn_inspection) gives it the Assessment card, under its old name "Lawn Inspection" too (the row's name before its
+// rename). The close-out keys the same visit off the lawn flow (SchedulePage.jsx visitServiceCategory). Only a lawn name
+// that reads as an inspection costs the key read.
+async function takesLawnApplications(req, serviceType) {
+  const name = normalizeText(serviceType);
+  if (!name.includes('lawn') && !name.includes('turf')) return false;
+  const id = String(req.query.visitId || req.query.scheduledServiceId || '');
+  if (!/\b(inspection|assessment)\b/.test(name) || !UUID_RE.test(id)) return true;
+  const row = await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
+    .leftJoin('services', 'scheduled_services.service_id', 'services.id')
+    .first(db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'));
+  return row?.service_key !== ASSESSMENT_KEY;
 }
 
 // GET /api/admin/protocols/match — best service template plus full program fallback.
@@ -1305,7 +1332,7 @@ router.get('/completion-actions', async (req, res, next) => {
     // The appointment's own month (real date): Bermuda removal's eligibility and rows follow it, not the round's recipe month.
     let appointmentMonth = null;
 
-    if (normalizeText(serviceType).includes('lawn') || normalizeText(serviceType).includes('turf')) {
+    if (await takesLawnApplications(req, serviceType)) {
       programKey = 'lawn';
       // Celsius and Blindside are not labeled for bahiagrass, so under v13 a bahia lawn (any of its
       // spellings, in any of the three inputs) gets no chips, never another grass's: decided on the raw
@@ -1333,7 +1360,8 @@ router.get('/completion-actions', async (req, res, next) => {
       }
     } else {
       // Raw month (see /match): an unusable value keeps the rule visit.
-      const matched = await matchForBookedVisit(req, protocols, serviceType);
+      // The lawn close-out sends its visit as scheduledServiceId: a booked assessment under a lawn name is matched by it too.
+      const matched = await matchForBookedVisit({ ...req, query: { ...req.query, visitId: req.query.visitId || req.query.scheduledServiceId } }, protocols, serviceType);
       programKey = matched.programKey;
       program = matched.program;
       visit = matched.matchedVisit || program?.visits?.[0];

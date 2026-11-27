@@ -81,8 +81,10 @@ export function isPestDefaultMixVisit(service) {
     service?.serviceTypeRaw || service?.serviceType || service?.service_type || "";
   const s = String(raw).toLowerCase();
   if (NON_MIX_SERVICE_RE.test(s)) return false;
+  // A callback booking counts when its name says pest work. A callback whose name says nothing ("Courtesy Visit") has no
+  // protocol card on the server (protocol-matcher.js no_protocol, owner pick D18): inspection only, nothing prefilled.
   const isReservice =
-    service?.isCallback === true || /re-?service|callback/.test(s);
+    (service?.isCallback === true && /\bpest\b/.test(s)) || /re-?service|callback/.test(s);
   if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
   // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
   // admin-created One-Time Pest Control Service job is often scheduled

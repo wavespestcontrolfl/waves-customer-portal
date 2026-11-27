@@ -32,3 +32,15 @@ describe('isPestDefaultMixVisit: trap-only retainer plans (owner 2026-11-19)', (
     expect((crosscheck / 4) * gallonsPer1000).toBeLessThanOrEqual(1);
   });
 });
+
+// No card = inspection only (owner pick D18): a callback whose name says nothing has no protocol card on the server, so the
+// close-out prefills no house mix. A callback whose name says pest work keeps it.
+describe('isPestDefaultMixVisit: a callback booking', () => {
+  it.each(['Courtesy Visit', 'Service Visit', 'Mud Dauber Removal'])('a callback named "%s" gets no house mix', (serviceType) => {
+    expect(isPestDefaultMixVisit({ serviceType, isCallback: true })).toBe(false);
+  });
+
+  it.each(['Pest Control Service', 'Quarterly Pest Control', 'Re-Service'])('a callback named "%s" keeps the house mix', (serviceType) => {
+    expect(isPestDefaultMixVisit({ serviceType, isCallback: true })).toBe(true);
+  });
+});

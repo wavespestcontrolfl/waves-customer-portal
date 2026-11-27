@@ -949,7 +949,8 @@ function serviceLineForType(serviceType) {
 
 function protocolTemplateCounts() {
   return {
-    pest: Math.max(0, (protocols.pest?.visits || []).length - 2),
+    // The pest program's two copies of the rodent and mosquito cards (old visits 5 and 6) are gone: every pest visit is a pest card.
+    pest: (protocols.pest?.visits || []).length,
     termite: (protocols.termite?.visits || []).length,
     lawn: Object.keys(lawnProtocols() || {}).length,
     // Dedicated programs now exist for these — counting keyword hits inside
@@ -4251,6 +4252,7 @@ router.post('/ai-price-lookup/bulk', async (req, res, next) => {
 });
 
 router._test = {
+  protocolTemplateCounts,
   parseAutoMapResponse,
   buildAutoMapRow,
   aiProposeVendorMappings,

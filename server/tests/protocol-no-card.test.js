@@ -122,6 +122,12 @@ describe('the matcher: a service no rule claims has no card', () => {
     expect(match('Termite Re-Service').slice(0, 1)).toEqual(['termite']);
     expect(match('Mosquito Callback').slice(0, 1)).toEqual(['mosquito']);
     expect(match('Service Visit', 'bee_wasp_removal')).toEqual(NO_CARD);
+    // The bare-name words count only with no catalog key: a keyed service no rule claims keeps no card.
+    expect(match('Wildlife Trapping Re-Service', 'wildlife_trapping')).toEqual(NO_CARD);
+    expect(match('Re-Service', 'bee_wasp_removal')).toEqual(NO_CARD);
+    expect(match('Callback', 'bird_box_install')).toEqual(NO_CARD);
+    // A general pest key keeps the card under these names.
+    expect(match('Re-Service', 'pest_re_service')).toEqual(['pest', 1, 'general_pest', true]);
     expect(match('Service Visit')).toEqual(NO_CARD);
   });
 
@@ -232,6 +238,16 @@ describe('a service with no card on the schedule panel and the close-out', () =>
     expect(body.actions.some((action) => action.treatmentApplied || action.product)).toBe(false);
   });
 
+  test('a booked assessment under a lawn name gets its own card, never the lawn month\'s applications', async () => {
+    bookedAs('lawn_inspection');
+    const { status, body } = await call('/completion-actions', { serviceType: 'Lawn Inspection', scheduledServiceId: VISIT, month: 'Nov' });
+    expect(status).toBe(200);
+    expect(body).toMatchObject({ programKey: 'assessment', programName: 'Waves Assessment Protocol' });
+    expect(body.actions.some((action) => action.treatmentApplied || action.product)).toBe(false);
+    // "Lawn Assessment" with the same key, by visitId (the non-lawn close-out's parameter), too.
+    expect((await call('/completion-actions', { serviceType: 'Lawn Assessment Service', visitId: VISIT, month: 'Nov' })).body.programKey).toBe('assessment');
+  });
+
   test('the close-out seeds no product for a service with no card', () => {
     expect(resolveCompletionDefaultProductNames({ protocols, serviceType: 'Bee / Wasp Nest Removal Service', serviceKey: 'bee_wasp_removal' }))
       .toMatchObject({ programKey: null, source: 'none', entries: [] });
@@ -266,6 +282,16 @@ describe('a card line that forbids work is not a treatment', () => {
       }
     }
     expect(wrong).toEqual([]);
+  });
+
+  test('a forbidding line that names a catalog product attaches no product; the same product on an applying line still does', () => {
+    const visit = { visit: 1, primary: 'Taurus SC 0.8 fl oz per gallon on the foundation band\nDo not apply Taurus SC within 10 ft of a well', secondary: '' };
+    const catalog = [{ id: 'tau', name: 'Taurus SC', category: 'insecticide', active: true }];
+    const actions = buildCompletionActions({ lines: parseProtocolLines(visit.primary, 'base'), products: catalog, programKey: 'pest', visit });
+    const applying = actions.find((action) => action.raw.startsWith('Taurus SC'));
+    const forbidding = actions.find((action) => action.raw.startsWith('Do not'));
+    expect(applying.product?.id).toBe('tau');
+    expect([forbidding.treatmentApplied, forbidding.product]).toEqual([false, null]);
   });
 
   test('a line that applies a product still records a treatment', () => {

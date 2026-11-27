@@ -255,6 +255,31 @@ it('a service with no protocol card shows "Inspection only, no product" on the c
   expect(screen.queryByLabelText('Add protocol action')).toBeNull();
 });
 
+it('a re-service the server calls no card opens on no house mix and shows the note', async () => {
+  stubFetchWithActions({ serviceType: 'Re-Service', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
+  const mixCatalog = [
+    { id: 'm1', name: 'Taurus SC', category: 'Insecticide' },
+    { id: 'm2', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
+    { id: 'm3', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' },
+  ];
+  await act(async () => {
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Re-Service', completionProfile: { serviceKey: 'web_sweep' }, findingsSchema: null })} products={mixCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
+  expect(screen.queryByText('Taurus SC')).toBeNull();
+  expect(screen.queryByText('LESCO Crosscheck Plus')).toBeNull();
+});
+
+it('a booked Waves Assessment under its old name "Lawn Inspection" asks for its own card by visit, not the lawn applications', async () => {
+  stubFetchWithActions({ programKey: 'assessment', programName: 'Waves Assessment Protocol', visit: { visit: 1, month: 'Any' }, actions: [{ id: 'w1', label: 'Walk the outside of the home', treatmentApplied: false }] });
+  await act(async () => {
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Lawn Inspection', completionProfile: { serviceKey: 'lawn_inspection' }, findingsSchema: null })} products={cockroachCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  expect(await screen.findByText('Walk the outside of the home')).toBeTruthy();
+  const url = fetch.mock.calls.map(([u]) => String(u)).find((u) => u.includes('/completion-actions'));
+  expect(url).toContain('visitId=cockroach-visit-1');
+});
+
 it('a service with a card shows no such line', async () => {
   stubFetchWithActions({ programKey: 'cockroach', programName: 'Cockroach Protocol', visit: { visit: 1, month: 'Any' }, actions: [{ id: 'a1', label: 'Apply cockroach gel bait', treatmentApplied: true }] });
   await act(async () => {

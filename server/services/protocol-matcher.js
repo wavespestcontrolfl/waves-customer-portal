@@ -333,9 +333,12 @@ const MATCH_RULES = [
     // close-out already reads these keys as regular pest work, and a service no rule claims gets no card (below).
     serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout',
       'pest_general_bimonthly', 'pest_general_semiannual', 'one_time_pest_control', 'pest_re_service', 'pest_rodent_quarterly'],
-    // "re-service", "callback", "semi-annual" and "recurring": the names the close-out reads as regular pest work with the house mix
-    // (client lib/pest-default-mix.js). Another line's re-service ("Lawn Care Re-Service") is that line's program by its name.
-    terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter', 're-service', 'reservice', 'callback', 'semi-annual', 'semiannual', 'recurring'],
+    terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter'],
+    // "re-service", "callback", "semi-annual" and "recurring": the bare names the close-out reads as regular pest work with the
+    // house mix (client lib/pest-default-mix.js). They count only on a visit with no catalog key: a keyed service no rule claims
+    // ("Wildlife Trapping Re-Service", key wildlife_trapping) keeps no card. Another line's re-service ("Lawn Care Re-Service") is
+    // that line's program by its name.
+    keylessTerms: ['re-service', 'reservice', 'callback', 'semi-annual', 'semiannual', 'recurring'],
   },
   {
     programKey: 'tree_shrub',
@@ -568,11 +571,14 @@ function stageInName(serviceType) {
 // service key. The key wins, except over a rule marked `explicitStage` (the name itself says "second treatment" or "heat") and
 // over a later stage the name states. In a package program the later-stage rule reads the name without its package phrases:
 // "Flea Treatment (2 Visits)" is the first visit of two, not "flea treatment 2".
-function ruleFor(keyRule, rules, normalized, serviceType, programKey) {
+// A rule's name words; its keylessTerms only on a visit with no catalog key.
+const ruleTerms = (rule, keyless) => (keyless && rule.keylessTerms ? [...rule.terms, ...rule.keylessTerms] : rule.terms);
+
+function ruleFor(keyRule, rules, normalized, serviceType, programKey, keyless = false) {
   const laterReason = STAGE_BY_NAME_RULES[programKey] || null;
   const stage = laterReason ? stageInName(serviceType) : { own: '', later: false };
   const ownNormalized = laterReason ? normalize(stage.own) : '';
-  const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(laterReason && rule.reason === laterReason ? ownNormalized : normalized, term)));
+  const named = rules.find((rule) => ruleTerms(rule, keyless).some((term) => matchesTerm(laterReason && rule.reason === laterReason ? ownNormalized : normalized, term)));
   if (named?.explicitStage) return named;
   const later = stage.later ? rules.find((rule) => rule.reason === laterReason) : null;
   return later || keyRule || named;
@@ -588,7 +594,7 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
   const keyRule = MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey));
   const fallbackProgramKey = keyRule?.programKey || programKeyForService(serviceType);
   const rules = MATCH_RULES.filter((rule) => rule.programKey === fallbackProgramKey);
-  const matchedRule = ruleFor(keyRule, rules, normalized, serviceType, fallbackProgramKey);
+  const matchedRule = ruleFor(keyRule, rules, normalized, serviceType, fallbackProgramKey, !serviceKey);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };
