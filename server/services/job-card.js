@@ -1723,7 +1723,7 @@ function linesFromProtocolText(visit, catalog) {
     // condition phrasing the protocols use: a primary line the tech has to
     // justify is conditional work, never selected base work.
     const labelHold = visit?.fieldGuide && /\bheld\b|\bhold dose\b|exact.*label needed|verify container label|target-specific label rate|whiteflies.*listed scales/i.test(line.raw)
-      ? 'Treatment needs its verified label, target and application method before mixing' : null;
+      ? 'Treatment needs its verified label, target and application method before mixing. The amount shown is the catalog rate, which may be for another target: check the container label' : null;
     const conditional = Boolean(line.conditional) || isConditionalLine(line.raw) || Boolean(labelHold);
     for (const product of productsOnLine(line, catalog)) {
       if (!out.some((l) => l.product.id === product.id)) out.push({ raw: line.raw, product, role: conditional ? 'conditional' : 'base', selected: !conditional, ...(labelHold ? { labelHold } : {}) });
@@ -2412,7 +2412,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
 }
 
 // The spray volume (gal per 1,000 sq ft) a card's own label rate is stated over, or null when the band is not the card's.
-const lineCarrierOf = (band, line) => (band && line?.labelUse && Number(line.carrier) > 0 ? Number(line.carrier) : null);
+const lineCarrierOf = (band, line) => (band && (line?.labelUse || line?.statedVolume) && Number(line.carrier) > 0 ? Number(line.carrier) : null);
 
 // The warning when the picked or assigned rig sprays another volume than the card's rate holds at. No tolerance: the card's volume is
 // the one volume at which the mix is the label amount (the difference guard is for float noise only).
@@ -2437,16 +2437,18 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
   return conflictLines.map((line) => {
     const band = protocolBand(labelPerGallon, line);
     const used = band || labelPerGallon;
-    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [] };
+    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [], ...(line.conditional ? { conditional: true } : {}) };
     const lineCarrier = lineCarrierOf(band, line);
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
-    const warning = rigVolumeWarning({ lineCarrier, ...rigCtx });
+    const rigWarning = rigVolumeWarning({ lineCarrier, ...rigCtx });
+    const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, rigWarning].filter(Boolean);
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
     return {
       service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
       ...(sprayVolumeGalPer1000 ? { sprayVolumeGalPer1000, coversSqft } : {}),
       ...(labelCoversSqft ? { labelCoversSqft, rigSprayGalPer1000 } : {}),
-      warnings: warning ? [warning] : [],
+      ...(line.conditional ? { conditional: true } : {}),
+      warnings: warning,
     };
   });
 }
@@ -2535,7 +2537,20 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const selectedHits = hits.filter(({ hit }) => hit.selected !== false);
   const [selected] = selectedHits;
   const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, { conditional: hit.selected === false }));
-  const lineOf = (h) => ({ rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}) });
+  // The spray volume a line states for its own rate: a label-use card's carrier, or the protocol text's "at the label volume of N gal"
+  // (the April Distance IGR line: 5 gal of mix per 1,000 sq ft). "At least N gal" is a floor, not a volume, and is never read.
+  const statedVolumeOf = (hit) => {
+    const m = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(hit.raw || ''));
+    return m && Number(m[1]) > 0 ? Number(m[1]) : null;
+  };
+  const lineOf = (h) => {
+    const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
+    return {
+      rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
+      ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
+      ...(stated ? { carrier: stated, statedVolume: true } : {}),
+    };
+  };
   if (selected) {
     // A chemical area add-on's dose is its booked rate over the area sold, not a tank amount; a tank line that names the same product
     // (a Tree & Shrub visit's own Snapshot beside a Bed Pre-Emergent add-on) keeps its tank amount, and each add-on's booked rate and
@@ -2548,10 +2563,13 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
     // right one: the dose carries a warning. Each service's line goes along (conflictLines) so the warning can name the rates that pass the
     // same label check a single dose does (conflictText).
-    const rates = new Set(rateHits.map((h) => JSON.stringify(rateOf(h))));
+    // An "if needed" line of the same product on another booked service is a row of its own, marked as needing the call confirmed.
+    const conditionalHits = tankHits.length ? hits.filter(({ hit }) => hit.selected === false && !hit.governed) : [];
+    const conflictHits = [...rateHits, ...conditionalHits];
+    const rates = new Set(conflictHits.map((h) => JSON.stringify(rateOf(h))));
     // Only a card that states its own tank rate (a label rate, or a declared tankRatePerGallon such as Antapex 20 g beside 10 g) can disagree: another product's lines keep the first card's rate
     // narrowed by the label band, as before.
-    const ratesDisagree = rates.size > 1 && rateHits.some((h) => h.hit.labelUseRate || h.hit.declaredRate) ? { conflictLines: rateHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
+    const ratesDisagree = rates.size > 1 && conflictHits.some((h) => h.hit.labelUseRate || h.hit.declaredRate) ? { conflictLines: conflictHits.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
     // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
     // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
     const heldHit = selectedHits.find((h) => h.hit.labelHold);
@@ -2595,7 +2613,7 @@ function conflictText(product, label, conflictLines) {
   const volumeText = (line) => (line.labelUse && Number(line.carrier) > 0 ? ` at ${fmtGal(line.carrier)} gal per 1,000 sq ft` : '');
   const each = conflictLines.map((line) => {
     const band = protocolBand(label, line);
-    return `${line.name} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
+    return `${line.name}${line.conditional ? ' (if needed)' : ''} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
   });
   return `${product.name} has a different rate on each service on this visit: ${each.join('; ')}. Mix a separate tank for each`;
 }

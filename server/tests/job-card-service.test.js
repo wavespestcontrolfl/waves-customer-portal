@@ -2475,6 +2475,48 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out.warnings).toContain('Lawn Insect Spot Treatment: Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
   });
 
+  // Owner 2026-11-26: an "if needed" line of the same product on another booked service is a row of its own, marked for confirmation.
+  test('a bed bug follow-up with a flea add-on shows the conditional Antapex row beside the flea row', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Bed Bug Treatment Service', service_category: 'specialty', service_key: 'bed_bug_treatment', followup_source_service_id: 'first' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.conditional === true])).toEqual([['Flea Control Service', 20, false], ['Bed Bug Treatment Service', 40, true]]);
+    expect(out.warnings).toContain('Bed Bug Treatment Service: Listed as "if needed" on Bed Bug Treatment Service — confirm the call before mixing');
+  });
+
+  // Owner 2026-11-26: the volume a protocol line states for its rate is compared to the rig's, like a label card's.
+  test('the April Distance IGR line warns when the picked rig sprays another volume than the 5 gal per 1,000 sq ft it states', async () => {
+    const protocols = require('../config/protocols.json');
+    const distance = { id: 'di', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-04-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [distance], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Tank #1', system_type: 'tank', tank_capacity_gal: '110.00' }], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('di', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 6.6, sprayVolumeGalPer1000: 5, coversSqft: 55000, labelCoversSqft: 22000, rigSprayGalPer1000: 2 });
+    expect(out.warnings.join(' ')).toMatch(/The card's rate is for 5 gal per 1,000 sq ft\. Tank #1 sprays 2/);
+  });
+
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
