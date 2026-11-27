@@ -171,6 +171,10 @@ test('signature fields require a full name (first and last) when completing a fo
     content_snapshot: { kind: 'form', sections: [{ id: 'sig' }] },
   };
   expect(() => recordAnswers(version, { answers: { agree: true, 'signed-name': 'x' }, completed_steps: [], complete: true })).toThrow(/full name/);
+  expect(() => recordAnswers(version, { answers: { agree: true, 'signed-name': '' }, completed_steps: [], complete: false }, { forOtherOwner: true }))
+    .toThrow(/Leave signature and agreement boxes blank/);
+  expect(() => recordAnswers(version, { answers: { agree: false, 'signed-name': 'Jordan Rivera' }, completed_steps: [], complete: false }, { forOtherOwner: true }))
+    .toThrow(/Leave signature and agreement boxes blank/);
   expect(recordAnswers(version, { answers: { agree: true, 'signed-name': '  Jordan Rivera ' }, completed_steps: [], complete: true }).answers)
     .toBe('{"agree":true,"signed-name":"Jordan Rivera"}');
 });

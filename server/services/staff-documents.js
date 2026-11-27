@@ -7,6 +7,7 @@ const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 const ACKNOWLEDGMENT = 'I have read this policy version and acknowledge receipt. I intend my typed name to serve as my electronic signature for this acknowledgment (Florida Statutes 668.50).';
 const sourceOf = version => ({ title: version.title, body: version.body, metadata: version.staff_metadata });
 const isAdmin = actor => actor.role === 'admin';
+const versionRequiresSignature = (doc, version) => doc.staff_kind === 'policy' || hasSignatureField(version?.staff_metadata?.fields);
 
 function cleanEvidence(evidence) {
   if (!evidence || typeof evidence !== 'object') return {};
@@ -81,7 +82,9 @@ async function issueVersion(trx, document, version, policy, at, actor) {
     published_at: trx.fn.now(), approved_by: actor.id, policy_values_id: rendered.used_variables.length ? policy.id : null,
   }).returning('*');
   if (!issued) reject('This version has already been issued.', 409);
-  await trx('document_templates').where({ id: document.id }).update({ status: 'active', updated_at: trx.fn.now(), updated_by: actor.id });
+  await trx('document_templates').where({ id: document.id }).update({
+    status: 'active', requires_signature: versionRequiresSignature(document, version), updated_at: trx.fn.now(), updated_by: actor.id,
+  });
   await audit(trx, actor, 'issued', document.id, { version_id: issued.id, hash: issued.content_hash, policy_values_id: issued.policy_values_id });
   return issued;
 }
@@ -193,7 +196,8 @@ async function list(actor, { at = new Date(), search = '', asOf = false } = {}) 
     if (!version) continue;
     const title = version.content_snapshot?.title || version.title;
     if (search && !`${title} ${version.content_snapshot?.body || version.body}`.toLowerCase().includes(search.toLowerCase())) continue;
-    result.push({ ...document, version_id: version.id, title, version_number: version.version_number,
+    result.push({ ...document, requires_signature: versionRequiresSignature(document, version),
+      version_id: version.id, title, version_number: version.version_number,
       effective_at: version.effective_at, review_on: version.staff_metadata.review_on, owner_role: version.staff_metadata.owner_role,
       issued: !!version.published_at });
   }
@@ -217,7 +221,8 @@ async function detail(id, actor, versionId = null, at = null) {
     ? new Map((await db('technicians').whereIn('id', staffIds).select('id', 'name')).map(row => [row.id, row.name]))
     : new Map();
   const currentVersion = versions.find(v => v.published_at && new Date(v.effective_at) <= new Date());
-  return { document, version, rendered, current_version_id: currentVersion?.id || null,
+  return { document: { ...document, requires_signature: versionRequiresSignature(document, version) },
+    version, rendered, current_version_id: currentVersion?.id || null,
     versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })),
     acknowledgments: acknowledgments.map(a => ({ ...a, technician_name: namesById.get(a.technician_id) || null })),
     records: records.map(r => ({ ...r, owner_name: namesById.get(r.owner_id) || null })) };
@@ -255,25 +260,45 @@ async function acknowledge(versionId, input, actor, evidence = {}) {
   });
 }
 
-function recordAnswers(version, input) {
-  const fields = version.staff_metadata.fields;
-  const types = { text: Joi.string().max(8000).allow(''), textarea: Joi.string().max(8000).allow(''),
-    date: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(''), checkbox: Joi.boolean() };
+const ANSWER_FIELD_TYPES = {
+  text: Joi.string().max(8000).allow(''),
+  textarea: Joi.string().max(8000).allow(''),
+  date: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(''),
+  checkbox: Joi.boolean(),
+};
+
+function answerSchema(fields, complete) {
   const shape = {};
   for (const field of fields) {
-    let rule = types[field.type].label(field.label);
-    if (input.complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').trim().required();
+    let rule = ANSWER_FIELD_TYPES[field.type].label(field.label);
+    if (complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').trim().required();
     shape[field.id] = rule;
   }
-  const hasSigField = hasSignatureField(fields);
-  const rawAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers) ? { ...input.answers } : input.answers;
-  if (hasSigField && rawAnswers && typeof rawAnswers['signed-name'] === 'string') rawAnswers['signed-name'] = rawAnswers['signed-name'].trim();
-  const answers = validate(Joi.object(shape).required(), rawAnswers);
-  if (input.complete && hasSigField) {
+  return Joi.object(shape).required();
+}
+
+function enforceSignatureAnswers(fields, answers, { complete, forOtherOwner }) {
+  if (!hasSignatureField(fields)) return;
+  if (forOtherOwner) {
+    const hasPrefilledSig = Boolean(String(answers['signed-name'] || '').trim());
+    const hasCheckedBox = fields.some(field => field.type === 'checkbox' && answers[field.id] === true);
+    if (hasPrefilledSig || hasCheckedBox) reject('Leave signature and agreement boxes blank when saving a draft for another staff member.');
+  }
+  if (complete) {
     const parsedName = parseSignedName(answers['signed-name']);
     if (!parsedName) reject('Type your full name (first and last) to sign this agreement.');
     answers['signed-name'] = parsedName;
   }
+}
+
+function recordAnswers(version, input, { forOtherOwner = false } = {}) {
+  const fields = version.staff_metadata.fields;
+  const rawAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers) ? { ...input.answers } : input.answers;
+  if (hasSignatureField(fields) && rawAnswers && typeof rawAnswers['signed-name'] === 'string') {
+    rawAnswers['signed-name'] = rawAnswers['signed-name'].trim();
+  }
+  const answers = validate(answerSchema(fields, input.complete), rawAnswers);
+  enforceSignatureAnswers(fields, answers, { complete: input.complete, forOtherOwner });
   const ids = version.content_snapshot.sections.map(section => section.id);
   const steps = validate(Joi.array().items(Joi.string().valid(...ids)).unique().required(), input.completed_steps);
   if (input.complete && version.content_snapshot.kind === 'procedure' && steps.length !== ids.length) reject('Complete every procedure step.');
@@ -288,7 +313,7 @@ async function saveRecord(versionId, input, actor, evidence = {}) {
     await loadDocument(trx, version.template_id, owner);
     if (!isAdmin(actor) && input.owner_id !== actor.id) reject('Only an admin may assign a record to another staff member.', 403);
     if (input.complete && input.owner_id !== actor.id) reject('Only the assigned owner may complete this record.', 403);
-    const values = { ...recordAnswers(version, input), owner_id: input.owner_id, due_at: input.due_at,
+    const values = { ...recordAnswers(version, input, { forOtherOwner: input.owner_id !== actor.id }), owner_id: input.owner_id, due_at: input.due_at,
       updated_at: trx.fn.now(), completed_at: input.complete ? trx.fn.now() : null };
     let row;
     if (input.id) {

@@ -55,24 +55,34 @@ function recordHeading(canWrite, kind, isSignatureForm, completed, hasValidSaved
   return 'Create a record';
 }
 
-function RecordFields({ fields, answers, setAnswers }) {
+function clearSignerAnswers(fields, rawAnswers) {
+  const cleaned = { ...(rawAnswers || {}) };
+  for (const field of fields) {
+    if (field.type === 'checkbox') cleaned[field.id] = false;
+    else if (field.id === 'signed-name' && field.type === 'text') cleaned[field.id] = '';
+  }
+  return cleaned;
+}
+
+function RecordFields({ fields, answers, setAnswers, assigningOther }) {
   return fields.map(field => {
     const label = `${field.label}${field.required ? ' *' : ''}`;
     if (field.type === 'checkbox') {
       return (
         <label key={field.id} style={{ ...row, marginBottom: 18, fontWeight: 500, color: D.text }}>
-          <input type="checkbox" checked={answers[field.id] === true} onChange={e => setAnswers({ ...answers, [field.id]: e.target.checked })} style={{ width: 20, height: 20, accentColor: D.accent }} />
+          <input type="checkbox" disabled={assigningOther} checked={assigningOther ? false : answers[field.id] === true} onChange={e => setAnswers({ ...answers, [field.id]: e.target.checked })} style={{ width: 20, height: 20, accentColor: D.accent }} />
           {label}
         </label>
       );
     }
     const isSig = field.id === 'signed-name' && field.type === 'text';
+    const disabledForAssign = assigningOther && isSig;
     return (
       <Field key={field.id} label={label}>
         {field.type === 'textarea' ? (
           <textarea rows={4} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} />
         ) : (
-          <input type={field.type === 'date' ? 'date' : 'text'} autoComplete={isSig ? 'name' : undefined} placeholder={isSig ? 'First and last name' : undefined} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} />
+          <input type={field.type === 'date' ? 'date' : 'text'} disabled={disabledForAssign} autoComplete={isSig ? 'name' : undefined} placeholder={disabledForAssign ? 'Filled by the assigned staff member' : isSig ? 'First and last name' : undefined} style={inputStyle} value={disabledForAssign ? '' : answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} />
         )}
       </Field>
     );
@@ -197,13 +207,16 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
   const state = computeRecordState({ rendered, answers, owner, selfId, canWrite, record, records });
 
   function selectRecord(next) {
-    setRecord(next); setAnswers(next?.answers || {}); setSteps(next?.completed_steps || []);
+    const isAssignedDraft = Boolean(state.isSignatureForm && next && !next.completed_at && next.created_by !== selfId);
+    const loadedAnswers = isAssignedDraft ? clearSignerAnswers(rendered.metadata.fields, next.answers) : (next?.answers || {});
+    setRecord(next); setAnswers(loadedAnswers); setSteps(next?.completed_steps || []);
     setOwner(next?.owner_id || selfId); setDue(etDatetimeLocalValue(next?.due_at || new Date(Date.now() + 86400000)));
   }
   async function save(complete) {
     setBusy(true); setError('');
     try {
-      const payload = { content_hash: version.content_hash, answers, completed_steps: steps, owner_id: owner, due_at: due, complete,
+      const outboundAnswers = state.isSignatureForm && owner !== selfId ? clearSignerAnswers(rendered.metadata.fields, answers) : answers;
+      const payload = { content_hash: version.content_hash, answers: outboundAnswers, completed_steps: steps, owner_id: owner, due_at: due, complete,
         ...(record ? { id: record.id, base_updated_at: record.updated_at } : {}) };
       const result = await request(`/versions/${version.id}/records`, payload);
       selectRecord(result.record); onSaved(complete ? (state.isSignatureForm ? 'Agreement signed and saved.' : 'Completion record saved.') : 'Open record saved.');
@@ -233,7 +246,7 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     <fieldset disabled={busy || state.locked} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <RecordMetaControls visible={manage || !state.isSignatureForm} assignable={assignable} owner={owner} setOwner={setOwner} due={due} setDue={setDue} />
       <ProcedureSteps kind={rendered.kind} sections={rendered.sections} steps={steps} setSteps={setSteps} />
-      <RecordFields fields={rendered.metadata.fields} answers={answers} setAnswers={setAnswers} />
+      <RecordFields fields={rendered.metadata.fields} answers={answers} setAnswers={setAnswers} assigningOther={state.isSignatureForm && owner !== selfId} />
       {state.isSignatureForm && !state.locked && state.signedName.trim() && !state.signatureReady && <p style={{ color: '#991B1B', fontSize: 14, marginTop: -8 }}>Enter both your first and last name to sign.</p>}
       <PrefillNote hidden={state.locked || Boolean(record)} fields={rendered.metadata.fields} prefilled={prefilled} answers={answers} />
       <RecordActions locked={state.locked} isSignatureForm={state.isSignatureForm} manage={manage} record={record} canSignNow={state.canSignNow} owner={owner} selfId={selfId} onSave={save} />

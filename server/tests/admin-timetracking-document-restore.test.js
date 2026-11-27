@@ -144,7 +144,7 @@ describe('GET /documents/:id/download', () => {
     expect(recordAuditEvent).toHaveBeenCalledWith({
       actor_type: 'admin',
       actor_id: 'admin-1',
-      action: 'hr_document.downloaded',
+      action: 'hr_document.download_url_issued',
       resource_type: 'company_document',
       resource_id: DOC_ID,
       ip_address: '203.0.113.9',

@@ -181,3 +181,18 @@ test('a historical completed signature record with a single-character name does 
   expect(screen.queryByRole('heading', { name: 'Signed agreement' })).not.toBeInTheDocument();
   expect(screen.queryByText(/Signed by/)).not.toBeInTheDocument();
 });
+
+test('opening an admin-assigned draft clears prefilled signature and consent fields before the employee can sign', () => {
+  const assignedDraft = {
+    id: 'rec-assigned', owner_id: 'hire', created_by: 'me',
+    answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'Sample Hire' },
+    completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z',
+    due_at: '2026-11-02T12:00:00Z', completed_at: null,
+  };
+  render(<DocumentRecord detail={detail({ records: [assignedDraft] })} people={people} selfId="hire" manage={false} canWrite onSaved={() => {}} />);
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-assigned' } });
+  expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('Truck 7');
+  expect(screen.getByLabelText('Typed name *')).toHaveValue('');
+  expect(screen.getByLabelText('I agree *')).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'Sign and submit agreement' })).toBeDisabled();
+});

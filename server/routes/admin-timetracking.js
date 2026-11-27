@@ -2339,7 +2339,7 @@ router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
     await recordAuditEvent({
       actor_type: 'admin',
       actor_id: req.technicianId,
-      action: 'hr_document.downloaded',
+      action: 'hr_document.download_url_issued',
       resource_type: 'company_document',
       resource_id: doc.id,
       ip_address: req.ip ? String(req.ip).slice(0, 64) : null,
