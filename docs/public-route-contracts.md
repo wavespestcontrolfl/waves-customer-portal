@@ -6262,7 +6262,10 @@ site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
 review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
 (owner ruling 2026-09-03: the two-treatment package priced as one
-regular_standalone knockdown on the home footprint; species / severity /
+regular_standalone knockdown on the home footprint (since 2026-11-26, new quotes
+only: on the home's total living area, so a two-story home prices as a one-story
+home of the same size; a draft stored before that keeps its footprint price,
+estimate stamp `legacyWholeHomeSizing`); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed

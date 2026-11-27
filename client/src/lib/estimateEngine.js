@@ -2058,6 +2058,11 @@ export function calculateEstimate(inputs) {
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
+  // Cockroach and bed bug treatments size on the home's TOTAL living area, not the ground-floor footprint (owner ruling
+  // 2026-11-26 "whole home"; mirrors the server's resolveWholeHomeSize for a plain living-area input).
+  const wholeHomeSqFt = homeSqFt > 0 ? Math.round(homeSqFt) : 0;
+  // The cockroach bracket's size: the whole home, or the 2,500 fallback when the home size is unknown.
+  const roachSizeSqFt = wholeHomeSqFt > 0 ? wholeHomeSqFt : 2500;
   const treeNum = treeDensity === 'HEAVY' ? 2 : treeDensity === 'MODERATE' ? 1 : 0;
   const estimateHardscape = () => {
     const pt = (propertyType || '').toLowerCase();
@@ -2158,6 +2163,9 @@ export function calculateEstimate(inputs) {
     // zero and the fallback is the new rule (false). Above it with pest requested the fallback priced the flat top, so it does not
     // claim the new rule (the stamp is left MISSING). The server refuses that save by the home size (409) and prices it itself.
     ...((svcPest || svcOnetimePest) && footprint > 5500 ? {} : { legacyPestAboveTable: false }),
+    // Whole-home sizing (2026-11-26): this fallback sizes the cockroach and bed bug treatments on total living area, as the
+    // server does, so the saved quote never replays on the ground-floor footprint.
+    legacyWholeHomeSizing: false,
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback
     // quote at the minimum it was priced with, never the live global at
@@ -2655,7 +2663,7 @@ export function calculateEstimate(inputs) {
       }
     });
     R.pestRoachMod = roachMod;
-    R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
+    R.pestInitialRoachPrice = initialRoachPrice(roachMod, roachSizeSqFt, false);
     wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps, pricingVersion: 'v2' });
   }
 
@@ -3572,8 +3580,7 @@ export function calculateEstimate(inputs) {
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */
   if (R.pest && (roachMod === 'GERMAN' || roachMod === 'REGULAR')) {
     hasOT = true;
-    const fpEff = footprint > 0 ? footprint : 2500;
-    const fp = initialRoachPrice(roachMod, fpEff, false);
+    const fp = initialRoachPrice(roachMod, roachSizeSqFt, false);
     otItems.push({
       service: 'pest_initial_roach',
       // Static mirror of the server default (pest_base.initial_roach.display).
@@ -3650,11 +3657,10 @@ export function calculateEstimate(inputs) {
     const rt = roachType;
     if (rt === 'REGULAR') {
       if (R.pestRoachMod !== 'REGULAR') {
-        const fpEff = footprint > 0 ? footprint : 2500;
         specItems.push({
           service: 'pest_initial_roach',
           name: 'Cockroach Treatment Service',
-          price: initialRoachPrice(rt, fpEff, true),
+          price: initialRoachPrice(rt, roachSizeSqFt, true),
           det: 'Standalone knockdown',
           source: 'standalone_native_cockroach_treatment',
           standalone: true,
@@ -3748,8 +3754,8 @@ export function calculateEstimate(inputs) {
       let cp = Math.round((mpr * rm + LABOR * (lv1 / 60) + mpr * rm * 0.5 + LABOR * (lv2 / 60)) / 0.35 * 100) / 100;
       const fl = 400 + (rm - 1) * 250;
       if (cp < fl) cp = fl;
-      if (footprint > 2500) cp = Math.round(cp * 1.10);
-      else if (footprint > 1800) cp = Math.round(cp * 1.05);
+      if (wholeHomeSqFt > 2500) cp = Math.round(cp * 1.10);
+      else if (wholeHomeSqFt > 1800) cp = Math.round(cp * 1.05);
       specItems.push({ name: 'Bed Bug Chemical', price: bedBugP(cp), det: rm + ' room' + (rm > 1 ? 's' : '') + ', 2 visits' });
     }
     if (meth === 'HEAT') {
@@ -3761,8 +3767,8 @@ export function calculateEstimate(inputs) {
         const equipCost = 150 + (rm - 1) * 75; // heater rental/depreciation + fans + monitors
         hp += equipCost;
       }
-      if (footprint > 2500) hp = Math.round(hp * 1.10);
-      else if (footprint < 1200) hp = Math.round(hp * 0.95);
+      if (wholeHomeSqFt > 2500) hp = Math.round(hp * 1.10);
+      else if (wholeHomeSqFt < 1200) hp = Math.round(hp * 0.95);
       const fp = bedBugP(hp);
       specItems.push({ name: 'Bed Bug Heat', price: fp, det: rm + ' room' + (rm > 1 ? 's' : '') + ' — ' + fmtInt(fp / rm) + '/room' + (bedbugEquipment === 'INHOUSE' ? ' (in-house)' : '') });
     }

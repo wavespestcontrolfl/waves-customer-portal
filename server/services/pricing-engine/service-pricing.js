@@ -908,6 +908,17 @@ function optionBooleanTrue(value) {
   return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes';
 }
 
+// Size basis of the whole-home services (cockroach treatment, bed bug treatment, rodent guarantee). 'total_living_area' is the
+// live rule (owner 2026-11-26 "whole home"); 'ground_floor' is the rule before it (living area / stories), kept ONLY so a
+// stored estimate quoted that way replays at the price it was sent at (property.wholeHomeSizingLegacy, set by the engine from
+// the estimate's own stamp: estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal).
+const HOME_SIZE_BASIS_TOTAL = 'total_living_area';
+const HOME_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
+const HOME_SIZE_UNCLEAR_WARNING = 'Home size may be ground floor only: confirm total living area before sending.';
+const wholeHomeBasisOf = (property) => (property && property.wholeHomeSizingLegacy === true
+  ? HOME_SIZE_BASIS_GROUND_FLOOR
+  : HOME_SIZE_BASIS_TOTAL);
+
 function resolvePestFootprint(property = {}, options = {}) {
   const fallback = positiveFiniteNumber(options.fallback) || 2000;
   const manualReviewReasons = [];
@@ -1774,7 +1785,10 @@ function pricePestInitialRoach(property, options = {}) {
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
   const roachType = roachMeta.roachType;
   if (roachType === 'none') return null;
-  const footprintResolution = resolvePestFootprint(property);
+  // The treatment covers every floor, so the bracket reads the home's TOTAL living area (owner 2026-11-26 "whole home"), not the
+  // ground-floor footprint. A stored estimate quoted before that replays the footprint (property.wholeHomeSizingLegacy).
+  // An unclear size (a building measurement on a multi-story home) adds the resolution's size review reason and warning below.
+  const footprintResolution = resolveWholeHomeBasisSize(property);
 
   // Standalone Cockroach Treatment (without recurring pest) uses a higher
   // scale — no future visits to amortize the heavier visit-1 burden across.
@@ -1813,12 +1827,14 @@ function pricePestInitialRoach(property, options = {}) {
   const manualReviewReasons = uniqueList([
     ...footprintResolution.manualReviewReasons,
     ...(unmeasuredFootprint ? ['building_size_unmeasured_pest_footprint'] : []),
+    ...footprintResolution.sizeReviewReasons,
     ...(severityMeta.severity === 'severe' && !isGerman
       ? ['severe_native_roach_activity_manual_review']
       : []),
   ]);
   const warnings = uniqueList([
     ...footprintResolution.warnings,
+    ...footprintResolution.sizeWarnings,
     ...roachMeta.roachWarnings,
     ...severityMeta.warnings,
     ...(severityMeta.severity === 'severe' && isGerman
@@ -1875,6 +1891,7 @@ function pricePestInitialRoach(property, options = {}) {
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
+    homeSizeBasis: footprintResolution.homeSizeBasis,
     requiresManualReview: footprintResolution.requiresManualReview || manualReviewReasons.length > 0,
     manualReviewReasons,
     warnings,
@@ -8084,7 +8101,7 @@ function normalizeBedBugOptions(property = {}, options) {
           ? undefined
           : propertyFootprint
       );
-  const footprint = footprintValue === null || footprintValue === undefined || footprintValue === ''
+  const groundFloorFootprint = footprintValue === null || footprintValue === undefined || footprintValue === ''
     ? undefined
     : assertPositiveNumber(footprintValue, 'footprint');
 
@@ -8092,6 +8109,21 @@ function normalizeBedBugOptions(property = {}, options) {
   const stories = storiesValue === null || storiesValue === undefined || storiesValue === ''
     ? undefined
     : assertPositiveInteger(storiesValue, 'stories');
+
+  // The size modifier steps on the home's TOTAL living area (owner 2026-11-26 "whole home"), not the ground-floor footprint.
+  // A stored estimate quoted before that replays the footprint (property.wholeHomeSizingLegacy). With no size evidence at all
+  // the modifier stays 1 and priceBedBugTreatment routes the line to review, as before.
+  const homeSizeBasis = wholeHomeBasisOf(property);
+  let homeSizeResolution = null;
+  let footprint = groundFloorFootprint;
+  if (homeSizeBasis === HOME_SIZE_BASIS_TOTAL) {
+    homeSizeResolution = resolveWholeHomeBasisSize({
+      ...property,
+      stories,
+      ...(hasOptionFootprint ? { footprint: options.footprint, wholeHomeExplicitFootprint: options.footprint } : {}),
+    });
+    footprint = homeSizeResolution.wasDefaulted ? undefined : homeSizeResolution.footprint;
+  }
 
   const equipmentValue = options.equipment ?? options.bedbugEquipment;
   const equipment = readBedBugEnum(equipmentValue);
@@ -8172,6 +8204,9 @@ function normalizeBedBugOptions(property = {}, options) {
     method,
     rooms,
     footprint,
+    homeSizeBasis,
+    // Whole-home basis only (null on the ground-floor basis): the resolver's answer, read by priceBedBugTreatment.
+    homeSizeResolution,
     heatAreaSqFt,
     stories,
     severity,
@@ -8612,14 +8647,17 @@ function resolveHybridPrice(property, normalized) {
 
 function priceBedBugTreatment(property, options) {
   const normalized = normalizeBedBugOptions(property, options);
+  // The size the modifier used. Whole-home basis (sized): the total living area, the resolver's source, and the review mark when a
+  // building measurement on a multi-story home may be the ground floor only. Ground-floor basis: the footprint as given.
+  const sized = normalized.homeSizeResolution;
   const footprintResolution = normalized.footprint
     ? {
         footprint: normalized.footprint,
-        source: 'footprint',
+        source: sized ? sized.source : 'footprint',
         wasDefaulted: false,
-        requiresManualReview: false,
-        manualReviewReasons: [],
-        warnings: [],
+        requiresManualReview: sized ? sized.sizeReviewReasons.length > 0 : false,
+        manualReviewReasons: sized ? sized.sizeReviewReasons : [],
+        warnings: sized ? sized.sizeWarnings : [],
       }
     : resolvePestFootprint(property);
   const severityConfig = BED_BUG.severity[normalized.severity];
@@ -8665,6 +8703,7 @@ function priceBedBugTreatment(property, options) {
   result.footprintUsed = footprintResolution.footprint;
   result.footprintSource = footprintResolution.source;
   result.footprintWasDefaulted = footprintResolution.wasDefaulted;
+  result.homeSizeBasis = normalized.homeSizeBasis;
   result.requiresManualReview = footprintResolution.requiresManualReview;
   result.manualReviewReasons = footprintResolution.manualReviewReasons;
   result.warnings = uniqueWarnings(result.warnings, footprintResolution.warnings);
@@ -8859,8 +8898,8 @@ function fleaOfferConfig(cfg) {
 const FLEA_SIZE_BASIS_TOTAL = 'total_living_area';
 const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
 
-// The size the interior flea package steps on: the home's total living area.
-// Same result shape as resolvePestFootprint. Order: the living-area inputs
+// The size a whole-home service steps on: the home's total living area (flea interior, cockroach treatment, bed bug
+// treatment; owner 2026-11-26 "whole home"). Same result shape as resolvePestFootprint. Order: the living-area inputs
 // first (homeSqFt, livingAreaSqFt; see the provenance flags below), then a measured ground-floor footprint
 // scaled up by the story count (a footprint alone is the best evidence left
 // of the whole home; buildingSqFt is a footprint too and scales the same way).
@@ -8868,9 +8907,9 @@ const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
 // aggregate whose summed living area is not one home) keeps the pest
 // footprint rules untouched: explicit footprint only, else the 2,000 fallback
 // with manual review.
-function resolveFleaInteriorSize(property = {}) {
+function resolveWholeHomeSize(property = {}) {
   // The profile clears footprintUnknown when a measured footprint exists, so the engine also passes the original flag.
-  if (property.footprintUnknown === true || property.fleaFootprintUnknown === true) {
+  if (property.footprintUnknown === true || property.wholeHomeFootprintUnknown === true) {
     return resolvePestFootprint({ ...property, footprintUnknown: true });
   }
   // The public quote route substituted its 2,000 sq ft default for a missing home size and passes the server lookup's measured
@@ -8896,8 +8935,8 @@ function resolveFleaInteriorSize(property = {}) {
   // living area: the reading that never inflates a quote. buildingSizeMeasured is not read either (the tool defaults it
   // to false beside a real homeSqFt). Through generateEstimate only a SUPPLIED footprint counts: the profile's footprint
   // is homeSqFt / stories when none was supplied; a direct caller's footprint fields are read as given.
-  const suppliedFootprint = Object.prototype.hasOwnProperty.call(property, 'fleaExplicitFootprint')
-    ? [['footprintSqFt', property.fleaExplicitFootprint, scaled]]
+  const suppliedFootprint = Object.prototype.hasOwnProperty.call(property, 'wholeHomeExplicitFootprint')
+    ? [['footprintSqFt', property.wholeHomeExplicitFootprint, scaled]]
     : [['footprint', property.footprint, scaled], ['footprintSqFt', property.footprintSqFt, scaled]];
   // homeSqFt equal to buildingSqFt may be the Intelligence Bar's alias of a building measurement rather than a living area.
   // An explicit livingAreaSqFt wins over it. Otherwise the supplied value prices as a living area (never inflated) and the
@@ -8921,6 +8960,43 @@ function resolveFleaInteriorSize(property = {}) {
   // positive-number test, so it reaches the same dead end and returns the
   // shared 2,000 fallback with its review reasons.
   return resolvePestFootprint(property);
+}
+
+// The home size the rodent guarantee tiers on when the caller passed no homeSqFt, or null when the property carries no size
+// evidence (the 2,000 fallback is not a measurement): the total living area, or, for a quote priced before the rule
+// (property.wholeHomeSizingLegacy), the profile's own ground-floor footprint exactly as the guarantee read it then.
+function resolveWholeHomeSqFt(property = {}) {
+  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return property.footprint || null;
+  const resolution = resolveWholeHomeSize(property);
+  return resolution.wasDefaulted ? null : resolution.footprint;
+}
+
+// The size the cockroach treatment and the bed bug treatment price on, under the basis the estimate was priced with. Live rule:
+// the total living area. A quote priced before the rule (property.wholeHomeSizingLegacy): the ground-floor footprint
+// (resolvePestFootprint, the code it was sold on). Same shape as resolvePestFootprint, plus homeSizeBasis and the review reason
+// and warning for a size that may be the ground floor only (sizeReviewReasons / sizeWarnings: always lists, empty when the size
+// is clear and on the ground-floor basis). They stay separate from the resolver's own lists so each caller keeps its reason order.
+function resolveWholeHomeBasisSize(property = {}) {
+  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) {
+    return { ...resolvePestFootprint(property), homeSizeBasis: HOME_SIZE_BASIS_GROUND_FLOOR, sizeReviewReasons: [], sizeWarnings: [] };
+  }
+  const resolution = resolveWholeHomeSize(property);
+  const unclear = wholeHomeSizeSourceUnclear(property, resolution);
+  return {
+    ...resolution,
+    homeSizeBasis: HOME_SIZE_BASIS_TOTAL,
+    sizeReviewReasons: unclear ? ['home_size_source_unclear'] : [],
+    sizeWarnings: unclear ? [HOME_SIZE_UNCLEAR_WARNING] : [],
+  };
+}
+
+// Home size that may be the ground floor only (a buildingSqFt measurement, or the Intelligence Bar's alias of it in homeSqFt,
+// on a multi-story home): priced as a living area, never inflated, but a person confirms the total living area before it
+// goes out. Decided from the inputs, so every entry point (compute_estimate, the draft path, a replay) agrees.
+function wholeHomeSizeSourceUnclear(property, resolution) {
+  return positiveStories(property.stories) > 1
+    && (resolution.source === 'buildingSqFt'
+      || (resolution.source === 'homeSqFt' && Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt)));
 }
 
 function priceFlea(property = {}) {
@@ -8952,7 +9028,7 @@ function priceFlea(property = {}) {
         ? Math.round(Number(property.homeSqFt) / Number(property.stories || 1))
         : property.homeSqFt,
     })
-    : resolveFleaInteriorSize(property);
+    : resolveWholeHomeSize(property);
   // Named `footprint` for the adjustment table (its keys keep the name), but
   // under the whole-home basis it is the total living area, not a footprint.
   const footprint = footprintResolution.footprint;
@@ -9028,9 +9104,7 @@ function priceFlea(property = {}) {
   // Home size that may be the ground floor only (a buildingSqFt measurement, or the Intelligence Bar's alias of it in homeSqFt,
   // on a multi-story home): priced as a living area, never inflated, but a person confirms the total living area before it
   // goes out. Decided here from the inputs, so every entry point (compute_estimate, the draft path, a replay) agrees.
-  const homeSizeSourceUnclear = fleaSizeBasis === FLEA_SIZE_BASIS_TOTAL && positiveStories(property.stories) > 1
-    && (footprintResolution.source === 'buildingSqFt'
-      || (footprintResolution.source === 'homeSqFt' && Number(property.buildingSqFt) > 0 && Number(property.homeSqFt) === Number(property.buildingSqFt)));
+  const homeSizeSourceUnclear = fleaSizeBasis === FLEA_SIZE_BASIS_TOTAL && wholeHomeSizeSourceUnclear(property, footprintResolution);
   if (homeSizeSourceUnclear) manualReviewReasons.push('flea_home_size_source_unclear');
   if (exteriorSelected && exterior.source === 'UNKNOWN') {
     manualReviewReasons.push('flea_exterior_area_source_unknown');
@@ -10906,6 +10980,7 @@ function applyRodentBundle(componentTotal, bundle) {
 
 module.exports = {
   assertFinitePriceFields,
+  resolveWholeHomeSqFt,
   barrelMeasurementHold,
   oneTimeLawnPlateauMonthly,
   calcBermudaRemovalAnnualCost,

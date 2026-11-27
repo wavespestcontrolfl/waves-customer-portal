@@ -276,7 +276,7 @@ const {
   pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee, barrelMeasurementHold,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
-  resolvePalmCount,
+  resolvePalmCount, resolveWholeHomeSqFt,
   normalizeRoachType, assertFinitePriceFields,
   priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, buildPricingError,
 } = require('./service-pricing');
@@ -1078,6 +1078,18 @@ function legacyPestAboveTable(input) {
   return input?.legacyPestAboveTable === true;
 }
 
+// Whole-home sizing (owner 2026-11-26 "whole home"): the cockroach treatment, the bed bug treatment and the yearly rodent
+// guarantee price on the home's TOTAL living area, as flea does, new quotes only. Its own stamp
+// (pricingMetadata.legacyWholeHomeSizing), same replay mechanism: input.legacyWholeHomeSizing is derived from the estimate's own
+// stamp (estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), a priced estimate with no stamp, or one that kept only
+// inputs asking for one of the three, predates the rule, and a legacy quote runs the existing ground-floor code unchanged. A fresh
+// quote never sets it. Plan-wide (no per-service marker): a service a revision adds to a legacy estimate stays on the old rule, so
+// a replay never raises a sold price.
+const WHOLE_HOME_SIZING_SERVICES = new Set(['pest_initial_roach', 'bed_bug', 'rodent_guarantee']);
+function legacyWholeHomeSizing(input) {
+  return input?.legacyWholeHomeSizing === true;
+}
+
 // The plan line's quarterly per-app rate without its home-age step (a new one-time visit has none): the one shared helper
 // (one-time-pest-home-age.js quarterlyPerAppWithoutHomeAge), also used by the estimate page, with the quote-time floor.
 function ageFreeQuarterly(planLine, floor) {
@@ -1307,6 +1319,16 @@ function generateEstimate(input) {
   const property = calculatePropertyProfile(propertyProfileInput);
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
+  // Whole-home sizing inputs for the cockroach treatment, bed bug treatment and rodent guarantee (priceFlea's twin of these
+  // keys is set on its own call below). calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
+  // derives footprint = homeSqFt / stories when none was supplied, so the pricers need the caller's original flag and footprint.
+  // wholeHomeSizingLegacy: a quote priced before the rule keeps the ground-floor basis it was sold on.
+  const wholeHomeSizing = {
+    wholeHomeFootprintUnknown: input.footprintUnknown === true,
+    wholeHomeExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
+    wholeHomeSizingLegacy: legacyWholeHomeSizing(input),
+  };
+
   const modifiers = deriveModifiers(property);
   // Caller-supplied overrides for modifiers the caller computed from richer
   // data than the profile carries — e.g. the property lookup's graduated
@@ -1357,6 +1379,8 @@ function generateEstimate(input) {
     legacyOneTimePestBuffer: legacyOneTimePestBuffer(input),
     // Pest-above-table stamp (see legacyPestAboveTable above): true = priced before the rule (flat above 5,500 sq ft).
     legacyPestAboveTable: legacyPestAboveTable(input),
+    // Whole-home sizing stamp (see legacyWholeHomeSizing above): true = priced before the rule (the ground-floor footprint basis).
+    legacyWholeHomeSizing: legacyWholeHomeSizing(input),
     // Specialty prices stamp (see legacySpecialty1126 above): true = priced before them (old room curve, hand-priced lots above 2
     // acres, $250 wasp level).
     legacySpecialty1126: legacySpecialty1126(input),
@@ -1559,7 +1583,7 @@ function generateEstimate(input) {
       // which only paid back if the customer stayed past visit ~3.
       if (result.roachType && result.roachType !== 'none') {
         const pestOptions = serviceOptions(services.pest);
-        const initialRoach = pricePestInitialRoach(property, {
+        const initialRoach = pricePestInitialRoach({ ...property, ...wholeHomeSizing }, {
           roachType: result.roachType,
           standalone: false,
           autoFiredFromRecurringPest: true,
@@ -2269,7 +2293,7 @@ function generateEstimate(input) {
         skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
       });
     } else {
-      const result = pricePestInitialRoach(property, {
+      const result = pricePestInitialRoach({ ...property, ...wholeHomeSizing }, {
         ...pestInitialRoachOptions,
         roachType: standaloneRoachMeta.roachType,
         standalone: true,
@@ -2341,7 +2365,7 @@ function generateEstimate(input) {
   if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control', { scopedOneTime: bedBugScoped })) {
     const bedBugOptions = bedBugScopeOpts;
     const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
-    const result = priceBedBugTreatment(property, {
+    const result = priceBedBugTreatment({ ...property, ...wholeHomeSizing }, {
       ...bedBugOptions,
       urgency: bedBugOptions.urgency ?? input.urgency ?? 'standard',
       afterHours: bedBugOptions.afterHours ?? input.afterHours ?? false,
@@ -2388,13 +2412,13 @@ function generateEstimate(input) {
       // ground-floor footprint keeps that size basis. Absent = the live whole-home rule.
       fleaSizeBasis: input.fleaSizeBasisReplay,
       // calculatePropertyProfile clears footprintUnknown once a measured footprint exists; the flea sizing needs the original flag.
-      fleaFootprintUnknown: input.footprintUnknown === true,
+      wholeHomeFootprintUnknown: wholeHomeSizing.wholeHomeFootprintUnknown,
       // Public website quote, no home size posted: the server lookup's measured whole home replaces the 2,000 default (flea only).
       fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
       fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
       // The footprint the caller supplied. The profile's own footprint is homeSqFt / stories when none was supplied, so it
       // cannot tell a measurement from a derivation (and would divide a building footprint by stories twice).
-      fleaExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
+      wholeHomeExplicitFootprint: wholeHomeSizing.wholeHomeExplicitFootprint,
     });
     lineItems.push(result);
   }
@@ -2763,7 +2787,10 @@ function generateEstimate(input) {
     const exclusionResult = rodentExclusionV2Summary
       || lineItems.find(li => li.service === 'rodent_exclusion' || li.service === 'exclusion');
     const guaranteeOpts = {
-      homeSqFt: opts.homeSqFt || property.footprint || 2000,
+      // A caller's own homeSqFt is the total living area (the Admin V2 path passes it). The fallback is the home's TOTAL living
+      // area too (owner 2026-11-26 "whole home"); a quote priced before that falls back to the ground-floor footprint, as sold
+      // (resolveWholeHomeSqFt reads wholeHomeSizingLegacy).
+      homeSqFt: opts.homeSqFt || resolveWholeHomeSqFt({ ...property, ...wholeHomeSizing }) || 2000,
       stories: opts.stories || property.stories || 1,
       roofType: exclusionRoofType(opts.roofType || property.roofType || 'shingle'),
       eligibility: opts.eligibility || {},
@@ -3595,6 +3622,7 @@ function generateEstimate(input) {
     if (line && SPECIALTY_1126_SERVICES.has(line.service)) line.legacySpecialty1126 = legacySpecialty1126(input, line.service);
     if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
     if (line && PEST_ABOVE_TABLE_SERVICES.has(line.service)) line.legacyPestAboveTable = legacyPestAboveTable(input);
+    if (line && WHOLE_HOME_SIZING_SERVICES.has(line.service)) line.legacyWholeHomeSizing = legacyWholeHomeSizing(input);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
   }
 
