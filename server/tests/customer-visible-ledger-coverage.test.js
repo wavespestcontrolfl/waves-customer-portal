@@ -243,6 +243,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
     const origFetch = global.fetch;
     const origGate = process.env.GATE_LLM_CALL_LEDGER;
     const origGemModel = process.env.GEMINI_VISION_MODEL;
+    const origGemFallbackModel = process.env.GEMINI_VISION_FALLBACK_MODEL;
     const origModelGem = process.env.MODEL_GEMINI_VISION;
     const origModelGemFallback = process.env.MODEL_GEMINI_VISION_FALLBACK;
 
@@ -257,6 +258,8 @@ describe('customer_visible direct_sdk ledger closure', () => {
       else process.env.GATE_LLM_CALL_LEDGER = origGate;
       if (origGemModel === undefined) delete process.env.GEMINI_VISION_MODEL;
       else process.env.GEMINI_VISION_MODEL = origGemModel;
+      if (origGemFallbackModel === undefined) delete process.env.GEMINI_VISION_FALLBACK_MODEL;
+      else process.env.GEMINI_VISION_FALLBACK_MODEL = origGemFallbackModel;
       if (origModelGem === undefined) delete process.env.MODEL_GEMINI_VISION;
       else process.env.MODEL_GEMINI_VISION = origModelGem;
       if (origModelGemFallback === undefined) delete process.env.MODEL_GEMINI_VISION_FALLBACK;
@@ -274,6 +277,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
       process.env.GEMINI_API_KEY = 'test-gemini';
       process.env.ANTHROPIC_API_KEY = 'test-anth';
       delete process.env.GEMINI_VISION_MODEL;
+      delete process.env.GEMINI_VISION_FALLBACK_MODEL;
       delete process.env.MODEL_GEMINI_VISION;
       delete process.env.MODEL_GEMINI_VISION_FALLBACK;
       jest.resetModules();
@@ -304,6 +308,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
       process.env.GEMINI_API_KEY = 'test-gemini';
       delete process.env.ANTHROPIC_API_KEY;
       delete process.env.GEMINI_VISION_MODEL;
+      delete process.env.GEMINI_VISION_FALLBACK_MODEL;
       delete process.env.MODEL_GEMINI_VISION;
       delete process.env.MODEL_GEMINI_VISION_FALLBACK;
       jest.resetModules();

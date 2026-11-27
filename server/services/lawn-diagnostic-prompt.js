@@ -854,6 +854,10 @@ async function runWriter(contract = {}, _context = {}) {
     if (verdict) {
       return { ok: false, reason: verdict.code };
     }
+    if (!rawText || !String(rawText).trim()) {
+      ledgerCallRejected(data, 'empty_text');
+      return { ok: false, reason: 'empty_summary' };
+    }
     const parsed = parseLooseJson(rawText);
     const summary = parsed && typeof parsed.customer_summary === 'string' ? parsed.customer_summary.trim() : '';
     if (!summary) {

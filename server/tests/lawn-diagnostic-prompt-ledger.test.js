@@ -208,4 +208,19 @@ describe('runWriter (Stage 3, OpenAI primary) — ledgerCall + empty-summary rej
     expect(out).toEqual({ ok: false, reason: 'openai_refusal' });
     expect(ledgerCallRejected).not.toHaveBeenCalled();
   });
+
+  test('blank completed OpenAI reply rejects the ledger row as empty_text, not invalid_json', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'resp_empty',
+        status: 'completed',
+        output_text: '   ',
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'empty_summary' });
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.objectContaining({ id: 'resp_empty' }), 'empty_text');
+  });
 });
