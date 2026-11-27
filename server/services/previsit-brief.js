@@ -128,14 +128,23 @@ function visitFactsGateEnabled() {
 // product read failure only empties the names.
 const PAST_VISITS_LIMIT = 5;
 
+// The record's own frozen key (service_data.completedServiceKey, stamped when the visit closed; present
+// even as null) wins over what the scheduled row says today; legacy records without it use the join.
+function pastVisitServiceKey(row) {
+  const data = parseStoredBrief(row.service_data);
+  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) return data.completedServiceKey || null;
+  return row.service_key || row.service_key_snapshot || null;
+}
+
 async function loadPastVisits(dbh, svc) {
   try {
     const viewedDay = calendarDay(svc.scheduled_date);
     if (!viewedDay) return null;
     const { isReserviceVisit } = require('./reservice-asks');
     const rows = await dbh('service_records as sr')
-      // The linked visit's catalog key, else its saved key snapshot: a catalog re-service counts as
-      // a free return even with the record flag off, and a rodent trapping follow-up never does.
+      // Legacy records only (no frozen key in service_data): the linked visit's catalog key, else its
+      // saved key snapshot. A re-service key counts as a free return even with the record flag off,
+      // and a rodent trapping follow-up never does (isReserviceVisit decides).
       .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
       .leftJoin('services as catalog', 'catalog.id', 'ss.service_id')
       .where({ 'sr.customer_id': svc.customer_id, 'sr.status': 'completed' })
@@ -144,7 +153,7 @@ async function loadPastVisits(dbh, svc) {
       .orderBy('sr.created_at', 'desc')
       .orderBy('sr.id', 'desc')
       .limit(PAST_VISITS_LIMIT)
-      .select('sr.id', 'sr.service_type', 'sr.service_date', 'sr.technician_notes', 'sr.is_callback',
+      .select('sr.id', 'sr.service_type', 'sr.service_date', 'sr.technician_notes', 'sr.is_callback', 'sr.service_data',
         'catalog.service_key', 'ss.service_key_snapshot');
     let productRows = [];
     try {
@@ -156,9 +165,10 @@ async function loadPastVisits(dbh, svc) {
       date: calendarDay(r.service_date),
       type: cleanText(normalizeServiceType(r.service_type) || r.service_type, 120),
       notes: previewText(r.technician_notes),
-      products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)))
+      // Every distinct product name of that visit: no cap here (the cap of 8 is for the brief's guidance).
+      products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)), Infinity)
         .map((p) => ({ name: p.name })),
-      callback: isReserviceVisit({ is_callback: r.is_callback === true, service_key: r.service_key || r.service_key_snapshot }),
+      callback: isReserviceVisit({ is_callback: r.is_callback === true, service_key: pastVisitServiceKey(r) }),
     }));
   } catch (err) {
     logger.warn(`[previsit-brief] visit-facts past visits unreadable for customer ${svc.customer_id}: ${err.message}`);
@@ -329,7 +339,7 @@ function shapeHistoryProduct(row) {
 
 // Newest-first product dedupe (by name, cap 8) shared by the primary
 // history-guidance path and combined-visit companion blocks.
-function dedupeHistoryProducts(productRows) {
+function dedupeHistoryProducts(productRows, max = 8) {
   const seen = new Set();
   const products = [];
   for (const row of productRows) {
@@ -338,7 +348,7 @@ function dedupeHistoryProducts(productRows) {
     if (!key || seen.has(key)) continue;
     seen.add(key);
     products.push(shaped);
-    if (products.length >= 8) break;
+    if (products.length >= max) break;
   }
   return products;
 }

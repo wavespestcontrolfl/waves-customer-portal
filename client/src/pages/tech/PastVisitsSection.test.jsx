@@ -54,6 +54,12 @@ describe('PastVisitsSection', () => {
     expect(screen.queryByText(/2026-08-01/)).toBeNull();
   });
 
+  it('lists every product name of a visit, with no cut', () => {
+    const names = Array.from({ length: 9 }, (_, i) => `Example Product ${i + 1}`);
+    render(<PastVisitsSection memberBits={[{ facts: { past_visits: [{ ...VISITS[0], products: names.map((name) => ({ name })) }] } }]} />);
+    expect(screen.getByText(names.join(', '))).toBeInTheDocument();
+  });
+
   it('three or fewer visits: no button', () => {
     render(<PastVisitsSection memberBits={[{ facts: { past_visits: VISITS.slice(0, 3) } }]} />);
     expect(screen.queryByRole('button')).toBeNull();

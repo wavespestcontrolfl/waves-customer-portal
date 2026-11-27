@@ -18,7 +18,7 @@ const SVC = { id: 'svc-now', customer_id: 'cust-1', service_type: 'Pest Control 
 
 const rec = (id, date, type, extra = {}) => ({
   id, customer_id: 'cust-1', service_type: type, service_line: null, service_date: date,
-  technician_notes: null, is_callback: false, service_key: null, service_key_snapshot: null, scheduled_service_id: `sched-${id}`, ...extra,
+  technician_notes: null, is_callback: false, service_key: null, service_key_snapshot: null, service_data: null, scheduled_service_id: `sched-${id}`, ...extra,
 });
 
 // Newest first, mixed lines, so the cap and the strictly-before rule matter.
@@ -109,6 +109,31 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(byDate).toEqual({
       '2026-11-20': true, '2026-11-19': true, '2026-11-18': false, '2026-11-17': false, '2026-11-16': true, '2026-11-15': false,
     });
+  });
+
+  test('free return mark: the record\'s own frozen key beats the scheduled row\'s current key (object or JSON string)', async () => {
+    const rows = [
+      rec('f1', '2026-11-20', 'Pest Control Re-Service', { service_data: { completedServiceKey: 'pest_re_service' }, service_key: 'pest_control' }),
+      rec('f2', '2026-11-19', 'Pest Control Service', { service_data: JSON.stringify({ completedServiceKey: 'pest_control' }), service_key: 'pest_re_service', is_callback: false }),
+      rec('f3', '2026-11-18', 'Lawn Care Re-Service', { service_data: '{not json', service_key: 'lawn_re_service' }),
+      rec('f4', '2026-11-17', 'Pest Control Service', { service_data: { other: 1 }, service_key_snapshot: 'pest_re_service' }),
+    ];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(Object.fromEntries(visits.map((v) => [v.date, v.callback]))).toEqual({
+      '2026-11-20': true, '2026-11-19': false, '2026-11-18': true, '2026-11-17': true,
+    });
+  });
+
+  test('a past visit lists every distinct product name: no cap of eight', async () => {
+    const names = Array.from({ length: 9 }, (_, i) => `Example Product ${i + 1}`);
+    const products = [...names, names[0]].map((product_name) => ({ service_record_id: 'p1', product_name, targets: [] }));
+    const dbh = (table) => {
+      const q = fakeDbh({ rows: [rec('p1', '2026-11-10', 'Pest Control Service')] })(table);
+      if (table === 'service_products as sp') q.select = async () => products;
+      return q;
+    };
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, dbh);
+    expect(visits[0].products.map((p) => p.name)).toEqual(names);
   });
 
   test('entry shape: service name, the day note, product names, free return visit mark', async () => {
