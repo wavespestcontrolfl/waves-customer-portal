@@ -3519,7 +3519,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeJobHealthTool(toolName, input);
   }
   if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
-    return executeNeedsMeTool(toolName, input);
+    return executeNeedsMeTool(toolName, input, actionContext);
   }
   if (toolName === OFFER_CHOICES_TOOL_NAME) {
     return executeChoiceTool(toolName, input);

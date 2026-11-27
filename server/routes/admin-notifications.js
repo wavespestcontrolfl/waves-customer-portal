@@ -571,7 +571,8 @@ router.post('/:id/explain', requireAdmin, async (req, res, next) => {
     if (!explainerLive()) return res.status(404).json({ error: 'Not found' });
     const id = String(req.params.id);
     if (!UUID_RE.test(id)) return res.status(400).json({ error: 'Invalid notification id' });
-    const { status, body } = await explainAdminAlert(id, { role: req.techRole, technicianId: req.technicianId });
+    if (await hiddenFromLogin(req, id)) return res.status(404).json({ error: 'not_found' });
+    const { status, body } = await explainAdminAlert(id, { role: req.techRole, technicianId: req.technicianId, fullAccess: ibFullAccess(req) });
     res.status(status).json(body);
   } catch (err) { next(err); }
 });
