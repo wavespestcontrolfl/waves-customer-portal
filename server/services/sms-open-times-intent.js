@@ -1,18 +1,19 @@
 /**
- * When the texting AI's shadow drafter should look up OPEN TIMES, judged from the thread and not only from
- * the one inbound text, and which named day of the picker the customer asked about (texting AI gap 1, owner
- * 2026-11-26 "BUILD 1-6"). Pure and deterministic: no database read, no model call.
+ * The booking exchange a short reply answers, for the texting AI's shadow drafter (texting AI gap 1, owner 2026-11-26
+ * "BUILD 1-6"), and which named day of the picker the customer asked about. Pure and deterministic: no database read,
+ * no model call.
  *
- *   threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now })
- *     -> { carried, reason: 'prior_inbound' | 'staff_asked' | null, texts: string[], customerTexts: string[] }
- *   A short follow-up ("Anytime is fine", "Yes, please!", "Totally flexible") carries the booking talk of the
- *   thread: the customer's own earlier text asked to book or move a visit, or the last staff reply asked which
- *   day or time works. `texts` is that booking talk (the staff question and the
- *   customer's request before it): the drafter's job identity step reads it with the follow-up, so the times are sized
- *   for the job the thread named (Codex #8658 r1). `customerTexts` is the customer's own part, which the re-service
- *   lane decision reads. Only rows of this sender count: a reply sent to another contact on the account is skipped.
- *   Reminders, receipts and other automated texts never carry it (only the human reply
- *   types of sms-response-policy count), and a staff reply that asks nothing ends the booking talk.
+ *   bookingExchange({ smsHistory, currentSmsLogId, inboundMessage, inboundPhone })
+ *     -> null | { staffText, customerTexts: string[] }
+ *   One rule, built once: the history is cut at the row of the text being drafted (currentSmsLogId), so a later row
+ *   never reads as what the text answers. Walking back from there: this sender's own texts, up to the latest human
+ *   staff text sent to this sender within 72 hours of the drafted text. It is an exchange only when that staff text
+ *   asks the customer's availability or proposes a visit in an explicit form ("what day works", "when works for you",
+ *   "would Thursday work", "are you available", "we can come Monday", "I have Tuesday at 9 open"); a day or time
+ *   mentioned alone never counts. The drafted text must be a short reply (a yes, timing words, a day or a date).
+ *   customerTexts = this sender's texts after the staff text, oldest first, the drafted text last.
+ *   Fail closed (null): no sender phone, the drafted row not in the history, an unreadable date, another number's
+ *   text inside the exchange, no staff text in the window, or a staff text that does not ask.
  *
  *   namedDayMatcher(text)
  *     -> null | (dayLabel) => string[]
@@ -20,98 +21,66 @@
  *   ("Thursday, December 3"): the names that day answers. The drafter adds the first day the picker offers for
  *   each name, even past its first three days; the picker's own horizon still bounds it.
  */
-const { hasRescheduleOrAwayIntent, isSmsReaction, outboundAsksForReply } = require('./sms-intent');
+const { isSmsReaction } = require('./sms-intent');
 const { HUMAN_REPLY_TYPES } = require('./sms-response-policy');
 const { phoneIdentityKey } = require('../utils/phone');
 
-// The booking talk a follow-up can carry is recent: three days, and at most the last four earlier texts.
-const THREAD_WINDOW_MS = 72 * 60 * 60 * 1000;
-const THREAD_ROWS = 4;
-// A follow-up is short. A long text says what it wants on its own (the webhook's own test judges it).
-const FOLLOW_UP_MAX_CHARS = 160;
-// A reply to "what day works?" or "would Monday at 9 work?": it opens with a yes, or it answers with timing words. A new request
-// that merely contains a polite word ("Please email my receipt") is neither (Codex pre-push r3).
+const EXCHANGE_WINDOW_MS = 72 * 60 * 60 * 1000;
+// At most this many rows are walked back from the drafted text (the context holds 20).
+const EXCHANGE_MAX_ROWS = 8;
+// A reply is short. A long text says what it wants on its own (the webhook's own test judges it).
+const REPLY_MAX_CHARS = 160;
+// A reply opens with a yes, or answers with timing words, a day or a date. A new request that merely contains a polite word
+// ("Please email my receipt") is neither.
 const AFFIRM_START_RE = /^\W*(?:yes|yeah|yea|yep|yup|sure|ok|okay|k|sounds good|that works|perfect|great|absolutely|definitely)\b/i;
 const TIMING_ANSWER_RE = /\b(?:any ?time|any ?day|whenever|flexible|available|availability|either (?:day|one|time)|prefer|better|earlier|later|asap|soonest|mornings?|afternoons?|evenings?|after \d|before \d|between \d|next week|this week|weekends?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|that'?s fine|that is fine|fine (?:by|with) me|works? for (?:me|us)|works)\b/i;
-// Booking words. The customer's earlier text must carry one (or the reschedule / away test of sms-intent); a bare
-// time word ("thanks for coming today") is not a booking ask. A staff question may carry one or any scheduling word.
-const BOOKING_RE = /\b(?:availab\w*|slots?|time ?frame|reschedul\w*|book\w*|schedul\w*|appointment|appt|works? for you|good time|good day|what day|which day|what time|come (?:out|back|by|over)|when can you|can you come|another (?:day|time))\b/i;
+// The explicit forms of a staff text that asks availability or proposes a visit. Nothing else carries a reply: a day,
+// a time or "are you ..." alone ("Did you see ants after Thursday's treatment?", "Are you still seeing ants?") never does.
+const DAY_OR_TIME = '(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|today|tonight|this (?:week|morning|afternoon|evening)|next week|(?:in the )?(?:morning|afternoon|evening)|\\d{1,2}(?::\\d{2})?\\s*(?:a\\.?m\\.?|p\\.?m\\.?)|\\d{1,2}/\\d{1,2})';
+const STAFF_ASKS_RE = [
+  /\b(?:what|which) (?:days?|times?|dates?)(?: of (?:the )?week)? (?:works?|would work|is good|are good|is best|is better|suits?|do you prefer|would you prefer|would you like)\b/i,
+  /\bwhen (?:works|would work|is good|is best|is a good time|are you (?:available|free|home))\b/i,
+  /\b(?:are|would|will) you (?:be )?(?:available|free|home)\b/i,
+  /\bwhat(?:'s| is) your availability\b/i,
+  /\blet (?:me|us) know (?:what|which|when)\b[^.?!]*\b(?:day|time|works?)\b/i,
+  new RegExp(`\\b(?:would|does|do|will|could|can) (?:${DAY_OR_TIME}|this|that|it|either)(?: [\\w':]+){0,3} work\\b`, 'i'),
+  new RegExp(`\\b(?:we|i) (?:can|could) (?:come|stop|swing) (?:out |by |over |back )?(?:on )?${DAY_OR_TIME}`, 'i'),
+  new RegExp(`\\b(?:we|i) (?:have|got) (?:an? )?(?:opening|spot|slot)s?\\b|\\b(?:we|i) (?:have|got) [^.?!]{0,30}${DAY_OR_TIME}[^.?!]{0,20}\\b(?:open|available)\\b`, 'i'),
+];
 
-// A staff question about booking or timing: a booking word, a named day or date, or a time of day. sms-intent's wide scheduling test
-// is not used here: its "are you" makes "Are you still seeing ants?" a booking question (Codex pre-push r2). A greeting
-// ("Good morning") is not a time of day.
-const STAFF_TIME_RE = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\b\.?|p\.?m\b\.?)|(?<!good\s)(?:morning|afternoon|evening)|tomorrow|tonight|next week|come|stop by)/i;
+function staffAsksAvailability(body) {
+  return STAFF_ASKS_RE.some((re) => re.test(String(body || '')));
+}
 
-// A short reply: reply words, or a bare day or date ("12/3", "Dec 3?") answering "what day works?".
-function isFollowUpShape(text) {
+function isShortReply(text) {
   const body = String(text || '').trim();
-  if (!body || body.length > FOLLOW_UP_MAX_CHARS || isSmsReaction(body)) return false;
+  if (!body || body.length > REPLY_MAX_CHARS || isSmsReaction(body)) return false;
   const plain = body.replace(/[\u2018\u2019]/g, "'");
   return AFFIRM_START_RE.test(plain) || TIMING_ANSWER_RE.test(plain) || namedDayMatcher(plain) !== null;
 }
 
-function isBookingAsk(body) {
-  return BOOKING_RE.test(body) || hasRescheduleOrAwayIntent(body);
-}
-
-function isStaffBookingAsk(body) {
-  return outboundAsksForReply(body) && (BOOKING_RE.test(body) || STAFF_TIME_RE.test(body) || namedDayMatcher(body) !== null);
-}
-
-// The thread rows before the current text, newest first, while they are recent: the current inbound text is often
-// already the first row (the webhook logs it before drafting) and is skipped once, by its body; an unreadable or old
-// row ends the list (the booking talk must be recent and provably so).
-function priorRows(smsHistory, inboundMessage, cutoff) {
-  const rows = (Array.isArray(smsHistory) ? smsHistory : []).filter((m) => m && typeof m.body === 'string' && m.body.trim());
-  const current = String(inboundMessage || '').trim();
-  const skip = rows.length && rows[0].direction === 'inbound' && rows[0].body.trim() === current ? 1 : 0;
-  const recent = [];
-  for (const row of rows.slice(skip, skip + THREAD_ROWS)) {
-    const at = new Date(row.date).getTime();
-    if (!Number.isFinite(at) || at < cutoff) break;
-    recent.push(row);
-  }
-  return recent;
-}
-
-// Whose row it is: 'staff' (a human reply sent to this sender), 'customer' (this sender's own text), or 'skip' (an automated
-// text, another contact's text, a reply sent to another contact on the same account, or a reply with no readable number).
-function rowRole(row, sender) {
-  if (row.direction === 'outbound') {
-    if (!HUMAN_REPLY_TYPES.includes(row.type) || phoneIdentityKey(row.toPhone) !== sender) return 'skip';
-    return 'staff';
-  }
-  return row.direction === 'inbound' && phoneIdentityKey(row.fromPhone) === sender ? 'customer' : 'skip';
-}
-
-// The same sender's texts before the staff question, back to the staff reply before it: the request the question answers
-// ("Can you come out for the lawn?" -> "What day works?" -> "Anytime"), oldest first.
-function exchangeCustomerTexts(rows, sender) {
-  const texts = [];
-  for (const row of rows) {
-    const role = rowRole(row, sender);
-    if (role === 'staff') break;
-    if (role === 'customer') texts.unshift(row.body);
-  }
-  return texts;
-}
-
-function threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now = Date.now() } = {}) {
-  const none = { carried: false, reason: null, texts: [], customerTexts: [] };
+function bookingExchange({ smsHistory, currentSmsLogId, inboundMessage, inboundPhone } = {}) {
   const sender = phoneIdentityKey(inboundPhone);
-  if (!sender || !isFollowUpShape(inboundMessage)) return none;
-  const rows = priorRows(smsHistory, inboundMessage, (now instanceof Date ? now.getTime() : Number(now)) - THREAD_WINDOW_MS);
-  for (const [i, row] of rows.entries()) {
-    const role = rowRole(row, sender);
-    // The first human reply to this sender decides: a booking question carries the follow-up, anything else ends the talk.
-    if (role === 'staff') {
-      if (!isStaffBookingAsk(row.body)) return none;
-      const customerTexts = exchangeCustomerTexts(rows.slice(i + 1), sender);
-      return { carried: true, reason: 'staff_asked', texts: [...customerTexts, row.body], customerTexts };
+  if (!sender || !currentSmsLogId || !isShortReply(inboundMessage)) return null;
+  const rows = Array.isArray(smsHistory) ? smsHistory : [];
+  const at = rows.findIndex((m) => m && m.id != null && String(m.id) === String(currentSmsLogId));
+  const drafted = rows[at];
+  const draftedAt = drafted ? new Date(drafted.date).getTime() : NaN;
+  if (!Number.isFinite(draftedAt)) return null;
+  const customerTexts = [String(inboundMessage)];
+  for (const row of rows.slice(at + 1, at + 1 + EXCHANGE_MAX_ROWS)) {
+    const rowAt = new Date(row?.date).getTime();
+    if (!Number.isFinite(rowAt) || draftedAt - rowAt > EXCHANGE_WINDOW_MS) return null;
+    if (row.direction === 'outbound') {
+      // Automated texts and replies to another contact on the account are not this exchange.
+      if (!HUMAN_REPLY_TYPES.includes(row.type) || phoneIdentityKey(row.toPhone) !== sender) continue;
+      return staffAsksAvailability(row.body) ? { staffText: String(row.body), customerTexts } : null;
     }
-    if (role === 'customer' && isBookingAsk(row.body)) return { carried: true, reason: 'prior_inbound', texts: [row.body], customerTexts: [row.body] };
+    // Another number's text inside the exchange: it may be someone else's answer, so nothing is carried.
+    if (row.direction !== 'inbound' || phoneIdentityKey(row.fromPhone) !== sender) return null;
+    if (typeof row.body === 'string' && row.body.trim()) customerTexts.unshift(row.body);
   }
-  return none;
+  return null;
 }
 
 const WEEKDAY_RE = /\b(sunday|monday|tuesday|wednesday|thursday|friday|saturday)s?\b|\b(tues?|weds?|thu|thur|thurs|fri)\b\.?/gi;
@@ -161,7 +130,7 @@ function namedDayMatcher(text) {
 }
 
 module.exports = {
-  threadBookingIntent,
+  bookingExchange,
   namedDayMatcher,
-  _internals: { isFollowUpShape, priorRows, parseLabel, namedDaysIn, THREAD_WINDOW_MS, THREAD_ROWS },
+  _internals: { isShortReply, staffAsksAvailability, parseLabel, namedDaysIn },
 };

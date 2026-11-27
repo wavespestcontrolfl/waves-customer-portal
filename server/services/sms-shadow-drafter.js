@@ -3855,8 +3855,8 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, t
   const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${dateLabel(v)})` : ''}`);
   return [
     // Gap 1 (Codex #8658 r1): a short follow-up ("Anytime is fine") is about the job its thread's booking talk named.
-    ...(threadTexts.length ? ['Earlier in this text thread, the booking talk this text answers:', ...threadTexts.map((t) => JSON.stringify(String(t))), ''] : []),
-    `A customer of Waves Pest Control texted${threadTexts.length ? ' (a reply to the booking talk above)' : ''}:`,
+    ...(threadTexts.length ? ['Earlier in this text thread, oldest first (the staff text, then the customer\'s texts), the exchange this text answers:', ...threadTexts.map((t) => JSON.stringify(String(t))), ''] : []),
+    `A customer of Waves Pest Control texted${threadTexts.length ? ' (a reply in the exchange above)' : ''}:`,
     JSON.stringify(String(inboundMessage || '')),
     '',
     'Their visits:',
@@ -3955,27 +3955,22 @@ function unnamedServiceIdentity(visits, openEstimate, { nextOfSeries = nextOfSer
 
 // Code accepts only an option it offered (the schema already constrains the
 // provider; this re-checks) — anything else is uncertain.
-function serviceIdentityFromAnswer(answer, visits, openEstimate, services, { threadCarried = false, pendingEstimate = null } = {}) {
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services, { threadCarried = false } = {}) {
   const visit = visits.find((v) => v.id === answer?.visit);
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
-  if (answer?.about === 'none') return threadCarried && threadJobAmbiguous(visits, openEstimate || pendingEstimate) ? { serviceType: null, certain: false, reason: 'thread_ambiguous' } : unnamedServiceIdentity(visits, openEstimate);
+  // Gap 1: a reply carried by a booking exchange that names no job is never sized by the visit ladder: the job the staff text
+  // meant is not known, so OPEN TIMES is withheld (identity_uncertain:thread_unnamed), pending estimate or not.
+  if (answer?.about === 'none') return threadCarried ? { serviceType: null, certain: false, reason: 'thread_unnamed' } : unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
-}
-
-// Gap 1 (Codex #8658 r1): a follow-up whose thread booking talk names no service may fall back to the visit ladder only when the
-// customer has one job it could mean: one service type across their listed visits (upcoming and last completed), and no open
-// estimate beside a visit (the linked one, or the customer's pending estimate on the context: a live draft links none). Otherwise ("can you come out?" from a customer with a pest visit booked and a lawn visit done) the
-// draft withholds OPEN TIMES (identity_uncertain:thread_ambiguous) rather than offer the wrong job's times.
-function threadJobAmbiguous(visits, openEstimate) {
-  return new Set(visits.map((v) => v.type)).size > 1 || Boolean(openEstimate && visits.length);
 }
 
 // { serviceType, certain, reason, estimateId? } — estimateId when the open
 // estimate is the job.
-// threadTexts (gap 1): the booking texts a carried follow-up answers (sms-open-times-intent threadBookingIntent); [] otherwise.
+// threadTexts (gap 1): the booking exchange a carried reply answers, oldest first (the staff text, then the customer's texts
+// before this one; sms-open-times-intent bookingExchange); [] otherwise.
 async function serviceIdentityFor(inboundMessage, context, { openEstimate = null, threadTexts = [] } = {}) {
   const visits = serviceIdentityVisits(context);
   try {
@@ -3989,7 +3984,7 @@ async function serviceIdentityFor(inboundMessage, context, { openEstimate = null
       maxTokens: 100,
       timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
     }, { reserveFallbackBudget: true });
-    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, { threadCarried: threadTexts.length > 0, pendingEstimate: context?.pendingEstimate || null });
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, { threadCarried: threadTexts.length > 0 });
   } catch (err) {
     logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
     return { serviceType: null, certain: false, reason: 'no_valid_answer' };
@@ -6268,19 +6263,24 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
   return fetched.withheld || 'no_location';
 }
 
-// Gap 1: the thread's booking talk, read for a live real-answers draft (a gratitude "thanks" never; sms-open-times-intent
-// threadBookingIntent). A short reply the webhook already calls scheduling ("Thursday") reads it too, so the job and the day come
-// from the exchange it answers; its delivery flag is the webhook's either way. asOf (a late draft) is the inbound time.
-function threadOpenTimesIntent({ frozen, liveOpenTimes, intent, context, inboundMessage, inboundPhone, asOf }) {
-  if (frozen || !liveOpenTimes || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null, texts: [], laneText: inboundMessage, dayText: inboundMessage };
-  const found = openTimesIntent.threadBookingIntent({ smsHistory: context?.smsHistory, inboundMessage, inboundPhone, now: asOf instanceof Date ? asOf : Date.now() });
-  // laneText: what the re-service lane decision reads. A carried follow-up ("Anytime is fine" after "the ants are back, can you
-  // come again?") is judged with the customer's own booking text, so a covered pest report still books through the free
-  // re-service page (Codex pre-push r2).
-  // dayText: where the named day is read. A reply that names none ("Yes, please" to "Would Thursday work?") accepts the day
-  // the exchange named.
-  const dayText = found.carried && !openTimesIntent.namedDayMatcher(inboundMessage) ? found.texts.join('\n') : inboundMessage;
-  return { ...found, laneText: found.carried ? [...found.customerTexts, inboundMessage].join('\n') : inboundMessage, dayText };
+// Gap 1: the booking exchange a short reply answers (sms-open-times-intent bookingExchange), built once per draft and read by
+// every step that interprets the text: the job identity step (threadTexts), the named day (dayText), and the re-service lane
+// decision, its openings, its offer checks and the ABSTAIN check (reserviceText). Only a live real-answers draft the webhook's
+// own test did not call scheduling reads it: a text the webhook flags keeps exactly today's path (no gratitude "thanks" either).
+// No exchange: every text is the drafted text alone.
+function draftExchange({ frozen, liveOpenTimes, schedulingIntent, intent, context, inboundMessage, inboundPhone, smsLogId }) {
+  const exchange = frozen || !liveOpenTimes || schedulingIntent || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')
+    ? null
+    : openTimesIntent.bookingExchange({ smsHistory: context?.smsHistory, currentSmsLogId: smsLogId, inboundMessage, inboundPhone });
+  if (!exchange) return { carried: false, threadTexts: [], dayText: inboundMessage, reserviceText: inboundMessage };
+  const earlier = exchange.customerTexts.slice(0, -1);
+  return {
+    carried: true,
+    threadTexts: [exchange.staffText, ...earlier],
+    // a reply that names no day ("Yes, please" to "Would Thursday work?") takes the day the exchange named
+    dayText: openTimesIntent.namedDayMatcher(inboundMessage) ? inboundMessage : [exchange.staffText, ...exchange.customerTexts].join('\n'),
+    reserviceText: exchange.customerTexts.join('\n'),
+  };
 }
 
 // What draftShadowReply stores and decides from the OPEN TIMES outcome: `stamp` = the intended_actions keys (open_times_withheld,
@@ -6291,7 +6291,7 @@ function openTimesTraceFor({ frozen, threadIntent, ...withheldInputs }) {
   if (frozen || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { stamp: {}, schedulingFromThread: false };
   const withheld = openTimesWithheldReason(withheldInputs);
   return {
-    stamp: { ...(withheld ? { open_times_withheld: withheld } : {}), ...(threadIntent.carried ? { open_times_from_thread: threadIntent.reason } : {}) },
+    stamp: { ...(withheld ? { open_times_withheld: withheld } : {}), ...(threadIntent.carried ? { open_times_from_thread: 'staff_asked' } : {}) },
     schedulingFromThread: threadIntent.carried,
   };
 }
@@ -6334,7 +6334,7 @@ function draftPromptHints({ context, reserviceLaneDecides, reserviceState, inbou
  * verification miss must never break drafting. Caller supplies the Anthropic
  * client so live + backfill share one implementation.
  */
-async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false, asOf = null, bankAt: presetBankAt = null, allowAck }) {
+async function generateGroundedDraft({ client, context, inboundMessage, inboundPhone = null, intent, schedulingIntent, factsBlock: presetFactsBlock, routeOverride, voiceProfile: presetVoiceProfile, promptPatch: presetPromptPatch, metricsLane, laneId: presetLaneId, verifierLaneId = null, liveEtaFetchedAt = null, city, estimateId = null, openEstimate = null, liveOpenTimes = false, asOf = null, bankAt: presetBankAt = null, allowAck, smsLogId }) {
   // v9: the owner-approved voice profile joins the system prompt for every
   // generation in the loop (revisions included). voiceProfileVersion rides
   // back in telemetry so cohort readouts can see which profile (if any)
@@ -6408,9 +6408,10 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // A text linked to an estimate prices the estimate's service, so the missed visit's own times cannot be told apart from it: that draft
   // keeps today's hand-off (OPEN TIMES withheld for the whole reply).
   const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
-  // Gap 1 (owner 2026-11-26): a live webhook draft (liveOpenTimes) also reads the booking talk of the thread, so a follow-up
-  // ("Anytime is fine", "Yes, please!") to a booking question gets OPEN TIMES too (sms-open-times-intent threadBookingIntent).
-  const threadIntent = threadOpenTimesIntent({ frozen: presetFactsBlock, liveOpenTimes, intent, context, inboundMessage, inboundPhone, asOf });
+  // Gap 1 (owner 2026-11-26): a short reply ("Anytime is fine", "Yes, please!") to a staff text that asked the customer's availability
+  // gets OPEN TIMES too, judged on the whole exchange (draftExchange; smsLogId cuts the history at this text).
+  const threadIntent = draftExchange({ frozen: presetFactsBlock, liveOpenTimes, schedulingIntent, intent, context, inboundMessage, inboundPhone, smsLogId });
+  const { reserviceText } = threadIntent;
   const timesAsked = Boolean(schedulingIntent) || threadIntent.carried
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
@@ -6433,7 +6434,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // Frozen replays keep their own FREE RE-SERVICE line (or none); a live draft resolves eligibility through the
   // existing re-service mechanism.
   const reserviceState = presetFactsBlock ? null : await fetchReserviceFactState({ customerId: context?.customer?.id || null });
-  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage: threadIntent.laneText, context });
+  const reserviceLaneDecides = reserviceLaneDecidesReply({ reserviceState, inboundMessage: reserviceText, context });
   // PORTAL SELF-CANCEL: a frozen replay keeps its own line (or none); a live gate-on draft asks the shared verdict.
   const portalCancelAvailable = presetFactsBlock || !gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? null : await portalCancelFact.fetchPortalCancelAvailable({ customerId: context?.customer?.id || null });
@@ -6441,7 +6442,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
-    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate, threadTexts: threadIntent.texts }))
+    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate, threadTexts: threadIntent.threadTexts }))
     : { serviceType: liveServiceType(context), certain: true };
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
@@ -6476,7 +6477,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)
   const reserviceOpenings = presetFactsBlock
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock, RESERVICE_OPENINGS_HEADER_PREFIX), offer: null }
-    : await fetchReserviceOpeningsData({ reserviceState, reserviceLaneDecides, inboundMessage: threadIntent.laneText, context });
+    : await fetchReserviceOpeningsData({ reserviceState, reserviceLaneDecides, inboundMessage: reserviceText, context });
   const offerDays = [...openTimesDays, ...reserviceOpenings.days];
   // Gap 1: why this draft has no OPEN TIMES although the text asked for times (stored on the draft row by draftShadowReply).
   const openTimesTrace = openTimesTraceFor({
@@ -6540,7 +6541,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const exemplars = VERIFY_ENABLED && intent?.intent !== GRATITUDE_INTENT
     ? await fetchVoiceExemplars({ intent: intent?.intent }) : [];
   const exemplarBlock = formatExemplarBlock(exemplars);
-  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, draftPromptHints({ context, reserviceLaneDecides, reserviceState, inboundMessage }));
+  const userContent = buildUserPromptFromFacts(factsBlock, inboundMessage, intent, schedulingIntent, exemplarBlock, draftPromptHints({ context, reserviceLaneDecides, reserviceState, inboundMessage: reserviceText }));
 
   // Route once for the whole loop (revisions included) — routing looks at the
   // intent label AND the raw message so complaints mislabeled as scheduling
@@ -6560,7 +6561,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const first = await generateDraftOnce(client, system, userContent, route, { pinned, metricsLane, ...lane });
   if (!first) return {
     parsed: null, passes: 1, converged: false, model: null, servedModel: null,
-    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace,
+    voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace, reserviceText,
   };
   let { parsed, model, servedModel } = first;
   // allowAck: only the silent shadow lanes record an acknowledgement; every other caller reads an ACK as an ABSTAIN (no reply text).
@@ -6585,7 +6586,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // also switches real answers off at the delivery boundary.
     logger.warn('[sms-shadow] real-answers draft generated with SHADOW_DRAFT_VERIFY=false — kept shadow (real answers require the verifier)');
     return {
-      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace,
+      parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace, reserviceText,
       openTimesSnapshot: null,
       paymentStatusSnapshot: null,
       labelFactsSnapshot: null,
@@ -6601,7 +6602,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
       singlePassCheck.ok = false;
       singlePassCheck.violations.push('the reply does not name each declared day next to its offered time');
     }
-    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage, offeredTimes: parsed?.offered_times, context });
+    const singlePassReservice = validateReserviceOffer({ reply: parsed?.reply, factsBlock, intendedActions: parsed?.intended_actions, inboundMessage: reserviceText, offeredTimes: parsed?.offered_times, context });
     if (!singlePassReservice.ok) {
       singlePassCheck.ok = false;
       singlePassCheck.violations.push(...singlePassReservice.violations);
@@ -6626,14 +6627,14 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     if (!singlePassCheck.ok) {
       logger.warn(`[sms-shadow] single-pass draft failed the offered_times check (${singlePassCheck.violations.join('; ')}); not converged`);
       return {
-        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace,
+        parsed, passes: 1, converged: false, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace, reserviceText,
         openTimesSnapshot: null,
         paymentStatusSnapshot: null,
         labelFactsSnapshot: null,
       };
     }
     return {
-      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace,
+      parsed, passes: 1, converged: true, model, servedModel, voiceProfileVersion, verifierModels: [], factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace, reserviceText,
       ...draftSnapshots({ context, parsed, factsBlock, bankAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
     };
   }
@@ -6650,7 +6651,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // An ACK is the server's own fixed line for a text the server read as asking nothing (settleDraftKind): nothing for a verifier to judge.
     if (parsed.kind === DRAFT_KINDS.ACK) { converged = true; break; }
     if (parsed.kind === DRAFT_KINDS.ABSTAIN) {
-      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
+      const owed = validateReserviceOffer({ reply: '', factsBlock, intendedActions: parsed.intended_actions, inboundMessage: reserviceText, offeredTimes: parsed.offered_times, context });
       if (owed.ok) { converged = true; break; }
     }
 
@@ -6660,7 +6661,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     // revise/verify loop below via a synthesized verdict, exactly like an
     // LLM-caught fact-check miss.
     const timesCheck = validateOfferedTimes({ offeredTimes: parsed.offered_times, openTimesDays: offerDays, reply: parsed.reply, factsBlock });
-    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context });
+    const reserviceCheck = validateReserviceOffer({ reply: parsed.reply, factsBlock, intendedActions: parsed.intended_actions, inboundMessage: reserviceText, offeredTimes: parsed.offered_times, context });
     const complianceCheck = validateComplianceCopy({ reply: parsed.reply, factsBlock, inboundMessage: askedTexts, bankAt });
     const liveEtaCheck = validateLiveEtaMinutes({ reply: parsed.reply, factsBlock, liveEtaStopCount: countEnRouteEtaStops(context), techNames: techNamesFromContext(context) });
     // Payment status (owner ruling 2026-10-01): only a word-for-word copy of a rendered "Payment status sentences" line may state one.
@@ -6744,7 +6745,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   }
 
   return {
-    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace,
+    parsed, passes, converged, model, servedModel, voiceProfileVersion, verifierModels, factsBlock, factsGeneratedAt: factsAt, promptVersion, zelleInvoiceId, reserviceBooked, openTimesTrace, reserviceText,
     // Computed off the FINAL parsed.reply (after every revision pass) — see draftSnapshots.
     ...draftSnapshots({ context, parsed, factsBlock, bankAt, inboundMessage, askedTexts, labelFacts, realAnswersApplied, openTimesBlock: openTimesBlock || reserviceOpenings.block, city, pricingEstimateId, serviceType, schedulerOffer: schedulerOffer || reserviceOpenings.offer }),
   };
@@ -6928,9 +6929,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // from the customer row the webhook already matched, never re-looked-up.
     const {
       parsed, passes, converged, model: draftModel, voiceProfileVersion, factsBlock: factsForDraft, promptVersion,
-      openTimesSnapshot, paymentStatusSnapshot, labelFactsSnapshot, factsGeneratedAt, zelleInvoiceId, reserviceBooked, openTimesTrace,
+      openTimesSnapshot, paymentStatusSnapshot, labelFactsSnapshot, factsGeneratedAt, zelleInvoiceId, reserviceBooked, openTimesTrace, reserviceText,
     } = await generateGroundedDraft({
-      client, context, inboundMessage, inboundPhone: fromPhone, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true,
+      client, context, inboundMessage, inboundPhone: fromPhone, intent, schedulingIntent, city: customer?.city || null, liveOpenTimes: true, smsLogId,
       allowAck: true, // the silent shadow row records an ACK; it never leaves the shadow lane (deliverableReply below)
       ...(asOfDate ? { asOf: asOfDate } : {}),
     });
@@ -7124,7 +7125,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // already-booked callback has no such action and CAN auto-send, so the booked snapshot is threaded
     // (round 43) and rechecked live before provider entry.
     const reserviceLanesSnapshot = validateReserviceOffer({
-      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage, offeredTimes: parsed.offered_times, context,
+      reply: parsed.reply, factsBlock: factsForDraft, intendedActions: parsed.intended_actions, inboundMessage: reserviceText, offeredTimes: parsed.offered_times, context,
     }).promisedLanes || null;
 
     // Only verified-clean drafts (verify loop converged) may leave the silent
