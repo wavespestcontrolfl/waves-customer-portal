@@ -216,7 +216,10 @@ function dailySummaryWorkDate(value) {
  * here therefore cannot change before the signature is committed.
  */
 async function signWeek({ technicianId, weekStart, signature, reviewToken, now = new Date() }) {
-  const normalizedSignature = String(signature || '').replace(/\s+/g, ' ').trim();
+  if (typeof signature !== 'string') {
+    throw approvalHttpError(400, 'Full name signature (first and last) is required.');
+  }
+  const normalizedSignature = signature.replace(/\s+/g, ' ').trim();
   if (normalizedSignature.length < 3 || normalizedSignature.length > 180 || !/^\S+(\s+\S+)+$/.test(normalizedSignature)) {
     throw approvalHttpError(400, 'Full name signature (first and last) is required.');
   }

@@ -1,5 +1,5 @@
 const { launchBrowser } = require('../service-report/pdf-puppeteer');
-const { escapeHtml, hash, reject } = require('../staff-document-source');
+const { escapeHtml, hash, reject, parseSignedName, hasSignatureField } = require('../staff-document-source');
 const { withDocumentPdfCapacity } = require('./estimate-doc-pdf');
 const { getLogoBuffer } = require('./brand-logo');
 const { PDF_COLORS: C, PDF_SPACE: S, PDF_TYPE: T } = require('./pdf-tokens');
@@ -68,10 +68,8 @@ function formatFieldAnswer(field, answer) {
 function fieldsHtml(rendered, record) {
   const allFields = rendered.metadata.fields || [];
   if (!allFields.length) return '';
-  const isSignatureForm = rendered.kind === 'form' && allFields.some(field => field.id === 'signed-name' && field.type === 'text' && field.required === true);
-  const signedName = isSignatureForm && record?.completed_at && typeof record?.answers?.['signed-name'] === 'string'
-    ? record.answers['signed-name'].trim()
-    : '';
+  const isSignatureForm = rendered.kind === 'form' && hasSignatureField(allFields);
+  const signedName = isSignatureForm && record?.completed_at ? parseSignedName(record?.answers?.['signed-name']) : null;
   const displayFields = signedName ? allFields.filter(field => field.id !== 'signed-name') : allFields;
   const fields = displayFields.map(field => {
     const answer = record?.answers?.[field.id];

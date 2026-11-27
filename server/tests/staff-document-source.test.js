@@ -79,16 +79,37 @@ test('shared values cannot issue with embedded decision markers or merge placeho
   expect(unterminated.unresolved).toEqual(['[DECISION: confirm payday']);
   expect(() => checkRelease(draft, unterminated, new Date())).toThrow(/Resolve/);
 });
-test('oversized Markdown tables are rejected before HTML expansion', () => {
+test('oversized or overwide Markdown tables stay editable in drafts and are rejected at issuance', () => {
   const wideHeaders = Array.from({ length: 13 }, (_, i) => `C${i}`).join(' | ');
   const wideSep = Array.from({ length: 13 }, () => '---').join(' | ');
-  expect(() => renderSource(source(`## Wide {#wide}\n| ${wideHeaders} |\n| ${wideSep} |\n| ${wideHeaders} |`), values))
-    .toThrow(/maximum of 12 columns/);
+  const wideDraft = source(`## Wide {#wide}\n| ${wideHeaders} |\n| ${wideSep} |\n| ${wideHeaders} |`);
+  const wideRendered = renderSource(wideDraft, values);
+  expect(wideRendered.sections[0].html).not.toContain('<table>');
+  expect(wideRendered.sections[0].html).toContain('C12');
+  expect(() => checkRelease(wideDraft, wideRendered, new Date())).toThrow(/maximum of 12 columns/);
+
   const tenHeaders = Array.from({ length: 10 }, (_, i) => `C${i}`).join(' | ');
   const tenSep = Array.from({ length: 10 }, () => '---').join(' | ');
   const manyRows = Array.from({ length: 105 }, () => '| a |').join('\n');
-  expect(() => renderSource(source(`## Tall {#tall}\n| ${tenHeaders} |\n| ${tenSep} |\n${manyRows}`), values))
-    .toThrow(/maximum of 1000 rendered cells/);
+  const tallDraft = source(`## Tall {#tall}\n| ${tenHeaders} |\n| ${tenSep} |\n${manyRows}`);
+  const tallRendered = renderSource(tallDraft, values);
+  expect(tallRendered.sections[0].html).not.toContain('<table>');
+  expect(() => checkRelease(tallDraft, tallRendered, new Date())).toThrow(/maximum of 1000 rendered cells/);
+
+  const overwideDraft = source('## Extra {#extra}\n| A | B |\n|---|---|\n| 1 | 2 | kept-third-cell |');
+  const overwideRendered = renderSource(overwideDraft, values);
+  expect(overwideRendered.sections[0].html).not.toContain('<table>');
+  expect(overwideRendered.sections[0].html).toContain('kept-third-cell');
+  expect(() => checkRelease(overwideDraft, overwideRendered, new Date())).toThrow(/more cells than the header row/);
+});
+test('unresolved placeholders in displayed metadata are flagged and rejected at issuance', () => {
+  const draft = source('## Scope {#scope}\nClean body.');
+  draft.metadata.owner_role = '[TBD]';
+  draft.metadata.fields = [{ id: 'note', label: '[OWNER: pick field label]', type: 'text', required: false }];
+  draft.metadata.citations = [{ anchor: 'scope', label: '[DECISION: verify citation]', url: 'https://example.com', verified_on: day(-1), review_on: day(30) }];
+  const rendered = renderSource(draft, values);
+  expect(rendered.unresolved).toEqual(expect.arrayContaining(['[TBD]', '[OWNER: pick field label]', '[DECISION: verify citation]']));
+  expect(() => checkRelease(draft, rendered, new Date())).toThrow(/Resolve before issuing/);
 });
 test('HTML, scripts, images and unsafe links cannot become executable content', () => {
   const html = renderSource(source('## Example {#example}\n<img src=x onerror=alert(1)> [bad](javascript:alert) [good](https://example.com/?q="x") **Bold**')).sections[0].html;

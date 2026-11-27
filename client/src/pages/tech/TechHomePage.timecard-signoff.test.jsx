@@ -71,16 +71,13 @@ describe('weekly timecard sign-off card', () => {
     expect(screen.queryByText('Unpaid lunch')).not.toBeInTheDocument();
   });
 
-  it('does not auto-prefill the signature and requires explicit attestation and a full name before signing', async () => {
+  it('does not auto-prefill the signature and requires a full name (first and last) before signing', async () => {
     mountWith(week({}));
     expect(await screen.findByText('Sign Last Week\'s Timecard')).toBeInTheDocument();
     const input = screen.getByPlaceholderText('e.g. Fixture Technician');
-    const checkbox = screen.getByLabelText('I confirm these hours are accurate and complete.');
     const button = screen.getByRole('button', { name: 'Sign Timecard' });
     expect(input).toHaveValue('');
-    expect(checkbox).not.toBeChecked();
     expect(button).toBeDisabled();
-    fireEvent.click(checkbox);
     fireEvent.change(input, { target: { value: 'x' } });
     expect(button).toBeDisabled();
     fireEvent.change(input, { target: { value: 'Fixture Technician' } });

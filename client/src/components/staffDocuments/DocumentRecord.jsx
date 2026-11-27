@@ -115,7 +115,8 @@ function RecordActions({ locked, isSignatureForm, manage, record, canSignNow, ow
 
 function RecordCompletedBanner({ record, isSignatureForm }) {
   if (!record?.completed_at) return null;
-  const signedBy = isSignatureForm && record.answers?.['signed-name'];
+  const rawSigned = record.answers?.['signed-name'];
+  const signedBy = isSignatureForm && signedNameValid(rawSigned) ? String(rawSigned).trim() : '';
   return (
     <div style={{ marginTop: 14, padding: 14, background: D.successBg, border: `1px solid ${D.successBorder}`, borderRadius: 8, color: D.successText }}>
       <p style={{ margin: 0, fontWeight: 600 }}>

@@ -242,6 +242,7 @@ function resultMessage(data, own) {
 // signed / declined / date_requested: the answer given (see resultMessage).
 function ResultState({ data, own }) {
   const showSignedCopy = data.state === 'signed' && hasOfferFacts(data);
+  const canPrintSigned = showSignedCopy && Boolean(data.signedName && data.signedAt && data.terms?.markdown?.trim());
   return (
     <Column>
       <div style={EYEBROW}>Waves</div>
@@ -289,7 +290,7 @@ function ResultState({ data, own }) {
             )}
           </>
         )}
-        {data.state === 'signed' && !isNativeApp() && (
+        {canPrintSigned && !isNativeApp() && (
           <div style={{ marginTop: 16 }} className="waves-field-no-print">
             <BrandButton variant="secondary" fullWidth onClick={() => window.print()}>
               Print / Save PDF copy
@@ -747,22 +748,10 @@ function DeclinePanel({ onSubmit, onCancel, busy, frozen, locked, error }) {
   );
 }
 
-function SignBlock({ name, onName, agreed, onAgreed, onAccept, busy, saving, frozen }) {
+function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
   const valid = signedNameValid(name);
   return (
     <div style={{ marginTop: 18 }}>
-      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 12, minHeight: 44, marginBottom: 14, cursor: frozen ? 'default' : 'pointer' }}>
-        <input
-          type="checkbox"
-          checked={agreed}
-          disabled={frozen}
-          onChange={(e) => onAgreed(e.target.checked)}
-          style={{ width: 22, height: 22, marginTop: 2, flex: '0 0 auto', accentColor: 'var(--brand, #04395E)' }}
-        />
-        <span style={{ fontFamily: FONTS.body, fontSize: 15, lineHeight: 1.45, color: TEXT }}>
-          I have read and agree to this offer and the displayed terms, and I intend my typed full name to be my electronic signature (Florida Statutes 668.50).
-        </span>
-      </label>
       <label htmlFor="offer-sign-name" style={LABEL_STYLE}>Type your full name to sign</label>
       <input
         id="offer-sign-name"
@@ -774,7 +763,7 @@ function SignBlock({ name, onName, agreed, onAgreed, onAccept, busy, saving, fro
         onChange={(e) => onName(e.target.value)}
         style={FIELD_STYLE}
       />
-      <BrandButton fullWidth disabled={!valid || !agreed || busy} onClick={onAccept} style={{ marginTop: 12 }}>
+      <BrandButton fullWidth disabled={!valid || busy} onClick={onAccept} style={{ marginTop: 12 }}>
         {saving ? 'Saving…' : 'Accept and sign'}
       </BrandButton>
     </div>
@@ -783,7 +772,6 @@ function SignBlock({ name, onName, agreed, onAgreed, onAccept, busy, saving, fro
 
 function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRecheck, onInvalid, onRead, onOwnAnswer }) {
   const [name, setName] = useState('');
-  const [agreed, setAgreed] = useState(false);
   const [panel, setPanel] = useState('none'); // none | date | decline
   // 0, or the status (404, 409) of a refusal whose re-read failed: the page does
   // not know where the offer stands, and Check again reads with that status, so
@@ -860,8 +848,6 @@ function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRe
           <SignBlock
             name={name}
             onName={setName}
-            agreed={agreed}
-            onAgreed={setAgreed}
             busy={anyBusy}
             saving={accept.busy}
             frozen={accept.frozen}

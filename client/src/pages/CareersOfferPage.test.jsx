@@ -59,11 +59,6 @@ function bodyOf(fetchMock, index) {
   return JSON.parse(fetchMock.mock.calls[index][1].body);
 }
 
-function tickAgree() {
-  const cb = screen.getByLabelText(/I have read and agree to this offer and the displayed terms/);
-  if (!cb.checked) fireEvent.click(cb);
-}
-
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date('2026-12-14T15:00:00Z')); // Mon Dec 14 ET
@@ -130,7 +125,6 @@ describe('CareersOfferPage — open state', () => {
     const box = await screen.findByLabelText('Text me about this offer');
     expect(box).not.toBeChecked();
     fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });
@@ -142,7 +136,7 @@ describe('CareersOfferPage — open state', () => {
     expect(bodyOf(fetchMock, 3)).toEqual({ signedName: 'Jordan Rivera', version: changed });
   });
 
-  it('enables Accept and sign only with agreement ticked and at least two words, then posts the name', async () => {
+  it('enables Accept and sign only with at least two words, then posts the name', async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(jsonResponse(openPayload()))
       .mockResolvedValueOnce(jsonResponse({ state: 'signed', signedAt: '2026-12-12T13:15:00.000Z' }));
@@ -154,8 +148,6 @@ describe('CareersOfferPage — open state', () => {
     fireEvent.change(input, { target: { value: 'Jordan' } });
     expect(accept).toBeDisabled();
     fireEvent.change(input, { target: { value: '  Jordan Rivera ' } });
-    expect(accept).toBeDisabled(); // still disabled until the agreement box is ticked
-    tickAgree();
     expect(accept).toBeEnabled();
     fireEvent.click(accept);
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
@@ -208,7 +200,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
@@ -265,7 +256,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: 'This link is not valid.' })).not.toBeInTheDocument();
@@ -295,7 +285,6 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     const accept = await screen.findByRole('button', { name: 'Accept and sign' });
     fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(accept);
     expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
@@ -315,7 +304,6 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined })));
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('This page is out of date. Please reload it and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reload page' })).toBeEnabled();
@@ -346,7 +334,6 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload({ version: undefined }))); // Check again: no version
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
     expect(await screen.findByRole('button', { name: 'Reload page' })).toBeEnabled();
@@ -364,7 +351,6 @@ describe('CareersOfferPage — open state', () => {
       .mockResolvedValueOnce(jsonResponse(openPayload())); // Check again: still open
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Check again' }));
     expect(await screen.findByRole('button', { name: 'Reload page' })).toBeEnabled();
@@ -401,7 +387,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
@@ -422,7 +407,6 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     const accept = await screen.findByRole('button', { name: 'Accept and sign' });
     fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(accept);
     expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
   });
@@ -436,7 +420,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
@@ -459,7 +442,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Try again' })).toBeEnabled());
@@ -487,7 +469,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -516,7 +497,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     const box = screen.getByLabelText('Text me about this offer');
     expect(box).toBeChecked();
     fireEvent.click(box);
@@ -567,7 +547,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(fetchMock.mock.calls[2][1]).toBeUndefined(); // a read, not a write
@@ -586,7 +565,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
@@ -645,7 +623,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
@@ -688,7 +665,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
@@ -712,7 +688,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText('We could not refresh this offer. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.queryByText('That did not go through. Please try again.')).toBeNull();
@@ -738,7 +713,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     expect(await screen.findByText(/We could not confirm that choice/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
@@ -771,7 +745,6 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     if (act === 'sign') {
       fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-      tickAgree();
       fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     } else if (act === 'consent') {
       fireEvent.click(await screen.findByLabelText('Text me about this offer'));
@@ -794,7 +767,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/^This offer was signed by Jordan M\. Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
@@ -814,7 +786,6 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     if (act === 'sign') {
       fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-      tickAgree();
       fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     } else {
       fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
@@ -835,7 +806,6 @@ describe('CareersOfferPage — open state', () => {
     const box = await screen.findByLabelText('Text me about this offer');
     expect(box).not.toBeChecked();
     fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(screen.getByLabelText('Text me about this offer')).toBeChecked());
@@ -851,7 +821,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
@@ -867,7 +836,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'jordan rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/^This offer was signed by Jordan Rivera on Sat, Dec 12, 2026\. Welcome to Waves\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
@@ -887,7 +855,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('That did not go through. Please try again.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Decline' }));
@@ -944,7 +911,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/This offer was updated/)).toBeInTheDocument();
   });
@@ -957,7 +923,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/We could not refresh this offer/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled();
@@ -978,7 +943,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText('We could not confirm that. Check your connection and try again.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Accept and sign' })).toBeDisabled();
@@ -1009,7 +973,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
@@ -1067,7 +1030,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     expect(await screen.findByText('Too many requests, please try again shortly.')).toBeInTheDocument();
@@ -1115,7 +1077,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
@@ -1137,7 +1098,6 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
     fireEvent.change(screen.getByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Yes, decline' })).toBeDisabled());
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
@@ -1153,7 +1113,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByLabelText('Text me about this offer'));
     await waitFor(() => expect(screen.getByRole('button', { name: /Saving|Accept and sign/ })).toBeDisabled());
     finish(jsonResponse({ textConsent: false, version: '2026-12-11T15:21:00.000Z' }));
@@ -1175,7 +1134,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: '  Jordan   Rivera ' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/^This offer was signed by JORDAN RIVERA on Sat, Dec 12, 2026\./)).toBeInTheDocument();
     expect(screen.queryByText(/You signed this offer/)).toBeNull();
@@ -1195,7 +1153,6 @@ describe('CareersOfferPage — open state', () => {
     renderPage();
     if (act === 'sign') {
       fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-      tickAgree();
       fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     } else {
       fireEvent.click(await screen.findByRole('button', { name: 'Decline' }));
@@ -1213,7 +1170,6 @@ describe('CareersOfferPage — open state', () => {
     globalThis.fetch = fetchMock;
     renderPage();
     fireEvent.change(await screen.findByLabelText('Type your full name to sign'), { target: { value: 'Jordan Rivera' } });
-    tickAgree();
     fireEvent.click(screen.getByRole('button', { name: 'Accept and sign' }));
     expect(await screen.findByText(/Check your connection and try again/)).toBeInTheDocument();
     expect(screen.getByLabelText('Type your full name to sign')).toHaveValue('Jordan Rivera');
@@ -1279,6 +1235,13 @@ describe('CareersOfferPage — other states', () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse({ error: 'Not found' }, 404));
     renderPage();
     expect(await screen.findByRole('heading', { name: 'This link is not valid.' })).toBeInTheDocument();
+  });
+
+  it('does not enable signed-copy printing when signature evidence is missing', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload({ state: 'signed', signedName: null, signedAt: null })));
+    renderPage();
+    expect(await screen.findByText(/^This offer was signed\./)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Print / Save PDF copy' })).toBeNull();
   });
 
   it('offers a retry when the load fails', async () => {

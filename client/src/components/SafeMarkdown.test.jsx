@@ -76,4 +76,12 @@ describe('SafeMarkdown', () => {
     expect(container.querySelector('table')).toBeNull();
     expect(container).toHaveTextContent('C0 | C1');
   });
+
+  it('falls back to literal text when a body row has more cells than the header row', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'| A | B |\n|---|---|\n| 1 | 2 | kept-third-cell |'} />,
+    );
+    expect(container.querySelector('table')).toBeNull();
+    expect(container).toHaveTextContent('kept-third-cell');
+  });
 });

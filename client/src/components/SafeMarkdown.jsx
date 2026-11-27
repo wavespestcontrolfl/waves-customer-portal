@@ -75,7 +75,9 @@ function tryParseTable(lines, startIndex, remainingCells) {
   let cursor = startIndex + 2;
   while (cursor < lines.length && lines[cursor].includes("|") && lines[cursor].trim()) {
     if (rows.length >= MAX_TABLE_ROWS) return null;
-    rows.push(splitTableCells(lines[cursor]));
+    const cells = splitTableCells(lines[cursor]);
+    if (cells.length > headers.length) return null;
+    rows.push(cells);
     cursor += 1;
   }
   const cells = headers.length * (rows.length + 1);

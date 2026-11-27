@@ -1698,7 +1698,6 @@ export function TimecardSignoffCard({ techName }) {
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [signature, setSignature] = useState('');
-  const [attested, setAttested] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState(null); // {message, isError}
 
@@ -1761,13 +1760,13 @@ export function TimecardSignoffCard({ techName }) {
   // week, show paid hours (regular + overtime, both from the server) and the
   // lunch taken off. With none (gate off), the card is exactly as before.
   const summary = summarizeSignoffWeek(weekly, weekStart);
-  const canSign = attested && isValidSignoffName(signature);
+  const canSign = isValidSignoffName(signature);
   const disabled = submitting || !canSign;
   const feedbackTone = feedback ? SIGNOFF_FEEDBACK_TONE[feedback.isError ? 'error' : 'ok'] : null;
 
   const handleSign = async () => {
     if (!canSign) {
-      setFeedback({ message: 'Confirm your hours and type your full name to sign', isError: true });
+      setFeedback({ message: 'Type your full name (first and last) to sign', isError: true });
       return;
     }
     setSubmitting(true);
@@ -1786,7 +1785,6 @@ export function TimecardSignoffCard({ techName }) {
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
       setSignature('');
-      setAttested(false);
       setFeedback({ message: 'Timecard signed', isError: false });
       load();
     } catch (e) {
@@ -1814,16 +1812,7 @@ export function TimecardSignoffCard({ techName }) {
         <div><strong style={{ color: '#04395E' }}>{summary.otHrs}h</strong> <span style={{ color: FIELD.muted }}>OT</span></div>
         <div><strong style={{ color: '#04395E' }}>{summary.jobCount}</strong> <span style={{ color: FIELD.muted }}>jobs</span></div>
       </div>
-      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10, fontSize: 14, color: FIELD.text, cursor: 'pointer' }}>
-        <input
-          type="checkbox"
-          checked={attested}
-          onChange={(e) => setAttested(e.target.checked)}
-          style={{ width: 18, height: 18, marginTop: 2, accentColor: '#04395E' }}
-        />
-        <span>I confirm these hours are accurate and complete.</span>
-      </label>
-      <div style={{ fontSize: 14, fontWeight: 600, color: '#04395E', marginBottom: 4 }}>Type your full name to sign:</div>
+      <div style={{ fontSize: 14, fontWeight: 600, color: '#04395E', marginBottom: 4 }}>Type your full name (first and last) to sign:</div>
       <input
         value={signature}
         onChange={(e) => setSignature(e.target.value)}

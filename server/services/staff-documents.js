@@ -1,22 +1,12 @@
 const db = require('../models/db');
 const Joi = require('joi');
 const { recordAuditEvent } = require('./audit-log');
-const { sourceSchema, policySchema, validate, reject, hash, renderSource, checkRelease } = require('./staff-document-source');
+const { sourceSchema, policySchema, validate, reject, hash, renderSource, checkRelease, parseSignedName, hasSignatureField } = require('./staff-document-source');
 const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 
 const ACKNOWLEDGMENT = 'I have read this policy version and acknowledge receipt. I intend my typed name to serve as my electronic signature for this acknowledgment (Florida Statutes 668.50).';
 const sourceOf = version => ({ title: version.title, body: version.body, metadata: version.staff_metadata });
 const isAdmin = actor => actor.role === 'admin';
-const isRequiredSignatureField = field => Boolean(field && field.id === 'signed-name' && field.type === 'text' && field.required === true);
-const hasSignatureField = fields => Array.isArray(fields) && fields.some(isRequiredSignatureField);
-
-// Typed full name: trimmed, 3 to 180 characters, at least two words (first + last name).
-function parseSignedName(value) {
-  if (typeof value !== 'string') return null;
-  const cleaned = value.replace(/\s+/g, ' ').trim();
-  if (cleaned.length < 3 || cleaned.length > 180) return null;
-  return /^\S+(\s+\S+)+$/.test(cleaned) ? cleaned : null;
-}
 
 function cleanEvidence(evidence) {
   if (!evidence || typeof evidence !== 'object') return {};

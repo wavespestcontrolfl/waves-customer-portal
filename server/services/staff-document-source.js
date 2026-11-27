@@ -55,6 +55,22 @@ function findUnresolvedMarkers(text) {
   return String(text || '').match(UNRESOLVED_MARKER_RE) || [];
 }
 
+function isRequiredSignatureField(field) {
+  return Boolean(field && field.id === 'signed-name' && field.type === 'text' && field.required === true);
+}
+
+function hasSignatureField(fields) {
+  return Array.isArray(fields) && fields.some(isRequiredSignatureField);
+}
+
+// Typed full name: string only, trimmed, 3 to 180 characters, at least two words (first + last name).
+function parseSignedName(value) {
+  if (typeof value !== 'string') return null;
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  if (cleaned.length < 3 || cleaned.length > 180) return null;
+  return /^\S+(\s+\S+)+$/.test(cleaned) ? cleaned : null;
+}
+
 function reject(message, status = 400) {
   const error = new Error(message);
   error.status = status;
@@ -121,18 +137,30 @@ function isTableStart(lines, index) {
   return splitTableCells(lines[index]).length >= 2;
 }
 
+function tableIssue(headers, rows, usedCells) {
+  if (headers.length > MAX_TABLE_COLS) return `Table exceeds the maximum of ${MAX_TABLE_COLS} columns.`;
+  if (rows.length > MAX_TABLE_ROWS) return `Table exceeds the maximum of ${MAX_TABLE_ROWS} rows.`;
+  if (rows.some(row => row.length > headers.length)) return 'Table row has more cells than the header row.';
+  if (usedCells + headers.length * (rows.length + 1) > MAX_TABLE_CELLS) {
+    return `Document tables exceed the maximum of ${MAX_TABLE_CELLS} rendered cells.`;
+  }
+  return null;
+}
+
 function renderTable(lines, startIndex, budget) {
   const headers = splitTableCells(lines[startIndex]);
-  if (headers.length > MAX_TABLE_COLS) reject(`Table exceeds the maximum of ${MAX_TABLE_COLS} columns.`);
   const rows = [];
   let cursor = startIndex + 2;
   while (cursor < lines.length && lines[cursor].includes('|') && lines[cursor].trim()) {
-    if (rows.length >= MAX_TABLE_ROWS) reject(`Table exceeds the maximum of ${MAX_TABLE_ROWS} rows.`);
     rows.push(splitTableCells(lines[cursor]));
     cursor += 1;
   }
+  const issue = tableIssue(headers, rows, budget.cells);
+  if (issue) {
+    budget.issues.push(issue);
+    return { html: `<p>${lines.slice(startIndex, cursor).map(inline).join('<br>')}</p>`, nextIndex: cursor };
+  }
   budget.cells += headers.length * (rows.length + 1);
-  if (budget.cells > MAX_TABLE_CELLS) reject(`Document tables exceed the maximum of ${MAX_TABLE_CELLS} rendered cells.`);
   const headHtml = `<thead><tr>${headers.map(cell => `<th>${inline(cell)}</th>`).join('')}</tr></thead>`;
   const bodyHtml = rows.length
     ? `<tbody>${rows.map(row => `<tr>${headers.map((_, idx) => `<td>${inline(row[idx] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>`
@@ -176,9 +204,8 @@ function renderParagraphBlock(paragraph, budget) {
   return out.join('\n');
 }
 
-function sections(markdown) {
+function sections(markdown, budget = { cells: 0, issues: [] }) {
   const result = [];
-  const budget = { cells: 0 };
   for (const block of markdown.trim().split(/\n(?=## )/)) {
     const match = /^## (.+?) \{#([a-z][a-z0-9-]{1,79})\}\n([\s\S]*)$/.exec(block);
     if (!match) reject('Each clause must start with ## Title {#stable-anchor}, followed by its text.');
@@ -189,6 +216,14 @@ function sections(markdown) {
   }
   if (result.length > 80) reject('Use at most 80 clauses per document.');
   return result;
+}
+
+function metadataPlaceholderText(metadata) {
+  return [
+    metadata.owner_role || '',
+    ...(metadata.fields || []).map(f => f.label || ''),
+    ...(metadata.citations || []).map(c => c.label || ''),
+  ].join('\n');
 }
 
 function policyContext(values) {
@@ -206,23 +241,27 @@ function renderSource(source, policyValues) {
   const rendered = renderDocumentText(source.body, context);
   const title = renderDocumentText(source.title, context);
   const used = [...new Set([...rendered.usedVariables, ...title.usedVariables])].sort();
-  const clauses = sections(rendered.rendered);
+  const budget = { cells: 0, issues: [] };
+  const clauses = sections(rendered.rendered, budget);
   const unknown = used.filter(key => !/^policy\.(pay_frequency|pay_schedule|pto_accrual|paid_holidays|unpaid_holidays|equipment_deduction_terms)$/.test(key));
   if (unknown.length) reject(`Unsupported policy binding: ${unknown.join(', ')}`);
   for (const citation of source.metadata.citations) {
     if (!clauses.some(clause => clause.id === citation.anchor)) reject(`Citation has no matching clause: ${citation.anchor}`);
   }
+  const metaText = metadataPlaceholderText(source.metadata);
   return {
     title: title.rendered, body: rendered.rendered, sections: clauses,
     metadata: source.metadata, used_variables: used,
+    table_issues: [...new Set(budget.issues)],
     unresolved: [...new Set([...rendered.unresolvedVariables, ...title.unresolvedVariables,
-      ...findUnresolvedMarkers(`${title.rendered}\n${rendered.rendered}`)])],
+      ...findUnresolvedMarkers(`${title.rendered}\n${rendered.rendered}\n${metaText}`)])],
   };
 }
 
 function checkRelease(source, rendered, effectiveAt) {
   if (!source.metadata.owner_role || !source.metadata.review_on) reject('Choose a document owner role and next-review date before issuing.');
   if (rendered.unresolved.length) reject(`Resolve before issuing: ${rendered.unresolved.join('; ')}`);
+  if (rendered.table_issues?.length) reject(rendered.table_issues[0]);
   const start = new Date(effectiveAt).getTime();
   const review = parseETDateTime(`${source.metadata.review_on}T23:59:59`).getTime();
   if (review <= start || review - start > 366 * 86400000) reject('Next review must be after the effective date and within one year.');
@@ -237,4 +276,7 @@ function checkRelease(source, rendered, effectiveAt) {
   }
 }
 
-module.exports = { sourceSchema, policySchema, validate, reject, hash, escapeHtml, sections, renderSource, checkRelease };
+module.exports = {
+  sourceSchema, policySchema, validate, reject, hash, escapeHtml, sections, renderSource, checkRelease,
+  parseSignedName, isRequiredSignatureField, hasSignatureField,
+};
