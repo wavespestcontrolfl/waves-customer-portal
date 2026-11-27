@@ -191,6 +191,12 @@ function moveRuleConfig(overrides, flexTierEnabled) {
     // window never counts.
     maxAutoMovesPerVisit: overrides.maxAutoMovesPerVisit
       ?? intEnv('AUTO_DISPATCH_MAX_MOVES_PER_VISIT', flexTierEnabled ? 0 : 2, { min: 0, max: 20 }),
+    // BOUNCE COOLDOWN (bounce-guard.js): under flex mode there is no per-visit
+    // move-count cap, so an ordinary optimization may not bounce a visit BACK
+    // onto a date auto-dispatch moved it off within this many days. Conflict
+    // moves, first placements, and same-day re-times are exempt. 0 = off.
+    bounceCooldownDays: overrides.bounceCooldownDays
+      ?? intEnv('AUTO_DISPATCH_BOUNCE_COOLDOWN_DAYS', flexTierEnabled ? 7 : 0, { min: 0, max: 60 }),
     // ROAD CHECK (GATE_AUTO_DISPATCH_ROAD_CHECK, road-check.js): an ordinary
     // move's drive saving is measured again on Google's traffic-aware roads
     // before the visit moves. The cap is the most route-matrix legs one run

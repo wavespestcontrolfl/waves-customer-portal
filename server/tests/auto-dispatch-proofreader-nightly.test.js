@@ -130,6 +130,30 @@ describe('checkMove', () => {
     expect(run.proofreader).toMatchObject({ calls: 1, allowed: 1, held: 0, unsure: 0 });
   });
 
+  test('an empty complete record fast-allows without calling the model or spending a call, while keeping recordPrint and personHeld', async () => {
+    const emptyRecord = { entries: [], unread: [], serviceTypes: ['Quarterly Pest Control'], tooLong: false };
+    const run = runOf();
+    const proofreader = proofreaderOf({ verdict: 'hold', why: 'quoted_statement' }, emptyRecord);
+    const got = await check(run, proofreader);
+    expect(got).toEqual({
+      allowed: true,
+      recordPrint: expect.any(String),
+      audit: { verdict: 'allow', why: 'empty_record', entry_id: null, model: null, prompt_version: 'move-proofreader-v1' },
+    });
+    expect(proofreader.proofreadMove).not.toHaveBeenCalled();
+    // No model call spent and NOT counted as `answered` (so an API outage on other moves still alerts).
+    expect(run.proofreader).toMatchObject({ calls: 0, allowed: 1, answered: 0, broke: 0 });
+    // An empty record with an unread part (e.g. untranscribed call) still goes to the model / fails closed.
+    const incomplete = proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, { ...emptyRecord, unread: [{ channel: 'call', reason: 'not_transcribed' }] });
+    const incGot = await check(runOf(), incomplete);
+    expect(incomplete.proofreadMove).toHaveBeenCalledTimes(1);
+    expect(incGot).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE' });
+    // An empty record with a person-marked Done notice is still held.
+    doneNotice = PERSON_DONE;
+    expect(await check(runOf(), proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, emptyRecord)))
+      .toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD' });
+  });
+
   test('an allow stands only when the record read again after the answer is the one the model saw', async () => {
     const run = runOf();
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });

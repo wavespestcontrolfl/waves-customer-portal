@@ -111,4 +111,54 @@ async function getCustomerSchedulingPreferences(customerId, serviceType, conn = 
   return withDryTime(normalized, conn, { customerId, serviceType, serviceKey, runDate: etDateString() });
 }
 
-module.exports = { getCustomerSchedulingPreferences, normalizePreferences, DAY_NAME_TO_INDEX };
+/**
+ * At apply (apply.js makeMoveGuard and makeMemberGuard), inside the move
+ * transaction: re-read the customer's property_preferences row FOR SHARE and
+ * refuse a destination date inside the customer's blackout dates
+ * (blackout_start..blackout_end) or — when any row in `serviceTypes` is a Lawn
+ * Care Service visit — on or next to the customer's mowing day. One FOR SHARE
+ * read covers both hard rules so a blackout or mowing-day edit made after the
+ * run scored the move cannot land the visit on a blocked day, whether or not a
+ * proofreader looked at it.
+ */
+async function assertDestinationClear(trx, service, dateStr, refuse, serviceTypes = []) {
+  const destDate = toDateStr(dateStr);
+  const checkMowing = serviceTypes.some(mowingDays.isLawnCareService);
+  const checkBlackout = Boolean(service && service.customer_id);
+  if (!destDate || (!checkMowing && !checkBlackout)) return;
+  const row = await trx('property_preferences')
+    .where('customer_id', service.customer_id)
+    .forShare()
+    .first('preferred_day', 'mowing_days', 'blackout_start', 'blackout_end');
+  const normalized = normalizePreferences(row, service && service.service_type);
+  if (normalized.blackout && destDate >= normalized.blackout.start && destDate <= normalized.blackout.end) {
+    throw refuse(service.id, `would land on ${destDate}, inside the customer's blackout dates (${normalized.blackout.start} to ${normalized.blackout.end})`);
+  }
+  if (checkMowing) {
+    const rule = mowingDays.ruleFor(row, normalized.preferred_day_indexes);
+    if (mowingDays.blocksDay(destDate, rule)) {
+      throw refuse(service.id, `would land on ${destDate}, on or next to the customer's mowing day`);
+    }
+  }
+}
+
+/**
+ * Grouped-unit destination preference check (apply.js makeMemberGuard): runs
+ * the mowing-day + blackout check for the unit's primary customer, plus a
+ * blackout check for any sibling carrying a distinct customer_id.
+ */
+async function assertUnitDestinationClear(trx, primary, siblings, dateStr, refuse) {
+  const serviceTypes = (siblings || []).map((r) => r.service_type);
+  await assertDestinationClear(trx, primary, dateStr, refuse, serviceTypes);
+  const seen = new Set(primary && primary.customer_id ? [String(primary.customer_id)] : []);
+  for (const r of siblings || []) {
+    if (r && r.customer_id && !seen.has(String(r.customer_id))) {
+      seen.add(String(r.customer_id));
+      await assertDestinationClear(trx, r, dateStr, refuse, []);
+    }
+  }
+}
+
+module.exports = {
+  getCustomerSchedulingPreferences, normalizePreferences, assertDestinationClear, assertUnitDestinationClear, DAY_NAME_TO_INDEX,
+};
