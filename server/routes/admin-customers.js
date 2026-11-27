@@ -4653,9 +4653,10 @@ const customerUpdateHandler = async (req, res, next) => {
               statusCode: 409, isOperational: true, code: 'preview_changed',
             });
           }
-          // req.ibVerifyPlan is set only by setCustomerBillToFromBar (never an HTTP field): it re-derives the bar card
-          // inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open invoice FOR UPDATE)
-          // and throws preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
+          // req.ibVerifyPlan is set only by the bar's in-process cards (runCustomerUpdateFromBar; never an HTTP field): it
+          // re-derives the bar card inside this transaction over held rows (bill-to-tools.js lockedPlanCheck: every open
+          // invoice FOR UPDATE; service-contact-tools.js lockedPlanCheck: the locked contact slots) and throws
+          // preview_changed on any difference, before any Bill-To step reads or clears a checkout stamp.
           if (req.ibVerifyPlan) await req.ibVerifyPlan(trx);
           // REBUILD the shared-phone mark clear from the locked row (codex #6268
           // r4/r8): the pre-lock pass may have derived `false` from a stale
@@ -7254,6 +7255,8 @@ router.post('/:id/credits', requireAdmin, async (req, res, next) => {
 });
 
 router._private = {
+  SERVICE_CONTACT_SLOT_FIELDS,
+  normalizeChangedServiceContacts,
   latestHealthValueRaw,
   customerHealthFilterSchema,
   applyCustomerListFilters,
@@ -7319,13 +7322,12 @@ router.hasMembership = hasMembership;
 
 module.exports = router;
 
-// The Intelligence Bar's set_customer_bill_to runs the SAME handler as PUT /:id with only { payerId } — exactly
-// what the customer page's Bill-To select sends — without an HTTP request (the admin-invoices.js adapter
-// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the
-// reply it would send, { status, json }. An error passed to next() rejects. expectedPayerId: the Bill-To the
-// card showed (null = the customer pays); verifyPlan(trx): re-checks the card inside the transaction and throws
-// preview_changed on any difference; the change refuses too if any invoice would move (the card promises none).
-function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
+// The Intelligence Bar's cards run the SAME handler as PUT /:id without an HTTP request (the admin-invoices.js adapter
+// pattern): the handler gets the request fields it reads and a capture response, and the promise resolves the reply it
+// would send, { status, json }. An error passed to next() rejects. verifyPlan(trx): re-checks the card inside the
+// transaction over the locked customer row and throws preview_changed on any difference. `ib` holds the other
+// internal-only request fields a card sets (never HTTP body fields).
+function runCustomerUpdateFromBar({ customerId, body, verifyPlan, actor, ib = {} }) {
   return new Promise((resolve, reject) => {
     const res = {
       statusCode: 200,
@@ -7334,16 +7336,34 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
     };
     const req = {
       params: { id: customerId },
-      body: { payerId: payerId == null ? '' : String(payerId) },
+      body,
       technicianId: actor?.technicianId || null,
       ip: null,
       get: () => null,
-      ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId),
       ibVerifyPlan: typeof verifyPlan === 'function' ? verifyPlan : null,
-      ibExpectNoMove: true,
+      ...ib,
     };
     Promise.resolve(customerUpdateHandler(req, res, reject)).catch(reject);
   });
 }
+
+// set_customer_bill_to: only { payerId }, exactly what the customer page's Bill-To select sends. expectedPayerId: the
+// Bill-To the card showed (null = the customer pays); the change refuses too if any invoice would move (the card
+// promises none).
+function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verifyPlan, actor }) {
+  return runCustomerUpdateFromBar({
+    customerId,
+    body: { payerId: payerId == null ? '' : String(payerId) },
+    verifyPlan,
+    actor,
+    ib: { ibExpectedPayerId: expectedPayerId == null ? null : String(expectedPayerId), ibExpectNoMove: true },
+  });
+}
+// set_customer_service_contact (IB gap #28): the three service-contact slots' name, phone and email, exactly what the
+// customer page's contact editor sends (it posts every slot on every save).
+function setServiceContactsFromBar({ customerId, slots, verifyPlan, actor }) {
+  return runCustomerUpdateFromBar({ customerId, body: slots, verifyPlan, actor });
+}
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
+module.exports.setServiceContactsFromBar = setServiceContactsFromBar;
 module.exports.reminder24hField = reminder24hField;

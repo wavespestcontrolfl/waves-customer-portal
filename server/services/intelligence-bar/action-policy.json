@@ -2111,6 +2111,14 @@
     "approval": "ui_confirm",
     "scope": "record"
   },
+  "set_customer_service_contact": {
+    "module": "service-contact-tools.js",
+    "domain": "customers",
+    "kind": "internal_write",
+    "role": "admin",
+    "approval": "ui_confirm",
+    "scope": "record"
+  },
   "set_estimate_presentation": {
     "module": "estimate-tools.js",
     "domain": "estimate",
