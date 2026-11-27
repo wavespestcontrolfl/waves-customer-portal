@@ -2370,7 +2370,7 @@ function EstimatePipelineViewV2({
           method: "PATCH",
           body: JSON.stringify({ [field]: value }),
         });
-        setEstimates((prev) =>
+        const applyToggle = (prev) =>
           prev.map((est) =>
             est.id === estimate.id
               ? {
@@ -2378,8 +2378,9 @@ function EstimatePipelineViewV2({
                   [field]: value,
                 }
               : est,
-          ),
-        );
+          );
+        setEstimates(applyToggle);
+        setArchivedEstimates(applyToggle);
         return true;
       } finally {
         setPendingToggleKeys((prev) => {
@@ -2655,7 +2656,7 @@ function EstimatePipelineViewV2({
           estimate={outlineTarget}
           adminFetch={adminFetch}
           onClose={() => setOutlineTarget(null)}
-          onChanged={refreshEstimates}
+          onChanged={() => refreshEstimates({ silent: true })}
         />
       )}
 
@@ -5014,7 +5015,7 @@ function EstimatesMobileListView({
           estimate={outlineTarget}
           adminFetch={adminFetch}
           onClose={() => setOutlineTarget(null)}
-          onChanged={refreshEstimates}
+          onChanged={() => refreshEstimates({ silent: true })}
         />
       )}
     </div>
@@ -5154,11 +5155,10 @@ function EstimatesWorkspace() {
     // Estimates tab so the row can be scrolled to + highlighted. An explicit
     // tab still wins (e.g. ?estimateId=…&tab=pricing honors pricing).
     const estimateId = searchParams.get("estimateId");
+    const justStrippedEstimateId = strippedEstimateIdRef.current;
+    strippedEstimateIdRef.current = false;
     if (!hasIncoming && !hasTabParam && !estimateId) {
-      if (strippedEstimateIdRef.current) {
-        strippedEstimateIdRef.current = false;
-        return;
-      }
+      if (justStrippedEstimateId) return;
       setActiveTab("leads");
       return;
     }

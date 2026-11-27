@@ -15,7 +15,7 @@ import CustomerDialogHost from './components/brand/CustomerDialogHost';
 
 function TodayEstimateRedirect() {
   const outlet = useOutletContext() || {};
-  const isAdmin = outlet.user?.role === 'admin';
+  const isAdmin = outlet.techRole === 'admin';
   return <Navigate to={isAdmin ? '/admin/pipeline?tab=new' : '/admin/today'} replace />;
 }
 
