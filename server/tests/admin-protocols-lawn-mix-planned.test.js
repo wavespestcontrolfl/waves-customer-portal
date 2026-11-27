@@ -377,3 +377,73 @@ describe('the gate-off June LESCO Crosscheck Plus lines', () => {
     }
   });
 });
+
+// The mix safety table on the sheet (services/product-mix-rules.js checkMix): every pair of sprayed products, for the
+// sheet's mix-line helper to show under each shared tank. A warning only; a failed check is left out and logged.
+describe('lawn-mix mixCheck', () => {
+  const mixRules = require('../services/product-mix-rules');
+  const logger = require('../services/logger');
+
+  test('checks every sprayed product on the sheet and sends each pair\'s verdict and reason', async () => {
+    const check = jest.spyOn(mixRules, 'checkMix').mockResolvedValue({
+      products: [],
+      pairs: [{ productAId: 'kflow', productAName: 'LESCO K-Flow 0-0-25', productBId: 'arena', productBName: 'Arena 50 WDG', verdict: 'caution', reason: 'Jar test first.', source: 'owner', jarTestRequired: true, entries: [{ kind: 'pair' }] }],
+      catalogNotes: [],
+    });
+    const body = await lawnMix();
+    expect(check).toHaveBeenCalledWith(['kflow', 'arena', 'hydretain'], { max: 3 });
+    expect(body.mixCheck).toEqual({ pairs: [{ productAId: 'kflow', productAName: 'LESCO K-Flow 0-0-25', productBId: 'arena', productBName: 'Arena 50 WDG', verdict: 'caution', reason: 'Jar test first.', jarTestRequired: true }] });
+    // A warning only: every product keeps its amounts.
+    expect(body.items.map((item) => item.plannedMix?.amount)).toEqual([30, 2.9, 90]);
+    check.mockRestore();
+  });
+
+  test('a failed check returns the unavailable status, logs, and the sheet still renders', async () => {
+    const check = jest.spyOn(mixRules, 'checkMix').mockRejectedValue(new Error('product_mix_rules is missing'));
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const body = await lawnMix();
+    expect(body.mixCheck).toEqual({ status: 'unavailable', pairs: [] });
+    expect(body.items).toHaveLength(3);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('product_mix_rules is missing'));
+    check.mockRestore();
+    warn.mockRestore();
+  });
+
+  test('a sheet with fewer than two sprayed products makes no check', async () => {
+    visit.primary = 'BLACKOUT — K-Flow 0-0-25 ($2.18)';
+    visit.secondary = '';
+    const check = jest.spyOn(mixRules, 'checkMix');
+    const body = await lawnMix();
+    expect(check).not.toHaveBeenCalled();
+    expect(body.mixCheck).toBeNull();
+    check.mockRestore();
+  });
+});
+
+describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan line resolver', () => {
+  const { resolveMixWith } = adminProtocolsRouter._internals;
+  const catalog = [
+    { id: 'cel', name: 'Celsius WG Herbicide', aliases: ['Celsius WG'] },
+    // No NIS alias on the row: the protocol's short name resolves by the explicit map.
+    { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [] },
+    { id: 'kflow', name: 'LESCO K-Flow 0-0-25', aliases: ['K-Flow'] },
+    { id: 'rec', name: 'Recognition Post Emergent Herbicide', aliases: ['Recognition'] },
+    { id: 'fus', name: 'Fusilade II Turf and Ornamental', aliases: ['Fusilade II'] },
+  ];
+  const line = (id, mixWith) => ({ product: { id }, tankAmounts: { mixWith } });
+
+  test('names and aliases resolve to ids; a seller word alone and an unknown name resolve to nothing', () => {
+    const [nis, cel, both, seller, unknown, none] = resolveMixWith([
+      line('nis', 'Celsius WG'), line('cel', 'NIS'), line('nis', 'Recognition Post Emergent Herbicide and Fusilade II'),
+      line('cel', 'LESCO'), line('cel', 'Unknown blend'), line('kflow', null),
+    ], catalog);
+    expect(nis.tankAmounts.mixWithProductIds).toEqual(['cel']);
+    expect(cel.tankAmounts.mixWithProductIds).toEqual(['nis']);
+    expect(both.tankAmounts.mixWithProductIds).toEqual(['rec', 'fus']);
+    // "LESCO" is the seller, not a product: no LESCO product attaches, and the sheet says "No rule on file".
+    expect(seller.tankAmounts.mixWithProductIds).toEqual([]);
+    expect(unknown.tankAmounts.mixWithProductIds).toEqual([]);
+    expect(none.tankAmounts).toEqual({ mixWith: null });
+  });
+});
+
