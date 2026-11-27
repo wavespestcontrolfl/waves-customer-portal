@@ -516,7 +516,7 @@ describe('row limits: proof and fingerprint see every row, only the excerpts are
 });
 
 describe('the booking requirement holds on every path', () => {
-  const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' };
+  const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?', whole: true };
   const run = async (events, extra = {}, judge) => {
     const deps = makeDeps({ timeline: async () => timelineOf(events, { reply, ...extra }), ...(judge ? { judge } : {}) });
     await agent.runAlertClearAgent({ now: NOW, deps });
@@ -559,7 +559,7 @@ describe('the booking requirement holds on every path', () => {
   // The offer's send time comes with it: "tomorrow" sent on Wednesday is Thursday, whenever the customer replies.
   test('the model is shown the offer with its send time and the reply, redacted, and a changed offer changes the fingerprint', () => {
     const sent = new Date('2026-11-25T20:10:00Z');
-    const tl = (prevOutbound, prevAt = sent) => timelineOf([staffMove], { reply: { lastBody: 'Yes', prevOutbound, prevAt }, ctx: ['CUSTOMER TEXT: thanks'] });
+    const tl = (prevOutbound, prevAt = sent, whole = true) => timelineOf([staffMove], { reply: { lastBody: 'Yes', prevOutbound, prevAt, whole }, ctx: ['CUSTOMER TEXT: thanks'] });
     const input = agent.judgeInput(alertRow(), tl('We could come tomorrow at 10 am. Does that work?'), agent.computeFacts(tl('x')));
     expect(input).toMatch(/THE YES AND THE MESSAGE IT ANSWERS/);
     expect(input).toMatch(/^- WAVES MESSAGE \(sent Wednesday 2026-11-25 3:10 PM\): We could come tomorrow at 10 am\. Does that work\?$/m);
@@ -572,6 +572,8 @@ describe('the booking requirement holds on every path', () => {
     const long = `${'Thanks for bearing with us on the schedule this week. '.repeat(12)}Correction: we can come Friday at 2 pm instead.`;
     expect(long.length).toBeGreaterThan(600);
     expect(agent.judgeInput(alertRow(), tl(long), agent.computeFacts(tl('x')))).toMatch(/Correction: we can come Friday at 2 pm instead\.$/m);
+    // A message longer than what was read is marked cut, so the model knows it may not see the offer.
+    expect(agent.judgeInput(alertRow(), tl('Your bill is ready.', sent, false), agent.computeFacts(tl('x')))).toMatch(/Your bill is ready\. \[cut: the message is longer than shown\]$/m);
     const fp = (prevOutbound, prevAt) => agent.fingerprintOf(alertRow(), tl(prevOutbound, prevAt), NOW);
     expect(fp('We could come Friday at 10 am?')).not.toBe(fp('We could come Tuesday at 2 pm?'));
     expect(fp('We could come tomorrow at 10 am?')).not.toBe(fp('We could come tomorrow at 10 am?', new Date('2026-11-24T20:10:00Z')));
@@ -584,15 +586,25 @@ describe('the booking requirement holds on every path', () => {
     const numeric = await run([staffText()], { reply: { lastBody: 'yes', prevOutbound: 'Can we visit 12/4 between 9 and 11?' } }, judgeNames('E1'));
     expect(numeric.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
     const bill = jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'ok to an invoice note', proof: null, model: 'm', yesToOffer: false }));
-    const dated = await run([], { reply: { lastBody: 'OK', prevOutbound: 'Your invoice is due 12/4.' } }, bill);
+    const dated = await run([], { reply: { lastBody: 'OK', prevOutbound: 'Your invoice is due 12/4.', whole: true } }, bill);
     expect(bill.mock.calls[0][0]).toMatch(/- WAVES MESSAGE: Your invoice is due 12\/4\.$/m);
     expect(dated.row).toMatchObject({ outcome: 'nothing_to_answer', source: 'ai' });
+  });
+
+  // The model's "accepts no offer" counts only when it saw the whole message the yes answers: one cut short, or none paired with
+  // the number the yes came from, keeps the booking requirement.
+  test('a cut or unpaired message keeps the booking requirement, whatever the model reads', async () => {
+    const bill = () => jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'ok to a bill', proof: null, model: 'm', yesToOffer: false }));
+    const cut = await run([], { reply: { lastBody: 'OK', prevOutbound: 'Your bill is ready.', whole: false } }, bill());
+    expect(cut.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
+    const unpaired = await run([], { reply: { lastBody: 'OK', prevOutbound: '', prevAt: null, whole: false } }, bill());
+    expect(unpaired.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
   });
 
   // What a bare yes answers is language, so the model judges it, shown the message: a staff reply never closes the yes by rule.
   // A reply that is not a bare yes still closes by the staff reply.
   test('a bare yes goes to the model, shown the message it answers, never to a plain rule', async () => {
-    const missed = { lastBody: 'Yes', prevOutbound: 'Shall we pencil you in for early next month?' };
+    const missed = { lastBody: 'Yes', prevOutbound: 'Shall we pencil you in for early next month?', whole: true };
     const judge = jest.fn(async () => ({ outcome: 'still_owed', why: 'yes to a proposed visit, nothing booked', proof: null, model: 'm' }));
     const { deps, row } = await run([staffText()], { reply: missed }, judge);
     expect(deps.judge).toHaveBeenCalledTimes(1);

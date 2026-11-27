@@ -97,6 +97,9 @@ const OWED_RULE_PROOFS = [...RULE_PROOFS, 'estimate_sent'];
 const OWED_DONE_WHEN = new Set(['promise_fulfilled']);
 const OWED_TITLE_RE = /we still owe/i;
 const BARE_YES_RE = /^\s*(ok(ay)?|yes|yep|yeah|sure|y|k|sounds good|that works)\W*$/i;
+// The message a bare yes answers is shown up to this many characters (a text is at most 1,600); a longer one is marked cut.
+const OFFER_CHARS = 2000;
+const QUOTED_RE = /On .{5,60} wrote:/;
 // Rows a reservation or an error left behind are looked at again after an hour.
 const RETRY_RULES = new Set(['ai_error', 'ai_reserved']);
 // Part of every fingerprint. Bumped when a rule or a proof definition changes, so each open alert gets one fresh look under it.
@@ -500,17 +503,33 @@ async function smsContext(r, anchor, key, trigger) {
   const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor } : [...ordered].reverse().find((x) => x.direction === 'inbound');
   if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
   const lastAt = lastIn ? toDate(lastIn.created_at) : null;
-  const offer = lastAt ? await lastDeliveredText(r, lastAt, key) : { body: '', at: null };
-  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer.body, prevAt: offer.at } : null };
+  // The message the reply answers went to the number the reply came from.
+  const sender = hasTrigger ? trigger.phone : key.phone;
+  const offer = lastAt ? await lastDeliveredText(r, lastAt, key, sender) : { body: '', at: null, whole: false };
+  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer.body, prevAt: offer.at, whole: offer.whole } : null };
 }
 
 // The last outbound text the customer actually received (delivered, or accepted by their app) before the reply, found by its own query:
 // never "the latest outbound row that happens to sit in the excerpt". Its send time comes with it: an offer's "tomorrow" is read from it.
-async function lastDeliveredText(r, before, key) {
+// It went to the number the reply came from: a text to the customer's other number is not what that number answered. With no sender
+// number, or no such text, the pair cannot be shown, so it is not whole and the booking requirement stays (guardBareYes).
+async function lastDeliveredText(r, before, key, senderPhone) {
+  const sender = phoneIdentityKey(senderPhone);
+  if (!sender) return { body: '', at: null, whole: false };
   const rows = await r.read('prev-offer', () => scopeToContact(smsBase(r.conn).where('os.direction', 'outbound').whereRaw(smsDeliveredSql('os'))
-    .where('os.created_at', '<', before), key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
-    .orderBy('os.created_at', 'desc').limit(1).select('os.created_at', r.conn.raw('left(os.message_body, 1500) as message_body')));
-  return rows[0] ? { body: String(rows[0].message_body || ''), at: toDate(rows[0].created_at) } : { body: '', at: null };
+    .where('os.created_at', '<', before).whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [sender]), key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
+    .orderBy('os.created_at', 'desc').limit(1)
+    .select('os.created_at', r.conn.raw(`left(os.message_body, ${OFFER_CHARS}) as message_body`), r.conn.raw('length(os.message_body) as body_len')));
+  if (!rows[0]) return { body: '', at: null, whole: false };
+  return { body: String(rows[0].message_body || ''), at: toDate(rows[0].created_at), whole: Number(rows[0].body_len) <= OFFER_CHARS };
+}
+
+// A Waves email's own words, before the quoted thread. Whole when they end inside what was read and fit what the model is shown.
+function ownEmailText(row) {
+  const read = String(row.b || '');
+  const own = read.split(QUOTED_RE)[0];
+  const ended = own.length < read.length || Number(row.body_len) <= read.length;
+  return { body: own.slice(0, OFFER_CHARS), whole: ended && own.length <= OFFER_CHARS };
 }
 
 // The contact to read for: the customer, plus the resolved phone ONLY when no other customer is tied to that number (the contact
@@ -565,10 +584,12 @@ async function emailTimeline(r, alert, bellAt) {
   const events = await eventsAfter(r, anchor, contact, { threadId: mail.gmail_thread_id, replyTo });
   // The last email Waves actually sent in the thread before the reply, by its own query (not the four context lines).
   const offer = await r.read('thread-offer', () => r.conn('emails as er').where('er.gmail_thread_id', mail.gmail_thread_id).whereRaw(personSentFilter('er'))
-    .where('er.received_at', '<', anchor).orderBy('er.received_at', 'desc').limit(1).select('er.received_at', r.conn.raw('left(er.body_text, 600) as b')));
+    .where('er.received_at', '<', anchor).orderBy('er.received_at', 'desc').limit(1)
+    .select('er.received_at', r.conn.raw(`left(er.body_text, ${OFFER_CHARS * 2}) as b`), r.conn.raw('length(er.body_text) as body_len')));
+  const sent = offer[0] ? ownEmailText(offer[0]) : { body: '', whole: false };
   const reply = {
-    lastBody: String(mail.body_text || '').split(/On .{5,60} wrote:/)[0].slice(0, 600),
-    prevOutbound: offer[0] ? String(offer[0].b || '') : '', prevAt: offer[0] ? toDate(offer[0].received_at) : null,
+    lastBody: String(mail.body_text || '').split(QUOTED_RE)[0].slice(0, 600),
+    prevOutbound: sent.body, prevAt: offer[0] ? toDate(offer[0].received_at) : null, whole: sent.whole,
   };
   return timelineOf(anchor, bellAt, `email:${emailId}`, { customerKnown: !!customerId, ctx, events, reply });
 }
@@ -704,7 +725,7 @@ function fingerprintOf(alert, timeline, now) {
   const contextHash = crypto.createHash('sha1').update((timeline.ctx || []).join('\n')).digest('hex');
   // The message, its send time and the reply a bare yes is judged on: a changed one gets a fresh look.
   const reply = timeline.reply;
-  const replyHash = reply ? crypto.createHash('sha1').update(`${reply.prevAt ? toDate(reply.prevAt).toISOString() : ''}\n${reply.prevOutbound || ''}\n${reply.lastBody || ''}`).digest('hex') : '';
+  const replyHash = reply ? crypto.createHash('sha1').update(`${reply.prevAt ? toDate(reply.prevAt).toISOString() : ''}\n${reply.whole ? 'w' : 'c'}\n${reply.prevOutbound || ''}\n${reply.lastBody || ''}`).digest('hex') : '';
   const parts = [`rules:${RULES_VERSION}`, timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash, replyHash,
     // Each event with a hash of what the model reads of it (body, summary, status notes), not just its id and state.
     ...(timeline.unreadable ? [] : timeline.events.map((e) => `${e.key}:${crypto.createHash('sha1').update(String(e.line || '')).digest('hex').slice(0, 12)}`).sort())];
@@ -754,11 +775,12 @@ function ruleVerdict(alert, timeline, owed, now) {
 // it is one, only the booking or held staff move the model names as its proof answers it: a text, an email, a call, an estimate or
 // a "nothing to answer" never does. No plain rule closes any bare yes (ruleVerdict). Code checks only what records prove (a real
 // booking, never a visit waiting for the customer to pick a time; a staff move the visit still holds) and holds the model to its
-// own reading.
+// own reading. The model's "accepts no offer" counts only when it saw the whole message the yes answers (`whole`: paired with the
+// number the yes came from, and not cut).
 const ANSWERS_A_YES = ['booking', 'date_change'];
 const bareYes = (timeline) => !!timeline.reply && BARE_YES_RE.test(timeline.reply.lastBody);
 function guardBareYes(v, timeline) {
-  if (v.outcome === 'still_owed' || !bareYes(timeline) || v.yesToOffer === false) return v;
+  if (v.outcome === 'still_owed' || !bareYes(timeline) || (v.yesToOffer === false && timeline.reply.whole === true)) return v;
   const named = v.outcome === 'answered' && v.proofId ? timeline.events.find((e) => e.type === v.proofType && e.id === v.proofId) : null;
   if (named && ANSWERS_A_YES.includes(named.proof)) return v;
   return verdict('still_owed', v.source, 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move named as the answer', { model: v.model });
@@ -810,7 +832,7 @@ function judgeInput(alert, timeline, facts) {
     // offer's "tomorrow" is read from when it was sent.
     ...(bareYes(timeline) && timeline.reply.prevOutbound ? [
       'THE YES AND THE MESSAGE IT ANSWERS (the last message Waves sent before the reply, then the reply):',
-      `- WAVES MESSAGE${timeline.reply.prevAt ? ` (sent ${instantText(timeline.reply.prevAt)})` : ''}: ${clean(timeline.reply.prevOutbound, 1500)}`,
+      `- WAVES MESSAGE${timeline.reply.prevAt ? ` (sent ${instantText(timeline.reply.prevAt)})` : ''}: ${clean(timeline.reply.prevOutbound, OFFER_CHARS * 2)}${timeline.reply.whole ? '' : ' [cut: the message is longer than shown]'}`,
       `- CUSTOMER REPLY (${instantText(timeline.alertAt)}): ${clean(timeline.reply.lastBody, 300)}`,
     ] : []),
     'AFTER THE ALERT (id | time | what):',

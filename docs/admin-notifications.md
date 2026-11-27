@@ -325,8 +325,9 @@ customer's message by this rule.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
    a real record (never an automated text, an expired link or an unsent Gmail draft). No plain rule closes a bare "ok" or "yes":
-   the model is shown the message it answers (whole, with when it was sent) and says whether the yes accepts an offered day or
-   time (`yes_to_offer`; a reply without it counts as yes). When it does, the bell closes only when the model names the booking or
+   the model is shown the message it answers (whole, with when it was sent; for a text, the last one sent to the number the yes
+   came from) and says whether the yes accepts an offered day or time (`yes_to_offer`; a reply without it counts as yes). Its
+   "accepts nothing new" counts only when it saw that whole message: a message cut short, or none found, keeps the rule below. When it does, the bell closes only when the model names the booking or
    held staff move that puts the visit at the offered day and time (the match is the model's: offers are free text, and each
    visit line gives the day with its weekday and the arrival window the customer is told; a visit waiting for the customer to pick
    a time is no booking). An owed bell with a bare yes stays owed. A finished visit never answers a question about its result. A visit move (a new day or a new start)

@@ -198,12 +198,12 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: phone(31) }).returning('id');
     made.conversations.push(conv.id);
     await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Yes', twilio_sid: sid, created_at: T0 });
-    await sms({ customer_id: cid, direction: 'outbound', message_type: 'manual', status: 'delivered', message_body: 'We could come Friday at 10 am. Does that work?', created_at: at(-30), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', to_phone: phone(31), message_type: 'manual', status: 'delivered', message_body: 'We could come Friday at 10 am. Does that work?', created_at: at(-30), metadata: { human_authored: 'true' } });
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const timeline = await agent.buildTimeline(row);
     expect(timeline.complete).toBe(true);
-    // The offer's send time comes with it, so the model can read "tomorrow" from it.
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?', prevAt: at(-30) });
+    // The offer's send time comes with it, so the model can read "tomorrow" from it; it went to the number the yes came from.
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?', prevAt: at(-30), whole: true });
     expect(timeline.ctx[timeline.ctx.length - 1]).toMatch(/the text this alert is about\): Yes/);
   });
 
@@ -224,6 +224,15 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(timeline.reply.lastBody.trim()).toBe('Yes');
     expect(timeline.reply.prevOutbound).toBe('Can we come Friday at 10 am?');
     expect(timeline.reply.prevAt).toEqual(at(-60));
+    expect(timeline.reply.whole).toBe(true);
+
+    // A Waves email whose own words run past what the model is shown is cut: the model's reading cannot lift the booking requirement.
+    const longThread = `th-${tag}-z`;
+    await mailRow({ gmail_thread_id: longThread, from_address: 'contact@wavespestcontrol.com', to_address: address, subject: 'Update', body_text: `${'Your account update is below. '.repeat(90)}Can we come Friday at 10 am?`, received_at: at(-60), label_ids: JSON.stringify(['SENT']) });
+    const longYes = await mailRow({ gmail_thread_id: longThread, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Re: Update', body_text: 'Yes', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid });
+    const cut = await agent.buildTimeline(await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: longYes } }));
+    expect(cut.reply.whole).toBe(false);
+    expect(cut.reply.prevOutbound).not.toMatch(/Can we come Friday/);
   });
 
   test('a hold voicemail bell: top-level call id, fragment link, judged from the bell\'s own time (a call during the hold answers nothing)', async () => {
@@ -544,12 +553,25 @@ postgres('alert clear-up agent: readers on a real schema', () => {
   test('the offer behind a "yes" is the last text the customer received, however many rows sit between', async () => {
     const cid = await customer();
     const sid = `SM${tag}o1`;
-    await sms({ customer_id: cid, direction: 'outbound', message_type: 'manual', status: 'delivered', message_body: 'Friday at 10 am works for the visit?', created_at: at(-600), metadata: { human_authored: 'true' } });
-    await sms({ customer_id: cid, direction: 'outbound', message_type: 'manual', status: 'queued', message_body: 'never delivered text', created_at: at(-100), metadata: { human_authored: 'true' } });
-    for (let i = 0; i < 15; i += 1) await sms({ customer_id: cid, direction: 'inbound', message_body: `chatter ${i}`, created_at: at(-500 + i), status: 'received' });
-    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
+    const number = phone(75);
+    await sms({ customer_id: cid, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Friday at 10 am works for the visit?', created_at: at(-600), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'queued', message_body: 'never delivered text', created_at: at(-100), metadata: { human_authored: 'true' } });
+    for (let i = 0; i < 15; i += 1) await sms({ customer_id: cid, direction: 'inbound', from_phone: number, message_body: `chatter ${i}`, created_at: at(-500 + i), status: 'received' });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Friday at 10 am works for the visit?', prevAt: at(-600) });
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Friday at 10 am works for the visit?', prevAt: at(-600), whole: true });
+  });
+
+  // A customer with two numbers: the yes from the first number answers the offer sent to it, never a later bill sent to the other.
+  test('the offer behind a text "yes" is the last text sent to the number the yes came from', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}o2`;
+    const [main, other] = [phone(76), phone(77)];
+    await sms({ customer_id: cid, direction: 'outbound', to_phone: main, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', to_phone: other, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-10) });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: main, twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
+    expect(timeline.reply).toMatchObject({ prevOutbound: 'Can we come Friday at 10 am?', whole: true });
   });
 
   test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {
