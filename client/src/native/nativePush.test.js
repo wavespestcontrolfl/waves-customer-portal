@@ -460,3 +460,58 @@ it('aborts an Android registration awaiting listChannels when logout starts so i
   const paths = api.request.mock.calls.map(([p]) => p);
   expect(paths).toEqual(['/push/native-unsubscribe']);
 });
+
+it('retries missing Android notification channels on foreground after an initial createChannel failure', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  let failedOnce = false;
+  nativeMocks.PushNotifications.createChannel.mockImplementation(async (ch) => {
+    if (ch.id === 'waves_billing' && !failedOnce) {
+      failedOnce = true;
+      throw new Error('transient os error');
+    }
+  });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  expect(nativeMocks.PushNotifications.createChannel).toHaveBeenCalledTimes(3);
+
+  // Next foreground retries ONLY the channel that failed initially.
+  await freshNativePush.initNativePush();
+  expect(nativeMocks.PushNotifications.createChannel).toHaveBeenCalledTimes(4);
+  expect(nativeMocks.PushNotifications.createChannel.mock.calls[3][0].id).toBe('waves_billing');
+});
+
+it('immediately unsubscribes on logout without blocking on a slow registration, and cleans up if the slow subscribe finishes later', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => ({ channels: [] }));
+  localStorage.setItem('waves_token', 'jwt-old-customer');
+
+  let resolveSlowSubscribe;
+  api.request.mockImplementation((path) => {
+    if (path === '/push/native-subscribe') {
+      return new Promise((resolve) => { resolveSlowSubscribe = resolve; });
+    }
+    return Promise.resolve({ ok: true, deactivated: 1 });
+  });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+
+  // Registration starts and hangs on /push/native-subscribe.
+  const regPromise = nativeMocks.state.listeners.registration({ value: 'fcm-slow-device' });
+  await vi.waitFor(() => expect(resolveSlowSubscribe).toBeTypeOf('function'));
+
+  // Logout MUST send /push/native-unsubscribe immediately without waiting for the hung subscribe.
+  await freshNativePush.deactivateNativePushToken();
+  localStorage.removeItem('waves_token');
+  expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-subscribe', '/push/native-unsubscribe']);
+
+  // Later, the slow subscribe finally succeeds — postToken must re-issue unsubscribe with its captured JWT.
+  resolveSlowSubscribe({ ok: true, id: 'sub-late' });
+  await regPromise;
+  await vi.waitFor(() => expect(api.request).toHaveBeenCalledTimes(3));
+  expect(api.request.mock.calls[2][0]).toBe('/push/native-unsubscribe');
+  expect(api.request.mock.calls[2][1].headers).toEqual({ Authorization: 'Bearer jwt-old-customer' });
+});

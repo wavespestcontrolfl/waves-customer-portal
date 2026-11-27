@@ -275,7 +275,7 @@ function unsupersededFailedDraftIds(facts) {
   return new Set(ids);
 }
 
-function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds, invoiceNumbers, limit, database }) {
+function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds, invoiceNumbers, limit, offset = 0, database }) {
   const query = database('invoices')
     .where({ customer_id: customerId })
     .where(function openOrEligibleDraft() {
@@ -301,11 +301,26 @@ function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds
   }
   query.orderBy('created_at', 'asc');
   if (limit) query.limit(limit);
+  if (offset > 0) query.offset(offset);
 
   return query.select(
     'id', 'status', 'token', 'invoice_number', 'due_date',
     'total', 'credit_applied', 'amount_paid', 'scheduled_service_id',
   );
+}
+
+function formatPayablePortalRow(row, eligibleDraftIds) {
+  if (!row.token) return null;
+  if (row.status && !OPEN_PORTAL_STATUSES.has(row.status) && !(row.status === 'draft' && eligibleDraftIds.has(String(row.id)))) {
+    return null;
+  }
+  return {
+    id: row.id != null ? String(row.id) : null,
+    payUrl: `/pay/${row.token}`,
+    amountDue: invoiceAmountDue(row),
+    invoiceNumber: row.invoice_number || null,
+    dueDate: row.due_date ?? null,
+  };
 }
 
 /**
@@ -324,24 +339,20 @@ async function listPayablePortalInvoices(customerId, {
   const { loadFailedPaymentFacts } = require('./failed-payments');
   const facts = failedFacts || await loadFailedPaymentFacts(customerId, database);
   const eligibleDraftIds = unsupersededFailedDraftIds(facts);
-  const rows = await queryPortalPayableCandidates(customerId, eligibleDraftIds, {
-    invoiceIds, invoiceNumbers, limit, database,
-  });
 
   const payable = [];
-  for (const row of rows) {
-    const statusOk = !row.status
-      || OPEN_PORTAL_STATUSES.has(row.status)
-      || (row.status === 'draft' && eligibleDraftIds.has(String(row.id)));
-    if (!row.token || !statusOk) continue;
-    if (!(await rowIsSelfPayDue(customerId, row, { database }))) continue;
-    payable.push({
-      id: row.id != null ? String(row.id) : null,
-      payUrl: `/pay/${row.token}`,
-      amountDue: invoiceAmountDue(row),
-      invoiceNumber: row.invoice_number || null,
-      dueDate: row.due_date ?? null,
+  const pageSize = limit || MAX_OPEN_INVOICES;
+  for (let offset = 0; offset < MAX_OPEN_INVOICES; offset += pageSize) {
+    const rows = await queryPortalPayableCandidates(customerId, eligibleDraftIds, {
+      invoiceIds, invoiceNumbers, limit: limit ? pageSize : null, offset, database,
     });
+    for (const row of rows) {
+      const formatted = formatPayablePortalRow(row, eligibleDraftIds);
+      if (!formatted || !(await rowIsSelfPayDue(customerId, row, { database }))) continue;
+      payable.push(formatted);
+      if (limit && payable.length >= limit) return payable;
+    }
+    if (!limit || rows.length < pageSize) break;
   }
   return payable;
 }

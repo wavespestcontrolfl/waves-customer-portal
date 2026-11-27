@@ -45,12 +45,13 @@ let pushPluginPromise = null;
 // so a quick logout→login re-subscribe can't reach the server first and then
 // be deactivated when the older unsubscribe lands.
 let inflightDeactivation = null;
-// Active /push/native-subscribe request while it's on the wire. Logout awaits
-// it before calling /push/native-unsubscribe so deactivation always finishes last.
-let inflightRegistration = null;
+// Serializes concurrent postToken() calls so two registrations for the same
+// device never race each other on the wire.
+let registrationQueue = Promise.resolve();
 // Monotonic epoch incremented whenever logout begins so any in-flight
 // registration awaiting async plugin work (e.g. listChannels) aborts before
-// touching the server.
+// touching the server, or cleans up with its captured JWT if it was already
+// on the wire when logout ran.
 let registrationEpoch = 0;
 const registrationWaiters = new Set();
 
@@ -96,8 +97,14 @@ async function readDisabledAndroidChannels() {
   }
 }
 
-async function postToken(token) {
+function postToken(token) {
   const epoch = registrationEpoch;
+  const run = registrationQueue.catch(() => {}).then(() => postTokenSerialized(token, epoch));
+  registrationQueue = run;
+  return run;
+}
+
+async function postTokenSerialized(token, epoch) {
   rememberToken(token);
   const jwt = authToken();
   if (!jwt) {
@@ -105,6 +112,7 @@ async function postToken(token) {
     pendingToken = token;
     return false;
   }
+  if (epoch !== registrationEpoch) return false;
   // Post the real platform so the backend routes iOS tokens to APNs and Android
   // tokens to FCM. (On Android, Capacitor's 'registration' event delivers an FCM
   // token here.) Default to 'ios' for anything non-Android (this only runs on a
@@ -118,7 +126,7 @@ async function postToken(token) {
     // started in the meantime, abort cleanly so we never reactivate the prior
     // customer's notifications after unsubscribe.
     if (epoch !== registrationEpoch || !authToken()) return false;
-    const subscribePromise = api.request('/push/native-subscribe', {
+    await api.request('/push/native-subscribe', {
       method: 'POST',
       body: JSON.stringify({
         platform,
@@ -130,13 +138,18 @@ async function postToken(token) {
         ...(disabledChannels !== null ? { disabledChannels } : {}),
       }),
     });
-    inflightRegistration = subscribePromise;
-    try {
-      await subscribePromise;
-    } finally {
-      if (inflightRegistration === subscribePromise) inflightRegistration = null;
+    if (epoch !== registrationEpoch) {
+      // Logout started while /push/native-subscribe was already on the wire and
+      // may have cleared localStorage tokens. Re-issue a best-effort unsubscribe
+      // using this request's captured JWT so our late subscribe cannot leave
+      // the signed-out customer's pushes active.
+      void api.request('/push/native-unsubscribe', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${jwt}` },
+        body: JSON.stringify({ token }),
+      }).catch(() => {});
+      return false;
     }
-    if (epoch !== registrationEpoch) return false;
     if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
     pendingToken = null;
     // The Lock Screen visit card rides on this registration: the server keeps the card's start token on
@@ -191,25 +204,24 @@ const ANDROID_NOTIFICATION_CHANNELS = [
   },
 ];
 
-let androidChannelsCreated = false;
+const createdAndroidChannels = new Set();
 async function ensureAndroidChannels(PushNotifications) {
-  if (androidChannelsCreated || nativePlatform() !== 'android') return;
+  if (nativePlatform() !== 'android') return;
   if (typeof PushNotifications?.createChannel !== 'function') return;
-  androidChannelsCreated = true;
-  try {
-    await Promise.all(
-      ANDROID_NOTIFICATION_CHANNELS.map((ch) => PushNotifications.createChannel(ch).catch(() => {})),
-    );
-  } catch {
-    androidChannelsCreated = false;
-  }
+  const missing = ANDROID_NOTIFICATION_CHANNELS.filter((ch) => !createdAndroidChannels.has(ch.id));
+  if (!missing.length) return;
+  await Promise.all(
+    missing.map((ch) => PushNotifications.createChannel(ch)
+      .then(() => { createdAndroidChannels.add(ch.id); })
+      .catch(() => {})),
+  );
 }
 
 async function bindPushListeners(PushNotifications) {
+  await ensureAndroidChannels(PushNotifications);
   if (listenersBound) return;
   listenersBound = true;
   try {
-    await ensureAndroidChannels(PushNotifications);
     await PushNotifications.addListener('registration', async (t) => {
       const registered = t?.value && await postToken(t.value);
       finishRegistration(registered ? 'granted' : 'registration_unavailable');
@@ -491,15 +503,12 @@ export async function deactivateNativePushToken() {
   // until the next Capacitor registration event (app restart).
   pendingToken = token;
   const request = (async () => {
-    // Wait for any already-in-flight /push/native-subscribe to settle before
-    // sending /push/native-unsubscribe so deactivation always wins last.
-    if (inflightRegistration) {
-      try { await inflightRegistration; } catch { /* ignore */ }
-    }
     try {
-      // api.request throws on non-OK, so a failed unsubscribe lands in the
-      // catch — pendingToken stays armed and the next login's flush re-points
-      // the subscription (which supersedes the old row server-side).
+      // Send /push/native-unsubscribe immediately while logout credentials are
+      // still live (never block behind a slow registration that could outlast
+      // logout's credential cleanup window). Any already-in-flight subscribe
+      // that finishes later sees epoch !== registrationEpoch and cleans up
+      // with its own captured JWT.
       await api.request('/push/native-unsubscribe', {
         method: 'POST',
         body: JSON.stringify({ token }),
