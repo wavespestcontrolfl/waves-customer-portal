@@ -604,10 +604,10 @@ async function loadCall(r, callId) {
 // The missed-call text-back sent for THIS call: the lane's own claim names the originating call (missed_call_text_claims.call_log_id).
 // Never "some text to the number a minute later", and never the number's earlier text-back: a later call the lane skipped (one text
 // per number ever) holds no claim of its own. The send pipeline keeps no call id on the text row, so the text is the number's newest
-// text-back row written after this call began, read only when this call holds the claim, and read from sms_log itself: the shared
-// text base hides cancelled rows. It went out when the claim says sent, or when the provider's receipt says delivered or read (a claim
-// an unclear provider reply left uncertain). A text the provider bounced, or one never sent (the lane's own unsent list,
-// auto-text-holds.js UNSENT_STATUSES), reached no one whatever the claim says.
+// text-back row written after this call began, read only when this call holds the claim. The read keeps cancelled rows (the shared
+// reservation filter with keepNeverSent; the agent's text base hides them). It went out when the claim says sent, or when the
+// provider's receipt says delivered or read (a claim an unclear provider reply left uncertain). A text the provider bounced, or one
+// never sent (the lane's own unsent list, auto-text-holds.js UNSENT_STATUSES), reached no one whatever the claim says.
 const TEXT_BACK_RECEIPTS = ['delivered', 'read'];
 async function textBackWasSent(r, call, phone) {
   const { CLAIM, MESSAGE_TYPE } = require('./missed-call-text-back');
@@ -615,7 +615,8 @@ async function textBackWasSent(r, call, phone) {
   const claims = await r.read('text-back-claim', () => r.conn('missed_call_text_claims').where({ call_log_id: call.id }).limit(1).select('outcome'));
   const claim = claims[0]?.outcome || 'none';
   const peer = phoneIdentityKey(phone);
-  const texts = claims.length && peer ? await r.read('text-back', () => r.conn('sms_log as os').where('os.direction', 'outbound').where('os.message_type', MESSAGE_TYPE)
+  const texts = claims.length && peer ? await r.read('text-back', () => excludeUnresolvedSendReservations(r.conn('sms_log as os'), 'os', { keepNeverSent: true })
+    .where('os.direction', 'outbound').where('os.message_type', MESSAGE_TYPE)
     .whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [peer]).where('os.created_at', '>=', toDate(call.created_at))
     .orderBy('os.created_at', 'desc').limit(1).select('os.status')) : [];
   const text = String(texts[0]?.status || 'none').toLowerCase();

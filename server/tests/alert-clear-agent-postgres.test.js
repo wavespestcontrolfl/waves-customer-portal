@@ -405,7 +405,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(bounced.call).toMatchObject({ textBackSent: false, textBackUnsent: true, robocall: null, textBackState: 'sent:undelivered' });
     expect(agent.ruleVerdict({ category: 'missed_call' }, bounced, false, day)).toBeNull();
 
-    // A cancelled text never went out, though the claim says sent. The shared text base hides cancelled rows; this read sees them.
+    // A cancelled text never went out, though the claim says sent. The agent's text base hides cancelled rows; this read keeps them.
     const textBackCall = async (n, claim, status, sentAt, suffix) => {
       const number = phone(n);
       const callId = await missedCall(number);
