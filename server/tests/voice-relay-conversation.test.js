@@ -411,10 +411,12 @@ describe('RelayConversation — explicit end after capture', () => {
       try {
         const a = new RelayConversation({ callSid: 'CAc-a', from: '+19415551234', send: jest.fn() });
         a._callerContext = { customer: { id: 'c-1' }, tier: 'full', block: 'KNOWN CALLER: Pat A' };
+        a._runModelRound = jest.fn().mockResolvedValue(null);
         const b = new RelayConversation({ callSid: 'CAc-b', from: '+19415559999', send: jest.fn() });
         b._callerContext = { customer: { id: 'c-2' }, tier: 'full', block: 'KNOWN CALLER: Sam B' };
-        await a._runLoop('hi').catch(() => {});
-        await b._runLoop('hi').catch(() => {});
+        b._runModelRound = jest.fn().mockResolvedValue(null);
+        await a._runLoop('hi');
+        await b._runLoop('hi');
         expect(a._systemBlocks).toHaveLength(2);
         expect(b._systemBlocks).toHaveLength(2);
         expect(a._systemBlocks[0].text).toBe(b._systemBlocks[0].text);
