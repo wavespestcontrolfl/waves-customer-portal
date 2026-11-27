@@ -600,4 +600,4 @@ async function loadLeadReachStats(leads, { conn = db } = {}) {
   return stats;
 }
 
-module.exports = { loadLeadReachStats, judgeReach, reachCohort, REACH_WITHIN_MINUTES, NOT_JUDGED, _test: { usablePhoneKey, leadEmail, bucketReach } };
+module.exports = { loadLeadReachStats, judgeReach, reachCohort, estimateSends, estimateItems, REACH_WITHIN_MINUTES, NOT_JUDGED, _test: { usablePhoneKey, leadEmail, bucketReach } };
