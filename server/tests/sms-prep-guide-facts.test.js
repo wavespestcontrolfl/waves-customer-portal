@@ -89,6 +89,10 @@ describe('loadPrepGuideFacts', () => {
     expect(named.result).toMatchObject({ source: 'named', key: 'prep.lawn', label: 'Lawn Treatment' });
     expect(named.sender.bookedPrepGuide).toHaveBeenCalledWith(['c1'], { family: 'lawn' });
     expect((await load({ booked: { visit: { id: 'v1' }, pestType: 'interior_pest', config: PEST } })).result).toMatchObject({ source: 'booked' });
+    // no upcoming visit of the named service: the last completed guide only when it IS that service, never another service's guide
+    const lastFlea = { last: { id: 'rec-1', service_type: 'Flea Treatment', scheduled_service_id: 'ss-1' } };
+    expect((await load({ booked: null, family: ['flea', FLEA] }, { ...lastFlea, family: 'lawn' })).result).toEqual({ sections: [] });
+    expect((await load({ booked: null, family: ['flea', FLEA] }, { ...lastFlea, family: 'flea' })).result).toMatchObject({ source: 'last', key: 'prep.flea' });
   });
 
   test('no booked visit: the last completed service\'s family, by the sender\'s own match rule', async () => {

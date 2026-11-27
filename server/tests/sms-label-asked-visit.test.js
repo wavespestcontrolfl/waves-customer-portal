@@ -73,8 +73,15 @@ describe('pickAskedVisitDate', () => {
     expect(pick('after the lawn treatment can the dog go out?', [day('2026-11-24', ['interior_pest']), day('2026-11-21', [], true), day('2026-11-18', ['lawn'])])).toBe(labelFactsLib.NO_ASKED_VISIT);
   });
 
-  test('two services named: ambiguous, the latest visit (null)', () => {
-    expect(pick('the lawn treatment or the pest control visit, which one?')).toBeNull();
+  test('two services named: the one day both resolve to, else none on file (never the latest visit of a third service)', () => {
+    expect(pick('the lawn treatment or the pest control visit, which one?')).toBe(labelFactsLib.NO_ASKED_VISIT);
+    expect(pick('the lawn treatment and the mosquito spray', [day('2026-11-24', ['flea']), day('2026-11-18', ['lawn', 'mosquito'])])).toBe('2026-11-18');
+    expect(pick('the lawn treatment and the mosquito spray', [day('2026-11-24', ['flea']), day('2026-11-18', ['lawn'])])).toBe(labelFactsLib.NO_ASKED_VISIT);
+  });
+
+  test('a catalog service name reads as PREP_CONFIG classifies it: "Lawn Pest Control" is the lawn service', () => {
+    expect([...labelFactsLib.namedServiceFamilies('after the Lawn Pest Control visit can the dog go out')]).toEqual(['lawn']);
+    expect(pick('after the Lawn Pest Control visit can the dog go out')).toBe('2026-11-18');
   });
 
   test('a date: the one earlier visit every date reference resolves to', () => {

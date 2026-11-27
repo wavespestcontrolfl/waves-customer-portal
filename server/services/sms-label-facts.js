@@ -447,9 +447,21 @@ const NAMED_SERVICE_FAMILIES = [
   { family: 'rodent', re: new RegExp(`\\b(?:rodent|rat|mouse|mice)\\s+(?:control|trapping|${SERVICE_NOUN_SRC})\\b`) },
 ];
 /** The prep guide families a text names by a service word (a Set; empty when none). A heat bed bug service is never also the chemical one. */
+// The words only FIND a service phrase; PREP_CONFIG (the guide sender's own matcher, which classifies every visit) names its family:
+// each match is read with the one word before it, so a catalog name ("Lawn Pest Control") is the family PREP_CONFIG gives it (lawn),
+// never the family of the generic words inside it. A phrase PREP_CONFIG does not classify ("the fertilizer") keeps the words' family.
+const NAMED_SERVICE_GLOBAL = NAMED_SERVICE_FAMILIES.map(({ family, re }) => ({ family, re: new RegExp(re.source, 'g') }));
+function catalogFamilyOf(canon, match) {
+  const before = canon.slice(0, match.index).split(/\s+/).filter(Boolean).slice(-1).join(' ');
+  const hit = require('./prep-guide-sender').prepFamilyForServiceType(`${before} ${match[0]}`);
+  return hit ? hit[0] : null;
+}
 function namedServiceFamilies(text) {
   const canon = canonText(text).toLowerCase();
-  const found = new Set(NAMED_SERVICE_FAMILIES.filter(({ re }) => re.test(canon)).map(({ family }) => family));
+  const found = new Set();
+  for (const { family, re } of NAMED_SERVICE_GLOBAL) {
+    for (const match of canon.matchAll(re)) found.add(catalogFamilyOf(canon, match) || family);
+  }
   if (found.has('bed_bug_heat')) found.delete('bed_bug');
   return found;
 }
@@ -463,12 +475,13 @@ const NO_ASKED_VISIT = Symbol('no asked visit');
 /**
  * Which visit's label facts a text asks for, deterministically, from `days` (readRecentVisitDays) and `texts` (the current text first):
  *   null           the latest visit, as before: no service named and no date that resolves (an unresolved date: labelFactsForInbound
- *                  then reads it as another visit, none on file), or two services named;
+ *                  then reads it as another visit, none on file);
  *   'YYYY-MM-DD'   the visit day asked about (the latest one included, so the read is pinned to it): the text's date references all
  *                  resolve to that one earlier day (inboundRefersToOtherVisit, the resolver the none-on-file rule uses), or the text names
  *                  ONE service and that day is the newest that certainly had it, with no newer day of an unmatched service type;
- *   NO_ASKED_VISIT the text names one service and no visit of the window is certainly it (none had it, a newer day has a service type
- *                  no family covers, no visit in the window, or a named date that disagrees): none on file.
+ *   NO_ASKED_VISIT the text names a service and no ONE visit of the window is certainly it (none had it, a newer day has a service type
+ *                  no family covers, no visit in the window, a named date that disagrees, or two services named that resolve to
+ *                  different days): none on file.
  * The service words come from the current text, and from the thread too when the current text is a short follow-up; date references
  * from the current text only (an older row's relative words mean its own day: labelFactsForInbound reads those).
  */
@@ -476,19 +489,23 @@ function pickAskedVisitDate(days, texts, today = etDateString()) {
   const list = [].concat(texts || []).filter((t) => typeof t === 'string');
   if (!list.length || inboundOverCap(list)) return null;
   const sources = inboundIsElliptical(list) ? list : list.slice(0, 1);
-  const families = new Set(sources.flatMap((text) => [...namedServiceFamilies(text)]));
-  if (families.size > 1) return null;
-  const [family] = [...families];
+  const families = [...new Set(sources.flatMap((text) => [...namedServiceFamilies(text)]))];
   // a named service with no visit in the window: none on file, never an older latest visit
-  if (!Array.isArray(days) || !days.length) return family ? NO_ASKED_VISIT : null;
+  if (!Array.isArray(days) || !days.length) return families.length ? NO_ASKED_VISIT : null;
   const latest = days[0].date;
   if (inboundRefersToOtherVisit(list[0], latest, today)) {
-    const resolved = days.filter((d) => d.date !== latest && !inboundRefersToOtherVisit(list[0], d.date, today) && (!family || d.families.has(family)));
+    const resolved = days.filter((d) => d.date !== latest && !inboundRefersToOtherVisit(list[0], d.date, today) && families.every((f) => d.families.has(f)));
     if (resolved.length === 1) return resolved[0].date;
-    return family ? NO_ASKED_VISIT : null;
+    return families.length ? NO_ASKED_VISIT : null;
   }
-  if (!family) return null;
-  // the newest day that certainly had the service, and no newer day whose service no family covers (it could be the one): else none
+  if (!families.length) return null;
+  // every service named must resolve to the SAME visit day, else none on file
+  const picks = new Set(families.map((family) => newestDayWith(days, family)));
+  return picks.size === 1 ? [...picks][0] : NO_ASKED_VISIT;
+}
+
+// The newest day that certainly had `family`, with no newer day whose service no family covers (it could be the one): else NO_ASKED_VISIT.
+function newestDayWith(days, family) {
   const first = days.find((d) => d.families.has(family) || d.unknown);
   return first && first.families.has(family) ? first.date : NO_ASKED_VISIT;
 }

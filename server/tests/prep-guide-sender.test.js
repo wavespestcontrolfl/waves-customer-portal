@@ -136,14 +136,18 @@ let serviceUpdateCount = 1;
 function scheduledQuery() {
   let tokenMode = false;
   let listMode = false; // nextUpcomingVisit: .limit(n).select(cols) → rows
+  let pageLimit = Infinity;
+  let pageOffset = 0;
   const q = {
-    limit: jest.fn(() => { listMode = true; return q; }),
-    offset: jest.fn(() => q),
+    limit: jest.fn((n) => { listMode = true; pageLimit = n; return q; }),
+    offset: jest.fn((n) => { pageOffset = n; return q; }),
     // nextUpcomingVisits / nextUpcomingVisit: …limit().offset().select(cols) → rows.
     select: jest.fn(() => {
       if (listMode) {
         if (visitLookupError) return Promise.reject(visitLookupError);
-        return Promise.resolve(upcomingVisitRows || (upcomingVisitRow ? [upcomingVisitRow] : []));
+        // several candidates are paged like the real query (limit + offset); one row stays the single answer
+        if (upcomingVisitRows) return Promise.resolve(upcomingVisitRows.slice(pageOffset, pageOffset + pageLimit));
+        return Promise.resolve(upcomingVisitRow ? [upcomingVisitRow] : []);
       }
       tokenMode = true; return q;
     }),
@@ -1086,7 +1090,20 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     const own = await sender.bookedPrepGuide(['cust-1'], { family: 'interior_pest' });
     expect(own).toMatchObject({ visit: { id: 'svc-1' }, pestType: 'interior_pest' });
     expect(own).not.toHaveProperty('source');
-    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'mosquito' })).toMatchObject({ visit: { id: 'svc-1' }, pestType: 'interior_pest' });
+    // a named service no upcoming visit carries: no guide at all, never the first booking's unrelated one
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'mosquito' })).toBeNull();
+  });
+
+  test('upcomingPrepGuideFor reads the family\'s own PREP_CONFIG keywords and pages past the first ten upcoming visits', async () => {
+    upcomingVisitRows = [
+      ...Array.from({ length: 11 }, (_, i) => ({ ...VISIT, id: `svc-p${i}`, service_type: 'Pest Control' })),
+      { ...VISIT, id: 'svc-lawn', service_type: 'Lawn Fertilization' },
+    ];
+    scheduledQueries = [];
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-lawn' }, pestType: 'lawn' });
+    const raws = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls);
+    expect(raws.some(([sql, args]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)) && JSON.stringify(args) === JSON.stringify(['%lawn%']))).toBe(true);
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'lawn' })).toMatchObject({ visit: { id: 'svc-lawn' }, source: 'named' });
   });
 
   test('bookedPrepGuide reads the whole stop from the snapshot its page state was judged on: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {

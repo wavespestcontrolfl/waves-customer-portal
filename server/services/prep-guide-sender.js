@@ -424,8 +424,9 @@ async function bookedPrepGuide(customerIds, { family = null } = {}) {
   if (!visit) return null;
   const next = await stopPrepGuide(visit);
   if (!family || next.pestType === family) return next;
+  // the customer named another service: that service's visit, or no guide at all (never the first booking's unrelated guide)
   const named = await upcomingPrepGuideFor(customerIds, family);
-  return named ? { ...named, source: 'named' } : next;
+  return named ? { ...named, source: 'named' } : null;
 }
 
 // The guide one upcoming visit's STOP carries (bookedPrepGuide's rule): { visit, pestType, config }. THROWS on a lookup error.
@@ -439,13 +440,16 @@ async function stopPrepGuide(visit) {
 
 /**
  * The guide of the soonest upcoming visit whose stop carries the guide family `pestType` (texting AI gap 5: the customer named a service,
- * "the lawn treatment", whose visit is not the next one). The same visits, order and per-stop rule as bookedPrepGuide, over the first
- * page of the customer's upcoming visits (VISIT_PAGE, the soonest ten). { visit, pestType, config } or null when none of them carries
- * it. THROWS on a lookup error (a stop whose members could not be read included).
+ * "the lawn treatment", whose visit is not the next one). The same order and per-stop rule as bookedPrepGuide, over EVERY upcoming visit
+ * whose service type the family's own PREP_CONFIG keywords match (paged to the end, so a visit behind any number of other bookings is
+ * found), at most NAMED_GUIDE_SCAN_MAX of them: past that, none. { visit, pestType, config } or null when none of them carries it.
+ * THROWS on a lookup error (a stop whose members could not be read included).
  */
+const NAMED_GUIDE_SCAN_MAX = 50;
 async function upcomingPrepGuideFor(customerIds, pestType) {
-  if (!PREP_CONFIG[pestType] || PREP_CONFIG[pestType].guide) return null;
-  const visits = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, VISIT_PAGE, { strict: true });
+  const config = PREP_CONFIG[pestType];
+  if (!config || config.guide) return null;
+  const visits = await upcomingFamilyVisits(customerIds, config, NAMED_GUIDE_SCAN_MAX, { strict: true });
   for (const visit of visits) {
     const guide = await stopPrepGuide(visit);
     if (guide.pestType === pestType) return guide;

@@ -173,6 +173,12 @@ function guideGroups(blocks, productNames) {
  * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
  * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
  */
+// The guide the completed services agree on, else null. A named service (`family`): only a guide of that service, never another
+// service's last guide.
+function lastGuideConfig(completed, family) {
+  const keys = new Set(completed.map((guide) => (family && guide.pestType !== family ? null : guide.config?.emailTemplateKey || null)));
+  return keys.size === 1 && [...keys][0] ? completed[0].config : null;
+}
 async function loadPrepGuideFacts(customerId, lastRecords, { db, family } = {}) {
   const none = { sections: [] };
   if (!customerId || !db) return null;
@@ -185,8 +191,7 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db, family } = {}) 
     // Each resolves to the guide it carried; they must all agree, else no guide is named.
     // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
     const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceRecordId: record?.id, serviceType: record?.service_type })));
-    const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
-    const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
+    const config = booked ? booked.config : lastGuideConfig(completed, family);
     if (!config) return none;
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     // the template must be one the customer's own page and the email sender would use: published (an active version) and not switched off
