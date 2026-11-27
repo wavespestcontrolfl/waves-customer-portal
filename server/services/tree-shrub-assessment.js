@@ -417,6 +417,11 @@ async function callClaudeVision(base64Image, mimeType) {
       ledgerCallRejected(response, 'invalid_json');
       throw err;
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      ledgerCallRejected(response, 'schema_invalid');
+      logger.warn('[tree-shrub-assessment] Claude vision response failed schema validation');
+      return null;
+    }
     normalizeTreeShrubScores(parsed);
     if (!isValidTreeShrubScores(parsed)) {
       ledgerCallRejected(response, 'schema_invalid');
@@ -470,6 +475,11 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
   } catch (err) {
     ledgerCallRejected(data, 'invalid_json');
     throw err;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    ledgerCallRejected(data, 'schema_invalid');
+    logger.warn(`Tree-shrub assessment Gemini vision response failed schema validation (${model})`);
+    return null;
   }
   normalizeTreeShrubScores(parsed);
   if (!isValidTreeShrubScores(parsed)) {

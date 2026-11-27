@@ -177,4 +177,35 @@ describe('runWriter (Stage 3, OpenAI primary) — ledgerCall + empty-summary rej
     expect(out).toEqual({ ok: false, reason: 'openai_500' });
     expect(ledgerCall).toHaveBeenCalledWith('openai', expect.any(String), expect.any(Function), { laneId: 'lawn_diag_writer' });
   });
+
+  test('OpenAI status incomplete fails with openai_incomplete even when output_text parses', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'resp_1',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output_text: JSON.stringify({ customer_summary: 'Truncated text' }),
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'openai_incomplete' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('OpenAI refusal fails with openai_refusal without misclassifying as invalid_json', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'resp_2',
+        status: 'completed',
+        output: [{ content: [{ type: 'refusal', refusal: 'Declined' }] }],
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'openai_refusal' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
 });

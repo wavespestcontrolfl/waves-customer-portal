@@ -235,6 +235,11 @@ async function callClaudeVision(base64Image, mimeType, context = {}, deadline = 
       ledgerCallRejected(response, 'invalid_json');
       throw err;
     }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      ledgerCallRejected(response, 'schema_invalid');
+      logger.warn('[lawn-assessment] Claude vision response failed schema validation');
+      return null;
+    }
     parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
     normalizeVisionScores(parsed);
     if (!isValidVisionScores(parsed)) {
@@ -301,6 +306,11 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}, d
   } catch (err) {
     ledgerCallRejected(data, 'invalid_json');
     throw err;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    ledgerCallRejected(data, 'schema_invalid');
+    logger.warn(`Lawn assessment Gemini vision response failed schema validation (${model})`);
+    return null;
   }
   parsed.grass_type = normalizeDetectedGrass(parsed.grass_type);
   normalizeVisionScores(parsed);

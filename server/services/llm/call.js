@@ -1058,6 +1058,8 @@ module.exports = {
   dispatch,
   dispatchWithFallback,
   extractOpenAIText,
+  openAIVerdict,
+  geminiVerdict,
   parseLooseJson,
   providerErrorReason,
   OPENAI_RESPONSES_API,

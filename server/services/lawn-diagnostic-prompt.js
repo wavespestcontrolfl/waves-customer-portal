@@ -26,7 +26,7 @@
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText, dispatch, rejectCall } = require('./llm/call');
+const { anthropicText, geminiText, dispatch, rejectCall, openAIVerdict } = require('./llm/call');
 // Shared egress sanitizers: reduce names to allowlisted labels and scrub free text
 // BEFORE the narrative LLM sees them, so no raw/injected finding text can echo into
 // the published customer_summary (the output is scrubbed again at the public route).
@@ -849,7 +849,12 @@ async function runWriter(contract = {}, _context = {}) {
       }
       return resp.json();
     }, { laneId: 'lawn_diag_writer' });
-    const parsed = parseLooseJson(extractOpenAIText(data));
+    const rawText = extractOpenAIText(data);
+    const verdict = typeof openAIVerdict === 'function' ? openAIVerdict(data, rawText) : null;
+    if (verdict) {
+      return { ok: false, reason: verdict.code };
+    }
+    const parsed = parseLooseJson(rawText);
     const summary = parsed && typeof parsed.customer_summary === 'string' ? parsed.customer_summary.trim() : '';
     if (!summary) {
       ledgerCallRejected(data, parsed ? 'invalid_output' : 'invalid_json');

@@ -565,6 +565,38 @@ function ledgerCallRejected(value, errorCode) {
   }
 }
 
+function anthropicResponseErrorCode(value) {
+  if (value?.stop_reason === 'refusal') return 'anthropic_refusal';
+  if (value?.stop_reason === 'max_tokens') return 'anthropic_incomplete';
+  return endedWithoutText(value) ? 'empty_text' : null;
+}
+
+function geminiResponseErrorCode(value) {
+  if (!value || typeof value !== 'object') return null;
+  try {
+    const { geminiVerdict } = require('./llm/call');
+    if (typeof geminiVerdict !== 'function') return null;
+    return geminiVerdict(value, value.candidates?.[0] || {}, null) || null;
+  } catch { return null; }
+}
+
+function openAIResponseErrorCode(value) {
+  if (!value || typeof value !== 'object') return null;
+  try {
+    const { openAIVerdict, extractOpenAIText } = require('./llm/call');
+    if (typeof openAIVerdict !== 'function') return null;
+    const out = typeof extractOpenAIText === 'function' ? extractOpenAIText(value) : '';
+    return openAIVerdict(value, out)?.code || null;
+  } catch { return null; }
+}
+
+function providerResponseErrorCode(provider, value) {
+  if (provider === 'anthropic') return anthropicResponseErrorCode(value);
+  if (provider === 'gemini') return geminiResponseErrorCode(value);
+  if (provider === 'openai') return openAIResponseErrorCode(value);
+  return null;
+}
+
 /**
  * Run one raw provider call under the ledger. `fn` resolves the provider's
  * own value — an SDK Message or a parsed JSON body — which is returned
@@ -591,18 +623,11 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
     throw err;
   }
-  // An Anthropic Message that resolved with stop_reason 'refusal' is a
-  // failed call (the model declined; the DEEP helper falls over to OpenAI),
-  // billed for its tokens like any other answered request. 'max_tokens' is
-  // an incomplete one — the output was cut off (the DEEP helper warns and
-  // hands it back unchanged) — filed the way OpenAI's `incomplete` status
-  // already is, so the ledger's success rate and failure classes do not
-  // depend on which provider truncated (Codex r7 on #3846).
-  const errorCode = provider !== 'anthropic' ? null
-    : value?.stop_reason === 'refusal' ? 'anthropic_refusal'
-    : value?.stop_reason === 'max_tokens' ? 'anthropic_incomplete'
-    : endedWithoutText(value) ? 'empty_text'
-    : null;
+  // Classify provider-level outcomes (refusals, truncations, empty Anthropic
+  // answers) across Anthropic, Gemini, and OpenAI before callers parse or
+  // validate — preserving provider verdicts so downstream ledgerCallRejected
+  // calls never mask a refusal or MAX_TOKENS truncation as invalid_json.
+  const errorCode = providerResponseErrorCode(provider, value);
   const callId = recordCall({
     provider,
     requestedModel,

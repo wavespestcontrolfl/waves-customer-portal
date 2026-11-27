@@ -206,7 +206,11 @@ describe('customer_visible direct_sdk ledger closure', () => {
   });
 
   describe('contact_dictation laneId', () => {
-    afterEach(() => { jest.resetModules(); });
+    afterEach(() => {
+      jest.dontMock('../services/llm/call');
+      jest.dontMock('../services/logger');
+      jest.resetModules();
+    });
 
     test('passes laneId contact_dictation to dispatchWithFallback', async () => {
       jest.resetModules();
@@ -224,6 +228,114 @@ describe('customer_visible direct_sdk ledger closure', () => {
         expect.objectContaining({ laneId: 'contact_dictation' }),
         expect.any(Object),
       );
+    });
+  });
+
+  describe('provider verdicts and JSON-null rejection in ledgerCall', () => {
+    const origGem = process.env.GEMINI_API_KEY;
+    const origAnth = process.env.ANTHROPIC_API_KEY;
+    const origFetch = global.fetch;
+    const origGate = process.env.GATE_LLM_CALL_LEDGER;
+
+    afterEach(() => {
+      if (origGem === undefined) delete process.env.GEMINI_API_KEY;
+      else process.env.GEMINI_API_KEY = origGem;
+      if (origAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = origAnth;
+      if (origGate === undefined) delete process.env.GATE_LLM_CALL_LEDGER;
+      else process.env.GATE_LLM_CALL_LEDGER = origGate;
+      global.fetch = origFetch;
+      jest.dontMock('@anthropic-ai/sdk');
+      jest.dontMock('../services/llm-dispatch-metrics');
+      jest.dontMock('../services/llm/call');
+      jest.dontMock('../services/logger');
+      jest.dontMock('../models/db');
+      jest.resetModules();
+    });
+
+    test('lawn_assess records JSON null replies as schema_invalid on both Gemini and Claude', async () => {
+      process.env.GEMINI_API_KEY = 'test-gemini';
+      process.env.ANTHROPIC_API_KEY = 'test-anth';
+      jest.resetModules();
+      const mockLedgerCall = jest.fn((p, m, fn) => fn());
+      const mockLedgerCallRejected = jest.fn();
+      const mockCreate = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'null' }],
+        stop_reason: 'end_turn',
+      });
+      jest.doMock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
+      jest.doMock('../services/llm-dispatch-metrics', () => ({ ledgerCall: mockLedgerCall, ledgerCallRejected: mockLedgerCallRejected }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ candidates: [{ content: { parts: [{ text: 'null' }] } }] }),
+      }));
+
+      const lawn = require('../services/lawn-assessment');
+      const result = await lawn.analyzePhoto('AA==', 'image/jpeg');
+      expect(result).toBeNull();
+      expect(mockLedgerCallRejected).toHaveBeenCalledTimes(2);
+      expect(mockLedgerCallRejected).toHaveBeenNthCalledWith(1, expect.anything(), 'schema_invalid');
+      expect(mockLedgerCallRejected).toHaveBeenNthCalledWith(2, expect.anything(), 'schema_invalid');
+    });
+
+    test('real ledgerCall preserves gemini_refusal, gemini_incomplete, openai_incomplete, and openai_refusal without overwriting on ledgerCallRejected', async () => {
+      process.env.GATE_LLM_CALL_LEDGER = 'true';
+      jest.resetModules();
+      const inserted = [];
+      const updated = [];
+      const mockDb = jest.fn(() => ({
+        insert: (row) => {
+          inserted.push(row);
+          return { returning: async () => [{ id: inserted.length }] };
+        },
+        where: () => ({
+          update: async (patch) => {
+            updated.push(patch);
+            return 1;
+          },
+        }),
+      }));
+      jest.doMock('../models/db', () => mockDb);
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+      const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
+
+      const blocked = await ledgerCall('gemini', 'gemini-3.8-flash', async () => ({
+        candidates: [{ finishReason: 'SAFETY' }],
+      }), { laneId: 'pest_id' });
+      ledgerCallRejected(blocked, 'empty_text');
+
+      const truncated = await ledgerCall('gemini', 'gemini-3.8-flash', async () => ({
+        candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"best_match":' }] } }],
+      }), { laneId: 'pest_id' });
+      ledgerCallRejected(truncated, 'invalid_json');
+
+      const oaiIncomplete = await ledgerCall('openai', 'gpt-5.5', async () => ({
+        id: 'resp_inc',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output_text: '{"customer_summary":"partial"}',
+      }), { laneId: 'lawn_diag_writer' });
+      ledgerCallRejected(oaiIncomplete, 'invalid_output');
+
+      const oaiRefusal = await ledgerCall('openai', 'gpt-5.5', async () => ({
+        id: 'resp_ref',
+        status: 'completed',
+        output: [{ content: [{ type: 'refusal', refusal: 'Cannot answer' }] }],
+      }), { laneId: 'lawn_diag_writer' });
+      ledgerCallRejected(oaiRefusal, 'invalid_json');
+
+      await new Promise((r) => setImmediate(r));
+      expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code }))).toEqual([
+        { ok: false, error_code: 'gemini_refusal' },
+        { ok: false, error_code: 'gemini_incomplete' },
+        { ok: false, error_code: 'openai_incomplete' },
+        { ok: false, error_code: 'openai_refusal' },
+      ]);
+      // None of the already-classified provider failures should be overwritten by ledgerCallRejected.
+      expect(updated).toEqual([]);
     });
   });
 });
