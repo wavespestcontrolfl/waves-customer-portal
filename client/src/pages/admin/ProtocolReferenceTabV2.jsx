@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, ScanStrip, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
-import ProtocolTankSheet from "./ProtocolTankSheet";
+import ProtocolTankSheet, { neverMixLines } from "./ProtocolTankSheet";
 import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
@@ -861,26 +861,7 @@ export function ProtocolMixCard({
         </div>{" "}
         <div className="p-4 space-y-2">
           {plan.mixingOrder?.length ? (
-            plan.mixingOrder.map((step) => (
-              <div
-                key={`${step.step}-${step.productId}`}
-                className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
-              >
-                {" "}
-                <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
-                  {step.step}
-                </div>{" "}
-                <div>
-                  {" "}
-                  <div className="text-13 font-medium text-zinc-900">
-                    {step.productName}
-                  </div>{" "}
-                  <div className="text-12 text-ink-secondary leading-normal mt-1">
-                    {step.instruction}
-                  </div>{" "}
-                </div>{" "}
-              </div>
-            ))
+            <MixOrderSteps steps={plan.mixingOrder} mixCheck={plan.mixCheck} nameClass="text-13" textClass="text-12" />
           ) : plan.blocks?.length ? (
             <div className="text-13 text-alert-fg">
               {plan.blocks.map((b) => b.message).join(" ")}
@@ -898,25 +879,41 @@ export function ProtocolMixCard({
             <div className="text-14 font-medium text-zinc-900">Bermuda backpack mix</div>
           </div>
           <div className="p-4 space-y-2">
-            {plan.bermudaMixingOrder.map((step) => (
-              <div
-                key={`${step.step}-${step.productId}`}
-                className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
-              >
-                <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
-                  {step.step}
-                </div>
-                <div>
-                  <div className="text-14 font-medium text-zinc-900">{step.productName}</div>
-                  <div className="text-14 text-ink-secondary leading-normal mt-1">{step.instruction}</div>
-                </div>
-              </div>
-            ))}
+            <MixOrderSteps steps={plan.bermudaMixingOrder} mixCheck={plan.mixCheck} nameClass="text-14" textClass="text-14" />
           </div>
         </Card>
       )}
       <ProductLabelsCard items={plan.items} />{" "}
     </div>
+  );
+}
+
+// One tank's mixing order. A Never pair among its products (the mix safety table, /lawn-mix mixCheck): the "Do not mix" lines
+// come first and the steps lose their numbers, so nothing reads as an order to combine them; every product and its amount
+// line stay (owner 2026-11-26).
+function MixOrderSteps({ steps, mixCheck, nameClass, textClass }) {
+  const never = neverMixLines(steps.filter((step) => step.productId).map((step) => String(step.productId)), mixCheck);
+  return (
+    <>
+      {never.map((text) => <div key={text} className={`${nameClass} font-medium text-alert-fg`}>{text}</div>)}
+      {never.length > 0 && <div className={`${textClass} text-alert-fg`}>Not one tank: mix these separately. The amounts below stay for reference.</div>}
+      {steps.map((step) => (
+        <div
+          key={`${step.step}-${step.productId}`}
+          className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
+        >
+          {!never.length && (
+            <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
+              {step.step}
+            </div>
+          )}
+          <div>
+            <div className={`${nameClass} font-medium text-zinc-900`}>{step.productName}</div>
+            <div className={`${textClass} text-ink-secondary leading-normal mt-1`}>{step.instruction}</div>
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 

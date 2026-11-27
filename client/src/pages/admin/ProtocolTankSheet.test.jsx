@@ -333,8 +333,13 @@ describe("110-gallon tank reference", () => {
   });
 
   it("a Never pair replaces both cards' mix line with Do not mix, on screen and in print; products and amounts stay", () => {
-    const { container } = render(<ProtocolTankSheet plan={weedMixPlan([pair("never", "Label: no surfactant.")])} />);
+    const plan = weedMixPlan([pair("never", "Label: no surfactant.")]);
+    plan.items[1].raw = "Synthetic surfactant in the Celsius weed mix";
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      // The protocol's own mix words stay, marked so nobody follows them.
+      expect(within(surface).getByText("Do not mix as this protocol line says (see Do not mix above): Synthetic surfactant in the Celsius weed mix")).toBeInTheDocument();
+      expect(within(surface).queryByText("Synthetic surfactant in the Celsius weed mix")).not.toBeInTheDocument();
       expect(within(surface).getAllByText("Do not mix: Label: no surfactant.")).toHaveLength(2);
       expect(within(surface).queryByText("Tank with: Synthetic surfactant")).not.toBeInTheDocument();
       expect(within(surface).queryByText("Add to the Celsius WG mix")).not.toBeInTheDocument();

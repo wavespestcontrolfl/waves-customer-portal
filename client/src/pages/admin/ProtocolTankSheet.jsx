@@ -82,6 +82,12 @@ function tankMixWarnings(tankIds, mixCheck) {
   return lines.filter((entry, index) => lines.findIndex((other) => other.text === entry.text) === index);
 }
 
+// The "Do not mix" lines for the products of one tank (a card's tank, a mixing order's steps): empty when no pair is Never.
+export const neverMixLines = (productIds, mixCheck) => tankMixWarnings(productIds, mixCheck)
+  .filter((warning) => warning.replacesLine).map((warning) => warning.text);
+// The protocol's own line on a card in a Never tank: it stays, marked so its mix words are not followed.
+export const NEVER_PROTOCOL_PREFIX = "Do not mix as this protocol line says (see Do not mix above):";
+
 // The Celsius label's heat rule (server: lawn-weed-mix.js), on the surfactant card and the Celsius card whenever the sheet tells
 // them to mix.
 function surfactantNote(item, products) {
@@ -210,10 +216,11 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         const cautions = productCautions(item, exclusions, products);
         const method = applicationMethod(item, products, plan.bermudaMixingOrder);
         const tankWarnings = tankMixWarnings(method.tankIds, plan.mixCheck);
+        const neverLines = tankWarnings.filter((warning) => warning.replacesLine);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
           ["Active ingredient", product.activeIngredient],
-          ["Application instruction", item.raw],
+          ["Application instruction", neverLines.length && item.raw ? `${NEVER_PROTOCOL_PREFIX} ${item.raw}` : item.raw],
           ["Application scope", item.scope],
           ["Signal word", product.signalWord],
           ["PPE", ppe || "Not on file — consult the product label"],
@@ -230,8 +237,8 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
               <h3>{product.name}</h3>
               <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            {tankWarnings.some((warning) => warning.replacesLine)
-              ? tankWarnings.filter((warning) => warning.replacesLine).map((warning) => <p key={warning.text} className="mt-2 font-medium text-alert-fg">{warning.text}</p>)
+            {neverLines.length
+              ? neverLines.map((warning) => <p key={warning.text} className="mt-2 font-medium text-alert-fg">{warning.text}</p>)
               : <p className="mt-2 font-medium">{method.text}</p>}
             {tankWarnings.filter((warning) => !warning.replacesLine).map((warning) => (
               <p key={warning.text} className={`mt-1 ${warning.verdict === "unknown" ? "text-zinc-700" : "text-alert-fg"}`}>{warning.text}</p>

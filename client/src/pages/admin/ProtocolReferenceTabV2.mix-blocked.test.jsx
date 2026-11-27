@@ -87,3 +87,40 @@ it("a bermuda backpack mix order shows as its own block beside the base order, o
   renderCard(plan({ mixingOrder }));
   expect(screen.queryByText("Bermuda backpack mix")).not.toBeInTheDocument();
 });
+
+it("a Never pair in a mixing order shows Do not mix first and drops the step numbers; every product and amount line stays", () => {
+  const bermudaMixingOrder = [
+    { step: 1, productId: null, productName: "Water", instruction: "Fill the backpack sprayer about half full with clean water." },
+    { step: 2, productId: "rec", productName: "Recognition", instruction: "Add 0.1 oz Recognition." },
+    { step: 3, productId: "fus", productName: "Fusilade II", instruction: "Add 1.5 fl oz Fusilade II." },
+    { step: 4, productId: "nis", productName: "Surfactant", instruction: "Add the surfactant last." },
+  ];
+  const mixingOrder = [
+    { step: 1, productId: "pot", productName: "Fixture potassium", instruction: "Add 2 oz potassium." },
+    { step: 2, productId: "fe", productName: "Fixture iron", instruction: "Add 1 oz iron." },
+  ];
+  const mixCheck = { pairs: [
+    { productAId: "rec", productAName: "Recognition", productBId: "nis", productBName: "Surfactant", verdict: "never", reason: "Label bars it." },
+    { productAId: "pot", productAName: "Fixture potassium", productBId: "fe", productBName: "Fixture iron", verdict: "never", reason: "Fixture rule." },
+  ] };
+  renderCard(plan({ mixingOrder, bermudaMixingOrder, mixCheck }));
+  expect(screen.getByText("Do not mix: Label bars it. (Recognition + Surfactant)")).toBeInTheDocument();
+  expect(screen.getByText("Do not mix: Fixture rule.")).toBeInTheDocument();
+  expect(screen.getAllByText("Not one tank: mix these separately. The amounts below stay for reference.")).toHaveLength(2);
+  for (const step of [...bermudaMixingOrder, ...mixingOrder]) {
+    expect(screen.getByText(step.productName)).toBeInTheDocument();
+    expect(screen.getByText(step.instruction)).toBeInTheDocument();
+  }
+  for (const n of ["1", "2", "3", "4"]) expect(screen.queryByText(n, { selector: ".u-nums" })).not.toBeInTheDocument();
+});
+
+it("a mixing order with no Never pair keeps its step numbers and shows no Do not mix line", () => {
+  const mixingOrder = [
+    { step: 1, productId: "pot", productName: "Fixture potassium", instruction: "Add 2 oz potassium." },
+    { step: 2, productId: "fe", productName: "Fixture iron", instruction: "Add 1 oz iron." },
+  ];
+  const mixCheck = { pairs: [{ productAId: "pot", productAName: "Fixture potassium", productBId: "fe", productBName: "Fixture iron", verdict: "caution", reason: "Jar test." }] };
+  renderCard(plan({ mixingOrder, mixCheck }));
+  expect(screen.queryByText(/^Do not mix: /)).not.toBeInTheDocument();
+  expect(screen.getByText("2", { selector: ".u-nums" })).toBeInTheDocument();
+});
