@@ -281,6 +281,9 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const automatic = await move({ new_date: '2027-01-12', new_window: '15:00-16:00', initiated_by: 'auto_dispatch' });
     const ownMove = await move({ new_date: '2027-01-12', new_window: '15:00-16:00', initiated_by: 'customer_self_serve' });
     const since = await move({ new_date: '2027-01-11', new_window: '15:00-16:00', initiated_by: 'admin' });
+    // The same window written another way, and a new end alone: no move at all.
+    await move({ original_date: '2027-01-12', original_window: '15:00:00-16:00:00', new_date: '2027-01-12', new_window: '15:00-16:00', initiated_by: 'admin' });
+    await move({ original_date: '2027-01-12', original_window: '15:00-16:00', new_date: '2027-01-12', new_window: '15:00-17:00', initiated_by: 'admin_bulk' });
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const moves = (await agent.buildTimeline(row)).events.filter((e) => e.type === 'reschedule');
     expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since].sort());
@@ -348,32 +351,40 @@ postgres('alert clear-up agent: readers on a real schema', () => {
 
   test('a bounced text-back is none, and a robocall closes by its own rule from the call\'s own stamps', async () => {
     const day = new Date(T0.getTime() + 25 * 3600 * 1000);
-    const missedCall = async (number, metadata = {}) => {
-      const [r] = await db('call_log').insert({ from_phone: number, to_phone: '+15550003333', direction: 'inbound', status: 'no-answer', created_at: at(-2), duration_seconds: 4, metadata: JSON.stringify(metadata) }).returning('id');
+    const missedCall = async (number, metadata = {}, extra = {}) => {
+      const [r] = await db('call_log').insert({ from_phone: number, to_phone: '+15550003333', direction: 'inbound', status: 'no-answer', created_at: at(-2), duration_seconds: 4, metadata: JSON.stringify(metadata), ...extra }).returning('id');
       made.calls.push(r.id);
       return r.id;
     };
     const timelineFor = async (callId) => agent.buildTimeline(await alert('missed_call', 'Missed call', `/admin/communications#tab=calls&call=${callId}`, { payload: { callLogId: callId } }));
 
-    // The claim says sent, but the text it sent bounced: no text-back reached the caller.
+    // The claim says sent, but the text it sent bounced: no text-back reached the caller. The row carries no call id, as the send
+    // pipeline writes it; the number's one text-back row is the claim's text.
     const bouncedNumber = phone(61);
     const bouncedCall = await missedCall(bouncedNumber);
     await db('missed_call_text_claims').insert({ phone: bouncedNumber, outcome: 'sent', call_log_id: bouncedCall });
-    await sms({ direction: 'outbound', to_phone: bouncedNumber, message_type: 'missed_call_text_back', status: 'undelivered', twilio_sid: `SM${tag}k`, message_body: 'Sorry we missed your call', created_at: at(1), metadata: { call_log_id: String(bouncedCall) } });
+    await sms({ direction: 'outbound', to_phone: bouncedNumber, message_type: 'missed_call_text_back', status: 'undelivered', twilio_sid: `SM${tag}k`, message_body: 'Sorry we missed your call', created_at: at(1), metadata: { template_key: 'missed_call_text_back' } });
     const bounced = await timelineFor(bouncedCall);
-    expect(bounced.call).toMatchObject({ textBackSent: false, textBackBounced: true, robocall: null });
+    expect(bounced.call).toMatchObject({ textBackSent: false, textBackBounced: true, robocall: null, textBackState: 'sent:undelivered' });
     expect(agent.ruleVerdict({ category: 'missed_call' }, bounced, false, day)).toBeNull();
+
+    // The same number calls again: the lane holds its one claim on the first call, so the delivered or bounced text is not this call's.
+    const repeatNumber = phone(65);
+    const firstCall = await missedCall(repeatNumber, {}, { created_at: at(-600) });
+    const repeatCall = await missedCall(repeatNumber);
+    await db('missed_call_text_claims').insert({ phone: repeatNumber, outcome: 'sent', call_log_id: firstCall });
+    await sms({ direction: 'outbound', to_phone: repeatNumber, message_type: 'missed_call_text_back', status: 'delivered', twilio_sid: `SM${tag}m`, message_body: 'Sorry we missed your call', created_at: at(-598) });
+    expect((await timelineFor(repeatCall)).call).toMatchObject({ textBackSent: false, textBackBounced: false, textBackState: 'none:none' });
 
     // A failed press-1 screen: a robocall, closed after 24 hours although no text-back went out.
     const screened = await timelineFor(await missedCall(phone(62), { preconnect_screen: 'failed' }));
     expect(screened.call).toMatchObject({ textBackSent: false, robocall: 'screen_failed' });
     expect(agent.ruleVerdict({ category: 'missed_call' }, screened, false, day)).toMatchObject({ outcome: 'nothing_to_answer', rule: 'quiet_robocall' });
 
-    // The bell's robodialer marker counts only for a caller who did not press 1.
-    expect((await timelineFor(await missedCall(phone(63), { missed_call_spam_wave: 'block_quiet' }))).call.robocall).toBe('block_quiet');
-    const pressed = await timelineFor(await missedCall(phone(64), { missed_call_spam_wave: 'repeat_quiet', preconnect_screen: 'passed' }));
-    expect(pressed.call.robocall).toBeNull();
-    expect(agent.ruleVerdict({ category: 'missed_call' }, pressed, false, day)).toBeNull();
+    // The bell's robodialer pattern marker alone is no robocall: a genuine caller can match a wave.
+    const waved = await timelineFor(await missedCall(phone(63), { missed_call_spam_wave: 'block_quiet' }));
+    expect(waved.call.robocall).toBeNull();
+    expect(agent.ruleVerdict({ category: 'missed_call' }, waved, false, day)).toBeNull();
   });
 
   test('an inbound call that went from hold to voicemail answers only up to the hold', async () => {

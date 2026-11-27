@@ -764,12 +764,11 @@ describe('rule 1 also closes a robocall that got no text-back', () => {
     return { deps, rows: saved(deps) };
   };
 
-  test.each([
-    ['failed the press-1 screen', 'screen_failed', 'robocall (failed the press-1 screen), no voicemail, silent 24 hours'],
-    ['carries the bell\'s robodialer marker', 'block_quiet', 'robocall (the missed-call bell marked it a robodialer), no voicemail, silent 24 hours'],
-  ])('a call that %s closes after 24 hours of silence, with no model call', async (_n, robocall, why) => {
-    const { deps, rows } = await run(robo(robocall));
-    expect(rows).toEqual([expect.objectContaining({ outcome: 'nothing_to_answer', source: 'rule', rule: 'quiet_robocall', why })]);
+  test('a caller who failed the press-1 screen closes after 24 hours of silence, with no model call', async () => {
+    const { deps, rows } = await run(robo('screen_failed'));
+    expect(rows).toEqual([expect.objectContaining({
+      outcome: 'nothing_to_answer', source: 'rule', rule: 'quiet_robocall', why: 'robocall (failed the press-1 screen), no voicemail, silent 24 hours',
+    })]);
     expect(deps.judge).not.toHaveBeenCalled();
   });
 
@@ -778,35 +777,39 @@ describe('rule 1 also closes a robocall that got no text-back', () => {
     for (const [timeline, now] of [
       [robo('screen_failed'), new Date(ALERT_AT.getTime() + 3 * 3600 * 1000)],
       [robo('screen_failed', { call: { customerId: null, hasVoicemail: true, textBackSent: false, robocall: 'screen_failed' } }), undefined],
-      [robo('block_quiet', { events: [again] }), undefined],
+      [robo('screen_failed', { events: [again] }), undefined],
     ]) {
       const { rows } = await run(timeline, now);
       expect(rows.every((r) => r.rule !== 'quiet_robocall')).toBe(true);
     }
   });
-
-  test('the two lanes\' own tests decide: a failed screen, or the bell\'s live marker on a caller who did not press 1', () => {
-    expect(agent.robocallOf({ metadata: { preconnect_screen: 'failed' } })).toBe('screen_failed');
-    expect(agent.robocallOf({ metadata: JSON.stringify({ missed_call_spam_wave: 'block_quiet' }) })).toBe('block_quiet');
-    expect(agent.robocallOf({ metadata: { missed_call_spam_wave: 'repeat_quiet', preconnect_screen: 'passed' } })).toBeNull();
-    expect(agent.robocallOf({ metadata: { missed_call_spam_repeat_shadow: true, missed_call_screen_quiet_shadow: true } })).toBeNull();
-    expect(agent.robocallOf({ metadata: { missed_call_spam_wave: 'not_a_marker' } })).toBeNull();
-    expect(agent.robocallOf({ metadata: null })).toBeNull();
-  });
 });
 
 describe('the text-back for this call', () => {
   // A reader stand-in that answers each labelled read with a canned row.
-  const reader = (claim, text) => ({ conn: null, read: async (label) => (label === 'text-back-claim' ? [claim].filter(Boolean).map((outcome) => ({ outcome })) : [text].filter(Boolean).map((status) => ({ status }))) });
+  const reader = (claim, text) => {
+    const labels = [];
+    const read = async (label) => {
+      labels.push(label);
+      return label === 'text-back-claim' ? [claim].filter(Boolean).map((outcome) => ({ outcome })) : [text].filter(Boolean).map((status) => ({ status }));
+    };
+    return { conn: null, read, labels };
+  };
   test.each([
-    ['a sent claim and a delivered text', 'sent', 'delivered', { sent: true, bounced: false }],
-    ['a sent claim with no text row yet', 'sent', null, { sent: true, bounced: false }],
-    ['a delivered text with no claim', null, 'delivered', { sent: true, bounced: false }],
-    ['a sent claim whose text bounced', 'sent', 'undelivered', { sent: false, bounced: true }],
-    ['a sent claim whose text failed', 'sent', 'failed', { sent: false, bounced: true }],
-    ['a claim still dispatching', 'dispatching', null, { sent: false, bounced: false }],
+    ['a sent claim and a delivered text', 'sent', 'delivered', { sent: true, bounced: false, state: 'sent:delivered' }],
+    ['a sent claim with no text row yet', 'sent', null, { sent: true, bounced: false, state: 'sent:none' }],
+    ['a sent claim whose text bounced', 'sent', 'undelivered', { sent: false, bounced: true, state: 'sent:undelivered' }],
+    ['a sent claim whose text failed', 'sent', 'failed', { sent: false, bounced: true, state: 'sent:failed' }],
+    ['a claim still dispatching', 'dispatching', 'sent', { sent: false, bounced: false, state: 'dispatching:sent' }],
   ])('%s', async (_n, claim, text, expected) => {
-    expect(await agent.textBackWasSent(reader(claim, text), 'call-1')).toMatchObject(expected);
+    expect(await agent.textBackWasSent(reader(claim, text), 'call-1', '+19415550100')).toMatchObject(expected);
+  });
+
+  // The send pipeline keeps no call id on the text row: the number's text-back is this call's only when this call holds the claim.
+  test('with no claim for this call, the number\'s text-back (an earlier call\'s) is not read and does not count', async () => {
+    const r = reader(null, 'delivered');
+    expect(await agent.textBackWasSent(r, 'call-2', '+19415550100')).toMatchObject({ sent: false, bounced: false, state: 'none:none' });
+    expect(r.labels).toEqual(['text-back-claim']);
   });
 });
 
@@ -843,9 +846,19 @@ describe('a visit move answers only when Waves staff made it and the visit still
     expect(agent.rescheduleEvent(move({ visit_date: null })).proof).toBeNull();
   });
 
-  test('a Quick Move by a tech and an Intelligence Bar move are a person\'s', () => {
+  test('a Quick Move by a tech, an Intelligence Bar move and a Schedule bulk move are a person\'s', () => {
     expect(agent.rescheduleEvent(move({ initiated_by: 'tech' })).proof).toBe('date_change');
     expect(agent.rescheduleEvent(move({ initiated_by: 'admin_ib' })).proof).toBe('date_change');
+    expect(agent.rescheduleEvent(move({ initiated_by: 'admin_bulk' })).proof).toBe('date_change');
+  });
+
+  test('a move is a new day or a new start: a window written another way, or a new end alone, is no move', () => {
+    const sameDay = (original, next) => move({ original_date: day('2026-11-27'), original_window: original, new_window: next });
+    expect(agent.realMove(sameDay('09:00:00-10:00:00', '09:00-10:00'))).toBe(false);
+    expect(agent.realMove(sameDay('09:00-10:00', '09:00-11:00'))).toBe(false);
+    expect(agent.realMove(sameDay('09:00-10:00', '15:00-16:00'))).toBe(true);
+    expect(agent.realMove(sameDay(null, '15:00-16:00'))).toBe(true);
+    expect(agent.realMove(move())).toBe(true);
   });
 
   // The trial's case: a staff move matched "after 3", then the day planner and the customer moved the visit again.
