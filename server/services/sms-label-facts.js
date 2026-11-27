@@ -769,6 +769,16 @@ function labelSentencesIn(sectionText) {
   return out;
 }
 
+/**
+ * True when a facts block carries any LABEL FACTS product note (texting AI gap 5). Structural rule, like a photo reply (gap 6): such a
+ * draft is NEVER sent automatically; a person reviews it, at draft time (the drafter's review rule) and again at the auto-send claim. Any
+ * "- " line of the WHOLE block in a note's shape counts, not only the exactly located section (stricter, never looser).
+ */
+function factsBlockCarriesProductNotes(factsBlock) {
+  if (typeof factsBlock !== 'string' || !factsBlock) return false;
+  return factsBlock.split('\n').some((line) => line.startsWith('- ') && isProductNoteText(line.slice(2).trim()));
+}
+
 /** Which kinds of label sentence a section carries: { rain, reentry }. */
 function groundedLineKinds(sectionText) {
   const sentences = labelSentencesIn(sectionText);
@@ -2178,6 +2188,7 @@ module.exports = {
   sanctionSafeOnceDry,
   replyClaimsUngroundedLabelTiming,
   hasUnbackedLabeledForClaim,
+  factsBlockCarriesProductNotes,
   stripHandoffDeadlines,
   askedLabelKinds,
   inboundIsElliptical,

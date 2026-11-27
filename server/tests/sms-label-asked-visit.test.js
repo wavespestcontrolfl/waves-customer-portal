@@ -154,6 +154,16 @@ describe('PRODUCT NOTES', () => {
     expect(labelFactsLib.LABEL_FACTS_FILLED_HEADER_RE.test(text.split('\n')[0])).toBe(true);
   });
 
+  test('a facts block that carries any product note is marked never-auto-send; timing-only or no section is not', () => {
+    const withNotes = labelFactsLib.renderLabelFactsSection(visit([product(ANT_GEL)]));
+    expect(labelFactsLib.factsBlockCarriesProductNotes(`COMPANY FACTS:\n- x\n${withNotes}BILLING:\n- none`)).toBe(true);
+    process.env[COPY_GATE] = 'false';
+    const timingOnly = labelFactsLib.renderLabelFactsSection(visit([product(ANT_GEL)]));
+    expect(labelFactsLib.factsBlockCarriesProductNotes(`COMPANY FACTS:\n- x\n${timingOnly}BILLING:\n- none`)).toBe(false);
+    expect(labelFactsLib.factsBlockCarriesProductNotes('')).toBe(false);
+    expect(labelFactsLib.factsBlockCarriesProductNotes(null)).toBe(false);
+  });
+
   test('a note is copyable verbatim, never answers a re-entry or rain question, and nothing typed in its shape is authorized', () => {
     const facts = labelFactsLib.labelFactsForInbound(visit([product(ANT_GEL)]), ['Will this get the ghost ants?'], TODAY);
     const section = labelFactsLib.renderLabelFactsSection(facts);

@@ -6939,7 +6939,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // offer came from a booking picker: then a card, never a send), and
     // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
-    const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft);
+    // LABEL FACTS product notes (texting AI gap 5): a draft whose facts carry any goes to a person, never auto-send (claimAutoSend
+    // refuses it again from the stored facts block)
+    const requireReview = [openLoopThanks, factsListOpenLoop(factsForDraft), labelFactsLib.factsBlockCarriesProductNotes(factsForDraft)].some(Boolean);
     // Only an ANSWER may leave the silent shadow lane (owner 2026-11-25). An ACK is the fixed acknowledgement and an ABSTAIN has no text:
     // routing sees an empty reply for both (deliverableReply), which is never eligible, so they stay shadow rows for the judge whatever the
     // suggest and auto-send gates say, and no card and no send can come from them.

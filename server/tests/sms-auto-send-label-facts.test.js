@@ -7,7 +7,7 @@
  * call, refusing the same way the open-times recheck does. The recheck itself
  * (visit changed / today guard / changed label) is tested in sms-label-facts.test.js.
  */
-jest.mock('../services/sms-label-facts', () => ({ labelFactsSendBlockReason: jest.fn(async () => null) }));
+jest.mock('../services/sms-label-facts', () => ({ labelFactsSendBlockReason: jest.fn(async () => null), factsBlockCarriesProductNotes: jest.fn(() => false) }));
 jest.mock('../models/db', () => {
   const db = jest.fn((table) => db.trx(table));
   db.transaction = jest.fn(async (work) => work(db.trx));
@@ -48,6 +48,7 @@ const { sendCustomerMessage } = require('../services/messaging/send-customer-mes
 const autoSend = require('../services/sms-auto-send');
 const labelFacts = require('../services/sms-label-facts');
 let decisions;
+let drafts;
 
 function chain(overrides = {}) {
   const q = {};
@@ -66,7 +67,7 @@ beforeEach(() => {
   })) });
   const activeClaim = chain();
   decisions = chain();
-  const drafts = chain();
+  drafts = chain();
   db.trx = jest.fn((table) => {
     if (table === 'sms_log') return inbound;
     if (table === 'agent_decisions as ad') return activeClaim;
@@ -80,9 +81,21 @@ beforeEach(() => {
   suggest.ignoreParkedSuggestions.mockResolvedValue(1);
   drafter.openTimesStillOffered.mockResolvedValue({ ok: true });
   labelFacts.labelFactsSendBlockReason.mockResolvedValue(null);
+  labelFacts.factsBlockCarriesProductNotes.mockReturnValue(false);
   sendCustomerMessage.mockResolvedValue({
     sent: true, deliveryOutcome: 'accepted', providerMessageId: `SM${'a'.repeat(32)}`,
   });
+});
+
+// Texting AI gap 5: a draft whose STORED facts block carries a LABEL FACTS product note is never claimed for an automatic send.
+test('a draft whose stored facts carry a product note is never auto-sent: the claim refuses before any decision row', async () => {
+  drafts.first = jest.fn(async () => ({ facts_block: 'LABEL FACTS ...\n- a product note' }));
+  labelFacts.factsBlockCarriesProductNotes.mockReturnValue(true);
+  await expect(attempt({ labelFactsSnapshot: LABEL_SNAPSHOT })).resolves.toMatchObject({ sent: false });
+  expect(drafts.where).toHaveBeenCalledWith({ id: '00000000-0000-4000-8000-000000000001' });
+  expect(labelFacts.factsBlockCarriesProductNotes).toHaveBeenCalledWith('LABEL FACTS ...\n- a product note');
+  expect(decisions.insert).not.toHaveBeenCalled();
+  expect(sendCustomerMessage).not.toHaveBeenCalled();
 });
 
 const REPLY = "For the products applied at your Sep 29 visit, the label says to keep people and pets off treated areas for 4 hours.";
