@@ -7837,7 +7837,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // May Tetrino is never inferred from sunlight or an old map. Keep
             // the technician's named target and current field evidence with
             // the closeout that used (or deliberately skipped) it.
-            ...require('./lawn-fast-complete').tetrinoScoutFreeze(lawnFast),
+            ...(await require('./lawn-fast-complete').tetrinoScoutFreezeFor(lawnFast, products)),
             // GATE_LAWN_REPORT_FACTS: which spot rows' area the technician recorded as the spot's extent (a typed amount
             // is not an area), so the card never states a whole-lawn fallback as the spot.
             ...require('./service-report/lawn-report-facts').spotAreaFreeze(lawnFast),

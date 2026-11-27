@@ -214,6 +214,9 @@ const completeButton = () => document.querySelector('.tech-visit-footer .tech-vi
 const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'));
 const editorFor = (name) => screen.getByRole('group', { name });
 // The limit warnings on the footer (a yearly limit warns, never holds: owner 2026-10-30).
+// The warning for a place the maps do not take (a take-all card row on an unmapped place): owner 2026-11-26, only warned, never blocked.
+const MAP_WARNING = 'Take-all is treated on mapped take-all areas only. Pick a mapped place, or add the fungicide through Search to map a new one. You can still complete. The visit record keeps the place.';
+const placeWarnings = () => [...document.querySelectorAll('.tech-visit-footer .tech-visit-status--warn')].map((node) => node.textContent).filter((text) => /The visit record keeps the place/.test(text));
 const limitWarnings = () => [...document.querySelectorAll('.tech-visit-footer .tech-visit-status--warn')].map((node) => node.textContent).filter((text) => /You can still complete/.test(text));
 const footerNote = () => document.querySelector('.tech-visit-footer [role="status"]')?.textContent || '';
 
@@ -1127,12 +1130,13 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await analyze();
   };
 
-  test('the card row starts on the mapped place and cannot be moved to another; the body names the card as its source', async () => {
+  test('the card row starts on the mapped place; another place is open but warned (never blocked); the body names the card as its source', async () => {
     await open2();
     fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
     expect(pressed(chips())).toEqual(['Back · known']);
-    expect(chipOf(chips(), 'Front').disabled).toBe(true);
-    expect(chipOf(chips(), 'Right side').disabled).toBe(true);
+    expect(chipOf(chips(), 'Front').disabled).toBe(false);
+    expect(chipOf(chips(), 'Right side').disabled).toBe(false);
+    expect(placeWarnings()).toEqual([]);
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
@@ -1170,15 +1174,24 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     expect(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).getByText(CHECK_ONLY)).toBeTruthy();
   });
 
-  test('a card row already on the sheet at the cleared place: its chip closes and Complete waits', async () => {
+  test('a card row already on the sheet at the cleared place: the place goes, Complete asks for one; the cleared place is still open, shows the mapping warning and completes with the place recorded', async () => {
     await open2();
     fireEvent.click(within(await screen.findByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
     typeArea(placeGroup('Spot Fungicide'), '100');
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await clearArea('Clear Back, take-all');
-    await waitFor(() => expect(chipOf(chips(), 'Back').disabled).toBe(true));
-    expect(pressed(chips())).toEqual([]);
-    expect(completeButton().disabled).toBe(true);
+    await waitFor(() => expect(pressed(chips())).toEqual([]));
+    // The required-place check stays: no place picked, no Complete.
+    expect(chipOf(chips(), 'Back').disabled).toBe(false);
+    await waitFor(() => expect(completeButton().disabled).toBe(true));
+    expect(footerNote() || completeButton().textContent).toMatch(/Pick where on the lawn Spot Fungicide went\./);
+    // Owner 2026-11-26: the tech's own place only warns.
+    fireEvent.click(chipOf(chips(), 'Back'));
+    expect(placeWarnings()).toEqual([`Spot Fungicide, Back: ${MAP_WARNING}`]);
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(footerNote()).not.toMatch(/cannot go on|Remove Spot Fungicide/);
+    await submit();
+    expect(sent(P_FUNG)).toMatchObject({ areaPlaces: ['back'] });
   });
 
   test('two mapped places, one cleared: the card keeps the other and names only it', async () => {
@@ -1192,11 +1205,14 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await clearArea('Clear Back, take-all');
     await waitFor(() => expect(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).getByText('Take-all area on file: Front.')).toBeTruthy());
     fireEvent.click(within(screen.getByRole('group', { name: 'Suggested from this lawn' })).getByRole('button', { name: 'I checked. Add it' }));
-    expect(chipOf(chips(), /^Back/).disabled).toBe(true);
+    // The cleared place is open but warned; the mapped one is not.
+    expect(chipOf(chips(), /^Back/).disabled).toBe(false);
     expect(chipOf(chips(), /^Front/).disabled).toBe(false);
+    fireEvent.click(chipOf(chips(), /^Back/));
+    expect(placeWarnings()).toEqual([`Spot Fungicide, Back: ${MAP_WARNING}`]);
   });
 
-  test('a lawn_place_not_mapped refusal reads the maps again like a limit refusal, and the chip stays closed', async () => {
+  test('a lawn_place_not_mapped refusal reads the maps again like a limit refusal; the place only warns and the chip stays open', async () => {
     const urls = [];
     const c = ctx();
     const base = makeRequest({ ctx: { ...c, plannedProducts: { ...c.plannedProducts, takeAllProductIds: [P_FUNG] } } });
@@ -1209,11 +1225,16 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     completeErrors.push(refusal(400, 'lawn_place_not_mapped', 'Take-all is treated on mapped take-all areas only.', { productId: P_FUNG, place: 'back' }));
     await submit();
-    await waitFor(() => expect(chipOf(chips(), /^Back/).disabled).toBe(true));
     await waitFor(() => expect(urls.filter((u) => u.includes(`productIds=${P_FUNG}`))).toHaveLength(2));
-    // The refusal is not dose-dependent: a different area does not reopen the place.
+    // The default place is dropped (the maps no longer take it) and the sheet asks for a place; the chip stays open (never blocked).
+    await waitFor(() => expect(pressed(chips())).toEqual([]));
+    expect(chipOf(chips(), /^Back/).disabled).toBe(false);
+    fireEvent.click(chipOf(chips(), /^Back/));
+    expect(placeWarnings()).toEqual([`Spot Fungicide, Back: Take-all is treated on mapped take-all areas only. You can still complete. The visit record keeps the place.`]);
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    // The refusal is not dose-dependent: a different area does not clear the warning.
     typeArea(placeGroup('Spot Fungicide'), '250');
-    expect(chipOf(chips(), /^Back/).disabled).toBe(true);
+    expect(placeWarnings()).toEqual([`Spot Fungicide, Back: Take-all is treated on mapped take-all areas only. You can still complete. The visit record keeps the place.`]);
   });
 
   test('an unmapped refusal belongs to the card row only: removing it and adding the same product through Search opens the place, and the area is stored as a Search one', async () => {
@@ -1227,7 +1248,8 @@ describe('take-all: the card offers only the mapped places, Search maps a new on
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     completeErrors.push(refusal(400, 'lawn_place_not_mapped', 'Take-all is treated on mapped take-all areas only.', { productId: P_FUNG, place: 'back' }));
     await submit();
-    await waitFor(() => expect(chipOf(chips(), /^Back/).disabled).toBe(true));
+    await waitFor(() => expect(pressed(chips())).toEqual([]));
+    expect(chipOf(chips(), /^Back/).disabled).toBe(false);
     // The stale card row comes off; the same fungicide is added through Search, the path that may map a new area.
     fireEvent.click(within(placeGroup('Spot Fungicide')).getByRole('button', { name: 'Remove' }));
     fireEvent.change(await screen.findByLabelText('Search products'), { target: { value: 'Spot Fungicide' } });
