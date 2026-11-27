@@ -1,112 +1,16 @@
 /**
- * Texting AI gap 1 (owner 2026-11-26 "BUILD 1-6"): the shadow drafter withholds OPEN TIMES less often.
- *  - A short reply to a staff text that asked the customer's availability gets OPEN TIMES, judged on the whole exchange
- *    (cut at the drafted text's own row): the job, the named day and the re-service lane all read it.
+ * Texting AI gap 1 (owner 2026-11-26 "BUILD 1-6"): the shadow drafter withholds OPEN TIMES less often, and says why.
  *  - A day the customer named joins the first three days, from the same picker read.
  *  - Why a draft had no OPEN TIMES is stored on the draft row (intended_actions.open_times_withheld).
+ * A short reply ("Anytime is fine") is judged on its own text, as on main: the thread carry was built and removed.
  * Synthetic names and numbers only.
  */
-const { bookingExchange, namedDayMatcher, _internals } = require('../services/sms-open-times-intent');
+const { namedDayMatcher, _internals } = require('../services/sms-open-times-intent');
 
 const GATE = 'GATE_SMS_REAL_ANSWERS';
 const ME = '+19415550100';
-const OTHER = '+19415550199';
-const LINE = '+19415550111'; // the Waves line the customer texted
-const LINE_2 = '+19415550122';
-const NOW = new Date('2026-11-26T15:00:00Z').getTime();
-const ago = (h) => new Date(NOW - h * 3600 * 1000).toISOString();
+const LINE = '+19415550111';
 const IDENTITY_NONE = { ok: true, json: { about: 'none', visit: null, service: null } };
-
-const cur = (body) => ({ id: 'log-9', direction: 'inbound', fromPhone: ME, toPhone: LINE, body, date: ago(0) });
-const staff = (body, h = 1, extra = {}) => ({ direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body, date: ago(h), ...extra });
-const mine = (body, h) => ({ direction: 'inbound', fromPhone: ME, toPhone: LINE, body, date: ago(h) });
-const exchange = (body, rows, phone = ME) => bookingExchange({ smsHistory: [cur(body), ...rows], currentSmsLogId: 'log-9', inboundMessage: body, inboundPhone: phone });
-
-describe('staffAsksAvailability: only explicit availability asks and visit offers', () => {
-  test.each([
-    'What day works for you?', 'What time works best?', 'When works for you?', 'Would Thursday work?', 'Would Thursday at 9 work for you?',
-    'Are you available Monday?', 'We can come Monday.', 'I can come by tomorrow afternoon, does that work?', 'I have Tuesday at 9 open',
-    'We have an opening Friday', 'We have availability at 9 a.m. on Monday. Would this work for you?', 'Let me know what day works',
-  ])('asks: %s', (text) => expect(_internals.staffAsksAvailability(text)).toBe(true));
-
-  test.each([
-    "Did you see ants after Thursday's treatment?", 'Are you still seeing ants?', 'Good morning! Any roach sightings?',
-    'Thanks, see you Thursday!', 'You are all set for Monday at 9.', 'We have your report open now?', 'Can you send a photo?',
-  ])('does not ask: %s', (text) => expect(_internals.staffAsksAvailability(text)).toBe(false));
-});
-
-describe('bookingExchange', () => {
-  test.each(['Anytime is fine', 'Yes, please!', 'Totally flexible. We both work from home.', "That's fine", 'Mornings works better', '12/3', 'Dec 3?', 'Thursday'])(
-    '"%s" after "What day works for you?" is a reply in the exchange',
-    (text) => expect(exchange(text, [staff('What day works for you?')])).toEqual({ staffText: 'What day works for you?', customerTexts: [text] }),
-  );
-
-  test("the customer's texts after the staff text ride along, oldest first; a middle clarification included", () => {
-    const rows = [mine('For the lawn treatment', 0.5), staff('Sure. What day works for you?', 1), mine('Can you come for my lawn?', 2)];
-    expect(exchange('Thursday', rows)).toEqual({ staffText: 'Sure. What day works for you?', customerTexts: ['For the lawn treatment', 'Thursday'] });
-  });
-
-  test('the history is cut at the drafted row: a later staff text never reads as what it answers', () => {
-    const later = staff('What day works for you?', -0.1); // logged after the drafted "Yes"
-    const r = bookingExchange({ smsHistory: [later, cur('Yes'), staff('You are all set.', 1)], currentSmsLogId: 'log-9', inboundMessage: 'Yes', inboundPhone: ME });
-    expect(r).toBeNull();
-  });
-
-  test('the drafted row missing from the history, or no id: no exchange', () => {
-    expect(bookingExchange({ smsHistory: [staff('What day works for you?')], currentSmsLogId: 'log-9', inboundMessage: 'Yes', inboundPhone: ME })).toBeNull();
-    expect(bookingExchange({ smsHistory: [cur('Yes'), staff('What day works for you?')], currentSmsLogId: null, inboundMessage: 'Yes', inboundPhone: ME })).toBeNull();
-  });
-
-  test('a staff text that does not ask ends it: a day alone, a pest question, a confirmation', () => {
-    expect(exchange('Yes', [staff("Did you see ants after Thursday's treatment?")])).toBeNull();
-    expect(exchange('Yes', [staff('Are you still seeing ants?')])).toBeNull();
-    expect(exchange('ok', [staff('You are all set for Monday at 9.'), staff('What day works for you?', 2)])).toBeNull();
-  });
-
-  test('the customer\'s own earlier booking text never carries a reply on its own', () => {
-    expect(exchange('Anytime is fine', [mine('Can you come out and do the ants again?', 1)])).toBeNull();
-  });
-
-  test('any automated, AI assistant, other-line or other-contact text inside the exchange stops it (no carry)', () => {
-    const ask = staff('What day works for you?', 1);
-    expect(exchange('Yes', [staff('Reminder: your visit is tomorrow. Reply C to confirm?', 0.5, { type: 'appointment_reminder' }), ask])).toBeNull();
-    expect(exchange('Yes', [staff('Thanks for your payment.', 0.5, { type: 'receipt' }), ask])).toBeNull();
-    expect(exchange('Yes', [staff('What day works for you?', 0.7, { toPhone: OTHER }), ask])).toBeNull();
-    expect(exchange('Yes', [{ ...mine('Friday?', 0.5), toPhone: LINE_2 }, ask])).toBeNull();
-  });
-
-  test('the staff text must be a person\'s send from the line the customer texted', () => {
-    expect(exchange('Yes', [staff('What day works for you?')])).not.toBeNull();
-    for (const type of ['ai_approved', 'ai_revised']) expect(exchange('Yes', [staff('What day works for you?', 1, { type })])).not.toBeNull();
-    for (const type of ['ai_assistant', 'ai_assistant_reply']) expect(exchange('Yes', [staff('What day works for you?', 1, { type })])).toBeNull();
-    expect(exchange('Yes', [staff('What day works for you?', 1, { fromPhone: LINE_2 })])).toBeNull();
-    expect(exchange('Yes', [staff('What day works for you?', 1, { toPhone: null })])).toBeNull();
-    const noLine = { ...cur('Yes'), toPhone: null };
-    expect(bookingExchange({ smsHistory: [noLine, staff('What day works for you?')], currentSmsLogId: 'log-9', inboundMessage: 'Yes', inboundPhone: ME })).toBeNull();
-  });
-
-  test("another number's text inside the exchange: nothing is carried", () => {
-    expect(exchange('Anytime', [{ direction: 'inbound', fromPhone: OTHER, body: 'Friday for me', date: ago(0.5) }, staff('What day works for you?')])).toBeNull();
-  });
-
-  test('older than 72 hours, an undated row, or more than 8 rows back: no exchange', () => {
-    expect(exchange('Yes', [staff('What day works for you?', 73)])).toBeNull();
-    expect(exchange('Yes', [staff('What day works for you?', 1, { date: 'not a date' })])).toBeNull();
-    const mineRows = Array.from({ length: 8 }, () => mine('also', 0.5));
-    expect(exchange('Yes', [...mineRows, staff('What day works for you?')])).toBeNull();
-    expect(exchange('Yes', [...mineRows.slice(1), staff('What day works for you?')])).not.toBeNull();
-  });
-
-  test('not a short reply: a new request, long text, a reaction, no sender phone', () => {
-    const q = [staff('What day works for you?')];
-    expect(exchange('Please email my receipt', q)).toBeNull();
-    expect(exchange('Can you send the invoice again', q)).toBeNull();
-    expect(exchange(`Yes ${'x'.repeat(200)}`, q)).toBeNull();
-    expect(exchange('Liked “What day works for you?”', q)).toBeNull();
-    expect(exchange('Haven\'t seen any.', q)).toBeNull();
-    expect(exchange('Anytime is fine', q, null)).toBeNull();
-  });
-});
 
 describe('namedDayMatcher', () => {
   test('weekday names, abbreviations and plurals', () => {
@@ -215,8 +119,8 @@ describe('fetchOpenTimesData: a named day past the first three', () => {
   });
 });
 
-describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the withhold reason is stored', () => {
-  async function runDraft({ gateOn = true, inboundMessage, smsHistory = [], schedulingIntent = false, city = 'Venice', days, upcomingServices = [], serviceHistory = [], services = [], identity = () => IDENTITY_NONE, pendingEstimate = null, currentRow = true } = {}) {
+describe('draftShadowReply: named days and the stored withhold reason', () => {
+  async function runDraft({ gateOn = true, inboundMessage, smsHistory = [], schedulingIntent = false, city = 'Venice', days, upcomingServices = [], serviceHistory = [], services = [], identity = () => IDENTITY_NONE, pendingEstimate = null } = {}) {
     jest.resetModules();
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
@@ -236,9 +140,7 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     jest.doMock('../services/context-aggregator', () => ({
       getContextForCustomer: jest.fn(async () => ({
-        summary: 'QA customer', flags: [], upcomingServices, serviceHistory, pendingEstimate,
-        // the webhook logs the drafted text (sms-1) before drafting: it is the newest row
-        smsHistory: currentRow ? [{ id: 'sms-1', direction: 'inbound', fromPhone: ME, toPhone: LINE, body: inboundMessage, date: new Date().toISOString() }, ...smsHistory] : smsHistory,
+        summary: 'QA customer', flags: [], upcomingServices, serviceHistory, pendingEstimate, smsHistory,
         customer: { id: 'customer-1', billingLane: null },
         billing: { outstandingBalance: 0, recentPayments: [] },
       })),
@@ -283,87 +185,22 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
   });
 
 
-  const staffAsk = () => ({ direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body: 'We can come Monday. What time works for you?', date: new Date(Date.now() - 3600e3).toISOString() });
-  const at = (h) => new Date(Date.now() - h * 3600e3).toISOString();
+
   const pestVisit = { type: 'Pest Control', date: '2026-12-08', scheduledServiceId: 'svc-pest-1' };
   const lawnDone = { type: 'Lawn Care', date: '2026-11-02' };
-  const LAWN = { service_key: 'lawn_care', name: 'Lawn Care' };
-  const PEST = { service_key: 'pest_control', name: 'Pest Control' };
-  const pickPest = (prompt) => (/pest/i.test(prompt.split('Their visits:')[0]) ? { ok: true, json: { about: 'visit', visit: 'V1', service: null } } : IDENTITY_NONE);
-  const pickLawn = (prompt) => (/lawn/i.test(prompt.split('Their visits:')[0]) ? { ok: true, json: { about: 'new_service', visit: null, service: 'lawn_care' } } : IDENTITY_NONE);
+  const mk = (iso, label) => ({ date: iso, fullDate: label, slots: [{ startTime24: '09:00' }] });
+  const FOUR_DAYS = [mk('2026-11-30', 'Monday, November 30'), mk('2026-12-01', 'Tuesday, December 1'), mk('2026-12-02', 'Wednesday, December 2'), mk('2026-12-03', 'Thursday, December 3')];
 
-  test('"Anytime is fine" to a staff text naming the job: OPEN TIMES for that job, scheduling draft, exchange stamped', async () => {
-    const ask = { ...staffAsk(), body: 'We can come Monday for your pest service. What time works for you?' };
-    const { row, actions, getAvailableSlots, resolveDeliveryMode, identityPrompts } = await runDraft({
-      inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit], services: [PEST, LAWN], identity: pickPest,
-    });
-    expect(identityPrompts[0]).toContain(JSON.stringify(ask.body));
-    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1', serviceType: 'Pest Control' });
-    expect(row.facts_block).toContain('Monday, November 30: 9:00 AM - 11:00 AM');
-    expect(row.scheduling_intent).toBe(true);
-    expect(resolveDeliveryMode.mock.calls[0][0].schedulingIntent).toBe(true);
-    expect(actions.open_times_from_thread).toBe('staff_asked');
-    expect(actions.open_times_withheld).toBeUndefined();
-  });
-
-  test('a lawn ask and the clarification after it size lawn times, not the booked pest visit', async () => {
-    const rows = [{ direction: 'inbound', fromPhone: ME, toPhone: LINE, body: 'For the lawn treatment', date: at(0.5) }, { ...staffAsk(), body: 'Sure. What day works for you?' }];
-    const { getAvailableSlots, identityPrompts } = await runDraft({
-      inboundMessage: 'Thursday', smsHistory: rows, upcomingServices: [pestVisit], services: [PEST, LAWN], identity: pickLawn,
-    });
-    expect(identityPrompts[0]).toContain(JSON.stringify('For the lawn treatment'));
-    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1', serviceType: 'Lawn Care' });
-  });
-
-  test.each([
-    ['one booked visit', { upcomingServices: [pestVisit] }],
-    ['a booked visit and a lawn visit done', { upcomingServices: [pestVisit], serviceHistory: [lawnDone] }],
-    ['a pending estimate and no visit', { pendingEstimate: { id: 'est-1' } }],
-  ])('the exchange names no job (%s): withheld identity_uncertain:thread_unnamed, never the ladder', async (_label, ctx) => {
-    const { getAvailableSlots, actions, row } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()], services: [PEST, LAWN], ...ctx });
-    expect(getAvailableSlots).not.toHaveBeenCalled();
-    expect(actions.open_times_withheld).toBe('identity_uncertain:thread_unnamed');
-    expect(actions.open_times_from_thread).toBe('staff_asked');
-    expect(row.scheduling_intent).toBe(true);
-  });
-
-  test('"Yes, please" to "Would Thursday work?" shows that Thursday even past the first three days', async () => {
-    const ask = { ...staffAsk(), body: 'Would Thursday work for your pest service?' };
-    const mk = (iso, label) => ({ date: iso, fullDate: label, slots: [{ startTime24: '09:00' }] });
-    const { row } = await runDraft({
-      inboundMessage: 'Yes, please', smsHistory: [ask], upcomingServices: [pestVisit], identity: pickPest,
-      days: [mk('2026-11-30', 'Monday, November 30'), mk('2026-12-01', 'Tuesday, December 1'), mk('2026-12-02', 'Wednesday, December 2'), mk('2026-12-03', 'Thursday, December 3')],
-    });
+  test('"Can we move it to Thursday?" shows that Thursday even past the first three days; no withhold key', async () => {
+    const { row, actions } = await runDraft({ inboundMessage: 'Can we move it to Thursday?', schedulingIntent: true, upcomingServices: [pestVisit], days: FOUR_DAYS });
     expect(row.facts_block).toContain('- Thursday, December 3: 9:00 AM - 11:00 AM');
+    expect(actions).not.toHaveProperty('open_times_withheld');
   });
 
-  test('times asked but the finder offers none: no_open_days, still a scheduling draft (delivery rules hold)', async () => {
-    const ask = { ...staffAsk(), body: 'We can come Monday for your pest service. What time works for you?' };
-    const { row, actions } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit], identity: pickPest, days: [] });
+  test('times asked but the finder offers none: open_times_withheld = no_open_days', async () => {
+    const { row, actions } = await runDraft({ inboundMessage: 'Can I reschedule?', schedulingIntent: true, upcomingServices: [pestVisit], days: [] });
     expect(actions.open_times_withheld).toBe('no_open_days');
     expect(row.scheduling_intent).toBe(true);
-  });
-
-  test('no booking exchange: no lookup, no keys, not a scheduling draft', async () => {
-    const { row, actions, getAvailableSlots } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [] });
-    expect(getAvailableSlots).not.toHaveBeenCalled();
-    expect(row.scheduling_intent).toBe(false);
-    expect(actions).not.toHaveProperty('open_times_withheld');
-    expect(actions).not.toHaveProperty('open_times_from_thread');
-  });
-
-  test('the drafted row is not in the history: no exchange (fail closed)', async () => {
-    const { getAvailableSlots } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()], currentRow: false });
-    expect(getAvailableSlots).not.toHaveBeenCalled();
-  });
-
-  test("a text the webhook already calls scheduling keeps today's path: no exchange in the identity prompt, the ladder decides", async () => {
-    const { identityPrompts, getAvailableSlots, actions } = await runDraft({
-      inboundMessage: 'Thursday', schedulingIntent: true, smsHistory: [staffAsk()], upcomingServices: [pestVisit], serviceHistory: [lawnDone], services: [PEST, LAWN],
-    });
-    expect(identityPrompts[0]).not.toContain('Earlier in this text thread');
-    expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1', serviceType: 'Pest Control' });
-    expect(actions).not.toHaveProperty('open_times_from_thread');
   });
 
   test('times asked with no city to look up: no_location', async () => {
@@ -371,100 +208,27 @@ describe('draftShadowReply: a reply in a booking exchange gets OPEN TIMES; the w
     expect(actions.open_times_withheld).toBe('no_location');
   });
 
-  test('a carried reply never gets the next-of-series pick in the identity prompt', async () => {
-    process.env.GATE_SMS_OFFERS_SCHEDULER = 'true';
-    try {
-      const series = [0, 1].map((i) => ({ type: 'Pest Control', date: `2026-12-0${i + 3}`, scheduledServiceId: `svc-${i}`, seriesKey: 'series-1', seriesExclusive: true }));
-      const carried = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()], upcomingServices: series });
-      expect(carried.identityPrompts[0]).toContain('Earlier in this text thread');
-      expect(carried.identityPrompts[0]).not.toContain('it is about the NEXT one');
-      const flagged = await runDraft({ inboundMessage: 'Can I move my appointment?', schedulingIntent: true, upcomingServices: series });
-      expect(flagged.identityPrompts[0]).toContain('it is about the NEXT one');
-    } finally {
-      delete process.env.GATE_SMS_OFFERS_SCHEDULER;
-    }
+  test('times asked and the job is not clear: identity_uncertain:<why>, no lookup', async () => {
+    const { actions, getAvailableSlots } = await runDraft({
+      inboundMessage: 'Can I reschedule?', schedulingIntent: true, upcomingServices: [pestVisit, { type: 'Lawn Care', date: '2026-12-10' }], serviceHistory: [lawnDone],
+      identity: () => ({ ok: true, json: { about: 'unclear', visit: null, service: null } }),
+    });
+    expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(actions.open_times_withheld).toBe('identity_uncertain:unclear');
   });
 
-  test('gate off: no exchange, no new keys (byte-identical row shape)', async () => {
-    const { row, actions, getAvailableSlots } = await runDraft({ gateOn: false, inboundMessage: 'Anytime is fine', smsHistory: [staffAsk()] });
+  test('a short reply after a staff availability question is judged on its own text: no lookup, no keys, not a scheduling draft', async () => {
+    const ask = { direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body: 'What day works for you?', date: new Date(Date.now() - 3600e3).toISOString() };
+    const { row, actions, getAvailableSlots, identityPrompts } = await runDraft({ inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit] });
     expect(getAvailableSlots).not.toHaveBeenCalled();
+    expect(identityPrompts).toEqual([]);
     expect(row.scheduling_intent).toBe(false);
     expect(actions).not.toHaveProperty('open_times_withheld');
-    expect(actions).not.toHaveProperty('open_times_from_thread');
-  });
-});
-
-describe('a reply in a booking exchange after a covered pest report books through the free re-service page', () => {
-  beforeEach(() => {
-    process.env.SHADOW_DRAFT_VERIFY = 'false';
-    process.env.SHADOW_FEWSHOT = 'false';
-    process.env.GATE_SMS_REAL_ANSWERS = 'true';
-    process.env.GATE_SMS_PROMPT_B1 = 'true';
-  });
-  afterEach(() => {
-    for (const k of ['SHADOW_DRAFT_VERIFY', 'SHADOW_FEWSHOT', 'GATE_SMS_REAL_ANSWERS', 'GATE_SMS_PROMPT_B1']) delete process.env[k];
-    for (const m of ['../services/availability', '../services/call-booking-catalog', '../services/llm/call', '@anthropic-ai/sdk',
-      '../services/reservice-scheduler', '../routes/reservice-public']) jest.dontMock(m);
-    jest.resetModules();
   });
 
-  function mockDeps({ reply = { reply: 'ok', intended_actions: [], missing_info: null } } = {}) {
-    const getAvailableSlots = jest.fn(async () => ({ days: [{ date: '2026-06-16', fullDate: 'Tuesday, June 16', slots: [{ startTime24: '09:00' }] }] }));
-    const reserviceOpenings = jest.fn(async () => ({ days: [{ date: '2026-06-17', slots: [{ start_time: '10:00' }] }] }));
-    jest.doMock('../services/availability', () => ({ getAvailableSlots }));
-    jest.doMock('../services/call-booking-catalog', () => ({ loadBookableCallServices: async () => [] }));
-    jest.doMock('../services/llm/call', () => ({
-      dispatchWithFallback: jest.fn(async (policy, payload) => (payload?.laneId === 'sms_service_identity' ? IDENTITY_NONE : {
-        ok: true, text: JSON.stringify(reply), model: 'fixture',
-      })),
-    }));
-    jest.doMock('@anthropic-ai/sdk', () => jest.fn(() => ({ messages: { create: jest.fn() } })));
-    jest.doMock('../services/reservice-scheduler', () => ({
-      ...jest.requireActual('../services/reservice-scheduler'),
-      reserviceSelfServeEnabled: () => true,
-      loadReserviceLaneAvailability: async () => ({ eligible: ['pest'], bookable: ['pest'], open: {}, verified: true, hasRecurringPlan: true }),
-    }));
-    jest.doMock('../routes/reservice-public', () => ({ _internals: { reserviceOpeningsFor: reserviceOpenings } }));
-    jest.resetModules();
-    return { getAvailableSlots, reserviceOpenings };
-  }
-  const at = (h) => new Date(Date.now() - h * 3600e3).toISOString();
-  const draft = (inboundMessage, rows) => require('../services/sms-shadow-drafter').generateGroundedDraft({
-    client: {},
-    context: {
-      summary: 'Test customer', customer: { id: 'cust-1' }, serviceHistory: [{ type: 'Quarterly Pest', date: '2026-05-20' }],
-      smsHistory: [{ id: 'log-9', direction: 'inbound', fromPhone: ME, toPhone: LINE, body: inboundMessage, date: at(0) }, ...rows],
-    },
-    inboundMessage, inboundPhone: ME, intent: { intent: 'GENERAL' }, schedulingIntent: false, city: 'Venice', voiceProfile: null, liveOpenTimes: true, smsLogId: 'log-9',
-  });
-  const rows = [
-    { direction: 'inbound', fromPhone: ME, toPhone: LINE, body: 'The ants are back in the kitchen', date: at(0.5) },
-    { direction: 'outbound', type: 'manual', fromPhone: LINE, toPhone: ME, body: 'Sorry to hear that. What day works for you?', date: at(1) },
-  ];
-
-  test('"Anytime is fine" after the report: re-service openings, never ordinary OPEN TIMES', async () => {
-    const { getAvailableSlots, reserviceOpenings } = mockDeps();
-    const result = await draft('Anytime is fine', rows);
-    expect(reserviceOpenings).toHaveBeenCalledWith('cust-1', { lanes: ['pest'] });
-    expect(getAvailableSlots).not.toHaveBeenCalled();
-    expect(result.factsBlock).toContain('FREE RE-SERVICE OPENINGS');
-    expect(result.factsBlock).not.toContain('OPEN TIMES (real');
-    expect(result.reserviceText).toBe('The ants are back in the kitchen\nAnytime is fine');
-    expect(result.openTimesTrace.stamp).toEqual({ open_times_from_thread: 'staff_asked' });
-  });
-
-  test('the re-service offer checks read the exchange too: an empty reply to the carried report does not converge', async () => {
-    mockDeps({ reply: { reply: '', kind: 'ABSTAIN', intended_actions: [{ type: 'none' }], missing_info: null } });
-    const result = await draft('Anytime is fine', rows);
-    expect(result.converged).toBe(false);
-  });
-});
-
-describe('settleDraftKind: a carried reply is never a courtesy ACK', () => {
-  const { settleDraftKind, DRAFT_KINDS } = require('../services/sms-shadow-drafter');
-  test('the same ACK settles as ACK alone and as ABSTAIN when carried', () => {
-    const ack = { kind: 'ACK', reply: '', intended_actions: [] };
-    expect(settleDraftKind(ack, { inboundMessage: 'ok', factsBlock: '', allowAck: true }).kind).toBe(DRAFT_KINDS.ACK);
-    expect(settleDraftKind(ack, { inboundMessage: 'ok', factsBlock: '', allowAck: true, carried: true }).kind).toBe(DRAFT_KINDS.ABSTAIN);
+  test('gate off: no new keys (byte-identical row shape)', async () => {
+    const { row, actions } = await runDraft({ gateOn: false, inboundMessage: 'Can I reschedule?', schedulingIntent: true, city: null });
+    expect(row.scheduling_intent).toBe(true);
+    expect(actions).not.toHaveProperty('open_times_withheld');
   });
 });
