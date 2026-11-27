@@ -110,7 +110,9 @@ function explicitTripEndTime(payload = {}) {
 // The time a trip-end happened: its own block's time, else the event's own time. Never the
 // time of an envelope GPS sample (gps / location / position), which can be older than the stop.
 function tripEndTime(payload = {}) {
-  return firstPresent(explicitTripEndTime(payload), payload.timestamp, payload.ts) ?? null;
+  const readable = [explicitTripEndTime(payload), payload.timestamp, payload.ts]
+    .find((value) => value != null && Number.isFinite(Date.parse(String(value))));
+  return readable ?? null;
 }
 
 function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayload(payload)) {
@@ -126,7 +128,7 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
   if (canonicalEventType === 'trip-end') {
     const point = pointFromSource(payload.end);
     if (!point) return null;
-    if (point.reported_at == null) point.reported_at = tripEndTime(payload);
+    if (!Number.isFinite(Date.parse(point.reported_at ?? ''))) point.reported_at = tripEndTime(payload);
     return Number.isFinite(Date.parse(point.reported_at ?? '')) ? point : null;
   }
   return (

@@ -35,7 +35,6 @@ const {
 const {
   eventTypeFromPayload,
   extractImei,
-  firstPresent,
   normalizeEventType,
   normalizeTripMetricsPayload,
   pointFromPayload,
@@ -148,7 +147,10 @@ const ENGINE_OFF_LAST_LOCATION_MAX_MS = 10 * 60 * 1000;
 // detector's freshness and en-route checks as a fresh engine-off. Without one,
 // null: the event is handled as before and never as an engine-off.
 async function engineOffPoint({ imei, payload, ownPoint }) {
-  const endedMs = Date.parse(firstPresent(explicitTripEndTime(payload), ownPoint?.reported_at, tripEndTime(payload)) || '');
+  // The first READABLE time: the end block's own, the point's, then the event's.
+  const endedMs = [explicitTripEndTime(payload), ownPoint?.reported_at, tripEndTime(payload)]
+    .map((value) => Date.parse(String(value ?? '')))
+    .find((ms) => Number.isFinite(ms)) ?? NaN;
   if (!Number.isFinite(endedMs)) return null;
   const endedAt = new Date(endedMs);
   const base = { ignition: false, speed_mph: 0, reported_at: endedAt.toISOString(), engine_off: true };
