@@ -95,6 +95,10 @@ function parseLines(raw) {
   return Array.isArray(arr) ? arr.map((x) => String(x)) : INVALID_LINES;
 }
 
+// A corrupt scope (not a list): the close-out consumes nothing for it and rings its own bell. The weekly buy list
+// warns instead of reading it as "no need".
+const serviceLinesInvalid = (raw) => parseLines(raw) === INVALID_LINES;
+
 // null = every line; invalid = none; a scoped list needs a resolvable line.
 function appliesToLine(rawLines, serviceLine) {
   const lines = parseLines(rawLines);
@@ -436,6 +440,7 @@ module.exports = {
   completionSuppliesOwed,
   completionSuppliesOwedMarker,
   appliesToLine,
+  serviceLinesInvalid,
   noKitReason,
   COMPLETION_CONSUMABLE_SOURCE: SOURCE,
   INSPECTION_SERVICE_RE,

@@ -8,6 +8,7 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/admin-alert-episodes', () => ({ raiseAdminAlertWithReopen: jest.fn(async () => ({ id: 'n1' })), openAdminAlertKeys: jest.fn(), closeAdminAlertKeys: jest.fn() }));
 
 const { runWeeklyBuyList, specFor, detailFor, whyFor, growth } = require('../services/procurement/weekly-buy-alert');
 const { composeAdminAlert } = require('../services/admin-alert-compose');
@@ -195,6 +196,65 @@ describe('a list-wide warning is never dropped', () => {
     const group = entry({ warnings: [taurusWarning] });
     const text = detailFor(group, listOf([group], { warnings: [taurusWarning] }));
     expect(text.split(taurusWarning)).toHaveLength(2);
+  });
+});
+
+describe('a shelf check is content on its own, and rings once', () => {
+  const KEY = 'weekly-buy:tech-a:2026-12-07';
+  const shelf = 'Check the shelf: one unopened 1 gal of Synthetic Liquid should remain.';
+  const group = () => entry({ items: [], estTotalCents: null, warnings: [shelf] });
+
+  test('with nothing to buy and nothing else to say, the list still raises a check alert', async () => {
+    const notify = notifier();
+    expect((await runWeeklyBuyList({ list: listOf([group()]), io: fakeIo(), notify })).raised).toBe(1);
+    expect(notify.mock.calls[0][1]).toBe("Inventory — check Alex's supplies, week of Dec 7");
+    expect(notify.mock.calls[0][3].detail).toContain(`Check:\n- ${shelf}`);
+  });
+
+  test('the next day it writes nothing (no daily ring); appearing on a standing alert refreshes quietly', async () => {
+    const first = notifier();
+    await runWeeklyBuyList({ list: listOf([group()]), io: fakeIo(), notify: first });
+    const stored = first.mock.calls[0][3].metadata.weeklyBuy;
+    const again = notifier();
+    const result = await runWeeklyBuyList({ list: listOf([group()], { fromDate: '2026-12-09' }), io: fakeIo({ standing: { [KEY]: { open: true, cleared: false, weeklyBuy: stored } }, open: [KEY] }), notify: again });
+    expect(again).not.toHaveBeenCalled();
+    expect(result.unchanged).toBe(1);
+    // a buy alert already standing: the shelf check joins its text without a ring
+    const buying = entry();
+    const bought = notifier();
+    await runWeeklyBuyList({ list: listOf([buying]), io: fakeIo(), notify: bought });
+    const standing = { open: true, cleared: false, weeklyBuy: bought.mock.calls[0][3].metadata.weeklyBuy };
+    const joined = notifier();
+    await runWeeklyBuyList({ list: listOf([{ ...buying, warnings: [shelf] }]), io: fakeIo({ standing: { [KEY]: standing }, open: [KEY] }), notify: joined });
+    expect(joined.mock.calls[0][3].ringOnRefresh()).toBe(false);
+  });
+});
+
+describe('alerts are written on the connection the run reads and closes through', () => {
+  const episodes = require('../services/admin-alert-episodes');
+  beforeEach(() => episodes.raiseAdminAlertWithReopen.mockClear());
+
+  test('a plain knex: one transaction on it for each alert, the writer gets that transaction', async () => {
+    const trx = { id: 'trx-1' };
+    const knex = Object.assign(jest.fn(), { transaction: jest.fn(async (fn) => fn(trx)) });
+    await runWeeklyBuyList({ knex, list: listOf([entry(), entry({ technicianId: 'tech-b', technicianName: 'Blake Sample' })]), io: fakeIo() });
+    expect(knex.transaction).toHaveBeenCalledTimes(2);
+    expect(episodes.raiseAdminAlertWithReopen).toHaveBeenCalledTimes(2);
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls.every((call) => call[3].trx === trx)).toBe(true);
+  });
+
+  test('a transaction the caller already holds is the one written on, with no new transaction', async () => {
+    const held = Object.assign(jest.fn(), { isTransaction: true, transaction: jest.fn() });
+    await runWeeklyBuyList({ knex: held, list: listOf([entry()]), io: fakeIo() });
+    expect(held.transaction).not.toHaveBeenCalled();
+    expect(episodes.raiseAdminAlertWithReopen.mock.calls[0][3].trx).toBe(held);
+  });
+
+  test('an injected notifier is used as given', async () => {
+    const notify = notifier();
+    await runWeeklyBuyList({ knex: Object.assign(jest.fn(), { transaction: jest.fn() }), list: listOf([entry()]), io: fakeIo(), notify });
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(episodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
   });
 });
 

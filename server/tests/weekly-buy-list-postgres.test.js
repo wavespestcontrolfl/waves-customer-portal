@@ -123,6 +123,17 @@ jest.setTimeout(60000);
     expect(inside.technicians[0].items).toEqual(alone.technicians[0].items);
   });
 
+  test('alerts are written on the connection the run was given: inside a caller\'s transaction they roll back with it', async () => {
+    const list = await buildWeeklyBuyList({ knex: mockConn, now: NOW });
+    const key = `weekly-buy:${techId}:2026-12-07`;
+    await expect(mockConn.transaction(async (trx) => {
+      await runWeeklyBuyList({ knex: trx, list });
+      expect(await trx('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key])).toHaveLength(1); // visible to the caller's connection
+      throw new Error('roll back');
+    })).rejects.toThrow('roll back');
+    expect(await mockConn('notifications').whereRaw("metadata->>'dedupeKey' = ?", [key])).toHaveLength(0); // and gone with it
+  });
+
   test('the alert store: raise, rerun quietly, close when nothing is left, end last week', async () => {
     const list = await buildWeeklyBuyList({ knex: mockConn, now: NOW });
     const key = `weekly-buy:${techId}:2026-12-07`;

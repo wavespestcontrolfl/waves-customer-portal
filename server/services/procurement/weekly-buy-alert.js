@@ -188,6 +188,18 @@ async function syncWeeklyBuyAlerts({ list, io, notify }) {
   return result;
 }
 
+// The alert writer on the SAME connection pool (or transaction) the run reads and closes through, never the global
+// one: raiseAdminAlertWithReopen takes the connection as `trx`, so one transaction per alert on this knex, or the
+// caller's own transaction when it holds one (its errors then belong to the caller). The supply snapshot of
+// buildWeeklyBuyList is closed before any alert is written; it is never the write connection.
+function raiseOn(knex) {
+  const episodes = require('../admin-alert-episodes');
+  const raise = (trx, category, title, body, opts) => episodes.raiseAdminAlertWithReopen(category, title, body, { ...opts, trx });
+  return (category, title, body, opts) => (knex.isTransaction
+    ? raise(knex, category, title, body, opts)
+    : knex.transaction((trx) => raise(trx, category, title, body, opts)));
+}
+
 /**
  * Monday-Saturday 7:00 AM ET. buildWeeklyBuyList counts from today (never before
  * Monday), so Monday is the whole week and a later day is the recheck: the sync
@@ -195,7 +207,7 @@ async function syncWeeklyBuyAlerts({ list, io, notify }) {
  */
 async function runWeeklyBuyList({ knex = require('../../models/db'), now = new Date(), notify, io, list } = {}) {
   const built = list || await buildWeeklyBuyList({ knex, now });
-  const sink = notify || require('../admin-alert-episodes').raiseAdminAlertWithReopen;
+  const sink = notify || raiseOn(knex);
   return { weekStart: built.weekStart, ...(await syncWeeklyBuyAlerts({ list: built, io: io || defaultIo(knex), notify: sink })) };
 }
 

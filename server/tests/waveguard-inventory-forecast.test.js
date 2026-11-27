@@ -455,9 +455,22 @@ describe('visits whose plan gives no usable amounts (the weekly buy list warns i
     expect(result.noUsablePlan).toEqual(['v-a']);
   });
 
+  test('a visit planned for some lines only is reported as partial: the lines with no product, no rate or no amount are missing from its totals', async () => {
+    const planned = (items) => ({ propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [] }, appointmentAssignment: {}, mixCalculator: { items } });
+    const result = await run({
+      'v-a': planned([item('short', 64, 'fl_oz', stock), { product: null, mix: { amount: 5 } }]), // an unknown product
+      'v-b': planned([item('short', 64, 'fl_oz', stock), item('warning', null, 'fl_oz', stock)]), // a line with no rate, so no amount
+      'v-c': planned([item('short', 64, 'fl_oz', stock), item('warning', 32, 'fl_oz', stock)]), // complete
+      'v-d': planned([item('short', 64, 'fl_oz', stock), item('warning', 0, 'fl_oz', stock)]), // a zero amount
+    });
+    expect(result.partialPlan).toEqual(['v-a', 'v-b', 'v-d']);
+    expect(result.noUsablePlan).toEqual([]);
+  });
+
   test('the technician projection never carries the ids, as with serviceIds', async () => {
-    const projected = await forecastForTechnician({ products: [], errors: [], skippedNonProgram: [], serviceIds: ['v-a'], noUsablePlan: ['v-a'] }, { technicianId: 'tech-1' }, db);
+    const projected = await forecastForTechnician({ products: [], errors: [], skippedNonProgram: [], serviceIds: ['v-a'], noUsablePlan: ['v-a'], partialPlan: ['v-a'] }, { technicianId: 'tech-1' }, db);
     expect(projected).not.toHaveProperty('noUsablePlan');
+    expect(projected).not.toHaveProperty('partialPlan');
     expect(projected).not.toHaveProperty('serviceIds');
   });
 });

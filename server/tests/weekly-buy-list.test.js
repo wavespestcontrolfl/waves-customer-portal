@@ -29,7 +29,7 @@ const plan = (over = {}) => ({
   pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, tax: 0, floorKey: null, ...over,
 });
 const demand = (qty, unit = 'fl_oz', reasons = ['lawn_plan']) => ({ qty, unit, reasons: new Set(reasons) });
-const group = (entries, over = {}) => ({ demand: new Map(entries), firstAt: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), extra: new Set(), ...over });
+const group = (entries, over = {}) => ({ demand: new Map(entries), firstAt: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), extra: new Set(), lawnMismatch: new Set(), ...over });
 const techs = new Map([['a', { name: 'Alex Sample', supplyStore: 'Synthetic Supply North' }], ['b', { name: 'Blake Sample', supplyStore: null }]]);
 const run = (groups, products) => planGroups({ groups, products: new Map(products.map((p) => [p.id, p])), techs });
 
@@ -173,6 +173,30 @@ describe('demand per technician', () => {
     const out = planGroups({ groups, products: new Map(), techs });
     expect(out.get('a').warnings).toEqual(['1 lawn visit has no usable plan, so its need is unknown']);
     expect(out.get('b').warnings).toEqual(['1 lawn visit has no usable plan, so its need is unknown']);
+  });
+
+  test('lawn demand counts only for visits read as lawn: a planned visit of another line is warned about, never counted or doubled', () => {
+    const forecast = {
+      serviceIds: ['m1', 'm2'], noUsablePlan: ['m1'], partialPlan: [], errors: [], skippedNonProgram: [],
+      products: [{ productId: 'lawn-1', inventoryUnit: 'gal', appointments: [{ serviceId: 'm1', inventoryAmount: 3 }, { serviceId: 'm2', inventoryAmount: 1 }], mismatchAppointments: [] }],
+    };
+    const groups = deriveDemand({ visits: [visit('m1', 'a', 'Tree & Shrub Fertilization'), visit('m2', 'a', 'Lawn Care Treatment')], forecast, mix: noMix, kit: [] });
+    expect(groups.get('a').demand.get('lawn-1').qty).toBe(1); // only the lawn visit
+    const out = planGroups({ groups, products: new Map(), techs });
+    expect(out.get('a').warnings).toContain('1 visit the lawn forecast planned is not read as lawn here, so its lawn products are left out');
+    // its other lawn findings do not count against the lawn list either: it is a tree and shrub visit, counted once as unplanned
+    expect(out.get('a').warnings).not.toContain('1 lawn visit has no usable plan, so its need is unknown');
+    expect(out.get('a').warnings).toContain('1 visit of types this list does not plan yet');
+  });
+
+  test('a lawn visit planned for only some of its lines is warned about', () => {
+    const groups = deriveDemand({
+      visits: [visit('p1', 'a', 'Lawn Care Treatment'), visit('p2', 'b', 'Lawn Care Treatment')],
+      forecast: { serviceIds: ['p1', 'p2'], partialPlan: ['p1'], noUsablePlan: [], errors: [], skippedNonProgram: [], products: [] }, mix: noMix, kit: [],
+    });
+    const out = planGroups({ groups, products: new Map(), techs });
+    expect(out.get('a').warnings).toEqual(['1 lawn visit has a product with no amount, so that product is missing from its need']);
+    expect(out.get('b').warnings).toEqual([]);
   });
 
   test('stock goes to the technician who is at the first stop earlier that day; an unset start time sorts last', () => {
@@ -377,21 +401,21 @@ describe('spare floor (one unopened container of the everyday liquids)', () => {
     test('under one pack left after the week: buy one spare', () => {
       const out = noteOf(10, { onHand: 100 }); // 90 left
       expect(out.items[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] });
-      expect(out.notes.join(' ')).not.toMatch(/Check the shelf/);
+      expect(out.warnings.join(' ')).not.toMatch(/Check the shelf/);
     });
 
     test('two packs or more left: certainly one sealed, buy nothing and say nothing', () => {
       const out = noteOf(10, { onHand: 266 }); // 256 left = exactly two packs
       expect(out.items).toEqual([]);
-      expect(out.notes).toEqual([]);
-      expect(noteOf(10, { onHand: 400 }).notes).toEqual([]);
+      expect(out.warnings).toEqual([]);
+      expect(noteOf(10, { onHand: 400 }).warnings).toEqual([]);
     });
 
     test('one to two packs left: buy nothing, and ask for a look at the shelf', () => {
       for (const onHand of [138, 200, 265]) { // 128, 190 and 255 left
         const out = noteOf(10, { onHand });
         expect(out.items).toEqual([]);
-        expect(out.notes).toEqual(['Check the shelf: one unopened 1 gal of Synthetic Liquid should remain.']);
+        expect(out.warnings).toEqual(['Check the shelf: one unopened 1 gal of Synthetic Liquid should remain.']); // a warning: it keeps the list with nothing to buy
       }
     });
 
@@ -399,7 +423,7 @@ describe('spare floor (one unopened container of the everyday liquids)', () => {
       const gal = (over) => plan({ unit: 'gal', pack: { pack: 1 }, packLabel: '1 gal', floorKey: 'crosscheck_plus', onHand: 1.5, ...over });
       const out = run(new Map([['a', group([['p1', demand(0.1, 'gal', ['pest_mix'])]])]]), [gal()]).get('a');
       expect(out.items).toEqual([]);
-      expect(out.notes.join(' ')).toMatch(/Check the shelf/);
+      expect(out.warnings.join(' ')).toMatch(/Check the shelf/);
     });
 
     test('the live example still buys one spare: 1.34 gal on hand, 0.55 gal used, 1 gal packs', () => {
@@ -651,6 +675,17 @@ describe('buildWeeklyBuyList read wiring', () => {
       const list = await listWith(status);
       expect(list.technicians[0].warnings).toEqual([]);
     });
+  });
+
+  test('a per-visit supply whose service lines are corrupt is a warning on every list, never silently no need', async () => {
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: [], serviceCount: 0, errors: [], skippedNonProgram: [], products: [] });
+    const knex = fakeKnex({
+      'scheduled_services as ss': [[visit('k1', 'a', 'Quarterly Pest Control', '2026-12-09')]],
+      technicians: [[{ id: 'a', name: 'Alex Sample' }]],
+      products_catalog: [[], [{ id: 'sign', per_completion_usage: 1, per_completion_service_lines: 'not-a-list', inventory_unit: 'each' }]],
+    });
+    const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    expect(list.technicians[0].warnings).toContain('A per-visit supply has service lines that are not a list, so its need is left out.');
   });
 
   test('a forecast that fails fails the list: lawn need is never left out silently', async () => {

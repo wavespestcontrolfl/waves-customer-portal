@@ -169,6 +169,7 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
   const productMap = new Map();
   const errors = [];
   const noUsablePlan = [];
+  const partialPlan = [];
   const skippedNonProgram = [];
 
   function ensureRow(product, inventory, demandUnit) {
@@ -226,6 +227,9 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
       // A plan with a block, or lines that gave no amount, adds no demand: say so, never "nothing needed" (the
       // weekly buy list warns "no usable plan"). A plan with no lines and no block is a visit with no products.
       if (!added.some(Boolean) && ((plan?.propertyGate?.blocks || []).length || added.length)) noUsablePlan.push(service.id);
+      // Some lines gave an amount and some did not (no product, no rate, no amount): the visit is planned, but a product
+      // of it is missing from the totals.
+      if (added.some(Boolean) && !added.every(Boolean)) partialPlan.push(service.id);
     } catch (err) {
       errors.push({
         serviceId: service.id,
@@ -282,6 +286,8 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
     // Visits whose plan added no demand although it had a block or lines (missing lawn area, no turf profile, no
     // program for the grass, no protocol visit, lines with no amount): their need is unknown, not zero. Ids only.
     noUsablePlan,
+    // Visits planned for some lines only (a line with no product, no rate or no amount is missing from the totals). Ids only.
+    partialPlan,
     productCount: products.length,
     statusCounts,
     products,
@@ -328,8 +334,8 @@ async function ownForecastServiceIds(forecast, actor, knex) {
 async function forecastForTechnician(forecast, actor, knex = db) {
   const own = await ownForecastServiceIds(forecast, actor, knex);
   const project = (entry) => (own.has(String(entry.serviceId)) ? entry : withoutCustomerFields(entry));
-  // serviceIds and noUsablePlan are for procurement (the weekly buy list): they name visits of other technicians too.
-  const { serviceIds: _internal, noUsablePlan: _unusable, ...visible } = forecast;
+  // serviceIds, noUsablePlan and partialPlan are for procurement (the weekly buy list): they name visits of other technicians too.
+  const { serviceIds: _internal, noUsablePlan: _unusable, partialPlan: _partial, ...visible } = forecast;
   return {
     ...visible,
     products: (forecast.products || []).map((row) => ({

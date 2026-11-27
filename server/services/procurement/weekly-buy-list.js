@@ -47,7 +47,7 @@ const { convertInventoryQuantity, normalizeInventoryUnit } = require('../invento
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { packFor, packReorder, pickPriceRow } = require('./reorder-limit-suggestions');
 const { fertilizerBlackoutHold, FERTILIZER_COLUMNS } = require('./fertilizer-blackout');
-const { appliesToLine, noKitReason, INSPECTION_SERVICE_RE } = require('../supplies-consumption');
+const { appliesToLine, noKitReason, serviceLinesInvalid, INSPECTION_SERVICE_RE } = require('../supplies-consumption');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { isPestHouseMixVisit, resolveHouseMix, PEST_HOUSE_MIX } = require('./pest-house-mix');
 const { projectTaurusEligibility } = require('../taurus-yearly-count');
@@ -87,7 +87,7 @@ function weekBounds(now = new Date()) {
 const visitStart = (v) => `${dateOnlyString(v.scheduled_date)}T${v.window_start ? String(v.window_start).slice(0, 8) : '99'}`;
 
 function newGroup() {
-  return { demand: new Map(), firstAt: null, lawnNoPlan: 0, lawnNoUsable: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), taurusLeft: 0, hasLawn: false, mixVisit: false, extra: new Set() };
+  return { demand: new Map(), firstAt: null, lawnNoPlan: 0, lawnNoUsable: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), taurusLeft: 0, hasLawn: false, mixVisit: false, extra: new Set(), lawnMismatch: new Set(), lawnPartial: 0 };
 }
 
 // Sum demand for one product, kept in the unit of its first entry.
@@ -103,10 +103,18 @@ function addDemand(group, productId, qty, unit, reason) {
   held.reasons.add(reason);
 }
 
+// The forecast finds lawn visits by their service name (lawn, fertiliz, turf), so it can plan a visit this list does
+// not call a lawn visit ("Tree & Shrub Fertilization"). Lawn demand counts only for visits the close-out reads as lawn
+// (detectServiceLine); a visit the forecast planned that is not one is warned about on its list, not counted, so it
+// cannot double with the pest mix or another line.
 function addLawnDemand(groups, visitById, forecast) {
   const groupOf = (serviceId) => {
     const visit = visitById.get(String(serviceId));
-    return visit ? groups.get(visit.groupKey) : null;
+    if (!visit) return null;
+    const g = groups.get(visit.groupKey);
+    if (visit.line === 'lawn') return g;
+    g.lawnMismatch.add(String(visit.id));
+    return null;
   };
   for (const row of forecast?.products || []) {
     for (const a of row.appointments || []) {
@@ -121,9 +129,9 @@ function addLawnDemand(groups, visitById, forecast) {
   countLawnGaps(groupOf, forecast);
 }
 
-// Lawn visits the forecast could not plan (an error entry), could not use (ids), or left out as not on a program.
+// Lawn visits the forecast could not plan (an error entry), could not use or only part-planned (ids), or left out as not on a program.
 function countLawnGaps(groupOf, forecast) {
-  const counted = [[forecast?.errors, 'lawnNoPlan'], [forecast?.noUsablePlan, 'lawnNoUsable'], [forecast?.skippedNonProgram, 'unplanned']];
+  const counted = [[forecast?.errors, 'lawnNoPlan'], [forecast?.noUsablePlan, 'lawnNoUsable'], [forecast?.partialPlan, 'lawnPartial'], [forecast?.skippedNonProgram, 'unplanned']];
   for (const [entries, field] of counted) {
     for (const entry of entries || []) {
       const g = groupOf(entry?.serviceId ?? entry);
@@ -144,7 +152,7 @@ function deriveDemand({ visits, forecast, mix, kit }) {
   for (const v of visits) {
     const groupKey = v.technician_id ? String(v.technician_id) : UNASSIGNED;
     if (!groups.has(groupKey)) groups.set(groupKey, newGroup());
-    visitById.set(String(v.id), { ...v, groupKey });
+    visitById.set(String(v.id), { ...v, groupKey, line: detectServiceLine(v.service_type) });
   }
   addLawnDemand(groups, visitById, forecast);
   const forecastIds = new Set((forecast?.serviceIds || []).map(String));
@@ -152,7 +160,7 @@ function deriveDemand({ visits, forecast, mix, kit }) {
     const g = groups.get(v.groupKey);
     const at = visitStart(v);
     if (at < (g.firstAt || '9999')) g.firstAt = at;
-    const line = detectServiceLine(v.service_type);
+    const { line } = v;
     addPlannedDemand(g, v, { line, mix, planned: forecastIds.has(String(v.id)) });
     // The close-out's own rule for the kit: an inspection or an internal-only visit leaves none (noKitReason).
     const left = !noKitReason({ isInternalOnlyCompletion: v.internal_only, serviceType: v.service_type, projectType: v.project_type });
@@ -250,7 +258,7 @@ function planGroups({ groups, products, techs }) {
     }
     if (groups.get(key).taurusLeft) notes.get(key).push(`Taurus SC is left out of ${groups.get(key).taurusLeft} ${plural(groups.get(key).taurusLeft, 'visit', 'visits')}: the home reached the label's yearly limit, or its count is unavailable.`);
   }
-  applySpareFloor({ order, lines, notes });
+  applySpareFloor({ order, lines, groups });
   const out = new Map();
   for (const key of order) out.set(key, groupEntry({ key, group: groups.get(key), lines: lines.get(key), notes: notes.get(key), sharing, techs }));
   return out;
@@ -268,7 +276,7 @@ function planGroups({ groups, products, techs }) {
 //    A line with demand always draws on the stock first, so whenever there is stock on the shelf something is handed out of it;
 //    whole packs on the shelf are never counted as sealed on the volume alone.
 // Opened containers never combine. The spare goes to the first technician with demand for the product.
-function applySpareFloor({ order, lines, notes }) {
+function applySpareFloor({ order, lines, groups }) {
   const floorKeys = new Set(PEST_HOUSE_MIX.filter((e) => e.floor).map((e) => e.key));
   const byProduct = new Map();
   for (const key of order) for (const line of lines.get(key)) {
@@ -287,7 +295,9 @@ function applySpareFloor({ order, lines, notes }) {
     if (packsLeft >= 2 - NOISE) continue;
     const first = entries[0];
     if (packsLeft >= 1 - NOISE) {
-      notes.get(first.key).push(`Check the shelf: one unopened ${product.packLabel || 'container'} of ${product.name} should remain.`);
+      // A warning, not a note: it must keep the list (and its alert) even when nothing is to be bought. It sits in the
+      // alert's own text, so it rings once when it first appears and refreshes quietly after.
+      groups.get(first.key).extra.add(`Check the shelf: one unopened ${product.packLabel || 'container'} of ${product.name} should remain.`);
       continue;
     }
     first.packs = (first.packs || 0) + 1;
@@ -299,6 +309,8 @@ function applySpareFloor({ order, lines, notes }) {
 // [value read off a group (falsy = no warning), the sentence for it]
 const WARNING_TEXT = [
   [(g) => g.lawnNoPlan, (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} no lawn plan`],
+  [(g) => g.lawnPartial, (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} a product with no amount, so that product is missing from its need`],
+  [(g) => g.lawnMismatch.size, (n) => `${n} ${plural(n, 'visit', 'visits')} the lawn forecast planned ${plural(n, 'is', 'are')} not read as lawn here, so ${plural(n, 'its', 'their')} lawn products are left out`],
   [(g) => g.lawnNoUsable, (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} no usable plan, so its need is unknown`],
   [(g) => g.unplanned, (n) => `${n} ${plural(n, 'visit', 'visits')} of types this list does not plan yet`],
   [(g) => g.unitProblems.size, (n) => `${n} ${plural(n, 'product has', 'products have')} units that do not convert, so its need is left out`],
@@ -512,6 +524,7 @@ async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
   }
   for (const pid of onOrderProblems) warnGroups(groups, (g) => g.demand.has(pid), 'An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.');
   for (const pid of onOrderUnsettled) warnGroups(groups, (g) => g.demand.has(pid), 'An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.');
+  if (kit.some((p) => serviceLinesInvalid(p.per_completion_service_lines))) warnGroups(groups, () => true, 'A per-visit supply has service lines that are not a list, so its need is left out.');
   if (taurusFailed) warnGroups(groups, (g) => g.mixVisit, TAURUS_FAILED);
   if (lawnCapped) warnGroups(groups, (g) => g.hasLawn, LAWN_CAPPED);
   const listWarnings = [taurusFailed && TAURUS_FAILED, lawnCapped && LAWN_CAPPED].filter(Boolean);
