@@ -165,7 +165,7 @@ describe('GET lawn-fast/context', () => {
     buildLawnFastContext.mockResolvedValue({ ok: true, eligible: true, reason: null, visitType: 'recurring', service: { id: 'visit-1' } });
     const res = await invoke('get', CONTEXT, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, visitType: 'recurring', service: { id: 'visit-1' } });
+    expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, visitType: 'recurring', service: { id: 'visit-1' }, stockAdvisory: true });
     expect(buildLawnFastContext).toHaveBeenCalledWith(VISIT, { technicianId: 'tech-1' });
   });
 
@@ -183,7 +183,7 @@ describe('GET lawn-fast/context', () => {
     buildLawnFastContext.mockResolvedValue({ ok: true, eligible: false, reason: 'lawn_re_service', service: { id: 'visit-1' } });
     const res = await invoke('get', CONTEXT, { params });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ enabled: true, eligible: false, reason: 'lawn_re_service', service: { id: 'visit-1' } });
+    expect(res.body).toEqual({ enabled: true, eligible: false, reason: 'lawn_re_service', service: { id: 'visit-1' }, stockAdvisory: true });
   });
 
   test('a visit that disappears is 404', async () => {
@@ -214,10 +214,10 @@ describe('GET lawn-fast/context carries the stock advisory', () => {
     expect(res.body).toMatchObject({ enabled: true, eligible: true, stockAdvisory: true });
   });
 
-  test('a visit /complete still refuses below zero (mosquito): no stockAdvisory key', async () => {
+  test('a mosquito visit: stockAdvisory is true too (owner 2026-11-26: stock never blocks any visit type)', async () => {
     buildLawnFastContext.mockResolvedValue(ctxFor('Mosquito Control'));
     const res = await invoke('get', CONTEXT, { params });
-    expect(res.body).not.toHaveProperty('stockAdvisory');
+    expect(res.body.stockAdvisory).toBe(true);
   });
 });
 

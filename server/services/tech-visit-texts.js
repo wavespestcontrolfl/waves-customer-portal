@@ -194,10 +194,17 @@ function mentionsStoredCode(body, codes) {
   return Boolean(codes) && codes.test(normalizedBody(body).toLowerCase());
 }
 
+// The one body screen for any free text a technician may read (the texts here, and the Visit Brief's "Customer asked" items):
+// money words, card / bank / credential / sign-in / secret cues, a run of 3+ digits (times and dates exempt), a link, payment-scoped
+// text, and the customer's stored access codes. 'held' = never shown; 'ok' = passed every screen. `codes` is readStoredCodes' matcher.
+function screenBodyForTechnician(body, { codes = null } = {}) {
+  const held = hasMoneyWords(body) || hasCardCredentials(body) || hasNumberRun(body) || hasLink(body) || isPaymentScopedText(body) || mentionsStoredCode(body, codes);
+  return held ? 'held' : 'ok';
+}
+
 function isHeldBack(row, codes = null) {
   if (!(row.direction === 'inbound' ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(row.message_type || '')) return true;
-  const body = row.message_body;
-  return hasMoneyWords(body) || hasCardCredentials(body) || hasNumberRun(body) || hasLink(body) || isPaymentScopedText(body) || mentionsStoredCode(body, codes);
+  return screenBodyForTechnician(row.message_body, { codes }) === 'held';
 }
 
 // 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
@@ -336,4 +343,4 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   return { texts, hidden };
 }
 
-module.exports = { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };
+module.exports = { sequenceHeldIds, screenBodyForTechnician, readStoredCodes, textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };

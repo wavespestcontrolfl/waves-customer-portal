@@ -425,7 +425,9 @@ describe('bed bug specialty pricing', () => {
       expect(result.sqftBasedPrice).toBe(6000);
       expect(result.basePrice).toBe(6000);
       expect(result.multipliers.stories).toBe(1.05);
-      expect(result.price).toBe(6300);
+      // The size modifier steps on the total living area (3,000 sq ft > 2,500: x1.10), not the 1,500 sq ft footprint (owner 2026-11-26).
+      expect(result.multipliers.footprint).toBe(1.1);
+      expect(result.price).toBe(6930);
     });
 
     test('HEAT protocol fields are returned', () => {

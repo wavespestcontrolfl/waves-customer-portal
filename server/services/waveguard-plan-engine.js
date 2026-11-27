@@ -1915,6 +1915,12 @@ async function calculateNutrientLedger(knex, customerId, products, lawnSqft, ser
   if (ledgerServiceProductIds.length) {
     serviceProductQuery.whereNotIn('sp.id', ledgerServiceProductIds);
   }
+  // A line the completion flagged over its product's ceiling (owner 2026-11-26) wrote no nutrient row on purpose, so it is
+  // not an application the fallback should count: a flagged 50,000 lb entry must not use up the year's nitrogen.
+  serviceProductQuery.whereRaw(
+    `NOT EXISTS (SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(sr.structured_notes->'inventoryDeductions') = 'array' THEN sr.structured_notes->'inventoryDeductions' ELSE '[]'::jsonb END) AS d
+      WHERE d->>'status' = 'not_deducted_implausible' AND d->>'serviceProductId' = sp.id::text)`,
+  );
 
   const rows = await savepointRead(knex, () => serviceProductQuery).catch((err) => { if (strict) throw err; return []; });
   const fallbackSummary = calculateNutrientLedgerFromRows(rows, products, lawnSqft, year);
@@ -3035,6 +3041,7 @@ module.exports = {
   v13VisitLimits,
   settleCatchUpForVisit,
   calculateNutrientLedgerFromRows,
+  calculateNutrientLedger,
   calculateNutrients,
   summarizeAnnualN,
   buildMixOrder,

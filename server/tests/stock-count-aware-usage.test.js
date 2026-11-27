@@ -112,7 +112,7 @@ describe('deductProductInventory', () => {
   test('visit before the count: no lockout even when stock would go negative', async () => {
     const trx = fakeTrx({ countRows: [COUNT_ROW] });
     const args = deductArgs({ product: { id: 'dimension', name: 'Dimension 18-0-10', inventory_on_hand: '3', inventory_unit: 'lb' } });
-    const result = await deductProductInventory(trx, { ...args, allowNegative: false });
+    const result = await deductProductInventory(trx, args);
     expect(result).toMatchObject({ status: 'not_deducted_counted', stockBefore: 3, stockAfter: 3 });
     expect(trx.writes.filter((w) => w.table === 'products_catalog')).toEqual([]);
   });
@@ -152,11 +152,12 @@ describe('deductProductInventory', () => {
     expect((await deductProductInventory(trx, deductArgs())).status).toBe('deducted');
   });
 
-  test('the lockout still applies when there is no count to blame', async () => {
+  test('with no count to blame, stock still goes negative and the shortfall is recorded: no lockout on any visit (owner 2026-11-26)', async () => {
     const trx = fakeTrx({ countRows: [] });
     const args = deductArgs({ product: { id: 'dimension', name: 'Dimension 18-0-10', inventory_on_hand: '3', inventory_unit: 'lb' } });
-    await expect(deductProductInventory(trx, args)).rejects.toMatchObject({ code: 'waveguard_inventory_lockout' });
-    expect(trx.writes).toEqual([]);
+    const result = await deductProductInventory(trx, args);
+    expect(result.status).toBe('deducted_insufficient_stock');
+    expect(result.stockAfter).toBeLessThan(0);
   });
 
   test('a missing amount still short-circuits before any count read', async () => {

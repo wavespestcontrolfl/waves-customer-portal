@@ -255,3 +255,39 @@ describe('20261127200000_mix_rules_spray_fert_miticide', () => {
     expect(knex.raw).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127240000_mix_rules_group_fixes', () => {
+  const fix = require('../models/migrations/20261127240000_mix_rules_group_fixes');
+  const before = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+
+  test('adds five groups to the previous list and quotes the TriTek card line on every rule', () => {
+    expect(fix._GROUPS_BEFORE).toEqual(before._GROUPS);
+    expect(fix._GROUPS).toEqual([...before._GROUPS, 'sulfur', 'captan', 'carbaryl', 'dimethoate', 'npk_spray_fertilizer']);
+    const guide = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'tree-shrub-field-guide.json'), 'utf8'));
+    expect(guide.products.tritek.limits).toContain(fix._CARD_LINE);
+    expect(fix._RULES.map((r) => r.group_b)).toEqual(['npk_spray_fertilizer', 'sulfur', 'captan', 'carbaryl', 'dimethoate']);
+    for (const rule of fix._RULES) {
+      expect(rule).toMatchObject({ verdict: 'never', jar_test_required: false });
+      expect(rule.source).toContain(`"${fix._CARD_LINE}"`);
+      expect(rule.reason.length).toBeLessThanOrEqual(200);
+    }
+    for (const g of fix._GROUPS) expect(g.length).toBeLessThanOrEqual(30);
+    expect(`migration:${fix._MIGRATION}:down`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('down() never matches by product name, pair or group', () => {
+    const text = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20261127240000_mix_rules_group_fixes.js'), 'utf8');
+    const down = text.slice(text.indexOf('exports.down'));
+    expect(down).not.toMatch(/findProduct|product_a_id|product_b_id|group_b:/);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    knex.raw = jest.fn();
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+});

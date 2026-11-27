@@ -538,11 +538,20 @@ async function unmappedRefusal({ knex, svc, spots, propertyId }) {
   }
   const rows = claims.filter((row) => takeAll.has(String(row.productId || '').toLowerCase()));
   if (!rows.length) return null;
-  const mapped = new Set((await loadActive(knex, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
+  // A warning only (owner 2026-11-26): a failed read of the mapped areas never stops the completion.
+  let mapped;
+  try {
+    mapped = new Set((await loadActive(knex, propertyId)).filter((area) => area.type === 'take_all').map((area) => area.place));
+  } catch (err) {
+    logger.warn(`[lawn-trouble-areas] mapped take-all areas unavailable at completion for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    return null;
+  }
   // Every place the row names must be mapped; the refusal names the first one that is not.
   for (const row of rows) {
     const place = placesOfInput(row).find((id) => !mapped.has(id));
-    if (place) return { status: 400, payload: { error: UNMAPPED_REASON, code: 'lawn_place_not_mapped', productId: String(row.productId).toLowerCase(), place } };
+    // A warning, never a refusal (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"):
+    // the store still keeps a card take-all row off an unmapped place (recordStore), and the visit completes.
+    if (place) logger.warn(`[lawn-trouble-areas] take-all card row on unmapped place ${place} for ${svc.id} (warning only)`);
   }
   return null;
 }

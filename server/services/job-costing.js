@@ -588,10 +588,30 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
 }
 
-// The identity of a refused line: product, amount and base unit, so a corrected amount is a different line. The
-// amount is compared at the stored precision (quantity_applied / total_amount are decimal(8,3)), so a submitted
-// 641.1234 matches the 641.123 the ledger kept.
-const refusedLineKey = (productId, amount, unit) => `${productId}|${Number(amount).toFixed(3)}|${baseQuantityUnit(unit) || ''}`;
+// The amount as decimal(8,3) stores it, in thousandths: the shortest decimal text of the number rounded half up ONCE, the way
+// PostgreSQL rounds the text it is sent (406.0005 stores as 406.001, 406.00049999999 as 406.000), never a binary double
+// scaled and rounded twice. A numeric column's own text ("406.001") reads the same way.
+function storedThousandths(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const text = /e/i.test(String(n)) ? n.toFixed(20) : String(n);
+  const [whole, fraction = ''] = text.replace(/^-/, '').split('.');
+  const padded = `${fraction}0000`;
+  return BigInt(whole + padded.slice(0, 3)) + (padded[3] >= '5' ? 1n : 0n);
+}
+
+// A flagged line (not_deducted_implausible) is skipped when the ledger row is the one it was recorded on (its service
+// product id) OR carries the same product, base unit and stored amount. The second test keeps the exclusion when a pest recap
+// re-saves the product: the recap replaces the service_products row and relinks the ledger row to the new id with the
+// quantity unchanged, and a deduction saved before the id was kept has only the amount. A corrected amount matches neither, so it is costed.
+function isFlaggedLedgerRow(flagged, row) {
+  const unit = baseQuantityUnit(row.quantity_unit) || '';
+  const stored = storedThousandths(row.quantity_applied);
+  return flagged.some((d) => (d.serviceProductId && d.serviceProductId === row.service_product_id)
+    || (d.productId === row.product_id
+      && (baseQuantityUnit(d.amountUnit) || '') === unit
+      && stored != null && storedThousandths(d.amount) === stored));
+}
 
 // Standard labor (owner ruling 2026-10-31), applied to the measured result of
 // calcLaborCost. Order: an admin time-on-site correction (overrideLaborMinutes, resolved by the caller) wins;
@@ -651,23 +671,21 @@ async function calcProductsCost(db, serviceRecordId, structuredNotes = null) {
   }
 
   try {
-    // A line the completion refused as an implausible amount wrote no movement and no cost, so the ledger fallback skips
-    // that line too. The refusal is bound to the amount it refused (product, amount and unit): a correction that changes
-    // the amount no longer matches, and the corrected usage is costed.
-    const refused = new Set((parseJsonObject(structuredNotes).inventoryDeductions || [])
-      .filter((d) => d?.status === 'not_deducted_implausible')
-      .map((d) => refusedLineKey(d.productId, d.amount, d.amountUnit)));
+    // A line the completion flagged as an implausible amount wrote no movement and no cost, so the ledger fallback skips
+    // that line too, by the service product it was recorded on (owner 2026-11-26). A correction that changes the amount is
+    // a new service product and is costed.
+    const flagged = (parseJsonObject(structuredNotes).inventoryDeductions || []).filter((d) => d?.status === 'not_deducted_implausible');
     const rows = await db('property_application_history')
       .where({ service_record_id: serviceRecordId })
       // Retracted applications (recap corrections) carry no material cost.
       .whereNull('retracted_at')
-      .select('product_id', 'quantity_applied', 'quantity_unit');
+      .select('product_id', 'service_product_id', 'quantity_applied', 'quantity_unit');
 
     for (const r of rows) {
       const qty = Number(r.quantity_applied) || 0;
       if (!qty || !r.product_id) continue;
       if (costedInventoryProductIds.has(r.product_id)) continue;
-      if (refused.has(refusedLineKey(r.product_id, r.quantity_applied, r.quantity_unit))) continue;
+      if (isFlaggedLedgerRow(flagged, r)) continue;
 
       // Price the amount the way the completion deduction prices an inventory
       // movement (inventory-cost.js): cost_per_unit in its own unit, else the

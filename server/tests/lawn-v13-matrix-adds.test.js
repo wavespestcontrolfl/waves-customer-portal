@@ -307,19 +307,26 @@ describe('5. Ronstar (oxadiazon) is blocked on lawns', () => {
     expect(await prohibited.lawnProhibitedProductBlocks(database, [])).toEqual([]);
   });
 
-  test('a fresh lawn closeout refuses with a 400 body that names the product; the gate sits right after the internal-only products block', () => {
-    const blocks = [prohibited.lawnProhibitedProductBlock({ name: 'Ronstar G' })];
-    expect(prohibited.lawnProhibitedProductsBlockPayload(blocks)).toEqual({
-      error: 'A product on this lawn visit is not for home lawns',
-      code: 'lawn_product_not_for_home_lawns',
-      details: [blocks[0].message],
-      blocks,
+  test('a fresh lawn closeout only WARNS (owner 2026-11-26): the finding says the label prohibits residential use; the closeout never returns a 400 for it', () => {
+    const block = { ...prohibited.lawnProhibitedProductBlock({ name: 'Ronstar G' }), productId: 'r1' };
+    expect(prohibited.lawnProhibitedProductFinding(block)).toEqual({
+      code: 'application_limit_exceeded',
+      limitType: 'label_prohibits_residential',
+      productId: 'r1',
+      productName: 'Ronstar G',
+      message: 'Ronstar G: the label prohibits residential use (oxadiazon is not for use on home lawns). The visit was recorded and the office was told.',
     });
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
     const gate = source.indexOf("claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn') {");
     expect(gate).toBeGreaterThan(source.indexOf('return ({ status: 422, body: internalOnlyProductsBlock });'));
-    expect(source.slice(gate, gate + 700)).toContain('lawnCloseoutProhibitedBlocks(db, svc, products)');
-    expect(source.slice(gate, gate + 700)).toContain('status: 400, body: lawnProhibitedProductsBlockPayload(prohibited)');
+    expect(source.slice(gate, gate + 500)).toContain('lawnProhibited.lawnCloseoutProhibitedBlocks(db, svc, products)');
+    expect(source.slice(gate, gate + 500)).toContain('lawnWarningFindings.push(');
+    expect(source.slice(gate, gate + 500)).not.toContain('return');
+  });
+
+  test('the closeout check hands back the catalog id of a flagged product', async () => {
+    const database = () => ({ whereIn: () => ({ select: async () => [{ id: 'r1', name: 'Ronstar G', active_ingredient: 'Oxadiazon' }] }) });
+    expect(await prohibited.lawnProhibitedProductBlocks(database, [{ productId: 'r1' }])).toEqual([expect.objectContaining({ productId: 'r1', productName: 'Ronstar G' })]);
   });
 
   test('the closeout check runs only while GATE_LAWN_V13 is on, read at call time: gate off is the pre-v13 closeout', async () => {
