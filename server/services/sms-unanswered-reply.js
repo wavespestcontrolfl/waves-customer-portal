@@ -122,6 +122,8 @@ function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled, fa
       policy_version: STAMP_VERSION,
       facts_fingerprint: factsFingerprint?.hash || null,
       facts_fingerprint_at: factsFingerprint?.at || null,
+      // the prep guide family the customer's text named (texting AI gap 5): the send re-renders the same guide pick (absent = none named)
+      ...(factsFingerprint?.prepGuideFamily ? { facts_prep_family: factsFingerprint.prepGuideFamily } : {}),
       actions_verified_safe: autoSendSafe === true,
       require_review: requireReview !== false,
       lint_pass: lintPass === true,
@@ -147,7 +149,7 @@ function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled, fa
  * A guide or report delivery read that FAILED (null while the facts were asked for) throws: unlike the drafter, which writes without the
  * section, a hash taken without it could equal an earlier hash taken without it. Database reads only, no model call.
  */
-async function factsFingerprintFor(customer, at, dbh = db) {
+async function factsFingerprintFor(customer, at, dbh = db, { prepGuideFamily = null } = {}) {
   // Both sides render from the stored row itself, never a caller's partial
   // copy of it (the webhook's match carries only some columns).
   const row = await dbh('customers').where({ id: customer?.id, active: true }).whereNull('deleted_at').first();
@@ -155,7 +157,8 @@ async function factsFingerprintFor(customer, at, dbh = db) {
   const ContextAggregator = require('./context-aggregator');
   const { buildFactsBlock } = require('./sms-shadow-drafter');
   const staffFacts = require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS');
-  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true, ...(staffFacts ? { includeSmsStaffFacts: true } : {}) });
+  // (a prep guide family the customer's text named picks the same guide the drafter rendered: texting AI gap 5)
+  const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true, ...(staffFacts ? { includeSmsStaffFacts: true, ...(prepGuideFamily ? { smsPrepGuideFamily: prepGuideFamily } : {}) } : {}) });
   if (staffFacts && context?.prepGuide === null) throw new Error('prep guide could not be read');
   // the same for the REPORT DELIVERY sentences (texting AI gap 2): a failed read must not hash as "no report delivery"
   if (staffFacts && context?.reportDeliveries === null) throw new Error('report delivery could not be read');
@@ -164,12 +167,14 @@ async function factsFingerprintFor(customer, at, dbh = db) {
 }
 
 /** Draft time: the fingerprint to store, or null (gate off, no customer, or an unreadable context). */
-async function draftFactsFingerprint(customer) {
+async function draftFactsFingerprint(customer, { prepGuideFamily = null } = {}) {
   if (!unansweredReplyLive() || !customer?.id) return null;
   const at = new Date();
+  // (the named service's guide is a real-answers fact: with that gate off nothing is named, so the stamp stays as before)
+  const family = require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS') ? prepGuideFamily : null;
   try {
-    const hash = await factsFingerprintFor(customer, at);
-    return hash ? { hash, at: at.toISOString() } : null;
+    const hash = await factsFingerprintFor(customer, at, db, { prepGuideFamily: family });
+    return hash ? { hash, at: at.toISOString(), ...(family ? { prepGuideFamily: family } : {}) } : null;
   } catch (err) {
     logger.warn(`[sms-unanswered] facts fingerprint failed at draft time: ${errLabel(err)}`);
     return null; // no fingerprint → the draft is never sent by this lane
@@ -180,7 +185,8 @@ async function draftFactsFingerprint(customer) {
 async function factsFingerprintRefusal(dbh, { customerId, stamp }) {
   const at = stamp?.facts_fingerprint_at ? new Date(stamp.facts_fingerprint_at) : null;
   if (!stamp?.facts_fingerprint || !at || Number.isNaN(at.getTime())) return 'facts_unverifiable';
-  const now = await factsFingerprintFor({ id: customerId }, at, dbh);
+  const family = typeof stamp.facts_prep_family === 'string' && stamp.facts_prep_family ? stamp.facts_prep_family : null;
+  const now = await factsFingerprintFor({ id: customerId }, at, dbh, { prepGuideFamily: family });
   if (!now) return 'customer_untrusted';
   return now === stamp.facts_fingerprint ? null : 'facts_changed';
 }

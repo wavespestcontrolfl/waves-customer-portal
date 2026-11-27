@@ -1067,6 +1067,28 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     expect(scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).some(([sql]) => /NOT LIKE/.test(String(sql)))).toBe(false);
   });
 
+  test('upcomingPrepGuideFor (texting AI gap 5): the soonest upcoming visit whose stop carries the named guide, by the same per-stop rule', async () => {
+    upcomingVisitRows = [
+      { ...VISIT, id: 'svc-1', service_type: 'Pest Control' },
+      { ...VISIT, id: 'svc-2', service_type: 'Lawn Health Inspection' }, // no guide: skipped, never a lawn guide by its name
+      { ...VISIT, id: 'svc-3', service_type: 'Lawn Fertilization' },
+      { ...VISIT, id: 'svc-4', service_type: 'Lawn Weed Control' },
+    ];
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-3' }, pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn' } });
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'interior_pest')).toMatchObject({ visit: { id: 'svc-1' } });
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'mosquito')).toBeNull();
+    // a how-to guide or an unknown family is never a visit's guide
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'sprinkler_timer')).toBeNull();
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'nope')).toBeNull();
+    // bookedPrepGuide with the named family: that later visit's guide (source 'named') when the booked visit does not carry it,
+    // else the booked visit's guide as without it
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'lawn' })).toMatchObject({ visit: { id: 'svc-3' }, pestType: 'lawn', source: 'named' });
+    const own = await sender.bookedPrepGuide(['cust-1'], { family: 'interior_pest' });
+    expect(own).toMatchObject({ visit: { id: 'svc-1' }, pestType: 'interior_pest' });
+    expect(own).not.toHaveProperty('source');
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'mosquito' })).toMatchObject({ visit: { id: 'svc-1' }, pestType: 'interior_pest' });
+  });
+
   test('bookedPrepGuide reads the whole stop from the snapshot its page state was judged on: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {
     const appointmentPublic = require('../routes/appointment-public');
     const spy = jest.spyOn(appointmentPublic, 'pageStateForVisit');

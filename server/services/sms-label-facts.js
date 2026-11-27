@@ -48,19 +48,31 @@ const LABEL_FACTS_NONE_SECTION = `${LABEL_FACTS_MARKER}none on file for the last
 `;
 // The exact shape of a rendered (non-empty) section header, for the judge's
 // exact-position exemption.
-const LABEL_FACTS_FILLED_HEADER_RE = /^LABEL FACTS \(from the labels of products applied at the last visit on [^()\n]{1,60}\):$/;
+// Two visit phrases (texting AI gap 5, owner 2026-11-26 "BUILD 1-6"): "the last visit" (the latest performed visit, as before) or "the
+// visit the customer asked about" (an earlier visit of the last 14 days the customer named by its service or its date, pickAskedVisitDate).
+const LABEL_VISIT_PHRASE_SRC = '(?:the last visit|the visit the customer asked about)';
+const LABEL_FACTS_FILLED_HEADER_RE = new RegExp(`^LABEL FACTS \\(from the labels of products applied at ${LABEL_VISIT_PHRASE_SRC} on [^()\n]{1,60}\\):$`);
 // Structural bounds of a rendered section (shared by the judge exemption and
 // the sealed-eval exact-structure test; 255 is also the Postgres regex
 // repetition ceiling the SQL twin runs under).
 const LABEL_LINE_MAX = 240;
-const LABEL_LINES_MAX = 2; // one rainfast sentence + one re-entry sentence, nothing else
+// One rainfast sentence + one re-entry sentence, then at most PRODUCT_NOTES_MAX product notes (or the no-timing line + the notes):
+// 7 lines of 242 characters + the header stay under the judge's 2,000-character LABEL FACTS cap.
+const PRODUCT_NOTES_MAX = 5;
+const LABEL_LINES_MAX = 2 + PRODUCT_NOTES_MAX;
 const escapeRegex = (t) => String(t).replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 // Regex SOURCE (JS + Postgres ARE compatible) of a whole rendered LABEL FACTS
 // section, no leading/trailing newline: the exact "none on file" section, or
 // the exact header shape plus 1..20 bounded "- " lines.
-const LABEL_SECTION_REGEX_SRC = `(?:${escapeRegex(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''))}|LABEL FACTS \\(from the labels of products applied at the last visit on [^()\n]{1,60}\\):(?:\n- [^\n]{1,${LABEL_LINE_MAX}}){1,${LABEL_LINES_MAX}})`;
+const LABEL_SECTION_REGEX_SRC = `(?:${escapeRegex(LABEL_FACTS_NONE_SECTION.replace(/\n$/, ''))}|LABEL FACTS \\(from the labels of products applied at ${LABEL_VISIT_PHRASE_SRC} on [^()\n]{1,60}\\):(?:\n- [^\n]{1,${LABEL_LINE_MAX}}){1,${LABEL_LINES_MAX}})`;
 const LABEL_FACTS_HEADER_PREFIX = 'LABEL FACTS (from the labels of products applied at the last visit on ';
+const LABEL_FACTS_NAMED_HEADER_PREFIX = 'LABEL FACTS (from the labels of products applied at the visit the customer asked about on ';
+// The no-timing line of a filled section that carries product notes but no timing sentence (the none-on-file rule, for that visit).
+const NO_TIMING_LINE = 'No product timing is on file for this visit. Do not state any rainfast, drying or re-entry time. For a rain question, answer from the COMPANY FACTS rain line, plainly, with no mention of the label.';
 const LABEL_FACTS_TIMEOUT_MS = 3000;
+// How far back an asked-about earlier visit may be (texting AI gap 5): a label's rainfast and re-entry times are hours, a day at most,
+// so a visit older than two weeks is never the one a "when can the dog go out" question is about.
+const LABEL_VISIT_WINDOW_DAYS = 14;
 const LABEL_FACTS_STATEMENT_TIMEOUT_MS = 2500;
 const WATER_CONDITIONER_RE = /water\s*condition|buffer|acidifier|\bph\b|conditioner/i;
 // The catalog's generic placeholder is not a re-entry statement.
@@ -211,6 +223,9 @@ function productFromRow(row, frozen) {
     reentrySummary: f.reentrySummary || null,
     reentryText: null,
     labelVerifiedAt: f.labelVerifiedAt,
+    // the product's identity frozen at completion, for its PRODUCT NOTES (the service report's own wording, productNoteSentences)
+    epaReg: f.epaRegNumber || null,
+    name: f.name || row.product_name || null,
   };
 }
 
@@ -236,8 +251,13 @@ function productFromRow(row, frozen) {
  * product with no verified snapshot is omitted and counted (so the whole visit
  * is none on file), an adjuvant / water conditioner is omitted.
  */
-async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString() } = {}) {
+async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateString(), serviceDate = null } = {}) {
   if (!customerId) return null;
+  // `serviceDate` (texting AI gap 5): the visit the customer asked about (pickAskedVisitDate), an EARLIER performed visit of the last
+  // LABEL_VISIT_WINDOW_DAYS days. Every guard below holds for it as for the latest visit; null = the latest performed visit.
+  // (an asked-about visit is never older than the window; a later one than the latest visit is refused inside the read)
+  const wanted = serviceDate == null ? null : String(serviceDate);
+  if (wanted !== null && (!/^\d{4}-\d{2}-\d{2}$/.test(wanted) || wanted < isoAddDays(today, -LABEL_VISIT_WINDOW_DAYS))) return null;
   // ONE consistent read: the newest performed date, the stale-visit guards and the products must all come from the same snapshot, or a
   // visit that lands between two queries leaves the facts describing a visit that is no longer the last one. A connection that can open
   // transactions (knex) reads inside a REPEATABLE READ, READ ONLY transaction; any other connection is re-checked after the read
@@ -249,17 +269,17 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
     return conn.transaction(async (trx) => {
       // The server cancels a slow read itself (a JS-side timeout cannot release the pooled connection); the 3 s race in fetchLabelFacts stays the outer guard.
       if (typeof trx.raw === 'function') await trx.raw(`SET LOCAL statement_timeout = '${LABEL_FACTS_STATEMENT_TIMEOUT_MS}ms'`);
-      return readLastVisitLabelFactsOnce({ customerId, conn: trx, today });
+      return readLastVisitLabelFactsOnce({ customerId, conn: trx, today, wanted });
     }, { isolationLevel: 'repeatable read', readOnly: true });
   }
-  const facts = await readLastVisitLabelFactsOnce({ customerId, conn, today });
+  const facts = await readLastVisitLabelFactsOnce({ customerId, conn, today, wanted });
   if (!facts) return null;
-  return await isStillTheLastVisit({ customerId, conn, today, serviceDate: facts.serviceDate, recordIds: facts.recordIds }) ? facts : null;
+  return await isStillTheLastVisit({ customerId, conn, today, serviceDate: facts.serviceDate, recordIds: facts.recordIds, sinceRecordIds: facts.sinceRecordIds }) ? facts : null;
 }
 
 // After a read on a connection without snapshot isolation: is the facts' date still the newest performed date, and is there still no
 // visit today and no unrecorded later visit?
-async function isStillTheLastVisit({ customerId, conn, today, serviceDate, recordIds = [] }) {
+async function isStillTheLastVisit({ customerId, conn, today, serviceDate, recordIds = [], sinceRecordIds = recordIds }) {
   const performed = () => conn('service_records')
     .where('service_records.customer_id', customerId)
     .where('service_records.status', 'completed')
@@ -278,8 +298,11 @@ async function isStillTheLastVisit({ customerId, conn, today, serviceDate, recor
   const since = await performed()
     .where('service_records.service_date', '>=', serviceDate)
     .select('service_records.id', 'service_records.service_date');
-  if (!Array.isArray(since) || since.some((r) => dateOnlyString(r.service_date) !== serviceDate)) return false;
-  return JSON.stringify(since.map((r) => String(r.id)).sort()) === JSON.stringify([...recordIds].map(String).sort());
+  // (an asked-about earlier visit: the records of its own date are the facts' records, and every later one is still exactly the set the
+  // facts were read beside, so no visit landed or moved in between; for the latest visit the two sets are the same)
+  if (!Array.isArray(since)) return false;
+  const sameSet = (rows, ids) => JSON.stringify(rows.map((r) => String(r.id)).sort()) === JSON.stringify([...ids].map(String).sort());
+  return sameSet(since.filter((r) => dateOnlyString(r.service_date) === serviceDate), recordIds) && sameSet(since, sinceRecordIds);
 }
 
 // A customer with more than one active property (a home and a rental, say) cannot be answered from "the latest visit": the
@@ -290,7 +313,7 @@ async function hasMultipleProperties(conn, customerId) {
   return Array.isArray(rows) && rows.length > 1;
 }
 
-async function readLastVisitLabelFactsOnce({ customerId, conn, today }) {
+async function readLastVisitLabelFactsOnce({ customerId, conn, today, wanted = null }) {
 
   if (await hasVisitToday(conn, customerId, today)) return null;
   if (await hasMultipleProperties(conn, customerId)) return null;
@@ -303,8 +326,11 @@ async function readLastVisitLabelFactsOnce({ customerId, conn, today }) {
       NON_PERFORMED_VISIT_OUTCOMES,
     );
   const newest = await performed().max('service_records.service_date as service_date').first();
-  const serviceDate = dateOnlyString(newest && newest.service_date);
-  if (!serviceDate) return null;
+  const latestDate = dateOnlyString(newest && newest.service_date);
+  if (!latestDate) return null;
+  // an asked-about visit is an earlier performed date (never after the latest visit)
+  const serviceDate = wanted || latestDate;
+  if (serviceDate > latestDate) return null;
   if (await hasUnrecordedVisitSince(conn, customerId, serviceDate, today)) return null;
   const visits = await performed()
     .where('service_records.service_date', serviceDate)
@@ -335,25 +361,126 @@ async function readLastVisitLabelFactsOnce({ customerId, conn, today }) {
     else if (p) products.push(p);
   }
   if (unverified) logger.info(`[sms-label-facts] ${unverified} applied product(s) omitted — label not verified`);
-  return products.length ? { customerId, serviceDate, recordIds: recordIds.map(String).sort(), products, unverifiedCount: unverified } : null;
+  if (!products.length) return null;
+  const facts = { customerId, serviceDate, recordIds: recordIds.map(String).sort(), products, unverifiedCount: unverified };
+  if (serviceDate === latestDate) return facts;
+  // An asked-about earlier visit also carries every performed record from its date on (the later visits included), re-checked before
+  // use and at send time: a visit that lands or moves in between refuses.
+  const since = await performed().where('service_records.service_date', '>=', serviceDate).select('service_records.id');
+  return { ...facts, asked: true, latestDate, sinceRecordIds: since.map((r) => String(r.id)).sort() };
 }
 
 // Timeout wrapper + fail-safe: any error or timeout -> null (section omitted).
 // Must never block drafting.
-async function fetchLabelFacts({ customerId, conn = db, timeoutMs = LABEL_FACTS_TIMEOUT_MS } = {}) {
+// `inbound` (texting AI gap 5): the customer's texts, the CURRENT one first (the drafter's askedTexts). When they clearly name an earlier
+// visit of the last LABEL_VISIT_WINDOW_DAYS days (pickAskedVisitDate), the facts are that visit's; without `inbound`, or when nothing is
+// clearly named, they are the latest performed visit's, as before.
+async function fetchLabelFacts({ customerId, conn = db, timeoutMs = LABEL_FACTS_TIMEOUT_MS, inbound = null } = {}) {
   if (!customerId) return null;
   let timer = null;
   try {
     const timeout = new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error('label facts timeout')), timeoutMs);
     });
-    return await Promise.race([readLastVisitLabelFacts({ customerId, conn }), timeout]);
+    return await Promise.race([readAskedVisitLabelFacts({ customerId, conn, inbound }), timeout]);
   } catch (err) {
     logger.warn(`[sms-label-facts] lookup failed (${err.message}); section omitted`);
     return null;
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function readAskedVisitLabelFacts({ customerId, conn, inbound, today = etDateString() }) {
+  const texts = inbound == null ? [] : [].concat(inbound).filter((t) => typeof t === 'string');
+  if (!texts.length) return readLastVisitLabelFacts({ customerId, conn, today });
+  const pick = pickAskedVisitDate(await readRecentVisitDays(conn, customerId, today), texts, today);
+  if (pick === NO_ASKED_VISIT) return null;
+  return readLastVisitLabelFacts({ customerId, conn, today, ...(pick ? { serviceDate: pick } : {}) });
+}
+
+// ---- Which visit is the customer asking about: the service or date they name (texting AI gap 5) ----------------------------------
+// The customer's performed visit days of the last LABEL_VISIT_WINDOW_DAYS days, newest first: { date, families, unknown }. `families` are
+// the prep guide families its service types belong to by prep-guide-sender's own matcher (prepConfigMatches: every family a type matches,
+// so a combined "Pest & Lawn" visit counts for both); `unknown` = a service type no family covers. Only used to PICK the date; the facts
+// themselves are then read, and re-checked, by readLastVisitLabelFacts.
+async function readRecentVisitDays(conn, customerId, today) {
+  const rows = await conn('service_records')
+    .where('service_records.customer_id', customerId)
+    .where('service_records.status', 'completed')
+    .whereRaw(
+      `COALESCE(service_records.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})`,
+      NON_PERFORMED_VISIT_OUTCOMES,
+    )
+    .where('service_records.service_date', '>=', isoAddDays(today, -LABEL_VISIT_WINDOW_DAYS))
+    .where('service_records.service_date', '<=', today)
+    .select('service_records.service_date', 'service_records.service_type');
+  const { PREP_CONFIG, prepConfigMatches } = require('./prep-guide-sender');
+  const byDate = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const date = dateOnlyString(row.service_date);
+    if (!date) continue;
+    const day = byDate.get(date) || { date, families: new Set(), unknown: false };
+    const families = Object.keys(PREP_CONFIG).filter((key) => prepConfigMatches(PREP_CONFIG[key], row.service_type));
+    for (const family of families) day.families.add(family);
+    if (!families.length) day.unknown = true;
+    byDate.set(date, day);
+  }
+  return [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
+}
+
+// The service a text names, as prep guide families. SERVICE-shaped words only: "lawn" alone is a place ("can the dog go on the lawn?"
+// after a pest visit asks about that pest visit), so a family counts only as "lawn treatment / lawn service / lawn guy ...", or by a word
+// that is only ever the service (fertilizer, weed control, pest control, mosquito spray ...). A pest name ("roaches", "fleas") is the
+// pest, not the service, so it names no family.
+const SERVICE_NOUN_SRC = '(?:treatments?|services?|visits?|spray(?:s|ing)?|applications?|appointments?|care|program|plan|tech(?:nician)?s?|guys?|man|crew|team|people|company)';
+const NAMED_SERVICE_FAMILIES = [
+  { family: 'lawn', re: new RegExp(`\\b(?:lawn\\s+${SERVICE_NOUN_SRC}|fertiliz\\w*|weed\\s+(?:control|killer|treatment|spray)|turf\\s+${SERVICE_NOUN_SRC})\\b`) },
+  { family: 'interior_pest', re: new RegExp(`\\b(?:pest\\s+(?:control|${SERVICE_NOUN_SRC})|perimeter\\s+${SERVICE_NOUN_SRC}|bug\\s+spray(?:ing)?|exterminat\\w*)\\b`) },
+  { family: 'mosquito', re: new RegExp(`\\bmosquito(?:e?s)?\\s+(?:control|${SERVICE_NOUN_SRC})\\b`) },
+  { family: 'termite', re: new RegExp(`\\btermites?\\s+(?:control|bait|${SERVICE_NOUN_SRC})\\b`) },
+  { family: 'rodent', re: new RegExp(`\\b(?:rodent|rat|mouse|mice)\\s+(?:control|trapping|${SERVICE_NOUN_SRC})\\b`) },
+];
+/** The prep guide families a text names by a service word (a Set; empty when none). */
+function namedServiceFamilies(text) {
+  const canon = canonText(text).toLowerCase();
+  return new Set(NAMED_SERVICE_FAMILIES.filter(({ re }) => re.test(canon)).map(({ family }) => family));
+}
+/** The ONE prep guide family a text names, or null (none, or two: ambiguous). */
+function namedServiceFamily(text) {
+  const families = [...namedServiceFamilies(text)];
+  return families.length === 1 ? families[0] : null;
+}
+
+const NO_ASKED_VISIT = Symbol('no asked visit');
+/**
+ * Which visit's label facts a text asks for, deterministically, from `days` (readRecentVisitDays) and `texts` (the current text first):
+ *   null           the latest visit, as before: nothing clearly named, two services named, or a date that matches no one earlier visit
+ *                  (labelFactsForInbound then reads the date reference as another visit: none on file);
+ *   'YYYY-MM-DD'   an EARLIER visit day of the window: the text's date references all resolve to that one day (inboundRefersToOtherVisit,
+ *                  the same resolver the none-on-file rule uses), or the text names ONE service and that day is the newest with it;
+ *   NO_ASKED_VISIT the text names one service and no visit of the window certainly had it: none on file (the latest visit's
+ *                  figures would answer for another service).
+ * The service words come from the current text, and from the thread too when the current text is a short follow-up; date references
+ * from the current text only (an older row's relative words mean its own day: labelFactsForInbound reads those).
+ */
+function pickAskedVisitDate(days, texts, today = etDateString()) {
+  const list = [].concat(texts || []).filter((t) => typeof t === 'string');
+  if (!list.length || inboundOverCap(list) || !Array.isArray(days) || !days.length) return null;
+  const sources = inboundIsElliptical(list) ? list : list.slice(0, 1);
+  const families = new Set(sources.flatMap((text) => [...namedServiceFamilies(text)]));
+  if (families.size > 1) return null;
+  const [family] = [...families];
+  const latest = days[0].date;
+  if (inboundRefersToOtherVisit(list[0], latest, today)) {
+    const resolved = days.filter((d) => d.date !== latest && !inboundRefersToOtherVisit(list[0], d.date, today) && (!family || d.families.has(family)));
+    return resolved.length === 1 ? resolved[0].date : null;
+  }
+  if (!family) return null;
+  const first = days.find((d) => d.families.has(family) || d.unknown);
+  if (!first) return NO_ASKED_VISIT;
+  if (first.date === latest) return null;
+  return first.families.has(family) ? first.date : NO_ASKED_VISIT;
 }
 
 function plural(n, unit) { return `${n} ${unit}${n === 1 ? '' : 's'}`; }
@@ -479,6 +606,103 @@ function labelFactsSentences(labelFacts) {
   return out;
 }
 
+// ---- PRODUCT NOTES (texting AI gap 5) ---------------------------------------------------------------------------------------------
+// After the timing sentences, the section may carry the service report's own published wording for the products applied at THAT visit
+// (config/report-product-copy.js, owner-approved 2026-09-28, printed on the report under GATE_REPORT_PRODUCT_COPY; the earlier advisors'
+// 11-25 pick "label sentences add howItWorks / petsKids + labelPests"):
+//   - its "how it works" sentence, verbatim;
+//   - its pets-and-kids sentence, verbatim, ONLY when it states no timing or clearance of its own ("Please leave the small bait placements
+//     alone."): a per-product "keep off until dried" would understate another product's re-entry, which only the whole-visit LABEL FACTS
+//     sentence may state (pre-push audit P1 of #5416);
+//   - "A treatment applied at your Nov 20 visit is one labeled for ghost ants." when the customer names a pest that product's EPA label
+//     lists (label-pest-facts.js, the report writer's own rule and the owner's 2026-10-24 wording "one labeled for german cockroaches"):
+//     never that it kills the pest, never a pest the customer did not name, never a count.
+// The same exact-sentence contract: a note reaches a customer only as a whole verbatim copy, and a copy only ever accompanies an answer
+// (it never answers a re-entry or rain question: copiesDoNotAnswerAskedKinds). Recognized ONLY as one of the published texts (or the
+// fixed labeled-for shape over the fixed pest terms), so a line typed into the block authorizes nothing new; the send-time recheck also
+// re-derives every copied note from the visit's products. Additives and products the report has no wording for get no note.
+const LABELED_FOR_LEAD = 'A treatment applied at your ';
+const LABELED_FOR_RE = /^A treatment applied at your ([A-Z][a-z]{2} \d{1,2}) visit is one labeled for ([a-z][a-zA-Z ,-]{1,160})\.$/;
+function productCopyLibs() {
+  return {
+    copy: require('../config/report-product-copy'),
+    screened: require('./service-report/report-product-copy'),
+    pests: require('./service-report/label-pest-facts'),
+  };
+}
+// A pets-and-kids sentence states no timing or clearance when the reply guard finds nothing in it on its own and it names no stay-off.
+const statesNoTiming = (text) => !hasUngroundedLabelClaim(canonText(text)) && !REENTRY_TOPIC_RE.test(canonText(text).toLowerCase())
+  && !DRY_RE.test(canonText(text).toLowerCase()) && !BEING_RE.test(canonText(text).toLowerCase());
+// The screened report wording of one product ({ how_it_works, pets_kids } or null), the same function every report mode reads.
+function screenedCopyFor(epaReg, name) {
+  return productCopyLibs().screened.reportProductCopyForApplicationProduct({ epa_reg_number: epaReg || '', product_name: name || '' }, null);
+}
+let publishedNoteCache = null;
+// Every note text a section may carry: each reviewed product's screened how-it-works sentence and its no-timing pets-and-kids sentence.
+function publishedNoteTexts() {
+  if (!publishedNoteCache) {
+    const out = new Set();
+    for (const entry of productCopyLibs().copy.REPORT_PRODUCT_COPY) {
+      const copy = screenedCopyFor(entry.epaReg, entry.epaReg ? '' : entry.names[0]);
+      if (!copy) continue;
+      if (copy.how_it_works && copy.how_it_works.length <= LABEL_LINE_MAX) out.add(copy.how_it_works);
+      if (copy.pets_kids && copy.pets_kids.length <= LABEL_LINE_MAX && statesNoTiming(copy.pets_kids)) out.add(copy.pets_kids);
+    }
+    publishedNoteCache = out;
+  }
+  return publishedNoteCache;
+}
+let pestTermCache = null;
+function knownPestTerms() {
+  if (!pestTermCache) {
+    const { PEST_GROUPS, SPECIES, displayTerm } = productCopyLibs().pests;
+    pestTermCache = new Set([...PEST_GROUPS.map((g) => g.term), ...SPECIES.map((e) => e.term)].map(displayTerm));
+  }
+  return pestTermCache;
+}
+// True when `text` is a note a section may carry: a published text, or the labeled-for shape over known pest terms only.
+function isProductNoteText(text) {
+  if (publishedNoteTexts().has(text)) return true;
+  const m = LABELED_FOR_RE.exec(text);
+  return Boolean(m) && m[2].split(/, | and /).every((term) => knownPestTerms().has(term));
+}
+
+/**
+ * [{ kind: 'product', text }] the notes the visit's products support, labeled-for lines first (they answer what the customer named),
+ * then how-it-works, then pets-and-kids, deduplicated, at most `max`. [] with the report wording gate off, an unverified product on the
+ * visit (the same fail-closed rule as the timing sentences), or no reviewed product. `namedPests`: label-pest-facts pestsNamedToday of
+ * the customer's own texts (labelFactsForInbound sets it); none = no labeled-for line.
+ */
+function productNoteSentences(labelFacts, { namedPests = labelFacts && labelFacts.namedPests, max = PRODUCT_NOTES_MAX } = {}) {
+  if (!labelFacts || !Array.isArray(labelFacts.products) || !labelFacts.products.length || labelFacts.unverifiedCount > 0) return [];
+  const libs = productCopyLibs();
+  if (!libs.screened.reportProductCopyGateOn()) return [];
+  const date = shortVisitDate(labelFacts.serviceDate);
+  if (!date) return [];
+  const labeled = [];
+  const how = [];
+  const pets = [];
+  for (const product of labelFacts.products) {
+    if (product.additive) continue;
+    const entry = libs.copy.findReportProductCopyEntry({ epaReg: product.epaReg, name: product.name });
+    const copy = entry ? screenedCopyFor(product.epaReg, product.name) : null;
+    if (!copy) continue;
+    const terms = namedPests ? libs.pests.labelFactPests(entry.labelPests, namedPests, entry.labelPestsExcept).map(libs.pests.displayTerm) : [];
+    if (terms.length) labeled.push(`${LABELED_FOR_LEAD}${date} visit is one labeled for ${libs.pests.joinTerms(terms)}.`);
+    if (copy.how_it_works) how.push(copy.how_it_works);
+    if (copy.pets_kids && statesNoTiming(copy.pets_kids)) pets.push(copy.pets_kids);
+  }
+  const texts = [...new Set([...labeled, ...how, ...pets])].filter((text) => text.length <= LABEL_LINE_MAX && isProductNoteText(text));
+  return texts.slice(0, max).map((text) => ({ kind: 'product', text }));
+}
+
+// A copied note is still true of the visit `current` (the send-time recheck): it is one of the notes its products support now, a
+// labeled-for line for the very pests it names.
+function productNoteStillTrue(sentence, current) {
+  const named = LABELED_FOR_RE.test(sentence) ? productCopyLibs().pests.pestsNamedToday({ texts: [LABELED_FOR_RE.exec(sentence)[2]] }) : null;
+  return productNoteSentences(current, { namedPests: named, max: Infinity }).some((note) => note.text === sentence);
+}
+
 /**
  * Render the LABEL FACTS section, '' when there is nothing to render.
  * `formatDate` is the drafter's SERVICE HISTORY date formatter, so the date in
@@ -489,9 +713,13 @@ function labelFactsSentences(labelFacts) {
  */
 function renderLabelFactsSection(labelFacts, { formatDate } = {}) {
   const sentences = labelFactsSentences(labelFacts);
-  if (!sentences.length) return '';
+  const notes = productNoteSentences(labelFacts);
+  if (!sentences.length && !notes.length) return '';
   const date = (formatDate ? formatDate(labelFacts.serviceDate) : labelFacts.serviceDate) || labelFacts.serviceDate;
-  return `${LABEL_FACTS_HEADER_PREFIX}${date}):\n${sentences.map((s) => `- ${s.text}`).join('\n')}\n`;
+  // an earlier visit the customer asked about says so in its header; notes with no timing sentence carry the none-on-file rule as a line
+  const prefix = labelFacts.asked ? LABEL_FACTS_NAMED_HEADER_PREFIX : LABEL_FACTS_HEADER_PREFIX;
+  const lines = [...(sentences.length ? sentences.map((s) => s.text) : [NO_TIMING_LINE]), ...notes.map((n) => n.text)];
+  return `${prefix}${date}):\n${lines.map((line) => `- ${line}`).join('\n')}\n`;
 }
 
 /** The LABEL FACTS section text out of a rendered facts block ('' if absent). */
@@ -509,6 +737,7 @@ function labelSentencesIn(sectionText) {
     const text = line.slice(2);
     if (REENTRY_SENTENCE_RE.test(text)) out.push({ kind: 'reentry', text });
     else if (RAIN_SENTENCE_RE.test(text)) out.push({ kind: 'rainfast', text });
+    else if (isProductNoteText(text)) out.push({ kind: 'product', text });
   }
   return out;
 }
@@ -584,7 +813,8 @@ function stripLabelSentences(text, sectionText) {
   let out = canonText(text);
   for (const s of labelSentencesIn(sectionText)) {
     // the marker keeps the copy's KIND (labelsentencereentry / labelsentencerainfast) so a rainfast copy never answers a pet question
-    const marker = s.kind === 'reentry' ? 'labelsentencereentry' : 'labelsentencerainfast';
+    // (a product note keeps its own kind: it never answers a re-entry or rain question)
+    const marker = { reentry: 'labelsentencereentry', rainfast: 'labelsentencerainfast', product: 'labelsentenceproduct' }[s.kind];
     for (const { start, end } of completeCopies(out, s.text).reverse()) out = `${out.slice(0, start)} ; ${marker} ; ${out.slice(end)}`;
   }
   return out;
@@ -1398,7 +1628,7 @@ const wordsOf = (text) => text.match(/[a-z]+/g) || [];
 const allIn = (words, set) => words.every((w) => set.has(w));
 const wordSet = (list) => new Set(list.split(/\s+/));
 // (a) an authorized copy (stripLabelSentences left its marker)
-const isCopyMarker = (sentence) => /^labelsentence(?:reentry|rainfast)$/.test(sentence);
+const isCopyMarker = (sentence) => /^labelsentence(?:reentry|rainfast|product)$/.test(sentence);
 // (b) the sanctioned "safe once dry" (sanctionSafeOnceDry left its token), optionally with the technician confirming timing
 const SANCTIONED_SENTENCE_RE = /^(?:(?:(?:it|that|this|they|everything)(?:'s|'re|\s+(?:is|are|will\s+be))|(?:pets|people|kids|dogs)(?:\s+and\s+(?:pets|people|kids|dogs))?\s+(?:are|will\s+be))\s+)?sanctioned_idiom\s*[,;-]?\s*(?:and\s+)?(?:(?:your|the|our)\s+(?:technician|tech)\s+(?:will\s+)?confirms?\s+(?:the\s+|your\s+)?timing(?:\s+(?:at|during|for|on)\s+(?:the|your)\s+(?:visit|appointment|yard|next\s+visit|service))?)?$/;
 const isSanctionedSentence = (sentence) => SANCTIONED_SENTENCE_RE.test(sentence);
@@ -1652,6 +1882,9 @@ function labelFactsSnapshotFor({ labelFacts, reply, sectionText, asked = [] }) {
     sentences: copied,
     // which label kinds the customer asked (a snapshot without this key predates it: unknown)
     asked,
+    // an earlier visit the customer asked about (texting AI gap 5): the send re-reads THAT visit, and every performed record since it
+    // must still be the set the draft was written beside
+    ...(labelFacts.asked ? { asked_visit: true, since_record_ids: [...(labelFacts.sinceRecordIds || [])].map(String).sort() } : {}),
   };
 }
 
@@ -1683,19 +1916,23 @@ async function labelFactsSendBlockReason({ snapshot, body, inbound, conn = db, t
   const present = sentences.filter((s) => copiesSentence(body, s));
   if (!present.length) return null;
   if (!snapshot.customer_id) return 'label_facts_recheck_no_customer';
+  const askedVisit = snapshot.asked_visit === true;
   let current;
   try {
-    current = await readLastVisitLabelFacts({ customerId: snapshot.customer_id, conn, ...(today ? { today } : {}) });
+    current = await readLastVisitLabelFacts({ customerId: snapshot.customer_id, conn, ...(today ? { today } : {}), ...(askedVisit ? { serviceDate: snapshot.visit_date } : {}) });
   } catch (err) {
     logger.warn(`[sms-label-facts] send-time recheck failed (${err.message}); refusing`);
     return 'label_facts_recheck_failed';
   }
   if (!current) return 'label_facts_no_longer_current';
+  const sortedIds = (ids) => JSON.stringify([...(Array.isArray(ids) ? ids : [])].map(String).sort());
   const same = current.serviceDate === snapshot.visit_date
-    && JSON.stringify(current.recordIds) === JSON.stringify([...(snapshot.record_ids || [])].map(String).sort());
+    && JSON.stringify(current.recordIds) === sortedIds(snapshot.record_ids)
+    // the latest visit must still be the latest; an asked-about visit must still have exactly the same visits after it
+    && (askedVisit ? current.asked === true && sortedIds(current.sinceRecordIds) === sortedIds(snapshot.since_record_ids) : !current.asked);
   if (!same) return 'label_facts_visit_changed';
   const nowTexts = labelFactsSentences(current).map((s) => s.text);
-  return present.every((s) => nowTexts.includes(s)) ? null : 'label_facts_changed';
+  return present.every((s) => nowTexts.includes(s) || (isProductNoteText(s) && productNoteStillTrue(s, current))) ? null : 'label_facts_changed';
 }
 
 // ---- Which visit is the customer asking about? ---------------------------
@@ -1836,7 +2073,10 @@ function labelFactsForInbound(labelFacts, inbound, today = etDateString(), rende
     ...renderedTexts.map((r) => (r && typeof r === 'object' ? { text: r.text, today: rowToday(r.date) } : { text: r, today })),
   ];
   const otherVisit = refs.some((r) => inboundRefersToOtherVisit(r.text, labelFacts.serviceDate, r.today));
-  return otherVisit || looksNonEnglish(texts[0]) || !isVerifiablyEnglish(texts[0]) || isUnverifiedLanguageInbound(texts) ? null : labelFacts;
+  if (otherVisit || looksNonEnglish(texts[0]) || !isVerifiablyEnglish(texts[0]) || isUnverifiedLanguageInbound(texts)) return null;
+  // the pests the customer named (the current text, and the thread for a short follow-up): only those earn a labeled-for note
+  const named = productCopyLibs().pests.pestsNamedToday({ texts: (inboundIsElliptical(texts) ? texts : texts.slice(0, 1)).filter((t) => typeof t === 'string') });
+  return named.species.length || named.groups.length ? { ...labelFacts, namedPests: named } : labelFacts;
 }
 
 /**
@@ -1875,6 +2115,16 @@ module.exports = {
   LABEL_FACTS_TIMEOUT_MS,
   readLastVisitLabelFacts,
   fetchLabelFacts,
+  LABEL_VISIT_WINDOW_DAYS,
+  PRODUCT_NOTES_MAX,
+  LABEL_FACTS_NAMED_HEADER_PREFIX,
+  readRecentVisitDays,
+  namedServiceFamilies,
+  namedServiceFamily,
+  pickAskedVisitDate,
+  NO_ASKED_VISIT,
+  productNoteSentences,
+  isProductNoteText,
   renderLabelFactsSection,
   labelFactsSentences,
   labelFactsSectionFrom,

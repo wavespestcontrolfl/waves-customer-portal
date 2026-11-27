@@ -173,13 +173,14 @@ function guideGroups(blocks, productNames) {
  * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
  * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
  */
-async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
+async function loadPrepGuideFacts(customerId, lastRecords, { db, family } = {}) {
   const none = { sections: [] };
   if (!customerId || !db) return null;
   const completedRecords = [].concat(lastRecords || []);
   try {
     const sender = require('./prep-guide-sender');
-    const booked = await sender.bookedPrepGuide([customerId]);
+    // `family` (texting AI gap 5): the service the customer named; a later upcoming visit that carries its guide comes back as source 'named'
+    const booked = await sender.bookedPrepGuide([customerId], { family });
     // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
     // Each resolves to the guide it carried; they must all agree, else no guide is named.
     // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
@@ -193,7 +194,7 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
     const raw = loaded.activeVersion.blocks;
     const blocks = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const sections = guideGroups(blocks, await require('./company-facts-bank').readProductNames(db));
-    return sections.length ? { source: booked ? 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
+    return sections.length ? { source: booked ? booked.source || 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}: ${err.message}`);
     return null;

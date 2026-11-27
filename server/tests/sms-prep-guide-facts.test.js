@@ -40,7 +40,7 @@ describe('loadPrepGuideFacts', () => {
     { type: 'signature', content: 'Thanks, the Waves team.' },
   ];
   const state = { booked: undefined, family: undefined, template: undefined, products: [{ name: 'Rockwell Max' }], blocks: GUIDE_BLOCKS };
-  const load = async (over = {}, { customerId = 'c1', last = { service_type: 'Pest Control' }, withDb = true } = {}) => {
+  const load = async (over = {}, { customerId = 'c1', last = { service_type: 'Pest Control' }, withDb = true, family = null } = {}) => {
     Object.assign(state, { booked: null, family: null, template: 'default', products: [{ name: 'Rockwell Max' }], blocks: GUIDE_BLOCKS }, over);
     jest.resetModules();
     jest.doMock('../services/logger', () => ({ warn: jest.fn(), error: jest.fn(), info: jest.fn() }));
@@ -60,7 +60,7 @@ describe('loadPrepGuideFacts', () => {
     jest.doMock('../services/prep-guide-sender', () => sender);
     jest.doMock('../services/email-template-library', () => library);
     const database = jest.fn(() => ({ select: async () => { if (state.products instanceof Error) throw state.products; return state.products; } }));
-    const result = await require('../services/sms-staff-facts').loadPrepGuideFacts(customerId, last, withDb ? { db: database } : {});
+    const result = await require('../services/sms-staff-facts').loadPrepGuideFacts(customerId, last, withDb ? { db: database, ...(family ? { family } : {}) } : {});
     return { result, sender, library, database };
   };
 
@@ -78,9 +78,17 @@ describe('loadPrepGuideFacts', () => {
         { heading: 'Before your visit', sentences: ['Vacuum the carpets the day before.'] },
       ],
     });
-    expect(sender.bookedPrepGuide).toHaveBeenCalledWith(['c1']);
+    expect(sender.bookedPrepGuide).toHaveBeenCalledWith(['c1'], { family: undefined });
     expect(sender.completedPrepGuide).not.toHaveBeenCalled(); // a booked visit decides; the last service is never consulted
     expect(library.loadTemplateByKey).toHaveBeenCalledWith('prep.interior_pest', database); // the row the customer's prep page renders
+  });
+
+  test('a named service (texting AI gap 5): the sender is asked with the family, and a later visit\'s guide is labeled as the one asked about', async () => {
+    const LAWN = { emailTemplateKey: 'prep.lawn', label: 'Lawn Treatment' };
+    const named = await load({ booked: { visit: { id: 'v2' }, pestType: 'lawn', config: LAWN, source: 'named' } }, { family: 'lawn' });
+    expect(named.result).toMatchObject({ source: 'named', key: 'prep.lawn', label: 'Lawn Treatment' });
+    expect(named.sender.bookedPrepGuide).toHaveBeenCalledWith(['c1'], { family: 'lawn' });
+    expect((await load({ booked: { visit: { id: 'v1' }, pestType: 'interior_pest', config: PEST } })).result).toMatchObject({ source: 'booked' });
   });
 
   test('no booked visit: the last completed service\'s family, by the sender\'s own match rule', async () => {

@@ -1134,7 +1134,7 @@ describe('auto-send fallback publication', () => {
       expect(off.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false, includeVisitLoops: true });
       process.env.GATE_SMS_REAL_ANSWERS = 'true';
       const { getContextForCustomer } = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
-      expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true, includeSmsStaffFacts: true });
+      expect(getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true, includeSmsStaffFacts: true, smsPrepGuideFamily: null });
     } finally {
       delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;
@@ -1183,11 +1183,11 @@ describe('auto-send fallback publication', () => {
       try {
         process.env.GATE_SMS_REAL_ANSWERS = 'true';
         const forcedOff = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { liveEta: false });
-        expect(forcedOff.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: true });
+        expect(forcedOff.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: true, smsPrepGuideFamily: null });
         const unset = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true });
-        expect(unset.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true, includeSmsStaffFacts: true });
+        expect(unset.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true, includeSmsStaffFacts: true, smsPrepGuideFamily: null });
         const explicitTrue = await runDraft({ sent: false, reason: 'provider_uncertain', ambiguous: true }, { liveEta: true });
-        expect(explicitTrue.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true, includeSmsStaffFacts: true });
+        expect(explicitTrue.getContextForCustomer).toHaveBeenCalledWith({ id: 'customer-1' }, { includeLiveEta: true, includeVisitLoops: true, includeSmsStaffFacts: true, smsPrepGuideFamily: null });
       } finally {
         delete process.env.GATE_SMS_REAL_ANSWERS;
         restore('SHADOW_DRAFT_VERIFY', priorVerify);
@@ -1209,7 +1209,7 @@ describe('auto-send fallback publication', () => {
         { inboundMessage: 'Thank you!', source: 'live_webhook', customer: { id: 'customer-1', first_name: 'Test' } },
       );
       expect(getContextForCustomer).toHaveBeenCalledTimes(1);
-      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: true });
+      expect(getContextForCustomer).toHaveBeenCalledWith(expect.objectContaining({ id: 'customer-1' }), { includeLiveEta: false, includeVisitLoops: true, includeSmsStaffFacts: true, smsPrepGuideFamily: null });
     } finally {
       delete process.env.GATE_SMS_REAL_ANSWERS;
       if (priorVerify === undefined) delete process.env.SHADOW_DRAFT_VERIFY;

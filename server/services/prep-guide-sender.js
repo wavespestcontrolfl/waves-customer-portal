@@ -416,14 +416,41 @@ async function completedPrepGuide({ scheduledServiceId = null, serviceRecordId =
  * { visit, pestType, config } or null with no booked visit; pestType and config are null when no single guide can be named. THROWS on a
  * lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
  */
-async function bookedPrepGuide(customerIds) {
+// `family` (texting AI gap 5): the guide family the customer's text named ("the lawn treatment"). When the booked visit does not carry it,
+// the soonest upcoming visit that does is the one asked about (upcomingPrepGuideFor), returned with source 'named'; none upcoming carries
+// it = the booked visit's guide, as without it.
+async function bookedPrepGuide(customerIds, { family = null } = {}) {
   const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
   if (!visit) return null;
+  const next = await stopPrepGuide(visit);
+  if (!family || next.pestType === family) return next;
+  const named = await upcomingPrepGuideFor(customerIds, family);
+  return named ? { ...named, source: 'named' } : next;
+}
+
+// The guide one upcoming visit's STOP carries (bookedPrepGuide's rule): { visit, pestType, config }. THROWS on a lookup error.
+async function stopPrepGuide(visit) {
   // (a sibling the booking query itself would hide, a dispatch-owned booking nobody confirmed, is not part of what the customer sees)
   const { dispatchOwnedUnreviewed } = require('../routes/appointment-public');
   const stop = (visit.stop_members || [visit]).filter((row) => !dispatchOwnedUnreviewed(row));
   const projects = await db('projects').whereIn('scheduled_service_id', stop.map((row) => row.id)).whereNotNull('prep_template_key').select('prep_template_key');
   return { visit, ...singleGuide([...stop, ...projects].map((row) => row.prep_template_key).filter(Boolean), stop.map((row) => row.service_type)) };
+}
+
+/**
+ * The guide of the soonest upcoming visit whose stop carries the guide family `pestType` (texting AI gap 5: the customer named a service,
+ * "the lawn treatment", whose visit is not the next one). The same visits, order and per-stop rule as bookedPrepGuide, over the first
+ * page of the customer's upcoming visits (VISIT_PAGE, the soonest ten). { visit, pestType, config } or null when none of them carries
+ * it. THROWS on a lookup error (a stop whose members could not be read included).
+ */
+async function upcomingPrepGuideFor(customerIds, pestType) {
+  if (!PREP_CONFIG[pestType] || PREP_CONFIG[pestType].guide) return null;
+  const visits = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, VISIT_PAGE, { strict: true });
+  for (const visit of visits) {
+    const guide = await stopPrepGuide(visit);
+    if (guide.pestType === pestType) return guide;
+  }
+  return null;
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes
@@ -1250,5 +1277,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 
 module.exports = {
   sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
-  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide, completedPrepGuide,
+  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide, completedPrepGuide, upcomingPrepGuideFor,
 };
