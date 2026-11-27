@@ -826,10 +826,12 @@ function reminderFreezeHours(guardMode) {
 // the explicit lock24h option, so no other caller's default ever changes. A night
 // run (owner 2026-11-05, "D1 a") also freezes a visit the customer was told a time
 // for (`toldLock`, a known-slot promise).
-// The option also freezes a visit whose latest promise is a day-only or unknown-window one (opts.anyPromise).
+// Owner 2026-11-26 (W20): day-only confirmations are NOT frozen before the 72h
+// reminder (`anyPromise: false`) — only explicit time-window promises lock the slot.
 function freezeReadArgs(guardMode) {
   const hours = reminderFreezeHours(guardMode);
-  return [hours, { lock24h: true, toldLock: true, anyPromise: true }];
+  const { NIGHT_FREEZE_ANY_PROMISE } = require('./told-visits');
+  return [hours, { lock24h: true, toldLock: true, anyPromise: NIGHT_FREEZE_ANY_PROMISE === true }];
 }
 
 // How the skip text names the reminder that froze a visit: the 24-hour reminder, or a time the customer was told.

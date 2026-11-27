@@ -871,5 +871,13 @@ describe('the final pass ends with the DB fences', () => {
     setDbImpl((table) => (table === 'invoices' ? chain({ first: { ...i, stripe_payment_intent_id: 'pi_new' } }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
     await expect(visibilityOf({ invoice: i, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
   });
+  test('a chemical add-on review hold denies Zelle both initially and on the final DB re-read (P0-2)', async () => {
+    const held = invoiceData({ status: 'overdue', scheduled_send_error: 'chemical_addon_review:svc-1' });
+    rows(held);
+    await expect(visibilityOf({ invoice: held, creditWillCoverAnchor: false, saveRequired: false })).resolves.toMatchObject({ visible: false });
+    const unheld = invoiceData({ status: 'overdue', scheduled_send_error: null });
+    setDbImpl((table) => (table === 'invoices' ? chain({ first: { ...unheld, scheduled_send_error: 'chemical_addon_review:svc-2' } }) : chain({ first: { billing_mode: null, monthly_rate: null } })));
+    await expect(visibilityOf({ invoice: unheld, creditWillCoverAnchor: false, saveRequired: false })).resolves.toEqual({ visible: false, reason: 'invoice_changed' });
+  });
 });
 

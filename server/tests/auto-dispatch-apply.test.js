@@ -949,8 +949,8 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set(['s3']) });
     const trx = fakeTrx();
     await expect(on({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3' });
-    // queried on the caller's TRANSACTION for the SIBLINGS only, with the night options
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: true });
+    // queried on the caller's TRANSACTION for the SIBLINGS only, with the night options (W20: anyPromise: false)
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: false });
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: true, frozen: new Set() });
     await expect(on({ trx, members })).rejects.toMatchObject({ code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD' });
     routeTiers.loadReminderFreeze.mockResolvedValueOnce({ failed: false, frozen: new Set() });
@@ -969,8 +969,8 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     await expect(guard({ trx, members })).rejects.toMatchObject({
       code: 'VISIT_MEMBER_AUTO_DISPATCH_GUARD', memberId: 's3', message: expect.stringContaining('already told its time'),
     });
-    // The explicit options are passed; the band stays the module default for the 24-hour leg.
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: true });
+    // The explicit options are passed (W20: anyPromise: false); the band stays the module default for the 24-hour leg.
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2', 's3'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: false });
   });
 
   test('the primary is rechecked on the move transaction with a fresh row read (Codex #6055 r5, r7)', async () => {

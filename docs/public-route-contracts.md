@@ -897,7 +897,20 @@ transaction, and the customer did ask to save the card. A
 withdrawn invoice is also absent from the authenticated portal's balance and
 Pay Now list, and carries no `manualPayOptions`. Nothing else in the payload
 changes; an invoice that returns to self-pay is released by the Bill-To
-reconciliation and collects normally again). TERMITE RENEWAL ELIGIBILITY
+reconciliation and collects normally again). CHEMICAL AREA ADD-ON REVIEW HOLD
+(2026-11-26): an unpaid invoice whose visit completed a chemical area add-on
+without a recorded product application carries a `chemical_addon_review:<serviceId>`
+billing hold stamp while awaiting office review (keeping a collectible status
+and a NULL `payer_id`). `/setup`, `/quote`, `/update-amount`, `/finalize` and
+`/confirm` refuse such an invoice through the shared collectibility gate /
+hold check (code `INVOICE_CHEMICAL_ADDON_HOLD`); combined-balance
+selection (`open-balance.js` / `pay-combined.js`) excludes held siblings and
+refuses any held row under the locked allocation verifier (`verifyAllocationLocked`
+→ `409 staleBalance`); and `GET /api/pay/:token` / `payPageZelleVisibility`
+withholds `manualPayOptions` (Zelle) on held invoices via `zelleDeniedByInvoiceState`
+(including its final DB re-read). Nothing else in the payload changes, no
+customer or service details leak, and once the office reviews and explicitly
+releases/sends or reschedules the invoice it collects normally again. TERMITE RENEWAL ELIGIBILITY
 (2026-09-28, dark behind GATE_TERMITE_ANNUAL_PLAN — only an invoice that is a
 termite annual-plan RENEWAL successor's prepay invoice, found through its own
 `annual_prepay_term_id` link, is ever judged; every other invoice is

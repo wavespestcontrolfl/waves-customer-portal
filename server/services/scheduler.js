@@ -9571,13 +9571,15 @@ function initScheduledJobs() {
   cron.schedule('0 8 * * *', async () => {
     logger.info('Running: AI campaign advisor');
     try {
-      const CampaignAdvisor = require('./ads/campaign-advisor');
-      // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
-      if (await CampaignAdvisor.hasModelReportToday()) {
-        logger.info('AI campaign advisor: today already has a model-written report, skipping');
-        return;
-      }
-      await CampaignAdvisor.generateDailyAdvice();
+      await runExclusive('ads-daily-advisor', async () => {
+        const CampaignAdvisor = require('./ads/campaign-advisor');
+        // The office Mac's Max-plan runner writes today's report at 7:30 AM (owner 2026-10-29).
+        if (await CampaignAdvisor.hasModelReportToday()) {
+          logger.info('AI campaign advisor: today already has a model-written report, skipping');
+          return;
+        }
+        await CampaignAdvisor.generateDailyAdvice();
+      });
     } catch (err) {
       logger.error(`AI campaign advisor failed: ${err.message}`);
     }

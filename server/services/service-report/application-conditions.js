@@ -196,6 +196,7 @@ function normalizeForecastPayload(payload) {
   const wind = column('wind_speed_10m');
   const gust = column('wind_gusts_10m');
   const windDir = column('wind_direction_10m');
+  const weatherCode = column('weather_code');
   const hourly = [];
   times.forEach((seconds, i) => {
     const ms = epochMs(seconds);
@@ -214,6 +215,7 @@ function normalizeForecastPayload(payload) {
       wind_gust_mph: roundedNumber(gust[i], 1),
       wind_dir_deg: finiteNumber(windDir[i]),
       wind_dir: compassLabel(windDir[i]),
+      weather_code: finiteNumber(weatherCode[i]),
       // Unrounded readings, for callers that test a label limit with a strict
       // comparison (exactReadings); dropped from the returned rows otherwise.
       temperature_raw_f: finiteNumber(temp[i]),
@@ -273,7 +275,7 @@ function propertyForecastUrl({ keyLat, keyLon, standard, startDate, endDate }) {
   url.searchParams.set('latitude', String(keyLat));
   url.searchParams.set('longitude', String(keyLon));
   url.searchParams.set('current', 'temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,precipitation_probability,weather_code');
-  url.searchParams.set('hourly', 'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m');
+  url.searchParams.set('hourly', 'precipitation,precipitation_probability,temperature_2m,relative_humidity_2m,wind_speed_10m,wind_gusts_10m,wind_direction_10m,weather_code');
   if (standard) {
     url.searchParams.set('past_days', '1');
     url.searchParams.set('forecast_days', '7');

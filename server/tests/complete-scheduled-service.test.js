@@ -218,11 +218,15 @@ describe('customer-safe routine completion observations', () => {
     service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'tree_shrub_6week' });
-    const result = await complete({
-      structuredObservations: completionObservationCatalog.tree_shrub
-        .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
-    });
-    expect(result.body?.code).not.toBe('conflicting_structured_observations');
+    let result;
+    try {
+      result = await complete({
+        structuredObservations: completionObservationCatalog.tree_shrub
+          .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
+      });
+    } catch { /* proceeds past validation into unmodeled tx */ }
+    expect(db.transaction).toHaveBeenCalled();
+    expect(result?.body?.code).not.toBe('conflicting_structured_observations');
   });
 
   test.each([
@@ -286,16 +290,20 @@ describe('customer-safe routine completion observations', () => {
       deliveryMode: 'auto_send',
     });
 
-    const result = await complete({
-      structuredObservations: [completionObservationCatalog.tree_shrub.find(([id]) => id === 'no-visible-stress')[1]],
-      structuredFindings: {
-        type: 'tree_shrub',
-        values: { plant_groups: ['Shrubs'], landscape_condition: landscapeCondition },
-      },
-      nextStepChips: ['Continue Tree & Shrub program'],
-    });
+    let result;
+    try {
+      result = await complete({
+        structuredObservations: [completionObservationCatalog.tree_shrub.find(([id]) => id === 'no-visible-stress')[1]],
+        structuredFindings: {
+          type: 'tree_shrub',
+          values: { plant_groups: ['Shrubs'], landscape_condition: landscapeCondition },
+        },
+        nextStepChips: ['Continue Tree & Shrub program'],
+      });
+    } catch { /* proceeds past validation into unmodeled tx */ }
 
-    expect(result.body?.code).not.toBe('conflicting_structured_observations');
+    expect(db.transaction).toHaveBeenCalled();
+    expect(result?.body?.code).not.toBe('conflicting_structured_observations');
   });
 
   test.each(['', ...lawnConditionCatalog.extents])('rejects routine live pests with a throughout-lawn absence claim (extent %s)', async (extent) => {
@@ -409,7 +417,7 @@ describe('customer-safe routine completion observations', () => {
     expect(result).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
   });
 
-  test('the real typed tree-and-shrub completion profile accepts its routine observation vocabulary', async () => {
+  test('the real typed tree-and-shrub completion profile accepts its routine observation vocabulary and warns instead of blocking compliance (owner 2026-11-26)', async () => {
     service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
@@ -419,17 +427,23 @@ describe('customer-safe routine completion observations', () => {
       deliveryMode: 'auto_send',
     });
 
-    const result = await complete({
-      structuredObservations: [completionObservationCatalog.tree_shrub[0][1]],
-      structuredFindings: {
-        type: 'tree_shrub',
-        values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' },
-      },
-      nextStepChips: ['Continue Tree & Shrub program'],
-    });
+    const logger = require('../services/logger');
+    let result;
+    try {
+      result = await complete({
+        structuredObservations: [completionObservationCatalog.tree_shrub[0][1]],
+        structuredFindings: {
+          type: 'tree_shrub',
+          values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' },
+        },
+        nextStepChips: ['Continue Tree & Shrub program'],
+      });
+    } catch { /* proceeds past validation into the committed flow, which this fixture does not model */ }
 
-    expect(result.body?.code).not.toBe('invalid_structured_observation');
-    expect(result).toMatchObject({ status: 400, body: { code: 'tree_shrub_typed_compliance' } });
+    expect(db.transaction).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking typed Tree & Shrub compliance warnings/));
+    expect(result?.body?.code).not.toBe('invalid_structured_observation');
+    expect(result?.body?.code).not.toBe('tree_shrub_typed_compliance');
   });
 
   test('a lost-response retry replays the accepted completion after its observation profile changes', async () => {
@@ -585,13 +599,17 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
   beforeEach(() => { pair = jest.spyOn(removal, 'bermudaPairViolation').mockResolvedValue('Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.'); });
   afterEach(() => pair.mockRestore());
 
-  test('a fresh attempt is refused with 400 and the attempt is marked failed', async () => {
+  test('a fresh attempt is NOT refused for a bermuda pair warning (owner 2026-11-26): the message is a warning and the completion goes on', async () => {
+    const logger = require('../services/logger');
     const completionAttempt = { id: 'fixture-attempt' };
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
-    const result = await complete({ products: [] });
-    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_pair_required' } });
+    let result;
+    try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+    expect(db.transaction).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda pair warning/));
+    expect(result?.body?.code).not.toBe('lawn_bermuda_pair_required');
     expect(pair).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
-    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_pair_required' }), expect.anything());
+    expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_pair_required' }), expect.anything());
   });
 
   test('a replay of a committed completion returns its stored result and never runs the check', async () => {
@@ -624,22 +642,29 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     afterEach(() => limit.mockRestore());
 
     test('a fresh attempt is NOT refused for a cap breach (owner 2026-11-26): the limit message is a warning and the completion goes on', async () => {
+      const logger = require('../services/logger');
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       let result;
       try { result = await complete({ products: [] }); } catch { /* the completion proceeds into the committed flow, which this fixture does not model */ }
+      expect(db.transaction).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda limit warning/));
       expect(result?.body?.code).not.toBe('lawn_bermuda_limit_reached');
       expect(limit).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
       expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
 
-    test('"its limits are not loaded" (setup, not a cap) is still refused with 400 lawn_bermuda_limit_reached', async () => {
+    test('"its limits are not loaded" is also warned rather than blocked (owner 2026-11-26)', async () => {
+      const logger = require('../services/logger');
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       limit.mockResolvedValue(removal.NOT_CONFIGURED_MESSAGE);
-      const result = await complete({ products: [] });
-      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_limit_reached', error: removal.NOT_CONFIGURED_MESSAGE } });
-      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
+      let result;
+      try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+      expect(db.transaction).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda limit warning/));
+      expect(result?.body?.code).not.toBe('lawn_bermuda_limit_reached');
+      expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
 
     test('a replay and a resume never run the limit check', async () => {
@@ -659,12 +684,17 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     });
     afterEach(() => area.mockRestore());
 
-    test('a fresh attempt is refused with 400 lawn_bermuda_area_required and the attempt is marked failed', async () => {
+    test('a fresh attempt is NOT refused for missing bermuda area/amount (owner 2026-11-26): the message is a warning and completion goes on', async () => {
+      const logger = require('../services/logger');
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
-      const result = await complete({ products: [] });
-      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_area_required', error: 'Enter the area treated and the amount used for the bermuda mix.' } });
-      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
+      let result;
+      try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+      expect(db.transaction).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda area warning/));
+      expect(result?.body?.code).not.toBe('lawn_bermuda_area_required');
+      expect(area).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID, treatedSqft: undefined });
+      expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
     });
 
     test('a replay never runs the area check', async () => {
@@ -1158,4 +1188,247 @@ test('the autopay decline notice persists every shared replay hold, including a 
   const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
   expect(source).toMatch(/!failResult\.sent && !heldAtBoundary && require\('\.\/messaging\/billing-channel-routing'\)\.REPLAY_HOLD_CODES\.includes\(failResult\.code\) && failResult\.deferred && failResult\.nextAllowedAt/);
   expect(require('../services/messaging/billing-channel-routing').REPLAY_HOLD_CODES).toContain('BILLING_PREFERENCES_CHANGED');
+});
+
+describe('unverified chemical add-on billing hold (P0-1)', () => {
+  const { shouldAutoInvoiceCompletion } = require('../services/complete-scheduled-service');
+
+  test('shouldAutoInvoiceCompletion returns false when unrecordedChemicalAddOnHold is true', () => {
+    const base = {
+      isBackfillCompletion: false,
+      isIncompleteVisit: false,
+      alreadyPaid: false,
+      prepaidCovered: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      terminalInvoiceOnVisit: false,
+      unmintedSetupFeeHold: false,
+      createInvoiceOnComplete: true,
+      waveguardTier: null,
+      explicitMembership: false,
+      hasVisitPrice: true,
+      invoiceAmount: 125,
+      visitPerformed: true,
+    };
+    expect(shouldAutoInvoiceCompletion({ ...base, unrecordedChemicalAddOnHold: false })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...base, unrecordedChemicalAddOnHold: true })).toBe(false);
+  });
+
+  test('completionInvoiceGateInput wires unrecordedChemicalAddOnHold resume-safely, holds unpaid existing & pre-minted invoices BEFORE exposure, routes annual-prepay to office review, and fails closed if billing alert cannot be saved (P0-1 + P0-2 + P1-1)', () => {
+    const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    const holdDeclAt = source.indexOf('const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))');
+    const existingAssignAt = source.indexOf('if (existingCompletionInvoice) {');
+    const existingHoldAt = source.indexOf('if (holdExistingUnpaid && !recapReviewOnly) {', existingAssignAt);
+    const existingHoldBlock = source.slice(existingHoldAt, existingHoldAt + 700);
+    expect(holdDeclAt).toBeGreaterThan(-1);
+    expect(existingAssignAt).toBeGreaterThan(holdDeclAt);
+    expect(existingHoldAt).toBeGreaterThan(existingAssignAt);
+    expect(existingHoldBlock).toContain('invoice = null;');
+    expect(existingHoldBlock).toContain('payUrl = null;');
+    expect(existingHoldBlock).toContain('invoiceCreated = false;');
+
+    expect(source).toContain('dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`');
+    expect(source).toContain("code: 'chemical_addon_billing_alert_failed'");
+    expect(source).toContain('if (unpaidPreMintedOnChemicalHold) {');
+    const preMintAt = source.indexOf('} else if (preMintedInvoice) {');
+    const holdAt = source.indexOf('if (unpaidPreMintedOnChemicalHold) {', preMintAt);
+    const creditAt = source.indexOf('applyPrepaidCreditToInvoice(preMintedInvoice)', preMintAt);
+    expect(preMintAt).toBeGreaterThan(-1);
+    expect(holdAt).toBeGreaterThan(preMintAt);
+    expect(creditAt).toBeGreaterThan(holdAt);
+
+    // Annual-prepay covered visits pass unrecordedChemicalAddOnHold + heldExistingInvoice into reconcileCoveredVisitInvoice.
+    const coveredCallAt = source.indexOf('const covered = await reconcileCoveredVisitInvoice({');
+    expect(coveredCallAt).toBeGreaterThan(-1);
+    const coveredCallSlice = source.slice(coveredCallAt, coveredCallAt + 500);
+    expect(coveredCallSlice).toContain('unrecordedChemicalAddOnHold');
+    expect(coveredCallSlice).toContain('heldExistingInvoice');
+
+    const annualSource = require('fs').readFileSync(require.resolve('../services/annual-prepay-addon-billing'), 'utf8');
+    expect(annualSource).toContain('if (this.ctx.unrecordedChemicalAddOnHold) {');
+    const billFnAt = annualSource.indexOf('async bill() {');
+    const chemHoldInBillAt = annualSource.indexOf('if (this.ctx.unrecordedChemicalAddOnHold) {', billFnAt);
+    const mintCallAt = annualSource.indexOf('await this.mint(read);', billFnAt);
+    expect(chemHoldInBillAt).toBeGreaterThan(billFnAt);
+    expect(mintCallAt).toBeGreaterThan(chemHoldInBillAt);
+
+    // Tree & Shrub photo gate preserves retry throws on actual upload failures, warns without rollback when 0 failed.
+    const tsPhotoAt = source.indexOf('if (treeShrubPhotoGateRequired && uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {');
+    expect(tsPhotoAt).toBeGreaterThan(-1);
+    expect(source.slice(tsPhotoAt, tsPhotoAt + 400)).toContain('if (completionPhotoUploadResult.failed > 0) {');
+  });
+
+  test('grouped visit packet billing sends unrecorded chemical add-on members to office review instead of minting or adopting (P0-3)', async () => {
+    const { _test } = require('../services/visit-completion-invoice');
+    const member = {
+      id: 'svc-addon-1',
+      record_status: 'completed',
+      record_notes: {
+        lawnWarningFindings: [{
+          code: 'area_addon_application_required',
+          limitType: 'area_addon_application_required',
+          productName: 'area_addon_bed_pre_emergent',
+          message: 'No product recorded',
+        }],
+      },
+    };
+    expect(_test.memberHasUnrecordedChemicalAddOn(member)).toBe(true);
+    const eligibility = await _test.memberBillingEligibility(member, { id: 'cust-1' }, {});
+    expect(eligibility).toEqual({
+      state: 'office_required',
+      reason: 'unrecorded_chemical_addon',
+      serviceId: 'svc-addon-1',
+      invoiceId: null,
+    });
+  });
+
+  test('Bermuda pair, area, and limit warnings have distinct codes, limitTypes, accurate copy, and distinct dedupe keys (P1-4)', () => {
+    const {
+      bermudaStepFinding,
+      bermudaPairFinding,
+      bermudaAreaFinding,
+      limitFindingDedupeKey,
+    } = require('../services/complete-scheduled-service');
+    const pair = bermudaPairFinding('Recognition and Fusilade II go on together.');
+    const area = bermudaAreaFinding('Enter treated square feet.');
+    const limit = bermudaStepFinding('3 steps in 12 months exceeded.');
+
+    expect(pair.limitType).toBe('bermuda_pair_missing');
+    expect(pair.code).toBe('bermuda_pair_warning');
+    expect(pair.message).not.toMatch(/past its limit/i);
+
+    expect(area.limitType).toBe('bermuda_area_missing');
+    expect(area.code).toBe('bermuda_area_warning');
+    expect(area.message).not.toMatch(/past its limit/i);
+
+    expect(limit.limitType).toBe('bermuda_step_limit');
+    expect(limit.code).toBe('application_limit_exceeded');
+
+    const record = { id: 'rec-bermuda-1' };
+    const keys = new Set([
+      limitFindingDedupeKey(record, pair),
+      limitFindingDedupeKey(record, area),
+      limitFindingDedupeKey(record, limit),
+    ]);
+    expect(keys.size).toBe(3);
+  });
+
+  test('P0-2 + P1-4: chemical add-on hold persists on published invoices, blocks reminders/collection, and still alerts on prepaid backfills', async () => {
+    const invoiceHelpers = require('../services/invoice-helpers');
+    const heldInv = {
+      id: 'inv-chem-1',
+      status: 'sent',
+      total: 125,
+      payer_id: null,
+      scheduled_send_error: invoiceHelpers.chemicalAddonHoldStamp('svc-123'),
+    };
+    expect(invoiceHelpers.invoiceHeldForChemicalReview(heldInv)).toBe(true);
+    expect(invoiceHelpers.isCollectibleOwnInvoice(heldInv)).toBe(false);
+    expect(() => invoiceHelpers.assertInvoiceCollectible(heldInv)).toThrow(/chemical area add-on/i);
+
+    const mockDbForDispatch = jest.fn(() => ({
+      where: () => ({ first: async () => heldInv }),
+    }));
+    const dispatchCheck = await invoiceHelpers.selfPayAtDispatch('inv-chem-1', mockDbForDispatch)();
+    expect(dispatchCheck).toMatchObject({ ok: false, code: 'INVOICE_CHEMICAL_ADDON_HOLD' });
+
+    // P1-4: out-of-band prepaid backfill would mint without chemical hold, so counterfactual alerts office.
+    const backfillPrepaid = {
+      isBackfillCompletion: true,
+      annualPrepayCovered: false,
+      prepaidCovered: true,
+      alreadyPaid: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      terminalInvoiceOnVisit: false,
+      unmintedSetupFeeHold: false,
+      createInvoiceOnComplete: true,
+      hasVisitPrice: true,
+      invoiceAmount: 125,
+      visitPerformed: true,
+    };
+    expect(shouldAutoInvoiceCompletion({ ...backfillPrepaid, unrecordedChemicalAddOnHold: false })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...backfillPrepaid, unrecordedChemicalAddOnHold: true })).toBe(false);
+
+    const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(source).toContain('scheduled_send_at: null');
+    expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(serviceId)');
+    expect(source).toContain("where({ invoice_id: heldInv.id, status: 'active' })");
+    expect(source).toContain('if (Number(stamped) > 0)');
+    // P0-1 & P0-2 (r7) + P1 (GitHub r2): locks all unpaid visit invoices on both standalone and grouped packet closeouts and neutralizes/reconciles open PaymentIntents.
+    expect(source).toContain("orderBy('id', 'asc')");
+    expect(source).toContain('if (unrecordedChemicalAddOnHold && !recapReviewOnly) {');
+    expect(source).toContain('guardOpenPaymentIntentForPrepaid(heldInv)');
+    expect(source).toContain('StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id)');
+    // P2 (GitHub r2): resolved area add-on rows are exempt from transactional 400 area_sqft_required so warn-never-block holds end to end.
+    expect(source).toContain('const isResolvedAreaAddOnRow = Boolean(addOnTags?.get?.(areaAddOnGovernedRate.productRowKey(p)));');
+    expect(source).toContain('&& !isResolvedAreaAddOnRow');
+    // P1 (GitHub r2): grouped packet records phase stamps existing unpaid member invoices and pauses active reminders.
+    const { _test: packetBillingTest } = require('../services/visit-completion-invoice');
+    const invoiceUpdates = [];
+    const seqUpdates = [];
+    const packetTrx = jest.fn((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereNotIn: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          noWait: jest.fn(() => q),
+          select: jest.fn(async () => [
+            { id: 'inv-self-1', status: 'sent', stripe_payment_intent_id: 'pi_open_1', scheduled_send_error: null },
+            { id: 'inv-payer-1', status: 'sent', stripe_payment_intent_id: null, scheduled_send_error: 'payer_billed:payer-1' },
+          ]),
+          update: jest.fn(async (patch) => { invoiceUpdates.push(patch); return 1; }),
+        };
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = {
+          where: jest.fn(() => q),
+          update: jest.fn(async (patch) => { seqUpdates.push(patch); return 1; }),
+        };
+        return q;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const heldPacketIds = await packetBillingTest.holdUnrecordedChemicalAddOnMemberInvoices(packetTrx, [{
+      id: 'svc-grouped-1',
+      record_id: 'rec-grouped-1',
+      record_status: 'completed',
+      record_notes: { lawnWarningFindings: [{ code: 'area_addon_application_required', limitType: 'area_addon_application_required' }] },
+    }]);
+    expect(heldPacketIds).toEqual(['inv-self-1']);
+    expect(invoiceUpdates).toHaveLength(1);
+    expect(invoiceUpdates[0]).toMatchObject({
+      scheduled_send_at: null,
+      scheduled_send_error: 'chemical_addon_review:svc-grouped-1',
+    });
+    expect(seqUpdates).toHaveLength(1);
+    expect(seqUpdates[0]).toMatchObject({ status: 'paused', paused_reason: 'unrecorded_chemical_addon_review' });
+    // P0-1 (r7): /confirm route refuses held invoices too.
+    const payV2Src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
+    expect(payV2Src).toContain('if (invoiceHeldForChemicalReview(invoice))');
+    // P1-1 (r7): releasing a chemical hold resumes ONLY chemical-review paused follow-up sequences.
+    const followupsSrc = require('fs').readFileSync(require.resolve('../services/invoice-followups'), 'utf8');
+    expect(followupsSrc).toContain('function isChemicalReviewPause(existing)');
+    expect(followupsSrc).toContain('function rearmSourceFor(existing)');
+    expect(followupsSrc).toContain('const chemicalPause = isChemicalReviewPause(existing);');
+    // P1-2: add-on warning logs must never interpolate caller-supplied product text.
+    expect(source).not.toContain('add-on actuals warning for ${svc.id}: ${addOnErr.message}');
+    expect(source).not.toContain('chemical add-on warning for ${svc.id}: ${item.message}');
+    // P0-1: delivery finalization preserves chemical_addon_review:% stamps stamped mid-send.
+    const rawMock = { raw: jest.fn((sql) => sql) };
+    const preserveSql = invoiceHelpers.preserveWithdrawalStamp(rawMock);
+    expect(preserveSql).toContain("scheduled_send_error LIKE 'payer_billed:%'");
+    expect(preserveSql).toContain("scheduled_send_error LIKE 'chemical_addon_review:%'");
+    // P1-1: explicit office override pins and atomically clears the reviewed chemical hold in claimInvoiceForSend.
+    const invoiceSrc = require('fs').readFileSync(require.resolve('../services/invoice'), 'utf8');
+    expect(invoiceSrc).toContain('isReleasingChemicalReviewHold(current, overridesReviewHold)');
+    expect(invoiceSrc).toContain('flip.where({ scheduled_send_error: current.scheduled_send_error })');
+    const holdAppliesAt = source.indexOf('const chemicalAddOnBillingHoldApplies =');
+    expect(source.slice(holdAppliesAt, holdAppliesAt + 350)).not.toContain('!prepaidCovered &&');
+  });
 });
