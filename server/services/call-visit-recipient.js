@@ -190,8 +190,11 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
-      if (existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source');
+      // A list copy the customer no longer lists (its entry stayed on another account in a merge) grants nothing, so a fresh
+      // call replaces it like any ineligible row.
+      const deadCopy = existing && existing.source === REMINDER_SOURCE && !(await listedNow(visit.customer_id, entry.phoneKey, trx));
+      if (existing && !deadCopy && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
       if (existing) await trx(TABLE).where({ id: existing.id }).del();
       await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that

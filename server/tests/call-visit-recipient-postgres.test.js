@@ -595,6 +595,21 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
       });
 
+      test('a fresh call replaces a list copy the customer no longer lists (new id, call-recorded), and keeps one that is listed', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        const [copy] = await otherRows();
+        const again = await record({ scheduledServiceId: otherVisitId });
+        expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
+        expect((await otherRows())[0].id).toBe(copy.id);
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        const fresh = await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
+        expect(fresh.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+        const [row] = await otherRows();
+        expect(row.id).not.toBe(copy.id);
+        expect(row.source).toBe('call_caller_provided');
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+      });
+
       test('a customer merge never moves the list: the loser\'s entries stay on the loser', async () => {
         const { REPOINT_EXCLUDED_TABLES } = require('../services/customer-dedupe');
         expect(REPOINT_EXCLUDED_TABLES.has('customer_reminder_contacts')).toBe(true);
