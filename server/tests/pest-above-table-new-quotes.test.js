@@ -536,6 +536,48 @@ test('the public pest range note says the $8 is per application on the quarterly
   expect(pest.notes).toContain('$7.04 and $6.24 per application');
 });
 
+// The phone price tool (get_pricing = pricingText) on the REAL engine. A caller states the home size; the tool had no lot, so it
+// priced on a stand-in lot of 4 x the home size. For a home above the table that lot is above the engine's 20,000 sq ft lot review,
+// so a caller who answered the story question still got no price. The tool asks for both at once.
+describe('the phone price tool: a home above 5,500 sq ft prices once the caller gives the story count and the lot size', () => {
+  const { pricingText } = require('../services/voice-agent/relay-context');
+  const ask = (input) => pricingText({ service: 'pest_control', home_sqft: 12000, ...input });
+
+  test('both are asked for at once, and each alone asks only for the other; no price is stated meanwhile', async () => {
+    const both = await ask({});
+    expect(both).toContain('still needed: how many stories the home has (stories) and the approximate lot size in square feet (lot_sqft)');
+    const lotOnly = await ask({ stories: 2 });
+    expect(lotOnly).toContain('still needed: the approximate lot size in square feet (lot_sqft)');
+    expect(lotOnly).not.toContain('how many stories');
+    const storiesOnly = await ask({ lot_sqft: 15000 });
+    expect(storiesOnly).toContain('still needed: how many stories the home has (stories)');
+    expect(storiesOnly).not.toContain('lot_sqft');
+    for (const out of [both, lotOnly, storiesOnly]) expect(out).not.toMatch(/\$\d/);
+  });
+
+  test('with both, the footprint prices: two floors $132, one floor $180', async () => {
+    // Two floors = a 6,000 sq ft footprint: $128 + $8 x 0.5. One floor = 12,000: $128 + $8 x 6.5.
+    expect(await ask({ stories: 2, lot_sqft: 15000 })).toContain('$132 per application');
+    expect(await ask({ stories: 1, lot_sqft: 15000 })).toContain('$180 per application');
+    expect(await pricingText({ service: 'pest_control', home_sqft: 8000, stories: 1, lot_sqft: 15000 })).toContain('$148 per application');
+  });
+
+  test('a lot the engine reviews (above 20,000 sq ft) is still a custom quote: no price is stated', async () => {
+    for (const lot of [20001, 48000]) {
+      const out = await ask({ stories: 2, lot_sqft: lot });
+      expect(out).toMatch(/custom quote/i);
+      expect(out).not.toMatch(/\$\d/);
+    }
+  });
+
+  test('at or under the table nothing new is asked: a 5,000 sq ft home prices at once, and other plans never ask for a story count', async () => {
+    expect(await pricingText({ service: 'pest_control', home_sqft: 5000 })).toContain('$126 per application');
+    const bait = await pricingText({ service: 'termite_bait', home_sqft: 12000 });
+    expect(bait).not.toContain('how many stories');
+    expect(bait).not.toContain('lot_sqft');
+  });
+});
+
 describe('the client fallback estimator: the premium is server-only', () => {
   const clientPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
   const load = () => {

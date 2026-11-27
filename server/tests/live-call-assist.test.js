@@ -442,26 +442,27 @@ describe('live call assist property and plan inputs', () => {
     expect(mockPricing).toHaveBeenCalledWith({ service: 'pest_control', home_sqft: 2000, lot_sqft: undefined });
   });
 
-  test('a big home: the price tool asks for the story count, and the caller\'s answer in a later read gets the price', async () => {
-    // Pest above 5,500 sq ft is priced on the footprint (living area over the stories), so the tool asks before it prices.
-    const ASK = 'Cannot price pest control yet — still needed: how many stories the home has (stories). Ask the caller, then call get_pricing again. Do NOT guess or estimate a price yourself.';
+  test('a big home: the price tool asks for the story count and the lot size, and the caller\'s answers in a later read get the price', async () => {
+    // Pest above 5,500 sq ft is priced on the footprint (living area over the stories), so the tool asks before it prices. It asks
+    // for the lot size with it: on its stand-in lot the engine would hold every home this size for review.
+    const ASK = 'Cannot price pest control yet — still needed: how many stories the home has (stories) and the approximate lot size in square feet (lot_sqft). Ask the caller, then call get_pricing again. Do NOT guess or estimate a price yourself.';
     const PRICE = 'Standard pest control pricing for this property size: $132 per application on the quarterly plan; 4 applications per year. Quote ONLY these numbers.';
-    mockPricing.mockImplementation(async (input) => (input.stories ? PRICE : ASK));
+    mockPricing.mockImplementation(async (input) => (input.stories && input.lot_sqft ? PRICE : ASK));
     mockCreate.mockResolvedValue(reply({ ...PEST, home_sqft: 12000 }));
     await run();
     expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control', home_sqft: 12000, lot_sqft: undefined });
-    expect(assist().price).toBe('Cannot price pest control yet — still needed: how many stories the home has');
-    // The caller answers: the count is a new fact, so the price is looked up again with it.
-    await next({ home_sqft: 12000, stories: 2 });
+    expect(assist().price).toBe('Cannot price pest control yet — still needed: how many stories the home has and the approximate lot size in square feet');
+    // The caller answers: both are new facts, so the price is looked up again with them.
+    await next({ home_sqft: 12000, stories: 2, lot_sqft: 15000 });
     expect(mockPricing).toHaveBeenCalledTimes(2);
-    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control', home_sqft: 12000, stories: 2, lot_sqft: undefined });
+    expect(mockPricing).toHaveBeenLastCalledWith({ service: 'pest_control', home_sqft: 12000, stories: 2, lot_sqft: 15000 });
     expect(assist().price).toBe('Standard pest control pricing for this property size: $132 per application on the quarterly plan; 4 applications per year');
     expect(assist().facts.stories).toBe(2);
-    // The count stays when a later read does not repeat it, and a corrected count is looked up again.
+    // Both stay when a later read does not repeat them, and a corrected count is looked up again.
     await next({ home_sqft: 12000 });
     expect(mockPricing).toHaveBeenCalledTimes(2);
     await next({ home_sqft: 12000, stories: 1 });
-    expect(mockPricing).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 1 }));
+    expect(mockPricing).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 1, lot_sqft: 15000 }));
   });
 
   test('a changed input forces a new lookup, and the caller correcting it replaces the old value', async () => {

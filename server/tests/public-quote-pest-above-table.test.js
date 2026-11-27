@@ -271,6 +271,45 @@ describe('POST /api/public/quote/calculate: pest above the 5,500 sq ft table (ne
       expectHeld(await calculate(12000, posted));
     });
 
+    // With no lot the route prices on a stand-in lot of 4 x the home size: 48,000 sq ft here, above the engine's 40,000 sq ft lot
+    // review. The engine lists that review BEFORE the story count on the pest line, and the route read reasons[0]: the homeowner
+    // was told commercial properties need a manual quote, and the office notice said "commercial manual quote".
+    test('no lot size either: the story-count hold still names the quote, never the lot review listed before it', async () => {
+      const { notifyAdmin } = require('../services/notification-service');
+      for (const size of [12000, 20000, 8000]) {
+        notifyAdmin.mockClear();
+        const held = await calculate(size, 1, { pest: { frequency: 'quarterly' } }, null);
+        expectHeld(held);
+        expect(storedEngineInput().lotSqFt).toBe(size * 4);
+        const bodies = notifyAdmin.mock.calls.map((call) => String(call[2]));
+        expect(bodies.some((body) => /needs property confirmation \(stories_estimated\)/.test(body))).toBe(true);
+        expect(bodies.some((body) => /commercial/i.test(body))).toBe(false);
+      }
+      // The engine does list the lot review first on that line; the route no longer reads it as the quote's reason.
+      const { generateEstimate } = require('../services/pricing-engine');
+      await calculate(12000, 1, { pest: { frequency: 'quarterly' } }, null);
+      const pest = generateEstimate(storedEngineInput()).lineItems.find((line) => line.service === 'pest_control');
+      expect(pest.manualReviewReasons.indexOf('very_large_lot')).toBe(0);
+      expect(pest.manualReviewReasons).toContain('stories_estimated');
+      // One-time pest carries the same two reasons.
+      const oneTime = await calculate(12000, 1, { oneTimePest: {} }, null);
+      expect(oneTime.json).toMatchObject({ quote_required: true, service: 'one_time_pest', reason: 'stories_estimated' });
+      expect(oneTime.json.message).toMatch(/A home this size is priced by our team/);
+    });
+
+    // The first held line names a multi-service quote, as on every website quote. One-time pest is listed after the recurring
+    // lines, so a held lawn line beside it keeps its own service, reason and message.
+    test('another service\'s held line listed before the pest line keeps its own reason', async () => {
+      const both = await calculate(12000, 1, { oneTimePest: {}, lawn: { track: 'st_augustine' } }, null);
+      expect(both.status).toBe(202);
+      expect(both.json.service).toBe('lawn_care');
+      expect(both.json.reason).not.toBe('stories_estimated');
+      expect(both.json.message).not.toMatch(/Commercial/);
+      // Recurring pest is the first line: with lawn beside it the story-count hold names the quote.
+      const pestFirst = await calculate(12000, 1, { pest: { frequency: 'quarterly' }, lawn: { track: 'st_augustine' } }, null);
+      expect(pestFirst.json).toMatchObject({ quote_required: true, service: 'pest_control', reason: 'stories_estimated' });
+    });
+
     test('one-time pest is held the same way: its price is built from the same footprint', async () => {
       const held = await calculate(12000, 1, { oneTimePest: {} });
       expect(held.status).toBe(202);

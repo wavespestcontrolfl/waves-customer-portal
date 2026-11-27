@@ -2363,6 +2363,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // below and told the customer commercial properties need a manual
       // quote (GH codex P2 on 2aaf7d9a5).
       || manualQuoteLine?.customQuoteReason
+      // The story-count hold above the pest table names its pest line, whatever the engine lists before it there. A big home with
+      // no measured lot prices on the stand-in lot (4 x the home size), and the engine lists that lot review (very_large_lot) first:
+      // reading reasons[0] told the homeowner that commercial properties need a manual quote.
+      || (['pest_control', 'one_time_pest'].includes(manualQuoteLine?.service)
+        && manualQuoteLine.manualReviewReasons?.includes('stories_estimated') ? 'stories_estimated' : null)
       || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
