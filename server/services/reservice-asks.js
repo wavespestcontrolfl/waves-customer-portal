@@ -43,7 +43,10 @@ const CALL_COLUMNS = ['id', 'call_summary', 'ai_extraction', 'ai_extraction_enri
 const CALL_LEAD = 'On your call, you mentioned';
 const OFFICE_LEAD = 'As reported to our office:';
 // What the booking flow appends to a notes line after the customer's words.
-const NOTE_APPENDIX_RE = /\s+—\s+(?=Unit: |booked beside |self-booked plan |first visit reserved |auto-seeded )/;
+const NOTE_APPENDIX_RE = /\s+—\s+(?=Unit: |booked beside |self-booked plan |first visit reserved |auto-seeded |series activation never completed)/;
+// What other writers append to the visit's notes after the customer's words: routes/schedule.js's " | RESCHEDULE
+// REQUEST: ..." and time-tracking's " [auto-closed ...]" suffix.
+const NOTE_RECORD_BOUNDARY_RE = /\s+\|\s+RESCHEDULE REQUEST:|\s+\[auto-closed/;
 const LEGACY_NOTE_RE = /^Re-service request(?: \([^)]*\))?: (.+)$/;
 
 // ---------------------------------------------------------------------------
@@ -192,12 +195,12 @@ function legacyRequestText(notes) {
 // The note a customer typed when self-booking. The original booking's customer_notes win when the caller has them
 // (the self_booked_appointments row, untouched by later edits). Otherwise it is read from the visit's notes line
 // ("Self-booked. Notes: Please text first — Unit: 5"): everything after the lead up to the appendix the booking flow
-// adds, continuation lines included. A re-service request line is bookingWords' and is not returned here.
+// adds or that a later writer appends (a reschedule request), continuation lines included. A re-service request line is bookingWords' and is not returned here.
 function selfBookedNoteText(notes, customerNotes = null) {
   let text = compact(customerNotes);
   if (!text) {
     const match = /(?:^|\n)\s*Self-booked\.\s*Notes:\s*([\s\S]+)$/.exec(String(notes || ''));
-    text = match ? compact(match[1].split(NOTE_APPENDIX_RE)[0]) : '';
+    text = match ? compact(match[1].split(NOTE_APPENDIX_RE)[0].split(NOTE_RECORD_BOUNDARY_RE)[0]) : '';
   }
   return text && !LEGACY_NOTE_RE.test(text) ? text : null;
 }

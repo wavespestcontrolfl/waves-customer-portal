@@ -151,7 +151,7 @@ describe('customerAskedFacts: portal requests', () => {
     expect(sql).toMatch(/"category" in \(\?, \?, \?, \?, \?, \?\)/);
     expect(sql).toMatch(/"source" in \(\?, \?, \?\) or \("source" is null and \(metadata->>'writer' = 'portal_form'/);
     expect(sql).toMatch(/order by GREATEST\(created_at, COALESCE\(updated_at, created_at\)\) DESC limit \?/);
-    expect(sql).toMatch(/select "subject", "description", "source", "created_at" from/);
+    expect(sql).toMatch(/select "subject", "description", "source", "created_at", "metadata" from/);
     expect(sql).not.toMatch(/pricing_revision/);
     expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'resolved', 'closed', 'cancelled', 'pest_issue']));
     expect(bindings).not.toContain('cancellation');
@@ -187,25 +187,27 @@ describe('customerAskedFacts: portal requests', () => {
   });
 
   describe('which properties the visit is on (not single premises)', () => {
+    const { resolveVisitPropertyScope } = require('../services/service-report/visit-property-scope');
+    const idsOf = async (svc, dbh) => _test.visitPropertyIds(svc, dbh, await resolveVisitPropertyScope(svc, dbh));
     beforeEach(() => mockSingle.mockResolvedValue(false));
 
     test('a visit with no stamp, property or estimate is on the primary property', async () => {
-      expect(await _test.visitPropertyIds(SVC, fakeDbh({ props: [HOME, RENTAL] }))).toEqual(['prop-1']);
+      expect(await idsOf(SVC, fakeDbh({ props: [HOME, RENTAL] }))).toEqual(['prop-1']);
     });
 
     test('a stamped service address resolves to the property it matches, even with no property_id', async () => {
       const svc = { ...SVC, service_address_line1: '200 Sample St', service_address_city: 'Parrish', service_address_zip: '34219' };
-      expect(await _test.visitPropertyIds(svc, fakeDbh({ props: [HOME, RENTAL] }))).toEqual(['prop-2']);
+      expect(await idsOf(svc, fakeDbh({ props: [HOME, RENTAL] }))).toEqual(['prop-2']);
     });
 
     test("a visit's property_id resolves through that property's current address", async () => {
-      expect(await _test.visitPropertyIds({ ...SVC, property_id: 'prop-2' }, fakeDbh({ props: [HOME, { ...RENTAL, id: 'prop-2' }] }))).toEqual(['prop-2']);
+      expect(await idsOf({ ...SVC, property_id: 'prop-2' }, fakeDbh({ props: [HOME, { ...RENTAL, id: 'prop-2' }] }))).toEqual(['prop-2']);
     });
 
     test('a stamp that matches no property, or an unreadable read, withholds', async () => {
       const stray = { ...SVC, service_address_line1: '300 Nowhere Rd', service_address_city: 'Sarasota', service_address_zip: '34236' };
-      expect(await _test.visitPropertyIds(stray, fakeDbh({ props: [HOME, RENTAL] }))).toEqual([]);
-      expect(await _test.visitPropertyIds(SVC, fakeDbh({ fail: true }))).toEqual([]);
+      expect(await idsOf(stray, fakeDbh({ props: [HOME, RENTAL] }))).toEqual([]);
+      expect(await idsOf(SVC, fakeDbh({ fail: true }))).toEqual([]);
     });
   });
 
@@ -243,6 +245,55 @@ describe('customerAskedFacts: portal requests', () => {
       const rows = [formRow({ description: 'Appointment svc-1: Pest Control on 2026-12-01\nPreferred date: 2026-12-03', source: 'customer_portal_reschedule' })];
       expect(await customerAskedFacts(SVC, fakeDbh({ rows }))).toBeNull();
     });
+  });
+});
+
+describe('customerAskedFacts: the address the request stored', () => {
+  const STAMPED = { ...SVC, service_address_line1: '100 Example Ave', service_address_city: 'Bradenton', service_address_zip: '34205' };
+  const withAddress = (address, over) => formRow({ metadata: { writer: 'portal_form', propertyId: 'prop-1', property: { id: 'prop-1', address } }, ...over });
+
+  test('on a provably single-premises account, a request filed for another address is withheld', async () => {
+    const rows = [withAddress('200 Sample St, Parrish, FL 34219', { description: 'Roaches at the rental' })];
+    expect(await customerAskedFacts(STAMPED, fakeDbh({ rows }))).toBeNull();
+  });
+
+  test('a request whose stored address is this visit premises shows, spelled differently', async () => {
+    const rows = [withAddress('100 Example Avenue, Bradenton, FL 34205', { description: 'Gate sticks' })];
+    const facts = await customerAskedFacts(STAMPED, fakeDbh({ rows }));
+    expect(facts.items[0].text).toBe('Pest issue: Gate sticks');
+  });
+
+  test('a request with no stored address keeps the property-id rule alone', () => {
+    const scope = { hasEvidence: true, key: 'x|y|z' };
+    expect(_test.storedAddressMatches({ metadata: null }, scope)).toBe(true);
+    expect(_test.storedAddressMatches({ metadata: '{"writer":"portal_form"}' }, scope)).toBe(true);
+  });
+
+  test('a stored address cannot be matched when the visit premises are unresolved or the address is unreadable', () => {
+    const row = { metadata: { property: { address: '100 Example Ave, Bradenton, FL 34205' } } };
+    expect(_test.storedAddressMatches(row, { hasEvidence: true, key: null })).toBe(false);
+    expect(_test.storedAddressMatches(row, { hasEvidence: false, key: null })).toBe(true);
+    expect(_test.storedAddressMatches({ metadata: { property: { address: 'the yellow house' } } }, { hasEvidence: true, key: '100exampleave|bradenton|34205' })).toBe(false);
+  });
+
+  test('the query reads more rows than it shows, so a dropped row does not hide a valid one', () => {
+    const { sql, bindings } = _test.portalRowsQuery(knexLib({ client: 'pg' }), SVC, null).toSQL();
+    expect(sql).toMatch(/select "subject", "description", "source", "created_at", "metadata" from/);
+    expect(bindings[bindings.length - 1]).toBe(20);
+  });
+});
+
+describe('customerAskedFacts: the eight slots', () => {
+  test('the return reason keeps its slot when ten newer messages exist; the display is newest first', async () => {
+    mockGather.mockResolvedValue(asks([
+      askItem({ id: 'booking:svc-1', source: 'request_form', at: '2026-11-01T15:00:00.000Z', text: 'Ants in the kitchen.' }),
+      ...Array.from({ length: 10 }, (_, n) => askItem({ id: `text:${n}`, at: `2026-11-${String(10 + n).padStart(2, '0')}T14:00:00.000Z`, text: `Message number ${n}.` })),
+    ]));
+    const facts = await customerAskedFacts(SVC, fakeDbh());
+    expect(facts.items).toHaveLength(MAX_ITEMS);
+    expect(facts.items.filter((i) => i.kind === 'reservice_reason')).toHaveLength(1);
+    // The 7 newest messages (n = 3..9) fill the other slots; the reason is oldest, so it sorts last.
+    expect(facts.items.map((i) => i.text)).toEqual([...Array.from({ length: 7 }, (_, k) => `Message number ${9 - k}.`), 'Ants in the kitchen.']);
   });
 });
 

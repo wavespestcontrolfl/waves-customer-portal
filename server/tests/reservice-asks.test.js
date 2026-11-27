@@ -613,3 +613,20 @@ describe('selfBookedNoteText: multiline and the original booking', () => {
     expect(selfBookedNoteText('x', 'Re-service request: ants are back')).toBeNull();
   });
 });
+
+describe('selfBookedNoteText: stops at records other writers append', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('a rescheduled visit keeps only the booking words', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Please text first — Unit: 5 | RESCHEDULE REQUEST: Move to Friday (preferred: 2026-12-04)')).toBe('Please text first');
+    expect(selfBookedNoteText('Self-booked. Notes: Please text first | RESCHEDULE REQUEST: Move to Friday')).toBe('Please text first');
+    expect(selfBookedNoteText('Self-booked. Notes: Side gate sticks.\nPlease text first. | RESCHEDULE REQUEST: Move it')).toBe('Side gate sticks. Please text first.');
+  });
+  test('the other appended records end the note too', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Beware of the dog — series activation never completed (worker died mid-booking); office converts')).toBe('Beware of the dog');
+    expect(selfBookedNoteText('Self-booked. Notes: Beware of the dog [auto-closed 11PM]')).toBe('Beware of the dog');
+    expect(selfBookedNoteText('Self-booked. Notes: Beware of the dog — booked beside an existing pest plan; kept as a one-off visit')).toBe('Beware of the dog');
+  });
+  test('a visit with no booking note stays empty after a reschedule', () => {
+    expect(selfBookedNoteText('Self-booked via portal — Unit: 5 | RESCHEDULE REQUEST: Move it')).toBeNull();
+  });
+});

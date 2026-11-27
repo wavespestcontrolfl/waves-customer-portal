@@ -25,7 +25,9 @@ const { parseETDateTime } = require('../utils/datetime-et');
 
 const MAX_ITEMS = 8;
 const MAX_TEXT_CHARS = 280;
+// Rows shown, and rows read: a row whose stored address is another home's is dropped after the read.
 const PORTAL_ROW_LIMIT = 5;
+const PORTAL_READ_LIMIT = 20;
 // The portal form's categories that name a service or a visit; billing, cancellation, pause and moving requests are
 // the office's.
 const PORTAL_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'upgrade', 'other'];
@@ -121,14 +123,13 @@ async function singlePremises(svc, dbh) {
 // repo's visit-property-scope resolver reads the visit's own stamp, then its property_id, then its source estimate;
 // a visit with none of the three is an unstamped visit and belongs to the primary property (the visit rule of
 // account-properties.js). A stamp or link that cannot be resolved matches nothing: the request is withheld.
-async function visitPropertyIds(svc, dbh) {
+async function visitPropertyIds(svc, dbh, scope) {
   try {
-    const { resolveVisitPropertyScope, sameResolvedProperty } = require('./service-report/visit-property-scope');
+    const { sameResolvedProperty } = require('./service-report/visit-property-scope');
     const linkage = require('./estimate-property-linkage');
     const props = await dbh('customer_properties')
       .where({ customer_id: svc.customer_id, active: true })
       .select('id', 'is_primary', 'address_line1', 'address_line2', 'city', 'zip');
-    const scope = await resolveVisitPropertyScope(svc, dbh);
     if (!scope.hasEvidence) return (props || []).filter((p) => p.is_primary === true).map((p) => String(p.id));
     if (!scope.key) return [];
     return (props || []).filter((p) => {
@@ -139,6 +140,34 @@ async function visitPropertyIds(svc, dbh) {
     logger.warn(`[visit-customer-asked] visit premises unreadable: ${err?.code || err?.name || 'Error'}`);
     return [];
   }
+}
+
+// The visit's premises key (stamp, property_id, source estimate). An unreadable resolve is "stamp present, not
+// resolved": it matches nothing.
+async function visitScope(svc, dbh) {
+  try {
+    return await require('./service-report/visit-property-scope').resolveVisitPropertyScope(svc, dbh);
+  } catch (err) {
+    logger.warn(`[visit-customer-asked] visit scope unreadable: ${err?.code || err?.name || 'Error'}`);
+    return { key: null, hasEvidence: true };
+  }
+}
+
+// The address the portal form stored on a request (metadata.property.address, one line), against the visit's
+// premises: the stored address is what the customer saw, so it is checked on every path, single premises included. A
+// request with no stored address keeps the property-id rule alone, and a visit with no premises evidence is the
+// primary property (the id rule already decided it).
+function storedAddressMatches(row, scope) {
+  let meta = row.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { meta = null; }
+  }
+  const address = meta?.property?.address;
+  if (!address || !scope.hasEvidence) return true;
+  if (!scope.key) return false;
+  const { sameResolvedProperty } = require('./service-report/visit-property-scope');
+  const key = require('./estimate-property-linkage').normalizedEstimateStreet(address);
+  return !!key && sameResolvedProperty(scope.key, key);
 }
 
 // A portal request belongs to this visit's property when it was filed for it. A request that names no property shows
@@ -175,8 +204,8 @@ function portalRowsQuery(dbh, svc, propertyIds) {
     })
     // Newest by last change: a revised reschedule note appends to an old row and bumps updated_at.
     .orderByRaw('GREATEST(created_at, COALESCE(updated_at, created_at)) DESC')
-    .limit(PORTAL_ROW_LIMIT)
-    .select('subject', 'description', 'source', 'created_at');
+    .limit(PORTAL_READ_LIMIT)
+    .select('subject', 'description', 'source', 'created_at', 'metadata');
 }
 
 // The customer's own note from a reschedule request, dated by the update that supplied it: the newest block with a
@@ -198,8 +227,9 @@ function rescheduleNote(description, createdAt) {
 // reschedule request for this appointment shows only the note the customer typed, dated by the update that supplied it.
 async function portalItems(svc, dbh) {
   const single = await singlePremises(svc, dbh);
-  const rows = await portalRowsQuery(dbh, svc, single ? null : await visitPropertyIds(svc, dbh));
-  return (rows || []).map((row) => {
+  const scope = await visitScope(svc, dbh);
+  const rows = await portalRowsQuery(dbh, svc, single ? null : await visitPropertyIds(svc, dbh, scope));
+  return (rows || []).filter((row) => storedAddressMatches(row, scope)).slice(0, PORTAL_ROW_LIMIT).map((row) => {
     if (row.source === RESCHEDULE_SOURCE) {
       const revised = rescheduleNote(row.description, row.created_at);
       // `appointment` marks a note that belongs to this one appointment, so a grouped stop keeps it with its service.
@@ -209,6 +239,16 @@ async function portalItems(svc, dbh) {
     const subject = compact(row.subject);
     return entry('portal_request', row.created_at, note ? `${subject}: ${note}` : subject, { source: 'portal' });
   });
+}
+
+const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
+
+// At most MAX_ITEMS: the return reason (why the visit exists) always has its slot, the newest others fill the rest,
+// then everything is ordered newest first for display.
+function pickItems(items) {
+  const reason = items.filter((item) => item.kind === 'reservice_reason').sort(newestFirst)[0];
+  const others = items.filter((item) => item !== reason).sort(newestFirst);
+  return [...(reason ? [reason] : []), ...others.slice(0, MAX_ITEMS - (reason ? 1 : 0))].sort(newestFirst);
 }
 
 /**
@@ -228,8 +268,8 @@ async function customerAskedFacts(svc, dbh) {
     seen.add(key);
     return true;
   });
-  items.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  return items.length ? { items: items.slice(0, MAX_ITEMS) } : null;
+  const picked = pickItems(items);
+  return picked.length ? { items: picked } : null;
 }
 
-module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { portalRowsQuery, rescheduleNote, visitPropertyIds } };
+module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };
