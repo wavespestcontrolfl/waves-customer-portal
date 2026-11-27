@@ -76,15 +76,31 @@ const RECURRING_GENERAL_PEST_RE =
 // re-services ONLY. Callers on an un-gated surface pass the whole
 // schedule row (name tokens exclude the other lines); the recap lane is
 // additionally server-gated to the pest_control category.
+// The general pest catalog keys (server protocol-matcher.js, the general pest rule's serviceKeys, less the two the name
+// test above always excludes: the initial cleanout and pest + rodent).
+const GENERAL_PEST_KEYS = new Set([
+  "pest_general_quarterly", "pest_general_monthly", "pest_general_bimonthly", "pest_general_semiannual",
+  "one_time_pest_control", "pest_re_service",
+]);
+
 export function isPestDefaultMixVisit(service) {
   const raw =
     service?.serviceTypeRaw || service?.serviceType || service?.service_type || "";
   const s = String(raw).toLowerCase();
   if (NON_MIX_SERVICE_RE.test(s)) return false;
-  // A callback booking counts when its name says pest work. A callback whose name says nothing ("Courtesy Visit") has no
-  // protocol card on the server (protocol-matcher.js no_protocol, owner pick D18): inspection only, nothing prefilled.
+  const key = String(
+    service?.completionProfile?.serviceKey
+      || service?.serviceKey
+      || service?.service_key_snapshot
+      || "",
+  ).toLowerCase();
+  // A re-service counts as the server's general pest card does (protocol-matcher.js): its name says pest, or its key is a
+  // general pest service, or a bare "Re-Service" / "Callback" name has no key at all. A callback booking whose name and key
+  // say nothing ("Courtesy Visit"), or a bare "Re-Service" under another service's key, has no card on the server
+  // (no_protocol, owner pick D18): inspection only, nothing prefilled.
+  const pestWork = /\bpest\b/.test(s) || GENERAL_PEST_KEYS.has(key);
   const isReservice =
-    (service?.isCallback === true && /\bpest\b/.test(s)) || /re-?service|callback/.test(s);
+    (service?.isCallback === true && pestWork) || (/re-?service|callback/.test(s) && (pestWork || !key));
   if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
   // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
   // admin-created One-Time Pest Control Service job is often scheduled
@@ -98,12 +114,6 @@ export function isPestDefaultMixVisit(service) {
   // has its own distinct one (tick_control, bee_wasp_removal, …). Checked
   // across every field a caller's dispatch-shaped service object might
   // carry it under.
-  const key = String(
-    service?.completionProfile?.serviceKey
-      || service?.serviceKey
-      || service?.service_key_snapshot
-      || "",
-  ).toLowerCase();
   return key === "one_time_pest_control";
 }
 

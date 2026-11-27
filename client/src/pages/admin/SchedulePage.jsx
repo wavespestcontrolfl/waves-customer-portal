@@ -804,14 +804,18 @@ const PHOTO_LOOKUP_TYPE_BY_CATEGORY = {
 // pest or lawn visit with add-on rows attached keeps its own lane (AreaAddOnFields adds the
 // add-on's product beside it); only the lightweight shortcuts stay off for it.
 const AREA_ADDON_LINE = "general";
-// A booked Waves Assessment (catalog key lawn_inspection) is an inspection under any name: its old name "Lawn Inspection"
-// would read as lawn and open the lawn applications in place of its own card (server takesLawnApplications).
+// A booked Waves Assessment (catalog key lawn_inspection) reads as its current name under any name: its old name "Lawn
+// Inspection" (or any lawn word) would read as lawn and open the lawn applications and yard areas in place of its own card.
+// The server picks the Assessment card by the same key (admin-protocols.js takesLawnApplications, protocol-matcher.js).
+const ASSESSMENT_SERVICE_TYPE = "Waves Assessment";
+function lineTypeFor(service, serviceType) {
+  return (service?.completionProfile?.serviceKey || service?.serviceKey) === "lawn_inspection" ? ASSESSMENT_SERVICE_TYPE : serviceType;
+}
 function visitServiceCategory(service, serviceType) {
-  if (isAreaAddOnVisit(service)) return AREA_ADDON_LINE;
-  return (service?.completionProfile?.serviceKey || service?.serviceKey) === "lawn_inspection" ? "inspection" : detectServiceCategory(serviceType);
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : detectServiceCategory(lineTypeFor(service, serviceType));
 }
 function visitServiceLine(service, serviceType) {
-  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(serviceType);
+  return isAreaAddOnVisit(service) ? AREA_ADDON_LINE : serviceLineFromType(lineTypeFor(service, serviceType));
 }
 
 function detectServiceCategory(serviceType) {
@@ -14224,8 +14228,9 @@ export function CompletionPanel({
     if (isTypedFindings || isBedBugVisit || !isRegularPestVisit) return;
     if (visitOutcome !== "completed") return;
     if (!protocolCompletionDefaultsSettled) return;
-    // The server's card answer first: a no-card visit (noProtocol, owner pick D18) is inspection only and seeds nothing. A
-    // failed read keeps the house mix, as before.
+    // The server's card answer first: a no-card visit (owner pick D18) is inspection only and seeds nothing, whichever read
+    // says so (the actions read's noProtocol or the defaults read's no_protocol). A failed actions read alone keeps the mix.
+    if (protocolCompletionDefaults?.matchedVisit?.reason === "no_protocol") return;
     if (service.serviceType && !protocolActionsLoaded && !protocolActionError) return;
     if (!Array.isArray(products) || products.length === 0) return;
     if (selectedProducts.length) {
@@ -14253,7 +14258,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly, protocolActionsLoaded, protocolActionError]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly, protocolActionsLoaded, protocolActionError, protocolCompletionDefaults]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +

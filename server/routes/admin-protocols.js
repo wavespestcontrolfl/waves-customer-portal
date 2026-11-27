@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const db = require('../models/db');
+const logger = require('../services/logger');
 const { adminAuthenticate, requireAdmin, requireTechOrAdmin } = require('../middleware/admin-auth');
 const { etParts } = require('../utils/datetime-et');
 const {
@@ -875,18 +876,24 @@ async function matchForBookedVisit(req, protocols, serviceType) {
 }
 
 // A lawn name sends a close-out to the lawn month's applications, except a booked Waves Assessment: its catalog key
-// (lawn_inspection) gives it the Assessment card, under its old name "Lawn Inspection" too (the row's name before its
-// rename). The close-out keys the same visit off the lawn flow (SchedulePage.jsx visitServiceCategory). Only a lawn name
-// that reads as an inspection costs the key read.
+// (lawn_inspection) gives it the Assessment card under any lawn name ("Lawn Inspection", the row's name before its rename,
+// or a visit renamed by hand). The close-out keys the same visit off the lawn flow (SchedulePage.jsx lineTypeFor). A lawn
+// close-out with a visit costs one key read; with no visit the name decides.
 async function takesLawnApplications(req, serviceType) {
   const name = normalizeText(serviceType);
   if (!name.includes('lawn') && !name.includes('turf')) return false;
   const id = String(req.query.visitId || req.query.scheduledServiceId || '');
-  if (!/\b(inspection|assessment)\b/.test(name) || !UUID_RE.test(id)) return true;
-  const row = await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
-    .leftJoin('services', 'scheduled_services.service_id', 'services.id')
-    .first(db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'));
-  return row?.service_key !== ASSESSMENT_KEY;
+  if (!UUID_RE.test(id)) return true;
+  // A failed read keeps the name's answer (the lawn close-out it had), and says so in the log.
+  try {
+    const row = await technicianCurrentVisitFilter(req, db('scheduled_services').where({ 'scheduled_services.id': id }))
+      .leftJoin('services', 'scheduled_services.service_id', 'services.id')
+      .first(db.raw('COALESCE(scheduled_services.service_key_snapshot, services.service_key) as service_key'));
+    return row?.service_key !== ASSESSMENT_KEY;
+  } catch (err) {
+    logger.warn(`[protocols] booked key unavailable for a lawn close-out: ${err?.code || err?.name || 'Error'}`);
+    return true;
+  }
 }
 
 // GET /api/admin/protocols/match — best service template plus full program fallback.

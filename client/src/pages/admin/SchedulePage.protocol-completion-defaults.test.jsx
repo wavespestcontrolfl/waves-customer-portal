@@ -239,7 +239,7 @@ it('a bed bug visit whose card lists no products (the inspection, a follow-up) s
 function stubFetchWithActions(actionsResponse) {
   vi.stubGlobal('fetch', vi.fn(async (url) => {
     if (String(url).includes('/completion-actions')) return { ok: true, json: async () => actionsResponse };
-    return { ok: true, json: async () => ({ customer: {}, actions: [], available: false, source: 'none', products: [] }) };
+    return { ok: true, json: async () => ({ customer: {}, actions: [], available: false, source: 'none', products: [], taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }) };
   }));
 }
 const NO_CARD_NOTE = 'Inspection only, no product: this service has no protocol card.';
@@ -263,11 +263,32 @@ it('a re-service the server calls no card opens on no house mix and shows the no
     { id: 'm3', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' },
   ];
   await act(async () => {
-    render(<CompletionPanel service={cockroachService({ serviceType: 'Re-Service', completionProfile: { serviceKey: 'web_sweep' }, findingsSchema: null })} products={mixCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Re-Service', completionProfile: null, findingsSchema: null })} products={mixCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
   });
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
   expect(screen.queryByText('Taurus SC')).toBeNull();
   expect(screen.queryByText('LESCO Crosscheck Plus')).toBeNull();
+});
+
+it('a no-card answer from the defaults read holds the house mix, whatever the actions read says', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (String(url).includes('/completion-actions')) return { ok: true, json: async () => ({ programKey: 'pest', programName: 'Pest Protocol', visit: { visit: 1, month: 'Any' }, actions: [] }) };
+    if (String(url).includes('/default-products')) {
+      return { ok: true, json: async () => ({ serviceId: 'cockroach-visit-1', programKey: null, matchedVisit: { visit: null, reason: 'no_protocol', matched: false }, source: 'none', products: [], unresolved: [], taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }) };
+    }
+    return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+  }));
+  const mixCatalog = [
+    { id: 'm1', name: 'Taurus SC', category: 'Insecticide' },
+    { id: 'm2', name: 'LESCO Crosscheck Plus', category: 'Insecticide' },
+    { id: 'm3', name: 'LESCO 90/10 Nonionic Surfactant', category: 'Adjuvant' },
+  ];
+  await act(async () => {
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Re-Service', completionProfile: null, findingsSchema: null })} products={mixCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  await waitFor(() => expect(fetch.mock.calls.some(([url]) => String(url).includes('/completion-actions'))).toBe(true));
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  expect(screen.queryByText('Taurus SC')).toBeNull();
 });
 
 it('a booked Waves Assessment under its old name "Lawn Inspection" asks for its own card by visit, not the lawn applications', async () => {

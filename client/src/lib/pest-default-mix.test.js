@@ -44,3 +44,18 @@ describe('isPestDefaultMixVisit: a callback booking', () => {
     expect(isPestDefaultMixVisit({ serviceType, isCallback: true })).toBe(true);
   });
 });
+
+describe('isPestDefaultMixVisit: a re-service follows the server card by key', () => {
+  it('a callback named "Courtesy Visit" keeps the mix under a general pest key, and gets none with no key or another key', () => {
+    expect(isPestDefaultMixVisit({ serviceType: 'Courtesy Visit', isCallback: true, completionProfile: { serviceKey: 'pest_re_service' } })).toBe(true);
+    expect(isPestDefaultMixVisit({ serviceType: 'Courtesy Visit', isCallback: true })).toBe(false);
+    expect(isPestDefaultMixVisit({ serviceType: 'Courtesy Visit', isCallback: true, serviceKey: 'web_sweep' })).toBe(false);
+  });
+
+  it('a bare "Re-Service" keeps the mix with no key or a general pest key, and gets none under another service\'s key', () => {
+    expect(isPestDefaultMixVisit({ serviceType: 'Re-Service' })).toBe(true);
+    expect(isPestDefaultMixVisit({ serviceType: 'Re-Service', serviceKey: 'pest_general_quarterly' })).toBe(true);
+    expect(isPestDefaultMixVisit({ serviceType: 'Re-Service', serviceKey: 'web_sweep' })).toBe(false);
+    expect(isPestDefaultMixVisit({ serviceType: 'Pest Control Re-Service', serviceKey: 'web_sweep' })).toBe(true);
+  });
+});

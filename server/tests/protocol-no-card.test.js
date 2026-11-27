@@ -248,6 +248,13 @@ describe('a service with no card on the schedule panel and the close-out', () =>
     expect((await call('/completion-actions', { serviceType: 'Lawn Assessment Service', visitId: VISIT, month: 'Nov' })).body.programKey).toBe('assessment');
   });
 
+  test('a booked assessment renamed to any lawn name ("Lawn Visit") still gets its card; a lawn visit with another key keeps the lawn applications', async () => {
+    bookedAs('lawn_inspection');
+    expect((await call('/completion-actions', { serviceType: 'Lawn Visit', scheduledServiceId: VISIT, month: 'Nov' })).body.programKey).toBe('assessment');
+    bookedAs('lawn_care_recurring');
+    expect((await call('/completion-actions', { serviceType: 'Lawn Inspection', scheduledServiceId: VISIT, month: 'Nov' })).body.programKey).toBe('lawn');
+  });
+
   test('the close-out seeds no product for a service with no card', () => {
     expect(resolveCompletionDefaultProductNames({ protocols, serviceType: 'Bee / Wasp Nest Removal Service', serviceKey: 'bee_wasp_removal' }))
       .toMatchObject({ programKey: null, source: 'none', entries: [] });
