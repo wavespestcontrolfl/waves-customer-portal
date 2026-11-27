@@ -9232,7 +9232,7 @@ a generic `/call-status` fallback row that won the race (`source` NULL) is
 adopted — sandbox source, customer link cleared — and any row with a foreign
 non-null source is refused (403 hangup). `/call-status` itself writes the
 sandbox-sourced row, with no customer link or touchpoint, when it sees the
-sandbox number first. The handler then renders a 3-second two-digit DTMF
+sandbox number first. The handler then renders a 6-second two-digit DTMF
 `<Gather>` (a relay-profile cell code, `relay-profiles.SANDBOX_CELLS`;
 '99' = the raw env attributes; no digits ⇒ the production profile) followed
 by the same `<Connect><ConversationRelay>` + per-call minted token that
