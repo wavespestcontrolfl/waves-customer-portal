@@ -163,12 +163,10 @@ function liveAccountHolderSenderE164({ liveWebhook, fromPhone, accountHolderPhon
 }
 
 function setTimeMoveOptions(previousDate, customerInitiatedPhone) {
-  return {
-    timePromise: 'set_time',
-    previousDate,
-    customerInitiated: Boolean(customerInitiatedPhone),
-    customerInitiatedPhone: customerInitiatedPhone || null,
-  };
+  const base = { timePromise: 'set_time', previousDate };
+  return customerInitiatedPhone
+    ? { ...base, customerInitiated: true, customerInitiatedPhone }
+    : { ...base, customerInitiated: false, customerInitiatedPhone: null };
 }
 const stampEffects = (dbh, key) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object(?::text, to_jsonb(now()))", [key]);
 const countAttempt = (dbh) => dbh.raw("COALESCE(execution, '{}'::jsonb) || jsonb_build_object('effects_attempts', COALESCE((execution->>'effects_attempts')::int, 0) + 1)");
