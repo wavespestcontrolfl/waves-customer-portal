@@ -225,7 +225,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const timeline = await agent.buildTimeline(row);
     expect(timeline.complete).toBe(true);
     // The offer's send time comes with it, so the model can read "tomorrow" from it; it went to the number the yes came from.
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?', prevAt: at(-30), whole: true });
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', at: T0, prevOutbound: 'We could come Friday at 10 am. Does that work?', prevAt: at(-30), whole: true });
     expect(timeline.ctx[timeline.ctx.length - 1]).toMatch(/the text this alert is about\): Yes/);
   });
 
@@ -610,7 +610,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     for (let i = 0; i < 15; i += 1) await sms({ customer_id: cid, direction: 'inbound', from_phone: number, message_body: `chatter ${i}`, created_at: at(-500 + i), status: 'received' });
     await sms({ customer_id: cid, direction: 'inbound', from_phone: number, twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Friday at 10 am works for the visit?', prevAt: at(-600), whole: true });
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', at: T0, prevOutbound: 'Friday at 10 am works for the visit?', prevAt: at(-600), whole: true });
   });
 
   // A customer with two numbers: the yes from the first number answers the offer sent to it, never a later bill sent to the other.
@@ -649,7 +649,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'OK', created_at: at(-100), status: 'received' });
     for (let i = 0; i < 13; i += 1) await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: `notice ${i}`, created_at: at(-90 + i) });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'OK', prevOutbound: 'Your visit is on Friday.', prevAt: at(-200), whole: true });
+    expect(timeline.reply).toEqual({ lastBody: 'OK', at: at(-100), prevOutbound: 'Your visit is on Friday.', prevAt: at(-200), whole: true });
   });
 
   // The Waves line comes from the canonical address rule: the message's own endpoint before the thread's (a thread can be
@@ -696,7 +696,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Waves here. Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
     await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Yes', twilio_sid: `SM${tag}o7`, created_at: at(-5) });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Waves here. Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', at: at(-5), prevOutbound: 'Waves here. Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
   });
 
   // A thread bell names no number, so its offer is looked up with the reply's own sender (the shared-phone check kept): a text Waves
@@ -709,7 +709,39 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await sms({ customer_id: null, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
     await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'Yes', created_at: at(-5), status: 'received' });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', at: at(-5), prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+  });
+
+  // A thread bell's newest text takes its numbers by its SID over both stores: its text-log row (here with no customer id, so the
+  // contact-scoped read misses it) names the number it came from, though the message has no number of its own and the thread names
+  // the customer's other number. The bill sent to that other number is not the offer.
+  test('a thread bell takes its newest text\'s numbers by its SID, past a text-log row with no customer id', async () => {
+    const cid = await customer();
+    const [first, second] = [phone(952), phone(953)];
+    const sid = `SM${tag}o8`;
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: first, our_endpoint_id: LINE }).returning('id');
+    made.conversations.push(conv.id);
+    await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Yes', twilio_sid: sid, created_at: at(-5) });
+    await sms({ customer_id: null, direction: 'inbound', from_phone: second, to_phone: LINE, twilio_sid: sid, message_body: 'Yes', created_at: new Date(at(-5).getTime() + 500), status: 'received' });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: second, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: first, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-10) });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
+    expect(timeline.reply).toMatchObject({ lastBody: 'Yes', at: at(-5), prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+  });
+
+  // A thread bell's latest text reaches the model with its own time, yes or not: here a request only the unified inbox holds.
+  test('a thread bell shows the model its latest text in, dated, even when the excerpt lacks it', async () => {
+    const cid = await customer();
+    const number = phone(954);
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: number, our_endpoint_id: LINE }).returning('id');
+    made.conversations.push(conv.id);
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'Thanks', created_at: at(-90), status: 'received' });
+    await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Can you move my visit to Monday?', twilio_sid: `SM${tag}o9`, created_at: at(-5) });
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`);
+    const timeline = await agent.buildTimeline(row);
+    expect(timeline.reply).toMatchObject({ lastBody: 'Can you move my visit to Monday?', at: at(-5) });
+    expect(timeline.ctx.join('\n')).not.toMatch(/move my visit/);
+    expect(agent.judgeInput(row, timeline, agent.computeFacts(timeline))).toMatch(/^THE CUSTOMER'S LATEST TEXT BEFORE THE ALERT \(sent [^)]+\): Can you move my visit to Monday\?$/m);
   });
 
   test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {

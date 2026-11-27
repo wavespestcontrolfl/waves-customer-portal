@@ -554,6 +554,21 @@ describe('the booking requirement holds on every path', () => {
     expect(parse(',"yes_to_offer":"false"').yesToOffer).toBe(true);
   });
 
+  // A bell with no message id dates the reply by when it came, and always shows the model its latest text in, yes or not: the excerpt
+  // can miss it (an inbox-only text, or one pushed out by later notices), and the alert is about it. A bell with a message id carries
+  // that text in its excerpt already, so it is not repeated.
+  test('a thread bell shows its latest text in, dated by when it came; a bell with a message id does not repeat it', () => {
+    const came = new Date('2026-11-26T13:30:00Z');
+    const thread = (lastBody, prevOutbound = '') => timelineOf([], { trigger: 'sms:none', reply: { lastBody, at: came, prevOutbound, prevAt: null, whole: !!prevOutbound } });
+    const ask = agent.judgeInput(alertRow(), thread('Can you move my visit to Monday?'), agent.computeFacts(thread('x')));
+    expect(ask).toMatch(/^THE CUSTOMER'S LATEST TEXT BEFORE THE ALERT \(sent Thursday 2026-11-26 8:30 AM\): Can you move my visit to Monday\?$/m);
+    const yes = agent.judgeInput(alertRow(), thread('Yes', 'Friday at 10 am?'), agent.computeFacts(thread('x')));
+    expect(yes).toMatch(/^- CUSTOMER REPLY \(Thursday 2026-11-26 8:30 AM\): Yes$/m);
+    expect(yes).not.toMatch(/THE CUSTOMER'S LATEST TEXT/);
+    const named = agent.judgeInput(alertRow(), timelineOf([], { reply: { lastBody: 'Can you move my visit?', at: came, prevOutbound: '' } }), agent.computeFacts(timelineOf()));
+    expect(named).not.toMatch(/THE CUSTOMER'S LATEST TEXT/);
+  });
+
   // The offer comes from its own query and can be older than the context lines (3 days, 12 texts; 4 thread emails), so the model is
   // shown the pair whole, redacted, and the pair is in the fingerprint.
   // The offer's send time comes with it: "tomorrow" sent on Wednesday is Thursday, whenever the customer replies.

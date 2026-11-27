@@ -554,7 +554,7 @@ async function smsContext(r, anchor, key, trigger) {
   // same shared-phone check as every contact (trustedContact), so a text Waves sent to that number with no customer id is not skipped.
   const offerKey = lastIn && !hasTrigger ? await trustedContact(r, key.customerId, lastIn.from_phone, anchor) : key;
   const offer = lastAt ? await lastDeliveredText(r, lastAt, offerKey, lastIn.from_phone, lastIn.to_phone) : { body: '', at: null, whole: false };
-  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer.body, prevAt: offer.at, whole: offer.whole } : null };
+  return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), at: lastAt, prevOutbound: offer.body, prevAt: offer.at, whole: offer.whole } : null };
 }
 
 // A thread bell's reply: the newest text in at or before the bell, from either store, by its own query (never only what the capped
@@ -572,8 +572,11 @@ async function latestReplyIn(r, anchor, key) {
   ]);
   const newest = [...canonical, ...legacy].sort((a, b) => toDate(b.created_at) - toDate(a.created_at))[0];
   if (!newest) return null;
-  const same = (rows) => rows.filter((x) => x === newest || (newest.twilio_sid && x.twilio_sid === newest.twilio_sid));
-  const { phone, line } = addressesOf(same(legacy), same(canonical));
+  // Its numbers by its SID over both stores (resolveInboundText, the resolver a bell with a message id uses): the contact-scoped
+  // reads above can miss its text-log row (one with no customer id), and the thread's contact phone can name another number.
+  const resolved = newest.twilio_sid ? await resolveInboundText(r, String(newest.twilio_sid)) : null;
+  const own = (rows) => rows.filter((x) => x === newest);
+  const { phone, line } = resolved || addressesOf(own(legacy), own(canonical));
   return { message_body: newest.body, created_at: newest.created_at, from_phone: phone, to_phone: line };
 }
 
@@ -822,7 +825,7 @@ function fingerprintOf(alert, timeline, now) {
   const contextHash = crypto.createHash('sha1').update((timeline.ctx || []).join('\n')).digest('hex');
   // The message, its send time and the reply a bare yes is judged on: a changed one gets a fresh look.
   const reply = timeline.reply;
-  const replyHash = reply ? crypto.createHash('sha1').update(`${reply.prevAt ? toDate(reply.prevAt).toISOString() : ''}\n${reply.whole ? 'w' : 'c'}\n${reply.prevOutbound || ''}\n${reply.lastBody || ''}`).digest('hex') : '';
+  const replyHash = reply ? crypto.createHash('sha1').update(`${reply.prevAt ? toDate(reply.prevAt).toISOString() : ''}\n${reply.whole ? 'w' : 'c'}\n${reply.prevOutbound || ''}\n${reply.lastBody || ''}\n${reply.at ? toDate(reply.at).toISOString() : ''}`).digest('hex') : '';
   const parts = [`rules:${RULES_VERSION}`, timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash, replyHash,
     // Each event with a hash of what the model reads of it (body, summary, status notes), not just its id and state.
     ...(timeline.unreadable ? [] : timeline.events.map((e) => `${e.key}:${crypto.createHash('sha1').update(String(e.line || '')).digest('hex').slice(0, 12)}`).sort())];
@@ -938,7 +941,12 @@ function judgeInput(alert, timeline, facts) {
     ...(bareYes(timeline) && timeline.reply.prevOutbound ? [
       'THE YES AND THE MESSAGE IT ANSWERS (the last message Waves sent before the reply, then the reply):',
       `- WAVES MESSAGE${timeline.reply.prevAt ? ` (sent ${instantText(timeline.reply.prevAt)})` : ''}: ${clean(timeline.reply.prevOutbound, OFFER_CHARS * 2)}${timeline.reply.whole ? '' : ' [cut: the message is longer than shown]'}`,
-      `- CUSTOMER REPLY (${instantText(timeline.alertAt)}): ${clean(timeline.reply.lastBody, 300)}`,
+      `- CUSTOMER REPLY (${instantText(timeline.reply.at || timeline.alertAt)}): ${clean(timeline.reply.lastBody, 300)}`,
+    ] : []),
+    // A bell with no message id: the customer's latest text in, found by its own query in either store, dated by when it came. The
+    // excerpt above can miss it (an inbox-only text, or one pushed out by later notices), and the alert is about it.
+    ...(timeline.trigger === 'sms:none' && timeline.reply && !(bareYes(timeline) && timeline.reply.prevOutbound) ? [
+      `THE CUSTOMER'S LATEST TEXT BEFORE THE ALERT (sent ${instantText(timeline.reply.at || timeline.alertAt)}): ${clean(timeline.reply.lastBody, 300)}`,
     ] : []),
     'AFTER THE ALERT (id | time | what):',
     after,
