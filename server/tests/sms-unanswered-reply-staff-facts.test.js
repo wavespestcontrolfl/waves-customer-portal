@@ -96,3 +96,34 @@ describe('the PREP GUIDE is part of the send-time fingerprint', () => {
     expect(await hashWith({ prepGuide: null })).toBe(base);
   });
 });
+
+// REPORT DELIVERY (texting AI gap 2): the report delivery sentences in the draft's facts are part of the send-time fingerprint. The fake context
+// carries what sms-staff-facts.loadReportDeliveryFacts returns (a delivery state per visit, never an address).
+describe('the REPORT DELIVERY sentences are part of the send-time fingerprint', () => {
+  const visit = (over = {}) => ({ recordId: 'sr-1', serviceType: 'Quarterly Pest Control', serviceDate: '2026-11-20', state: 'sent', sentOn: '2026-11-20', recipient: 'account', ...over });
+  const reports = (...visits) => ({ reportDeliveries: { visits } });
+
+  test('a delivery row that changed between the draft and the send retires the draft ("facts_changed"); the same row stands', async () => {
+    const { factsFingerprintRefusal } = require('../services/sms-unanswered-reply');
+    const stamp = { facts_fingerprint: await hashWith(reports(visit({ state: 'pending', sentOn: undefined, recipient: undefined }))), facts_fingerprint_at: AT.toISOString() };
+    const refusal = async (extra) => { ContextAggregator.getContextForCustomer.mockResolvedValue({ summary: 'X', billing, ...extra }); return factsFingerprintRefusal(dbh, { customerId: 'c1', stamp }); };
+    expect(await refusal(reports(visit({ state: 'pending', sentOn: undefined, recipient: undefined })))).toBeNull();
+    expect(await refusal(reports(visit()))).toBe('facts_changed'); // queued -> sent
+    expect(await refusal(reports())).toBe('facts_changed'); // the row is gone
+    await expect(refusal({ reportDeliveries: null })).rejects.toThrow('report delivery could not be read');
+  });
+
+  test('a bounce, or the account\'s email changing, changes the hash', async () => {
+    const sent = await hashWith(reports(visit()));
+    expect(await hashWith(reports(visit({ recipient: 'undelivered' })))).not.toBe(sent);
+    expect(await hashWith(reports(visit({ recipient: 'other_address' })))).not.toBe(sent);
+    expect(await hashWith(reports(visit()))).toBe(sent);
+  });
+
+  test('gate off: the reports are neither asked for nor part of the hash, and a null key refuses nothing', async () => {
+    delete process.env[GATE];
+    const base = await hashWith({});
+    expect(await hashWith(reports(visit()))).toBe(base);
+    expect(await hashWith({ reportDeliveries: null })).toBe(base);
+  });
+});
