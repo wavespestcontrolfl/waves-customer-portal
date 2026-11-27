@@ -11,7 +11,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText, geminiVerdict } = require('./llm/call');
+const { anthropicText, geminiText, geminiEnvelopeError } = require('./llm/call');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const { normalizeGrassType } = require('./lawn-grass-context');
 
@@ -298,7 +298,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType, context = {}, d
     throw err;
   }
 
-  if (geminiVerdict(data, data?.candidates?.[0] || {}, 2048)) return null;
+  if (geminiEnvelopeError(data, 2048)) return null;
   const text = geminiText(data);
   if (!text) {
     ledgerCallRejected(data, 'empty_text');

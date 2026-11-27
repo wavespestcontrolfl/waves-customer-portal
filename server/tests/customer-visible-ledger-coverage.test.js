@@ -421,9 +421,10 @@ describe('customer_visible direct_sdk ledger closure', () => {
       }), { laneId: 'lawn_diag_writer' });
       ledgerCallRejected(oaiRefusal, 'invalid_json');
 
-      // Non-object HTTP 200 envelopes (e.g. JSON null) and malformed envelopes
-      // whose parser throws (e.g. OpenAI {"output":{}} or Gemini non-array parts)
-      // must record as failed rows.
+      // Non-object HTTP 200 envelopes (e.g. JSON null), malformed envelopes
+      // whose parser throws (e.g. OpenAI {"output":{}} or Gemini non-array parts),
+      // and JSON decoding errors (SyntaxError from truncated HTTP 200 body) must
+      // all record as failed provider rows (`invalid_response`).
       await ledgerCall('gemini', 'gemini-3.8-flash', async () => null, { laneId: 'pest_id' });
       await ledgerCall('gemini', 'gemini-3.8-flash', async () => ({
         responseId: 'gem_bad_parts',
@@ -431,6 +432,12 @@ describe('customer_visible direct_sdk ledger closure', () => {
       }), { laneId: 'pest_id' });
       await ledgerCall('openai', 'gpt-5.5', async () => null, { laneId: 'lawn_diag_writer' });
       await ledgerCall('openai', 'gpt-5.5', async () => ({ id: 'resp_bad_output', output: {} }), { laneId: 'lawn_diag_writer' });
+      await expect(ledgerCall('openai', 'gpt-5.5', async () => {
+        throw new SyntaxError('Unexpected end of JSON input');
+      }, { laneId: 'lawn_diag_writer' })).rejects.toThrow(SyntaxError);
+      await expect(ledgerCall('gemini', 'gemini-3.8-flash', async () => {
+        throw new SyntaxError('Unexpected token < in JSON');
+      }, { laneId: 'pest_id' })).rejects.toThrow(SyntaxError);
 
       await new Promise((r) => setImmediate(r));
       expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code, error_class: r.error_class, provider_ref: r.provider_ref }))).toEqual([
@@ -442,6 +449,8 @@ describe('customer_visible direct_sdk ledger closure', () => {
         { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: 'gem_bad_parts' },
         { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: null },
         { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: 'resp_bad_output' },
+        { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: null },
+        { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: null },
       ]);
       // None of the already-classified provider failures should be overwritten by ledgerCallRejected.
       expect(updated).toEqual([]);
@@ -487,6 +496,74 @@ describe('customer_visible direct_sdk ledger closure', () => {
       expect(await lawn.analyzePhoto('AA==', 'image/jpeg')).toBeNull();
       expect(await ts.analyzePhoto('AA==', 'image/jpeg')).toBeNull();
       expect(mockLedgerCallRejected).not.toHaveBeenCalled();
+    });
+
+    test('malformed non-array Gemini candidates object is rejected as a miss and triggers fallback across pest_id, lawn_assess, and tree_shrub', async () => {
+      process.env.GEMINI_API_KEY = 'test-gemini';
+      process.env.ANTHROPIC_API_KEY = 'test-anth';
+      delete process.env.GEMINI_VISION_MODEL;
+      delete process.env.GEMINI_VISION_FALLBACK_MODEL;
+      delete process.env.MODEL_GEMINI_VISION;
+      delete process.env.MODEL_GEMINI_VISION_FALLBACK;
+      jest.resetModules();
+      const mockLedgerCall = jest.fn((p, m, fn) => fn());
+      const mockLedgerCallRejected = jest.fn();
+      const validScores = JSON.stringify({
+        pest_key: 'fire_ant',
+        category: 'ants',
+        confidence: 'high',
+        confidence_score: 0.95,
+        visual_notes: 'Red ants.',
+        turf_density: 82,
+        weed_coverage: 6,
+        color_health: 8,
+        fungal_activity: 'none',
+        insect_damage: 'none',
+        drought_stress: 'none',
+        mechanical_damage: 'none',
+        thatch_visibility: 'low',
+        grass_type: 'st_augustine',
+        overwatering_signal: false,
+        foliage_fullness: 85,
+        leaf_color_vigor: 80,
+        pest_signals: 'none',
+        disease_signals: 'none',
+        water_heat_stress: 'none',
+        pruning_mechanical: 'none',
+        observations: 'Healthy turf and foliage with no visible stress.',
+      });
+      const mockCreate = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: validScores }],
+        stop_reason: 'end_turn',
+      });
+      jest.doMock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
+      jest.doMock('../services/llm-dispatch-metrics', () => ({
+        ledgerCall: mockLedgerCall,
+        ledgerCallRejected: mockLedgerCallRejected,
+        recordCall: jest.fn(() => null),
+        failCall: jest.fn(),
+        recordDispatch: jest.fn(),
+        recordedPolicyLabel: jest.fn(() => 'photoIdVision'),
+      }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          candidates: { 0: { content: { parts: [{ text: validScores }] } } },
+        }),
+      }));
+
+      const pest = require('../services/pest-identification');
+      const lawn = require('../services/lawn-assessment');
+      const ts = require('../services/tree-shrub-assessment');
+      expect((await pest.analyzePhoto('AA==', 'image/jpeg')).gemini).toBeNull();
+      const lawnRes = await lawn.analyzePhoto('AA==', 'image/jpeg');
+      const tsRes = await ts.analyzePhoto('AA==', 'image/jpeg');
+      expect(lawnRes.gemini).toBeNull();
+      expect(lawnRes.claude).toBeTruthy();
+      expect(tsRes.gemini).toBeNull();
+      expect(tsRes.claude).toBeTruthy();
     });
   });
 });

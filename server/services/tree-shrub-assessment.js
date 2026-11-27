@@ -23,7 +23,7 @@ const db = require('../models/db');
 const logger = require('./logger');
 const MODELS = require('../config/models');
 const { anthropicMaxTokens, anthropicEffortConfig } = require('./llm/anthropic-wire');
-const { anthropicText, geminiText, geminiVerdict, dispatchWithFallback } = require('./llm/call');
+const { anthropicText, geminiText, geminiEnvelopeError, dispatchWithFallback } = require('./llm/call');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const {
   TECH_FINDING_LABELS, PALM_CROWN_PROMPT_RULE, techFindingsCopyLive, normalizeTechFindings, editText,
@@ -468,7 +468,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     }
     throw err;
   }
-  if (geminiVerdict(data, data?.candidates?.[0] || {}, 2048)) return null;
+  if (geminiEnvelopeError(data, 2048)) return null;
   const text = geminiText(data);
   if (!text) {
     ledgerCallRejected(data, 'empty_text');

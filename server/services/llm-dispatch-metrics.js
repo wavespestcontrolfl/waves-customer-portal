@@ -572,17 +572,12 @@ function anthropicResponseErrorCode(value) {
 }
 
 function geminiResponseErrorCode(value) {
-  if (!value || typeof value !== 'object') return 'invalid_response';
-  let geminiVerdict;
-  let geminiText;
-  try { ({ geminiVerdict, geminiText } = require('./llm/call')); } catch { return null; }
-  if (typeof geminiVerdict !== 'function') return null;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_response';
+  let geminiEnvelopeError;
+  try { ({ geminiEnvelopeError } = require('./llm/call')); } catch { return null; }
+  if (typeof geminiEnvelopeError !== 'function') return null;
   try {
-    if (value.candidates !== undefined && !Array.isArray(value.candidates)) return 'invalid_response';
-    const verdict = geminiVerdict(value, value.candidates?.[0] || {}, null);
-    if (verdict) return verdict;
-    if (typeof geminiText === 'function') geminiText(value);
-    return null;
+    return geminiEnvelopeError(value, null);
   } catch { return 'invalid_response'; }
 }
 
@@ -625,10 +620,15 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   try {
     value = await fn();
   } catch (err) {
-    // The adapters' own reason (`<provider>_<status>`, `<provider>_timeout`);
-    // llm/call.js requires this module, so its require is lazy.
+    // The adapters' own reason (`<provider>_<status>`, `<provider>_timeout`),
+    // plus `invalid_response` when a 200 body fails JSON decoding (`resp.json()`
+    // throws SyntaxError) — llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
-    try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
+    if (err?.name === 'SyntaxError') {
+      errorCode = 'invalid_response';
+    } else {
+      try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
+    }
     recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
     throw err;
   }
