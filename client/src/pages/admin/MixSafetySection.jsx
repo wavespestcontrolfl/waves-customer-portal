@@ -58,9 +58,11 @@ export function sourceLabel(source) {
   if (!technical) return text;
   if (/^Catalog row/i.test(text)) return "Catalog";
   if (/field-guide\.json .* limits:/i.test(text)) return "Field guide";
-  // Only a quote that states what the label says reads "Label"; a mere mention ("not on the label") is a Waves rule.
+  // Only a quote that states what the label says reads "Label"; a mere mention ("not on the label") is not.
   if (/\b(the label (says|states|bars|bans|requires)|specimen label|label:)/i.test(text)) return "Label";
-  return "Waves rule";
+  if (/safety_rules|card lines?\b/i.test(text)) return "Waves rule";
+  // A file or migration source this does not recognize: say so plainly; the stored text stays in the title.
+  return "Other (see note)";
 }
 
 async function readJson(response) {

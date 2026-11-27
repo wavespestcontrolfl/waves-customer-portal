@@ -3616,7 +3616,7 @@
     "notes": [
       "Inspection, 2 treatments 14 days apart, then a clearance check. Third treatment: heavy jobs only (owner ruling 2026-11-23).",
       "Three cards: inspection, treatment 1, and one follow-up card for every later visit (treatment 2 at day 14, each clearance check, a heavy job's third treatment).",
-      "Heavy job (book 3 treatments) if any: more than 20 live bugs; 2 or more rooms; bugs off the bed (sofa, baseboards, outlets, wall hangings); heavy clutter or no prep; attached unit, neighbor not checked; bug bombs, a failed treatment, or older than 3 months.",
+      "Heavy job (book 3 treatments) if any: more than 20 live bugs; 2 or more rooms; bugs off the bed (sofa, baseboards, outlets, wall hangings); heavy clutter or prep not done; attached unit, neighbor not checked; bug bombs, a failed treatment, or older than 3 months.",
       "Add the third treatment if: day 14 has a live adult, large nymph or more than 10 bugs in the cups; or day 28 has any bug caught since day 14.",
       "Clear: cups empty at 2 checks 14 days apart and no live bugs found.",
       "No heat treatment, no fogging, no growth regulator on bed bugs.",
@@ -4125,7 +4125,7 @@
         "visit_type": "Installation (one-time)",
         "main_goal": "Install, calibrate and hand over a working misting system.",
         "primary": "Call 811 before any trenching\nMount the unit and cabinet; install the surge protector, inline filter and check valves\nTubing on eaves and fences first, then landscape risers; bury or clip runs clear of mower and edger paths\nSet and photograph each nozzle per the placement rules\nPressure and leak test; walk every nozzle for its spray pattern",
-        "secondary": "Calibrate before enabling the schedule: from the label and measured output, set cycle length and cycles per day within the label; record the math\nProgram dawn and dusk cycles; connect the app and any weather sensor\nPost the product label and dilution statement at the unit and lock the cabinet\nWalkthrough and disclosure sheet (product, pause steps, pollinator and pet guidance, no self-refill, comfort not disease prevention)",
+        "secondary": "Calibrate before enabling the schedule: from the label and measured output, set cycle length and cycles per day within the label; record the calculation on the install record\nProgram dawn and dusk cycles; connect the app and any weather sensor\nPost the product label and dilution statement at the unit and lock the cabinet\nWalkthrough and disclosure sheet (product, pause steps, pollinator and pet guidance, no self-refill, comfort not disease prevention)",
         "material_cost": "inventory",
         "labor_cost": "standard",
         "notes": "Signed agreement and any HOA or ARC approval before install day. Re-calibrate when product, dilution or nozzle count changes."

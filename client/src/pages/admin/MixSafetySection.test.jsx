@@ -62,6 +62,7 @@ describe("MixSafetySection", () => {
     expect(sourceLabel('server/config/protocols.json tree_shrub card line (Sequestar 6% Fe EDDHA): "never tank-mix with oil"')).toBe("Waves rule");
     expect(sourceLabel('Catalog row Celsius WG, compatibility_notes (migration 20260401000026): "Do NOT tank-mix with fertilizer."')).toBe("Catalog");
     expect(sourceLabel('server/config/protocols.json card line (X): "rate not on the label, Waves limit"')).toBe("Waves rule");
+    expect(sourceLabel('migration 20261127240000 note: "not on the label"')).toBe("Other (see note)");
     expect(sourceLabel("owner")).toBe("Owner");
     expect(sourceLabel("Supplier call 11-27")).toBe("Supplier call 11-27");
     expect(sourceLabel("")).toBe("—");
