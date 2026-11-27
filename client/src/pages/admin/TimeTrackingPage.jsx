@@ -28,20 +28,9 @@ import { DashboardTab } from "./staff/DashboardTab";
 import { TimesheetTab } from "./staff/TimesheetTab";
 import { EntriesTab } from "./staff/EntriesTab";
 import { AnalyticsTab } from "./staff/AnalyticsTab";
-import { TeamTab, TechVoicePinField } from "./staff/TeamTab";
+import { TeamTab } from "./staff/TeamTab";
 import { DocumentsTab } from "./staff/DocumentsTab";
 import { ApprovalsTab } from "./staff/ApprovalsTab";
-
-export {
-  DashboardTab,
-  TimesheetTab,
-  EntriesTab,
-  AnalyticsTab,
-  TeamTab,
-  DocumentsTab,
-  ApprovalsTab,
-  TechVoicePinField,
-};
 
 const STAFF_SECTIONS = [
   { key: "dashboard", label: "Dashboard", Icon: LayoutDashboard },

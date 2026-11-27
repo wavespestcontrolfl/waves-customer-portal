@@ -8,7 +8,10 @@ import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import TimeTrackingPage, { ApprovalsTab, TeamTab, TimesheetTab } from "./TimeTrackingPage";
+import TimeTrackingPage from "./TimeTrackingPage";
+import { ApprovalsTab } from "./staff/ApprovalsTab";
+import { TeamTab } from "./staff/TeamTab";
+import { TimesheetTab } from "./staff/TimesheetTab";
 
 vi.mock("../../hooks/useStaffDocumentsAvailable", () => ({ default: () => false }));
 vi.mock("../../hooks/usePayrollAvailable", () => ({ default: () => false }));

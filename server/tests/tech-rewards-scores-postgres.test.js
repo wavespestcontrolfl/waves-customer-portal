@@ -675,6 +675,17 @@ describe('tech rewards scores input checks', () => {
       expect(await scores.readCallbacks(tech, { from: '2026-05-01', to: '2026-05-31' })).toBeNull();
     });
 
+    test('callbacks: internal test customer visits and callbacks are both excluded from the score', async () => {
+      const testCustId = INTERNAL_TEST_CUSTOMER_IDS[0];
+      await db('customers').insert({ id: testCustId, first_name: 'Internal', last_name: 'Test' });
+      const realCust = randomUUID();
+      await visit(tech, { customer_id: realCust, service_date: '2026-04-01', created_at: ts('2026-04-01T14:00:00Z') });
+      await visit(tech, { customer_id: testCustId, service_date: '2026-04-02', created_at: ts('2026-04-02T14:00:00Z') });
+      await visit(other, { customer_id: testCustId, service_date: '2026-04-20', is_callback: true, created_at: ts('2026-04-20T14:00:00Z') });
+      // Real visit stays 100; internal test visit and its callback are both left out.
+      expect(await scores.readCallbacks(tech, WINDOW)).toBe(100);
+    });
+
     test('callbacks: 63 callbacks in 1,600 visits is exactly 60.625, rounded half up to 60.63; both id spellings agree', async () => {
       const customers = Array.from({ length: 1600 }, () => randomUUID());
       await db.batchInsert('service_records', customers.map((customer_id) => ({

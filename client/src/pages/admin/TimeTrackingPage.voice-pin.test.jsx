@@ -4,7 +4,7 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TeamTab, TechVoicePinField } from './TimeTrackingPage';
+import { TeamTab, TechVoicePinField } from './staff/TeamTab';
 
 // The voice line PIN field on the Team tab's technician form: digits only, 4 to 6, sent once
 // to the PIN route, and never kept or shown after the request.

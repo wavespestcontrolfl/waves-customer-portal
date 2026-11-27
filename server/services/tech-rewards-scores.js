@@ -300,7 +300,9 @@ async function readCallbacks(rawTechnicianId, window, conn = db) {
   )).rows[0];
   const visits = toCount(visitRow?.visits);
   if (!visits) return null;
-  const credited = await callbackCreditByTechnician(conn, { start: from, endDate: to, distinctVisits: true, performedSourcesOnly: true });
+  const credited = await callbackCreditByTechnician(conn, {
+    start: from, endDate: to, distinctVisits: true, performedSourcesOnly: true, excludeInternalTests: true,
+  });
   const callbacks = toCount(credited.get(technicianId));
   // score = 100 - 100 x per100 / CALLBACK_RATE_AT_ZERO, per100 = 100 x callbacks / visits, all in
   // integers: hundredths = (10000 x visits - 10000 x 100 x callbacks / RATE) / visits, half up once.

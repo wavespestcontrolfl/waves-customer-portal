@@ -546,8 +546,8 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     }
     if (v.fromWeek || !sameHours(v.hours, tech.paid_week_minimum_hours)) {
       const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
-      if (await findFinalizedCheckOnOrAfter(trx, tech.id, v.fromWeek)) {
-        throw new PayrollError(409, `A final pay run already paid this employee for the week of ${effectiveWeek} or later. Void that pay run first or pick a later week.`);
+      if (await findFinalizedCheckOnOrAfter(trx, tech.id, v.fromWeek, true)) {
+        throw new PayrollError(409, `A final pay run already covers this employee for the week of ${effectiveWeek} or later. Void that pay run first or pick a later week.`);
       }
       await trx('payroll_week_minimum_changes')
         .insert({ technician_id: tech.id, from_week: effectiveWeek, hours: v.hours })

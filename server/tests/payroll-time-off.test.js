@@ -191,9 +191,10 @@ describe('writes', () => {
     });
   });
 
-  it('setWeekMinimum honors an explicit fromWeek even when minimum hours match current hours, and guards finalized weeks', async () => {
+  it('setWeekMinimum honors an explicit fromWeek even when minimum hours match current hours, and guards finalized checks and unpaid-only runs', async () => {
     const inserted = [];
     let hasFinalizedCheck = false;
+    let hasFinalizedUnpaidRun = false;
     const trx = (table) => {
       if (table === 'technicians') {
         const q = {
@@ -214,6 +215,14 @@ describe('writes', () => {
         const q = {
           where: () => q,
           first: () => Promise.resolve(hasFinalizedCheck ? { id: 'chk-1' } : null),
+        };
+        return q;
+      }
+      if (table === 'payroll_runs') {
+        const q = {
+          where: () => q,
+          whereRaw: () => q,
+          first: () => Promise.resolve(hasFinalizedUnpaidRun ? { id: 'run-unpaid-1' } : null),
         };
         return q;
       }
@@ -240,7 +249,14 @@ describe('writes', () => {
     await setWeekMinimum(TECH_ID, { hours: 32 }, TECH_ID, conn);
     expect(inserted).toEqual([]);
 
-    // Explicit fromWeek is still refused when a finalized check exists on or after that week.
+    // Explicit fromWeek is refused when a finalized unpaid-only run exists on or after that week.
+    hasFinalizedUnpaidRun = true;
+    await expect(setWeekMinimum(TECH_ID, { hours: 32, fromWeek: '2026-09-14' }, TECH_ID, conn))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/2026-09-14/) });
+    expect(inserted).toEqual([]);
+
+    // Explicit fromWeek is also refused when a finalized check exists on or after that week.
+    hasFinalizedUnpaidRun = false;
     hasFinalizedCheck = true;
     await expect(setWeekMinimum(TECH_ID, { hours: 32, fromWeek: '2026-09-14' }, TECH_ID, conn))
       .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/2026-09-14/) });
