@@ -616,23 +616,39 @@ const lowerToken = (v) => String(v || '').trim().toLowerCase();
 const matchesOptionalToken = (stored, next) => !stored || !next || stored === next;
 const matchesOptionalNumber = (stored, next) => !Number.isFinite(stored) || next === stored;
 
-function mistingRowMatchesInput(row, inputOpt) {
-  if (!row || !inputOpt || typeof inputOpt !== 'object') return false;
+function storedMistingLayout(row) {
   const knobs = plainRecord(row.pricingKnobs);
   const mist = plainRecord(row.misting);
   const refill = plainRecord(row.refill || mist.refill);
-  const storedNozzles = positiveOrNull(firstFiniteVal(row.nozzles, mist.nozzles));
-  // Require explicit layout facts on the row (mapped installation rows omit nozzles/risers).
-  if (storedNozzles === null) return false;
-  const storedTier = lowerToken(row.tier || mist.tier || knobs.tier);
-  const storedSol = lowerToken(row.solution || mist.solution || refill.solution || knobs.refillSolution);
-  const storedRisers = storedFigure(firstFiniteVal(row.risers, mist.risers));
-  const storedRefills = storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear, mist.refillsPerYear));
-  return matchesOptionalToken(storedTier, lowerToken(inputOpt.tier))
-    && matchesOptionalToken(storedSol, lowerToken(inputOpt.solution))
-    && (inputOpt.nozzles == null || positiveOrNull(inputOpt.nozzles) === storedNozzles)
-    && matchesOptionalNumber(storedRisers, inputOpt.risers == null ? storedRisers : storedFigure(inputOpt.risers))
-    && matchesOptionalNumber(storedRefills, inputOpt.refillsPerYear == null ? storedRefills : storedFigure(inputOpt.refillsPerYear));
+  return {
+    nozzles: positiveOrNull(firstFiniteVal(row.nozzles, mist.nozzles)),
+    tier: lowerToken(row.tier || mist.tier || knobs.tier),
+    sol: lowerToken(row.solution || mist.solution || refill.solution || knobs.refillSolution),
+    risers: storedFigure(firstFiniteVal(row.risers, mist.risers)),
+    refills: storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear, mist.refillsPerYear)),
+  };
+}
+
+function mistingRowMatchesInput(row, rawInputOpt) {
+  if (!row || !rawInputOpt) return false;
+  if (rawInputOpt !== true && typeof rawInputOpt !== 'object') return false;
+  const stored = storedMistingLayout(row);
+  if (stored.nozzles === null) return false;
+  const inputOpt = rawInputOpt === true ? {} : rawInputOpt;
+  const M = require('./pricing-engine/constants').MOSQUITO_MISTING;
+  const nextTier = lowerToken(inputOpt.tier || M.defaultTier);
+  const nextSol = lowerToken(inputOpt.solution || M.defaultSolution);
+  const defaultNozzles = M.tiers[nextTier]?.includedNozzles ?? stored.nozzles;
+  const nextNozzles = inputOpt.nozzles == null ? defaultNozzles : positiveOrNull(inputOpt.nozzles);
+  const nextRisers = inputOpt.risers == null ? 0 : storedFigure(inputOpt.risers);
+  const nextRefills = inputOpt.refillsPerYear == null ? M.defaultRefillsPerYear : storedFigure(inputOpt.refillsPerYear);
+  return [
+    matchesOptionalToken(stored.tier, nextTier),
+    matchesOptionalToken(stored.sol, nextSol),
+    nextNozzles === stored.nozzles,
+    matchesOptionalNumber(stored.risers, nextRisers),
+    matchesOptionalNumber(stored.refills, nextRefills),
+  ].every(Boolean);
 }
 
 function boraCareScopeMatchesInput(row, v1Input, boraCareInput, storedEstimateData) {
