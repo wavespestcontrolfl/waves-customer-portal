@@ -147,6 +147,16 @@ jest.setTimeout(30000);
     await expect(inventory.previewRestockAction(req.id, { action: 'receive' })).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
   });
 
+  test('a receipt stamped minutes before the request (its transaction began first) still counts; much older does not', async () => {
+    const req = await request({ created_at: new Date(Date.now() - 3 * DAY) });
+    await invoiceMovement(4, 3 * 1 + 5 / (24 * 60)); // 5 minutes before the request
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    const older = await request({ created_at: new Date(Date.now() - 3 * DAY), source: 'test_fixture' });
+    await mockConn('product_inventory_movements').where({ product_id: product.id }).del();
+    await invoiceMovement(4, 3 + 3 / 24); // 3 hours before the request
+    expect((await inventory.updateRestockRequest(older.id, { action: 'receive' }, {})).request.status).toBe('received');
+  });
+
   test('an invoice that posted before the vendor confirmation (a late placed_at) still counts', async () => {
     const req = await request();
     await ledger(req.id, { placed_at: new Date(Date.now() - 0.1 * DAY), created_at: new Date(Date.now() - 2 * DAY) });

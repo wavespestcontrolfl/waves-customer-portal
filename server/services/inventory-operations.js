@@ -487,10 +487,16 @@ function validateTransition(request, action, guard) {
 // ledger's placed_at: the vendor's confirmation can arrive after the invoice has posted, and that invoice is the
 // very delivery the request is waiting for. Receiving the request then would count the delivery twice. A receipt
 // the inventory-agent undo reversed (a correction carrying undoOfMovementId) no longer counts. Oldest first.
+// A movement's created_at is its transaction's start, so a receipt whose transaction began just before the request
+// was created can post after it and still be stamped earlier. The window opens this long before the earliest
+// creation to catch that interleave; the warning only asks, and Receive anyway stays.
+const RECEIPT_WINDOW_MARGIN_MS = 60 * 60 * 1000;
+
 async function receiptStockAddedSince(conn, request) {
   const { SOURCES } = require('./purchase-receipts/receipt-processor');
   const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('created_at');
-  const since = order?.created_at && new Date(order.created_at) < new Date(request.created_at) ? order.created_at : request.created_at;
+  const earliest = order?.created_at && new Date(order.created_at) < new Date(request.created_at) ? order.created_at : request.created_at;
+  const since = new Date(new Date(earliest).getTime() - RECEIPT_WINDOW_MARGIN_MS);
   const movements = 'product_inventory_movements';
   return conn(movements)
     .where({ [`${movements}.product_id`]: request.product_id, [`${movements}.movement_type`]: 'restock' })

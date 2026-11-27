@@ -110,6 +110,21 @@ describe('Close, already counted', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  it('if every listed receipt was undone, the dialog closes, the queue reloads and the server message shows', async () => {
+    const MESSAGE = 'The receipts for this product changed while you looked. Reload the Restock tab.';
+    installFetch({ action: (body) => (body.action === 'receive' && !body.confirm
+      ? reply({ error: WARNING, code: 'already_counted_by_receipt', receiptFingerprint: 'fp-1' }, 409)
+      : reply({ error: MESSAGE, code: 'receipts_changed' }, 409)) });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Receive' }));
+    const loads = () => queue.mock.calls.filter(([url]) => String(url).includes('/restock-requests?')).length;
+    const before = loads();
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Close, already counted' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(loads()).toBeGreaterThan(before));
+    expect(screen.queryByText('Failed: HTTP 409')).not.toBeInTheDocument();
+  });
+
   it('if the receipts changed while the dialog was open, it shows the new list and confirms that one', async () => {
     const NEW_WARNING = 'Invoices already added 4 gal on November 24 and 2 gal on November 27. Receive again only if this is a second delivery.';
     installFetch({ action: (body) => {

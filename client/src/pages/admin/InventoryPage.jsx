@@ -3368,6 +3368,11 @@ function RestockRequestsTab({
     } catch (err) {
       if (err.code === "already_counted_by_receipt") {
         setAlreadyCounted({ request, message: err.details?.error || err.message, fingerprint: err.details?.receiptFingerprint || null });
+      } else if (err.code === "receipts_changed") {
+        // Every listed receipt was undone while the dialog was open: nothing is counted any more.
+        setAlreadyCounted(null);
+        showToast(err.details?.error || err.message);
+        await load();
       } else {
         showToast(`Failed: ${err.message}`);
       }
