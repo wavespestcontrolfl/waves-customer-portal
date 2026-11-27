@@ -94,8 +94,11 @@ beforeAll(() => {
   process.env.GATE_IB_DELETE_CUSTOMER = 'true';
   // propose_admin_edit is dark behind GATE_IB_GENERAL_EDIT (and owner login only); off, its preview refuses.
   process.env.GATE_IB_GENERAL_EDIT = 'true';
+  // link_customer_family is offered only with owner-direct on (it names two customers).
+  process.env.GATE_IB_OWNER_DIRECT = 'true';
 });
 afterAll(() => {
+  delete process.env.GATE_IB_OWNER_DIRECT;
   delete process.env.GATE_IB_BOOK_PLAN_VISITS;
   delete process.env.GATE_IB_GENERAL_EDIT;
   delete process.env.GATE_IB_INVOICE_ACTIONS;
@@ -1277,8 +1280,10 @@ const UNCONFIRMED_CALLS = [
       global.fetch = fetchMock;
     }
     let result;
+    // propose_admin_edit and the family link tools are owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES).
     const ownerContext = toolName === 'propose_admin_edit'
-      ? { fullAccess: true, isAdmin: true, staffAuthorization: 'Bearer synthetic-owner-token-0000' } : undefined;
+      ? { fullAccess: true, isAdmin: true, staffAuthorization: 'Bearer synthetic-owner-token-0000' }
+      : ['link_customer_family', 'unlink_customer_family'].includes(toolName) ? { fullAccess: true, isAdmin: true } : undefined;
     try { result = await executor(toolName, input, ownerContext); } finally {
       pricingSync?.mockRestore();
       closeoutStatus?.mockRestore();

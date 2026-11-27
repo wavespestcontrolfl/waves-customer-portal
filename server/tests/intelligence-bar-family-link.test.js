@@ -26,7 +26,7 @@ const { buildContract } = require('../services/intelligence-bar/authorization-co
 const A = '00000000-0000-4000-8000-0000000000a1';
 const B = '00000000-0000-4000-8000-0000000000b1';
 const C = '00000000-0000-4000-8000-0000000000c1';
-const ADMIN = { isAdmin: true, technicianId: '00000000-0000-4000-8000-0000000000f1' };
+const ADMIN = { isAdmin: true, fullAccess: true, technicianId: '00000000-0000-4000-8000-0000000000f1' };
 
 let customers;
 let families; // customer id -> family id
@@ -167,6 +167,15 @@ describe('link_customer_family', () => {
     }
   });
 
+  it('marks the request untrusted: the profiles ride under a current_* key owner-direct reads as customer text', async () => {
+    const OwnerDirect = require('../services/intelligence-bar/owner-direct');
+    for (const card of [await link(), (families = { [A]: 'f', [B]: 'f' }, await executeFamilyLinkTool('unlink_customer_family', { customer_id: A }, ADMIN))]) {
+      const taint = OwnerDirect.newRequestTaint();
+      OwnerDirect.noteUntrustedRead(taint, card.tool, card);
+      expect(taint.untrustedRead).toBe(true);
+    }
+  });
+
   it('shows the existing family when one side is already linked', async () => {
     families = { [B]: 'fam-1', [C]: 'fam-1' };
     const card = await link();
@@ -229,6 +238,15 @@ describe('link_customer_family', () => {
     const card = await link();
     expect(await confirmLink(card, undefined, { isAdmin: undefined })).toMatchObject({ code: 'permission_denied' });
     expect(await link(undefined, { isAdmin: false })).toMatchObject({ code: 'permission_denied' });
+    // Another admin login (no fullAccess) is refused before any profile read.
+    mockFamily.familyMembers.mockClear();
+    expect(await link(undefined, { isAdmin: true })).toMatchObject({ code: 'permission_denied' });
+    expect(await confirmLink(card, undefined, { isAdmin: true })).toMatchObject({ code: 'permission_denied' });
+    expect(mockFamily.familyMembers).not.toHaveBeenCalled();
+    delete process.env.GATE_IB_OWNER_DIRECT;
+    expect(await link()).toMatchObject({ code: 'gate_off' });
+    expect(await executeFamilyLinkTool('unlink_customer_family', { customer_id: A }, ADMIN)).toMatchObject({ code: 'not_linked' });
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
     delete process.env.GATE_IB_PLATFORM;
     expect(await link()).toMatchObject({ code: 'gate_off' });
     expect(mockFamily.linkFamily).not.toHaveBeenCalled();

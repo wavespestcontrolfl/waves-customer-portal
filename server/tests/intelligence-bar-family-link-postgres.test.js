@@ -17,16 +17,18 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
   let db;
   let executeFamilyLinkTool;
   const created = [];
-  const ADMIN = { isAdmin: true, technicianId: null };
+  const ADMIN = { isAdmin: true, fullAccess: true, technicianId: null };
 
   beforeAll(async () => {
     process.env.GATE_IB_PLATFORM = 'true';
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
     db = require('../models/db');
     ({ executeFamilyLinkTool } = require('../services/intelligence-bar/family-link-tools'));
   });
 
   afterAll(async () => {
     delete process.env.GATE_IB_PLATFORM;
+    delete process.env.GATE_IB_OWNER_DIRECT;
     if (!db) return;
     if (created.length) {
       await db('multi_home_family_members').whereIn('customer_id', created).del();

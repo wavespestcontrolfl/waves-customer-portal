@@ -151,15 +151,10 @@ async function buildLinkPlan(input, { database = db } = {}) {
     if (!p.active) return refusal(`${p.name}'s profile is not active. Only active profiles can be linked. Nothing was changed.`, 'profile_inactive');
   }
   if (mine.family_id && other.family_id && mine.family_id === other.family_id) {
-    return refusal(`${mine.name} and ${other.name} are already linked as the same family. Nothing was changed.`, 'already_linked', {
-      family: mine.members.map(memberLabel),
-    });
+    return refusal(`${mine.name} and ${other.name} are already linked as the same family. Nothing was changed.`, 'already_linked');
   }
   if (mine.family_id && other.family_id) {
-    return refusal(`${mine.name} and ${other.name} are already in two different families. Unlink one first (unlink_customer_family), then link them. Nothing was changed.`, 'different_families', {
-      account_family: mine.members.map(memberLabel),
-      other_family: other.members.map(memberLabel),
-    });
+    return refusal(`${mine.name} and ${other.name} are already in two different families. Unlink one first (unlink_customer_family), then link them. Nothing was changed.`, 'different_families');
   }
   // The family after the link: the existing family (whichever side has one) plus the side that joins it.
   const byId = new Map();
@@ -175,6 +170,9 @@ async function buildLinkPlan(input, { database = db } = {}) {
     other_customer_id: other.id,
     account: { name: mine.name, address: mine.address },
     family_member: { name: other.name, address: other.address },
+    // Customer-entered text (names, addresses) under a current_* key: owner-direct.js carriesPriorText reads it as
+    // untrusted, so a request that saw this card keeps every later write on a card.
+    current_profiles: [mine, other].map(memberLabel),
     joins_existing: Boolean(mine.family_id || other.family_id),
     family_after: after.map(memberLabel),
     effects: [
@@ -220,7 +218,8 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
     tool: 'unlink_customer_family',
     customer_id: mine.id,
     account: { name: mine.name, address: mine.address },
-    family_now: mine.members.map(memberLabel),
+    current_profiles: [memberLabel(mine)],
+    current_family: mine.members.map(memberLabel),
     stays_linked: dissolves ? [] : others.map(memberLabel),
     dissolves,
     stays_alone: dissolves && others.length > 0,
@@ -303,7 +302,7 @@ function cardLines(toolName, preview) {
   }
   return [
     { kind: 'customer', text: `Profile: ${where(preview.account)}` },
-    { kind: 'operational', text: `Family now: ${preview.family_now.join('; ')}` },
+    { kind: 'operational', text: `Family now: ${preview.current_family.join('; ')}` },
     ...(preview.effects || []).map(({ kind, text }) => ({ kind, text })),
   ];
 }
@@ -320,10 +319,16 @@ function pinnedDisplay(toolName, preview) {
 async function executeFamilyLinkTool(toolName, input = {}, actionContext = {}) {
   if (!FAMILY_LINK_TOOLS.some((t) => t.name === toolName)) return { error: `Unknown tool: ${toolName}` };
   // Admin only, like the page's Same family section (requireAdmin); the confirmed run needs a positive admin flag.
-  if (actionContext?.isAdmin === false || (input.confirmed === true && actionContext?.isAdmin !== true)) {
-    return refusal('Linking customer profiles as family is limited to admin accounts', 'permission_denied');
+  // Owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES; ibFullAccess carried as actionContext.fullAccess), checked here too so
+  // a caller that skips the registry still reads and writes nothing.
+  if (actionContext?.fullAccess !== true || actionContext?.isAdmin === false || (input.confirmed === true && actionContext?.isAdmin !== true)) {
+    return refusal('Linking customer profiles as family from the bar is limited to the owner account', 'permission_denied');
   }
   if (!onPlatformPath()) return refusal('Linking customer profiles as family from the bar is switched off.', 'gate_off');
+  // The link names two customers; only owner-direct carries both past the task's one-target check (action-registry.js).
+  if (toolName === 'link_customer_family' && require('../../config/feature-gates').gateEnvValue('GATE_IB_OWNER_DIRECT') !== true) {
+    return refusal('Linking two profiles from the bar needs owner-direct on. Use the Same family section on the customer page.', 'gate_off');
+  }
   try {
     // Only /confirm-action sets confirmed (route-derived, never a model param).
     return input.confirmed === true ? await commit(toolName, input, actionContext) : await buildPlan(toolName, input);
