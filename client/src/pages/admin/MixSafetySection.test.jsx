@@ -70,6 +70,31 @@ describe("MixSafetySection", () => {
     );
   });
 
+  it("clears the answer when the picked products change, and a late answer for the old pick never shows", async () => {
+    const THIRD = { id: "33333333-3333-4333-8333-333333333333", name: "Tetrino Insecticide" };
+    let release;
+    fetch.mockImplementation(async (url) => {
+      if (!String(url).includes("/check?")) return respond({ ...LIST, products: [CELSIUS, CERTAINTY, THIRD] });
+      if (String(url).includes(THIRD.id)) return respond(CHECK);
+      return new Promise((resolve) => { release = () => resolve(respond(CHECK)); });
+    });
+    render(<MixSafetySection />);
+    await screen.findByRole("table", { name: "Mix safety rules" });
+    fireEvent.change(screen.getByLabelText("Tank product 1"), { target: { value: CELSIUS.id } });
+    fireEvent.change(screen.getByLabelText("Tank product 2"), { target: { value: CERTAINTY.id } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    await waitFor(() => expect(release).toBeTypeOf("function"));
+    fireEvent.change(screen.getByLabelText("Tank product 2"), { target: { value: THIRD.id } });
+    release();
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(screen.queryByRole("list", { name: "Tank check result" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    expect(await screen.findByRole("list", { name: "Tank check result" })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Tank product 1"), { target: { value: "" } });
+    expect(screen.queryByRole("list", { name: "Tank check result" })).not.toBeInTheDocument();
+  });
+
   it("allows up to 5 tank products", async () => {
     render(<MixSafetySection />);
     await screen.findByRole("table", { name: "Mix safety rules" });

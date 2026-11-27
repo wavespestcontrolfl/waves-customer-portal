@@ -21,7 +21,8 @@ jest.mock('../middleware/admin-auth', () => {
     },
   };
 });
-jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
+const mockAudit = [];
+jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async (event) => { mockAudit.push(event); }) }));
 
 const mockWrites = [];
 const A = '00000000-0000-4000-8000-000000000001';
@@ -34,18 +35,26 @@ jest.mock('../models/db', () => {
     ],
   };
   const query = (table) => {
+    let ids = null;
     const q = {
-      leftJoin: () => q, select: () => q, orderBy: () => q, where: () => q, whereIn: () => q, andWhere: () => q,
+      leftJoin: () => q, select: () => q, orderBy: () => q, where: () => q, andWhere: () => q, whereNot: () => q, forUpdate: () => q,
+      whereIn: (col, values) => { if (col === 'id') ids = values; return q; },
       first: async () => undefined,
       insert: (row) => { mockWrites.push(['insert', table, row]); return { returning: async () => [{ id: 'r1', ...row }] }; },
       update: (row) => { mockWrites.push(['update', table, row]); return { returning: async () => [{ id: 'r1', ...row }] }; },
-      then: (resolve, reject) => Promise.resolve(rows[table] || []).then(resolve, reject),
+      then: (resolve, reject) => Promise.resolve((rows[table] || []).filter((r) => !ids || ids.includes(r.id))).then(resolve, reject),
     };
     return q;
   };
   const db = jest.fn(query);
   db.fn = { now: () => 'NOW' };
-  db.transaction = async (fn) => { const trx = jest.fn(query); trx.fn = db.fn; return fn(trx); };
+  db.transaction = async (fn) => {
+    const trx = jest.fn(query);
+    trx.fn = db.fn;
+    trx.isTestTrx = true;
+    trx.raw = async (sql, bindings) => { mockWrites.push(['raw', sql, bindings]); return { rows: [{ id: 'r1', inserted: true, verdict: bindings[3] }] }; };
+    return fn(trx);
+  };
   return db;
 });
 
@@ -71,7 +80,7 @@ async function call(method, url, body) {
 
 const good = { productAId: A, productBId: B, verdict: 'caution', reason: 'Approved weed mix.' };
 
-beforeEach(() => { mockRole = 'admin'; mockWrites.length = 0; });
+beforeEach(() => { mockRole = 'admin'; mockWrites.length = 0; mockAudit.length = 0; });
 
 describe('a technician', () => {
   beforeEach(() => { mockRole = 'technician'; });
@@ -101,10 +110,20 @@ describe('a technician', () => {
 });
 
 describe('an admin', () => {
-  test('adds a rule: a pair is stored smaller id first', async () => {
+  test('adds a rule in one atomic upsert on the pair index, smaller id first, audited in the same transaction', async () => {
     const res = await call('post', '/api/admin/product-mix-rules', { ...good, productAId: B, productBId: A });
     expect(res.status).toBe(201);
-    expect(mockWrites[0]).toEqual(['insert', 'product_mix_rules', expect.objectContaining({ product_a_id: A, product_b_id: B, verdict: 'caution', active: true })]);
+    const [kind, sql, bindings] = mockWrites[0];
+    expect(kind).toBe('raw');
+    expect(sql).toMatch(/INSERT INTO product_mix_rules \(product_a_id, product_b_id, group_b, verdict,/);
+    expect(sql).toMatch(/ON CONFLICT \(product_a_id, product_b_id\) WHERE product_b_id IS NOT NULL\s+DO UPDATE SET/);
+    expect(bindings.slice(0, 4)).toEqual([A, B, null, 'caution']);
+    expect(mockAudit).toEqual([expect.objectContaining({ action: 'product_mix_rules.created', critical: true, trx: expect.objectContaining({ isTestTrx: true }) })]);
+  });
+
+  test('a product + group rule upserts on the group index', async () => {
+    await call('post', '/api/admin/product-mix-rules', { ...good, productBId: null, groupB: 'fertilizer' });
+    expect(mockWrites[0][1]).toMatch(/ON CONFLICT \(product_a_id, group_b\) WHERE group_b IS NOT NULL/);
   });
 
   test.each([
@@ -118,6 +137,14 @@ describe('an admin', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toEqual(expect.any(String));
     expect(mockWrites).toEqual([]);
+  });
+
+  test('the tank check counts distinct products: duplicates and case do not count twice', async () => {
+    expect((await call('get', `/api/admin/product-mix-rules/check?productIds=${A},${A.toUpperCase()}, ${A}`)).status).toBe(400);
+    const repeated = [...Array.from({ length: 10 }, () => A), B].join(',');
+    const res = await call('get', `/api/admin/product-mix-rules/check?productIds=${repeated}`);
+    expect(res.status).toBe(200);
+    expect(res.body.pairs).toHaveLength(1);
   });
 
   test('a tank check needs 2 to 10 products', async () => {

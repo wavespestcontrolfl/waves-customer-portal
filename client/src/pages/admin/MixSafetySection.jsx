@@ -1,7 +1,7 @@
 // Services -> Treatments -> Mix safety (owner 2026-11-27): which products can share a tank. One rule names two products,
 // or a product and a product group. Every answer is a warning only: nothing here blocks a visit or a product.
 // Server: server/routes/admin-product-mix-rules.js + server/services/product-mix-rules.js.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ActionFeedback,
   Badge,
@@ -148,20 +148,37 @@ function TankCheck({ products }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [checking, setChecking] = useState(false);
+  const lastRequest = useRef(0);
   const chosen = picked.filter(Boolean);
+  // The selection a result answers: the same products in any order. A result shows only while it matches.
+  const selectionKey = [...new Set(chosen)].sort().join(",");
+  const shownResult = result && result.key === selectionKey ? result.data : null;
   const nameOf = (id) => products.find((p) => p.id === id)?.name || "Unknown product";
 
   async function checkTank() {
+    const request = lastRequest.current + 1;
+    lastRequest.current = request;
+    const key = selectionKey;
     setChecking(true);
     setError("");
     try {
       const ids = [...new Set(chosen)].join(",");
-      setResult(await readJson(await adminFetch(`/admin/product-mix-rules/check?productIds=${encodeURIComponent(ids)}`)));
+      const data = await readJson(await adminFetch(`/admin/product-mix-rules/check?productIds=${encodeURIComponent(ids)}`));
+      // A later request, or a changed selection, wins over this answer.
+      if (lastRequest.current === request) setResult({ key, data });
     } catch (err) {
-      setError(err.message || "Could not check the tank");
+      if (lastRequest.current === request) setError(err.message || "Could not check the tank");
     } finally {
-      setChecking(false);
+      if (lastRequest.current === request) setChecking(false);
     }
+  }
+
+  function pick(index, value) {
+    lastRequest.current += 1;
+    setChecking(false);
+    setError("");
+    setResult(null);
+    setPicked((prev) => prev.map((old, i) => (i === index ? value : old)));
   }
 
   return (
@@ -175,7 +192,7 @@ function TankCheck({ products }) {
               key={index}
               label={`Tank product ${index + 1}`}
               value={value}
-              onChange={(v) => setPicked((prev) => prev.map((old, i) => (i === index ? v : old)))}
+              onChange={(v) => pick(index, v)}
               products={products}
             />
           ))}
@@ -185,9 +202,9 @@ function TankCheck({ products }) {
           <Button onClick={checkTank} loading={checking} disabled={checking || new Set(chosen).size < 2}>Check</Button>
         </div>
         {error && <ActionFeedback error>{error}</ActionFeedback>}
-        {result && (
+        {shownResult && (
           <ul className="grid gap-2" aria-label="Tank check result">
-            {result.pairs.map((pair) => (
+            {shownResult.pairs.map((pair) => (
               <li key={`${pair.productAId}-${pair.productBId}`} className="rounded-sm border-hairline border-zinc-200 p-3">
                 <div className="flex flex-wrap items-center gap-2 text-14 font-medium">
                   <span>{pair.productAName || nameOf(pair.productAId)} + {pair.productBName || nameOf(pair.productBId)}</span>
@@ -197,8 +214,9 @@ function TankCheck({ products }) {
                 <div className="mt-1 text-14 text-zinc-700">{pair.reason}</div>
                 {pair.entries.length > 1 && (
                   <ul className="mt-1 list-disc pl-5 text-14 text-ink-secondary">
+                    {/* The server lists the headline entry first; the rest are every other match, once. */}
                     {pair.entries.slice(1).map((entry, i) => (
-                              <li key={i}>{VERDICT_TEXT[entry.verdict]?.label || entry.verdict}: {entry.reason}</li>
+                      <li key={i}>{VERDICT_TEXT[entry.verdict]?.label || entry.verdict}: {entry.reason}</li>
                     ))}
                   </ul>
                 )}

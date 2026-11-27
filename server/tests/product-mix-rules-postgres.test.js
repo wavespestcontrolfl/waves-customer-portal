@@ -11,7 +11,13 @@ jest.mock('../models/db', () => new Proxy(function db() {}, {
   apply: (_target, _this, args) => mockTrx(...args),
   get: (_target, prop) => (typeof mockTrx[prop] === 'function' ? mockTrx[prop].bind(mockTrx) : mockTrx[prop]),
 }));
-jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
+const mockAudit = { fail: false, events: [] };
+jest.mock('../services/audit-log', () => ({
+  recordAuditEvent: jest.fn(async (event) => {
+    if (mockAudit.fail) throw new Error('audit_log write failed');
+    mockAudit.events.push(event);
+  }),
+}));
 
 // The seed logs each skipped or added row; keep the test output quiet.
 beforeAll(() => { jest.spyOn(console, 'log').mockImplementation(() => {}); });
@@ -38,7 +44,8 @@ const mix = require('../services/product-mix-rules');
       CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
       CREATE TABLE products_catalog (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(150) NOT NULL, category varchar(30),
-        active_ingredient varchar(150), moa_group varchar(30), formulation varchar(50), mixing_order_category varchar(50),
+        active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
+        mixing_order_category varchar(50), allows_surfactant boolean,
         do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true
       );
     `);
@@ -51,6 +58,8 @@ const mix = require('../services/product-mix-rules');
       { key: 'copper', name: 'Southern Ag Copper Fungicide 27.15%', category: 'fungicide', active_ingredient: 'Copper' },
       { key: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', category: 'insecticide', active_ingredient: 'Mineral oil' },
       { key: 'bifenthrin', name: 'LESCO Crosscheck Plus', category: 'insecticide', active_ingredient: 'Bifenthrin', moa_group: '3A' },
+      { key: 'kflow', name: 'LESCO K-Flow 0-0-25', category: 'fertilizer', allows_surfactant: false },
+      { key: 'typed', name: 'Typed IRAC insecticide', category: 'insecticide', irac_group: '28+3A' },
     ];
     for (const { key, ...row } of products) {
       const [inserted] = await mockTrx('products_catalog').insert(row).returning('id');
@@ -59,7 +68,7 @@ const mix = require('../services/product-mix-rules');
     await migration.up(mockTrx);
   });
 
-  afterEach(async () => { await mockTrx.rollback(); mockTrx = null; });
+  afterEach(async () => { await mockTrx.rollback(); mockTrx = null; mockAudit.fail = false; mockAudit.events = []; });
   afterAll(async () => { await knex.destroy(); });
 
   test('the seed adds the quoted rules for the products present, and a second run adds nothing', async () => {
@@ -105,6 +114,39 @@ const mix = require('../services/product-mix-rules');
     expect(again.id).toBe(created.id);
     expect(again).toMatchObject({ verdict: 'never', active: true });
     await expect(mix.upsertRule({ productAId: ids.celsius, productBId: ids.certainty, verdict: 'ok', reason: 'x' }, { id: created.id }))
+      .rejects.toMatchObject({ statusCode: 409 });
+  });
+  test('the label fields are read: allows_surfactant = false and a typed irac_group', async () => {
+    const result = await mix.checkMix([ids.kflow, ids.nis, ids.typed, ids.oil]);
+    const pair = (a, b) => result.pairs.find((p) => [p.productAId, p.productBId].sort().join() === [a, b].sort().join());
+    expect(pair(ids.kflow, ids.nis)).toMatchObject({ verdict: 'caution', source: 'catalog' });
+    expect(pair(ids.typed, ids.oil)).toMatchObject({ verdict: 'never', reason: 'No oil and pyrethroid in the same tank.' });
+  });
+
+  test('two creates for the same new target leave one row; the second is recorded as an update', async () => {
+    const first = await mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'caution', reason: 'First.' });
+    const second = await mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'never', reason: 'Second.' });
+    expect(second.id).toBe(first.id);
+    const rows = await mockTrx('product_mix_rules').where({ product_a_id: ids.copper, group_b: 'fertilizer' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ verdict: 'never', reason: 'Second.' });
+    expect(mockAudit.events.map((e) => [e.action, e.critical])).toEqual([['product_mix_rules.created', true], ['product_mix_rules.updated', true]]);
+    expect(mockAudit.events[1].metadata.before).toMatchObject({ verdict: 'caution', reason: 'First.' });
+  });
+
+  test('a lost audit event rolls the rule change back (create, edit and remove)', async () => {
+    mockAudit.fail = true;
+    await expect(mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'never', reason: 'x' })).rejects.toThrow('audit_log write failed');
+    expect(await mockTrx('product_mix_rules').where({ product_a_id: ids.copper, group_b: 'fertilizer' })).toHaveLength(0);
+    const seeded = await mockTrx('product_mix_rules').where({ product_a_id: ids.tetrino, group_b: 'any' }).first();
+    await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x' }, { id: seeded.id })).rejects.toThrow('audit_log write failed');
+    await expect(mix.deactivateRule(seeded.id)).rejects.toThrow('audit_log write failed');
+    expect(await mockTrx('product_mix_rules').where({ id: seeded.id }).first()).toMatchObject({ verdict: 'never', active: true });
+  });
+
+  test('an edit onto another row\'s product + group target is a 409', async () => {
+    const tetrino = await mockTrx('product_mix_rules').where({ product_a_id: ids.tetrino, group_b: 'any' }).first();
+    await expect(mix.upsertRule({ productAId: ids.celsius, groupB: 'fertilizer', verdict: 'ok', reason: 'x' }, { id: tetrino.id }))
       .rejects.toMatchObject({ statusCode: 409 });
   });
 });

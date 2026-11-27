@@ -124,6 +124,60 @@ describe('checkMix', () => {
   });
 });
 
+describe('label fields and IRAC codes', () => {
+  const NIS = { id: id(8), name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' };
+  const KFLOW = { id: id(9), name: 'LESCO K-Flow 0-0-25', category: 'fertilizer', allows_surfactant: false };
+
+  test('allows_surfactant = false with a surfactant reads caution from the catalog, never "No rule"', async () => {
+    mockTables.products_catalog.push(NIS, KFLOW);
+    const pair = (await mix.checkMix([KFLOW.id, NIS.id])).pairs[0];
+    expect(pair).toMatchObject({ verdict: 'caution', source: 'catalog', reason: 'Label: LESCO K-Flow 0-0-25 does not allow a surfactant in the tank.' });
+  });
+
+  test('an owner "ok" for that pair still shows the label restriction as the headline, never a bare Yes', async () => {
+    mockTables.products_catalog.push(NIS, KFLOW);
+    mockTables.product_mix_rules.push(rule(6, { product_a_id: NIS.id, product_b_id: KFLOW.id, verdict: 'ok', reason: 'Owner said fine.' }));
+    const pair = (await mix.checkMix([NIS.id, KFLOW.id])).pairs[0];
+    expect(pair.verdict).toBe('caution');
+    expect(pair.entries.map((e) => e.verdict)).toEqual(['caution', 'ok']);
+  });
+
+  test('allows_surfactant unset (NULL) adds nothing', async () => {
+    mockTables.products_catalog.push(NIS, { ...KFLOW, allows_surfactant: null });
+    expect((await mix.checkMix([KFLOW.id, NIS.id])).pairs[0].verdict).toBe('unknown');
+  });
+
+  test.each([
+    [{ category: 'insecticide', irac_group: '3A' }, ['3a']],
+    [{ category: 'insecticide', irac_group: '28+3A' }, ['28', '3a']],
+    [{ category: 'insecticide', moa_group: 'Group 3A' }, ['3a']],
+    [{ category: 'insecticide', moa_group: 'Group 3A + 4A' }, ['3a', '4a']],
+    [{ category: 'insecticide', moa_group: 'IRAC 3A, 4A' }, ['3a', '4a']],
+    [{ category: 'insecticide', moa_group: 'Group 3' }, ['3a']],
+    [{ category: 'mosquito', irac_group: '4A', moa_group: 'Group 3A' }, ['4a', '3a']],
+    [{ category: 'fungicide', moa_group: 'Group 11 + 3' }, []],
+    [{ category: 'herbicide', moa_group: 'Group 4' }, []],
+  ])('IRAC codes of %j', (product, codes) => {
+    expect([...mix.iracCodes(product)]).toEqual(codes);
+  });
+
+  test('pyrethroid and neonic groups match typed and legacy codes; a FRAC group 3 fungicide is neither', () => {
+    expect(mix.inGroup({ category: 'insecticide', moa_group: 'Group 3A' }, 'pyrethroid')).toBe(true);
+    expect(mix.inGroup({ category: 'insecticide', irac_group: '28+3A' }, 'pyrethroid')).toBe(true);
+    expect(mix.inGroup({ category: 'insecticide', moa_group: 'Group 3A + 4A' }, 'neonic')).toBe(true);
+    expect(mix.inGroup({ category: 'fungicide', moa_group: 'Group 11 + 3' }, 'pyrethroid')).toBe(false);
+  });
+});
+
+describe('the headline entry', () => {
+  test('the strongest group rule leads the entries and is not repeated; a weaker one stays listed', async () => {
+    mockTables.product_mix_rules.unshift(rule(7, { product_a_id: FERT.id, group_b: 'herbicide', verdict: 'caution', reason: 'Jar test the herbicide first.' }));
+    const pair = (await mix.checkMix([FERT.id, CELSIUS.id])).pairs[0];
+    expect(pair.verdict).toBe('never');
+    expect(pair.entries.map((e) => e.reason)).toEqual(['Do not tank mix Celsius with fertilizer.', 'Jar test the herbicide first.']);
+  });
+});
+
 describe('normalizeRuleInput', () => {
   const base = { productAId: CELSIUS.id, productBId: CERTAINTY.id, verdict: 'never', reason: 'Short reason.' };
 

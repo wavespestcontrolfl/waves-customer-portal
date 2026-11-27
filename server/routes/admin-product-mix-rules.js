@@ -25,7 +25,8 @@ router.get('/', async (req, res, next) => {
 router.get('/check', async (req, res, next) => {
   try {
     const raw = Array.isArray(req.query.productIds) ? req.query.productIds.join(',') : String(req.query.productIds || '');
-    const productIds = raw.split(',').map((v) => v.trim()).filter(Boolean);
+    // The same id twice, or in another case, is one product: count distinct ids (checkMix reads them the same way).
+    const productIds = [...new Set(raw.split(',').map((v) => v.trim().toLowerCase()).filter(Boolean))];
     if (productIds.length < 2) return res.status(400).json({ error: 'Pick at least 2 products.' });
     if (productIds.length > mixRules.MAX_CHECK) return res.status(400).json({ error: `Pick at most ${mixRules.MAX_CHECK} products.` });
     return res.json(await mixRules.checkMix(productIds));
