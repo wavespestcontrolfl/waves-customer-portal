@@ -184,6 +184,10 @@ describe('PRODUCT NOTES', () => {
     expect(held('Leave the placements undisturbed. The dogs can go out now.', 'When can the dog go out?')).toBe(true);
     // a labeled-for line for a pest the section does not carry, or an unknown pest term, authorizes nothing
     expect(labelFactsLib.isProductNoteText('A treatment applied at your Nov 18 visit is one labeled for dragons.')).toBe(false);
+    // the capitals displayTerm keeps (Argentine, Pharaoh, American) are known terms, not rejected shapes
+    expect(labelFactsLib.isProductNoteText('A treatment applied at your Nov 18 visit is one labeled for Argentine ants.')).toBe(true);
+    expect(labelFactsLib.isProductNoteText('A treatment applied at your Nov 18 visit is one labeled for Pharaoh ants and American cockroaches.')).toBe(true);
+    expect(labelFactsLib.isProductNoteText('A treatment applied at your Nov 18 visit is one labeled for Dragons.')).toBe(false);
     expect(labelFactsLib.labelSentencesIn(section).map((s) => s.kind)).toEqual(['rainfast', 'reentry', 'product', 'product', 'product']);
   });
 });
@@ -256,6 +260,16 @@ describe('the asked-about visit: read and send-time recheck (mock knex)', () => 
     expect(used).toContain('service_records');
     // a named service no visit of the window certainly had: none on file, inside the same read
     expect(await labelFactsLib.readLastVisitLabelFacts({ customerId: 'c1', conn: outer, today: TODAY, inbound: ['is the mosquito spray dry?'] })).toBeNull();
+  });
+
+  test('each visit is the ONE family the guide sender gives its service: "Flea & Tick Pest Control" is flea, never also pest', async () => {
+    const conn = fakeConn({ extra: [{ id: 'r5', service_date: '2026-11-20', service_type: 'Flea & Tick Pest Control', structured_notes: null }] });
+    const days = await labelFactsLib.readRecentVisitDays(conn, 'c1', TODAY);
+    expect(days.map((d) => [d.date, [...d.families], d.unknown])).toEqual([
+      ['2026-11-24', ['interior_pest'], false], ['2026-11-20', ['flea'], false], ['2026-11-18', ['lawn'], false],
+    ]);
+    // so a pest control question is the Nov 24 visit, a flea one the Nov 20 visit
+    expect(labelFactsLib.pickAskedVisitDate(days, ['after the flea treatment can the cat come in?'], TODAY)).toBe('2026-11-20');
   });
 
   test('an asked-about date outside the window, or after the latest visit, reads nothing', async () => {

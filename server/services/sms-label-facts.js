@@ -414,15 +414,17 @@ async function readRecentVisitDays(conn, customerId, today) {
     .where('service_records.service_date', '>=', isoAddDays(today, -LABEL_VISIT_WINDOW_DAYS))
     .where('service_records.service_date', '<=', today)
     .select('service_records.service_date', 'service_records.service_type');
-  const { PREP_CONFIG, prepConfigMatches } = require('./prep-guide-sender');
+  const { prepFamilyForServiceType } = require('./prep-guide-sender');
   const byDate = new Map();
   for (const row of Array.isArray(rows) ? rows : []) {
     const date = dateOnlyString(row.service_date);
     if (!date) continue;
     const day = byDate.get(date) || { date, families: new Set(), unknown: false };
-    const families = Object.keys(PREP_CONFIG).filter((key) => prepConfigMatches(PREP_CONFIG[key], row.service_type));
-    for (const family of families) day.families.add(family);
-    if (!families.length) day.unknown = true;
+    // a visit is the ONE family the guide sender's own rule gives its service ("Flea & Tick Pest Control" is flea, never also pest); a
+    // day of two services is two records, each its own family
+    const hit = prepFamilyForServiceType(row.service_type);
+    if (hit) day.families.add(hit[0]);
+    else day.unknown = true;
     byDate.set(date, day);
   }
   return [...byDate.values()].sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -654,7 +656,7 @@ function labelFactsSentences(labelFacts) {
 // fixed labeled-for shape over the fixed pest terms), so a line typed into the block authorizes nothing new; the send-time recheck also
 // re-derives every copied note from the visit's products. Additives and products the report has no wording for get no note.
 const LABELED_FOR_LEAD = 'A treatment applied at your ';
-const LABELED_FOR_RE = /^A treatment applied at your ([A-Z][a-z]{2} \d{1,2}) visit is one labeled for ([a-z][a-zA-Z ,-]{1,160})\.$/;
+const LABELED_FOR_RE = /^A treatment applied at your ([A-Z][a-z]{2} \d{1,2}) visit is one labeled for ([A-Za-z][a-zA-Z ,-]{1,160})\.$/;
 function productCopyLibs() {
   return {
     copy: require('../config/report-product-copy'),

@@ -1094,7 +1094,7 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     expect(await sender.bookedPrepGuide(['cust-1'], { family: 'mosquito' })).toBeNull();
   });
 
-  test('upcomingPrepGuideFor reads the family\'s own PREP_CONFIG keywords and pages past the first ten upcoming visits', async () => {
+  test('upcomingPrepGuideFor scans every upcoming visit (no service-name pre-filter) and pages past the first ten', async () => {
     upcomingVisitRows = [
       ...Array.from({ length: 11 }, (_, i) => ({ ...VISIT, id: `svc-p${i}`, service_type: 'Pest Control' })),
       { ...VISIT, id: 'svc-lawn', service_type: 'Lawn Fertilization' },
@@ -1102,8 +1102,17 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     scheduledQueries = [];
     expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-lawn' }, pestType: 'lawn' });
     const raws = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls);
-    expect(raws.some(([sql, args]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)) && JSON.stringify(args) === JSON.stringify(['%lawn%']))).toBe(true);
+    expect(raws.some(([sql, args]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)) && JSON.stringify(args) === JSON.stringify(['%%']))).toBe(true);
+    expect(raws.some(([, args]) => JSON.stringify(args) === JSON.stringify(['%lawn%']))).toBe(false);
     expect(await sender.bookedPrepGuide(['cust-1'], { family: 'lawn' })).toMatchObject({ visit: { id: 'svc-lawn' }, source: 'named' });
+  });
+
+  test('upcomingPrepGuideFor: a later visit with a generic name whose ASSIGNED guide is the one named is found (the stop rule decides)', async () => {
+    upcomingVisitRows = [
+      { ...VISIT, id: 'svc-1', service_type: 'Pest Control' },
+      { ...VISIT, id: 'svc-2', service_type: 'Service Visit', prep_template_key: 'prep.lawn' },
+    ];
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-2' }, pestType: 'lawn' });
   });
 
   test('bookedPrepGuide reads the whole stop from the snapshot its page state was judged on: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {
