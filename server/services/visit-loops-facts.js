@@ -754,8 +754,18 @@ async function loadStopped(conn, customerId, now) {
   // UPCOMING SERVICES' own row rule: a replacement en route today that still reads
   // rescheduled replaces the cancel too
   // rescheduled replaces the cancel too, and so does a replacement already completed
-  const replaced = new Set(rows.filter((r) => r.status === 'completed' || isUpcomingListedRow(r, today)).map(dayKey));
-  return stoppedGroups(rows.filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(dayKey(r)))).slice(0, SCHEDULE_STOPPED_LIMIT);
+  const going = rows.filter((r) => r.status === 'completed' || isUpcomingListedRow(r, today));
+  const replaced = new Set(going.map(dayKey));
+  // A stop beside a going visit of the same service that day at the OTHER property: the
+  // sentence names service and day only, so it would read as that visit's cancel. It is
+  // kept (`ambiguous`, so the signature still sees it) and renders no sentence.
+  const anyProperty = (r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`;
+  const besideGoing = new Set(going.map(anyProperty));
+  const stops = rows.filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(dayKey(r)));
+  return stoppedGroups(stops).map((g) => {
+    const members = stops.filter((r) => g.visitIds.includes(String(r.id)));
+    return members.some((r) => besideGoing.has(anyProperty(r))) ? { ...g, ambiguous: true } : g;
+  }).slice(0, SCHEDULE_STOPPED_LIMIT);
 }
 // `listed`: the listed visits whose slot held, as { id, date, start } in UPCOMING SERVICES'
 // order. The draft persists it, so the send-time rebuild asks about the same visits and
@@ -778,7 +788,7 @@ function scheduleChangesSignature(scheduleChanges) {
   // a first move included (the moved visit drops out of the rebuilt list)
   const listed = (scheduleChanges.listed || []).map((l) => (l.unverified ? `listed:${key(l.id)}:unverified` : `listed:${key(l.id, l.date, l.start, l.window, l.dayOnly === true)}`));
   const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`, m.toWindow)}`);
-  const stopped = (scheduleChanges.stopped || []).map((g) => `stopped:${key(g.status, g.type, [].concat(g.visitIds || []).join(','), g.date, g.lastDate)}`);
+  const stopped = (scheduleChanges.stopped || []).map((g) => `stopped:${key(g.status, g.type, [].concat(g.visitIds || []).join(','), g.date, g.lastDate, g.ambiguous === true)}`);
   return [...listed, ...moves, ...stopped].join('|');
 }
 

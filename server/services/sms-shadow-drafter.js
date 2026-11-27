@@ -5537,7 +5537,9 @@ function scheduleChangesLines(scheduleChanges) {
   const objects = (list) => (Array.isArray(list) ? list : []).filter((x) => x && typeof x === 'object');
   const lines = [
     ...objects(sc.moves).map((m) => scheduleMoveLine(m, day, visit)),
-    ...objects(sc.stopped).map((g) => scheduleStoppedLine(g, day, visit)),
+    // an `ambiguous` stop (a going visit of that service that day at the other property)
+    // renders nothing: service and day alone would name the going visit
+    ...objects(sc.stopped).filter((g) => g.ambiguous !== true).map((g) => scheduleStoppedLine(g, day, visit)),
   ].filter(Boolean);
   return [...new Set(lines)];
 }

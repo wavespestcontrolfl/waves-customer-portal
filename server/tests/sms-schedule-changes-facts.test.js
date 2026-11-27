@@ -249,9 +249,20 @@ describe('loadScheduleChanges: skipped and cancelled', () => {
 
   test('a live visit at the other property never hides a cancel or skip; the same property (or none on both) does', async () => {
     const live = visit({ id: 'v1', status: 'confirmed', scheduled_date: '2026-12-04', property_id: 'p-home' });
+    const drafter = require('../services/sms-shadow-drafter');
     for (const status of ['cancelled', 'skipped']) {
       const other = visit({ id: 'v3', status, scheduled_date: '2026-12-04', property_id: 'p-rental' });
-      expect((await read([live, other], [], [])).stopped.map((g) => g.visitIds)).toEqual([['v3']]);
+      const out = await read([live, other], [], []);
+      // kept for the signature, marked ambiguous, and no sentence (it would read as the going visit's)
+      expect(out.stopped.map((g) => [g.visitIds, g.ambiguous])).toEqual([[['v3'], true]]);
+      const prev = process.env.GATE_SMS_REAL_ANSWERS;
+      process.env.GATE_SMS_REAL_ANSWERS = 'true';
+      try {
+        expect(drafter.scheduleChangesSection({ scheduleChanges: out })).not.toMatch(/skipped|cancelled/);
+      } finally { if (prev === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = prev; }
+      // the same stop on a day with no going visit at all is stated
+      const alone = await read([{ ...other, scheduled_date: '2026-12-11' }], [], []);
+      expect(alone.stopped[0].ambiguous).toBeUndefined();
       expect((await read([live, { ...other, property_id: 'p-home' }], [], [])).stopped).toEqual([]);
     }
     const noProp = (over) => visit({ scheduled_date: '2026-12-04', property_id: null, ...over });
