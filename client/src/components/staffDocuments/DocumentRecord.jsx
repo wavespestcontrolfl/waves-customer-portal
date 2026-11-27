@@ -63,7 +63,7 @@ function RecordFields({ fields, answers, setAnswers }) {
         </label>
       );
     }
-    const isSig = field.id === 'signed-name';
+    const isSig = field.id === 'signed-name' && field.type === 'text';
     return (
       <Field key={field.id} label={label}>
         {field.type === 'textarea' ? (
@@ -127,7 +127,7 @@ function RecordCompletedBanner({ record, isSignatureForm }) {
 }
 
 function computeRecordState({ rendered, answers, owner, selfId, canWrite, record, records }) {
-  const signatureField = rendered.metadata.fields.find(field => field.id === 'signed-name' && field.required === true);
+  const signatureField = rendered.metadata.fields.find(field => field.id === 'signed-name' && field.type === 'text' && field.required === true);
   const isSignatureForm = rendered.kind === 'form' && Boolean(signatureField);
   const signedName = String(answers['signed-name'] || '');
   const signatureReady = !isSignatureForm || signedNameValid(signedName);

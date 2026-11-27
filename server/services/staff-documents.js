@@ -7,7 +7,8 @@ const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 const ACKNOWLEDGMENT = 'I have read this policy version and acknowledge receipt. I intend my typed name to serve as my electronic signature for this acknowledgment (Florida Statutes 668.50).';
 const sourceOf = version => ({ title: version.title, body: version.body, metadata: version.staff_metadata });
 const isAdmin = actor => actor.role === 'admin';
-const hasSignatureField = fields => Array.isArray(fields) && fields.some(field => field.id === 'signed-name' && field.required === true);
+const isRequiredSignatureField = field => Boolean(field && field.id === 'signed-name' && field.type === 'text' && field.required === true);
+const hasSignatureField = fields => Array.isArray(fields) && fields.some(isRequiredSignatureField);
 
 // Typed full name: trimmed, 3 to 180 characters, at least two words (first + last name).
 function parseSignedName(value) {
@@ -274,10 +275,11 @@ function recordAnswers(version, input) {
     if (input.complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').trim().required();
     shape[field.id] = rule;
   }
+  const hasSigField = hasSignatureField(fields);
   const rawAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers) ? { ...input.answers } : input.answers;
-  if (rawAnswers && typeof rawAnswers['signed-name'] === 'string') rawAnswers['signed-name'] = rawAnswers['signed-name'].trim();
+  if (hasSigField && rawAnswers && typeof rawAnswers['signed-name'] === 'string') rawAnswers['signed-name'] = rawAnswers['signed-name'].trim();
   const answers = validate(Joi.object(shape).required(), rawAnswers);
-  if (input.complete && fields.some(field => field.id === 'signed-name' && field.required)) {
+  if (input.complete && hasSigField) {
     const parsedName = parseSignedName(answers['signed-name']);
     if (!parsedName) reject('Type your full name (first and last) to sign this agreement.');
     answers['signed-name'] = parsedName;

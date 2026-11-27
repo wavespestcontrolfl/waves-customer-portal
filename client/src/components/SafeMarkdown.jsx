@@ -38,15 +38,29 @@ const BULLET_RE = /^\s*[-*]\s+(.*)$/;
 const NUMBER_RE = /^\s*(\d{1,9})[.)]\s+(.*)$/;
 const RULE_RE = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const TABLE_SEP_RE = /^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/;
+const MAX_TABLE_COLS = 12;
+const MAX_TABLE_ROWS = 200;
+const MAX_TABLE_CELLS = 1000;
 
 function splitTableCells(line) {
   return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((cell) => cell.trim());
 }
 
-function isTableStart(lines, index) {
-  if (index + 1 >= lines.length) return false;
-  if (!lines[index].includes("|") || !TABLE_SEP_RE.test(lines[index + 1].trim())) return false;
-  return splitTableCells(lines[index]).length >= 2;
+function tryParseTable(lines, startIndex, remainingCells) {
+  if (startIndex + 1 >= lines.length) return null;
+  if (!lines[startIndex].includes("|") || !TABLE_SEP_RE.test(lines[startIndex + 1].trim())) return null;
+  const headers = splitTableCells(lines[startIndex]);
+  if (headers.length < 2 || headers.length > MAX_TABLE_COLS) return null;
+  const rows = [];
+  let cursor = startIndex + 2;
+  while (cursor < lines.length && lines[cursor].includes("|") && lines[cursor].trim()) {
+    if (rows.length >= MAX_TABLE_ROWS) return null;
+    rows.push(splitTableCells(lines[cursor]));
+    cursor += 1;
+  }
+  const cells = headers.length * (rows.length + 1);
+  if (cells > remainingCells) return null;
+  return { headers, rows, cells, nextIndex: cursor };
 }
 
 export function parseBlocks(markdown) {
@@ -54,6 +68,7 @@ export function parseBlocks(markdown) {
   const lines = String(markdown || "").replace(/\r/g, "").split("\n");
   let para = [];
   let list = null;
+  let renderedCells = 0;
   const flushPara = () => {
     if (para.length) blocks.push({ type: "p", text: para.join("\n") });
     para = [];
@@ -64,18 +79,13 @@ export function parseBlocks(markdown) {
   };
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i];
-    if (isTableStart(lines, i)) {
+    const table = tryParseTable(lines, i, MAX_TABLE_CELLS - renderedCells);
+    if (table) {
       flushPara();
       flushList();
-      const headers = splitTableCells(line);
-      const rows = [];
-      let cursor = i + 2;
-      while (cursor < lines.length && lines[cursor].includes("|") && lines[cursor].trim()) {
-        rows.push(splitTableCells(lines[cursor]));
-        cursor += 1;
-      }
-      blocks.push({ type: "table", headers, rows });
-      i = cursor - 1;
+      blocks.push({ type: "table", headers: table.headers, rows: table.rows });
+      renderedCells += table.cells;
+      i = table.nextIndex - 1;
       continue;
     }
     const heading = HEADING_RE.exec(line);

@@ -281,8 +281,12 @@ function ResultState({ data, own }) {
         )}
         {showSignedCopy && (
           <>
-            <OfferSummary data={data} />
-            <TermsSection terms={data.terms} />
+            <OfferLetterContent data={data} />
+            {data.expiresAt && (
+              <p style={{ ...BODY_STYLE, marginTop: 14, fontSize: 14, color: MUTED, textAlign: 'center' }}>
+                Open until {formatExpiry(data.expiresAt)}
+              </p>
+            )}
           </>
         )}
         {data.state === 'signed' && !isNativeApp() && (
@@ -305,6 +309,22 @@ function OfferRow({ label, children }) {
         {children}
       </div>
     </div>
+  );
+}
+
+function OfferLetterContent({ data }) {
+  return (
+    <>
+      <p style={{ ...BODY_STYLE, marginTop: 14 }}>
+        Signed by {data.owner?.name || 'Adam'}, {data.owner?.title || 'owner'}
+        {data.owner?.sentOn ? <>{' · '}<span style={{ whiteSpace: 'nowrap' }}>{formatSentOn(data.owner.sentOn)}</span></> : null}
+      </p>
+      <OfferSummary data={data} />
+      <TermsSection terms={data.terms} />
+      <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
+        Please don&rsquo;t give notice at your current job until you have signed this offer.
+      </p>
+    </>
   );
 }
 
@@ -740,7 +760,7 @@ function SignBlock({ name, onName, agreed, onAgreed, onAccept, busy, saving, fro
           style={{ width: 22, height: 22, marginTop: 2, flex: '0 0 auto', accentColor: 'var(--brand, #04395E)' }}
         />
         <span style={{ fontFamily: FONTS.body, fontSize: 15, lineHeight: 1.45, color: TEXT }}>
-          I have read this offer and the Technician Terms (including the 12-month Waves customers rule and recorded calls and texts consent), and I agree that typing my full name is my electronic signature (Florida Statutes 668.50).
+          I have read and agree to this offer and the displayed terms, and I intend my typed full name to be my electronic signature (Florida Statutes 668.50).
         </span>
       </label>
       <label htmlFor="offer-sign-name" style={LABEL_STYLE}>Type your full name to sign</label>
@@ -834,15 +854,7 @@ function OpenOffer({ token, data, outdated, onApplied, onRefused, onReload, onRe
       <div style={EYEBROW}>Waves</div>
       <h1 style={H1_STYLE}>Your job offer</h1>
       <BrandCard padding={24}>
-        <p style={BODY_STYLE}>
-          Signed by {data.owner?.name || 'Adam'}, {data.owner?.title || 'owner'}
-          {data.owner?.sentOn ? <>{' · '}<span style={{ whiteSpace: 'nowrap' }}>{formatSentOn(data.owner.sentOn)}</span></> : null}
-        </p>
-        <OfferSummary data={data} />
-        <TermsSection terms={data.terms} />
-        <p style={{ ...BODY_STYLE, borderTop: '1px solid var(--border, #E2E8F0)', paddingTop: 12 }}>
-          Please don&rsquo;t give notice at your current job until you have signed this offer.
-        </p>
+        <OfferLetterContent data={data} />
         <TextConsent token={token} initial={data.textConsent} version={data.version} snapshot={data} onPending={setConsentPending} onStale={onRecheck} onUnknown={markUnknown} onSnapshot={onApplied} onRefused={onRefused} onInvalid={onInvalid} onRead={onRead} locked={blocked} />
         <SignBlock
           name={name}

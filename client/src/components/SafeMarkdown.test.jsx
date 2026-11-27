@@ -59,4 +59,13 @@ describe('SafeMarkdown', () => {
     expect(container.querySelectorAll('table tbody tr')).toHaveLength(2);
     expect(container.querySelector('table tbody strong')).toHaveTextContent('$920');
   });
+
+  it('falls back to literal text when a table exceeds the rendered cell budget', () => {
+    const headers = Array.from({ length: 10 }, (_, i) => `C${i}`).join(' | ');
+    const sep = Array.from({ length: 10 }, () => '---').join(' | ');
+    const rows = Array.from({ length: 105 }, () => '| x |').join('\n');
+    const { container } = render(<SafeMarkdown markdown={`| ${headers} |\n| ${sep} |\n${rows}`} />);
+    expect(container.querySelector('table')).toBeNull();
+    expect(container).toHaveTextContent('C0 | C1');
+  });
 });

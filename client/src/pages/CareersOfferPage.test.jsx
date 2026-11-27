@@ -60,7 +60,7 @@ function bodyOf(fetchMock, index) {
 }
 
 function tickAgree() {
-  const cb = screen.getByLabelText(/I have read this offer and the Technician Terms/);
+  const cb = screen.getByLabelText(/I have read and agree to this offer and the displayed terms/);
   if (!cb.checked) fireEvent.click(cb);
 }
 
@@ -162,6 +162,9 @@ describe('CareersOfferPage — open state', () => {
     const record = screen.getByTestId('offer-signature-record');
     expect(record).toHaveTextContent('Signed by: Jordan Rivera');
     expect(record).toHaveTextContent('Sat, Dec 12, 2026');
+    expect(screen.getByText((_, el) => el.tagName === 'P' && el.textContent === 'Signed by Sam Carter, owner · Dec 11, 2026')).toBeInTheDocument();
+    expect(screen.getByText(/Please don.t give notice at your current job until you have signed this offer\./)).toBeInTheDocument();
+    expect(screen.getByText('Open until Fri, Dec 18')).toBeInTheDocument();
     expect(screen.getByTestId('offer-terms')).toHaveTextContent('Four 10-hour days.');
     expect(screen.getByRole('button', { name: 'Print / Save PDF copy' })).toBeInTheDocument();
     expect(fetchMock.mock.calls[1][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));

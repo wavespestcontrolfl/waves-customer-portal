@@ -68,7 +68,10 @@ function formatFieldAnswer(field, answer) {
 function fieldsHtml(rendered, record) {
   const allFields = rendered.metadata.fields || [];
   if (!allFields.length) return '';
-  const signedName = record?.completed_at && record?.answers?.['signed-name'] ? String(record.answers['signed-name']).trim() : '';
+  const isSignatureForm = rendered.kind === 'form' && allFields.some(field => field.id === 'signed-name' && field.type === 'text' && field.required === true);
+  const signedName = isSignatureForm && record?.completed_at && typeof record?.answers?.['signed-name'] === 'string'
+    ? record.answers['signed-name'].trim()
+    : '';
   const displayFields = signedName ? allFields.filter(field => field.id !== 'signed-name') : allFields;
   const fields = displayFields.map(field => {
     const answer = record?.answers?.[field.id];

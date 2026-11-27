@@ -117,7 +117,15 @@ test('signature fields require a full name (first and last) when completing a fo
   expect(parseSignedName('Jordan')).toBeNull();
   expect(parseSignedName('  Jordan   Rivera  ')).toBe('Jordan Rivera');
   expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'text', required: false }])).toBe(false);
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'checkbox', required: true }])).toBe(false);
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'date', required: true }])).toBe(false);
   expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'text', required: true }])).toBe(true);
+  const nonTextSigVersion = {
+    staff_metadata: { fields: [{ id: 'signed-name', label: 'Signed check', type: 'checkbox', required: true }] },
+    content_snapshot: { kind: 'form', sections: [{ id: 'sig' }] },
+  };
+  expect(recordAnswers(nonTextSigVersion, { answers: { 'signed-name': true }, completed_steps: [], complete: true }).answers)
+    .toBe('{"signed-name":true}');
   const version = {
     staff_metadata: {
       fields: [

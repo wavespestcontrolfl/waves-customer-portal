@@ -133,3 +133,33 @@ test('completed signature forms render Yes/No checkboxes, staff name, and an ele
   expect(html).toContain('Jordan Rivera (tech-1)');
   expect(html).toContain('Florida Statutes 668.50');
 });
+
+test('optional signed-name fields stay as ordinary form fields without an electronic signature certificate', async () => {
+  const page = { route: jest.fn(), setContent: jest.fn(), pdf: jest.fn().mockResolvedValue(Buffer.from('pdf')) };
+  launchBrowser.mockResolvedValue({ newPage: jest.fn().mockResolvedValue(page), close: jest.fn() });
+  const optionalForm = {
+    document: { staff_kind: 'form', template_key: 'staff.optional-note' },
+    version: { version_number: 1, content_hash: 'd'.repeat(64), effective_at: '2027-01-01T14:00:00Z' },
+    rendered: {
+      title: 'Equipment Note', kind: 'form',
+      sections: [{ id: 'notes', number: 1, title: 'Notes', html: '<p>Notes.</p>' }],
+      metadata: {
+        owner_role: 'Owner', review_on: '2027-12-31', citations: [],
+        fields: [
+          { id: 'signed-name', label: 'Optional contact', type: 'text', required: false },
+        ],
+      },
+    },
+  };
+  await renderStaffDocumentPdf(optionalForm, {
+    record: {
+      id: 'rec-opt', owner_id: 'tech-1', owner_name: 'Jordan Rivera', content_hash: 'd'.repeat(64),
+      due_at: '2027-01-05T14:00:00Z', completed_at: '2027-01-04T15:00:00Z', completed_steps: [],
+      answers: { 'signed-name': 'Jordan Rivera' },
+    },
+  });
+  const html = page.setContent.mock.calls[0][0];
+  expect(html).not.toContain('Electronic signature');
+  expect(html).toContain('Optional contact');
+  expect(html).toContain('Jordan Rivera');
+});
