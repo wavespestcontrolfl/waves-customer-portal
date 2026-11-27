@@ -203,6 +203,15 @@ function canPlaceInRoute(siblings) {
   return !capacityEnabled() && arrivalWindowRoutingEnabled() && siblings.length === 0;
 }
 
+// Same date, technician, and arrival window as the visit's stored placement:
+// rebooker.js sees placementWindowChanged === false and skips placeMovedVisit,
+// so never score it as a fresh mid-route insertion on a stale numbered day.
+function isSamePlacement(service, cand) {
+  return toDateStr(service.scheduled_date) === cand.date
+    && String(service.technician_id || '') === String(cand.technician_id || '')
+    && String(service.window_start || '').slice(0, 5) === String(cand.start_time || '').slice(0, 5);
+}
+
 // Which tech-day a batched day-stop row belongs to (loadDayStopRows serves
 // every candidate tech-day from ONE query).
 const DAY_STOP_KEY_COLUMNS = ['scheduled_services.scheduled_date', 'scheduled_services.technician_id'];
@@ -553,7 +562,7 @@ function candidateRouteOrder(service, cand) {
 // are skipped by placeMovedVisit and keep currentOrder.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const insertByTime = canPlaceInRoute(siblings);
+  const insertByTime = !isSamePlacement(service, cand) && canPlaceInRoute(siblings);
   const cost = routeCost(
     stops,
     serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), insertByTime, cand.route_order_ids),
@@ -1396,7 +1405,7 @@ module.exports = {
   violatesPreferredTime,
   _internals: {
     candidateFromSlot, unitTerritory, dropCoverWhenOwnerHas, NO_SINGLE_TERRITORY, searchWindow, hhmmToMin, weekdayOf, isSaturday, isWeekendDay, loadDayStops, loadDayStopRows, loadGroupContext,
-    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
+    filterAndScoreSharedModelCandidates, loadDateOccupiedSpans, planUnitPlacement, movedSiblings, candidateRouteOrder, isSamePlacement, scoreOnSharedModel, readCurrentConflict, loadStartPoints, loadAllStartPoints, homeFor, scoredStartPoint, legacyCap, movingUnitIds, dropSlotsTheUnitCannotTake,
   },
 };
 // Own lines: the day-replan job reads the same open/close bounds the after_hours filter uses.

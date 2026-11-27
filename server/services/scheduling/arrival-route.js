@@ -1377,12 +1377,42 @@ async function persistArrivalOrder(conn, fit, targetId) {
  *  existing stops are already late by the same bounded rule the picker listed
  *  the hour under, and numbers the day in that order. Returns the order
  *  written, or null. */
-async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false } = {}) {
+function routeOrderChangedError(detail = 'Committed route neighbors differ from scored neighbors') {
+  return Object.assign(new Error(detail), { statusCode: 409, isOperational: true, code: 'ROUTE_ORDER_CHANGED' });
+}
+
+// Verify under the destination tech-day lock that the persisted route places
+// `serviceId` between the exact same prev/next physical stops that auto-dispatch
+// scored and road-checked. Collapses grouped siblings by visit_id so flat and
+// grouped representations match. Throws ROUTE_ORDER_CHANGED to roll back and
+// let apply.js re-evaluate/retry when the neighbors shifted.
+function verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours }) {
+  if (!expectedNeighbours) return;
+  const self = String(serviceId);
+  const visitById = new Map((context?.rows || []).filter(r => r && r.id != null && r.visit_id != null).map(r => [String(r.id), `v:${r.visit_id}`]));
+  const keyOf = (id) => (id == null ? null : (String(id) === self ? '__self__' : (visitById.get(String(id)) || String(id))));
+  const keys = [];
+  for (const id of (order || [self])) {
+    const k = keyOf(id);
+    if (k && keys[keys.length - 1] !== k) keys.push(k);
+  }
+  const at = keys.indexOf('__self__');
+  const actualPrev = at > 0 ? keys[at - 1] : null;
+  const actualNext = at >= 0 && at < keys.length - 1 ? keys[at + 1] : null;
+  const expectedPrev = keyOf(expectedNeighbours.prevId);
+  const expectedNext = keyOf(expectedNeighbours.nextId);
+  if (actualPrev !== expectedPrev || actualNext !== expectedNext) {
+    throw routeOrderChangedError(`Expected neighbors (${expectedPrev || 'home'}, ${expectedNext || 'home'}), got (${actualPrev || 'home'}, ${actualNext || 'home'})`);
+  }
+}
+
+async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lateDays = false, startPoints = false, vanDepartureMin, expectedNeighbours = null } = {}) {
   if (capacityEnabled() || !arrivalWindowRoutingEnabled()) return null;
   if (!conn?.isTransaction || !serviceId) return null;
   try {
-    return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }));
+    return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, startPoints, vanDepartureMin, expectedNeighbours }));
   } catch (error) {
+    if (error && error.code === 'ROUTE_ORDER_CHANGED') throw error;
     logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
     return null;
   }
@@ -1426,18 +1456,22 @@ async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, t
   return order;
 }
 
-async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) {
+async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, startPoints = false, vanDepartureMin, expectedNeighbours = null }) {
   const row = await sp('scheduled_services').where({ id: serviceId })
     .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
   const date = row ? dateOnly(row.scheduled_date) : '';
-  const refuse = reason => refusePlacement(serviceId, source, reason, date);
+  const refuse = (reason) => {
+    if (expectedNeighbours) throw routeOrderChangedError(`Route placement refused (${reason}) while neighbor verification was required`);
+    return refusePlacement(serviceId, source, reason, date);
+  };
   if (!row) return refuse('no_context');
   if (!row.technician_id) return refuse('unassigned');
   if (!row.window_start || !date) return refuse('untimed');
   if (!await require('./tech-day-lock').lockTechDays(sp, [{ techId: row.technician_id, date }], { wait: false })) return refuse('lock_busy');
-  // From the office, like every commit-time check (tech-start-point.js):
-  // the save probe certified this day from there, so the same order wins.
-  const context = await loadSavedRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id });
+  // From the office by default (staff saves), or from the technician's start
+  // point + van departure when auto-dispatch's arrival search certified from
+  // there (startPoints / vanDepartureMin).
+  const context = await loadSavedRouteContext({ conn: sp, serviceId, date, technicianId: row.technician_id, startPoints, vanDepartureMin });
   if (!context) return refuse('no_context');
   if (context.grouped) return refuse('grouped');
   if (staffSave === true) context.travel = staffSaveTravel(date);
@@ -1448,15 +1482,23 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
     ...(lateDays === true ? { lateDays: true } : {}) });
   // A refused check still numbers the visit by its arrival time.
   const refuseOrNumberByTime = async reason => {
-    refuse(reason);
-    return placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
+    refusePlacement(serviceId, source, reason, date);
+    const fallbackOrder = await placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
+    const effectiveOrder = fallbackOrder || currentOrder([
+      ...context.rows.filter(r => r.technician_id === row.technician_id && r.reservation_expires_at == null && r.status !== 'completed'),
+      { ...context.target, id: serviceId, route_order: null },
+    ]).map(r => r.id);
+    verifyPlacedNeighbours(effectiveOrder, { context, serviceId, expectedNeighbours });
+    return fallbackOrder;
   };
   if (!fit.feasible) return refuseOrNumberByTime(fit.reason || 'no_order');
   if (!fit.routeOrder) return refuseOrNumberByTime('no_order');
   if (fit.routeOrder.length === 1) {
+    verifyPlacedNeighbours([serviceId], { context, serviceId, expectedNeighbours });
     return clearLoneRouteOrder(sp, { context, serviceId, date, technicianId: row.technician_id });
   }
   const order = await writeRouteOrder(sp, fit, serviceId);
+  verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours });
   await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
     resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
     metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });
@@ -1680,5 +1722,5 @@ module.exports = {
   prepareArrivalCapacity, verifyArrivalCapacity, persistArrivalOrder, persistCapacityAllocation, capacityError,
   placeMovedVisit, INSERTION_MARGIN_MINUTES,
   blockedIntervalsFor, loadDayScheduleBlocks,
-  _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel, pickedShiftEnd },
+  _internals: { clockOrder, storedOrderStale, groupRouteStops, arrivalExceedsGrace, foldVisitUnit, comboRouteCheckLive, buildPlacementTarget, laterStopTooTight, staffSaveTravel, pickedShiftEnd, verifyPlacedNeighbours },
 };

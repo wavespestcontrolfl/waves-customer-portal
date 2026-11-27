@@ -69,6 +69,57 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
     expect(cost.detourMinutes).toBeCloseTo(withCandidate - repairedBaseline, 5);
     expect(cost.detourMinutes).toBeGreaterThan(20);
   });
+
+  test('verifyPlacedNeighbours accepts matching neighbors (including grouped visit_id siblings) and throws ROUTE_ORDER_CHANGED on drift', () => {
+    const { _internals: { verifyPlacedNeighbours } } = require('../services/scheduling/arrival-route');
+    const context = {
+      rows: [
+        { id: 'g1a', visit_id: 'vis1' },
+        { id: 'g1b', visit_id: 'vis1' },
+        { id: 's2', visit_id: null },
+      ],
+    };
+    // Grouped sibling g1a + g1b collapses to v:vis1, matching scored prevId g1a.
+    expect(() => verifyPlacedNeighbours(['g1a', 'g1b', 'svc', 's2'], {
+      context, serviceId: 'svc', expectedNeighbours: { prevId: 'g1a', nextId: 's2' },
+    })).not.toThrow();
+    // Neighbor shifted -> throws 409 ROUTE_ORDER_CHANGED so rebooker rolls back & retries.
+    expect(() => verifyPlacedNeighbours(['s2', 'svc', 'g1a', 'g1b'], {
+      context, serviceId: 'svc', expectedNeighbours: { prevId: 'g1a', nextId: 's2' },
+    })).toThrow(expect.objectContaining({ code: 'ROUTE_ORDER_CHANGED', statusCode: 409 }));
+    // Single-stop day matches { prevId: null, nextId: null }.
+    expect(() => verifyPlacedNeighbours(['svc'], {
+      context: { rows: [] }, serviceId: 'svc', expectedNeighbours: { prevId: null, nextId: null },
+    })).not.toThrow();
+  });
+
+  test('scoreOnSharedModel keeps stored route_order for same (date, tech, start) slot so a stale day never triggers a no-op move', () => {
+    const prevAdmin = process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+    const prevCap = process.env.GATE_SCHEDULING_CAPACITY;
+    process.env.GATE_ADMIN_ARRIVAL_WINDOWS = 'true';
+    delete process.env.GATE_SCHEDULING_CAPACITY;
+    try {
+      const { _internals: { scoreOnSharedModel, isSamePlacement } } = require('../services/auto-dispatch/candidate-slots');
+      const svc = { id: 'v', scheduled_date: '2026-12-10', technician_id: 't1', window_start: '09:00:00', route_order: 3 };
+      const stops = [
+        { id: 's1', geo: NORTH, startMin: 480, window_start: '08:00', route_order: 1 },
+        { id: 's2', geo: SOUTH, startMin: 780, window_start: '13:00', route_order: 2 },
+      ];
+      const sameCand = { date: '2026-12-10', technician_id: 't1', start_time: '09:00', route_order_ids: ['s1', '__candidate__', 's2'] };
+      const shiftedCand = { date: '2026-12-10', technician_id: 't1', start_time: '10:00', route_order_ids: ['s1', '__candidate__', 's2'] };
+      expect(isSamePlacement(svc, sameCand)).toBe(true);
+      expect(isSamePlacement(svc, shiftedCand)).toBe(false);
+      const sameScored = scoreOnSharedModel(svc, NEAR_NORTH, sameCand, stops, [], { targets: [] });
+      const shiftedScored = scoreOnSharedModel(svc, NEAR_NORTH, shiftedCand, stops, [], { targets: [] });
+      // Same slot keeps route_order=3 (behind s2 -> big backtrack detour); shifted slot inserts between s1 and s2.
+      expect(sameScored.detour_minutes).toBeGreaterThan(shiftedScored.detour_minutes + 15);
+    } finally {
+      if (prevAdmin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
+      else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdmin;
+      if (prevCap === undefined) delete process.env.GATE_SCHEDULING_CAPACITY;
+      else process.env.GATE_SCHEDULING_CAPACITY = prevCap;
+    }
+  });
 });
 
 describe('Phase 2: calibrated minutes-first qualification and ranking', () => {
