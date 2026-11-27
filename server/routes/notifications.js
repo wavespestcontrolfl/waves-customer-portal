@@ -1296,8 +1296,9 @@ router.get('/reminder-contacts/:customerId', async (req, res, next) => {
   return undefined;
 });
 
-for (const [action, stopped] of [['stop', true], ['restart', false]]) {
-  router.post(`/reminder-contacts/:customerId/:reminderId/${action}`, async (req, res, next) => {
+// Stop or restart one person's visit texts (literal paths, so the public-route scanner can prove each one).
+function reminderStopHandler(stopped) {
+  return async (req, res, next) => {
     try {
       if (!reminderParamsValid(req.params)) return res.status(400).json({ error: 'Invalid request' });
       const customerId = await reminderContactProfile(req, res);
@@ -1317,8 +1318,10 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
         next(err);
     }
     return undefined;
-  });
+  };
 }
+router.post('/reminder-contacts/:customerId/:reminderId/stop', reminderStopHandler(true));
+router.post('/reminder-contacts/:customerId/:reminderId/restart', reminderStopHandler(false));
 
 router.put('/property-preferences/:customerId', async (req, res, next) => {
   try {
