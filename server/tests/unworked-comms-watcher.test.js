@@ -427,21 +427,27 @@ describe('lane SQL binding integrity', () => {
     }
   });
 
-  test('loadUnworkedDigitalLeads delegates human-contact checks to lead-contact-sync and requires real estimate delivery + unambiguous linkage', async () => {
+  test('loadUnworkedDigitalLeads pages through all candidates, honors explicit estimate ownership, and scrubs PII bindings on failure', async () => {
     const t0 = '2026-11-27T10:00:00Z';
     const t1 = '2026-11-27T11:00:00Z';
-    const candidateRows = [
-      // Cleared by judgeLeads (connected call / human text / exact email / live booking)
-      { id: 'lead-contacted', lead_type: 'form_submission', first_name: 'Ana', last_name: 'Smith', phone: '+19415550101', email: 'ana@example.com', first_contact_at: t0, customer_id: 'cust-1', estimate_id: null },
+    const page1 = Array.from({ length: 200 }, (_, i) => ({
+      id: `lead-p1-${i}`, lead_type: 'form_submission', first_name: 'Contacted', last_name: `User${i}`,
+      phone: `+1941555${String(1000 + i).slice(-4)}`, email: `u${i}@example.com`,
+      first_contact_at: t0, cursor_at: t0, customer_id: `cust-p1-${i}`, estimate_id: null,
+    }));
+    const page2 = [
       // Cleared by direct delivered estimate_id (even on a shared customer)
-      { id: 'lead-est-direct', lead_type: 'quote_wizard', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, customer_id: 'cust-shared', estimate_id: 'est-delivered' },
+      { id: 'lead-est-direct', lead_type: 'quote_wizard', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-shared', estimate_id: 'est-delivered' },
       // Shares cust-shared with lead-est-direct: MUST NOT be cleared by cust-shared's other estimate
-      { id: 'lead-shared-open', lead_type: 'email_inquiry', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, customer_id: 'cust-shared', estimate_id: null },
-      // Unambiguous single open lead cleared by customer-level delivered estimate
-      { id: 'lead-est-cust', lead_type: 'voicemail', first_name: 'Cara', last_name: 'Lee', phone: '+19415550103', email: 'cara@example.com', first_contact_at: t0, customer_id: 'cust-solo', estimate_id: null },
-      // Truly unworked lead (judgeLeads skipped with no_contact_evidence, no delivered estimate)
-      { id: 'lead-unworked', lead_type: 'form_submission', first_name: 'Dan', last_name: 'Ng', phone: '+19415550104', email: 'dan@example.com', first_contact_at: t0, customer_id: 'cust-unworked', estimate_id: null },
+      { id: 'lead-shared-open', lead_type: 'email_inquiry', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-shared', estimate_id: null },
+      // Single open lead on cust-reopen, but the delivered estimate belongs to a DIFFERENT (closed) lead -> MUST stay unworked!
+      { id: 'lead-closed-est-owner', lead_type: 'form_submission', first_name: 'Eve', last_name: 'Ray', phone: '+19415550105', email: 'eve@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-reopen', estimate_id: null },
+      // Unambiguous single open lead cleared by unowned customer-level delivered estimate
+      { id: 'lead-est-cust', lead_type: 'voicemail', first_name: 'Cara', last_name: 'Lee', phone: '+19415550103', email: 'cara@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-solo', estimate_id: null },
+      // Truly unworked lead past the 200-row first page (proves keyset paging!)
+      { id: 'lead-unworked', lead_type: 'form_submission', first_name: 'Dan', last_name: 'Ng', phone: '+19415550104', email: 'dan@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-unworked', estimate_id: null },
     ];
+    let leadPageCall = 0;
     const estimateSqls = [];
     const knexPg = require('knex')({ client: 'pg' });
     jest.doMock('../models/db', () => {
@@ -459,14 +465,17 @@ describe('lane SQL binding integrity', () => {
           },
           orderBy: () => chain,
           limit: () => chain,
-          select: () => Promise.resolve(
-            String(table).startsWith('estimates')
-              ? [
-                { id: 'est-delivered', customer_id: 'cust-shared', delivered_at: t1 },
-                { id: 'est-solo', customer_id: 'cust-solo', delivered_at: t1 },
-              ]
-              : candidateRows,
-          ),
+          select: () => {
+            if (String(table).startsWith('estimates')) {
+              return Promise.resolve([
+                { id: 'est-delivered', customer_id: 'cust-shared', delivered_at: t1, owner_lead_ids: ['lead-est-direct'] },
+                { id: 'est-owned-by-closed', customer_id: 'cust-reopen', delivered_at: t1, owner_lead_ids: ['lead-already-closed'] },
+                { id: 'est-solo', customer_id: 'cust-solo', delivered_at: t1, owner_lead_ids: [] },
+              ]);
+            }
+            leadPageCall += 1;
+            return Promise.resolve(leadPageCall === 1 ? page1 : page2);
+          },
         };
         return chain;
       };
@@ -474,15 +483,18 @@ describe('lane SQL binding integrity', () => {
       dbMock.raw = (sql, bindings) => ({ sql, bindings });
       return dbMock;
     });
-    const judgeLeads = jest.fn(async () => new Map([
-      ['lead-contacted', { evidenceType: 'staff_text', evidenceId: 'sms-1', at: new Date(t1) }],
-      ['lead-est-direct', { skip: 'no_contact_evidence' }],
-      ['lead-shared-open', { skip: 'shared_phone' }],
-      ['lead-est-cust', { skip: 'no_contact_evidence' }],
-      ['lead-unworked', { skip: 'no_contact_evidence' }],
-    ]));
+    const judgeLeads = jest.fn(async (_db, batch) => {
+      const m = new Map();
+      for (const l of batch) {
+        if (l.id.startsWith('lead-p1-')) m.set(l.id, { evidenceType: 'staff_text', evidenceId: `sms-${l.id}`, at: new Date(t1) });
+        else if (l.id === 'lead-shared-open') m.set(l.id, { skip: 'shared_phone' });
+        else m.set(l.id, { skip: 'no_contact_evidence' });
+      }
+      return m;
+    });
     const openLeadIdentities = jest.fn(async () => new Map([
       ['customer:cust-shared', new Set(['lead-est-direct', 'lead-shared-open'])],
+      ['customer:cust-reopen', new Set(['lead-closed-est-owner'])],
       ['customer:cust-solo', new Set(['lead-est-cust'])],
       ['customer:cust-unworked', new Set(['lead-unworked'])],
     ]));
@@ -497,20 +509,31 @@ describe('lane SQL binding integrity', () => {
     jest.isolateModules(() => {
       ({ _private: loaders } = require('../services/unworked-comms-watcher'));
     });
-    jest.dontMock('../models/db');
-    jest.dontMock('../services/lead-contact-sync');
 
     const rows = await loaders.loadUnworkedDigitalLeads(new Date('2026-11-27T12:00:00Z'));
-    expect(judgeLeads).toHaveBeenCalledTimes(1);
+    expect(leadPageCall).toBe(2);
+    expect(judgeLeads).toHaveBeenCalledTimes(2);
     expect(openLeadIdentities).toHaveBeenCalledTimes(1);
-    expect(rows.map((r) => r.id)).toEqual(['lead-shared-open', 'lead-unworked']);
-    expect(rows[0].total_count).toBe(2);
-    expect(rows[0].all_ids).toEqual(['lead-shared-open', 'lead-unworked']);
+    expect(rows.map((r) => r.id)).toEqual(['lead-shared-open', 'lead-closed-est-owner', 'lead-unworked']);
+    expect(rows[0].total_count).toBe(3);
+    expect(rows[0].all_ids).toEqual(['lead-shared-open', 'lead-closed-est-owner', 'lead-unworked']);
     // Estimate delivery SQL binds cleanly through Knex PG native compiler with no stray ? placeholders.
     expect(estimateSqls.length).toBe(1);
     const native = knexPg.raw(estimateSqls[0].sql, estimateSqls[0].bindings).toSQL().toNative();
     const maxPlaceholder = (native.sql.match(/\$\d+/g) || [])
       .reduce((max, p) => Math.max(max, Number(p.slice(1))), 0);
     expect(maxPlaceholder).toBe(native.bindings.length);
+
+    // PII binding scrub: a Knex error carrying phone/email bindings must never surface in err.message.
+    judgeLeads.mockRejectedValueOnce(Object.assign(
+      new Error('select * from sms_log where to_phone = ANY({9415550199}) — secret@example.com'),
+      { code: '57014' },
+    ));
+    leadPageCall = 0;
+    await expect(loaders.loadUnworkedDigitalLeads(new Date('2026-11-27T12:00:00Z')))
+      .rejects.toThrow('digital leads query failed (57014)');
+
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/lead-contact-sync');
   });
 });

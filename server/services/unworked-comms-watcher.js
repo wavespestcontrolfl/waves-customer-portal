@@ -29,8 +29,7 @@ const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
 const { firstDeliveryEvidenceSql, deliveryInstantSql } = require('./self-serve-estimates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
-const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
-const { excludeInternalTestLeads } = require('./lead-waiting-queue');
+const { applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
 const {
   judgeLeads, openLeadIdentities, usablePhoneKey, leadEmail,
 } = require('./lead-contact-sync');
@@ -544,37 +543,38 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
 }
 
 // Lane 5: unworked digital leads (web forms, email inquiries, voicemails, quote
-// wizard) sitting in status='new' past the 30-minute SLA with no recorded
-// response and no verified human outreach. Delegates calls, human texts,
-// exact-recipient Gmail emails, live top-level bookings, and shared-identity
-// ambiguity checks to lead-contact-sync.js (`judgeLeads` / `openLeadIdentities`)
-// and uses self-serve-estimates.js delivery evidence for estimates so the
-// watcher never diverges from the portal's canonical contact rules.
-const DIGITAL_LEAD_CANDIDATE_CAP = 500;
-const DIGITAL_LEAD_SLA_MS = 30 * 60 * 1000;
+// wizard) sitting in status='new' past the shared waiting-queue SLA with no
+// recorded response and no verified human outreach. Reuses the canonical
+// waiting filter (lead-waiting-queue.js), contact evidence and shared-identity
+// ambiguity checks (lead-contact-sync.js), and estimate delivery evidence
+// (self-serve-estimates.js). Pages through EVERY candidate by (first_contact_at,
+// id) so a large backlog of contacted leads can never hide an older unworked
+// lead or cause false recovery; only displayed rows are capped.
+const DIGITAL_LEAD_PAGE_SIZE = 200;
 const DIGITAL_LEAD_HORIZON_MS = 30 * 24 * 60 * 60 * 1000;
 
-async function loadDigitalLeadCandidates(cutoff, includeExpired) {
-  const query = db('leads')
-    .whereNull('deleted_at')
-    .where('status', 'new')
-    .whereNull('response_time_minutes')
+function loadDigitalLeadCandidatesPage(cutoff, includeExpired, after = null) {
+  const query = applyLeadsAwaitingContactFilter(db('leads'), db, { cutoff })
     .whereNull('converted_at')
-    .whereNotNull('first_contact_at')
     .whereIn('lead_type', [...DIGITAL_LEAD_TYPES])
-    .where('first_contact_at', '<=', new Date(cutoff.getTime() - DIGITAL_LEAD_SLA_MS))
     .orderBy('first_contact_at', 'desc')
-    .limit(DIGITAL_LEAD_CANDIDATE_CAP);
+    .orderBy('id', 'desc')
+    .limit(DIGITAL_LEAD_PAGE_SIZE);
   if (!includeExpired) {
     query.where('first_contact_at', '>=', new Date(cutoff.getTime() - DIGITAL_LEAD_HORIZON_MS));
   }
-  if (SPEED_TO_LEAD_FRESH_START) {
-    query.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
+  if (after) {
+    query.whereRaw('(first_contact_at, id) < (?::timestamptz, ?::uuid)', [after.at, after.id]);
   }
-  return excludeInternalTestLeads(query, db).select(
+  return query.select(
     'id', 'lead_type', 'first_name', 'last_name', 'phone', 'email',
     'service_interest', 'first_contact_at', 'estimate_id', 'customer_id', 'twilio_call_sid',
+    db.raw('first_contact_at::text as cursor_at'),
   );
+}
+
+function estimateOwnerIds(row) {
+  return Array.isArray(row.owner_lead_ids) ? row.owner_lead_ids.filter(Boolean).map(String) : [];
 }
 
 async function loadDeliveredEstimateClearSet(leads, owners) {
@@ -595,29 +595,36 @@ async function loadDeliveredEstimateClearSet(leads, owners) {
       if (estIds.length) q.orWhereIn('fe.id', estIds);
       if (clearableCustIds.length) q.orWhereIn('fe.customer_id', clearableCustIds);
     })
-    .select('fe.id', 'fe.customer_id', db.raw(`${deliveredAtExpr} AS delivered_at`));
+    .select(
+      'fe.id', 'fe.customer_id',
+      db.raw(`${deliveredAtExpr} AS delivered_at`),
+      db.raw('ARRAY(SELECT ol.id::text FROM leads ol WHERE ol.estimate_id = fe.id AND ol.deleted_at IS NULL) AS owner_lead_ids'),
+    );
   const byEstId = new Map();
-  const byCustId = new Map();
+  const byUnownedCustId = new Map();
   for (const r of rows) {
     const ms = new Date(r.delivered_at).getTime();
     if (!Number.isFinite(ms)) continue;
     byEstId.set(String(r.id), Math.max(byEstId.get(String(r.id)) || 0, ms));
-    if (r.customer_id) byCustId.set(String(r.customer_id), Math.max(byCustId.get(String(r.customer_id)) || 0, ms));
+    // Respect explicit estimate ownership (lead-estimate-link.js): an estimate
+    // linked to another lead (even a closed one) never clears this customer's
+    // open inquiry via the customer fallback.
+    if (r.customer_id && estimateOwnerIds(r).length === 0) {
+      byUnownedCustId.set(String(r.customer_id), Math.max(byUnownedCustId.get(String(r.customer_id)) || 0, ms));
+    }
   }
   const cleared = new Set();
   for (const l of leads) {
     const firstMs = new Date(l.first_contact_at).getTime();
-    const directMs = l.estimate_id ? byEstId.get(String(l.estimate_id)) : 0;
+    const directMs = l.estimate_id ? (byEstId.get(String(l.estimate_id)) || 0) : 0;
     const custAllowed = Boolean(l.customer_id) && (owners.get(`customer:${l.customer_id}`)?.size || 0) <= 1;
-    const custMs = custAllowed ? (byCustId.get(String(l.customer_id)) || 0) : 0;
+    const custMs = custAllowed ? (byUnownedCustId.get(String(l.customer_id)) || 0) : 0;
     if (directMs > firstMs || custMs > firstMs) cleared.add(String(l.id));
   }
   return cleared;
 }
 
-async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = false } = {}) {
-  const candidates = await loadDigitalLeadCandidates(cutoff, includeExpired);
-  if (!candidates.length) return [];
+async function filterUnworkedDigitalLeadPage(candidates) {
   const verdicts = await judgeLeads(db, candidates);
   const uncontacted = candidates.filter((lead) => {
     const verdict = verdicts.get(String(lead.id));
@@ -629,13 +636,34 @@ async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = 
   const customerIds = [...new Set(uncontacted.map((l) => l.customer_id).filter(Boolean))];
   const owners = await openLeadIdentities(db, { peers, emails, customerIds });
   const estCleared = await loadDeliveredEstimateClearSet(uncontacted, owners);
-  const remaining = uncontacted.filter((lead) => !estCleared.has(String(lead.id)));
-  const allIds = remaining.map((l) => String(l.id));
-  return remaining.slice(0, MAX_PER_SECTION).map((row) => ({
-    ...row,
-    total_count: remaining.length,
-    all_ids: allIds,
-  }));
+  return uncontacted.filter((lead) => !estCleared.has(String(lead.id)));
+}
+
+async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = false } = {}) {
+  try {
+    const remaining = [];
+    let cursor = null;
+    for (;;) {
+      const candidates = await loadDigitalLeadCandidatesPage(cutoff, includeExpired, cursor);
+      if (!candidates.length) break;
+      const pageUnworked = await filterUnworkedDigitalLeadPage(candidates);
+      remaining.push(...pageUnworked);
+      if (candidates.length < DIGITAL_LEAD_PAGE_SIZE) break;
+      const last = candidates[candidates.length - 1];
+      cursor = { at: last.cursor_at || String(last.first_contact_at), id: last.id };
+    }
+    const allIds = remaining.map((l) => String(l.id));
+    return remaining.slice(0, MAX_PER_SECTION).map((row) => ({
+      ...row,
+      total_count: remaining.length,
+      all_ids: allIds,
+    }));
+  } catch (err) {
+    // Strip Knex query bindings (phone numbers / emails from judgeLeads or
+    // openLeadIdentities) before the error reaches logs (AGENTS.md PII rule).
+    const safeCode = String(err?.code || err?.name || 'DIGITAL_LEADS_QUERY_FAILED');
+    throw Object.assign(new Error(`digital leads query failed (${safeCode})`), { code: safeCode });
+  }
 }
 
 function formatDigitalLeadRow(r) {
