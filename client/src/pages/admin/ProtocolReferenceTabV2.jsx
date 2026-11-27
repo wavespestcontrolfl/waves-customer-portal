@@ -1126,14 +1126,9 @@ export default function ProtocolReferenceTabV2() {
   useEffect(() => {
     adminFetch("/admin/equipment-systems/calibrations")
       .then((d) => {
-        const rows = d.calibrations || [];
-        setEquipmentOptions(rows);
-        const defaultTank = rows.find((r) => Number(r.tank_capacity_gal) === 110
-          && r.calibration_status === "field_verified"
-          && (!r.expires_at || new Date(r.expires_at) > new Date()))
-          || rows.find((r) => Number(r.tank_capacity_gal) === 110);
-        if (defaultTank?.equipment_system_id)
-          setEquipmentSystemId(defaultTank.equipment_system_id);
+        // No sprayer is picked for the technician (owner 2026-11-27: the big tanks are on different numbers): the sheet then shows
+        // each tank's amount until one is chosen.
+        setEquipmentOptions(d.calibrations || []);
       })
       .catch(() => setEquipmentOptions([]));
   }, []);

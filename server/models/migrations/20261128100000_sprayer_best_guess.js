@@ -109,9 +109,8 @@ async function newRow(knex, change) {
     carrier_gal_per_1000: change.carrier, calibration_status: 'owner_estimate', expires_at: null, verification_notes: change.note,
     ...coverage(row, change.carrier),
   };
-  const [inserted] = await knex('equipment_calibrations').insert({ ...copy, ...wrote, active: true, updated_at: knex.fn.now() }).returning('id');
-  const newId = inserted?.id ?? inserted;
-  await audit(knex, 'new_row', 'equipment_calibrations', newId, { system_name: change.name, new_id: newId, old_id: row.id, old_row: old, wrote });
+  const [inserted] = await knex('equipment_calibrations').insert({ ...copy, ...wrote, active: true, updated_at: knex.fn.now() }).returning('*');
+  await audit(knex, 'new_row', 'equipment_calibrations', inserted.id, { system_name: change.name, new_id: inserted.id, old_id: row.id, old_row: old, wrote, new_row: inserted });
 }
 
 // The one row of the table with this exact name, or null (logged).
@@ -149,14 +148,20 @@ async function referenced(knex, id) {
   return false;
 }
 
-// The row still holds exactly what up() wrote.
-const holdsWrote = (row, wrote) => Object.entries(wrote).every(([column, value]) => (value == null ? row[column] == null
-  : (typeof value === 'number' ? sameNumber(row[column], value) : String(row[column]) === String(value))));
+// The new row is still exactly as up() inserted it: every column but updated_at (an admin edit through the calibration route
+// changes at least one other column).
+const norm = (value) => {
+  if (value == null) return null;
+  if (value instanceof Date) return value.toISOString();
+  return typeof value === 'object' ? JSON.stringify(value) : String(value);
+};
+const unchangedSince = (row, inserted) => Object.keys(inserted).filter((column) => column !== 'updated_at')
+  .every((column) => norm(row[column]) === norm(inserted[column]));
 
 async function undoNewRow(knex, metadata) {
   const row = await knex('equipment_calibrations').where({ id: metadata.new_id, active: true }).forUpdate().first();
   const old = await knex('equipment_calibrations').where({ id: metadata.old_id, active: false }).forUpdate().first('id');
-  if (!row || !old || !holdsWrote(row, metadata.wrote || {}) || await referenced(knex, metadata.new_id)) return false;
+  if (!row || !old || !metadata.new_row || !unchangedSince(row, metadata.new_row) || await referenced(knex, metadata.new_id)) return false;
   await knex('equipment_calibrations').where({ id: metadata.new_id }).del();
   await knex('equipment_calibrations').where({ id: metadata.old_id }).update({ active: true });
   return true;

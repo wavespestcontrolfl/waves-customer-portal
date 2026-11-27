@@ -18,7 +18,7 @@ const { calculateProductAmount, v13RateOptions } = require('./waveguard-plan-eng
 const { etDateString } = require('../utils/datetime-et');
 const roundsCatchUp = require('./lawn-rounds-catchup');
 const { SURFACTANT_CHECK_NOTE } = require('./lawn-weed-mix');
-const { labelUseRate, labelRateHoldText, perGallonRate } = require('../utils/protocol-label-rate');
+const { labelUseRate, labelRateCarrier, labelRateHoldText, perGallonRate } = require('../utils/protocol-label-rate');
 
 const BIG_TANK_GAL = 100;
 const BACKPACK_GAL = 4;
@@ -125,16 +125,21 @@ function spotRatePerGallon({ lineMeta, product, ratePer1000, bigTank, percent })
   const held = labelRateHoldText(lineMeta, product);
   if (held) return { held };
   const declared = labelUseRate(lineMeta, product);
-  if (declared) return { lo: declared.amount, hi: declared.amount, unit: declared.unit };
+  // The spray volume the label states the rate over (Tekko Pro on cockroaches: 2 fl oz per gallon at 1 gal per 1,000 sq ft), if any.
+  if (declared) return { lo: declared.amount, hi: declared.amount, unit: declared.unit, carrier: labelRateCarrier(lineMeta, product) };
   return Number(ratePer1000) > 0 ? null : perGallonRate(product);
 }
 
-// The FlowZone 4 gal fill and the sprayer number it is sized on: a per-gallon label rate x 4 with no sprayer in it (so no label
-// volume check either), none at all with the hold's reason for a held line, else the area math on the FlowZone's number.
+// The FlowZone 4 gal fill and the sprayer number it is sized on: a per-gallon label rate x 4 with no sprayer in it (its label
+// volume, when the label states one, checked against the FlowZone's number), none at all with the hold's reason for a held line,
+// else the area math on the FlowZone's number.
 function flowZoneFill(spot, sized, backpack) {
-  if (spot?.held) return { fill: null, sprayer: null, labelRateHold: spot.held };
-  if (spot) return { fill: perGallonFill(spot), sprayer: null, labelRateHold: null };
-  return { fill: sized(BACKPACK_GAL, backpack), sprayer: backpack, labelRateHold: null };
+  if (spot?.held) return { fill: null, sprayer: null, labelRateHold: spot.held, checks: [] };
+  if (spot) {
+    const checks = spot.carrier ? volumeChecks([{ use: null, label: spot.carrier }], [backpack].filter(Boolean)) : [];
+    return { fill: perGallonFill(spot), sprayer: null, labelRateHold: null, checks };
+  }
+  return { fill: sized(BACKPACK_GAL, backpack), sprayer: backpack, labelRateHold: null, checks: [] };
 }
 
 // The FlowZone 4 gal fill at a per-gallon label rate: the rate x 4, with no sprayer volume in it.
@@ -143,7 +148,7 @@ function perGallonFill(spot) {
   const amountMax = spot.hi > spot.lo ? Number((spot.hi * BACKPACK_GAL).toFixed(3)) : null;
   // A range shows no metric: one metric figure would read as the whole band.
   const metric = amountMax == null ? metricFor(amount, spot.unit) : {};
-  return { gallons: BACKPACK_GAL, carrierGalPer1000: null, carrierSource: 'label_per_gallon', sprayerName: null, amount, amountMax, amountUnit: spot.unit, ...metric };
+  return { gallons: BACKPACK_GAL, carrierGalPer1000: spot.carrier || null, carrierSource: 'label_per_gallon', sprayerName: null, amount, amountMax, amountUnit: spot.unit, ...metric };
 }
 
 // The spray volume a line's amount is stated over, read as the job calculation reads it, so the sheet and the job card agree:
@@ -250,7 +255,7 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack,
     backpack4Gal,
     labelRateHold: flowZone.labelRateHold,
     useFills,
-    volumeChecks: volumeChecks(fixedVolumes(lineCarrier, useFills), [tankFills && tankRig, flowZone.sprayer].filter(Boolean)),
+    volumeChecks: [...volumeChecks(fixedVolumes(lineCarrier, useFills), [tankFills && tankRig, flowZone.sprayer].filter(Boolean)), ...flowZone.checks],
     // The FlowZone has no sprayer test on file, so its amount cannot be sized (a rate exists, the line fixes no volume).
     backpackMissing: !backpack4Gal && rate.ratePer1000 > 0 && !(lineCarrier || percent || rigCarrier(backpack) > 0),
   };

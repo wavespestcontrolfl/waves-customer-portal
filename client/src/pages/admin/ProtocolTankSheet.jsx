@@ -194,8 +194,10 @@ const useRows = (useFills = []) => useFills.flatMap((use) => [["100 gal", use.pe
 const headingFill = (fill, backpack) => `${fillText(fill)} / ${num(fill.gallons)} gal${fill === backpack ? " FlowZone" : ""}`;
 
 // The card heading: the full tank, else 100 gal, else FlowZone. A card with only per-use fills (October Velista with no FlowZone
-// test) shows the first of them, never "No amount".
+// test) shows the first of them, never "No amount". With a line per big tank (tankOptions), each tank's full tank, named.
 function amountHeading(amounts) {
+  const tanks = (amounts.tankOptions || []).filter((tank) => tank.fullTank);
+  if (tanks.length) return tanks.map((tank) => `${headingFill(tank.fullTank)} ${tank.sprayerName}`).join("; ");
   const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
   if (main) return headingFill(main, amounts.backpack4Gal);
   const use = (amounts.useFills || []).find((entry) => entry.per100Gal || entry.backpack4Gal);

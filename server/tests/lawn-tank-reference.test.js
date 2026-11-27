@@ -126,6 +126,11 @@ describe('a fixed volume the sprayer test does not put out, and the Celsius heat
     expect(held.labelRateHold).toMatch(/^The card's rate is for EPA 100-1\..*read the bottle's label before mixing$/);
     expect(tankReference({ product: declared, item: spotItem, rig: TANK, backpack: BACKPACK, lineMeta: { labelRatePerGallon: { ...weaker.labelRatePerGallon } } }))
       .toMatchObject({ labelRateHold: null, backpack4Gal: { amount: 2.64, carrierSource: 'label_per_gallon' } });
+    // A label rate stated over its own spray volume keeps it: the FlowZone fill names it, and a FlowZone on another number gets a check.
+    const withVolume = { labelRatePerGallon: { amount: 2, unit: 'fl_oz', epa: '100-1', carrierGalPer1000: 1 } };
+    const stated = tankReference({ product: declared, item: spotItem, rig: TANK, backpack: { ...BACKPACK, carrier_gal_per_1000: 2 }, lineMeta: withVolume });
+    expect(stated.backpack4Gal).toMatchObject({ amount: 8, carrierGalPer1000: 1, carrierSource: 'label_per_gallon' });
+    expect(stated.volumeChecks).toEqual([{ use: null, sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 1, sprayerGalPer1000: 2 }]);
     // A small band shows no metric (one figure would read as the whole band); a small single rate converts.
     const smallBand = tankReference({ product: { ...perGallon, default_rate: '0.05-0.1' }, item: spotItem, rig: TANK, backpack: BACKPACK }).backpack4Gal;
     expect(smallBand).toMatchObject({ amount: 0.2, amountMax: 0.4 });

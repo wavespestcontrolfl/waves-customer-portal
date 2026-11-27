@@ -308,6 +308,8 @@ describe("110-gallon tank reference", () => {
       expect(within(surface).getByText("Full 110 gal tank · Udor tank #2").nextSibling).toHaveTextContent(/^6\.25 oz$/);
       expect(within(surface).getByText("100 gal tank · Udor tank #2").nextSibling).toHaveTextContent(/^5\.7 oz$/);
       expect(within(surface).queryByText("Full 110 gal tank")).not.toBeInTheDocument();
+      // The card heading names each tank's full tank, never one unnamed dose.
+      expect(within(surface).getAllByText("12.5 oz / 110 gal 110-Gallon Spray Tank #1; 6.25 oz / 110 gal Udor tank #2").length).toBeGreaterThan(0);
     }
   });
 

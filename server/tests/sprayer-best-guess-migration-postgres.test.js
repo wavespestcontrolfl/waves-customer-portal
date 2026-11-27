@@ -131,6 +131,18 @@ jest.setTimeout(30000);
     await database.raw(AUDIT_TABLE, [schema]);
   });
 
+  test('down keeps a new row an admin edited in a copied field (pressure), not only the fields up() wrote', async () => {
+    await seed();
+    await migration.up(database);
+    const tank2New = (await active(TANK_2)).id;
+    await database('equipment_calibrations').where({ id: tank2New }).update({ pressure_psi: 180, updated_at: database.fn.now() });
+    const log = quiet();
+    await migration.down(database);
+    log.mockRestore();
+    expect((await active(TANK_2)).id).toBe(tank2New);
+    expect((await active(FLOWZONE)).id).toBe(ids[FLOWZONE]);
+  });
+
   test('up, down, up: the first down restores the start exactly, and the second up writes it again', async () => {
     await seed();
     await migration.up(database);
