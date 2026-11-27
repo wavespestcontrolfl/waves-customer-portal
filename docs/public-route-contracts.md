@@ -4984,9 +4984,15 @@ Waves systems pre-consent — and metadata-only logging before consent. The
 ONE documented exception: Twilio's carrier-side AMD classification
 (`machineDetection: DetectMessageEnd`) runs before the vestibule and
 returns only a label (human/machine), never audio — a deliberate,
-counsel-review-before-flip item (DECISIONS-PRB #13), required so machine
+counsel-review-before-flip item (required so machine
 answers route to the capped generic-callback voicemail instead of playing
-the consent script to an answering machine. Press-1 renders `<Connect><ConversationRelay>` to the
+the consent script to an answering machine; confirm in pre-flip counsel review
+that carrier-side AMD label-only detection satisfies the pre-consent bar).
+Also confirm in pre-flip counsel review whether the vestibule opening speaking
+the customer's first name + "billing follow-up" before right-party confirmation
+crosses FCCPA third-party disclosure (wrong-party path shares zero account
+detail; if counsel wants a generic identity-first opening, it is a one-line
+`vestibuleScript` edit in `script.js`). Press-1 renders `<Connect><ConversationRelay>` to the
 existing `/ws/voice-agent` endpoint with a per-call minted token and a
 `session_mode=collections` Parameter — which the ws server treats as an
 UNVERIFIED hint and re-proves against the same call_log row before any
