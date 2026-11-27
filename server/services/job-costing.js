@@ -588,20 +588,29 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
 }
 
-// A flagged line (not_deducted_implausible) is skipped by its identity: the service_products row it was recorded on, which the
-// application ledger row carries as service_product_id. No amount is compared, so no rounding can make the keys differ.
-// A deduction saved before that id was kept falls back to product, base unit and an amount within the stored precision
-// (quantity_applied / total_amount are decimal(8,3)): a submitted 641.1234 matches the 641.123 the ledger kept.
-// The amount as decimal(8,3) stores it, in thousandths: PostgreSQL rounds half up on the decimal text (406.0005 is 406.001),
-// where toFixed(3) of the binary double gives 406.000.
-const storedThousandths = (value) => Math.round(Number((Number(value) * 1000).toPrecision(12)));
+// The amount as decimal(8,3) stores it, in thousandths: the shortest decimal text of the number rounded half up ONCE, the way
+// PostgreSQL rounds the text it is sent (406.0005 stores as 406.001, 406.00049999999 as 406.000), never a binary double
+// scaled and rounded twice. A numeric column's own text ("406.001") reads the same way.
+function storedThousandths(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const text = /e/i.test(String(n)) ? n.toFixed(20) : String(n);
+  const [whole, fraction = ''] = text.replace(/^-/, '').split('.');
+  const padded = `${fraction}0000`;
+  return BigInt(whole + padded.slice(0, 3)) + (padded[3] >= '5' ? 1n : 0n);
+}
+
+// A flagged line (not_deducted_implausible) is skipped when the ledger row is the one it was recorded on (its service
+// product id) OR carries the same product, base unit and stored amount. The second test keeps the exclusion when a pest recap
+// re-saves the product: the recap replaces the service_products row and relinks the ledger row to the new id with the
+// quantity unchanged, and a deduction saved before the id was kept has only the amount. A corrected amount matches neither, so it is costed.
 function isFlaggedLedgerRow(flagged, row) {
   const unit = baseQuantityUnit(row.quantity_unit) || '';
-  return flagged.some((d) => (d.serviceProductId
-    ? d.serviceProductId === row.service_product_id
-    : d.productId === row.product_id
+  const stored = storedThousandths(row.quantity_applied);
+  return flagged.some((d) => (d.serviceProductId && d.serviceProductId === row.service_product_id)
+    || (d.productId === row.product_id
       && (baseQuantityUnit(d.amountUnit) || '') === unit
-      && storedThousandths(d.amount) === storedThousandths(row.quantity_applied)));
+      && stored != null && storedThousandths(d.amount) === stored));
 }
 
 // Standard labor (owner ruling 2026-10-31), applied to the measured result of

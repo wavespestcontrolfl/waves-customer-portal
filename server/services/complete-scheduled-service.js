@@ -1849,7 +1849,7 @@ function overVisitLimitGroups(lines, rowById) {
 // limit are marked for deductProductInventory (the same advisory path an admin entry takes) and never refused. Returns
 // { status, body } or null. One catalog read, no history read. `skip` is a replay, a resume or a packet effects phase:
 // nothing is judged or changed.
-async function vetProductAmounts(database, { products, skip = false }) {
+async function vetProductAmounts(database, { products, skip = false, rowIdentity = (p) => p }) {
   if (skip || !Array.isArray(products)) return null;
   const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
   const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
@@ -1857,9 +1857,15 @@ async function vetProductAmounts(database, { products, skip = false }) {
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
   const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
   if (invalid) return invalid;
-  const overGroups = overVisitLimitGroups(lines, rowById);
+  // The ceiling judges what the completion records: the products loop keeps the FIRST row of each product and add-on
+  // (rowIdentity, the same rule) and drops the rest, so a dropped duplicate is neither summed nor flagged. The default
+  // judges every line as its own row.
+  const seenRows = new Set();
+  const recorded = new Set(products.filter((p) => p?.productId && !seenRows.has(rowIdentity(p)) && seenRows.add(rowIdentity(p))));
+  const recordedLines = lines.filter((line) => recorded.has(line));
+  const overGroups = overVisitLimitGroups(recordedLines, rowById);
   if (overGroups.size) {
-    for (const line of lines) {
+    for (const line of recordedLines) {
       const judged = visitLimitInput(line, rowById.get(line.productId));
       const group = judged && overGroups.get(`${line.productId}|${visitLimitShare(judged).bucket}`);
       if (group) OVER_VISIT_LIMIT_LINES.set(line, group);
@@ -2521,6 +2527,23 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   }
 }
 
+// What one flagged deduction says it entered: the combined amount and each contributing line when the product's lines are over
+// together, else its own amount.
+function flaggedAmountText(deduction) {
+  const unitText = (unit) => String(unit || '').replace(/_/g, ' ');
+  const parts = Array.isArray(deduction.contributingLines) ? deduction.contributingLines : [];
+  return parts.length > 1
+    ? `${deduction.combinedAmount} ${unitText(deduction.combinedAmountUnit)} across ${parts.length} lines (${parts.join(' + ')})`
+    : `${deduction.amount} ${unitText(deduction.amountUnit)}`;
+}
+function flaggedAmountDetail(fullName, visitLabel, flagged) {
+  const texts = [...new Set(flagged.map(flaggedAmountText))];
+  const tail = 'That is too much for one visit, so stock was not changed and no cost was recorded.';
+  if (texts.length > 1) return `${fullName}: ${texts.join('; ')} were entered on a ${visitLabel} visit. ${tail} Check the amounts entered, and fix the visit's product lines if they are wrong.`;
+  if (texts[0].includes(' across ')) return `${fullName}: ${texts[0].replace(' across ', ' was entered across ')} on a ${visitLabel} visit. ${tail} Check the amounts entered, and fix the visit's product lines if they are wrong.`;
+  return `${fullName}: ${texts[0]} was entered on a ${visitLabel} visit. ${tail} Check the amount entered, and fix the visit's product line if it is wrong.`;
+}
+
 const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
 // The alert words with the product named, or plain words when the alert rules refuse the name (a code, a bracket, a
 // second sentence). The headline and the one-sentence why carry a short name; the detail keeps it whole.
@@ -2573,22 +2596,22 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
       });
     });
   };
+  // One alert for each product on the record: it names every flagged group of that product's lines (a host line over the weight
+  // ceiling and an add-on line over the volume ceiling are two groups), so staff can correct each.
   const sendAmount = async (deduction) => {
     const fullName = deduction.productName || 'A product';
     const words = stockAlertWords(fullName, (n) => ({ action: `check ${n} amount`, why: `${n} amount looks too big for a ${visitLabel} visit, so stock was not changed.` }),
       { action: 'check a product amount', why: `A product amount looks too big for a ${visitLabel} visit, so stock was not changed.` });
+    const flagged = lines.filter((line) => line?.status === 'not_deducted_implausible' && line.productId === deduction.productId);
     return raise(words, `stock-amount-check:${record.id}:${deduction.productId}`, {
       link: `/admin/customers?customerId=${svc.customer_id}`,
       doneWhen: 'amount_checked',
     }, {
-      detail: Array.isArray(deduction.contributingLines) && deduction.contributingLines.length > 1
-        // The product's lines are over TOGETHER: name the total and each line, as one alert for the record and product.
-        ? `${fullName}: ${deduction.combinedAmount} ${String(deduction.combinedAmountUnit || '').replace(/_/g, ' ')} was entered across ${deduction.contributingLines.length} lines on a ${visitLabel} visit (${deduction.contributingLines.join(' + ')}). That is too much for one visit, so stock was not changed and no cost was recorded. Check the amounts entered, and fix the visit's product lines if they are wrong.`
-        : `${fullName}: ${deduction.amount} ${String(deduction.amountUnit || '').replace(/_/g, ' ')} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
+      detail: flaggedAmountDetail(fullName, visitLabel, flagged),
       metadata: {
         productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id,
         amount: deduction.combinedAmount ?? deduction.amount, amountUnit: deduction.combinedAmountUnit ?? deduction.amountUnit,
-        ...(deduction.contributingLines ? { contributingLines: deduction.contributingLines } : {}),
+        flaggedLines: [...new Set(flagged.map(flaggedAmountText))],
       },
     });
   };
@@ -5493,7 +5516,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // failed, as for the other refusals above, so a corrected resubmit is not blocked. An amount over its product's ceiling is
     // never refused, for any role (owner 2026-11-26): vetProductAmounts marks it and deductProductInventory flags the line.
     const amountRefusal = await vetProductAmounts(db, {
-      products, skip: claim.action !== 'proceed',
+      products, skip: claim.action !== 'proceed', rowIdentity: (p) => areaAddOnGovernedRate.productRowIdentity(addOnTags, p),
     });
     if (amountRefusal) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(amountRefusal.body.code), db);

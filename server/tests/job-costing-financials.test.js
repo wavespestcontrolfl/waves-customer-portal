@@ -750,8 +750,16 @@ describe('calcProductsCost — an application amount is priced per unit, never p
       const notes = { inventoryDeductions: [{ productId: 'p-jug', serviceProductId: 'sp-1', amount: 406.0005, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
       const row = { product_id: 'p-jug', service_product_id: 'sp-1', quantity_applied: '406.001', quantity_unit: 'fl_oz' };
       expect((await cost(row, notes)).productsCost).toBe(0);
-      // A different service product of the same product, amount and unit is not the flagged line.
-      expect((await cost({ ...row, service_product_id: 'sp-2' }, notes)).productsCost).toBeGreaterThan(0);
+      // A pest recap re-saves the product: a new service product id, the same stored quantity. Still the flagged line.
+      expect((await cost({ ...row, service_product_id: 'sp-2' }, notes)).productsCost).toBe(0);
+      // A corrected amount on a new service product is a different line and is costed.
+      expect((await cost({ ...row, service_product_id: 'sp-2', quantity_applied: '31.500' }, notes)).productsCost).toBeGreaterThan(0);
+    });
+
+    test('the amount rounds once, on its decimal text: 406.00049999999 stores as 406.000, so 406.001 is a different line and is costed', async () => {
+      const notes = { inventoryDeductions: [{ productId: 'p-jug', amount: 406.00049999999, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
+      expect((await cost({ product_id: 'p-jug', quantity_applied: '406.000', quantity_unit: 'fl_oz' }, notes)).productsCost).toBe(0);
+      expect((await cost({ product_id: 'p-jug', quantity_applied: '406.001', quantity_unit: 'fl_oz' }, notes)).productsCost).toBeGreaterThan(0);
     });
 
     test('a deduction saved before the service product id was kept still matches 406.0005 to the stored 406.001', async () => {

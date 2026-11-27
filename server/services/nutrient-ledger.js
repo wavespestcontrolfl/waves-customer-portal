@@ -64,6 +64,14 @@ function toDateOnly(value) {
   return Number.isNaN(parsed.getTime()) ? etDateString() : etDateString(parsed);
 }
 
+// A rate the column cannot hold is skipped with a warning, so the insert cannot abort the completion.
+function ratesAreStorable(nutrients, product, turfProfile, serviceProduct) {
+  const rates = [nutrients.nAppliedPer1000, nutrients.pAppliedPer1000, nutrients.kAppliedPer1000];
+  if (rates.every((rate) => rate <= MAX_STORABLE_RATE)) return true;
+  logger.warn(`[nutrient-ledger] ${product.name}: the per-1,000 rate on ${turfProfile?.lawn_sqft} sq ft is too large to store; no nutrient row written for service product ${serviceProduct.id}`);
+  return false;
+}
+
 async function recordServiceProductNutrients(trx, {
   customerId,
   turfProfile,
@@ -82,11 +90,8 @@ async function recordServiceProductNutrients(trx, {
     lawnSqft: turfProfile?.lawn_sqft,
   });
   if (!nutrients) return null;
-  // Never roll back a visit for a ledger row (owner 2026-11-26: warn, never block): a rate the column cannot hold is skipped, with a warning.
-  if ([nutrients.nAppliedPer1000, nutrients.pAppliedPer1000, nutrients.kAppliedPer1000].some((rate) => !(rate <= MAX_STORABLE_RATE))) {
-    logger.warn(`[nutrient-ledger] ${product.name}: the per-1,000 rate on ${turfProfile?.lawn_sqft} sq ft is too large to store; no nutrient row written for service product ${serviceProduct.id}`);
-    return null;
-  }
+  // Never roll back a visit for a ledger row (owner 2026-11-26: warn, never block).
+  if (!ratesAreStorable(nutrients, product, turfProfile, serviceProduct)) return null;
 
   const dateOnly = toDateOnly(applicationDate || serviceRecord.service_date);
   const applicationYear = etParts(parseETDateTime(`${dateOnly}T12:00`)).year;

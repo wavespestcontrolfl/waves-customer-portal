@@ -334,8 +334,18 @@ describe('the office alert for an amount no visit uses', () => {
     ]);
     expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [, , opts] = compose.raiseAdminAlert.mock.calls[0];
-    expect(opts.detail).toContain('101 lb was entered across 2 lines on a lawn visit (60 lb + 41 lb)');
-    expect(opts.metadata).toMatchObject({ amount: 101, amountUnit: 'lb', contributingLines: ['60 lb', '41 lb'] });
+    expect(opts.detail).toContain('101 lb was entered across 2 lines (60 lb + 41 lb) on a lawn visit');
+    expect(opts.metadata).toMatchObject({ amount: 101, amountUnit: 'lb', flaggedLines: ['101 lb across 2 lines (60 lb + 41 lb)'] });
+  });
+
+  test('two flagged groups of one product (a weight line and a volume line) go in the one alert', async () => {
+    await run({ id: 'visit-1', customer_id: 'customer-1', service_type: 'Lawn Care' }, [
+      refused({ amount: 120, amountUnit: 'lb' }), refused({ amount: 900, amountUnit: 'fl_oz' }),
+    ]);
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [, , opts] = compose.raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('120 lb; 900 fl oz were entered on a lawn visit');
+    expect(opts.metadata.flaggedLines).toEqual(['120 lb', '900 fl oz']);
   });
 
   test('a name the alert rules refuse falls back to plain words', async () => {

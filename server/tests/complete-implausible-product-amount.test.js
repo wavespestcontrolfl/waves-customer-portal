@@ -187,6 +187,19 @@ describe('the fixed per-visit limit (a warning, never a refusal)', () => {
     expect((await deduct(products, 0, 500)).result.combinedAmount).toBeUndefined();
   });
 
+  test('the ceiling judges what the completion records: a duplicate row of one product (the loop keeps the first) is neither summed nor flagged', async () => {
+    const rowIdentity = (p) => `${p.productId}|${p.areaAddOnKey || ''}`;
+    const dup = [{ productId: CELSIUS, totalAmount: 60, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 60, amountUnit: 'lb' }];
+    canonicalizeProductLines(dup);
+    expect(await vetProductAmounts(require('../models/db'), { products: dup, rowIdentity })).toBeNull();
+    expect(dup.map(isOverVisitLimitLine)).toEqual([false, false]);
+    // An add-on row is its own row: both are recorded, so together they are over.
+    const addOn = [{ productId: CELSIUS, totalAmount: 60, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 60, amountUnit: 'lb', areaAddOnKey: 'x' }];
+    canonicalizeProductLines(addOn);
+    await vetProductAmounts(require('../models/db'), { products: addOn, rowIdentity });
+    expect(addOn.map(isOverVisitLimitLine)).toEqual([true, true]);
+  });
+
   test('a client cannot mark its own line: a submitted flag changes nothing', async () => {
     const products = [{ productId: CELSIUS, totalAmount: 2, amountUnit: 'lb', overVisitLimit: true, status: 'not_deducted_implausible' }];
     expect(await marked(products)).toEqual({ out: null, over: [false] });
