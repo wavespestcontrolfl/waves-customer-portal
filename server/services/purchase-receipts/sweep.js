@@ -474,9 +474,10 @@ async function runPurchaseReceiptRestockSweep({ notify: notifyAdmin } = {}) {
   await processSiteOneInvoices({ floor, since, now, notifyAdmin, totals });
   await closeLoggedDeliveryBells().catch((err) => logger.warn(`[purchase-receipts] close pass failed: ${err.message}`));
   await closeDeliveredUndeliveredBells().catch((err) => logger.warn(`[purchase-receipts] undelivered close pass failed: ${err.message}`));
-  // job_health stays 'success' when single lines fail (the run worked), so the alert is what carries them, past the lookback too.
-  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, settled: totals.settledLines })
-    .catch((err) => { logger.error(`[purchase-receipts] failed-lines alert failed: ${err.message}`); return totals.failedLines.length; });
+  // Last, after every line was recorded. job_health stays 'success' when single lines fail (the run worked), so the
+  // alert carries them; if the alert cannot be saved the failures would be lost, so the error fails the run
+  // (job_health 'failed' with last_error) and the next tick retries the lines and rewrites the alert.
+  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, settled: totals.settledLines });
   return totals;
 }
 

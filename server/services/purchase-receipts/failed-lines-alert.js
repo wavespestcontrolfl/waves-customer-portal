@@ -36,11 +36,11 @@ const DEDUPE_KEY = 'purchase-receipt-failed-lines';
 const INVENTORY_LINK = '/admin/inventory?tab=products';
 const SHOWN = 5;
 const ROW_CHECK_CHUNK = 200;
-const ROW_COLUMNS = ['vendor', 'order_number', 'shipment_key', 'line_no'];
 const VENDOR_NAMES = { amazon: 'Amazon', siteone: 'SiteOne' };
 
 const plural = (n) => (n === 1 ? '' : 's');
 const lineKey = ({ vendor, orderNumber, shipmentKey, lineNo }) => [vendor, orderNumber || 'unknown', shipmentKey, lineNo].join('|');
+const normalizeTitle = (title) => String(title || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().slice(0, 200);
 const emailKey = (vendor, emailId) => `email|${vendor}|${emailId}`;
 
 // What the sweep records for a failed line (sweep.js recordLineOutcome). The
@@ -48,7 +48,7 @@ const emailKey = (vendor, emailId) => `email|${vendor}|${emailId}`;
 function failedLineEntry({ receipt, email, orderNumber, shipmentKey, lineNo, item, err }) {
   const entry = { vendor: receipt.vendor, orderNumber: orderNumber || 'unknown', shipmentKey, lineNo };
   return {
-    ...entry, key: lineKey(entry), title: cutAtWord(String(item.title || '').trim(), 80),
+    ...entry, key: lineKey(entry), title: cutAtWord(String(item.title || '').trim(), 80), titleKey: normalizeTitle(item.title),
     reason: cutAtWord(scrubSentryText(String(err.message || err).split('\n')[0]), 100),
     receivedAt: new Date(email.received_at).toISOString(),
   };
@@ -59,17 +59,29 @@ function failedEmailEntry({ vendor, email }) {
   return { kind: 'email', key: emailKey(vendor, email.id), vendor, emailId: email.id, receivedAt: new Date(email.received_at).toISOString() };
 }
 
-// Keys that already have a purchase_receipt_lines row: a line by its table key, an email by any row it wrote.
+// A line's identity across copies of one invoice. The sweep keys a SiteOne invoice by its number whichever email
+// carries it (siteOneInvoiceLines: the first copy handled owns the shipment), so a row from ANY email under the same
+// vendor and shipment_key counts, matched by line number or by the product text (a copy that numbered the lines differently).
+const byLine = (vendor, shipmentKey, lineNo) => `${vendor}|${shipmentKey}|line|${lineNo}`;
+const byTitle = (vendor, shipmentKey, title) => `${vendor}|${shipmentKey}|title|${normalizeTitle(title)}`;
+
+// Keys that already have a purchase_receipt_lines row: a line by its identity above, an email by any row it wrote.
 async function recordedKeys(entries, conn) {
   const recorded = new Set();
   const lines = entries.filter((entry) => entry.kind !== 'email');
-  for (let i = 0; i < lines.length; i += ROW_CHECK_CHUNK) {
-    const chunk = lines.slice(i, i + ROW_CHECK_CHUNK);
-    const rows = await conn('purchase_receipt_lines')
-      .whereIn(ROW_COLUMNS, chunk.map((e) => [e.vendor, e.orderNumber, e.shipmentKey, e.lineNo])).select(ROW_COLUMNS);
+  const shipments = [...new Set(lines.map((entry) => entry.shipmentKey))];
+  const identities = new Set();
+  for (let i = 0; i < shipments.length; i += ROW_CHECK_CHUNK) {
+    const rows = await conn('purchase_receipt_lines').whereIn('shipment_key', shipments.slice(i, i + ROW_CHECK_CHUNK))
+      .select('vendor', 'shipment_key', 'line_no', 'raw_title');
     for (const row of rows) {
-      recorded.add(lineKey({ vendor: row.vendor, orderNumber: row.order_number, shipmentKey: row.shipment_key, lineNo: row.line_no }));
+      identities.add(byLine(row.vendor, row.shipment_key, row.line_no));
+      identities.add(byTitle(row.vendor, row.shipment_key, row.raw_title));
     }
+  }
+  for (const entry of lines) {
+    if (identities.has(byLine(entry.vendor, entry.shipmentKey, entry.lineNo))
+      || (entry.titleKey && identities.has(byTitle(entry.vendor, entry.shipmentKey, entry.titleKey)))) recorded.add(entry.key);
   }
   const emails = entries.filter((entry) => entry.kind === 'email');
   if (emails.length) {

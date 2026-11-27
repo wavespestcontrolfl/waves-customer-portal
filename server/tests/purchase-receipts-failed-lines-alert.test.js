@@ -21,10 +21,8 @@ jest.mock('../models/db', () => {
     if (table !== 'purchase_receipt_lines') throw new Error(`unexpected table ${table}`);
     let matched = [];
     const builder = {
-      whereIn: (cols, tuples) => {
-        matched = Array.isArray(cols)
-          ? mockState.rows.filter((row) => tuples.some((t) => cols.every((col, i) => row[col] === t[i])))
-          : mockState.rows.filter((row) => tuples.includes(row[cols]));
+      whereIn: (col, values) => {
+        matched = mockState.rows.filter((row) => values.includes(row[col]));
         return builder;
       },
       select: async () => matched,
@@ -44,7 +42,7 @@ const entry = (n, receivedAt = '2026-11-25T15:00:00Z') => failedLineEntry({
   item: { title: `Product ${n} 50 LB. BAG` }, err: new Error(`boom ${n}`),
 });
 const emailEntry = (id = 's1', receivedAt = '2026-11-25T15:00:00Z') => failedEmailEntry({ vendor: 'siteone', email: { id, received_at: receivedAt } });
-const rowFor = (e, extra = {}) => ({ vendor: e.vendor, order_number: e.orderNumber, shipment_key: e.shipmentKey, line_no: e.lineNo, email_id: 'x', ...extra });
+const rowFor = (e, extra = {}) => ({ vendor: e.vendor, order_number: e.orderNumber, shipment_key: e.shipmentKey, line_no: e.lineNo, raw_title: 'other', email_id: 'x', ...extra });
 const openAlert = (...failedLines) => mockEpisodes.openAdminAlertMetadata.mockResolvedValue(failedLines.length ? [{ failedLines, itemKeys: failedLines.map((l) => l.key) }] : []);
 const raised = () => mockEpisodes.raiseAdminAlertWithReopen.mock.calls[0];
 
@@ -153,6 +151,26 @@ describe('what keeps and what drops an entry', () => {
   test('a failed line with no row stays even when the same key shows as settled earlier in the run', async () => {
     const failed = entry(1);
     expect(await reconcileFailedLineAlert({ failed: [failed], settled: [{ key: failed.key }] })).toBe(1);
+  });
+
+  test('the other copy of the same invoice recorded the line: matched by vendor + invoice number, not the exact key', async () => {
+    const failed = entry(1);
+    // Copy B (another email, another order_number text) wrote line 1 under the same shipment key.
+    mockState.rows = [rowFor(failed, { order_number: 'INV1-COPY', email_id: 'copy-b' })];
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(0);
+    expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
+  });
+
+  test('a copy that numbered the lines differently still matches by product text', async () => {
+    const failed = entry(1);
+    mockState.rows = [rowFor(failed, { line_no: 7, raw_title: 'PRODUCT 1 50 lb. bag', email_id: 'copy-b' })];
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(0);
+  });
+
+  test('another invoice, or another line with other text, never hides a failed line', async () => {
+    const failed = entry(1);
+    mockState.rows = [rowFor(entry(2)), rowFor(failed, { line_no: 2, raw_title: 'Something else' })];
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(1);
   });
 
   test('nothing failed and nothing open writes nothing', async () => {

@@ -375,14 +375,13 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(summarize(result)).toMatchObject({ errors: 1, unappliedFailedLines: 1 });
   });
 
-  test('a failed-lines alert that cannot be written is logged and never fails the sweep', async () => {
+  test('a failed-lines alert that cannot be written fails the run after every line was processed (job_health failed, retried next tick)', async () => {
     mockState.emails = [deliveredEmail];
     processReceiptLine.mockImplementationOnce(async () => { throw new Error('boom'); });
     processReceiptLine.mockImplementationOnce(async () => unmatched);
     reconcileFailedLineAlert.mockRejectedValueOnce(new Error('alert write timed out'));
-    const result = await runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) });
-    expect(logger.error).toHaveBeenCalledWith('[purchase-receipts] failed-lines alert failed: alert write timed out');
-    expect(result.unappliedFailedLines).toBe(1);
+    await expect(runPurchaseReceiptRestockSweep({ notify: jest.fn(async () => ({})) })).rejects.toThrow('alert write timed out');
+    expect(processReceiptLine).toHaveBeenCalledTimes(2); // both lines were processed before the alert write
   });
 
   test('a close pass that fails is logged and never fails the sweep or changes what it returns', async () => {
