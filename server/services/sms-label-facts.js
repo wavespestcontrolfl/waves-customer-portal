@@ -448,13 +448,15 @@ const NAMED_SERVICE_FAMILIES = [
 ];
 /** The prep guide families a text names by a service word (a Set; empty when none). A heat bed bug service is never also the chemical one. */
 // The words only FIND a service phrase; PREP_CONFIG (the guide sender's own matcher, which classifies every visit) names its family:
-// each match is read with up to three words before it, back to the nearest "and" / "or" / punctuation, so a catalog name ("Lawn Pest
-// Control", "Flea & Tick Pest Control") is the family PREP_CONFIG gives it (lawn, flea), never the family of the generic words inside
-// it, and a list ("the lawn and pest control") is never read as one name. A phrase PREP_CONFIG does not classify keeps the words' family.
+// each match is read with up to three words before it, back to the nearest joining word, article, possessive or preposition ("and",
+// "the", "my", "after" ...) or punctuation, so only the name itself is read: a catalog name ("Lawn Pest Control", "Flea & Tick Pest
+// Control") is the family PREP_CONFIG gives it (lawn, flea), never the family of the generic words inside it, and a list ("the lawn and
+// pest control") or a pest seen nearby ("roaches after the pest control") is never read as part of the name. A phrase PREP_CONFIG does
+// not classify keeps the words' family.
 const NAMED_SERVICE_GLOBAL = NAMED_SERVICE_FAMILIES.map(({ family, re }) => ({ family, re: new RegExp(re.source, 'g') }));
 const SERVICE_NAME_LEAD_WORDS = 3;
 function catalogFamilyOf(canon, match) {
-  const lead = canon.slice(0, match.index).split(/[,.;:!?()]|\b(?:and|or|but|then|also|plus)\b/).pop();
+  const lead = canon.slice(0, match.index).split(/[,.;:!?()]|\b(?:and|or|but|then|also|plus|the|a|an|my|our|your|this|that|these|those|next|last|after|before|since|from|for|about|of|on|at|in|to|with|by)\b/).pop();
   const before = lead.split(/\s+/).filter(Boolean).slice(-SERVICE_NAME_LEAD_WORDS).join(' ');
   const hit = require('./prep-guide-sender').prepFamilyForServiceType(`${before} ${match[0]}`);
   return hit ? hit[0] : null;

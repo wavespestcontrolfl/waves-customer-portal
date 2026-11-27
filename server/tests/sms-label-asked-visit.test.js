@@ -88,6 +88,8 @@ describe('pickAskedVisitDate', () => {
     expect(labelFactsLib.namedServiceFamily('What should I do before the Flea & Tick Pest Control visit?')).toBe('flea');
     expect(labelFactsLib.namedServiceFamily('before my Flea Tick Pest Control service')).toBe('flea');
     expect(labelFactsLib.namedServiceFamily('the fleas are back, and pest control is Friday')).toBe('interior_pest');
+    expect(labelFactsLib.namedServiceFamily('I see roaches after the pest control visit. When can the dog go out?')).toBe('interior_pest');
+    expect(labelFactsLib.namedServiceFamily('fleas since my pest control service')).toBe('interior_pest');
   });
 
   test('a date: the one earlier visit every date reference resolves to', () => {
