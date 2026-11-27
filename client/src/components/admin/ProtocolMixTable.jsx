@@ -34,7 +34,9 @@ export default function ProtocolMixTable({ mixRates }) {
                   </td>
                 ))}
                 <td className="px-3 py-1.5 text-ink-secondary">
+                  {row.labelRateMissing ? <div className="text-alert-fg">Label rate not on file</div> : null}
                   {row.dose ? <div>Dose, not a tank mix: <span className="font-mono u-nums">{row.dose}</span></div> : null}
+                  {row.note ? <div>{row.note}</div> : null}
                   {row.sprayVolume ? <div>{row.sprayVolume}</div> : null}
                   {row.limit ? <div className="text-ink-tertiary">{row.limit}</div> : null}
                 </td>

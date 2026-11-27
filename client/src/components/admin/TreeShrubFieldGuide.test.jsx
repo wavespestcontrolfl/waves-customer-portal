@@ -114,3 +114,28 @@ test('no palm-type table when the visit carries none', () => {
   render(<TreeShrubFieldGuide guide={{ ...guide, palmTypes: null }} />);
   expect(screen.queryByTestId('palm-types')).toBeNull();
 });
+
+test("the month's Mix Amounts table shows each sprayer's label amount, granular and drench doses as written, and no amount without a label rate", () => {
+  // The server's month payload (tree-shrub-field-guide.js): each product's rows, routine first.
+  const visit = protocols.tree_shrub.visits[0];
+  const keys = [...new Set([...visit.fieldGuide.routine, ...visit.fieldGuide.conditional].map(row => row.key))];
+  render(<TreeShrubFieldGuide guide={{ ...guide, mixRates: keys.flatMap(key => reference.products[key].mixRates) }} />);
+  // The Mix Amounts table (the palm-types table is another).
+  const table = screen.getByText('Mix Amounts').parentElement.querySelector('table');
+  expect(within(table).getAllByRole('columnheader').map(cell => cell.textContent)).toEqual(['Product', 'B&G 1 gal', 'FlowZone 4 gal', 'Rig 100 gal', 'Spray volume, placement, limit']);
+  const row = (where) => within(table).getByText(where).closest('tr');
+  // TriStar by target: per gallon, per 4 gal and per 100 gal from one label rate.
+  expect(within(row('Aphids')).getAllByRole('cell').slice(0, 3).map(cell => cell.textContent)).toEqual(['0.04 fl oz (1.2 mL)', '0.16 fl oz (4.7 mL)', '4 fl oz']);
+  expect(within(row('Whiteflies or soft scales (higher rate for high pressure)')).getAllByRole('cell')[2].textContent).toBe('8.5 to 16.5 fl oz');
+  // Merit: a soil drench by trunk or shrub size, never a tank amount.
+  const merit = row('Soil drench, FlowZone soil injector');
+  expect(within(merit).getAllByRole('cell').slice(0, 3).map(cell => cell.textContent)).toEqual(['—', '—', '—']);
+  expect(within(merit).getByText(/per inch of trunk diameter, or per foot of shrub height/)).toBeTruthy();
+  // Snapshot and the palm fertilizer: a rate per area or plant and the hand-spread note.
+  expect(within(row('Planting beds, before weeds germinate')).getByText(/2\.3, 3\.45 or 4\.6 lb per 1,000 sq ft/)).toBeTruthy();
+  expect(within(row('Palms, beds, trees and larger shrubs')).getByText(/spread by hand/)).toBeTruthy();
+  // Sequestar: no verified label rate, so no amount at all.
+  const sequestar = row('Iron chlorosis');
+  expect(within(sequestar).getByText('Label rate not on file')).toBeTruthy();
+  expect(within(sequestar).queryByText(/oz|lb/)).toBeNull();
+});
