@@ -1150,8 +1150,12 @@ function reportCompletionBody({
     // The untouched first-visit 5: the server re-checks it is still the
     // first visit (owner ruling 2026-09-24).
     ...(ratingSent && form.ratingPrefilled ? { clientPestRatingPrefilled: true } : {}),
-    technicianNotes: draft.text.trim(),
-    reportDraftBase: draft.base,
+    // A note visit (GATE_REPORT_OWN_NOTE): the report shows the tech's own note as the note step tidied it, so the
+    // record keeps the note as said and the server screens the tidied text against it again. No writer draft went
+    // out, so there is no draft base for the edit heads-up.
+    ...(draft.reportNote
+      ? { technicianNotes: form.note.trim(), reportNote: draft.reportNote }
+      : { technicianNotes: draft.text.trim(), reportDraftBase: draft.base }),
     ...(promiseMarks.length ? { promiseMarks } : {}),
     // The photo descriptions the report was written from (a changed one
     // makes the report stale here): the server re-reads them under the visit
@@ -1629,11 +1633,30 @@ const READS = {
 };
 const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
 
+// The note step (GATE_REPORT_OWN_NOTE, report speed plan step 2): on a plain pest visit the customer's report shows the
+// tech's own note, tidied by one model call and screened by the server ({ ok, text, source: 'cleaned' | 'fixed' }), in
+// place of the writer's report (the completion drops the writer's text on such a visit). The gate off (404), a visit
+// the step does not take (409) or a failed call writes the report the old way, so the note step never holds Complete.
+// A 404 is kept for the sheet, so a gate that is off costs one call.
+const isNoteAnswer = (answer) => answer?.ok === true && ['cleaned', 'fixed'].includes(answer.source)
+  && typeof answer.text === 'string' && answer.text.trim() !== '';
+async function readOwnNote({ request, base, note, offRef }) {
+  if (offRef.current) return null;
+  try {
+    const answer = await request(`${base}/pest-recap/report-note`, { method: 'POST', body: JSON.stringify({ note }) });
+    return isNoteAnswer(answer) ? answer : null;
+  } catch (err) {
+    if (err?.status === 404) offRef.current = true;
+    return null;
+  }
+}
+
 function useReportDraft({ request, base, mode = null, houseMix = false }) {
   const [draft, setDraft] = useState(null);
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
+  const noteOffRef = useRef(false);
   const write = useCallback(async ({ buildPayload, note, current, scoreSet, stationRead = NO_STATION_READ, signature, fresh, extraRead = null }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
@@ -1666,6 +1689,18 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     // lane visit's record fills from the read).
     const draftSignature = signature(facts, extra);
     const payload = buildPayload(facts, extra);
+    // Only a plain pest visit takes the note step (a lane or typed visit keeps its own record and report).
+    const noted = mode ? null : await readOwnNote({ request, base, note, offRef: noteOffRef });
+    if (sequence !== sequenceRef.current) return;
+    if (noted) {
+      const text = noted.text.trim();
+      setWriting(false);
+      setDraft({
+        text, base: text, signature: draftSignature, deterministic: false, facts, reportNote: { source: noted.source, text: noted.text },
+        noteReason: typeof noted.reason === 'string' ? noted.reason : null,
+      });
+      return;
+    }
     let written = null;
     let failure = null;
     try {
