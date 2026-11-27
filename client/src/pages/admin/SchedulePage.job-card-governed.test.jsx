@@ -42,6 +42,31 @@ describe("area add-on label text on the job card", () => {
 
 // Codex round 12 on #6135: a host's Snapshot and the Bed Pre-Emergent add-on's Snapshot are two applications, so two cards
 // of one product. They need distinct React keys, DOM ids and titles, and each keeps its own open or closed state.
+// Owner 2026-11-27: a lawn granular card names its LESCO spreader number (server: spreader-settings.js), or why it has none.
+describe("the spreader number on a granular card", () => {
+  const theme = { ...D, card: "#fff", border: "#ddd", input: "#fff", inputBorder: "#ccc", white: "#fff" };
+  const bag = (spreader) => ({ id: "bag", rowId: "bag", name: "Synthetic 10-0-22", role: "base", conditional: false, verdict: "ok", verdictReason: null, planned: { amount: 45, unit: "lb" }, short: false, onHand: null, lowStock: false, line: "Synthetic 10-0-22 — 4.5 lb per 1,000 sq ft, spreader", spreader });
+  const cardOf = (product) => ({ serviceId: "visit-1", strip: { name: "Synthetic Customer", program: "Lawn" }, tank: { calibrated: true, rigs: [] }, sprayCheck: { window: "today", forecast: null }, products: [product], addons: [] });
+
+  it("shows the number, and the weigh-test line when no row fits; the amount stays", () => {
+    for (const text of ["Spreader: LESCO #12 (field tested)", "No spreader number for this rate: weigh test."]) {
+      const { unmount } = render(<JobCardTab card={cardOf(bag({ setting: text.includes("#") ? 12 : null, text }))} D={theme} />);
+      fireEvent.click(document.getElementById("job-card-product-bag"));
+      expect(screen.getByText(text)).toBeInTheDocument();
+      expect(screen.getAllByText(/45 lb/).length).toBeGreaterThan(0);
+      unmount();
+    }
+  });
+
+  it("hides the number while a Use tick is read again, like the amounts", () => {
+    const card = cardOf({ ...bag({ setting: 12, text: "Spreader: LESCO #12 (field tested)" }), planOption: true, selectionId: "bag", conditional: true });
+    render(<JobCardTab card={card} D={theme} lawn={{ pending: true, selectedIds: ["bag"], onSet: () => {} }} />);
+    fireEvent.click(document.getElementById("job-card-product-bag"));
+    expect(screen.getByText("Checking the amounts…")).toBeInTheDocument();
+    expect(screen.queryByText("Spreader: LESCO #12 (field tested)")).toBeNull();
+  });
+});
+
 describe("two cards of one product (a host and a sold add-on)", () => {
   const theme = { ...D, card: "#fff", border: "#ddd", input: "#fff", inputBorder: "#ccc", white: "#fff" };
   const strip = { name: "Synthetic Customer", program: "Tree & Shrub" };

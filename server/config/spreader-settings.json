@@ -1,0 +1,20 @@
+{
+  "spreader": "LESCO rotary",
+  "source": "Owner field test 2026-11-27 and page QVyz36VN v18: the bag's printed number minus 4. Only the 10-0-22 is field tested; the others are start numbers to weigh test at first use.",
+  "rateTolerance": 0.03,
+  "rows": [
+    { "productMatch": "LESCO 10-0-22", "lbPer1000": 4.5, "setting": 12, "basis": "tested" },
+    { "productMatch": "LESCO 24-0-11", "lbPer1000": 3.1, "setting": 9.5, "basis": "start" },
+    { "productMatch": "LESCO 24-0-11", "lbPer1000": 4.17, "setting": 11, "basis": "start" },
+    { "productMatch": "LESCO 44-0-0", "lbPer1000": 2.27, "setting": 8, "basis": "start" },
+    { "productMatch": "LESCO Stonewall 0.37% 18-0-10", "lbPer1000": 4.04, "setting": 11, "basis": "start" },
+    { "productMatch": "LESCO Dimension 0.21% 18-0-10", "lbPer1000": 2.78, "setting": 9, "basis": "start" },
+    { "productMatch": "LESCO Black Out 0-0-24", "lbPer1000": 4.125, "setting": 11, "basis": "start" },
+    { "productMatch": "Dylox 6.2 G", "lbPer1000": 3, "setting": 10, "basis": "start" },
+    { "productMatch": "Topchoice", "lbPer1000": 2, "setting": 8, "basis": "start" },
+    { "productMatch": "LESCO 13-0-13", "lbPer1000": 7.5, "setting": 16, "basis": "start" }
+  ],
+  "noNumber": [
+    { "productMatch": "Advion Insect Granule", "reason": "A bait put down by hand shaker on the tunnel spots, not with the spreader." }
+  ]
+}

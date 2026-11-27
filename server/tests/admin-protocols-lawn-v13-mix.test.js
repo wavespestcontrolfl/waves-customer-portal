@@ -710,6 +710,10 @@ describe('the tank sheet fill amounts on the v13 program', () => {
     const bag = itemFor(body, F24).tankAmounts;
     expect(bag).toMatchObject({ application: 'spreader', rateUnit: 'lb', per100Gal: null, fullTank: null, backpack4Gal: null });
     expect(bag.ratePer1000).toBeCloseTo(3.125, 3);
+    // Owner 2026-11-27: its LESCO spreader number at that rate (3.125 is within 3% of the 3.1 lb row), a start number.
+    expect(itemFor(body, F24).spreader).toMatchObject({ spreader: 'LESCO rotary', setting: 9.5, basis: 'start', text: 'Spreader: LESCO #9½, start number. Weigh test at first use.' });
+    // A sprayed product gets no spreader field.
+    expect(body.items.filter((item) => item.tankAmounts?.application === 'spray').every((item) => item.spreader === null)).toBe(true);
   });
 
   test('a technician gets the same fill amounts with no price field in them', async () => {
