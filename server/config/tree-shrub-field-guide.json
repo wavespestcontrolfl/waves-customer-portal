@@ -3,8 +3,8 @@
     "snapshot": {
       "kind": "Weed prevention · granules",
       "targetTitle": "Weed targets",
-      "targets": "Annual grasses and broadleaf weeds before germination. Examples below; the label has the complete species list.",
-      "apply": "Remove existing weeds. Spread evenly with a calibrated drop or rotary spreader around established, listed ornamentals. Water in with at least ½ inch within 24 hours.",
+      "targets": "Annual grasses and broadleaf weeds, before germination. Full species list on the label.",
+      "apply": "Remove existing weeds. Calibrated drop or rotary spreader, around established, listed ornamentals. Water in at least ½ inch within 24 hours.",
       "rates": [
         [
           "2.3 lb / 1,000 sq ft",
@@ -47,7 +47,7 @@
       "kind": "Plant nutrition · granules",
       "targetTitle": "Nutrients",
       "targets": "8% nitrogen, 12% potash, 4% magnesium, 2% manganese. The nitrogen is slow release.",
-      "apply": "Use a rotary or chest spreader, or spread by hand. Apply to dry foliage and water in soon afterward. Sweep granules off pavement.",
+      "apply": "Rotary or chest spreader, or by hand. Apply to dry foliage; water in soon after. Sweep granules off pavement.",
       "rates": [
         [
           "Planting beds: 1–1½ lb / 100 sq ft",
@@ -55,7 +55,7 @@
         ],
         [
           "Trees and larger shrubs: ½–1 lb / inch of trunk diameter",
-          "Distribute evenly from the outer foliage edge inward. Bag directions specify spring and late fall."
+          "Spread evenly from the outer foliage edge inward. Bag: spring and late fall."
         ]
       ],
       "limits": [
@@ -85,7 +85,7 @@
       "kind": "Plant nutrition · granules",
       "targetTitle": "Nutrients",
       "targets": "16% potash, 6% magnesium, 2% manganese. Contains no nitrogen or phosphate.",
-      "apply": "Use a rotary or chest spreader, or spread by hand. Apply to dry foliage and water in soon afterward. Sweep granules off pavement.",
+      "apply": "Rotary or chest spreader, or by hand. Apply to dry foliage; water in soon after. Sweep granules off pavement.",
       "rates": [
         [
           "Planting beds: 1–1½ lb / 100 sq ft",
@@ -93,7 +93,7 @@
         ],
         [
           "Trees and larger shrubs: ½–1 lb / inch of trunk diameter",
-          "Distribute evenly from the outer foliage edge inward. Bag directions specify spring and late fall."
+          "Spread evenly from the outer foliage edge inward. Bag: spring and late fall."
         ]
       ],
       "limits": [
@@ -123,8 +123,8 @@
     "mnsulfate": {
       "kind": "Plant nutrition · granules",
       "targetTitle": "Nutrients",
-      "targets": "29% manganese (water soluble). For manganese deficiency (frizzle-top) on palms: the newest fronds come out yellow, small, withered or frizzled. Common on queen, royal, pygmy date, paurotis and coconut palms. Contains no nitrogen or phosphate, so it is allowed during the June–September blackout.",
-      "apply": "Spread evenly under the canopy. No mixing or spraying. Keep granules off pavement, masonry and painted surfaces: manganese sulfate stains them. Old frizzled fronds will not recover; judge results on new fronds in 3–6 months.",
+      "targets": "29% manganese (water soluble). For manganese deficiency (frizzle-top): newest fronds yellow, small, withered or frizzled. Common on queen, royal, pygmy date, paurotis, coconut. No nitrogen or phosphate: allowed in the June–September blackout.",
+      "apply": "Spread evenly under the canopy. No mixing or spraying. Keep off pavement, masonry and painted surfaces (it stains). Old frizzled fronds will not recover; judge new fronds in 3–6 months.",
       "rates": [
         [
           "Small palms: ½–1 lb per palm",
@@ -148,7 +148,7 @@
         ]
       ],
       "limits": [
-        "Use only on a diagnosed deficiency (frizzle-top on new fronds); the routine palm fertilizer already carries 2% manganese.",
+        "Only on a diagnosed deficiency (frizzle-top on new fronds); routine palm fertilizer already has 2% manganese.",
         "Too much manganese can bring on iron deficiency; stay inside the label size class.",
         "Stains masonry and painted surfaces; sweep and blow off hard surfaces.",
         "May be harmful if swallowed; avoid breathing dust; wash after use."
@@ -174,8 +174,8 @@
     "mainspring": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles, and aphids on landscape ornamentals. The label also lists caterpillars; the program does not use Mainspring for them.",
-      "apply": "Spray for even, thorough foliage coverage when infestations are first detected. Do not make foliar applications during rain.",
+      "targets": "Whiteflies, soft scales, leafminers, thrips, lace bugs, leaf-feeding beetles and aphids on ornamentals. Caterpillars are on the label but not used.",
+      "apply": "Even, thorough foliage coverage when first detected. Do not spray foliage during rain.",
       "rates": [
         [
           "2–8 fl oz / 100 gal",
@@ -227,8 +227,8 @@
     "acelepryn": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Leaf-feeding caterpillars on landscape shrubs, trees and palms, such as bagworms and tussock moth caterpillars. The label has no whitefly use.",
-      "apply": "Spray for full foliage coverage, at least 1 gallon of mix per 1,000 sq ft. Use the higher rates as pest pressure and foliage area increase. Add a spreader-sticker on hard-to-wet foliage such as holly or ivy.",
+      "targets": "Leaf-feeding caterpillars on shrubs, trees and palms (bagworms, tussock moth). No whitefly use on the label.",
+      "apply": "Full foliage coverage, at least 1 gallon of mix per 1,000 sq ft. Higher rates for more pressure and foliage. Spreader-sticker on hard-to-wet foliage (holly, ivy).",
       "rates": [
         [
           "2–16 fl oz / 100 gal",
@@ -279,7 +279,7 @@
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
       "targets": "Whiteflies. The label also lists scale crawlers and mealybug suppression; that use is on hold (see Restrictions).",
-      "apply": "Cover all plant surfaces evenly to the point of runoff. Use the label volume: 100 gal of mix per 20,000 sq ft, which is 5 gal per 1,000 sq ft.",
+      "apply": "Cover all plant surfaces evenly to runoff. Label volume: 100 gal of mix per 20,000 sq ft (5 gal per 1,000 sq ft).",
       "rates": [
         [
           "6–8 fl oz / 100 gal",
@@ -300,7 +300,7 @@
       "limits": [
         "Does not provide rapid adult-insect control.",
         "Whiteflies: one application at 8 fl oz per 100 gal per calendar year, or 6 fl oz followed by 6 fl oz 21 to 28 days later. Yearly limit 0.176 lb of active ingredient per acre, all pyriproxyfen products together.",
-        "Scale and mealybug use is on hold. The label allows one application a year and prints the yearly limit two ways (12 fl oz per acre, and 0.176 lb active ingredient per acre, which is 26 fl oz per acre). Do not apply Distance for scale or mealybug until Valent confirms which yearly limit applies.",
+        "Scale and mealybug: on hold. The label allows one application a year but prints two yearly limits (12 fl oz per acre; 0.176 lb active ingredient per acre = 26 fl oz per acre). Do not apply Distance for scale or mealybug until Valent confirms which applies.",
         "Label advises against use on gardenia, schefflera, salvia, Boston fern, ghost plant, and coral bells. Test other plants first."
       ],
       "source": "Valent · EPA 59639-96 · label accepted 11-08-23 · Table 1",
@@ -335,8 +335,8 @@
     "tristar": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Whiteflies, mealybugs, aphids and soft scales (Florida wax, cottony cushion). Use on live finds only, foliar only. Not for armored scale (euonymus, tea, false Florida red, oleander): Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.",
-      "apply": "Cover all plant surfaces evenly. The label sets the finished spray volume by plant size. Tank mixing with a surfactant may improve control of adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
+      "targets": "Whiteflies, mealybugs, aphids, soft scales (Florida wax, cottony cushion). Live finds only, foliar only. Not for armored scale (euonymus, tea, false Florida red, oleander): oil on live crawlers or a label-supported Zylam drench (Distance scale use on hold).",
+      "apply": "Cover all plant surfaces evenly. The label sets spray volume by plant size. A surfactant may help on adult whiteflies; test a small area first. Allow 6 hours before overhead irrigation.",
       "rates": [
         [
           "4.0 fl oz / 100 gal",
@@ -369,11 +369,11 @@
         ]
       ],
       "limits": [
-        "Not for armored scale. Distance scale use is on hold; use oil on live crawlers or a label-supported Zylam drench.",
+        "Not for armored scale (Distance scale use on hold): oil on live crawlers or a label-supported Zylam drench.",
         "Do not reapply more than once every 7 days.",
         "Maximum 4 applications per calendar year; 25.3 fl oz per acre per application; 92.5 fl oz per acre per year.",
         "Group 4A neonicotinoid: count it with Merit and Zylam in the annual 4A log.",
-        "Toxic to bees: do not apply while bees or other pollinators are actively visiting; dawn, dusk, or below 55°F lowers the risk.",
+        "Toxic to bees: do not apply while pollinators are visiting; dawn, dusk or below 55°F lowers the risk.",
         "Professional applicators only. Do not apply to bearing fruit trees."
       ],
       "source": "Cleary Chemicals · EPA 8033-106-1001 · label 62432_4, 06/29/2021 · pp. 9–12",
@@ -438,11 +438,11 @@
       "kind": "Insects, mites & diseases · contact oil",
       "targetTitle": "Pest & disease targets",
       "targets": "Listed aphids, leafminers, mites, plant bugs, psyllids, sawflies, scales, and whiteflies. Disease uses include black spot, powdery mildew, and rust.",
-      "apply": "Add to water with agitation and keep agitating. Wet upper and lower leaf surfaces and the canopy evenly, without significant runoff.",
+      "apply": "Add to water with agitation; keep agitating. Wet both leaf surfaces and the canopy evenly, without significant runoff.",
       "rates": [
         [
           "1–2 gal / 100 gal water",
-          "Landscape ornamentals, shade trees, and shrubs. The draft rows use 1% or 1.5% within this range."
+          "Ornamentals, shade trees and shrubs. The program uses 1% or 1.5% in this range."
         ]
       ],
       "limits": [
@@ -493,13 +493,13 @@
       "rates": [
         [
           "4–8 fl oz / 100 gal",
-          "Lower rate for light populations or prevention; higher rate for heavier pressure or longer residual control."
+          "Low rate: light or preventive. High rate: heavy pressure or longer residual."
         ]
       ],
       "limits": [
         "Not effective against broad, rust, or flat mites.",
         "Maximum two applications per crop per year and 32 fl oz/acre/year.",
-        "Rotate after one application; use at least two alternative products before returning to Floramite."
+        "Rotate after one application: at least two other products before Floramite again."
       ],
       "source": "Manufacturer specimen label · use rates pp. 6–8",
       "url": "https://bynder.envu.com/m/146955d9ada95ff9/original/Digital_FMC_Floramite_label_NA_US_EN.pdf",
@@ -541,7 +541,7 @@
       ],
       "equipmentNote": "Measure finished solution in quarts or gallons. Calculate product dose from trunk diameter or shrub height.",
       "targets": "Listed soft and armored scales, whiteflies, royal palm bug, and specified borers. Match the species to the label table.",
-      "apply": "Dose by tree trunk diameter measured 4½ ft above ground, or by shrub height. For soil injection, distribute at low pressure through at least four holes per plant; keep the area moist for 7–10 days.",
+      "apply": "Dose by trunk diameter at 4½ ft above ground, or by shrub height. Soil injection: low pressure, at least four holes per plant; keep moist 7–10 days.",
       "rates": [
         [
           "0.1–0.2 fl oz / inch of trunk diameter or foot of shrub height",
@@ -576,8 +576,8 @@
     "reliant": {
       "kind": "Diseases · foliar spray",
       "targetTitle": "Disease targets",
-      "targets": "Phytophthora and Pythium root and crown rots on landscape ornamentals. Use only on beds with root-rot history or replacement plantings.",
-      "apply": "Foliar spray is the program method: phosphite moves down to the roots. Wet all foliage to the point of runoff.",
+      "targets": "Phytophthora and Pythium root and crown rots on ornamentals. Only beds with root-rot history or replacement plantings.",
+      "apply": "Program method: foliar spray (phosphite moves down to the roots). Wet all foliage to runoff.",
       "rates": [
         [
           "Foliar: 2–4 tsp / gal",
@@ -628,8 +628,8 @@
     "conserve": {
       "kind": "Insects · foliar spray",
       "targetTitle": "Pest targets",
-      "targets": "Listed caterpillars, including bagworms, oleander caterpillars, Florida fern caterpillars, and fall webworms. Other target groups have different rates.",
-      "apply": "Cover upper and lower leaf surfaces and penetrate dense foliage without excessive runoff. Treat bagworms while small and actively feeding; treat webworms before large webs form.",
+      "targets": "Listed caterpillars: bagworms, oleander and Florida fern caterpillars, fall webworms. Other targets have other rates.",
+      "apply": "Cover both leaf surfaces and dense foliage without excessive runoff. Bagworms: while small and feeding. Webworms: before large webs form.",
       "rates": [
         [
           "Caterpillar table: 0.06 fl oz / gal",
@@ -676,8 +676,8 @@
     "dipel": {
       "kind": "Insects · foliar spray (biological)",
       "targetTitle": "Pest targets",
-      "targets": "Young caterpillars that eat the leaves, including oleander caterpillar (oleander moth). Bt acts only on caterpillars, so it spares bees and the natural enemies that control scale and whitefly. Use on live finds only, while the caterpillars are small.",
-      "apply": "Spray the leaves the caterpillars are eating, tops and undersides. On trees, mix by the 100-gallon rate; on shrubs and beds, weigh the product for the area treated so the per-acre rate is not exceeded. Caterpillars must eat the treated leaves; they stop feeding within an hour and die in 1–3 days. Repeat while young caterpillars are still feeding.",
+      "targets": "Young leaf-eating caterpillars, including oleander caterpillar (oleander moth). Bt acts only on caterpillars: it spares bees and the enemies of scale and whitefly. Live finds only, while small.",
+      "apply": "Spray the leaves the caterpillars are eating, tops and undersides. Trees: mix by the 100-gallon rate. Shrubs and beds: weigh product for the area so the per-acre rate is not exceeded. Caterpillars must eat treated leaves; they stop feeding within an hour, die in 1–3 days. Repeat while young caterpillars still feed.",
       "rates": [
         [
           "½–1 lb / 100 gal",
@@ -689,9 +689,9 @@
         ]
       ],
       "limits": [
-        "Repeat at the interval needed to keep control, usually every 3–14 days, depending on plant growth and the hatch.",
+        "Repeat as needed to keep control, usually every 3–14 days (plant growth, hatch).",
         "Restricted-entry interval 4 hours.",
-        "Rain soon after spraying washes it off; plan for a dry window of 24–48 hours where possible.",
+        "Rain soon after washes it off; plan a 24–48 hour dry window where possible.",
         "Do not apply directly to water."
       ],
       "source": "Valent BioSciences / Nufarm DiPel PRO DF · EPA 73049-39 · EPA-accepted label 2024-09-19",
@@ -733,7 +733,7 @@
       "kind": "Insects · foliar spray or soil drench",
       "targetTitle": "Pest targets",
       "targets": "Listed soft and armored scales, whiteflies, mealybugs, lace bugs, and other ornamental insects. Aphids and certain thrips: suppression only.",
-      "apply": "Spray for thorough coverage before populations build. The foliar guide uses 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates), never by the tank amount. The label directs soil applications early in the plant's growing cycle for best control: drench at the spring flush, and treat a later drench as a rescue. Pull back mulch, rock or gravel first so the mix pools at the base. Mix the dose in at least 1 quart of water per foot of plant height and pour it evenly on the soil around the base, on moist soil. With less water, irrigate 1/2 inch right after. Keep the soil moist for 7 days. Bark applications have separate instructions.",
+      "apply": "Thorough coverage before populations build. Foliar: 100 gal of mix per 20,000 sq ft. Soil drench: dose by plant height (see Label rates), never by the tank amount. Label: soil applications early in the growing cycle; drench at the spring flush, a later drench is a rescue. Pull back mulch, rock or gravel so the mix pools at the base. Mix the dose in at least 1 quart of water per foot of height; pour evenly around the base, on moist soil. Less water: irrigate 1/2 inch right after. Keep the soil moist 7 days. Bark applications: separate instructions.",
       "rates": [
         [
           "7.25–16 fl oz / 100 gal",
@@ -797,11 +797,11 @@
       "kind": "Insects, mites & diseases · contact oil",
       "targetTitle": "Pest & disease targets",
       "targets": "Listed aphids, leafminers, mites, plant bugs, psyllids, sawflies, scales, and whiteflies. Disease uses include black spot, powdery mildew, and rust.",
-      "apply": "Add to water with agitation and keep agitating. Wet upper and lower leaf surfaces and the canopy evenly, without significant runoff.",
+      "apply": "Add to water with agitation; keep agitating. Wet both leaf surfaces and the canopy evenly, without significant runoff.",
       "rates": [
         [
           "1–2 gal / 100 gal water",
-          "Landscape ornamentals, shade trees, and shrubs. The draft rows use 1% or 1.5% within this range."
+          "Ornamentals, shade trees and shrubs. The program uses 1% or 1.5% in this range."
         ]
       ],
       "limits": [
@@ -848,7 +848,7 @@
       "kind": "Plant nutrition · granules",
       "targetTitle": "Nutrients",
       "targets": "13% nitrogen (7.8% slow release), 13% potash, 2% magnesium, 2% iron, 2% manganese, 5.69% sulfur. Contains no phosphate.",
-      "apply": "Use a rotary or chest spreader, or spread by hand. For trees and larger shrubs, spread evenly from the outer edge of the leaves inward to the trunk. Sweep granules off walks and painted surfaces.",
+      "apply": "Rotary or chest spreader, or by hand. Trees and larger shrubs: spread evenly from the leaf edge in to the trunk. Sweep granules off walks and painted surfaces.",
       "rates": [
         [
           "Waves beds: 0.75 lb / 100 sq ft",
@@ -864,7 +864,7 @@
         ]
       ],
       "limits": [
-        "Apply only when a documented plant or site need supports feeding; timing alone does not make it due.",
+        "Only for a documented plant or site need; timing alone does not make it due.",
         "At most two feedings a year, spring and late fall, at least 5 months apart.",
         "No nitrogen or phosphorus fertilizer June 1 to Sept. 30 (Sarasota and Manatee landscape).",
         "Keep fertilizer out of water and storm drains.",
@@ -894,7 +894,7 @@
       "kind": "Plant nutrition · iron",
       "targetTitle": "Symptoms",
       "targets": "Iron chlorosis: yellow new leaves with green veins, as on ixora and gardenia in high-pH soil near slabs and walks. Not a routine feeding.",
-      "apply": "Dissolve in water and pour at the root zone, or broadcast the dry product on the soil. Irrigate into the soil afterward.",
+      "apply": "Dissolve in water and pour at the root zone, or broadcast dry on the soil. Irrigate in after.",
       "rates": [
         [
           "Small shrubs: 2 oz each",

@@ -3,7 +3,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import MixSafetySection from "./MixSafetySection";
+import MixSafetySection, { sourceLabel } from "./MixSafetySection";
 
 const CELSIUS = { id: "11111111-1111-4111-8111-111111111111", name: "Celsius WG", category: "herbicide" };
 const CERTAINTY = { id: "22222222-2222-4222-8222-222222222222", name: "Certainty Turf Herbicide", category: "herbicide" };
@@ -51,6 +51,19 @@ describe("MixSafetySection", () => {
     expect(within(rows[2]).getByText("Caution")).toBeInTheDocument();
     expect(within(rows[2]).getByText("Jar test first")).toBeInTheDocument();
     expect(screen.getByText(/It never blocks a product/)).toBeInTheDocument();
+    expect(within(rows[1]).getByText("Catalog")).toHaveAttribute("title", "Catalog row Celsius WG");
+    expect(within(rows[2]).getByText("Waves rule")).toHaveAttribute("title", "card");
+  });
+
+  it("shows a plain source word, never a file or migration name", () => {
+    expect(sourceLabel('server/config/tree-shrub-field-guide.json TriTek 1% limits: "Do not mix with NPK foliar fertilizer"')).toBe("Field guide");
+    expect(sourceLabel('server/config/lawn-protocol-v13.json card line: "Topchoice ... (the label says not to apply it in combination)"')).toBe("Label");
+    expect(sourceLabel('server/config/lawn-protocol-v13.json safety_rules (Tetrino): "Sunny turf only"')).toBe("Waves rule");
+    expect(sourceLabel('server/config/protocols.json tree_shrub card line (Sequestar 6% Fe EDDHA): "never tank-mix with oil"')).toBe("Waves rule");
+    expect(sourceLabel('Catalog row Celsius WG, compatibility_notes (migration 20260401000026): "Do NOT tank-mix with fertilizer."')).toBe("Catalog");
+    expect(sourceLabel("owner")).toBe("Owner");
+    expect(sourceLabel("Supplier call 11-27")).toBe("Supplier call 11-27");
+    expect(sourceLabel("")).toBe("—");
   });
 
   it("checks a tank of the picked products and shows each pair's answer", async () => {

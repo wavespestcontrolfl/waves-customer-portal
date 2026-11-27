@@ -45,6 +45,23 @@ const EMPTY_FORM = {
   jarTestRequired: false,
 };
 
+// The Source column shows a plain word; the stored text (file, migration or card quote) stays in the cell's title.
+// A label quote reads "Label", a catalog compatibility note reads "Catalog" (it is not a verified label direction),
+// a field-guide limits quote reads "Field guide" (its limits mix label text and Waves rules), a Waves card or safety
+// rule reads "Waves rule", and a short source someone typed in the form shows as typed.
+export function sourceLabel(source) {
+  const text = String(source || "").trim();
+  if (!text) return "—";
+  if (/^owner$/i.test(text)) return "Owner";
+  if (/^(card|card rule|waves rule)$/i.test(text)) return "Waves rule";
+  const technical = /\.(json|js|md)\b|migration|safety_rules|card lines?\b|^Catalog row/i.test(text);
+  if (!technical) return text;
+  if (/^Catalog row/i.test(text)) return "Catalog";
+  if (/field-guide\.json .* limits:/i.test(text)) return "Field guide";
+  if (/\blabel\b/i.test(text)) return "Label";
+  return "Waves rule";
+}
+
 async function readJson(response) {
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw Object.assign(new Error(data.error || "Request failed"), { status: response.status, data });
@@ -363,7 +380,7 @@ export default function MixSafetySection() {
                       </div>
                     </TD>
                     <TD>{rule.reason}</TD>
-                    <TD className="max-w-[320px] text-ink-secondary">{rule.source}</TD>
+                    <TD className="text-ink-secondary" title={rule.source || undefined}>{sourceLabel(rule.source)}</TD>
                     <TD>
                       <div className="flex gap-1">
                         <Button size="sm" variant="secondary" onClick={() => { setNotice(""); editRule(rule); }}>Edit</Button>
