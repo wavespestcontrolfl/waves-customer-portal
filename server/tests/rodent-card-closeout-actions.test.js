@@ -22,11 +22,9 @@ describe('rodent card close-out actions', () => {
     expect(treated.sort()).toEqual([[5, 'blox', true, 'bait_placement'], [5, 'tomcat', true, 'bait_placement']]);
   });
 
-  test('the pest plan rodent visit splits home and commercial bait into their own if-needed actions', () => {
-    const visit = protocols.pest.visits.find((v) => v.visit === 5);
-    // Every other line (the inspection, the attic snap traps, the carcass removal) records no treatment.
-    const treated = actionsOf('pest', visit).filter((action) => action.treatmentApplied);
-    expect(treated.map((action) => [action.product?.id, action.conditional]).sort()).toEqual([['blox', true], ['tomcat', true]]);
+  test('the pest program keeps no rodent card of its own: rodent work is the rodent program\'s', () => {
+    expect(protocols.pest.visits.find((v) => v.visit === 5)).toBeUndefined();
+    expect(JSON.stringify(protocols.pest)).not.toMatch(/Contrac|Tomcat|bromethalin/i);
   });
 
   test('no rodent card lists the snap trap as a product line, keyed or legacy', () => {

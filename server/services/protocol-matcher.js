@@ -298,17 +298,14 @@ const MATCH_RULES = [
     serviceKeys: ['termite_inspection'],
     terms: ['termite', 'wdo', 'wood destroying', 'swarmer', 'swarm'],
   },
+  // The Waves Assessment (catalog key lawn_inspection since its 2026-06 rename): a free walk of the property, no product.
+  // By its key only: every booked assessment carries it (production read 2026-11-26), and a row with no key has no card.
   {
-    programKey: 'pest',
-    visit: 6,
-    reason: 'mosquito_barrier',
-    terms: ['mosquito', 'misting', 'barrier'],
-  },
-  {
-    programKey: 'pest',
-    visit: 5,
-    reason: 'rodent_monitoring',
-    terms: ['rodent', 'rat', 'mouse', 'mice', 'exclusion', 'trapping'],
+    programKey: 'assessment',
+    visit: 1,
+    reason: 'waves_assessment',
+    serviceKeys: ['lawn_inspection'],
+    terms: ['waves assessment'],
   },
   {
     programKey: 'pest',
@@ -332,8 +329,16 @@ const MATCH_RULES = [
     // The general-pest catalog rows: "Initial Pest Cleanout" is a general
     // active-infestation treatment, not the German-roach cleanout its name
     // would otherwise match.
-    serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout'],
+    // The other general pest rows keep this card under any name (a booking named "Re-Service" with the one-time key): the
+    // close-out already reads these keys as regular pest work, and a service no rule claims gets no card (below).
+    serviceKeys: ['pest_general_quarterly', 'pest_general_monthly', 'pest_initial_cleanout',
+      'pest_general_bimonthly', 'pest_general_semiannual', 'one_time_pest_control', 'pest_re_service', 'pest_rodent_quarterly'],
     terms: ['pest', 'quarterly', 'bimonthly', 'bi-monthly', 'monthly', 'perimeter'],
+    // A bare "Re-Service", "Callback", "Semi-Annual" or "Recurring" (with "Service" or "Visit" after it at most): names the
+    // close-out reads as regular pest work with the house mix (client lib/pest-default-mix.js). The WHOLE name must be one of
+    // them, and only on a visit with no catalog key: a longer name ("Wildlife Trapping Re-Service", "Bee / Wasp Nest Removal
+    // Callback") or a keyed service no rule claims keeps no card.
+    keylessNames: /^(re service|reservice|callback|semi annual|semiannual|recurring)( service| visit)?$/,
   },
   {
     programKey: 'tree_shrub',
@@ -566,11 +571,15 @@ function stageInName(serviceType) {
 // service key. The key wins, except over a rule marked `explicitStage` (the name itself says "second treatment" or "heat") and
 // over a later stage the name states. In a package program the later-stage rule reads the name without its package phrases:
 // "Flea Treatment (2 Visits)" is the first visit of two, not "flea treatment 2".
-function ruleFor(keyRule, rules, normalized, serviceType, programKey) {
+// A rule claims a name by its words, or (on a visit with no catalog key) by a whole bare name (keylessNames).
+const ruleClaimsName = (rule, normalized, keyless) => rule.terms.some((term) => matchesTerm(normalized, term))
+  || (keyless && !!rule.keylessNames?.test(normalized));
+
+function ruleFor(keyRule, rules, normalized, serviceType, programKey, keyless = false) {
   const laterReason = STAGE_BY_NAME_RULES[programKey] || null;
   const stage = laterReason ? stageInName(serviceType) : { own: '', later: false };
   const ownNormalized = laterReason ? normalize(stage.own) : '';
-  const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(laterReason && rule.reason === laterReason ? ownNormalized : normalized, term)));
+  const named = rules.find((rule) => ruleClaimsName(rule, laterReason && rule.reason === laterReason ? ownNormalized : normalized, keyless));
   if (named?.explicitStage) return named;
   const later = stage.later ? rules.find((rule) => rule.reason === laterReason) : null;
   return later || keyRule || named;
@@ -582,16 +591,19 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
   const normalized = normalize(serviceType);
   // The catalog service key outranks the name: a rule that claims the key
   // is the match, and the program is that rule's.
-  const keyRule = serviceKey ? MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey)) || null : null;
+  // (No rule lists an empty key, so a visit with no key finds none. No rule belongs to the lawn program: its plan engine owns the visit.)
+  const keyRule = MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey));
   const fallbackProgramKey = keyRule?.programKey || programKeyForService(serviceType);
-  const rules = MATCH_RULES.filter((rule) => {
-    if (fallbackProgramKey === 'lawn') return false;
-    return rule.programKey === fallbackProgramKey;
-  });
-  const matchedRule = ruleFor(keyRule, rules, normalized, serviceType, fallbackProgramKey);
+  const rules = MATCH_RULES.filter((rule) => rule.programKey === fallbackProgramKey);
+  const matchedRule = ruleFor(keyRule, rules, normalized, serviceType, fallbackProgramKey, !serviceKey);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };
+  // No protocol = no chemical plan (owner pick D18, 2026-11-25). "pest" is where a name that says nothing lands
+  // (programKeyForService's last line), so a service no pest rule claims (bee and wasp removal, a bird box, wildlife
+  // trapping) used to get the general pest card and its products. It gets no card: every surface then shows its own
+  // "no treatment protocol" state and prefills nothing, until the service has a card.
+  if (!matchedRule && programKey === 'pest') return { programKey: null, program: null, matchedVisit: null, matched: false, reason: 'no_protocol' };
 
   const fallbackVisit = program.visits?.[0] || null;
   const ruleVisit = matchedRule ? findVisit(program, matchedRule.visit) || fallbackVisit : fallbackVisit;

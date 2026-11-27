@@ -150,10 +150,11 @@ describe('protocol matcher specialty routing', () => {
   });
 
   test('preserves pest-primary combined services on the pest protocol', () => {
+    // The pest program's own rodent card (visit 5) is retired: the combined service is a general pest visit.
     expect(match('Pest & Rodent Control')).toEqual({
       programKey: 'pest',
-      visit: 5,
-      reason: 'rodent_monitoring',
+      visit: 1,
+      reason: 'general_pest',
     });
   });
 

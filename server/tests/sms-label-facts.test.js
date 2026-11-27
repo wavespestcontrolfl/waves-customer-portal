@@ -2684,7 +2684,7 @@ describe('prompt rules and hand-off narrowing', () => {
     process.env[GATE] = 'true';
     const { system } = buildSystemPromptWithProfile();
     expect(system).toContain('LABEL FACTS (product timing from the label):');
-    expect(system).toContain('COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(system).toContain('COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, SCHEDULE CHANGES, the thread');
     expect(system).toContain('Never name a product or brand');
     expect(system).toContain('COPY the sentence word for word');
     expect(system).toContain('including its visit date');
