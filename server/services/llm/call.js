@@ -621,8 +621,11 @@ function geminiText(data) {
 }
 
 /**
- * Gemini generateContent. jsonMode sets response_mime_type and joins ALL text
- * parts (a thinking model can emit a thought part before the answer part).
+ * Gemini generateContent. Sends `system` through Gemini's native
+ * `systemInstruction` channel (mirroring OpenAI `instructions` and Anthropic
+ * `system`) so untrusted inbound user content in `contents` never shares the
+ * instruction turn. jsonMode sets response_mime_type and joins ALL text parts
+ * (a thinking model can emit a thought part before the answer part).
  */
 const GEMINI_BLOCK_FINISHES = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII']);
 
@@ -632,8 +635,7 @@ const GEMINI_BLOCK_FINISHES = new Set(['SAFETY', 'RECITATION', 'BLOCKLIST', 'PRO
 const GEMINI_THINKING_LEVELS = new Set(['LOW', 'MEDIUM', 'HIGH']);
 
 function geminiRequest({ system, text, images, audio = [], jsonMode, jsonSchema, maxTokens, temperature, thinkingLevel }) {
-  const promptText = system ? `${system}\n\n${text || ''}` : (text || '');
-  const parts = [...audio.map(toGeminiAudio), ...withImageLabels(images, toGeminiImage, (label) => ({ text: label })), { text: promptText }];
+  const parts = [...audio.map(toGeminiAudio), ...withImageLabels(images, toGeminiImage, (label) => ({ text: label })), { text: text || '' }];
   const generationConfig = { temperature, maxOutputTokens: maxTokens };
   if (jsonMode) generationConfig.response_mime_type = 'application/json';
   if (jsonMode && jsonSchema) generationConfig.response_json_schema = jsonSchema;
@@ -642,7 +644,9 @@ function geminiRequest({ system, text, images, audio = [], jsonMode, jsonSchema,
     if (GEMINI_THINKING_LEVELS.has(level)) generationConfig.thinkingConfig = { thinkingLevel: level };
     else logger.warn(`[llm] Gemini thinkingLevel "${thinkingLevel}" ignored (LOW | MEDIUM | HIGH)`);
   }
-  return { contents: [{ parts }], generationConfig };
+  const body = { contents: [{ parts }], generationConfig };
+  if (system) body.systemInstruction = { parts: [{ text: system }] };
+  return body;
 }
 
 // The provider's own verdict on a 200 body, or null when the answer stands.

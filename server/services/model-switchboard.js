@@ -337,10 +337,10 @@ const secondSocialImageChainModel = nthSocialImageChainModel(1);
 // without the flag call every leg.
 const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by nine photo lanes';
 // `inbound: true` = the lane's prompt carries customer or third-party content
-// (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The Gemini
-// adapter (llm/call.js) folds the system prompt into the user turn, so moving
-// an inbound lane onto Gemini widens the prompt-injection surface — the tab
-// warns on that specific move.
+// (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The shared
+// Gemini adapter (`llm/call.js`) sends `system` via Gemini's native
+// `systemInstruction`; direct-fetch Gemini lanes still fold prompts into the
+// user turn, so the Models tab keeps the warning on inbound Gemini moves.
 const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ id, name, file, policy, primary, fallback, ...extra });
 
 // voice_relay's E() parse + allowed hooks (below): VOICE_RELAY_INBOUND_MODEL is
