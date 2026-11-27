@@ -511,7 +511,7 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
   requireUuid(technicianId, 'Technician');
   const v = validate(weekMinimumSchema, input);
   const actorId = actorOf(actor);
-  return conn.transaction(async (trx) => {
+  const row = await conn.transaction(async (trx) => {
     // The lock finalizeRun takes: the setting never changes under a finalize. A draft read before the save is stale
     // after it (the check and its token change).
     await lockPayrollMutations(trx);
@@ -544,8 +544,7 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
       // closed, and a new last day could owe it more.
       if (await findFinalizedCheckOnOrAfter(trx, tech.id, week, true)) throw new PayrollError(409, LAST_DAY_PAID(week));
     }
-    const hoursChanged = !sameHours(v.hours, tech.paid_week_minimum_hours);
-    if (hoursChanged) {
+    if (v.fromWeek || !sameHours(v.hours, tech.paid_week_minimum_hours)) {
       const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
       if (await findFinalizedCheckOnOrAfter(trx, tech.id, v.fromWeek)) {
         throw new PayrollError(409, `A final pay run already paid this employee for the week of ${effectiveWeek} or later. Void that pay run first or pick a later week.`);
@@ -561,14 +560,14 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
       action: 'payroll.week_minimum_changed', resource_type: 'technicians', resource_id: technicianId,
       metadata: { technician_id: technicianId, hours: v.hours, last_day: lastDay },
     });
-    const row = await trx('technicians').where({ id: technicianId })
+    return trx('technicians').where({ id: technicianId })
       .first('id', 'paid_week_minimum_hours', trx.raw("to_char(paid_week_minimum_last_day, 'YYYY-MM-DD') AS last_day"));
-    return {
-      id: row.id,
-      paidWeekMinimumHours: row.paid_week_minimum_hours == null ? null : Number(row.paid_week_minimum_hours),
-      paidWeekMinimumLastDay: row.last_day,
-    };
   });
+  return {
+    id: row.id,
+    paidWeekMinimumHours: row.paid_week_minimum_hours == null ? null : Number(row.paid_week_minimum_hours),
+    paidWeekMinimumLastDay: row.last_day,
+  };
 }
 
 // "Pay out the bank" (handbook, "When you leave"): the pay run for the week starting `weekStart` pays the

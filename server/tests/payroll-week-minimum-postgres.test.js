@@ -397,6 +397,12 @@ postgres('payroll minimum paid week', () => {
     expect(await changes()).toEqual([{ from_week: thisWeek, hours: null }]);
     const audit = await trx('audit_log').where({ action: 'payroll.week_minimum_changed', resource_id: id }).count('* as n').first();
     expect(Number(audit.n)).toBe(3);
+
+    // An explicit fromWeek applies even when the submitted hours match the current technician-level minimum.
+    expect((await put({ hours: '32' })).status).toBe(200);
+    expect((await put({ hours: '32', fromWeek: W1 })).status).toBe(200);
+    const backdated = (await draft(W1)).body.run;
+    expect(byName(backdated, 'Sample Alpha')).toMatchObject({ regularHours: '30.00', minimumWeekHours: '2.00' });
   });
 
   it('a draft read before a last-day change goes stale', async () => {

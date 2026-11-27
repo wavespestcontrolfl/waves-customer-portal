@@ -7,7 +7,7 @@ jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn() }));
 
 const {
   hoursToHundredths, minutesText, checkWorkDate,
-  createTimeOff, updateTimeOff, deleteTimeOff, setPtoAllowance, listTimeOff, balance,
+  createTimeOff, updateTimeOff, deleteTimeOff, setPtoAllowance, setWeekMinimum, listTimeOff, balance,
 } = require('../services/payroll-time-off');
 const { PAYROLL_LOCK_NS, PAYROLL_LOCK_KEY } = require('../services/payroll-runs');
 
@@ -189,5 +189,61 @@ describe('writes', () => {
     await expect(createTimeOff(good(), TECH_ID, conn)).rejects.toMatchObject({
       status: 409, message: expect.stringMatching(/already has time off recorded for that date/),
     });
+  });
+
+  it('setWeekMinimum honors an explicit fromWeek even when minimum hours match current hours, and guards finalized weeks', async () => {
+    const inserted = [];
+    let hasFinalizedCheck = false;
+    const trx = (table) => {
+      if (table === 'technicians') {
+        const q = {
+          where: () => q,
+          forUpdate: () => q,
+          first: () => Promise.resolve({
+            id: TECH_ID,
+            employment_type: 'w2',
+            paid_week_minimum_hours: '32.00',
+            last_day: null,
+            hire_date: '2026-01-05',
+          }),
+          update: () => Promise.resolve(1),
+        };
+        return q;
+      }
+      if (table === 'payroll_checks') {
+        const q = {
+          where: () => q,
+          first: () => Promise.resolve(hasFinalizedCheck ? { id: 'chk-1' } : null),
+        };
+        return q;
+      }
+      if (table === 'payroll_week_minimum_changes') {
+        return {
+          insert: (row) => {
+            inserted.push(row);
+            return { onConflict: () => ({ merge: () => Promise.resolve(1) }) };
+          },
+        };
+      }
+      throw new Error(`Unexpected table ${table}`);
+    };
+    trx.raw = jest.fn(async () => ({ rows: [] }));
+    trx.fn = { now: () => 'now' };
+    const conn = { transaction: (callback) => callback(trx) };
+
+    const result = await setWeekMinimum(TECH_ID, { hours: 32, fromWeek: '2026-09-14' }, TECH_ID, conn);
+    expect(result).toEqual({ id: TECH_ID, paidWeekMinimumHours: 32, paidWeekMinimumLastDay: null });
+    expect(inserted).toEqual([{ technician_id: TECH_ID, from_week: '2026-09-14', hours: '32' }]);
+
+    // Without fromWeek and with unchanged hours, no history row is written.
+    inserted.length = 0;
+    await setWeekMinimum(TECH_ID, { hours: 32 }, TECH_ID, conn);
+    expect(inserted).toEqual([]);
+
+    // Explicit fromWeek is still refused when a finalized check exists on or after that week.
+    hasFinalizedCheck = true;
+    await expect(setWeekMinimum(TECH_ID, { hours: 32, fromWeek: '2026-09-14' }, TECH_ID, conn))
+      .rejects.toMatchObject({ status: 409, message: expect.stringMatching(/2026-09-14/) });
+    expect(inserted).toEqual([]);
   });
 });

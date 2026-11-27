@@ -1500,19 +1500,25 @@ export default function RecruitingPage() {
   }, [closeStageDialog]);
 
   const saveContact = useCallback(async (id, fields) => {
+    const seq = detailSeq.current;
     const data = await adminFetch(`/admin/careers/${id}/contact`, {
       method: "PATCH",
       body: JSON.stringify(fields),
     });
-    applyStageAnswer(data.application);
+    if (seq === detailSeq.current && detailIdRef.current === id) {
+      applyStageAnswer(data.application);
+    }
     load(tabRef.current);
   }, [applyStageAnswer, load]);
 
   const rescreenApplication = useCallback(async (id) => {
+    const seq = detailSeq.current;
     const data = await adminFetch(`/admin/careers/${id}/rescreen`, {
       method: "POST",
     });
-    applyStageAnswer(data.application);
+    if (seq === detailSeq.current && detailIdRef.current === id) {
+      applyStageAnswer(data.application);
+    }
     load(tabRef.current);
   }, [applyStageAnswer, load]);
 
@@ -1620,6 +1626,7 @@ export default function RecruitingPage() {
       <Dialog open={Boolean(detail)} onClose={closeDetail}>
         {detail && (
           <ApplicationDetailContent
+            key={detail.id}
             detail={detail}
             replyMedia={replyMedia}
             samePhone={samePhone}

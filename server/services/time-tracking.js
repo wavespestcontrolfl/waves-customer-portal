@@ -656,10 +656,14 @@ function buildAdminEditUpdates(entry, {
   if (!isCompletedEntryIntervalValid({ ...entry, ...updates, clock_in: finalIn, clock_out: finalOut })) {
     throw staffTimeHttpError(400, 'clock_out must be after clock_in and match a finite positive duration.');
   }
-  if ((parsedClockIn || parsedClockOut) && finalOut.getTime() > Date.now() + 60000) {
+  const timeChanged = Boolean(updates.clock_in || updates.clock_out);
+  if (timeChanged && finalOut.getTime() > Date.now() + 60000) {
     throw staffTimeHttpError(400, 'clock_out cannot be in the future.');
   }
-  return { updates, finalIn, finalOut };
+  if (timeChanged && updates.duration_minutes > MAX_EDITED_ENTRY_MINUTES) {
+    throw staffTimeHttpError(400, 'An edited time entry cannot exceed 24 hours. Check the dates and AM/PM.');
+  }
+  return { updates, finalIn, finalOut, timeChanged };
 }
 
 /**
@@ -672,6 +676,8 @@ async function adminEditEntry(entryId, {
   const { normalizedReason, parsedClockIn, parsedClockOut } = validateAdminEditInput({
     clock_in, clock_out, entry_type, edit_reason,
   });
+  const expectedUpdatedAtMs = expected_updated_at ? new Date(expected_updated_at).getTime() : null;
+  const actorId = edited_by || null;
 
   const updated = await db.transaction(async (trx) => {
     // Read without a row lock first so we can acquire the advisory week locks
@@ -692,25 +698,18 @@ async function adminEditEntry(entryId, {
       requestedWorkDate,
     ], finalType === 'shift' ? requestedWorkDate : null);
 
-    if (expected_updated_at !== undefined) {
-      const observed = expected_updated_at ? new Date(expected_updated_at).getTime() : null;
-      const current = entry.updated_at ? new Date(entry.updated_at).getTime() : null;
-      if (observed !== current) {
-        throw staffTimeHttpError(409, 'Entry changed since it was read; reload before editing.');
-      }
+    if (
+      expected_updated_at !== undefined
+      && (entry.updated_at ? new Date(entry.updated_at).getTime() : null) !== expectedUpdatedAtMs
+    ) {
+      throw staffTimeHttpError(409, 'Entry changed since it was read; reload before editing.');
     }
 
-    const { updates, finalIn, finalOut } = buildAdminEditUpdates(entry, {
+    const { updates, finalIn, finalOut, timeChanged } = buildAdminEditUpdates(entry, {
       parsedClockIn, parsedClockOut, clock_out, entry_type, notes,
       normalizedReason, edited_by, target_duration_minutes,
     });
-    if ((parsedClockIn || parsedClockOut || target_duration_minutes) && updates.duration_minutes > MAX_EDITED_ENTRY_MINUTES) {
-      throw staffTimeHttpError(400, 'An edited time entry cannot exceed 24 hours. Check the dates and AM/PM.');
-    }
-    const shiftSpanChanged = finalType === 'shift' && (
-      parsedClockIn || parsedClockOut || target_duration_minutes || (entry_type && entry_type !== entry.entry_type)
-    );
-    if (shiftSpanChanged) {
+    if (finalType === 'shift' && (timeChanged || finalType !== entry.entry_type)) {
       await assertNoShiftOverlap(trx, entry.technician_id, finalIn, finalOut, entry.id);
     }
 
@@ -731,7 +730,7 @@ async function adminEditEntry(entryId, {
       trx,
       critical: true,
       actor_type: 'admin',
-      actor_id: edited_by || null,
+      actor_id: actorId,
       action: 'payroll.time_entry_edited',
       resource_type: 'time_entries',
       resource_id: saved.id,
