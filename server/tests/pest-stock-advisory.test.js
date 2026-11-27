@@ -151,12 +151,18 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
       expect(trx.reads).toEqual([]);
     });
 
-    test('a visit that may not go negative keeps the hard refusal, whatever the size', async () => {
+    test('a visit that may not go negative: an amount no visit uses is flagged, not refused (owner 2026-11-26)', async () => {
       const trx = fakeTrx();
-      await expect(deductProductInventory(trx, { ...args, productInput: { totalAmount: 1000000, amountUnit: 'fl_oz' } }))
+      const result = await deductProductInventory(trx, { ...args, productInput: { totalAmount: 1000000, amountUnit: 'fl_oz' } });
+      refusedWith(result, trx);
+      expect(trx.reads).toEqual([]);
+    });
+
+    test('a visit that may not go negative still keeps the hard lockout for an ordinary shortfall', async () => {
+      const trx = fakeTrx();
+      await expect(deductProductInventory(trx, { ...args, productInput: { totalAmount: 100, amountUnit: 'fl_oz' } }))
         .rejects.toMatchObject({ statusCode: 400, code: 'waveguard_inventory_lockout' });
       expect(trx.writes).toEqual([]);
-      expect(trx.reads).toEqual([]);
     });
   });
 });
@@ -282,6 +288,12 @@ describe('the office alert for an amount no visit uses', () => {
     const [, spec] = compose.raiseAdminAlert.mock.calls[0];
     expect(spec).toMatchObject({ action: 'check a product amount', why: 'A product amount looks too big for a pest visit, so stock was not changed.' });
     expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+
+  test('a visit type with no stock alert still alerts for an amount no visit uses, in plain words (owner 2026-11-26)', async () => {
+    await run({ id: 'visit-1', customer_id: 'customer-1', service_type: 'Termite Bait Station' }, [refused(), { productId: 'prod-2', productName: 'Talak', status: 'deducted_insufficient_stock', stockAfter: -3 }]);
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(compose.raiseAdminAlert.mock.calls[0][1]).toMatchObject({ action: 'check Taurus SC amount', why: 'Taurus SC amount looks too big for a service visit, so stock was not changed.' });
   });
 
   test('a failed alert is logged and never fails the visit', async () => {

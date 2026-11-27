@@ -1748,11 +1748,14 @@ function exceedsVisitLimit(line) {
   return share.value > share.limit;
 }
 
-// A technician's completion is refused, before any service write, when a submitted line is over its product's ceiling
-// (the office keeps the advisory path in deductProductInventory: an admin entry is deliberate, so the line is recorded, stock
-// is left alone and the office is alerted). The line would otherwise reach service_products, the FDACS ledger, usage, limits
-// and the customer report.
-const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
+// A line over its product's ceiling never stops a completion, for any role (owner 2026-11-26: "all alerts like this should
+// just be alerts, they should not stop the job from being completed or finished"). deductProductInventory records the
+// line, leaves stock alone and flags it not_deducted_implausible, and notifyOfficeOfStockShortfalls alerts the office.
+// vetProductAmounts marks the lines whose product total is over the ceiling here, so the deduction treats each of them as
+// over even when no single line is. A WeakSet: nothing is added to the submitted line, so nothing is saved or hashed.
+const OVER_VISIT_LIMIT_LINES = new WeakSet();
+// A submitted line is over its ceiling when vetProductAmounts marked it (its product's lines together are over) or it is over alone.
+const isOverVisitLimit = (submittedLine, judged) => OVER_VISIT_LIMIT_LINES.has(submittedLine) || exceedsVisitLimit(judged);
 
 // The ONE parse of a submitted product amount. An absent or empty amount is "no amount" (null); a number or a plain
 // decimal string is that number; anything else ("99999junk", "1e3", a boolean, an object, a negative) is invalid (NaN).
@@ -1793,22 +1796,10 @@ function visitLimitInput(submitted, catalogRow) {
   return { amount, amountUnit };
 }
 
-function implausibleRefusal(catalogRow, { amount, amountUnit }) {
-  return {
-    error: `${amount} ${String(amountUnit || '').replace(/_/g, ' ')} of ${catalogRow.name} is far more than one visit uses. Check the amount and submit again.`.replace(/\s{2,}/g, ' '),
-    code: IMPLAUSIBLE_PRODUCT_AMOUNT,
-    productId: catalogRow.id,
-    productName: catalogRow.name,
-    amount,
-    amountUnit,
-  };
-}
-
-// The first product whose lines TOGETHER are over its visit limit, as { catalogRow, amount, amountUnit } for the refusal, else null.
+// The keys (product id + dimension bucket) of the products whose lines TOGETHER are over its visit limit.
 // Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's use)
-// and by dimension, each line converted to the dimension's base unit from its own submitted unit. A group of one submitted
-// unit reports the submitted total; mixed units report the total in the dimension's base unit.
-function firstProductOverVisitLimit(lines, rowById) {
+// and by dimension, each line converted to the dimension's base unit from its own submitted unit.
+function overVisitLimitGroupKeys(lines, rowById) {
   const groups = new Map();
   for (const line of lines) {
     const catalogRow = rowById.get(line.productId);
@@ -1822,29 +1813,31 @@ function firstProductOverVisitLimit(lines, rowById) {
     group.units.add(String(judged.amountUnit || '').trim().toLowerCase());
     groups.set(key, group);
   }
-  for (const group of groups.values()) {
-    if (group.value <= group.limit) continue;
-    const single = group.units.size === 1;
-    return { catalogRow: group.catalogRow, amount: Number((single ? group.raw : group.value).toFixed(4)), amountUnit: single ? [...group.units][0] : group.baseUnit };
-  }
-  return null;
+  return new Set([...groups].filter(([, group]) => group.value > group.limit).map(([key]) => key));
 }
 
 // Vets every submitted product line before the first write. The ids are already canonical (canonicalizeProductLines ran at
-// intake), so spellings of one id are one product here and everywhere downstream. A malformed amount is a 400 for any role. A technician whose lines for one product add up to
-// more than its visit limit gets a 422 naming the product and the total (an admin's keeps the advisory path in
-// deductProductInventory). Returns { status, body } or null. One catalog read, no history read. `skip` is a replay, a
-// resume or a packet effects phase: nothing is judged or changed.
-async function vetProductAmounts(database, { actor, products, skip = false }) {
+// intake), so spellings of one id are one product here and everywhere downstream. A malformed amount is a 400 for any role:
+// it is unreadable input, not a product limit (owner 2026-11-26: a product ceiling only warns). Lines whose product total is over its visit
+// limit are marked for deductProductInventory (the same advisory path an admin entry takes) and never refused. Returns
+// { status, body } or null. One catalog read, no history read. `skip` is a replay, a resume or a packet effects phase:
+// nothing is judged or changed.
+async function vetProductAmounts(database, { products, skip = false }) {
   if (skip || !Array.isArray(products)) return null;
   const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
   const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
   const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
   const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
-  if (invalid || actor?.techRole === 'admin') return invalid;
-  const over = firstProductOverVisitLimit(lines, rowById);
-  return over ? { status: 422, body: implausibleRefusal(over.catalogRow, over) } : null;
+  if (invalid) return invalid;
+  const overKeys = overVisitLimitGroupKeys(lines, rowById);
+  if (overKeys.size) {
+    for (const line of lines) {
+      const judged = visitLimitInput(line, rowById.get(line.productId));
+      if (judged && overKeys.has(`${line.productId}|${visitLimitShare(judged).bucket}`)) OVER_VISIT_LIMIT_LINES.add(line);
+    }
+  }
+  return null;
 }
 
 async function deductProductInventory(trx, {
@@ -1905,6 +1898,19 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
+  // Owner "dont block", and owner 2026-11-26 for every role: the completion still succeeds, but an amount no visit uses
+  // moves no stock and no cost. It is judged before the hard lockout below, so a typo never stops a visit on a
+  // visit type that may not go negative. The office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
+  if (insufficient && isOverVisitLimit(productInput, { amount, amountUnit })) {
+    return {
+      ...snapshot,
+      status: 'not_deducted_implausible',
+      inventoryUnit,
+      stockBefore,
+      remainingStock: stockBefore,
+      warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
+    };
+  }
   // allowNegative is passed ONLY for an advisory-stock completion
   // (isStockAdvisoryCompletion): a lawn closeout (WaveGuard since the owner
   // directive 2026-08-03), a pest or a tree & shrub visit (owner 2026-10-20). The deduction proceeds,
@@ -1919,18 +1925,6 @@ async function deductProductInventory(trx, {
     err.isOperational = true;
     err.code = 'waveguard_inventory_lockout';
     throw err;
-  }
-  // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
-  // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
-  if (insufficient && exceedsVisitLimit({ amount, amountUnit })) {
-    return {
-      ...snapshot,
-      status: 'not_deducted_implausible',
-      inventoryUnit,
-      stockBefore,
-      remainingStock: stockBefore,
-      warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
-    };
   }
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
@@ -2493,11 +2487,13 @@ function stockAlertWords(fullName, wordsFor, plain) {
 // back to zero or above gets none. Called after the record's transaction has committed, so no lock is held here.
 // Decided from the committed record: a pest, lawn (WaveGuard included) or tree & shrub record alerts for each
 // shortfall it holds.
-// A line refused for an implausible amount (deductProductInventory) moved no stock: the office checks the amount entered,
-// one open alert for each record and product, instead of restocking.
+// A line flagged for an implausible amount (deductProductInventory; technician or admin, owner 2026-11-26) moved no stock: the
+// office checks the amount entered, one open alert for each record and product, instead of restocking.
 async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
-  const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
-  if (!visitLabel) return;
+  const stockVisitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
+  // The shortfall alert is for the advisory-stock visits only. An amount no visit uses is flagged on every visit type
+  // (owner 2026-11-26: a product ceiling warns, never blocks), so the amount alert has a plain label for the others.
+  const visitLabel = stockVisitLabel || 'service';
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
   const { stockShortfallKey } = require('../services/inventory-operations');
   let notes = record?.structured_notes || {};
@@ -2537,7 +2533,7 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
     });
   };
   const kinds = [
-    { status: 'deducted_insufficient_stock', label: 'shortfall', send: sendShortfall },
+    ...(stockVisitLabel ? [{ status: 'deducted_insufficient_stock', label: 'shortfall', send: sendShortfall }] : []),
     { status: 'not_deducted_implausible', label: 'amount', send: sendAmount },
   ];
   for (const { status, label, send } of kinds) {
@@ -5426,12 +5422,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
     await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
 
-    // A malformed amount (any role) and a technician's amount no visit uses are refused on a FRESH completion only, before the first service write
-    // (service_products, inventory, FDACS ledger, cost, report). A same-key replay or resume of a committed completion is
-    // never judged. The claim is released as failed, as for the other refusals above, so a corrected resubmit is not blocked. Admin keeps the
-    // advisory path in deductProductInventory.
+    // A malformed amount (any role) is refused on a FRESH completion only, before the first service write (service_products, inventory,
+    // FDACS ledger, cost, report). A same-key replay or resume of a committed completion is never judged. The claim is released as
+    // failed, as for the other refusals above, so a corrected resubmit is not blocked. An amount over its product's ceiling is
+    // never refused, for any role (owner 2026-11-26): vetProductAmounts marks it and deductProductInventory flags the line.
     const amountRefusal = await vetProductAmounts(db, {
-      actor: completionInput.actor, products, skip: claim.action !== 'proceed',
+      products, skip: claim.action !== 'proceed',
     });
     if (amountRefusal) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(amountRefusal.body.code), db);
@@ -16930,5 +16926,6 @@ module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.vetProductAmounts = vetProductAmounts;
 module.exports.canonicalizeProductLines = canonicalizeProductLines;
 module.exports.exceedsVisitLimit = exceedsVisitLimit;
+module.exports.isOverVisitLimitLine = (line) => OVER_VISIT_LIMIT_LINES.has(line);
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;
