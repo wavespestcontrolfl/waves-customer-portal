@@ -378,20 +378,21 @@ async function loadSendableCheck(conn, checkId) {
 
 const WAVES_PAY_NOTE_RE = /\bwaves-pay:([0-9a-f-]{36})\b/i;
 
-function isOtherWavesPaymentNote(text, paymentId) {
-  if (!paymentId || typeof text !== 'string') return false;
+function isOtherWavesPaymentNote(text, excludePaymentIds) {
+  if (!excludePaymentIds || !excludePaymentIds.size || typeof text !== 'string') return false;
   const match = WAVES_PAY_NOTE_RE.exec(text);
-  return Boolean(match && match[1].toLowerCase() !== String(paymentId).toLowerCase());
+  return Boolean(match && excludePaymentIds.has(match[1].toLowerCase()));
 }
 
 // True when Mercury shows an untracked request or outbound transaction of this amount to this recipient that could be
 // the unknown attempt or a duplicate: any still-open request whatever its age, and any request or outbound transaction
 // made in the last 7 days or since the attempt was made, whichever reaches further back. Requests and transactions
-// already linked to OTHER paychecks (or stamped with another payment's waves-pay:<id> note) are excluded so last
-// week's identical paycheck never deadlocks retrying this week's timed-out payment.
+// already linked to OTHER paychecks (or stamped with another paycheck's waves-pay:<id> note) are excluded so last
+// week's identical paycheck never deadlocks retrying this week's timed-out payment, while earlier attempts of THIS
+// paycheck remain blocking.
 async function mercuryHoldsSameAmount(client, {
   recipientId, amountCents, now, attemptAt,
-  excludeRequestIds = new Set(), excludeTransactionIds = new Set(), paymentId = null,
+  excludeRequestIds = new Set(), excludeTransactionIds = new Set(), excludePaymentIds = new Set(),
 }) {
   const weekAgo = now.getTime() - SEND_AGAIN_LOOKBACK_DAYS * DAY_MS;
   const since = Math.min(weekAgo, attemptAt ? new Date(attemptAt).getTime() - ATTEMPT_SLACK_MS : weekAgo);
@@ -402,7 +403,7 @@ async function mercuryHoldsSameAmount(client, {
   ]);
   const requestHit = requests.some((r) => {
     if (r.requestId && excludeRequestIds.has(r.requestId)) return false;
-    if (isOtherWavesPaymentNote(r.memo, paymentId)) return false;
+    if (isOtherWavesPaymentNote(r.memo, excludePaymentIds)) return false;
     return r.recipientId === recipientId && r.amountCents === amountCents
       && (r.status === 'pendingApproval' || (recent(r.createdAt) && r.status !== 'rejected' && r.status !== 'cancelled'));
   });
@@ -410,7 +411,7 @@ async function mercuryHoldsSameAmount(client, {
     if (t.isOutbound === false) return false;
     if (t.id && excludeTransactionIds.has(t.id)) return false;
     if (t.requestId && excludeRequestIds.has(t.requestId)) return false;
-    if (isOtherWavesPaymentNote(t.note, paymentId)) return false;
+    if (isOtherWavesPaymentNote(t.note, excludePaymentIds)) return false;
     return t.counterpartyId === recipientId && t.amountCents === amountCents
       && recent(t.createdAt) && !['failed', 'cancelled', 'blocked'].includes(t.status);
   });
@@ -424,9 +425,10 @@ async function assertUnknownCleared(client, before, check, now, conn = db) {
     throw new PayrollError(409, 'The Mercury account changed since that request. Check the old account in Mercury yourself before you send again.');
   }
   const otherRows = await conn('payroll_payments')
+    .where({ recipient_id: before.recipient_id })
     .whereNot({ check_id: check.id })
-    .where(function tracked() { this.whereNotNull('mercury_request_id').orWhereNotNull('mercury_transaction_id'); })
-    .select('mercury_request_id', 'mercury_transaction_id');
+    .select('id', 'mercury_request_id', 'mercury_transaction_id');
+  const excludePaymentIds = new Set(otherRows.map((r) => r.id && String(r.id).toLowerCase()).filter(Boolean));
   const excludeRequestIds = new Set(otherRows.map((r) => r.mercury_request_id).filter(Boolean));
   const excludeTransactionIds = new Set(otherRows.map((r) => r.mercury_transaction_id).filter(Boolean));
   let held;
@@ -438,7 +440,7 @@ async function assertUnknownCleared(client, before, check, now, conn = db) {
       attemptAt: before.created_at,
       excludeRequestIds,
       excludeTransactionIds,
-      paymentId: before.id,
+      excludePaymentIds,
     });
   } catch (err) { throw await readFailure(err); }
   if (held) throw new PayrollError(409, 'Mercury already shows a request or payment of this amount to this person in the last 7 days. Check Mercury first.');

@@ -2105,7 +2105,7 @@ async function markOfferLoginActivated(trx, technicianId, actor, now = new Date(
   const linked = await trx('job_offers')
     .where({ technician_id: technicianId, status: 'accepted' })
     .forUpdate()
-    .select('id', 'application_id', 'signed_at', 'start_date', 'technician_id', 'checklist');
+    .select('id', 'application_id', 'status', 'signed_at', 'start_date', 'technician_id', 'checklist');
   if (!linked.length) return 0;
   let updated = 0;
   const byApp = new Map();
@@ -2116,6 +2116,7 @@ async function markOfferLoginActivated(trx, technicianId, actor, now = new Date(
   const doneByName = (actor && actor.name) || null;
   for (const [applicationId, rows] of byApp.entries()) {
     const signed = newestSignedFirst(rows);
+    if (!signed.length) continue;
     const marks = firstDaysMarks(signed);
     if (marks[LOGIN_ITEM.key]) continue;
     const nextMarks = {

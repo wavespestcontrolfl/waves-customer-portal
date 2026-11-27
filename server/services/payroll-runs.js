@@ -1881,6 +1881,7 @@ module.exports = {
   listOwnChecks,
   getOwnStub,
   exportCsv,
+  withPaperPayments,
   lockPayrollMutations,
   PAYROLL_LOCK_NS,
   PAYROLL_LOCK_KEY,
