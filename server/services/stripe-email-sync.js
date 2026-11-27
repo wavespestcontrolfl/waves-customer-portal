@@ -62,7 +62,7 @@ const OFFICE_COPY = {
     next: 'Check which customer record owns this Stripe profile, then fix the Stripe email by hand only if it is wrong.',
   },
   gave_up: {
-    why: 'Stripe did not take the new email after several tries.',
+    why: 'The app could not confirm the new email in Stripe after several tries.',
     next: 'First confirm in Stripe that the profile belongs to this customer. Only then compare its email with the record, and fix it if they differ.',
   },
 };
@@ -255,8 +255,9 @@ async function drainOnce({ limit = 20 } = {}) {
         counts.error = (counts.error || 0) + 1;
         logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
         // Only the version this drain saw: a job changed or rescheduled since keeps its own schedule.
+        // It spends a try too, so a job that keeps failing here reaches the give-up alert like a Stripe failure.
         await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
-          .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
+          .update({ attempts: db.raw('attempts + 1'), last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
           .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
       }
     }

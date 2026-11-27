@@ -199,7 +199,7 @@ describe('stripe-email-sync processJob', () => {
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
     await expect(sync.drainDue()).resolves.toEqual({ error: 1 });
     expect(updateEmail).not.toHaveBeenCalled();
-    expect(state.jobs[0]).toMatchObject({ status: 'pending', last_error: 'Error' });
+    expect(state.jobs[0]).toMatchObject({ status: 'pending', last_error: 'Error', attempts: { sql: 'attempts + 1' } });
     expect(state.jobs[0].next_attempt_at).toEqual({ sql: "now() + interval '15 minutes'" });
   });
 
