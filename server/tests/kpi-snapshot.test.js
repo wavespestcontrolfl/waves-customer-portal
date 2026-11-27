@@ -87,7 +87,8 @@ describe('recordKpiSnapshot', () => {
     expect(byMetric.csat_avg).toBe(8.7); // parsed from the "8.7" toFixed string
     expect(byMetric.retention_pct).toBe(96.4);
     expect(byMetric.collection_rate).toBe(88.5);
-    expect(byMetric.autopay_pct).toBe(73.1);
+    expect(byMetric.recurring_autopay_pct).toBe(73.1);
+    expect(byMetric.autopay_pct).toBeUndefined();
     expect(byMetric.net_customers).toBe(5);
     expect(byMetric.net_mrr).toBe(412.5);
   });

@@ -27,7 +27,7 @@ export const KPI_METRIC_LABELS = {
   csat_avg: "CSAT (0-10)",
   retention_pct: "Retention (%)",
   collection_rate: "Collection rate (%)",
-  autopay_pct: "Autopay coverage (%)",
+  recurring_autopay_pct: "Autopay coverage — recurring plans (%)",
   net_customers: "Net customers (month)",
   net_mrr: "Net MRR (month, $)",
 };

@@ -204,7 +204,7 @@ describe("ActionInbox", () => {
     expect(screen.getByText(/Autopay covers 40% of recurring plans/)).toBeInTheDocument();
   });
 
-  it("shows standing health items open by default when there are no urgent items", () => {
+  it("shows standing health items open by default when there are no urgent items, and lets the user collapse them", () => {
     render(
       <ActionInbox
         alerts={[
@@ -213,6 +213,16 @@ describe("ActionInbox", () => {
       />,
     );
     expect(screen.getByText("1 standing")).toBeInTheDocument();
+    expect(screen.getByText(/10 customers at churn risk/)).toBeInTheDocument();
+
+    const toggle = screen.getByRole("button", { name: /Standing health/i });
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByText(/10 customers at churn risk/)).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByText(/10 customers at churn risk/)).toBeInTheDocument();
   });
 

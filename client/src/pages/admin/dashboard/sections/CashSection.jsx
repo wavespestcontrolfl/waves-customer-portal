@@ -75,7 +75,7 @@ export default function CashSection({
               />
               <KpiTile
                 label="Autopay Coverage"
-                metricKey="autopay_pct"
+                metricKey="recurring_autopay_pct"
                 targets={kpiTargets}
                 history={kpiHistory}
                 value={

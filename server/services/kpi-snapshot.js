@@ -25,7 +25,10 @@ const SNAPSHOT_METRICS = [
   ['csat_avg', (k) => (k.quality?.csatAvg != null ? parseFloat(k.quality.csatAvg) : null)],
   ['retention_pct', (k) => k.retention?.pct],
   ['collection_rate', (k) => k.billing?.collectionRate],
-  ['autopay_pct', (k) => k.billing?.autopayPct],
+  // Separate key from legacy `autopay_pct` (which tracked all active customers)
+  // so recurring-plan autopay starts a clean trend instead of splicing a step-
+  // change onto 90 days of customer-wide history.
+  ['recurring_autopay_pct', (k) => k.billing?.autopayPct],
   ['net_customers', (k) => k.momentum?.customers?.net],
   ['net_mrr', (k) => k.momentum?.mrr?.net],
 ];

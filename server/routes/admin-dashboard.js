@@ -162,6 +162,7 @@ function applyETTimestampWindow(qb, column, from, to) {
 // bare ET date string would shift the cutoff by the ET offset (the same trap
 // applyETTimestampWindow guards for ranges).
 const ET_MIDNIGHT_TS = "?::timestamp AT TIME ZONE 'America/New_York'";
+const ET_NEXT_MIDNIGHT_TS = "(?::timestamp + INTERVAL '1 day') AT TIME ZONE 'America/New_York'";
 function etDayStart(dateStr) { return `${dateStr}T00:00:00`; }
 
 // Real-customer stages live in a shared module so the dashboard, Intelligence
@@ -1805,6 +1806,7 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
   try {
     const win = resolveDashboardWindow(req.query);
     const cutoff = etDayStart(win.from); // ET period start; ET-midnight-bound below
+    const endDay = etDayStart(win.to);   // ET period end (exclusive next midnight)
     const valueSum = 'COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)), 0)';
 
     // estimates `e` + customers `c` so the internal/test-account exclusion
@@ -1829,11 +1831,18 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
       // booked another way (the daily reclaim's code; estimate-winloss
       // isBookedOtherWayRow), which resolves at its expiry. Resolution date
       // matches estimate-winloss.resolutionDate: accepted_at, else created_at.
-      // Bound ET-midnight so the cutoff doesn't drift at the UTC boundary on Railway.
+      // Bound both sides at ET-midnight so future expires_at rows or UTC drift
+      // cannot leak across window boundaries.
       base()
         .where((q) => q
-          .whereRaw(`(e.status = 'accepted' AND COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff])
-          .orWhereRaw(`(${bookedWinSql('e')} AND COALESCE(e.expires_at, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS})`, [cutoff]))
+          .whereRaw(
+            `(e.status = 'accepted' AND COALESCE(e.accepted_at, e.created_at) >= ${ET_MIDNIGHT_TS} AND COALESCE(e.accepted_at, e.created_at) < ${ET_NEXT_MIDNIGHT_TS})`,
+            [cutoff, endDay],
+          )
+          .orWhereRaw(
+            `(${bookedWinSql('e')} AND COALESCE(e.expires_at, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS} AND COALESCE(e.expires_at, e.updated_at, e.created_at) < ${ET_NEXT_MIDNIGHT_TS})`,
+            [cutoff, endDay],
+          ))
         // Dollars stay accepted-only (as MRR won does): a booked win is a win in the COUNT, but
         // the customer did not necessarily buy at this offer's price.
         .select(db.raw(`COALESCE(SUM(COALESCE(e.monthly_total, 0) * 12 + COALESCE(e.onetime_total, 0)) FILTER (WHERE e.status = 'accepted'), 0) as total`), db.raw('COUNT(*) as cnt'))
@@ -1841,14 +1850,15 @@ router.get('/sales-capture', dashboardCache, async (req, res, next) => {
       // Missed = declined/expired, resolved in window. declined → declined_at,
       // expired → expires_at, then updated_at, else created_at — matching
       // resolutionDate so AGE-expired rows (status set by the worker, no
-      // expires_at) still count instead of dropping to NULL.
+      // expires_at) still count instead of dropping to NULL. Upper bound
+      // prevents expired rows with a future expires_at from leaking into Today.
       base()
         .whereIn('e.status', ['declined', 'expired'])
         // An expired offer whose customer booked another way is a win (counted above), never missed.
         .whereRaw(`NOT ${bookedWinSql('e')}`)
         .whereRaw(
-          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS}`,
-          [cutoff],
+          `COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) >= ${ET_MIDNIGHT_TS} AND COALESCE(CASE WHEN e.status = 'expired' THEN e.expires_at ELSE e.declined_at END, e.updated_at, e.created_at) < ${ET_NEXT_MIDNIGHT_TS}`,
+          [cutoff, endDay],
         )
         .select(db.raw(`${valueSum} as total`), db.raw('COUNT(*) as cnt'))
         .first(),

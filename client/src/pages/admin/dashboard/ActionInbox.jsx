@@ -135,7 +135,9 @@ function StandingHealthGroup({ items, open, hasUrgent, onToggle }) {
 }
 
 export default function ActionInbox({ alerts, stale = false, failures = [] }) {
-  const [standingOpen, setStandingOpen] = useState(false);
+  // null = follow default (open when no urgent alerts exist, collapsed when
+  // urgent alerts are present); boolean = explicit user toggle.
+  const [standingOpen, setStandingOpen] = useState(null);
   const loaded = Array.isArray(alerts);
   const items = loaded ? [...alerts].sort((a, b) => rank(a) - rank(b)) : [];
   const failedNote = failedChecksNote(failures);
@@ -160,6 +162,7 @@ export default function ActionInbox({ alerts, stale = false, failures = [] }) {
   const criticalCount = urgentItems.filter((a) => a.severity === "critical").length;
   const allClear = items.length === 0;
   const headerBadgeCount = urgentItems.length || standingItems.length;
+  const isStandingOpen = standingOpen ?? urgentItems.length === 0;
 
   return (
     <UiSurface as={Card} className="mb-4">
@@ -203,9 +206,9 @@ export default function ActionInbox({ alerts, stale = false, failures = [] }) {
             )}
             <StandingHealthGroup
               items={standingItems}
-              open={standingOpen || urgentItems.length === 0}
+              open={isStandingOpen}
               hasUrgent={urgentItems.length > 0}
-              onToggle={() => setStandingOpen((open) => !open)}
+              onToggle={() => setStandingOpen(!isStandingOpen)}
             />
           </div>
         )}

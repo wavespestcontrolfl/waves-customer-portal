@@ -101,12 +101,18 @@ describe('Period-driven dashboard endpoints', () => {
     expect(res.body.period.label).toBe('Last 90 days');
   });
 
-  test('/sales-capture bounds resolution timestamps to the requested custom start date', async () => {
+  test('/sales-capture bounds resolution timestamps on both start and end of the requested window', async () => {
     const res = await get('/sales-capture?period=custom&from=2026-07-15');
     expect(res.status).toBe(200);
     expect(res.body.period).toMatchObject({ from: '2026-07-15', label: 'Since 2026-07-15' });
-    const rawBinds = dbCalls.filter((c) => c.table === 'estimates as e' && c.method === 'whereRaw').flatMap((c) => c.args[1] || []);
-    expect(rawBinds).toContain('2026-07-15T00:00:00');
+    const rawClauses = dbCalls.filter(
+      (c) => c.table === 'estimates as e' && (c.method === 'whereRaw' || c.method === 'orWhereRaw') && Array.isArray(c.args[1]),
+    );
+    expect(rawClauses.length).toBeGreaterThanOrEqual(3);
+    for (const c of rawClauses) {
+      expect(c.args[0]).toContain("INTERVAL '1 day'");
+      expect(c.args[1]).toEqual(['2026-07-15T00:00:00', `${res.body.period.to}T00:00:00`]);
+    }
   });
 
   test('/revenue-by-city filters service_date by the requested custom start date and returns period label', async () => {

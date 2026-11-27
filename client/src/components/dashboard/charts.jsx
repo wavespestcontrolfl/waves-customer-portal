@@ -522,41 +522,59 @@ export function ServiceMixDonut({ mix = [], height = 220 }) {
 // Each stage shrinks proportionally to the top of the funnel (sent).
 // Pass `funnel` { sent, viewed, accepted, declined } and `rates` { view_rate,
 // close_rate, decline_rate }.
-export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, byService }) {
+function buildEstimateFunnelStages(funnel, rates) {
   const sent = funnel.sent || 0;
+  const viewed = funnel.viewed || 0;
+  const accepted = funnel.accepted || 0;
+  const declined = funnel.declined || 0;
   const pending = funnel.pending || 0;
-  const stages = [
-    { label: 'Sent',     count: sent,                  pct: 100 },
-    { label: 'Viewed',   count: funnel.viewed || 0,    pct: rates.view_rate || 0 },
-    { label: 'Accepted', count: funnel.accepted || 0,  pct: rates.close_rate || 0 },
-    { label: 'Declined', count: funnel.declined || 0,  pct: rates.decline_rate || 0, dim: true },
-    // Neither won nor lost yet — these are the follow-up work, so they earn a
-    // visible row instead of hiding in the sent-minus-decided arithmetic.
-    { label: 'Pending',  count: pending, pct: sent > 0 ? Math.round((pending / sent) * 100) : 0, dim: true },
-  ];
-  if (sent === 0) return <EmptyState>No estimates sent this period</EmptyState>;
+  const pctOfSent = (val) => (sent > 0 ? val : null);
+  return {
+    hasActivity: [sent, viewed, accepted, declined, pending].some((n) => n > 0),
+    maxCount: Math.max(sent, viewed, accepted, declined, pending, 1),
+    stages: [
+      { label: 'Sent',     count: sent,     pct: pctOfSent(100) },
+      { label: 'Viewed',   count: viewed,   pct: pctOfSent(rates.view_rate || 0) },
+      { label: 'Accepted', count: accepted, pct: pctOfSent(rates.close_rate || 0) },
+      { label: 'Declined', count: declined, pct: pctOfSent(rates.decline_rate || 0), dim: true },
+      // Neither won nor lost yet — these are the follow-up work, so they earn a
+      // visible row instead of hiding in the sent-minus-decided arithmetic.
+      { label: 'Pending',  count: pending,  pct: pctOfSent(Math.round((pending / (sent || 1)) * 100)), dim: true },
+    ],
+  };
+}
+
+export function EstimateFunnel({ funnel = {}, rates = {}, totalAcceptedValue, byService }) {
+  // A short window like Today can have accepted/declined activity from quotes
+  // sent on an earlier day even when sent === 0; only show empty when every
+  // stage is zero.
+  const { hasActivity, maxCount, stages } = buildEstimateFunnelStages(funnel, rates);
+  if (!hasActivity) return <EmptyState>No estimates sent this period</EmptyState>;
   return (
     <div className="space-y-3">
-      {stages.map((s) => (
-        <div key={s.label}>
-          <div className="mb-1 flex items-baseline justify-between text-ui-caption">
-            <span className={cn('font-medium', s.dim ? 'text-ink-tertiary' : 'text-ink-secondary')}>{s.label}</span>
-            <span className="u-nums">
-              <span className={cn('font-medium', s.dim ? 'text-ink-tertiary' : 'text-zinc-900')}>{s.count}</span>
-              <span className="text-ink-tertiary ml-2">{s.pct}%</span>
-            </span>
+      {stages.map((s) => {
+        const widthPct = s.pct != null ? Math.min(100, s.pct) : Math.round((s.count / maxCount) * 100);
+        return (
+          <div key={s.label}>
+            <div className="mb-1 flex items-baseline justify-between text-ui-caption">
+              <span className={cn('font-medium', s.dim ? 'text-ink-tertiary' : 'text-ink-secondary')}>{s.label}</span>
+              <span className="u-nums">
+                <span className={cn('font-medium', s.dim ? 'text-ink-tertiary' : 'text-zinc-900')}>{s.count}</span>
+                {s.pct != null && <span className="text-ink-tertiary ml-2">{s.pct}%</span>}
+              </span>
+            </div>
+            <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
+              <div
+                className="h-full"
+                style={{
+                  width: `${widthPct}%`,
+                  background: s.dim ? CHART_PRIOR : CHART_PRIMARY,
+                }}
+              />
+            </div>
           </div>
-          <div className="h-2 bg-surface-sunken rounded-sm overflow-hidden">
-            <div
-              className="h-full"
-              style={{
-                width: `${Math.min(100, s.pct)}%`,
-                background: s.dim ? CHART_PRIOR : CHART_PRIMARY,
-              }}
-            />
-          </div>
-        </div>
-      ))}
+        );
+      })}
       {totalAcceptedValue != null && (
         <div className="pt-3 mt-3 flex items-baseline justify-between">
           <span className="ui-label text-ink-secondary">Accepted value</span>
@@ -644,13 +662,13 @@ export function AgingBar({ aging = {}, totalOutstanding, totalOverdue, height = 
 
 // ─── Revenue by city (horizontal bar list) ────────────────────────
 //
-// ServiceTitan-style geo cut: where this month's completed-service
+// ServiceTitan-style geo cut: where the selected period's completed-service
 // revenue comes from. Lightweight div-bar list (no Recharts), matching
 // the ChannelMixBar / AgingBar style already in this file.
 
 export function RevenueByCity({ cities = [], total = 0 }) {
   if (!cities.length) {
-    return <EmptyState>No completed-service revenue this month</EmptyState>;
+    return <EmptyState>No completed-service revenue this period</EmptyState>;
   }
   const maxRevenue = Math.max(...cities.map((c) => c.revenue || 0), 1);
   return (
