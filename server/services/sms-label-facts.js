@@ -466,10 +466,15 @@ function catalogFamilyOf(canon, match) {
 function namedServiceFamilies(text) {
   const canon = canonText(text).toLowerCase();
   const found = new Set();
+  // "bed bug heat treatment" also matches the chemical bed bug words; only a chemical match INSIDE a heat match is dropped, so a text
+  // naming both ("the bed bug spray and the heat treatment") names two services (ambiguous), never the heat one alone.
+  const heatSpans = [...canon.matchAll(NAMED_SERVICE_GLOBAL.find((f) => f.family === 'bed_bug_heat').re)].map((m) => [m.index, m.index + m[0].length]);
   for (const { family, re } of NAMED_SERVICE_GLOBAL) {
-    for (const match of canon.matchAll(re)) found.add(catalogFamilyOf(canon, match) || family);
+    for (const match of canon.matchAll(re)) {
+      if (family === 'bed_bug' && heatSpans.some(([a, b]) => match.index < b && match.index + match[0].length > a)) continue;
+      found.add(catalogFamilyOf(canon, match) || family);
+    }
   }
-  if (found.has('bed_bug_heat')) found.delete('bed_bug');
   return found;
 }
 /** The ONE prep guide family a text names, or null (none, or two: ambiguous). */

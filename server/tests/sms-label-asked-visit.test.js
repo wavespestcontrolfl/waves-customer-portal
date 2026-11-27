@@ -36,6 +36,8 @@ describe('namedServiceFamilies: service-shaped words only', () => {
     ['is the cockroach treatment dry', ['cockroach']],
     ['When can we sleep in the room after the bed bug treatment?', ['bed_bug']],
     ['after the bed bug heat treatment can we go back in', ['bed_bug_heat']],
+    // both bed bug services named: two families (ambiguous), never the heat one alone
+    ['the bed bug spray and the heat treatment, which one do we prep for', ['bed_bug', 'bed_bug_heat']],
     // "bed bug spray" is the bed bug service, never the general "bug spray"
     ['is the bed bug spray dry?', ['bed_bug']],
     ['is the bug spray dry?', ['interior_pest']],
