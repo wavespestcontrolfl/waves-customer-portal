@@ -109,7 +109,8 @@ describe('Bouncie payload normalization', () => {
     expect(pointFromPayload(payload, 'trip-end')).toMatchObject({ lat: 27.5, lng: -82.5, reported_at: '2026-11-25T12:20:00.000Z' });
     expect(pointFromPayload({ eventType: 'tripEnd', start: payload.start, end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
     expect(pointFromPayload({ eventType: 'tripEnd', location: { lat: 26.9, lon: -82.0 }, end: payload.end }, 'trip-end')).toMatchObject({ lat: 27.5, lng: -82.5 });
-    expect(pointFromPayload({ eventType: 'tripEnd', location: { lat: 26.9, lon: -82.0 }, end: { timestamp: 'x' } }, 'trip-end')).toMatchObject({ lat: 26.9 });
+    expect(pointFromPayload({ eventType: 'tripEnd', location: { lat: 26.9, lon: -82.0 }, end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
+    expect(pointFromPayload({ eventType: 'tripEnd', lat: 26.9, lon: -82.0, gps: { lat: 26.9, lon: -82.0 } }, 'trip-end')).toBeNull();
     expect(pointFromPayload({ eventType: 'tripEnd', ts: '2026-11-25T12:21:00.000Z', location: { lat: 26.9, lon: -82.0 }, end: { lat: 27.5, lon: -82.5 } }, 'trip-end'))
       .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:21:00.000Z' });
     expect(pointFromPayload({ eventType: 'tripEnd', end: { lat: 27.5, lon: -82.5 }, location: { lat: 26.9, lon: -82.0, timestamp: '2026-11-25T12:22:00.000Z' } }, 'trip-end'))

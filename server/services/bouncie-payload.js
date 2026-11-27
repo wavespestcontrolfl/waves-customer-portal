@@ -113,6 +113,7 @@ function tripEndTime(payload = {}) {
     explicitTripEndTime(payload),
     payload.timestamp,
     payload.ts,
+    timeFromSource(payload.gps),
     timeFromSource(payload.location),
     timeFromSource(payload.position)
   ) ?? null;
@@ -123,16 +124,12 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
     return pointFromSource(pickLatestSample(payload));
   }
   // A trip-end is where the truck stopped, and the arrival detector stamps this point with the
-  // end time: never the departure (start / connect) point. With no end position the receiver
-  // falls back to the truck's fresh last location (engineOffPoint).
+  // end time. So only the trip-end's own block (end, else disconnect) gives its position: never
+  // the departure (start / connect) point, and never an envelope sample (top level, location,
+  // position) whose age is unknown. With no end position the receiver falls back to the truck's
+  // last location under its 10-minute freshness check (engineOffPoint).
   if (canonicalEventType === 'trip-end') {
-    const point = (
-      pointFromSource(payload.end) ||
-      pointFromSource(payload.disconnect) ||
-      pointFromSource(payload) ||
-      pointFromSource(payload.location) ||
-      pointFromSource(payload.position)
-    );
+    const point = pointFromSource(payload.end) || pointFromSource(payload.disconnect);
     // An end point without its own time keeps the event's own time.
     if (point && point.reported_at == null) {
       point.reported_at = tripEndTime(payload);
