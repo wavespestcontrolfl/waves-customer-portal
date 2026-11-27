@@ -3348,7 +3348,8 @@ function RestockRequestsTab({
           quantity: draft.quantity || null,
           unit: draft.unit || null,
           note: draft.note || null,
-          ...(confirm ? { confirm: true, confirmFingerprint: fingerprint } : {}),
+          ...(confirm ? { confirm: true } : {}),
+          ...(fingerprint ? { confirmFingerprint: fingerprint } : {}),
         }),
       });
       setAlreadyCounted(null);
@@ -3515,7 +3516,7 @@ function RestockRequestsTab({
           message={alreadyCounted.message}
           busy={receivingId === alreadyCounted.request.id}
           onClose={() => setAlreadyCounted(null)}
-          onCloseCounted={() => runAction(alreadyCounted.request, "close_counted")}
+          onCloseCounted={() => runAction(alreadyCounted.request, "close_counted", { fingerprint: alreadyCounted.fingerprint })}
           onReceiveAnyway={() => runAction(alreadyCounted.request, "receive", { confirm: true, fingerprint: alreadyCounted.fingerprint })}
         />
       )}

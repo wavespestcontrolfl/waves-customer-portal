@@ -139,13 +139,19 @@ jest.setTimeout(30000);
     expect(await stock()).toBe(12);
   });
 
-  test('only invoices after the order went out count; the preview refuses the same way', async () => {
+  test('only receipts since the request existed count; the preview refuses the same way', async () => {
     const req = await request();
-    await ledger(req.id, { placed_at: new Date(Date.now() - 1 * DAY) });
-    await invoiceMovement(4, 2);
+    await invoiceMovement(4, 4); // before the request was raised (3 days ago)
     expect((await inventory.previewRestockAction(req.id, { action: 'receive' })).new_status).toBe('received');
     await invoiceMovement(4, 0.2);
     await expect(inventory.previewRestockAction(req.id, { action: 'receive' })).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+  });
+
+  test('an invoice that posted before the vendor confirmation (a late placed_at) still counts', async () => {
+    const req = await request();
+    await ledger(req.id, { placed_at: new Date(Date.now() - 0.1 * DAY), created_at: new Date(Date.now() - 2 * DAY) });
+    await invoiceMovement(4, 1);
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
   });
 
   test('confirm is not accepted on other actions', async () => {
@@ -219,6 +225,32 @@ jest.setTimeout(30000);
     });
     // The only receipt was undone: the set is empty, so a plain receive passes.
     expect((await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {})).request.status).toBe('received');
+  });
+
+  test('Close, already counted from the dialog sends the fingerprint: the same set closes, a changed or undone set is refused', async () => {
+    const req = await request();
+    const first = await invoiceMovement(2, 1);
+    const shown = await warningFor(req.id);
+    const late = await invoiceMovement(1, 0.1);
+    const changed = await inventory.updateRestockRequest(req.id, { action: 'close_counted', confirmFingerprint: shown.details.receiptFingerprint }, {}).catch((err) => err);
+    expect(changed).toMatchObject({ statusCode: 409, code: 'already_counted_by_receipt' });
+    expect(changed.details.alreadyAdded).toHaveLength(2);
+    expect((await reload(req.id)).status).toBe('ordered');
+    const closed = await inventory.updateRestockRequest(req.id, { action: 'close_counted', confirmFingerprint: changed.details.receiptFingerprint }, {});
+    expect(closed.request.status).toBe('received');
+    expect(await stock()).toBe(4);
+
+    // Every listed receipt undone: closing "already counted" would lose that stock, so it asks again.
+    const second = await request();
+    const undone = await invoiceMovement(5, 0.5);
+    const listed = await warningFor(second.id);
+    for (const row of [first, late, undone]) {
+      await mockConn('product_inventory_movements').insert({ product_id: product.id, movement_type: 'correction', quantity: -1, unit: 'gal', stock_before: 4, stock_after: 3,
+        metadata: { source: 'inventory_agent_undo', undoOfMovementId: row.id } });
+    }
+    await expect(inventory.updateRestockRequest(second.id, { action: 'close_counted', confirmFingerprint: listed.details.receiptFingerprint }, {})).rejects.toMatchObject({ code: 'receipts_changed' });
+    // The plain button has no list to check.
+    expect((await inventory.updateRestockRequest(second.id, { action: 'close_counted' }, {})).request.status).toBe('received');
   });
 
   describe('a late automatic order after the request was received', () => {

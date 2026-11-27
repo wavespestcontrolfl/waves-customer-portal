@@ -57,3 +57,9 @@ test('close_counted passes through without quantity, unit or confirm', async () 
   expect(res.status).toBe(200);
   expect(updateRestockRequest).toHaveBeenCalledWith(REQUEST_ID, { action: 'close_counted', note: 'invoice counted it' }, expect.any(Object));
 });
+
+test('Close, already counted from the warning dialog passes its fingerprint; receive-only fields stay out', async () => {
+  updateRestockRequest.mockResolvedValue({ request: { id: REQUEST_ID, status: 'received' } });
+  await post({ action: 'close_counted', confirm: true, confirmFingerprint: 'fp-1' });
+  expect(updateRestockRequest).toHaveBeenCalledWith(REQUEST_ID, { action: 'close_counted', note: undefined, confirmFingerprint: 'fp-1' }, expect.any(Object));
+});

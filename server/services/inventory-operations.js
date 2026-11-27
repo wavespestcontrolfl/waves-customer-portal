@@ -76,7 +76,8 @@ const actionSchema = Joi.object({
   // Receive only: the operator saw "an invoice already added this" and receives again anyway.
   // The fingerprint of the receipts the warning listed: confirm counts only while that set is unchanged.
   confirm: Joi.boolean().when('action', { is: 'receive', then: Joi.boolean(), otherwise: Joi.forbidden() }),
-  confirmFingerprint: Joi.string().max(100).when('action', { is: 'receive', then: Joi.string(), otherwise: Joi.forbidden() }),
+  // Close, already counted from that dialog sends the same fingerprint, so a changed set is refused too.
+  confirmFingerprint: Joi.string().max(100).when('action', { is: Joi.valid('receive', 'close_counted'), then: Joi.string(), otherwise: Joi.forbidden() }),
   quantity: numeric.positive().when('action', { is: 'receive', then: Joi.number(), otherwise: Joi.forbidden() }),
   unit: Joi.string().trim().max(50).when('action', { is: 'receive', then: Joi.string(), otherwise: Joi.forbidden() }),
   note: optionalText,
@@ -481,18 +482,20 @@ function validateTransition(request, action, guard) {
   return secondReceive;
 }
 
-// Stock the invoice / delivery-email lane (purchase-receipts) already added for this product since
-// the request's order went out (its ledger placed_at), else since the request was raised. Receiving
-// the request then would count the same delivery twice. A receipt the inventory-agent undo reversed
-// (a correction carrying undoOfMovementId) no longer counts. Oldest first; [] when nothing was added.
+// Stock the invoice / delivery-email lane (purchase-receipts) already added for this product since the request
+// existed. The window opens at the request's creation (or its ledger row's, if that is earlier), never at the
+// ledger's placed_at: the vendor's confirmation can arrive after the invoice has posted, and that invoice is the
+// very delivery the request is waiting for. Receiving the request then would count the delivery twice. A receipt
+// the inventory-agent undo reversed (a correction carrying undoOfMovementId) no longer counts. Oldest first.
 async function receiptStockAddedSince(conn, request) {
   const { SOURCES } = require('./purchase-receipts/receipt-processor');
-  const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('placed_at');
+  const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('created_at');
+  const since = order?.created_at && new Date(order.created_at) < new Date(request.created_at) ? order.created_at : request.created_at;
   const movements = 'product_inventory_movements';
   return conn(movements)
     .where({ [`${movements}.product_id`]: request.product_id, [`${movements}.movement_type`]: 'restock' })
     .whereIn(conn.raw(`${movements}.metadata->>'source'`), Object.values(SOURCES))
-    .where(`${movements}.created_at`, '>=', order?.placed_at || request.created_at)
+    .where(`${movements}.created_at`, '>=', since)
     .whereRaw(`NOT EXISTS (SELECT 1 FROM ${movements} u WHERE u.metadata->>'undoOfMovementId' = ${movements}.id::text)`)
     .orderBy(`${movements}.created_at`, 'asc').select('id', 'quantity', 'unit', 'created_at');
 }
@@ -512,12 +515,17 @@ function describeReceiptsInUnit(rows, formatDay) {
 const receiptFingerprint = (rows) => crypto.createHash('sha256').update(rows.map((row) => row.id).sort().join(',')).digest('base64url');
 
 // Run under the product row lock (the receipt lane writes under the same lock), so the set cannot change
-// between this read and the receive that follows. Receive anyway passes only for the set the dialog listed.
+// between this read and the write that follows. Receive anyway, and Close, already counted from the warning
+// dialog, pass only for the exact set the dialog listed. The plain Close button has no dialog and no list: it
+// is the operator's own call and sends no fingerprint.
 async function assertNotAlreadyCounted(conn, request, input) {
+  const closing = input.action === 'close_counted';
+  if (closing && !input.confirmFingerprint) return;
   const rows = await receiptStockAddedSince(conn, request);
-  if (!rows.length) return;
-  const fingerprint = receiptFingerprint(rows);
-  if (input.confirm && input.confirmFingerprint === fingerprint) return;
+  const fingerprint = rows.length ? receiptFingerprint(rows) : null;
+  if (closing ? fingerprint === input.confirmFingerprint : (!rows.length || (input.confirm && input.confirmFingerprint === fingerprint))) return;
+  // The listed receipt was undone: closing "already counted" would now lose that stock.
+  if (!rows.length) throw inventoryError('The receipts for this product changed while you looked. Reload the Restock tab.', 409, 'receipts_changed');
   const { formatETDate } = require('../utils/datetime-et');
   const byUnit = new Map();
   for (const row of rows) byUnit.set(row.unit, [...(byUnit.get(row.unit) || []), row]);
@@ -531,8 +539,8 @@ async function assertNotAlreadyCounted(conn, request, input) {
 
 async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
+  if (['receive', 'close_counted'].includes(input.action)) await assertNotAlreadyCounted(conn, request, input);
   if (input.action !== 'receive') return { secondReceive };
-  await assertNotAlreadyCounted(conn, request, input);
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
   if (!(quantity > 0)) throw inventoryError('Receive quantity is required');

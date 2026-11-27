@@ -64,6 +64,7 @@ describe('Close, already counted', () => {
     await waitFor(() => expect(actionBodies()).toHaveLength(1));
     expect(actionBodies()[0]).toMatchObject({ action: 'close_counted' });
     expect(actionBodies()[0].confirm).toBeUndefined();
+    expect(actionBodies()[0].confirmFingerprint).toBeUndefined(); // the plain button has no list to check
   });
 
   it('a late automatic order on a received request also offers it (no double receive)', async () => {
@@ -93,7 +94,8 @@ describe('Close, already counted', () => {
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close, already counted' }));
     await waitFor(() => expect(actionBodies()).toHaveLength(2));
-    expect(actionBodies()[1]).toMatchObject({ action: 'close_counted' });
+    expect(actionBodies()[1]).toMatchObject({ action: 'close_counted', confirmFingerprint: 'fp-1' });
+    expect(actionBodies()[1].confirm).toBeUndefined();
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 

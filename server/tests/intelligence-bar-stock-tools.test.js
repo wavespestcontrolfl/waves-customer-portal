@@ -1816,7 +1816,7 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     const CLOSE_PREVIEW = { product: { id: TAURUS.id, name: TAURUS.name }, request: { id: REQ }, action: 'close_counted' };
     const close = (prompt, over = {}) => resolveStockWriteTarget({
       toolName: 'update_restock_request', prompt, preview: CLOSE_PREVIEW, actorId: 'actor-1',
-      pageData: { route: '/admin/inventory', requestId: REQ }, ...over,
+      pageData: { route: '/admin/inventory', search: '?tab=restock', requestId: REQ }, ...over,
     });
     const ASK = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
 
@@ -1839,6 +1839,20 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       'close this restock request as already counted and receive it',
     ])('"%s" does not ground the close', async (prompt) => {
       expect(await close(prompt)).toEqual(ASK);
+    });
+
+    test('a page-relative phrase asks unless the Restock tab is open on that request', async () => {
+      for (const pageData of [
+        { route: '/admin/inventory', requestId: REQ },
+        { route: '/admin/inventory', search: '?tab=products', requestId: REQ },
+        { route: '/admin/inventory', search: '?tab=restock' },
+        {},
+      ]) {
+        expect(await close('close this request as already counted', { pageData })).toEqual(ASK);
+      }
+      expect(await close('close this request as already counted', { pageData: { route: '/admin/inventory', search: `?tab=restock&requestId=${REQ}` } })).toEqual({ productId: TAURUS.id, requestId: REQ });
+      // A request id typed in the words needs no page.
+      expect(await close(`close request ${REQ} as already counted`, { pageData: {} })).toEqual({ productId: TAURUS.id, requestId: REQ });
     });
 
     test('another request id, or a page reference away from the Restock tab, asks', async () => {

@@ -1651,10 +1651,10 @@ function resolveCloseCountedTarget({ prompt, pageData = {}, preview }) {
   const { targetClause, UUID_RE } = require('./task-context');
   const clause = String(targetClause(prompt, true)).trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
   const match = clause.match(CLOSE_COUNTED_RE) || clause.match(COUNTED_THEN_CLOSE_RE);
-  // Groups: 1 = this/that/the..., 2 = it, 3 = a request id. A page word needs the Restock tab open on that request.
+  // Groups: 1 = this/that/the..., 2 = it, 3 = a request id. A page word resolves only on the Restock tab (?tab=restock) with a selected request; anywhere else it asks.
   const pageWord = match?.[2] || (match?.[1] && match[1].toLowerCase() !== 'the');
-  const onPage = pageWord && /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '');
   const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
+  const onPage = pageWord && /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '') && query.get('tab') === 'restock';
   const reference = match?.[3] || (onPage ? pageData.requestId || pageData.request_id || query.get('requestId') : null);
   if (!UUID_RE.test(String(reference || '')) || reference.toLowerCase() !== preview.request?.id) return TARGET_UNAVAILABLE;
   return { productId: preview.product.id, requestId: preview.request.id };
