@@ -40,7 +40,7 @@ function installFetch({ action }) {
 }
 const actionBodies = () => queue.mock.calls.filter(([url]) => String(url).includes('/action')).map(([, init]) => JSON.parse(init.body));
 const refuseThenAccept = (body) => (body.action === 'receive' && !body.confirm
-  ? reply({ error: WARNING, code: 'already_counted_by_receipt', alreadyAdded: { quantity: 4, unit: 'gal' } }, 409)
+  ? reply({ error: WARNING, code: 'already_counted_by_receipt', receiptFingerprint: 'fp-1', alreadyAdded: [{ quantity: 4, unit: 'gal' }] }, 409)
   : reply({ success: true, request: { id: requestId, status: 'received' } }));
 
 function Host() {
@@ -104,7 +104,26 @@ describe('Close, already counted', () => {
     const dialog = await screen.findByRole('dialog');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Receive anyway' }));
     await waitFor(() => expect(actionBodies()).toHaveLength(2));
-    expect(actionBodies()[1]).toMatchObject({ action: 'receive', confirm: true });
+    expect(actionBodies()[1]).toMatchObject({ action: 'receive', confirm: true, confirmFingerprint: 'fp-1' });
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  it('if the receipts changed while the dialog was open, it shows the new list and confirms that one', async () => {
+    const NEW_WARNING = 'Invoices already added 4 gal on November 24 and 2 gal on November 27. Receive again only if this is a second delivery.';
+    installFetch({ action: (body) => {
+      if (body.action !== 'receive') return reply({ success: true });
+      if (!body.confirm) return reply({ error: WARNING, code: 'already_counted_by_receipt', receiptFingerprint: 'fp-1' }, 409);
+      return body.confirmFingerprint === 'fp-1'
+        ? reply({ error: NEW_WARNING, code: 'already_counted_by_receipt', receiptFingerprint: 'fp-2' }, 409)
+        : reply({ success: true, request: { id: requestId, status: 'received' } });
+    } });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Receive' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Receive anyway' }));
+    expect(await screen.findByText(NEW_WARNING)).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Receive anyway' }));
+    await waitFor(() => expect(actionBodies()).toHaveLength(3));
+    expect(actionBodies()[2]).toMatchObject({ action: 'receive', confirm: true, confirmFingerprint: 'fp-2' });
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 });

@@ -1640,6 +1640,33 @@ async function groundOperatorNamedProduct(rawPrompt, preview, actorId, threadId,
   return null;
 }
 
+// "Close, already counted" names the request the same ways the other restock actions do, and the words must say the stock
+// is already counted: a bare "close it" could mean cancel, so it never grounds this action.
+const COUNTED_PHRASE = '(?:already\\s+counted|counted|(?:since\\s+|because\\s+)?the\\s+invoice\\s+(?:already\\s+)?added\\s+it)';
+const CLOSE_REFERENCE = '(?:(this|that|current|selected|viewed|open|the)\\s+(?:restock\\s+)?request|(it)|(?:restock\\s+)?request)(?:\\s+([0-9a-f-]{36}))?';
+const CLOSE_COUNTED_RE = new RegExp(`^(?:please\\s+)?(?:close|mark|record)\\s+${CLOSE_REFERENCE}\\s*[,-]?\\s*(?:as\\s+)?${COUNTED_PHRASE}[.!]?$`, 'i');
+const COUNTED_THEN_CLOSE_RE = new RegExp(`^(?:please\\s+)?${COUNTED_PHRASE}\\s*[,-]?\\s*(?:so\\s+)?close\\s+${CLOSE_REFERENCE}[.!]?$`, 'i');
+const CLOSE_COUNTED_NAMED_RE = new RegExp(`^(?:please\\s+)?(?:close|mark)\\s+(?:the\\s+)?restock request for\\s+(.+?)\\s*[,-]?\\s*(?:as\\s+)?${COUNTED_PHRASE}[.!]?$`, 'i');
+
+async function resolveCloseCountedTarget({ prompt, clause, pageData, query, preview, UUID_RE }) {
+  const match = clause.match(CLOSE_COUNTED_RE) || clause.match(COUNTED_THEN_CLOSE_RE);
+  const inventoryPage = /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '');
+  if (match) {
+    // CLOSE_REFERENCE groups: 1 = this/that/the..., 2 = it, 3 = a request id. Page words need the open Restock tab.
+    const pageWord = (match[1] && match[1].toLowerCase() !== 'the') || match[2];
+    const reference = match[3] || (pageWord && inventoryPage ? pageData.requestId || pageData.request_id || query.get('requestId') : null);
+    if (!UUID_RE.test(String(reference || '')) || reference.toLowerCase() !== preview.request?.id) return TARGET_UNAVAILABLE;
+    return { productId: preview.product.id, requestId: preview.request.id };
+  }
+  const productName = String(prompt).trim().match(CLOSE_COUNTED_NAMED_RE)?.[1];
+  if (!productName) return TARGET_UNAVAILABLE;
+  const resolved = await resolveProduct({ product_name: productName });
+  if (resolved.error) return { ...resolved, code: 'target_clarification_required' };
+  const { requests } = await require('../inventory-restock-queue').listRestockRequests({ productId: resolved.product.id, status: 'active', limit: 2 });
+  if (requests.length !== 1 || requests[0].id !== preview.request?.id || resolved.product.id !== preview.product?.id) return TARGET_UNAVAILABLE;
+  return { productId: preview.product.id, requestId: preview.request.id };
+}
+
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
@@ -1659,6 +1686,9 @@ async function resolveInventoryWriteTarget({ toolName, prompt: operatorPrompt, p
   const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
   const quantity = '(?:[0-9]+(?:\\.[0-9]+)?|one|two|three|four|five|six|seven|eight|nine|ten|zero)';
   const unit = '(?:lb|lbs|pounds?|oz|ounces?|fl_oz|fluid ounces?|gal|gallons?|liters?|ml|grams?|kg|each|items?|bottles?|bags?|containers?|cases?|jugs?)';
+  if (toolName === 'update_restock_request' && preview.action === 'close_counted') {
+    return resolveCloseCountedTarget({ prompt, clause, pageData, query, preview, UUID_RE });
+  }
   if (toolName === 'update_restock_request') {
     const requestClause = clause.replace(new RegExp(`^receive\\s+(?:the\\s+)?(?:${quantity}\\s+${unit}(?:\\s+that arrived)?|(?:actual\\s+)?(?:packaged\\s+)?shipment)\\s+for\\s+`, 'i'), 'receive ');
     const referenceMatch = requestClause.match(/^(?:mark|record|cancel|receive)\s+(?:(this|that|current|selected|viewed|open|the)\s+)?(?:restock\s+)?request(?:\s+([0-9a-f-]{36}))?(?:\s+as\s+(?:ordered|received|cancelled))?[.!]?$/i);

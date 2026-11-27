@@ -74,7 +74,9 @@ const requestSchema = Joi.object({
 const actionSchema = Joi.object({
   action: Joi.string().valid('mark_ordered', 'receive', 'cancel', 'close_counted').required(),
   // Receive only: the operator saw "an invoice already added this" and receives again anyway.
+  // The fingerprint of the receipts the warning listed: confirm counts only while that set is unchanged.
   confirm: Joi.boolean().when('action', { is: 'receive', then: Joi.boolean(), otherwise: Joi.forbidden() }),
+  confirmFingerprint: Joi.string().max(100).when('action', { is: 'receive', then: Joi.string(), otherwise: Joi.forbidden() }),
   quantity: numeric.positive().when('action', { is: 'receive', then: Joi.number(), otherwise: Joi.forbidden() }),
   unit: Joi.string().trim().max(50).when('action', { is: 'receive', then: Joi.string(), otherwise: Joi.forbidden() }),
   note: optionalText,
@@ -492,7 +494,7 @@ async function receiptStockAddedSince(conn, request) {
     .whereIn(conn.raw(`${movements}.metadata->>'source'`), Object.values(SOURCES))
     .where(`${movements}.created_at`, '>=', order?.placed_at || request.created_at)
     .whereRaw(`NOT EXISTS (SELECT 1 FROM ${movements} u WHERE u.metadata->>'undoOfMovementId' = ${movements}.id::text)`)
-    .orderBy(`${movements}.created_at`, 'asc').select('quantity', 'unit', 'created_at');
+    .orderBy(`${movements}.created_at`, 'asc').select('id', 'quantity', 'unit', 'created_at');
 }
 
 const MOST_LISTED_RECEIPTS = 3;
@@ -506,9 +508,16 @@ function describeReceiptsInUnit(rows, formatDay) {
   return `${each.slice(0, MOST_LISTED_RECEIPTS).join(', ')} and ${more} more`;
 }
 
-async function assertNotAlreadyCounted(conn, request) {
+// Which receipts the operator was shown: a receipt that posts (or is undone) while the dialog is open changes it.
+const receiptFingerprint = (rows) => crypto.createHash('sha256').update(rows.map((row) => row.id).sort().join(',')).digest('base64url');
+
+// Run under the product row lock (the receipt lane writes under the same lock), so the set cannot change
+// between this read and the receive that follows. Receive anyway passes only for the set the dialog listed.
+async function assertNotAlreadyCounted(conn, request, input) {
   const rows = await receiptStockAddedSince(conn, request);
   if (!rows.length) return;
+  const fingerprint = receiptFingerprint(rows);
+  if (input.confirm && input.confirmFingerprint === fingerprint) return;
   const { formatETDate } = require('../utils/datetime-et');
   const byUnit = new Map();
   for (const row of rows) byUnit.set(row.unit, [...(byUnit.get(row.unit) || []), row]);
@@ -516,14 +525,14 @@ async function assertNotAlreadyCounted(conn, request) {
   throw Object.assign(inventoryError(
     `${rows.length === 1 ? 'An invoice' : 'Invoices'} already added ${parts}. Receive again only if this is a second delivery.`,
     409, 'already_counted_by_receipt'), {
-    details: { alreadyAdded: rows.map((row) => ({ quantity: round4(Number(row.quantity)), unit: row.unit, addedAt: new Date(row.created_at).toISOString() })) },
+    details: { receiptFingerprint: fingerprint, alreadyAdded: rows.map((row) => ({ quantity: round4(Number(row.quantity)), unit: row.unit, addedAt: new Date(row.created_at).toISOString() })) },
   });
 }
 
 async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
   if (input.action !== 'receive') return { secondReceive };
-  if (!input.confirm) await assertNotAlreadyCounted(conn, request);
+  await assertNotAlreadyCounted(conn, request, input);
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
   if (!(quantity > 0)) throw inventoryError('Receive quantity is required');

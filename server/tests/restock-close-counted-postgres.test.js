@@ -133,7 +133,8 @@ jest.setTimeout(30000);
     const second = await request();
     await invoiceMovement(1, 0.5, 'amazon_delivery');
     await expect(inventory.updateRestockRequest(second.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
-    const confirmed = await inventory.updateRestockRequest(second.id, { action: 'receive', confirm: true }, {});
+    const refused = await warningFor(second.id);
+    const confirmed = await inventory.updateRestockRequest(second.id, { action: 'receive', confirm: true, confirmFingerprint: refused.details.receiptFingerprint }, {});
     expect(confirmed.request.status).toBe('received');
     expect(await stock()).toBe(12);
   });
@@ -185,6 +186,39 @@ jest.setTimeout(30000);
     const second = await request();
     await invoiceMovement(2, 0.5);
     await expect(inventory.updateRestockRequest(second.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt', message: expect.stringContaining('2 gal') });
+  });
+
+  test('Receive anyway counts only the receipts the dialog listed: the same set passes, a changed set is refused with the new list', async () => {
+    const req = await request();
+    await invoiceMovement(2, 1);
+    const shown = await warningFor(req.id);
+    expect(shown.details.receiptFingerprint).toEqual(expect.any(String));
+    // A receipt posts while the dialog is open.
+    await invoiceMovement(3, 0.1);
+    const changed = await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {}).catch((err) => err);
+    expect(changed).toMatchObject({ statusCode: 409, code: 'already_counted_by_receipt' });
+    expect(changed.details.alreadyAdded).toHaveLength(2);
+    expect(changed.details.receiptFingerprint).not.toBe(shown.details.receiptFingerprint);
+    expect(await stock()).toBe(4);
+    expect((await reload(req.id)).status).toBe('ordered');
+    // The dialog shows the new list; confirming that set goes through.
+    const done = await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: changed.details.receiptFingerprint }, {});
+    expect(done.request.status).toBe('received');
+    expect(await stock()).toBe(8);
+  });
+
+  test('confirm without a fingerprint, or with another request\'s, is refused; an undone receipt leaves the set', async () => {
+    const req = await request();
+    const original = await invoiceMovement(2, 1);
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: 'stale' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    const shown = await warningFor(req.id);
+    await mockConn('product_inventory_movements').insert({
+      product_id: product.id, movement_type: 'correction', quantity: -2, unit: 'gal', stock_before: 4, stock_after: 2,
+      metadata: { source: 'inventory_agent_undo', undoOfMovementId: original.id },
+    });
+    // The only receipt was undone: the set is empty, so a plain receive passes.
+    expect((await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {})).request.status).toBe('received');
   });
 
   describe('a late automatic order after the request was received', () => {

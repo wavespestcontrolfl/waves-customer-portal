@@ -1810,6 +1810,52 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
     });
   });
 
+  // ─── "close, already counted" names its request (owner 2026-11-27) ──────
+  describe('close_counted names the request it closes', () => {
+    const queue = require('../services/inventory-restock-queue');
+    const REQ = '20000000-0000-4000-8000-000000000002';
+    const CLOSE_PREVIEW = { product: { id: TAURUS.id, name: TAURUS.name }, request: { id: REQ }, action: 'close_counted' };
+    const activeRequests = (...ids) => jest.spyOn(queue, 'listRestockRequests').mockResolvedValue({ requests: ids.map((id) => ({ id })) });
+    afterEach(() => jest.restoreAllMocks());
+    const close = (prompt, over = {}) => resolveInventoryWriteTarget({
+      toolName: 'update_restock_request', prompt, preview: CLOSE_PREVIEW, actorId: 'actor-1',
+      pageData: { route: '/admin/inventory', requestId: REQ }, ...over,
+    });
+    const ASK = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+
+    test.each([
+      'close this restock request as already counted',
+      'Close this request, already counted',
+      'close it, the invoice added it',
+      'mark this request already counted',
+      'Please close this request as counted.',
+      'the invoice already added it, close this request',
+      `close request ${REQ} as already counted`,
+    ])('"%s" targets the viewed request', async (prompt) => {
+      expect(await close(prompt)).toEqual({ productId: TAURUS.id, requestId: REQ });
+    });
+
+    test('a named product with one open request grounds', async () => {
+      setGroundingDb({ products: [TAURUS, ALPINE] });
+      activeRequests(REQ);
+      expect(await close('close the restock request for Taurus SC as already counted')).toEqual({ productId: TAURUS.id, requestId: REQ });
+    });
+
+    test.each([
+      'close this request',
+      'close it',
+      'cancel this request',
+      'close this restock request as already counted and receive it',
+    ])('"%s" does not ground the close', async (prompt) => {
+      expect(await close(prompt)).toEqual(ASK);
+    });
+
+    test('another request id, or a page reference away from the Restock tab, asks', async () => {
+      expect(await close('close this request as already counted', { pageData: { route: '/admin/inventory', requestId: '20000000-0000-4000-8000-0000000000ff' } })).toEqual(ASK);
+      expect(await close('close this request as already counted', { pageData: { route: '/admin/customers', requestId: REQ } })).toEqual(ASK);
+    });
+  });
+
   // ─── a named product is a receipt target (W10) ─────────────────────────
   describe('a receipt that names the product', () => {
     const queue = require('../services/inventory-restock-queue');

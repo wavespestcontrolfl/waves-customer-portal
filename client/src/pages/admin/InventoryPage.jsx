@@ -3334,7 +3334,7 @@ function RestockRequestsTab({
     };
   }, [load, refreshId]);
 
-  async function runAction(request, action, { confirm = false } = {}) {
+  async function runAction(request, action, { confirm = false, fingerprint = null } = {}) {
     setReceivingId(request.id);
     try {
       const draft = receiveDrafts[request.id] || {};
@@ -3348,7 +3348,7 @@ function RestockRequestsTab({
           quantity: draft.quantity || null,
           unit: draft.unit || null,
           note: draft.note || null,
-          ...(confirm ? { confirm: true } : {}),
+          ...(confirm ? { confirm: true, confirmFingerprint: fingerprint } : {}),
         }),
       });
       setAlreadyCounted(null);
@@ -3366,7 +3366,7 @@ function RestockRequestsTab({
       onUpdate && onUpdate();
     } catch (err) {
       if (err.code === "already_counted_by_receipt") {
-        setAlreadyCounted({ request, message: err.details?.error || err.message });
+        setAlreadyCounted({ request, message: err.details?.error || err.message, fingerprint: err.details?.receiptFingerprint || null });
       } else {
         showToast(`Failed: ${err.message}`);
       }
@@ -3516,7 +3516,7 @@ function RestockRequestsTab({
           busy={receivingId === alreadyCounted.request.id}
           onClose={() => setAlreadyCounted(null)}
           onCloseCounted={() => runAction(alreadyCounted.request, "close_counted")}
-          onReceiveAnyway={() => runAction(alreadyCounted.request, "receive", { confirm: true })}
+          onReceiveAnyway={() => runAction(alreadyCounted.request, "receive", { confirm: true, fingerprint: alreadyCounted.fingerprint })}
         />
       )}
       {vendorCancelFor && (

@@ -3198,7 +3198,7 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     const action = String(body.action || '').toLowerCase();
     const result = await inventoryOperations.updateRestockRequest(req.params.id, {
       action, note: body.note,
-      ...(action === 'receive' ? { quantity: body.quantity ?? undefined, unit: body.unit ?? undefined, confirm: body.confirm === true } : {}),
+      ...(action === 'receive' ? { quantity: body.quantity ?? undefined, unit: body.unit ?? undefined, confirm: body.confirm === true, confirmFingerprint: typeof body.confirmFingerprint === 'string' ? body.confirmFingerprint : undefined } : {}),
     }, { actorId: req.technicianId, source: 'restock_request_receive' });
     res.json({ success: true, request: result.request, ...(result.movement ? { movement: result.movement } : {}) });
   } catch (err) {

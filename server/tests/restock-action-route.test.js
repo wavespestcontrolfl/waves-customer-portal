@@ -33,20 +33,20 @@ beforeEach(() => updateRestockRequest.mockReset());
 
 test('a receive an invoice already counted comes back 409 with its code and the amount added', async () => {
   updateRestockRequest.mockRejectedValue(Object.assign(new Error('An invoice already added 4 gal on November 24. Receive again only if this is a second delivery.'),
-    { statusCode: 409, code: 'already_counted_by_receipt', details: { alreadyAdded: [{ quantity: 4, unit: 'gal', addedAt: '2026-11-24T15:00:00.000Z' }] } }));
+    { statusCode: 409, code: 'already_counted_by_receipt', details: { receiptFingerprint: 'fp-1', alreadyAdded: [{ quantity: 4, unit: 'gal', addedAt: '2026-11-24T15:00:00.000Z' }] } }));
   const res = await post({ action: 'receive' });
   expect(res.status).toBe(409);
   expect(res.body).toEqual({
     error: 'An invoice already added 4 gal on November 24. Receive again only if this is a second delivery.',
-    code: 'already_counted_by_receipt', alreadyAdded: [{ quantity: 4, unit: 'gal', addedAt: '2026-11-24T15:00:00.000Z' }],
+    code: 'already_counted_by_receipt', receiptFingerprint: 'fp-1', alreadyAdded: [{ quantity: 4, unit: 'gal', addedAt: '2026-11-24T15:00:00.000Z' }],
   });
   expect(updateRestockRequest).toHaveBeenCalledWith(REQUEST_ID, expect.objectContaining({ action: 'receive', confirm: false }), expect.any(Object));
 });
 
 test('Receive anyway sends confirm only when it is exactly true', async () => {
   updateRestockRequest.mockResolvedValue({ request: { id: REQUEST_ID, status: 'received' } });
-  await post({ action: 'receive', confirm: true });
-  expect(updateRestockRequest.mock.calls[0][1]).toMatchObject({ action: 'receive', confirm: true });
+  await post({ action: 'receive', confirm: true, confirmFingerprint: 'fp-1' });
+  expect(updateRestockRequest.mock.calls[0][1]).toMatchObject({ action: 'receive', confirm: true, confirmFingerprint: 'fp-1' });
   await post({ action: 'receive', confirm: 'yes' });
   expect(updateRestockRequest.mock.calls[1][1]).toMatchObject({ confirm: false });
 });
