@@ -242,7 +242,7 @@ describe('system prompt', () => {
     expect(off).not.toContain('Totally fine');
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
-    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, the thread');
     expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, the customer may still be waiting on something we owe, so a bare thanks or ok is never an ACK`);
     expect(on).toContain('or return ABSTAIN so a person handles it. Never promise a reply, a follow-up or any timing for it.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
@@ -386,7 +386,7 @@ describe('visitLoopStatus', () => {
 
 describe('identity + sealed-eval marker', () => {
   test('the identity carries the cumulative set (compact key m: cflvp + the MISSED VISIT scope line) and fits the column with all four tags', () => {
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers65_n');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers69_n');
     expect(`${REAL_ANSWERS_PROMPT_VERSION}+bcelm`.length).toBeLessThanOrEqual(40);
     process.env[GATE] = 'true';
     for (const c of REAL_ANSWERS_HANDOFF_CATEGORIES) process.env[c.gate] = 'true';
