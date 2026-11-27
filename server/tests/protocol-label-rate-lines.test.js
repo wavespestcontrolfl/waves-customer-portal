@@ -259,7 +259,9 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
   test('a flea add-on at another rate shows the dose with a warning naming each service (owner 2026-11-26)', async () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     const result = await mix();
-    expect(result.amount).not.toBeNull();
+    // One labeled amount per service, never one headline from the first card (owner 2026-11-26): 2 gal at 2 and at 0.66 fl oz per gallon.
+    expect(result.amount).toBeNull();
+    expect(result.serviceAmounts.map((row) => [row.service, row.amount, row.fromCard])).toEqual([['German Roach Cleanout', 4, true], ['Flea Treatment', 1.32, true]]);
     // The warning names each service's own rate with the spray volume it holds at, so the tech can mix a tank for each.
     expect(result.warnings).toContain('Tekko Pro IGR has a different rate on each service on this visit: German Roach Cleanout 2 fl oz per gallon at 1 gal per 1,000 sq ft; Flea Treatment 0.66 fl oz per gallon at 1 gal per 1,000 sq ft. Mix a separate tank for each');
   });
@@ -272,6 +274,7 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     tables.products_catalog = other;
     const mosquitoFirst = await mix();
     expect(mosquitoFirst.amount).not.toBeNull();
+    expect(mosquitoFirst.serviceAmounts).toBeUndefined();
     expect(mosquitoFirst.warnings.join(' ')).toContain('53883-335');
     // The flea visit with a mosquito add-on.
     tables.scheduled_services = [{ ...visit, service_type: 'Flea Treatment', service_key: 'flea_tick' }];
@@ -288,7 +291,7 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     tables.products_catalog = [{ ...TEKKO, category: 'insecticide', label_verified_at: null }];
     const result = await mix();
-    expect(result.amount).not.toBeNull();
+    expect(result.serviceAmounts.every((row) => row.amount != null)).toBe(true);
     // Warnings keep the old guard order: the label warning comes first, the per-service rates after it.
     expect(result.warnings[0]).toBe('Label rate not yet verified');
   });

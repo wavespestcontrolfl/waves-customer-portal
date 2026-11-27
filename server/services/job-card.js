@@ -1818,11 +1818,14 @@ function governedForCard(governed, verdict, product = {}, scope = null) {
   const grassName = requiresGrass ? GRASS_NAMES[requiresGrass] || requiresGrass : null;
   // Owner 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"): a spray-check hold, an
   // unverified label or a grass mismatch is a warning beside the rate, never a reason to hide it.
-  const withheldReason = (verdict.verdict === 'hold' && `Spray check: ${verdict.reason}`)
-    || (!product.label_verified_at && 'Label rate not yet verified')
-    || (requiresGrass && grass !== requiresGrass
-      && (grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${grassName} (this rate is ${grassName} only)` : `Grass on the estimate is not on this visit (the rate is ${grassName} only)`))
-    || null;
+  // Every check that fails shows (an unverified label does not hide a grass mismatch), joined in the old guard order.
+  const reasons = [
+    verdict.verdict === 'hold' && `Spray check: ${verdict.reason}`,
+    !product.label_verified_at && 'Label rate not yet verified',
+    requiresGrass && grass !== requiresGrass
+      && (grass ? `Grass on the estimate is ${clean(grass, 40)}, not ${grassName} (this rate is ${grassName} only)` : `Grass on the estimate is not on this visit (the rate is ${grassName} only)`),
+  ].filter(Boolean);
+  const withheldReason = reasons.length ? reasons.join(' · ') : null;
   return {
     ...facts,
     rate: facts.rate,
@@ -2039,16 +2042,19 @@ function dispatchReadiness({ facts, lines, blocks, sprayCheck, tank, isToday, no
   return { serviceId: facts.serviceId, checkedAt: now.toISOString(), issues };
 }
 
-// The warning beside a month-reference mix (owner 2026-11-26: warned, never blocked): the first check that used to
-// withhold it, or null. A plan block, an unmatched or unverified catalog product, an open label review, or a spray
-// check with no verdict and a real reason (not just a missing forecast).
+// The warnings beside a month-reference mix (owner 2026-11-26: warned, never blocked), every check that used to withhold it
+// joined in the old guard order, or null: a plan block, an unmatched or unverified catalog product, no spray verdict, an open
+// label review, a spray check that is unknown for a real reason (not just a missing forecast). A plan block never masks a
+// product-specific one.
 function fieldGuideMixWarning({ blocks, row, verdict, labelSource }) {
-  if (blocks.length) return 'Plan blocked, see the plan blocks';
-  if (!row?.label_verified_at) return 'Label rate not yet verified';
-  if (!verdict) return 'No spray check for this product';
-  if (reviewedWeather(row, labelSource)?.unresolved) return 'Label weather review still open, see product checks';
-  if (verdict.verdict === 'unknown' && verdict.forecastGap !== true) return `Spray check: ${verdict.reason}`;
-  return null;
+  const warnings = [
+    blocks.length > 0 && 'Plan blocked, see the plan blocks',
+    !row?.label_verified_at && 'Label rate not yet verified',
+    !verdict && 'No spray check for this product',
+    row && reviewedWeather(row, labelSource)?.unresolved && 'Label weather review still open, see product checks',
+    verdict && verdict.verdict === 'unknown' && verdict.forecastGap !== true && `Spray check: ${verdict.reason}`,
+  ].filter(Boolean);
+  return warnings.length ? warnings.join(' · ') : null;
 }
 
 /**
@@ -2344,20 +2350,34 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   });
   // No tank amount EXISTS for a product that is not a tank mix (a granular is spread by area) or for an area add-on (its dose is the
   // card's rate over the area sold, never a tank amount off the catalog default): that is not a withhold, so the warning stands
-  // with no number, and a granular's own label rate still shows beside it.
+  // with no number. The booked add-on's own rate (governedRate, per 1,000 sq ft) shows beside it, never the catalog default.
+  const governedRate = protocolLine?.governedRate || null;
   const noTankAmount = !tankMixable || Boolean(protocolLine?.governed);
-  const mix = noTankAmount
-    ? { amount: null, unit: rateUnit || null, reason: warnings.find((w) => /^(Not a tank mix|Area add-on)/.test(w)) || null }
-    : (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
+  const tankAmount = () => (perGallon ? buildPerGallonAmount(perGallon, volume, lineCarrier) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume }));
+  let mix;
+  if (noTankAmount) {
+    mix = { amount: null, unit: governedRate?.rateUnit || rateUnit || null, reason: warnings.find((w) => /^(Not a tank mix|Area add-on)/.test(w)) || null };
+  } else {
+    mix = tankAmount();
+    // Two services, two rates: one amount for each, named by service, never one headline from the first (owner 2026-11-26).
+    const serviceAmounts = protocolLine?.conflictLines ? conflictAmounts(protocolLine.conflictLines, labelPerGallon, volume) : null;
+    if (serviceAmounts?.some((row) => row.amount != null)) {
+      mix = { amount: null, unit: perGallon?.unit || rateUnit || null, gallons: volume, reason: 'Each service on this visit has its own amount, see below', serviceAmounts };
+    } else if (rigOffVolume && mix.coversSqft != null && rigCarrier > 0) {
+      // coversSqft is the area at the CARD's spray volume. The picked rig sprays another volume, so the area its tank covers is
+      // its own: the two figures ride separately and neither is read as the other's.
+      mix = { ...mix, labelCoversSqft: mix.coversSqft, coversSqft: Math.round((volume / rigCarrier) * 1000), rigSprayGalPer1000: rigCarrier };
+    }
+  }
   const packSizes = await loadPackSizes(dbh, [product.id]);
   // The label rate rides with the amount; with no number to show (see above) there is no rate to pair with it.
-  const permitted = mix.amount != null;
+  const permitted = mix.amount != null || Boolean(mix.serviceAmounts);
   return {
     productId: product.id,
     name: product.name,
-    ratePer1000: (permitted || !tankMixable) && ratePer1000 != null ? Number(ratePer1000) : null,
-    ratePerGallon: permitted ? perGallon : null,
-    rateSource: planned ? 'plan' : (protocolPerGallon ? 'protocol' : 'catalog'),
+    ratePer1000: governedRate ? governedRate.ratePer1000 : ((permitted || !tankMixable) && ratePer1000 != null ? Number(ratePer1000) : null),
+    ratePerGallon: mix.amount != null ? perGallon : null,
+    rateSource: governedRate ? 'governed' : (planned ? 'plan' : (protocolPerGallon ? 'protocol' : 'catalog')),
     rateVerified: Boolean(product.label_verified_at),
     tankMixable,
     sprayCheck,
@@ -2375,6 +2395,19 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     rig: pickedRig,
     order: packSizes ? orderFor(product, packSizes[product.id], null, { includePricing }) : null,
   };
+}
+
+// The amount for each service that names the product at its own rate (owner 2026-11-26). A service whose rate passes the label
+// check uses it; one that does not ("see its card") falls back to the label band, so each row still has a number when one exists.
+function conflictAmounts(conflictLines, labelPerGallon, volume) {
+  return conflictLines.map((line) => {
+    const band = protocolBand(labelPerGallon, line);
+    const used = band || labelPerGallon;
+    if (!used) return { service: line.name, amount: null, unit: null, fromCard: false };
+    const carrier = line.labelUse && Number(line.carrier) > 0 ? Number(line.carrier) : null;
+    const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft } = buildPerGallonAmount(used, volume, carrier);
+    return { service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band), ...(sprayVolumeGalPer1000 ? { sprayVolumeGalPer1000, coversSqft } : {}) };
+  });
 }
 
 // The checks that used to withhold a searched product's dose, in the old guard order, as warning text (owner 2026-11-26:
@@ -2471,11 +2504,15 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
     const heldHit = selectedHits.find((h) => h.hit.labelHold);
     const held = heldHit ? { labelHold: heldHit.hit.labelHold } : {};
-    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...held, ...ratesDisagree }, owners);
+    return found({ addon: selected.c.addon, selected: true, ...lineOf(selected), governed: Boolean(selected.hit.governed), ...governedRateOf(selected.hit.governed), ...held, ...ratesDisagree }, owners);
   }
   const [conditional] = hits;
   return found(conditional ? { addon: conditional.c.addon, selected: false, rate: null, ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}) } : null, owners);
 }
+
+// The booked add-on's own rate (protocols.json area_addon labelFacts: per 1,000 sq ft, in its unit) for a governed line.
+const governedRateOf = (governed) => (Number(governed?.ratePer1000) > 0 && governed.rateUnit
+  ? { governedRate: { ratePer1000: Number(governed.ratePer1000), rateUnit: String(governed.rateUnit) } } : {});
 
 // The per-gallon band the matched card line gives the mix, or null (the label band stands). A rate read from the line's text is clipped
 // to the label band. A rate the card DECLARES governs when it is on the label's unit and not above the label band's top: a card may mix
@@ -2589,5 +2626,5 @@ module.exports = {
   resolveVisitLines,
   describeLine,
   ALTERNATE_ADDRESS_BLOCK,
-  _test: { protocolBand, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
+  _test: { protocolBand, fieldGuideMixWarning, mixingOrderForCards, bermudaMixOrderForCards, lineService, heatSafetyAt, fieldGuideLineProduct, dispatchReadiness, weatherIssue, wavesRainRule, rainRulesFor, accessCodes, petLine, loadRain7d, wateringLine, precautionText, propertyCoords, isTankMixable, scrubKnownCodes, loadLastVisit, loadOpenIssues, loadCallsSince, loadCatalog, linesFromProtocolText, linesFromLineMeta, isConditionalLine, lineRate, orderFor, perGallonRate, serviceDayInstant, seasonalVisit, buildProductCards, rotationNote, awayUntil, loadPackSizes, loadAddons, describeLine, visitPinSql, loadRigCalibrations, loadRigSystems, rigRows, viewerRows, rigOptions, tankFromCalibrations, textsWindow },
 };

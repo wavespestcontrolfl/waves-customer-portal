@@ -1272,6 +1272,16 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     }
   });
 
+  test('a plan block never masks the product-specific guide warnings (owner 2026-11-26)', () => {
+    const { fieldGuideMixWarning } = jobCard._test;
+    const verdict = { verdict: 'unknown', forecastGap: false, reason: 'No limit on file' };
+    expect(fieldGuideMixWarning({ blocks: [{ code: 'x' }], row: { label_verified_at: null }, verdict, labelSource: null }))
+      .toBe('Plan blocked, see the plan blocks · Label rate not yet verified · Spray check: No limit on file');
+    expect(fieldGuideMixWarning({ blocks: [], row: { label_verified_at: '2027-12-01' }, verdict: { verdict: 'ok' }, labelSource: null })).toBeNull();
+    expect(fieldGuideMixWarning({ blocks: [{ code: 'x' }], row: null, verdict: undefined, labelSource: null }))
+      .toBe('Plan blocked, see the plan blocks · Label rate not yet verified · No spray check for this product');
+  });
+
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
     const deps = { getRecentCalls: async () => [] };
     const away = await jobCard.loadJobCardFacts('svc1', factsDb({ 'scheduled_services as ss': visit(true), property_preferences: prefs }), deps);
@@ -2028,6 +2038,28 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out.warnings).toContain('Area add-on — apply the label rate on the card over the area sold; no tank amount');
   });
 
+  // Owner 2026-11-26: a granular area add-on has no tank amount, and the rate beside the warning is the BOOKED add-on rate, not the catalog default.
+  test('a granular area add-on shows its booked rate and unit in the tank search, never the catalog default', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const snapshot = { id: 'sn', name: 'Snapshot 2.5TG', default_rate_per_1000: 9, rate_unit: 'oz', application_method: 'granular', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' };
+    const rows = { scheduled_services: [visit], products_catalog: [snapshot], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Bed Pre-Emergent Treatment', category: 'lawn_care', service_key: 'area_addon_bed_pre_emergent' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
+    const out = await jobCard.mixForProduct('sn', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, tankMixable: false, ratePer1000: 3.45, unit: 'lb', rateSource: 'governed' });
+    expect(out.warnings.join(' ')).toMatch(/Not a tank mix/);
+  });
+
   test('a product the add-on protocol lists as "if needed" gets its catalog dose with a warning in the tank search (r3 P1, owner 2026-11-26)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'h', name: 'Headway', default_rate: '0.5-1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
@@ -2486,12 +2518,23 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: unverified, dbh: () => ({}) });
       const [card] = await cardsFor(out.lines);
       expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), rateNote: 'Label rate not yet verified', area: expect.any(String), limit: expect.any(String) });
-      // A Hold on an unverified label reports the Hold, and the rate still shows.
+      // A Hold on an unverified label reports both, and the rate still shows.
       const [held] = await jobCard._test.buildProductCards({
         facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
         verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
       });
-      expect(held.governed).toMatchObject({ rate: expect.stringMatching(/\d/), rateNote: 'Spray check: wind over 10 mph' });
+      expect(held.governed).toMatchObject({ rate: expect.stringMatching(/\d/), rateNote: 'Spray check: wind over 10 mph · Label rate not yet verified' });
+    });
+
+    test('every failed check shows beside the governed rate, not just the first (owner 2026-11-26)', async () => {
+      const key = 'area_addon_lawn_insect_spot';
+      const unverified = catalog.map((row) => (row.name === PRODUCT_BY_KEY[key] ? { ...row, label_verified_at: null } : row));
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, areaAddOnScope: { tierSqFt: 1000, grassType: 'bermuda' }, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: unverified, dbh: () => ({}) });
+      const [card] = await jobCard._test.buildProductCards({
+        facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
+        verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
+      });
+      expect(card.governed.rateNote).toBe('Spray check: wind over 10 mph · Label rate not yet verified · Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
     });
 
     test('a spray-check Hold warns beside the rate and keeps area, limit and safety (owner 2026-11-26)', async () => {

@@ -149,6 +149,8 @@ describe('a label rate per gallon is bound to its spray volume', () => {
   test('a picked rig that sprays 2 gallons per 1,000 sq ft gets the amount with a warning: the same mix would be twice the label amount', async () => {
     const out = await mix(home, null, { equipmentSystemId: 'sys-1' });
     expect(out.amount).toBe(220);
+    // Two coverage figures, each its own: the rig's 110 gal at 2 gal per 1,000 covers 55,000 sq ft; at the card's 1 gal it would cover 110,000.
+    expect(out).toMatchObject({ coversSqft: 55000, rigSprayGalPer1000: 2, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1 });
     expect(out.warnings).toContain("The card's rate is for 1 gal per 1,000 sq ft. Tank #1 sprays 2: the same mix would put down more than the label amount. Use a sprayer at the card's volume");
     expect(out.ratePerGallon).toEqual({ lo: 2, hi: 2, unit: 'fl_oz' });
   });

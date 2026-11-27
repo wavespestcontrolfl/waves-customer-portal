@@ -475,4 +475,32 @@ describe("Job card Tank search warnings (owner 2026-11-26: warned, never blocked
     expect(screen.getByText("Warning: Celsius WG repeats HRAC 2.")).toBeVisible();
     expect(screen.queryByText("No mix available")).toBeNull();
   });
+
+  const searchAndPick = async (answer) => {
+    fetch.mockImplementation((url) => {
+      const parsed = new URL(url, "http://localhost");
+      if (parsed.pathname.endsWith("/protocols/job-card/products")) return reply({ products: [{ id: "p4", name: "Tekko Pro IGR", category: "insecticide" }] });
+      if (parsed.pathname.endsWith("/protocols/job-card/mix")) return reply({ enabled: true, rateVerified: true, sprayCheck: { verdict: "ok" }, planBlocks: [], ...answer });
+      if (parsed.pathname.includes("/protocols/job-card/")) return reply({ enabled: true, serviceId: service.id, strip: { name: "Fixture account", program: "Lawn Care" }, products: [], addons: [], planBlocks: [], sprayCheck: { window: "not_today" }, tank: { calibrated: true, source: "rig", rigs: [] } });
+      return reply(fixture(url));
+    });
+    await act(async () => { render(<ProtocolPanel service={service} onClose={() => {}} />); });
+    fireEvent.change(await screen.findByPlaceholderText("Search a product to mix"), { target: { value: "tekko" } });
+    fireEvent.click(await screen.findByRole("button", { name: "Tekko Pro IGR" }));
+  };
+
+  it("names one labeled amount for each service that has its own rate", async () => {
+    await searchAndPick({ amount: null, unit: "fl_oz", gallons: 2, reason: "Each service on this visit has its own amount, see below", serviceAmounts: [
+      { service: "German Roach Cleanout", amount: 4, amountMax: null, unit: "fl_oz", fromCard: true, sprayVolumeGalPer1000: 1, coversSqft: 2000 },
+      { service: "Flea Treatment", amount: 1.32, amountMax: null, unit: "fl_oz", fromCard: true },
+    ] });
+    expect(await screen.findByText(/^German Roach Cleanout:/)).toBeVisible();
+    expect(screen.getByText(/^Flea Treatment:/)).toBeVisible();
+  });
+
+  it("keeps the picked rig's coverage and the card volume's coverage as two separate figures", async () => {
+    await searchAndPick({ amount: 220, unit: "fl_oz", gallons: 110, coversSqft: 55000, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1, rigSprayGalPer1000: 2, rig: { name: "Tank #1" }, warnings: ["The card's rate is for 1 gal per 1,000 sq ft."] });
+    expect(await screen.findByText(/covers 55,000 sq ft/)).toBeVisible();
+    expect(screen.getByText(/Tank #1 sprays 2 gal per 1,000 sq ft\. At the card's 1 gal per 1,000 sq ft the same tank would cover 110,000 sq ft\./)).toBeVisible();
+  });
 });

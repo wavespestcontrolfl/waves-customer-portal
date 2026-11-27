@@ -129,3 +129,17 @@ describe("the heat safety line on the job card", () => {
     expect(screen.queryByTestId("job-card-heat-safety")).toBeNull();
   });
 });
+
+// Owner 2026-11-26: the warning rides beside the amount wherever the amount shows.
+describe("a card's warning beside its planned amount", () => {
+  const theme = { ...D, card: "#fff", border: "#ddd", input: "#fff", inputBorder: "#ccc", white: "#fff" };
+  const product = { id: "p1", rowId: "p1", name: "Celsius WG", role: "base", conditional: false, verdict: "ok", verdictReason: null, planned: { amount: 6, unit: "fl oz" }, amountNote: "Label rate not yet verified", short: false, onHand: null, lowStock: false, line: "Celsius WG 1 oz" };
+  const card = { serviceId: "visit-1", strip: { name: "Synthetic Customer", program: "Lawn" }, tank: { calibrated: true, rigs: [] }, sprayCheck: { window: "today", forecast: null }, products: [product], addons: [] };
+
+  it("shows the warning in the collapsed header next to the amount", () => {
+    render(<JobCardTab card={card} D={theme} />);
+    const toggle = document.getElementById("job-card-product-p1");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("Warning: Label rate not yet verified");
+  });
+});

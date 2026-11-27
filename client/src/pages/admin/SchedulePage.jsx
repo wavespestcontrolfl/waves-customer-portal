@@ -7204,6 +7204,8 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
       {short && <JobCardChip tone="hold" label="Short" D={D} />}
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
+      {/* The warning rides beside the amount wherever the amount shows, collapsed card included (owner 2026-11-26). */}
+      {amount && !pending && p.amountNote && <span role="alert" style={{ fontSize: 12, color: "#C8312F", maxWidth: 220 }}>Warning: {p.amountNote}</span>}
       {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the amounts…</span>}
     </>
   );
@@ -7411,8 +7413,21 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
                 {formatMeasuredRange(mix.amount, mix.amountMax, mix.unit)} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
+            ) : mix?.serviceAmounts?.length > 0 ? (
+              // Two services name the product at their own rates: one labeled amount for each, never one headline (owner 2026-11-26).
+              <div style={{ display: "grid", gap: 6 }}>
+                {mix.serviceAmounts.map((row) => (
+                  <div key={row.service} style={{ fontSize: 16, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
+                    {row.service}: {row.amount != null ? formatMeasuredRange(row.amount, row.amountMax, row.unit) : "no amount"} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{row.sprayVolumeGalPer1000 ? ` · spray ${row.sprayVolumeGalPer1000} gal per 1,000 sq ft` : ""}{row.coversSqft ? ` · covers ${row.coversSqft.toLocaleString()} sq ft` : ""}{row.fromCard ? "" : " · label rate, not this service's card rate"}</span>
+                  </div>
+                ))}
+              </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
+            )}
+            {/* The selected rig's coverage is above; the card's own volume would cover another area (owner 2026-11-26). */}
+            {!busy && mix?.amount != null && mix.labelCoversSqft > 0 && (
+              <div style={{ fontSize: 14, color: D.text }}>{mix.rig?.name || "This rig"} sprays {mix.rigSprayGalPer1000} gal per 1,000 sq ft. At the card's {mix.sprayVolumeGalPer1000} gal per 1,000 sq ft the same tank would cover {mix.labelCoversSqft.toLocaleString()} sq ft.</div>
             )}
             {/* A card's label rate holds only at its own spray volume (Tekko Pro on cockroaches: 1 gal per 1,000 sq ft). */}
             {!busy && mix?.amount != null && mix.sprayVolumeGalPer1000 > 0 && (
