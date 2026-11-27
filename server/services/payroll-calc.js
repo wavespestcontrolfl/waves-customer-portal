@@ -358,18 +358,18 @@ function minimumWeekPay({
 
 function computePaycheck({
   payDate,
-  workWeekEnd = null,
+  workWeekEnd,
   payFrequency = 'weekly',
   hourlyRate,
-  regularMinutes = 0,
-  overtimeMinutes = 0,
+  regularMinutes,
+  overtimeMinutes,
   ptoMinutes,
   holidayMinutes,
   minimumWeekMinutes,
   minimumWeekTargetMinutes,
   minimumWeekPayoutMinutes,
   holidayWorkMinutes,
-  ytdGrossWages = 0,
+  ytdGrossWages,
   w4,
   reemploymentRateBp = FLORIDA_NEW_EMPLOYER_RATE_BP,
   payLines,
@@ -387,7 +387,7 @@ function computePaycheck({
   if (rateCents === 0n) throw new Error('No pay rate set');
   // Validate the Florida minimum wage against the work week when supplied (falling back to payDate),
   // so hours worked before a Sept 30 step-up but paid on the Friday after aren't rejected retroactively.
-  const floorDay = (workWeekEnd && validCalendarDate(workWeekEnd)) || validCalendarDate(payDate);
+  const floorDay = validCalendarDate(workWeekEnd) || validCalendarDate(payDate);
   const floor = floridaMinimumWageCentsFor(floorDay);
   if (rateCents < floor) {
     throw new Error(`Hourly rate ${dollarsText(rateCents)} is below the Florida minimum wage of ${dollarsText(floor)} on ${floorDay}`);

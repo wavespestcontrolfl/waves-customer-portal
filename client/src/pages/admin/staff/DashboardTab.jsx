@@ -152,17 +152,12 @@ export function DashboardTab({ showToast }) {
             );
             const summary = todaySummaries.find(
               (s) => s.technician_id === tech.id,
-            );
+            ) || {};
             const shiftDur = activeMinutesFor(active);
-            const dayHrs =
-              ((summary ? paidMinutesOf(summary) : 0) + shiftDur) / 60;
-            const dayJobs = summary ? summary.job_count : 0;
-            const dayRev = summary
-              ? parseFloat(summary.revenue_generated || 0)
-              : 0;
-            const dayUtil = summary
-              ? parseFloat(summary.utilization_pct || 0)
-              : 0;
+            const dayHrs = (paidMinutesOf(summary) + shiftDur) / 60;
+            const dayJobs = summary.job_count || 0;
+            const dayRev = parseFloat(summary.revenue_generated) || 0;
+            const dayUtil = parseFloat(summary.utilization_pct) || 0;
 
             return (
               <div

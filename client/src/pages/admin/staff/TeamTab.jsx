@@ -353,21 +353,20 @@ export function TeamTab({ showToast, staffProfile, payrollAvailable = false, onO
 
   const handleSave = async () => {
     if (saveInFlightRef.current || !form.name.trim()) return;
-    if (workDaysEnabled && form.workDays.length === 0) {
-      showToast("Pick at least one work day", { error: true });
-      return;
-    }
-    if (shiftHoursEnabled && shiftHoursProblem(form)) {
-      showToast(shiftHoursProblem(form), { error: true });
+    const validationError =
+      (workDaysEnabled && form.workDays.length === 0 && "Pick at least one work day") ||
+      (shiftHoursEnabled && shiftHoursProblem(form));
+    if (validationError) {
+      showToast(validationError, { error: true });
       return;
     }
     saveInFlightRef.current = true;
     setSaving(true);
     try {
+      const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
       let targetId = editingId;
       let warningNote = "";
       if (editingId) {
-        const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
@@ -383,21 +382,21 @@ export function TeamTab({ showToast, staffProfile, payrollAvailable = false, onO
         // Prospective, or field eligibility removed) surfaces the same
         // remaining-assignment notice as the Deactivate button: future work
         // stays on the schedule for manual reassignment.
-        const pending = (res && res.futureAssignedVisits) || [];
+        const pending = res?.futureAssignedVisits || [];
         // New shift hours (GATE_TECH_SHIFT_HOURS): the visits those hours do not hold stay where they are.
-        const outside = (res && res.outsideShiftVisits) || [];
+        const outside = res?.outsideShiftVisits || [];
         const stillThere = pending.length
           ? `${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
-          : outside.length && `${outside.length} upcoming visit${outside.length === 1 ? "" : "s"} outside the new shift hours; move or reassign on the Schedule`;
-        warningNote = stillThere || "";
-        const gRes = await saveGoogleSignin(editingId, warningNote);
-        if (!gRes.ok) {
+          : outside.length
+            ? `${outside.length} upcoming visit${outside.length === 1 ? "" : "s"} outside the new shift hours; move or reassign on the Schedule`
+            : "";
+        warningNote = stillThere;
+        if (!(await saveGoogleSignin(editingId, warningNote)).ok) {
           load();
           return;
         }
         showToast(stillThere ? `Technician updated — ${stillThere}` : "Technician updated");
       } else {
-        const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const created = await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
           body: JSON.stringify({
@@ -407,8 +406,7 @@ export function TeamTab({ showToast, staffProfile, payrollAvailable = false, onO
           }),
         });
         targetId = created.technician.id;
-        const gRes = await saveGoogleSignin(targetId);
-        if (!gRes.ok) {
+        if (!(await saveGoogleSignin(targetId)).ok) {
           setEditingId(targetId);
           load();
           return;

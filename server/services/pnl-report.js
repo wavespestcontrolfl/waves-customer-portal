@@ -1343,8 +1343,8 @@ async function buildPnlReport(db, startDate, endDate) {
       checks: payRun.checks,
       wages: payRun.wages,
       employerTaxes: payRun.employerTaxes,
-      employeeBenefits: payRun.employeeBenefits || 0,
-      retirementContributions: payRun.retirementContributions || 0,
+      employeeBenefits: payRun.employeeBenefits,
+      retirementContributions: payRun.retirementContributions,
       total: payRun.total,
       bankLinesLeftOut: leftOut,
       note: 'Wages, employer payroll taxes, employer HSA (Line 14), and SIMPLE IRA employer match (Line 19) come from finalized pay runs, by pay date. '

@@ -493,6 +493,15 @@ async function setPtoAllowance(technicianId, input, actor, conn = db) {
   });
 }
 
+async function findFinalizedCheckOnOrAfter(trx, techId, week, includeUnpaidTimeOff = false) {
+  if (!week) return null;
+  const paid = await trx('payroll_checks').where({ technician_id: techId, status: 'finalized' })
+    .where('week_start', '>=', week).first('id');
+  if (paid || !includeUnpaidTimeOff) return paid;
+  return trx('payroll_runs').where({ status: 'finalized' }).where('week_start', '>=', week)
+    .whereRaw('unpaid_time_off @> ?::jsonb', [JSON.stringify([{ technicianId: techId }])]).first('id');
+}
+
 // The minimum paid hours of a full workweek, a setting (offer letter, "Hours and schedule"; payroll-week-minimum.js),
 // and the employee's last day when they leave (its week pays the scheduled days up to it; later weeks no minimum).
 // hours null clears the minimum (the last day stays on file): the pay run pays the hours on file and no more. A change of the last day is refused once a
@@ -533,30 +542,20 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
       const week = staffWeekStartForWorkDate(earliest);
       // A final check of the employee, or a final run that left their time off unpaid with no check: either week is
       // closed, and a new last day could owe it more.
-      const paid = await trx('payroll_checks').where({ technician_id: tech.id, status: 'finalized' })
-        .where('week_start', '>=', week).first('id')
-        || await trx('payroll_runs').where({ status: 'finalized' }).where('week_start', '>=', week)
-          .whereRaw('unpaid_time_off @> ?::jsonb', [JSON.stringify([{ technicianId: tech.id }])]).first('id');
-      if (paid) throw new PayrollError(409, LAST_DAY_PAID(week));
+      if (await findFinalizedCheckOnOrAfter(trx, tech.id, week, true)) throw new PayrollError(409, LAST_DAY_PAID(week));
     }
-    const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
-    if (v.fromWeek && !sameHours(v.hours, tech.paid_week_minimum_hours)) {
-      const paidAfter = await trx('payroll_checks').where({ technician_id: tech.id, status: 'finalized' })
-        .where('week_start', '>=', effectiveWeek).first('id');
-      if (paidAfter) {
+    const hoursChanged = !sameHours(v.hours, tech.paid_week_minimum_hours);
+    if (hoursChanged) {
+      const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
+      if (await findFinalizedCheckOnOrAfter(trx, tech.id, v.fromWeek)) {
         throw new PayrollError(409, `A final pay run already paid this employee for the week of ${effectiveWeek} or later. Void that pay run first or pick a later week.`);
       }
-    }
-    await trx('technicians').where({ id: technicianId })
-      .update({ paid_week_minimum_hours: v.hours, paid_week_minimum_last_day: lastDay, updated_at: trx.fn.now() });
-    // A change of the hours applies from the pay week it is saved in (or explicit fromWeek) via payroll_week_minimum_changes:
-    // a pay run reads the minimum of its own week, so a week paid late, voided and made again, or reopened keeps its own minimum
-    // (owner 2026-11-23 *a*). A second change in the same week replaces that week's row.
-    if (!sameHours(v.hours, tech.paid_week_minimum_hours)) {
       await trx('payroll_week_minimum_changes')
         .insert({ technician_id: tech.id, from_week: effectiveWeek, hours: v.hours })
         .onConflict(['technician_id', 'from_week']).merge(['hours', 'created_at']);
     }
+    await trx('technicians').where({ id: technicianId })
+      .update({ paid_week_minimum_hours: v.hours, paid_week_minimum_last_day: lastDay, updated_at: trx.fn.now() });
     await recordAuditEvent({
       trx, critical: true, actor_type: 'admin', actor_id: actorId,
       action: 'payroll.week_minimum_changed', resource_type: 'technicians', resource_id: technicianId,
@@ -567,7 +566,7 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
     return {
       id: row.id,
       paidWeekMinimumHours: row.paid_week_minimum_hours == null ? null : Number(row.paid_week_minimum_hours),
-      paidWeekMinimumLastDay: row.last_day || null,
+      paidWeekMinimumLastDay: row.last_day,
     };
   });
 }

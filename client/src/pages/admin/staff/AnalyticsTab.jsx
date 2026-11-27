@@ -64,11 +64,10 @@ export function AnalyticsTab() {
       </LoadFailedNotice>
     );
 
-  const { serviceTypeStats, rpmhByTech, overtimeTrend } = data;
+  const { serviceTypeStats, rpmhByTech, overtimeTrend, efficiencyByTech = [], loadAhead = {} } = data;
   // Older server responses carry neither field.
-  const efficiencyByTech = data.efficiencyByTech || [];
-  const loadAheadWeeks = (data.loadAhead && data.loadAhead.weeks) || [];
-  const loadAheadTrailing = (data.loadAhead && data.loadAhead.trailing) || null;
+  const loadAheadWeeks = loadAhead.weeks || [];
+  const loadAheadTrailing = loadAhead.trailing || null;
   const effColor = (pct) =>
     pct >= 70 ? D.green : pct >= 50 ? D.amber : D.red;
   const hrs = (min) => (parseFloat(min || 0) / 60).toFixed(1);

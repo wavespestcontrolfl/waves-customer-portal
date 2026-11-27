@@ -79,20 +79,23 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     finally { setBusy(false); }
   }
   const prefilled = usePrefill({ detail, canWrite, record, owner, setAnswers });
-  const locked = !canWrite || !!record?.completed_at;
+  const activeRecord = record || {};
+  const locked = !canWrite || Boolean(activeRecord.completed_at);
   const selectableRecords = [...new Map([...records, ...(record ? [record] : [])].map(item => [item.id, item])).values()];
   const selectablePeople = people.filter(person => (manage || person.id === selfId) && (detail.document.staff_access !== 'admin' || person.role === 'admin'));
-  const missingRecordOwner = record?.owner_id && !selectablePeople.some(person => person.id === record.owner_id);
+  const missingRecordOwner = Boolean(activeRecord.owner_id) && !selectablePeople.some(person => person.id === activeRecord.owner_id);
+  const heading = !canWrite ? 'Historical records' : rendered.kind === 'procedure' ? 'Checklist mode' : 'Create a record';
+  const editable = !locked;
   return <section style={{ ...box, marginTop: 24 }}>
-    <h2 style={{ marginTop: 0, fontSize: 20 }}>{!canWrite ? 'Historical records' : rendered.kind === 'procedure' ? 'Checklist mode' : 'Create a record'}</h2>
+    <h2 style={{ marginTop: 0, fontSize: 20 }}>{heading}</h2>
     {!canWrite && <p>This version is historical. Open the current version to record new work.</p>}
     <p>Every record keeps this version and its hash. Completed records cannot be edited.</p>
-    <Field label="Saved records"><select style={inputStyle} value={record?.id || ''} onChange={e => selectRecord(selectableRecords.find(item => item.id === e.target.value) || null)}><option value="">{canWrite ? 'New record' : 'Choose historical record'}</option>{selectableRecords.map(item => <option key={item.id} value={item.id}>{item.completed_at ? 'Completed' : 'Open'} · {dateLabel(item.created_at)} · {item.id.slice(0, 8)}</option>)}</select></Field>
+    <Field label="Saved records"><select style={inputStyle} value={activeRecord.id || ''} onChange={e => selectRecord(selectableRecords.find(item => item.id === e.target.value) || null)}><option value="">{canWrite ? 'New record' : 'Choose historical record'}</option>{selectableRecords.map(item => <option key={item.id} value={item.id}>{item.completed_at ? 'Completed' : 'Open'} · {dateLabel(item.created_at)} · {item.id.slice(0, 8)}</option>)}</select></Field>
     {error && <p role="alert">{error}</p>}
     <fieldset disabled={busy || locked} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <div style={row}>
         <Field label="Record owner"><select required style={inputStyle} value={owner} onChange={e => setOwner(e.target.value)}>
-          {missingRecordOwner && <option value={record.owner_id}>{record.owner_name || `Former staff (${record.owner_id.slice(0, 8)})`}</option>}
+          {missingRecordOwner && <option value={activeRecord.owner_id}>{activeRecord.owner_name || `Former staff (${activeRecord.owner_id.slice(0, 8)})`}</option>}
           {selectablePeople.map(person => <option key={person.id} value={person.id}>{person.name}</option>)}
         </select></Field>
         <Field label="Next action due (Eastern)"><input required type="datetime-local" style={inputStyle} value={due} onChange={e => setDue(e.target.value)} /></Field>
@@ -103,11 +106,13 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
         if (field.type === 'checkbox') return <label key={field.id} style={{ ...row, marginBottom: 18 }}><input type="checkbox" checked={answers[field.id] === true} onChange={e => setAnswers({ ...answers, [field.id]: e.target.checked })} />{label}</label>;
         return <Field key={field.id} label={label}>{field.type === 'textarea' ? <textarea rows={4} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} /> : <input type={field.type === 'date' ? 'date' : 'text'} style={inputStyle} value={answers[field.id] || ''} onChange={e => setAnswers({ ...answers, [field.id]: e.target.value })} />}</Field>;
       })}
-      <PrefillNote hidden={locked || !!record} fields={rendered.metadata.fields} prefilled={prefilled} answers={answers} />
-      {!locked && <div style={row}><button type="button" style={buttonStyle} onClick={() => save(false)}>Save open record</button><button type="button" disabled={owner !== selfId} style={primaryStyle} onClick={() => save(true)}>Complete record</button></div>}
-      {!locked && owner !== selfId && <p>The assigned owner must complete this record.</p>}
+      <PrefillNote hidden={locked || Boolean(record)} fields={rendered.metadata.fields} prefilled={prefilled} answers={answers} />
+      {editable && <>
+        <div style={row}><button type="button" style={buttonStyle} onClick={() => save(false)}>Save open record</button><button type="button" disabled={owner !== selfId} style={primaryStyle} onClick={() => save(true)}>Complete record</button></div>
+        {owner !== selfId && <p>The assigned owner must complete this record.</p>}
+      </>}
     </fieldset>
-    {record?.completed_at && <p>Completed {dateLabel(record.completed_at)}. Record {record.id}.</p>}
+    {activeRecord.completed_at && <p>Completed {dateLabel(activeRecord.completed_at)}. Record {activeRecord.id}.</p>}
     {record && <button disabled={busy} type="button" style={buttonStyle} onClick={download}>Export record PDF</button>}
   </section>;
 }

@@ -735,7 +735,7 @@ router.post('/sms', async (req, res) => {
         body: Body,
         messageSid: MessageSid,
         stage: 'applicant_opt_out',
-        code: optCommand.reason || null,
+        code: optCommand.reason,
         revokeOfferConsent: true,
       });
 

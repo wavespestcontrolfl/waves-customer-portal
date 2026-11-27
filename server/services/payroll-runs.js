@@ -579,6 +579,7 @@ const checkColumns = (conn) => [
 ];
 
 const iso = (value) => (value ? new Date(value).toISOString() : null);
+const num0 = (value) => Number(value || 0);
 
 function serializeCheck(row) {
   return {
@@ -615,12 +616,12 @@ function serializeCheck(row) {
       simpleEmployerCents: Number(row.simple_employer_cents),
     } : {}),
     ...(timeOffOn() || storedTimeOff(row) ? {
-      ptoMinutes: Number(row.pto_minutes || 0),
-      holidayMinutes: Number(row.holiday_minutes || 0),
+      ptoMinutes: num0(row.pto_minutes),
+      holidayMinutes: num0(row.holiday_minutes),
       ptoHours: hoursText(row.pto_minutes),
       holidayHours: hoursText(row.holiday_minutes),
-      ptoPayCents: Number(row.pto_pay_cents || 0),
-      holidayPayCents: Number(row.holiday_pay_cents || 0),
+      ptoPayCents: num0(row.pto_pay_cents),
+      holidayPayCents: num0(row.holiday_pay_cents),
     } : {}),
     ...bankView(row),
     // The minimum paid week (payroll-week-minimum.js): only on a check of a technician who has one.
@@ -638,12 +639,12 @@ function serializeCheck(row) {
       holidayWorkPremiumCents: Number(row.holiday_work_premium_cents),
     } : {}),
     ...(payLinesOn() || storedLines(row) ? {
-      reviewBonusCents: Number(row.review_bonus_cents || 0),
-      commissionCents: Number(row.commission_cents || 0),
-      healthAllowanceCents: Number(row.health_allowance_cents || 0),
-      hsaEmployerCents: Number(row.hsa_employer_cents || 0),
+      reviewBonusCents: num0(row.review_bonus_cents),
+      commissionCents: num0(row.commission_cents),
+      healthAllowanceCents: num0(row.health_allowance_cents),
+      hsaEmployerCents: num0(row.hsa_employer_cents),
       ...(row.tech_rewards_cents != null ? { techRewardsCents: Number(row.tech_rewards_cents) } : {}),
-      lineOvertimePremiumCents: Number(row.line_overtime_premium_cents || 0),
+      lineOvertimePremiumCents: num0(row.line_overtime_premium_cents),
       payLines: Array.isArray(row.pay_lines) ? row.pay_lines : [],
     } : {}),
   };
