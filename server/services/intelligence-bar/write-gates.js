@@ -151,6 +151,10 @@ const WRITE_TWO_STEP_TOOL_NAMES = new Set([
   // Email page's Unblock, run in process behind a card; each sends nothing.
   'resolve_dispatch_alert',
   'unblock_sender',
+  // link_customer_family / unlink_customer_family (IB gap #27): the customer page's Same family Link and Unlink, run in
+  // process behind a card; each sends nothing and changes no price.
+  'link_customer_family',
+  'unlink_customer_family',
   'update_lead_contact',
   // propose_admin_edit (owner ruling 2026-10-12): one reviewed small internal
   // edit, replayed through the screen's own PUT or PATCH after a confirm card.

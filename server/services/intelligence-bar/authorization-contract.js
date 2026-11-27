@@ -189,6 +189,9 @@ for (const name of ['approve_agent_review_draft', 'revise_agent_review_draft', '
 // unblock-sender-tools.js cardLines). Neither sends anything.
 CURATED_PREVIEW_TOOL_NAMES.add('resolve_dispatch_alert');
 CURATED_PREVIEW_TOOL_NAMES.add('unblock_sender');
+// link_customer_family / unlink_customer_family: card lines come from their own previews (family-link-tools.js cardLines). They send nothing.
+CURATED_PREVIEW_TOOL_NAMES.add('link_customer_family');
+CURATED_PREVIEW_TOOL_NAMES.add('unlink_customer_family');
 
 // Legacy-bare jobs with no mutation-free preview: what the launch does is
 // fixed and known, so the card states it explicitly (job launch, external
@@ -282,6 +285,8 @@ const ACTION_LABELS = {
   ignore_agent_review_draft: 'Dismiss an Agent Review draft (sends nothing)',
   resolve_dispatch_alert: 'Resolve a dispatch alert (sends nothing)',
   unblock_sender: 'Unblock an email sender (sends nothing)',
+  link_customer_family: 'Link two customer profiles as the same family (sends nothing)',
+  unlink_customer_family: 'Unlink a customer profile from its family (sends nothing)',
   block_sender: 'Block a sender',
   create_pending_estimate: 'Create an estimate',
   create_agent_estimate_draft: 'Save an estimate draft',
@@ -1013,6 +1018,10 @@ function buildContract({ toolName, params, displayParams, preview, summary }) {
   // unblock_sender: the address or domain, when and why it was blocked, its block count and every effect of the unblock.
   if (toolName === 'unblock_sender' && preview?.preview === true) {
     for (const line of require('./unblock-sender-tools').cardLines(toolName, preview)) push(line.kind, line.text);
+  }
+  // link_customer_family / unlink_customer_family: both profiles, the family before and after, and every effect.
+  if (['link_customer_family', 'unlink_customer_family'].includes(toolName) && preview?.preview === true) {
+    for (const line of require('./family-link-tools').cardLines(toolName, preview)) push(line.kind, line.text);
   }
   // send_estimate: the estimate, the masked recipients, the channel, the exact message and the totals.
   if (toolName === 'send_estimate' && preview?.preview === true) {

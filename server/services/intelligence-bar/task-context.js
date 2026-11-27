@@ -1212,7 +1212,9 @@ const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_closeout_
 // loads and version-stamps every one). The task must own ONE half directly;
 // the other is admitted only as an eligible duplicate-queue candidate under
 // that exact pairing (see the CUSTOMER_PAIR_SELECTORS use in validateRecordTarget).
-const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'] };
+// link_customer_family names its second profile as other_customer_id: read and version-stamped as a customer record
+// too, so a customer-scoped task must own both (no pair admission: that is the merge's duplicate check only).
+const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'], link_customer_family: ['customer_id', 'other_customer_id'] };
 const customerPairIds = (params, toolName) => (CUSTOMER_PAIR_SELECTORS[toolName] || []).map(key => params[key]).filter(Boolean);
 
 // Address-bound readers (lookup_property, and find_available_slots inside a
