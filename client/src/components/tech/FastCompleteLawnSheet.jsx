@@ -1229,14 +1229,17 @@ const HELD_PLACE_TAIL = 'You can still complete. The visit record keeps the plac
 const TETRINO_WARNING_TAIL = 'You can still complete.';
 // Tetrino above this rate (fl oz per 1,000 sq ft) is the high rate: it wants high current chinch pressure on the record.
 const TETRINO_HIGH_RATE = 0.367;
-// The rate the row will be recorded at: the plan's own, else the typed amount over the area (fl oz per 1,000 sq ft), else 0.
+// The rate the row will be recorded at (fl oz per 1,000 sq ft): the plan's own, else the typed amount (read in fl oz) over the area the
+// body submits (a spot row's own area, else the whole-lawn one), else 0.
+const FL_OZ_PER_GAL = 128;
 function tetrinoRateOf(row, lawnSqft) {
   if (!row) return 0;
   const planned = Number(rateOf(row)?.rate);
   if (planned > 0) return planned;
   const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
-  const area = areaOf(row, lawnSqft);
-  return hasAmount(row) && amountUnit === 'fl_oz' && area > 0 ? (Number(totalAmount) / area) * 1000 : 0;
+  const flOz = { fl_oz: Number(totalAmount), gal: Number(totalAmount) * FL_OZ_PER_GAL }[amountUnit];
+  const area = row.spotRule && row.spotArea > 0 ? row.spotArea : areaOf(row, lawnSqft);
+  return hasAmount(row) && flOz > 0 && area > 0 ? (flOz / area) * 1000 : 0;
 }
 // The May scout warnings above the Complete button: the record is missing, the recorded decision's product is not on the sheet, or
 // the high rate is on the sheet without high chinch pressure recorded. None holds Complete (owner 2026-11-26).

@@ -365,6 +365,17 @@ describe('May Tetrino scouting', () => {
     ]);
   });
 
+  test('a typed Tetrino amount in gallons is read in fl oz for the high-rate warning', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [], tetrinoScout: offer } });
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    await addProductByName('Tetrino Insecticide');
+    const row = editorFor('Tetrino Insecticide');
+    fireEvent.change(within(row).getByLabelText('Unit for Tetrino Insecticide'), { target: { value: 'gal' } });
+    fireEvent.change(within(row).getByLabelText('Tetrino Insecticide'), { target: { value: '1' } });
+    expect(footerWarnings()).toContain('The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.');
+  });
+
   test('Complete waits while the scout decision is saving and the plan is read again', async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
