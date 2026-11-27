@@ -24879,9 +24879,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a new exposure surface. Computed AFTER the single ownership-scoped
     // fetch above, so the reassignment protection covers it; fail-soft —
     // a facts outage omits the key, never 500s the brief read.
-    // "Customer asked" words are read for THIS visit date (portal messages' window, reschedule notes): finalRecheck binds the visit's
-    // scheduled_date too when they ride the answer, as GET /:id/visit-texts does.
+    // "Customer asked" words are read for THIS visit date (portal messages' window, reschedule notes) and THIS visit's premises (the
+    // property-scoped requests): finalRecheck binds the visit's scheduled_date and its premises columns (the ones
+    // resolveVisitPropertyScope reads: property_id, the service address stamp, the source estimate) as read at the start, when they
+    // ride the answer, as GET /:id/visit-texts does for the date. A changed premises withholds the whole answer.
     let customerAskedBound = false;
+    const bindVisitPremises = (q) => {
+      for (const column of ['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'source_estimate_id']) {
+        if (!(column in svc)) continue;
+        if (svc[column] == null) q.whereNull(`scheduled_services.${column}`);
+        else q.where(`scheduled_services.${column}`, svc[column]);
+      }
+      return q;
+    };
     const withFacts = async (payload) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
@@ -24978,7 +24988,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-          .modify((q) => (customerAskedBound ? q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date)) : q))
+          .modify((q) => (customerAskedBound ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
         return stillOwned ? payload : { brief: null };
