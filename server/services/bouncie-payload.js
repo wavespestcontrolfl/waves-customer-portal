@@ -102,9 +102,9 @@ function timeFromSource(source) {
   return firstPresent(source.timestamp, source.ts, gps?.timestamp, gps?.ts) ?? null;
 }
 
-// The time the trip-end block itself states (end, else disconnect).
+// The time the trip-end block itself states.
 function explicitTripEndTime(payload = {}) {
-  return firstPresent(timeFromSource(payload.end), timeFromSource(payload.disconnect)) ?? null;
+  return timeFromSource(payload.end);
 }
 
 // The time a trip-end happened: its own block's time, else the event's own time. Never the
@@ -118,17 +118,16 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
     return pointFromSource(pickLatestSample(payload));
   }
   // A trip-end is where the truck stopped, and the arrival detector stamps this point with the
-  // end time. So only the trip-end's own block (end, else disconnect) gives its position: never
-  // the departure (start / connect) point, and never an envelope sample (top level, location,
-  // position) whose age is unknown. With no end position the receiver falls back to the truck's
-  // last location under its 10-minute freshness check (engineOffPoint).
+  // end time. So only the trip-end's own end block gives its position: never the departure
+  // (start / connect) point, and never another sample (top level, location, position,
+  // disconnect) whose age is unknown. With no end position the receiver falls back to the
+  // truck's last location under its 10-minute freshness check (engineOffPoint). An end position
+  // with no time at all (neither its own nor the event's) is no point: it is never written.
   if (canonicalEventType === 'trip-end') {
-    const point = pointFromSource(payload.end) || pointFromSource(payload.disconnect);
-    // An end point without its own time keeps the event's own time.
-    if (point && point.reported_at == null) {
-      point.reported_at = tripEndTime(payload);
-    }
-    return point;
+    const point = pointFromSource(payload.end);
+    if (!point) return null;
+    if (point.reported_at == null) point.reported_at = tripEndTime(payload);
+    return point.reported_at == null ? null : point;
   }
   return (
     pointFromSource(payload) ||

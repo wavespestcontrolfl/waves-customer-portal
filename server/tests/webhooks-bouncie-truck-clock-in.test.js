@@ -269,9 +269,10 @@ describe('Bouncie tracking webhook, engine-off arrival', () => {
 
     await router._test.processTrackingEvent({ logId: 24, eventType: 'tripEnd', payload });
 
-    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
-    expect(point).toMatchObject({ lat: 27.51, lng: -82.52, reported_at: null });
-    expect(point.engine_off).toBeUndefined();
+    // An undated trip-end is no point: no arrival check, nothing written as a GPS sample.
+    expect(gpsArrivalDetector.maybeMarkArrivedFromGps).not.toHaveBeenCalled();
+    expect(db.raw).not.toHaveBeenCalled();
+    expect(pingTechLocation).not.toHaveBeenCalled();
   });
 
   test('a trip-end with its own GPS uses it as the engine-off position', async () => {
