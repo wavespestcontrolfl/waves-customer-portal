@@ -135,7 +135,7 @@ No required input (flat $250; footprint only feeds review flags). Commercial →
 
 ## 11. German roach / cockroach (`german_roach`, `pest_initial_roach`)
 
-German roach cleanout requires `severity` (light/moderate/heavy; severe → heavy). Missing severity defaults to LIGHT with a `severityWasDefaulted` flag but no review (P2) — require it. `pest_initial_roach` needs the home's total living area (new quotes since 2026-11-26; a footprint alone is read x stories, older quotes keep the ground-floor footprint) + roach type; the fee override has no reason/user/timestamp.
+German roach cleanout requires `severity` (light/moderate/heavy; severe → heavy). Missing severity defaults to LIGHT with a `severityWasDefaulted` flag but no review (P2) — require it. `pest_initial_roach` needs the home's total living area (new quotes since 2026-11-26; a footprint alone is read x stories, older quotes and commercial buildings keep the ground-floor footprint) + roach type; the fee override has no reason/user/timestamp.
 
 ## 12. Bed bug (`bed_bug`)
 
