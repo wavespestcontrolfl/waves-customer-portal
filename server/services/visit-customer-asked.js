@@ -24,28 +24,37 @@
  */
 
 const logger = require('./logger');
-const { parseETDateTime, etCalendarDayOf, addETDays, etDateString } = require('../utils/datetime-et');
+const { parseETDateTime, etCalendarDayOf, addETDays, etDateString, validCalendarDate } = require('../utils/datetime-et');
 
 const MAX_ITEMS = 8;
 const MAX_TEXT_CHARS = 280;
 // Rows shown, and rows read: a row whose stored address is another home's is dropped after the read.
 const PORTAL_ROW_LIMIT = 5;
-const PORTAL_READ_LIMIT = 20;
+const PORTAL_READ_LIMIT = 40;
 // The portal form's categories that name a service or a visit; billing, cancellation, pause and moving requests are
 // the office's.
 const PORTAL_CATEGORIES = ['pest_issue', 'lawn_concern', 'add_service', 'schedule_change', 'upgrade', 'other'];
 const ASK_SOURCE = { request_form: 'picker', text: 'text', office: 'office' };
 const RESCHEDULE_SOURCE = 'customer_portal_reschedule';
-// A null-source row is the customer's own portal form only when it says so: the form's writer mark, or the property
-// or photo-id stamp only that form writes. Other null-source rows (the cancel flow's re-service request, office
-// follow-ups) hold case ids and office instructions in the description, so they never show.
-const PORTAL_FORM_SQL = "(metadata->>'writer' = 'portal_form' OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL)";
+// A null-source row is the customer's portal form only when it says so: the writer mark routes/requests.js stamps, or
+// the property or photo-id stamp only that form writes. Other null-source rows (the cancel flow's re-service request,
+// office follow-ups) hold case ids and office instructions in the description, so they never show. The mark tells the
+// typed form ('portal_form': the customer's own words) from the pricing flows ('portal_flow': a generated description
+// that holds prices); a row with only the stamp is an older row of either kind.
+const PORTAL_FORM_SQL = "(metadata->>'writer' IN ('portal_form', 'portal_flow') OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL)";
 // The reschedule route (routes/schedule.js) writes the description as "Appointment <id>: <type> on <date>", then the
 // preferred date and "Customer notes: <text>" lines; each later update appends a "Customer updated <ET date>:" block.
-const ASKED_AT_SQL = "CASE WHEN source = 'customer_portal_reschedule' THEN GREATEST(created_at, COALESCE((SELECT max(m[1])::date FROM regexp_matches(COALESCE(description, ''), 'Customer updated (\\d{4}-\\d{2}-\\d{2}):', 'g') AS m), created_at::date)::timestamptz) ELSE created_at END";
 const RESCHEDULE_UPDATE_SPLIT_RE = /\n(?=Customer updated \d{4}-\d{2}-\d{2}:)/;
 const RESCHEDULE_UPDATE_DATE_RE = /^Customer updated (\d{4}-\d{2}-\d{2}):/;
 const RESCHEDULE_NOTE_RE = /Customer notes: ([\s\S]*)$/;
+
+// No prices on a technician screen (owner rule). An amount is a money sign, a dollar word, or a price-shaped number
+// (a comma thousand like 1,200, or two decimals like 49.95). The word screen adds what a message or an older
+// description must also pass: price, cost, charge, refund, invoice, quote and the like.
+const MONEY_AMOUNT_RE = /[$€£]|\b(?:usd|dollars?|bucks?)\b|\b\d{1,3}(?:,\d{3})+\b|\b\d+\.\d{2}\b/i;
+const MONEY_WORD_RE = /\b(?:price|prices|pricing|priced|cost|costs|costing|charge|charged|charges|refund\w*|invoice\w*|bill|billed|billing|pay|paid|payment\w*|fees?|quote\w*|estimate\w*|discount\w*|total|balance|deposit|owe|owed|credit|card)\b/i;
+const moneyFree = (text) => !MONEY_AMOUNT_RE.test(text);
+const moneyWordFree = (text) => moneyFree(text) && !MONEY_WORD_RE.test(text);
 
 const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
 const compact = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -60,10 +69,11 @@ const iso = (value) => {
   return value == null || Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
+// Every item of every kind passes the money-amount screen: an item with a price in its words is dropped.
 function entry(kind, at, text, extra = {}) {
   const when = iso(at);
   const words = clip(text);
-  return when && words ? { kind, at: when, text: words, ...extra } : null;
+  return when && words && moneyFree(words) ? { kind, at: when, text: words, ...extra } : null;
 }
 
 async function safely(name, read) {
@@ -98,22 +108,22 @@ async function reserviceItems(svc, dbh) {
     });
 }
 
-// The original booking's own words, when the visit came from a self-booking and its row is readable.
-async function typedBookingNote(svc, dbh) {
-  if (!svc.self_booking_id) return null;
-  const row = await dbh('self_booked_appointments').where({ id: svc.self_booking_id }).first('customer_notes');
-  return row?.customer_notes || null;
+// The booking row, when it is the public booking form's. Two writers make self_booked_appointments rows: the public
+// form (routes/booking.js) always stamps `source` ('direct', a fleet site, 'reservice_link'), and the AI assistant's
+// book_appointment (availability.confirmBooking) writes none. Only the form's row holds words the customer typed.
+async function typedBookingRow(svc, dbh) {
+  const row = await dbh('self_booked_appointments').where({ id: svc.self_booking_id }).first('customer_notes', 'source');
+  return row && row.source ? row : null;
 }
 
-// Only on the visit the customer booked (linked to the self-booking): the recurring seeder copies the parent's notes
-// onto every follow-up it seeds, and the customer typed that note once.
+// Only on the visit the customer booked (linked to a public self-booking whose row proves the form wrote it): the
+// recurring seeder copies the parent's notes onto every follow-up it seeds, and the AI assistant's booking notes are
+// not the customer's typing. An unreadable row proves nothing, so nothing shows.
 async function bookingNoteItems(svc, dbh) {
   if (!svc.self_booking_id) return [];
-  const typed = await typedBookingNote(svc, dbh).catch((err) => {
-    logger.warn(`[visit-customer-asked] booking row unreadable: ${err?.code || err?.name || 'Error'}`);
-    return null;
-  });
-  const text = require('./reservice-asks').selfBookedNoteText(svc.notes, typed);
+  const row = await typedBookingRow(svc, dbh);
+  if (!row) return [];
+  const text = require('./reservice-asks').selfBookedNoteText(svc.notes, row.customer_notes);
   return text ? [entry('booking_note', svc.created_at, text)] : [];
 }
 
@@ -161,14 +171,16 @@ async function visitScope(svc, dbh) {
   }
 }
 
-// The address the portal form stored on a request (metadata.property.address, one line), or null.
-function storedAddress(row) {
+function metaOf(row) {
   let meta = row.metadata;
   if (typeof meta === 'string') {
     try { meta = JSON.parse(meta); } catch { meta = null; }
   }
-  return meta?.property?.address || null;
+  return meta && typeof meta === 'object' ? meta : null;
 }
+
+// The address the portal form stored on a request (metadata.property.address, one line), or null.
+const storedAddress = (row) => metaOf(row)?.property?.address || null;
 
 // An unstamped visit is on the primary property: its premises key is the customer's CURRENT primary property address
 // (the customer row's own address when no property row exists). Nothing resolvable is "stamp present, not resolved":
@@ -231,30 +243,48 @@ function portalRowsQuery(dbh, svc, propertyIds) {
           .whereRaw('left(COALESCE(description, \'\'), ?) = ?', [appointmentHeader(svc).length, appointmentHeader(svc)]);
       });
     })
-    // Newest by when the customer asked, never by last change: an office edit bumps updated_at and must not displace
-    // a newer ask. A reschedule request counts from its newest "Customer updated <date>:" block.
-    .orderByRaw(ASKED_AT_SQL + ' DESC')
+    // Newest by creation, never by last change: an office edit bumps updated_at and must not displace a newer ask.
+    // A revised reschedule note is dated in JS (rescheduleNote), after a read deep enough to cover it.
+    .orderBy('created_at', 'desc')
     .limit(PORTAL_READ_LIMIT)
     .select('subject', 'description', 'source', 'created_at', 'metadata');
 }
 
 // The customer's own note from a reschedule request, dated by the update that supplied it: the newest block with a
-// "Customer notes:" line. The first block is the request itself (the row's date); a later one carries its ET date.
-// Nothing else of the row is read.
-function rescheduleNote(description, createdAt) {
+// "Customer notes:" line. The first block is the request itself (the row's date). A later block carries an ET date
+// the customer's own text could also spell: it counts only as a real calendar date between the request and now, at
+// noon Eastern (the one timestamp used to rank and to show); anything else falls back to the row's date.
+function rescheduleNote(description, createdAt, now = new Date()) {
   const blocks = String(description || '').split(RESCHEDULE_UPDATE_SPLIT_RE);
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const note = compact(RESCHEDULE_NOTE_RE.exec(blocks[i])?.[1]);
     if (!note) continue;
-    const day = i === 0 ? null : RESCHEDULE_UPDATE_DATE_RE.exec(blocks[i])?.[1];
-    return { note, at: day ? parseETDateTime(`${day}T12:00`) : createdAt };
+    const day = i === 0 ? null : validCalendarDate(RESCHEDULE_UPDATE_DATE_RE.exec(blocks[i])?.[1]);
+    const stamped = day ? parseETDateTime(`${day}T12:00`) : null;
+    const usable = stamped && stamped >= new Date(createdAt) && stamped <= now;
+    return { note, at: usable ? stamped : createdAt };
   }
   return null;
 }
 
-// Open requests the customer made in the portal or the app. A portal form row is their own subject and note; a card
-// or chat row (CTA sources) carries a server-written description, so only its subject (the service) shows; a
-// reschedule request for this appointment shows only the note the customer typed, dated by the update that supplied it.
+// The words of a portal request row. A card or chat row carries a server-written description: its subject (the
+// service) only. A typed portal form row shows the customer's description, once it passes the money-amount screen;
+// the pricing flows ('portal_flow', and any older row with only the stamp) post a GENERATED description that holds
+// prices: the first shows its subject only, the second its description only if it passes the whole money screen. The
+// typed form's subject is the description's first 80 characters, so a description that starts with its subject is
+// shown alone.
+function requestRowText(row) {
+  const subject = compact(row.subject);
+  if (row.source) return subject;
+  const description = compact(row.description);
+  const writer = metaOf(row)?.writer;
+  const shown = writer === 'portal_form' ? moneyFree(description) : writer !== 'portal_flow' && moneyWordFree(description);
+  if (!description || !shown) return subject;
+  return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
+}
+
+// Open requests the customer made in the portal or the app. A reschedule request for this appointment shows only the
+// note the customer typed, dated by the update that supplied it.
 async function portalItems(svc, dbh, singleSoon) {
   const single = await singleSoon;
   const scope = await visitScope(svc, dbh);
@@ -270,9 +300,7 @@ async function portalItems(svc, dbh, singleSoon) {
         // `appointment` marks a note that belongs to this one appointment, so a grouped stop keeps it with its service.
         return revised ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }) : null;
       }
-      const note = row.source ? '' : compact(row.description);
-      const subject = compact(row.subject);
-      return entry('portal_request', row.created_at, note ? `${subject}: ${note}` : subject, { source: 'portal' });
+      return entry('portal_request', row.created_at, requestRowText(row), { source: 'portal' });
     })
     .filter(Boolean)
     .sort(newestFirst)
@@ -292,7 +320,6 @@ function pickItems(items) {
 // never read. A message about money, a link or a number run is left out, as is an office-only message (a refund, a
 // complaint). The portal names no home: on an account that may have several, it may be about another one.
 const PORTAL_MESSAGE_WINDOW_DAYS = 7;
-const MONEY_WORD_RE = /[$€£]|\b(?:price|prices|pricing|priced|cost|costs|costing|charge|charged|charges|refund\w*|invoice\w*|bill|billed|billing|pay|paid|payment\w*|dollars?|bucks?|fees?|quote\w*|estimate\w*|discount\w*|total|balance|deposit|owe|owed|credit|card)\b/i;
 const LINK_RE = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|net|org|co|io|app|link|us|info|biz|me)\b/i;
 const NUMBER_RUN_RE = /\d{3,}/;
 
@@ -304,7 +331,7 @@ function messageWindow(svc, now = new Date()) {
   return { since, until: dayEnd < now ? dayEnd : now };
 }
 
-const safeMessage = (text) => !MONEY_WORD_RE.test(text) && !LINK_RE.test(text) && !NUMBER_RUN_RE.test(text)
+const safeMessage = (text) => moneyWordFree(text) && !LINK_RE.test(text) && !NUMBER_RUN_RE.test(text)
   && !require('./reservice-office-only').officeOnlyReason(text);
 
 async function portalMessageItems(svc, dbh, singleSoon) {
@@ -349,4 +376,4 @@ async function customerAskedFacts(svc, dbh) {
   return picked.length ? { items: picked } : null;
 }
 
-module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { portalMessageItems, safeMessage, messageWindow, portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };
+module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { requestRowText, portalMessageItems, safeMessage, messageWindow, portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };

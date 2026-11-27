@@ -35,7 +35,7 @@ const SVC = {
 };
 
 // A stub dbh: service_requests resolves to `rows`, self_booked_appointments to `booking`; `fail` makes every read throw.
-function fakeDbh({ rows = [], booking, props = [], customer, messages = [], fail = false } = {}) {
+function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct' }, props = [], customer, messages = [], fail = false } = {}) {
   const calls = [];
   const dbh = (table) => {
     calls.push(['table', table]);
@@ -118,7 +118,7 @@ describe('customerAskedFacts: the sources', () => {
 describe('customerAskedFacts: booking note', () => {
   test('the original booking customer_notes win over the visit notes line, and keep their lines', async () => {
     const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Cut short — Unit: 5' };
-    const dbh = fakeDbh({ booking: { customer_notes: 'Side gate sticks.\nPlease text first.' } });
+    const dbh = fakeDbh({ booking: { customer_notes: 'Side gate sticks.\nPlease text first.', source: 'direct' } });
     const facts = await customerAskedFacts(svc, dbh);
     expect(facts.items).toEqual([{ kind: 'booking_note', at: SVC.created_at, text: 'Side gate sticks. Please text first.' }]);
   });
@@ -129,11 +129,16 @@ describe('customerAskedFacts: booking note', () => {
     expect(facts.items[0].text).toBe('Side gate sticks. Please text first.');
   });
 
-  test('an unreadable booking row falls back to the notes line', async () => {
+  test('an unreadable booking row proves nothing: no note', async () => {
     const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Beware of the dog' };
-    const dbh = fakeDbh({ fail: true });
-    const facts = await customerAskedFacts(svc, dbh);
-    expect(facts.items.map((i) => i.kind)).toEqual(['booking_note']);
+    expect(await customerAskedFacts(svc, fakeDbh({ fail: true }))).toBeNull();
+  });
+
+  test('a booking the AI assistant made (no source on its row) is not the customer typing', async () => {
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Customer prefers mornings' };
+    expect(await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: 'Customer prefers mornings', source: null } }))).toBeNull();
+    expect((await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: 'Customer prefers mornings', source: 'direct' } }))).items).toHaveLength(1);
+    expect((await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: 'Customer prefers mornings', source: 'reservice_link' } }))).items).toHaveLength(1);
   });
 
   test('a re-service request line in the notes is the reason, not a booking note', async () => {
@@ -151,8 +156,8 @@ describe('customerAskedFacts: portal requests', () => {
     expect(sql).toMatch(/"customer_id" = \?/);
     expect(sql).toMatch(/"status" is null or "status" not in \(\?, \?, \?\)/);
     expect(sql).toMatch(/"category" in \(\?, \?, \?, \?, \?, \?\)/);
-    expect(sql).toMatch(/"source" in \(\?, \?, \?\) or \("source" is null and \(metadata->>'writer' = 'portal_form'/);
-    expect(sql).toMatch(/order by CASE WHEN source = 'customer_portal_reschedule' THEN GREATEST\(created_at, .*\) ELSE created_at END DESC limit \?/);
+    expect(sql).toMatch(/"source" in \(\?, \?, \?\) or \("source" is null and \(metadata->>'writer' IN/);
+    expect(sql).toMatch(/order by "created_at" desc limit \?/);
     expect(sql).not.toMatch(/updated_at/);
     expect(sql).toMatch(/select "subject", "description", "source", "created_at", "metadata" from/);
     expect(sql).not.toMatch(/pricing_revision/);
@@ -179,7 +184,7 @@ describe('customerAskedFacts: portal requests', () => {
 
   test('only a null-source row the portal form wrote shows its description; the cancel flow row is excluded in SQL', () => {
     const { sql } = sqlOf(SVC, null);
-    expect(sql).toContain("metadata->>'writer' = 'portal_form' OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL");
+    expect(sql).toContain("metadata->>'writer' IN ('portal_form', 'portal_flow') OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL");
   });
 
   test('a reschedule request is matched on the anchored appointment header, not anywhere in the description', () => {
@@ -304,7 +309,7 @@ describe('customerAskedFacts: the address the request stored', () => {
   test('the query reads more rows than it shows, so a dropped row does not hide a valid one', () => {
     const { sql, bindings } = _test.portalRowsQuery(knexLib({ client: 'pg' }), SVC, null).toSQL();
     expect(sql).toMatch(/select "subject", "description", "source", "created_at", "metadata" from/);
-    expect(bindings[bindings.length - 1]).toBe(20);
+    expect(bindings[bindings.length - 1]).toBe(40);
   });
 });
 
@@ -416,10 +421,91 @@ describe('customerAskedFacts: portal entries rank by their own date', () => {
     expect(facts.items[0]).toMatchObject({ text: 'moved to Friday', appointment: true });
   });
 
-  test('the SQL read order is the creation time (reschedule: its newest update date), never updated_at', () => {
+  test('the SQL read is ordered by creation time alone and never casts a date found in free text', () => {
     const { sql } = _test.portalRowsQuery(knexLib({ client: 'pg' }), SVC, null).toSQL();
-    expect(sql).toContain("regexp_matches(COALESCE(description, ''), 'Customer updated (\\d{4}-\\d{2}-\\d{2}):', 'g')");
-    expect(sql).not.toContain('updated_at');
+    expect(sql).toMatch(/order by "created_at" desc limit \?/);
+    expect(sql).not.toMatch(/updated_at|regexp_matches|::date|::timestamptz/);
+  });
+});
+
+describe('customerAskedFacts: no prices on a technician screen', () => {
+  const typed = (description, over) => formRow({ subject: description.slice(0, 80), description, metadata: { writer: 'portal_form' }, ...over });
+  const flow = (over) => formRow({ subject: 'Service pricing review requested', description: 'Customer asked WAVES AI: "lawn price". Lawn care is $149.00 per visit.', metadata: { writer: 'portal_flow', propertyId: 'prop-1' }, ...over });
+  const stamped = (description) => formRow({ subject: 'Lawn plan', description, metadata: { propertyId: 'prop-1' } });
+
+  test('a pricing-flow row shows its requested service only, never the generated description', async () => {
+    const facts = await customerAskedFacts(SVC, fakeDbh({ rows: [flow()] }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Service pricing review requested']);
+    expect(JSON.stringify(facts)).not.toMatch(/149|WAVES AI/);
+  });
+
+  test('a typed request with an amount in its words is reduced to its subject, or dropped when the subject has one too', async () => {
+    const reduced = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen, last company charged $120 and never fixed it', metadata: { writer: 'portal_form' } });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [reduced] }))).items[0].text).toBe('Ants in the kitchen');
+    const dropped = formRow({ subject: 'Was charged $120 twice', description: 'Was charged $120 twice, please fix', metadata: { writer: 'portal_form' } });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [dropped] }))).toBeNull();
+  });
+
+  test('an older row with only the stamp shows its description only if it passes the whole money screen', async () => {
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [stamped('Brown patch by the gate')] }))).items[0].text).toBe('Lawn plan: Brown patch by the gate');
+    for (const generated of ['Customer asked WAVES AI: "price". It is $149 per visit.', 'Quote for lawn care came to 1,200 a year', 'We were told the price would be lower', 'Total was 49.95']) {
+      expect((await customerAskedFacts(SVC, fakeDbh({ rows: [stamped(generated)] }))).items[0].text).toBe('Lawn plan');
+    }
+  });
+
+  test('every other kind drops an item whose words carry an amount', async () => {
+    mockGather.mockResolvedValue(asks([
+      askItem({ id: 'booking:svc-1', source: 'request_form', text: 'Ants again, the $89 visit did not work.' }),
+      askItem({ id: 'text:5', text: 'Roaches in the garage.' }),
+    ]));
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Pay the $50 deposit first' };
+    const facts = await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: 'Pay the $50 deposit first', source: 'direct' } }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Roaches in the garage.']);
+  });
+
+  test('a message with an amount is dropped, as are reschedule notes', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    expect(await customerAskedFacts({ ...SVC, scheduled_date: '2026-11-27' }, fakeDbh({ messages: [{ body: 'It was $50', created_at: '2026-11-24T15:00:00.000Z' }] }))).toBeNull();
+    delete process.env.GATE_PORTAL_MESSAGES;
+    const row = formRow({ source: 'customer_portal_reschedule', description: 'Appointment svc-1: Pest on 2026-12-01\nCustomer notes: only if it is under $100' });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).toBeNull();
+  });
+});
+
+describe('customerAskedFacts: a request whose description starts with its subject', () => {
+  test('is shown by its description alone', async () => {
+    const description = 'There are ants all along the back lanai door and they keep coming in every morning since the rain stopped last week';
+    const row = formRow({ subject: description.slice(0, 80), description, metadata: { writer: 'portal_form' } });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).items[0].text).toBe(description);
+  });
+  test('a different subject keeps both', () => {
+    expect(_test.requestRowText({ subject: 'Lawn Care', description: 'Brown patch', source: null, metadata: { writer: 'portal_form' } })).toBe('Lawn Care: Brown patch');
+    expect(_test.requestRowText({ subject: 'LAWN care', description: 'lawn care: brown patch', source: null, metadata: '{"writer":"portal_form"}' })).toBe('lawn care: brown patch');
+  });
+});
+
+describe('customerAskedFacts: reschedule note dates are derived in JS, with validation', () => {
+  const created = '2026-11-10T10:00:00.000Z';
+  const now = new Date('2026-11-27T12:00:00Z');
+  const head = 'Appointment svc-1: Pest on 2026-12-01\nCustomer notes: first';
+  const update = (day) => `${head}\nCustomer updated ${day}:\nCustomer notes: second`;
+
+  test('a real update date is noon Eastern, the one timestamp used to rank and to show', () => {
+    expect(_test.rescheduleNote(update('2026-11-25'), created, now)).toEqual({ note: 'second', at: new Date('2026-11-25T17:00:00.000Z') });
+  });
+
+  test.each([
+    ['not a calendar date', '2026-13-45'],
+    ['a date in the future', '2027-01-05'],
+    ['a date before the request was filed', '2026-11-01'],
+  ])('%s falls back to the row date', (_n, day) => {
+    expect(_test.rescheduleNote(update(day), created, now)).toEqual({ note: 'second', at: created });
+  });
+
+  test('the displayed and ranked time are the same value', async () => {
+    const row = formRow({ source: 'customer_portal_reschedule', created_at: created, description: update('2026-11-25') });
+    const facts = await customerAskedFacts(SVC, fakeDbh({ rows: [row] }));
+    expect(facts.items[0].at).toBe('2026-11-25T17:00:00.000Z');
   });
 });
 
@@ -447,8 +533,10 @@ describe('customerAskedFacts: failures and caps', () => {
   });
 
   test('one failed source leaves the others', async () => {
-    const facts = await customerAskedFacts({ ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Beware of the dog' }, fakeDbh({ fail: true }));
-    expect(facts.items.map((i) => i.kind)).toEqual(['booking_note']);
+    mockGather.mockResolvedValue(asks([askItem({ id: 'booking:svc-1', source: 'request_form', text: 'Ants in the kitchen.' })]));
+    const dbh = fakeDbh({ fail: true });
+    const facts = await customerAskedFacts({ ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Beware of the dog' }, dbh);
+    expect(facts.items.map((i) => i.kind)).toEqual(['reservice_reason']);
   });
 
   test('caps: 8 items, 280 characters each, repeats of one wording collapse', async () => {

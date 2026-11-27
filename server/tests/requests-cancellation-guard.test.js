@@ -295,7 +295,7 @@ describe('POST /api/requests cancellation guard', () => {
     expect(arg.reason).toMatch(/^Portal cancellation request /);
     // The pick as submitted is on the request itself, for any retry to read.
     expect(JSON.parse(mockState.service_requests_inserted[0].metadata)).toEqual({
-      writer: 'portal_form',
+      writer: 'portal_flow',
       cancelSubmission: { scope: [], reasonCode: 'price', adverseEvent: false, safetyComplaint: false },
     });
   }));

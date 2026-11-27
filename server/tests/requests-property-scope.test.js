@@ -142,8 +142,15 @@ test('a single-home session (gate on, scoped=false) pins its one property and st
   expect(ok.status).toBe(201);
   const insert = log.find((e) => e[0] === 'insert');
   expect(insert).toBeTruthy();
-  // Unscoped: no property stamp, only the writer's mark (the tech Visit Brief reads it).
-  expect(JSON.parse(insert[1].metadata)).toEqual({ writer: 'portal_form' });
+  // Unscoped: no property stamp, only the writer's mark (the tech Visit Brief reads it). No `urgency` = a pricing flow.
+  expect(JSON.parse(insert[1].metadata)).toEqual({ writer: 'portal_flow' });
+});
+
+test('the typed request form (the only sender of urgency) is marked portal_form, a pricing flow portal_flow', async () => {
+  global.__SCOPE__ = { customerId: 'cust-1', enabled: true, multi: false, scoped: false, property: PRIMARY.property };
+  const typed = await post({ category: 'schedule_change', subject: 'Move Friday', description: 'Any day next week', urgency: 'routine' });
+  expect(typed.status).toBe(201);
+  expect(JSON.parse(log.filter((e) => e[0] === 'insert').pop()[1].metadata).writer).toBe('portal_form');
 });
 
 test('the same covered issue under the PRIMARY selection is still steered to the re-service picker', async () => {

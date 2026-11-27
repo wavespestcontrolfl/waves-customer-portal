@@ -755,9 +755,11 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         photos: JSON.stringify(photoData),
         status: 'new',
         metadata: JSON.stringify({
-          // The writer's mark: this row is the customer's own portal form, so its description is their words
-          // (the tech Visit Brief shows it; the cancel flow's null-source rows carry office text instead).
-          writer: 'portal_form',
+          // The writer's mark, for the tech Visit Brief: 'portal_form' is the typed request form, whose description is
+          // the customer's own words (only that form sends `urgency`); 'portal_flow' is a pricing flow (the pricing
+          // assistant, the tier explorer), whose generated description holds prices. The cancel flow's rows carry
+          // neither mark: their description is office text.
+          writer: value.urgency ? 'portal_form' : 'portal_flow',
           ...(requestProperty ? { propertyId: requestProperty.id, property: requestProperty } : {}),
           ...(value.photoIdSource ? { photoIdSource: value.photoIdSource } : {}),
           // The submission as made: retries read it (submittedCancel).
