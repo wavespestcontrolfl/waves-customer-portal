@@ -652,9 +652,24 @@ export default function BidKitPage({ embedded = false }) {
     if (node && node.scrollIntoView) node.scrollIntoView({ block: "center" });
   }, [focusId, data]);
 
+  const confirmDiscardEditor = useCallback(
+    () => !editorDirty || window.confirm("Discard unsaved Bid Kit changes?"),
+    [editorDirty],
+  );
+  const switchView = (nextView) => {
+    if (nextView === view || !confirmDiscardEditor()) return;
+    closeEditors();
+    setView(nextView);
+  };
+  const openEditor = (nextId) => {
+    if (nextId === editing) return;
+    if (!confirmDiscardEditor()) return;
+    setEditorDirty(false);
+    setEditing(nextId);
+  };
   const handlers = {
-    ...actions, setEditing, setEditorDirty, cancel: closeEditors,
-    edit: (entry) => setEditing(entry.row ? entry.row.id : `new:${entry.item.key}`),
+    ...actions, setEditing: openEditor, setEditorDirty, cancel: closeEditors,
+    edit: (entry) => openEditor(entry.row ? entry.row.id : `new:${entry.item.key}`),
   };
   const sectionCounts = (data && data.summary.sections) || {};
 
@@ -668,8 +683,8 @@ export default function BidKitPage({ embedded = false }) {
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2" role="group" aria-label="View">
-        <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => setView("checklist")}>Checklist</Button>
-        <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => setView("facts")}>Facts sheet</Button>
+        <Button size="sm" variant={view === "checklist" ? "primary" : "secondary"} aria-pressed={view === "checklist"} onClick={() => switchView("checklist")}>Checklist</Button>
+        <Button size="sm" variant={view === "facts" ? "primary" : "secondary"} aria-pressed={view === "facts"} onClick={() => switchView("facts")}>Facts sheet</Button>
         {data && view === "checklist" && <SummaryLine overall={data.summary.overall} />}
       </div>
 
@@ -685,7 +700,7 @@ export default function BidKitPage({ embedded = false }) {
             <Section key={section.key} section={section} counts={sectionCounts[section.key]} editing={editing} busy={actions.busy} focusId={focusId} handlers={handlers} />
           ))}
           <div>
-            <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => setEditing(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
+            <Button size="sm" variant="secondary" disabled={actions.busy} onClick={() => openEditor(editing === NEW_CUSTOM ? "" : NEW_CUSTOM)}>Add another item</Button>
             {editing === NEW_CUSTOM && (
               <Editor
                 entry={CUSTOM_ENTRY} busy={actions.busy} onDirtyChange={setEditorDirty} onArchive={() => {}} onCancel={closeEditors}

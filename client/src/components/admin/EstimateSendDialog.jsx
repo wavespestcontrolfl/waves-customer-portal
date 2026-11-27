@@ -11,8 +11,17 @@ const headers = () => ({ "Content-Type": "application/json", Authorization: `Bea
 const CHANNEL_LABELS = { sms: "Text message", email: "Email", both: "Text message and email" };
 const palmsLabel = (count) => `${count} palm${count === 1 ? "" : "s"}`;
 
-async function parseJsonSafe(response) {
-  try { return await response.json(); } catch { return {}; }
+async function parseJsonReceipt(response) {
+  try { return { ok: true, data: await response.json() }; } catch { return { ok: false, data: {} }; }
+}
+
+function isChannelDisabled(key, preview, allowedChannels) {
+  if (allowedChannels) {
+    if (key === "both" && (!allowedChannels.includes("sms") || !allowedChannels.includes("email"))) return true;
+    if (key !== "both" && !allowedChannels.includes(key)) return true;
+  }
+  return (key !== "email" && (!preview.customerPhone || !!preview.smsBlockReason))
+    || (key !== "sms" && !preview.customerEmail);
 }
 
 function isPreDispatchRejection(status, data) {
@@ -89,7 +98,8 @@ export default function EstimateSendDialog({ request, onClose }) {
   const inFlight = useRef(false);
   const attempt = useRef(null);
   const sendingLabel = useRef("");
-  const dialogRef = useModalFocus(true, () => { if (!inFlight.current) onClose(outcome); });
+  const closeResult = () => outcome || (attempt.current ? { uncertain: true } : null);
+  const dialogRef = useModalFocus(true, () => { if (!inFlight.current) onClose(closeResult()); });
 
   useEffect(() => {
     const controller = new AbortController();
@@ -99,7 +109,7 @@ export default function EstimateSendDialog({ request, onClose }) {
           window.location.href = adminLoginUrl(window.location);
           throw new Error("Session expired");
         }
-        const data = await parseJsonSafe(response);
+        const { data } = await parseJsonReceipt(response);
         if (!response.ok) throw new Error(data.error || "Could not load the saved estimate.");
         if (!controller.signal.aborted) setPreview(data);
       })
@@ -135,7 +145,11 @@ export default function EstimateSendDialog({ request, onClose }) {
         setError("Session expired. Sign in again to send.");
         return;
       }
-      const data = await parseJsonSafe(response);
+      const parsed = await parseJsonReceipt(response);
+      const data = parsed.data;
+      if (response.ok && !parsed.ok) {
+        throw new Error("The server returned an unreadable send receipt.");
+      }
       if (!response.ok && isPreDispatchRejection(response.status, data)) {
         // Server rejected the request before any provider dispatch — release
         // the attempt lock so the operator can adjust inputs and retry cleanly.
@@ -162,13 +176,14 @@ export default function EstimateSendDialog({ request, onClose }) {
   const stale = request.expectedEditVersion && preview?.editVersion && request.expectedEditVersion !== preview.editVersion;
   const notice = [request.warning, preview?.requiresEngineReview ? preview.blockReason : "", preview?.uncertainAttempt ? "An earlier send has an uncertain outcome. Check the conversation and email delivery records; another send could duplicate it." : ""].filter(Boolean).join(" ");
   const needsAcknowledgment = !!notice;
+  const allowedChannels = Array.isArray(request.allowedChannels) && request.allowedChannels.length ? request.allowedChannels : null;
   const submitLabel = attempt.current ? "Check / retry attempt" : scheduledAt ? "Confirm scheduled send" : "Confirm send";
   return createPortal(
     <UiSurface density="comfortable" onClick={(event) => event.stopPropagation()} className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center px-3 sm:px-6 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-[calc(12px+env(safe-area-inset-bottom,0px))]">
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="estimate-send-title" className="w-full max-w-2xl max-h-full overflow-y-auto bg-white text-ink-primary rounded-sm shadow-xl p-5 sm:p-6 text-16">
         <div className="flex items-start justify-between gap-4">
           <div><h2 id="estimate-send-title" className="text-22 font-medium">Review and send</h2><p className="text-14 text-ink-secondary mt-1">The saved estimate is the offer being sent.</p></div>
-          <Button variant="ghost" disabled={busy} onClick={() => onClose(outcome)}>Close</Button>
+          <Button variant="ghost" disabled={busy} onClick={() => onClose(closeResult())}>Close</Button>
         </div>
         {!preview && !error && <ActionFeedback className="py-6">Loading saved recipient and message…</ActionFeedback>}
         {error && <ActionFeedback error className="my-4">{error}</ActionFeedback>}
@@ -185,7 +200,7 @@ export default function EstimateSendDialog({ request, onClose }) {
           <fieldset disabled={locked} className="border-0 p-0 min-w-0">
             <legend className="font-medium mb-2">Choose delivery channel</legend>
             {Object.entries(CHANNEL_LABELS).map(([key, label]) => <label key={key} className="ui-choice-label flex items-center gap-3">
-              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={(key !== "email" && (!preview.customerPhone || !!preview.smsBlockReason)) || (key !== "sms" && !preview.customerEmail)} />
+              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={isChannelDisabled(key, preview, allowedChannels)} />
               <span>{label}</span>
             </label>)}
             <p className="text-14 text-ink-secondary mt-2 break-words">Text: {preview.customerPhone || "No phone saved"}<br />Email: {preview.customerEmail || "No email saved"}</p>
@@ -208,7 +223,7 @@ export default function EstimateSendDialog({ request, onClose }) {
           <div className="ui-record-actions border-t border-zinc-200 pt-4">
             {!outcome && <Button loading={busy} disabled={!method || busy || blocked || stale || smsBlocked || (needsAcknowledgment && !acknowledged)} onClick={send}>{busy ? sendingLabel.current : submitLabel}</Button>}
             {preview.customerUrl && <Button variant="secondary" onClick={async () => { try { await navigator.clipboard.writeText(preview.customerUrl); setCopied(true); } catch { setError("Copy failed. Open the saved preview to access the link."); } }}>{copied ? "Link copied" : "Copy secure estimate link"}</Button>}
-            <Button variant="secondary" disabled={busy} onClick={() => onClose(outcome)}>{outcome ? "Done" : "Cancel"}</Button>
+            <Button variant="secondary" disabled={busy} onClick={() => onClose(closeResult())}>{outcome ? "Done" : "Cancel"}</Button>
           </div>
         </div>}
       </section>

@@ -499,3 +499,25 @@ it("a notice link off sam.gov is not shown", async () => {
   expect(await screen.findByText("Read from SAM.gov:")).toBeInTheDocument();
   expect(screen.queryByRole("link", { name: "Open the notice on SAM.gov" })).toBeNull();
 });
+
+it("prompts before switching to another bid row when the open detail has unsaved edits", async () => {
+  const b2 = LIST[1];
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [] }),
+    "GET /admin/bid-desk/b2": () => reply({ bid: b2, emails: [] }),
+  });
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  renderPage("/?bid=b1");
+  const note = await screen.findByLabelText("Note");
+  fireEvent.change(note, { target: { value: "Unsaved bid note" } });
+
+  fireEvent.click(screen.getByRole("button", { name: "Open RFP: Grounds pest control" }));
+  expect(confirmSpy).toHaveBeenCalledTimes(1);
+  expect(screen.getByLabelText("Note")).toHaveValue("Unsaved bid note");
+
+  fireEvent.click(screen.getByRole("button", { name: "Open RFP: Grounds pest control" }));
+  expect(confirmSpy).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(screen.getByLabelText("Note")).toHaveValue(""));
+  confirmSpy.mockRestore();
+});

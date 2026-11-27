@@ -243,7 +243,7 @@ const isBidDetailDirty = (bid, dueEditedAt, status, note) => Boolean(
   bid && (dueEditedAt !== null || status !== bid.status || note !== (bid.decision_note || "")),
 );
 
-function BidDetail({ bidId, onChanged, onClose, onProgress }) {
+function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
   const [dueInput, setDueInput] = useState("");
   // The bid version the date field was typed against: a date save is fenced on it, so a decision saved in between
@@ -338,6 +338,10 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const { bid, emails, extras } = state;
   const dirty = isBidDetailDirty(bid, dueEditedAt, status, note);
   useUnsavedLeaveGuard(dirty, "Leave this bid with unsaved changes?");
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+    return () => onDirtyChange?.(false);
+  }, [dirty, onDirtyChange]);
   const handleClose = () => {
     if (!dirty || window.confirm("Leave this bid with unsaved changes?")) onClose();
   };
@@ -595,7 +599,13 @@ export default function BidDeskPage({ embedded = false }) {
     if (button) button.focus({ preventScroll: true });
   }, [selectedId]);
 
-  const select = (id) => setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
+  const detailDirtyRef = useRef(false);
+  const handleDetailDirtyChange = useCallback((dirty) => { detailDirtyRef.current = dirty; }, []);
+  const select = (id, { force = false } = {}) => {
+    if (!force && id !== selectedId && detailDirtyRef.current && !window.confirm("Leave this bid with unsaved changes?")) return;
+    if (id !== selectedId) detailDirtyRef.current = false;
+    setParams((prev) => { const next = new URLSearchParams(prev); if (id) next.set("bid", id); else next.delete("bid"); return next; });
+  };
 
   const shown = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
@@ -699,7 +709,7 @@ export default function BidDeskPage({ embedded = false }) {
 
           {selectedId && (
             <div className="mt-4">
-              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onClose={() => { returnFocusTo.current = selectedId; select(""); }} onProgress={setProgress} />
+              <BidDetail key={selectedId} bidId={selectedId} onChanged={load} onDirtyChange={handleDetailDirtyChange} onClose={() => { returnFocusTo.current = selectedId; select("", { force: true }); }} onProgress={setProgress} />
             </div>
           )}
         </>

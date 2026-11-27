@@ -207,4 +207,100 @@ describe('AgentEstimatePage canonical send flow and blocked Add photo', () => {
     expect(await screen.findByText(/Agent Estimate drafting works on open leads only/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Add photo/i })).toBeDisabled();
   });
+
+  it('distinguishes all-failed, partial-retry, and uncertain send outcomes without falsely reporting sent', async () => {
+    let currentDraft = {
+      id: 'est-2',
+      status: 'draft',
+      editable_here: true,
+      customer_phone: '+19415550100',
+      customer_email: 'qa@example.invalid',
+      address: '100 Main St',
+      monthly_total: 99,
+      annual_total: 1188,
+      onetime_total: 0,
+    };
+    const previewBody = {
+      id: 'est-2',
+      status: 'draft',
+      editVersion: 'v1',
+      updatedAt: '2026-01-01T12:00:00Z',
+      customerName: 'QA Lead',
+      customerPhone: '+19415550100',
+      customerEmail: 'qa@example.invalid',
+      address: '100 Main St',
+      previewPath: '/estimate/tok?adminPreview=1',
+      messageVersion: 'msg-v1',
+      messages: { sms: 'Preview SMS', email: { subject: 'Estimate', text: 'Preview email' } },
+    };
+    adminFetch.mockImplementation(async (path) => {
+      if (path.startsWith('/admin/agent-estimate/lead/')) {
+        return {
+          context: {
+            lead: { id: 'lead-2', name: 'QA Lead', status: 'new', phone: '+19415550100', email: 'qa@example.invalid', address: '100 Main St' },
+            current_estimate: currentDraft,
+          },
+        };
+      }
+      if (path === '/admin/agent-estimate/memory') return { memories: [] };
+      if (path.startsWith('/admin/leads')) return { leads: [] };
+      return {};
+    });
+
+    let sendResponder = async () => ({
+      ok: false,
+      status: 422,
+      json: async () => ({ sent: false, channels: { sms: { ok: false, real: false, error: 'SMS suppressed' } } }),
+    });
+    vi.stubGlobal('fetch', vi.fn(async (url, opts) => {
+      if (String(url).endsWith('/send-preview')) return { ok: true, status: 200, json: async () => previewBody };
+      if (opts?.method === 'POST') return sendResponder();
+      return { ok: true, status: 200, json: async () => ({}) };
+    }));
+
+    mountPage('lead-2');
+    // 1. All-failed 422 keeps status draft and reports failure, not "Estimate sent."
+    fireEvent.click(await screen.findByRole('button', { name: /Review & send/i }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Text message', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+    await screen.findByText(/SMS suppressed/);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText(/Estimate send failed — sms: SMS suppressed/i)).toBeInTheDocument();
+    expect(screen.queryByText(/^Estimate sent\.$/i)).not.toBeInTheDocument();
+
+    // 2. Partial failure marks sent and restricts retry dialog to only the failed channel (email).
+    sendResponder = async () => {
+      currentDraft = { ...currentDraft, status: 'sent', editable_here: false };
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          sent: true,
+          channels: {
+            sms: { ok: true, real: true },
+            email: { ok: false, real: false, error: 'Email bounced' },
+          },
+        }),
+      };
+    };
+    fireEvent.click(screen.getByRole('button', { name: /Review & send/i }));
+    fireEvent.click(await screen.findByRole('radio', { name: 'Text message and email', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+    await screen.findByText(/Email bounced/);
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(await screen.findByText(/Estimate sent with an issue — email: Email bounced/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /Review & retry send/i }));
+    expect(await screen.findByRole('radio', { name: 'Text message', exact: true })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Text message and email', exact: true })).toBeDisabled();
+    expect(screen.getByRole('radio', { name: 'Email', exact: true })).not.toBeDisabled();
+
+    // 3. Closing after an uncertain transport failure surfaces an uncertain message.
+    sendResponder = async () => Promise.reject(new Error('Network down'));
+    fireEvent.click(screen.getByRole('radio', { name: 'Email', exact: true }));
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm send' }));
+    await screen.findByRole('alert');
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(await screen.findByText(/Send outcome is uncertain/i)).toBeInTheDocument();
+  });
 });

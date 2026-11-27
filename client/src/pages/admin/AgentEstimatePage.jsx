@@ -354,6 +354,35 @@ export function CustomerAccountPanel({ account, profile }) {
   );
 }
 
+function summarizeSendOutcome(outcome) {
+  if (outcome.scheduled) {
+    return { failed: [], anyDelivered: false, message: "Estimate scheduled for delivery." };
+  }
+  const entries = Object.entries(outcome.channels || {});
+  const uncertain = Boolean(outcome.uncertain)
+    || outcome.code === "SEND_OUTCOME_UNCERTAIN"
+    || entries.length === 0
+    || entries.some(([, value]) => value?.uncertain);
+  if (uncertain) {
+    const failed = entries.filter(([, value]) => value && !value.ok && !value.uncertain).map(([ch]) => ch);
+    return {
+      failed,
+      anyDelivered: entries.some(([, value]) => value && value.ok && value.real !== false && !value.uncertain),
+      message: "Send outcome is uncertain — check delivery records before resending.",
+    };
+  }
+  const succeeded = entries.filter(([, value]) => value && value.ok && value.real !== false);
+  const failedEntries = entries.filter(([, value]) => value && !value.ok);
+  const failed = failedEntries.map(([ch]) => ch);
+  const issues = failedEntries.map(([ch, value]) => `${ch}: ${value.error || "failed"}`);
+  const message = !issues.length
+    ? "Estimate sent."
+    : succeeded.length
+      ? `Estimate sent with an issue — ${issues.join("; ")}. Open Review & retry send to try again.`
+      : `Estimate send failed — ${issues.join("; ")}. Open Review & retry send to try again.`;
+  return { failed, anyDelivered: succeeded.length > 0, message };
+}
+
 function DraftSummary({ draft, contact, account, onPreview, onSendOutcome, sendMessage, failedChannels = [] }) {
   const openSend = useEstimateSend();
   const [sending, setSending] = useState(false);
@@ -372,7 +401,8 @@ function DraftSummary({ draft, contact, account, onPreview, onSendOutcome, sendM
     sendingRef.current = true;
     setSending(true);
     try {
-      const outcome = await openSend(draft.id);
+      const retryOpts = !canSend && retryChannels.length ? { allowedChannels: retryChannels } : undefined;
+      const outcome = await openSend(draft.id, retryOpts);
       if (outcome) await onSendOutcome?.(outcome);
     } finally {
       sendingRef.current = false;
@@ -762,21 +792,11 @@ export default function AgentEstimatePage() {
     if (!draft?.id || !outcome) return;
     const sendLeadId = selectedLeadId;
     if (activeLeadRef.current !== sendLeadId) return;
-    const entries = Object.entries(outcome.channels || {});
-    const failed = entries.filter(([, value]) => value && !value.ok).map(([channel]) => channel);
-    const channelIssues = entries
-      .filter(([, value]) => value && !value.ok)
-      .map(([channel, value]) => `${channel}: ${value.error || "failed"}`);
-    setFailedChannels(failed);
-    storeFailedChannels(draft.id, failed);
-    setSendMessage(
-      outcome.scheduled
-        ? "Estimate scheduled for delivery."
-        : channelIssues.length
-          ? `Estimate sent with an issue — ${channelIssues.join("; ")}. Open Review & retry send to try again.`
-          : "Estimate sent.",
-    );
-    if (!outcome.scheduled && entries.some(([, value]) => value && value.ok)) {
+    const summary = summarizeSendOutcome(outcome);
+    setFailedChannels(summary.failed);
+    storeFailedChannels(draft.id, summary.failed);
+    setSendMessage(summary.message);
+    if (summary.anyDelivered) {
       setDraft((current) => (current ? { ...current, status: "sent" } : current));
     }
     await loadContext();

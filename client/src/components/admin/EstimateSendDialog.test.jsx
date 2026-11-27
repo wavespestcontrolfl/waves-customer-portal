@@ -124,4 +124,36 @@ describe('saved estimate send confirmation',()=>{
   fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
   expect(await screen.findByRole('alert')).toHaveTextContent('The saved estimate is retained. Retrying checks the same attempt.');
  });
+ it('treats an unreadable JSON body on 200 OK as uncertain, preserves the attempt key, and notifies onClose',async()=>{
+  let posts=0;
+  const onClose=vi.fn();
+  const fetcher=vi.fn((url,opts)=>{
+   if(opts?.method!=='POST') return json(preview);
+   posts++;
+   return posts===1
+    ? Promise.resolve({ok:true,status:200,json:async()=>{throw new SyntaxError('Unexpected end of JSON');}})
+    : json({sent:true,replayed:true,channels:{email:{ok:true,real:true}}});
+  });
+  vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={onClose}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Email',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('unreadable send receipt');
+  expect(screen.getByRole('button',{name:'Check / retry attempt'})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button',{name:'Cancel'}));
+  expect(onClose).toHaveBeenCalledWith({uncertain:true});
+  fireEvent.click(screen.getByRole('button',{name:'Check / retry attempt'}));
+  expect(await screen.findByText(/No new message was sent/)).toBeInTheDocument();
+  const bodies=fetcher.mock.calls.filter(([,o])=>o?.method==='POST').map(([,o])=>o.body);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[1]).toBe(bodies[0]);
+ });
+ it('restricts selectable channels when allowedChannels is passed for a failed-channel retry',async()=>{
+  vi.stubGlobal('fetch',vi.fn(()=>json(preview)));
+  render(<EstimateSendDialog request={{id:preview.id,allowedChannels:['email']}} onClose={vi.fn()}/>);
+  expect(await screen.findByText('QA Recipient')).toBeInTheDocument();
+  expect(screen.getByRole('radio',{name:'Text message',exact:true})).toBeDisabled();
+  expect(screen.getByRole('radio',{name:'Text message and email',exact:true})).toBeDisabled();
+  expect(screen.getByRole('radio',{name:'Email',exact:true})).not.toBeDisabled();
+ });
 });
