@@ -66,12 +66,13 @@ async function lawnProhibitedProductBlocks(database, submittedProducts = [], { p
   const blocks = [];
   const seen = new Set();
   const push = (block, productId = null) => { if (block && !seen.has(block.productName)) { seen.add(block.productName); blocks.push(productId ? { ...block, productId } : block); } };
-  for (const submitted of list) push(lawnProhibitedProductBlock({ productName: submitted?.productName || submitted?.name }));
+  // Catalog rows first, so a product named both ways keeps its catalog id; a name nothing in the catalog matched follows.
   const ids = [...new Set(list.map((entry) => entry?.productId).filter(Boolean))];
   if (ids.length) {
     const rows = await database('products_catalog').whereIn('id', ids).select('id', 'name', 'display_name', 'active_ingredient');
     for (const row of rows) push(lawnProhibitedProductBlock(row), row.id);
   }
+  for (const submitted of list) push(lawnProhibitedProductBlock({ productName: submitted?.productName || submitted?.name }));
   return blocks;
 }
 

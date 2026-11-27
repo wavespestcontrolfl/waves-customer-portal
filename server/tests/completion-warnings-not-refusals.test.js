@@ -65,3 +65,24 @@ describe('a flagged over-ceiling line refutes the provisional WaveGuard shortfal
     expect(source).toContain("['deducted', 'deducted_insufficient_stock', 'not_deducted_counted', 'not_deducted_implausible'].includes(");
   });
 });
+
+describe('what the technician and the office see', () => {
+  const { deductionAdvisoryMessages } = require('../services/complete-scheduled-service');
+  const flagged = { status: 'not_deducted_implausible', warning: '101 lb of Celsius WG across 2 lines is too much for one visit, so stock was not changed. Check the amounts.' };
+  const short = { status: 'deducted_insufficient_stock', productName: 'Taurus SC', stockAfter: -3, deductedAmount: 4, inventoryUnit: 'fl_oz' };
+
+  test('a product\'s combined lines show one flagged-amount warning; a shortfall shows only where the visit has no WaveGuard stock advisory', () => {
+    expect(deductionAdvisoryMessages([flagged, { ...flagged }, { status: 'deducted' }])).toEqual([flagged.warning]);
+    expect(deductionAdvisoryMessages([short])).toEqual([]);
+    expect(deductionAdvisoryMessages([short], { shortfalls: true })).toEqual(['Taurus SC went to -3 fl_oz on hand after deducting 4 fl_oz.']);
+    expect(deductionAdvisoryMessages(undefined)).toEqual([]);
+  });
+
+  test('a free-text oxadiazon name does not share an alert key with another (the key falls back to the name)', async () => {
+    const a = prohibited.lawnProhibitedProductFinding({ productName: 'Ronstar G' });
+    const b = prohibited.lawnProhibitedProductFinding({ productName: 'LESCO Ronstar 20-1-20' });
+    await notifyOfficeOfLimitFindings({ svc, record, findings: [a, b] });
+    const keys = compose.raiseAdminAlert.mock.calls.map(([, , opts]) => opts.dedupeKey);
+    expect(new Set(keys).size).toBe(2);
+  });
+});

@@ -624,12 +624,29 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit }) {
-  return [blackout, nLimit, manager, calibration, inventory, limit]
-    .filter((record) => record && record.advisory)
-    .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
-    .map((block) => block && block.message)
-    .filter(Boolean);
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit, deductions = [], shortfalls = false }) {
+  return [
+    ...[blackout, nLimit, manager, calibration, inventory, limit]
+      .filter((record) => record && record.advisory)
+      .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
+      .map((block) => block && block.message)
+      .filter(Boolean),
+    ...deductionAdvisoryMessages(deductions, { shortfalls }),
+  ];
+}
+
+// What the committed deductions tell the technician (owner 2026-11-26: warned, never blocked): a line flagged over its product's
+// ceiling moved no stock (the lines of one product share one combined warning, shown once), and, `shortfalls` on a visit that
+// has no WaveGuard stock advisory of its own, stock that went below zero.
+function deductionAdvisoryMessages(deductions, { shortfalls = false } = {}) {
+  const messages = (Array.isArray(deductions) ? deductions : []).map((deduction) => {
+    if (deduction?.status === 'not_deducted_implausible') return deduction.warning;
+    if (shortfalls && deduction?.status === 'deducted_insufficient_stock') {
+      return `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`;
+    }
+    return null;
+  });
+  return [...new Set(messages.filter(Boolean))];
 }
 
 // Missing / ambiguous rig no longer blocks the plan (owner ruling
@@ -2475,6 +2492,13 @@ for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annu
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
 
+// The lawn warnings a committed record carries (structured_notes.lawnWarningFindings), for a resume or a packet's effects phase.
+function savedLawnWarningFindings(record) {
+  let notes = record?.structured_notes;
+  if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+  return Array.isArray(notes?.lawnWarningFindings) ? notes.lawnWarningFindings : [];
+}
+
 // The two completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn, and a bermuda removal
 // step past its yearly or 42-day limit. Each is the application-limit finding shape, so it takes the same advisory line and office alert.
 const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
@@ -2490,7 +2514,8 @@ FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past 
 FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
 FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit past its limit: ${f.reason} The visit was recorded. Review it and report it if needed.`;
 
-const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
+// A product the catalog could not name (a free-text oxadiazon entry) keys on its name, so two of them do not share one alert.
+const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || (finding.limitType === lawnProhibited.LIMIT_TYPE && finding.productName) || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
@@ -6324,9 +6349,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
           let actualVisitN = 0;
           const unquantifiedNProducts = [];
+          const projectedRows = new Set();
           for (const p of products) {
             const catalog = catalogById.get(String(p.productId));
             if (!catalog || Number(catalog.analysis_n || 0) <= 0) continue;
+            // Only what the completion records and counts: the products loop keeps the FIRST row of a product and add-on, and a
+            // line flagged over its ceiling writes no nutrient row (owner 2026-11-26), so neither adds to the annual projection.
+            const projectedRow = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);
+            if (projectedRows.has(projectedRow)) continue;
+            projectedRows.add(projectedRow);
+            if (isOverVisitLimit(p, { amount: Number(p.totalAmount), amountUnit: baseQuantityUnit(p.amountUnit || p.rateUnit || null) })) continue;
             // Same normalization the persistence path uses: a "/gal" unit is
             // a mix concentration whose total is concentrate amount.
             const pounds = amountToPounds(p.totalAmount, baseQuantityUnit(p.amountUnit || p.rateUnit || null));
@@ -9276,6 +9308,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           record.structured_notes = {
             ...(record.structured_notes || {}),
             inventoryDeductions,
+            // The lawn warnings (oxadiazon on a home lawn, a bermuda step limit) ride with the record, so a packet's effects phase
+            // or a resume after the commit still records the advisory and alerts the office.
+            ...(lawnWarningFindings.length ? { lawnWarningFindings } : {}),
             // Explicit even when null: the initial insert may have committed
             // a preflight advisory this reconcile just refuted — a
             // conditional spread would leave the stale record in the notes.
@@ -10435,7 +10470,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     if (record?.id && !issuedInvoiceCloseout) {
       // addOnRows: false when no row of this closeout is tagged to an add-on (the duplicate-application read is then skipped); a tag read that failed (a replay or resume) is not "none", so the read runs; the audit never asks the gate.
       const limitFindings = [
-        ...lawnWarningFindings,
+        ...(lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record)),
         ...await recordedProductLimitFindings({ svc, record, database: db, addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags) }),
       ];
       if (limitFindings.length) {
@@ -10916,6 +10951,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           calibration: waveguardCalibrationAdvisory,
           inventory: waveguardInventoryAdvisory,
           limit: applicationLimitAdvisory,
+          deductions: inventoryDeductions,
+          shortfalls: !isWaveGuardLawnCompletion(svc),
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -16897,6 +16934,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
         limit: applicationLimitAdvisory,
+        deductions: inventoryDeductions,
+        shortfalls: !isWaveGuardLawnCompletion(svc),
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -17032,6 +17071,7 @@ module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.vetProductAmounts = vetProductAmounts;
 module.exports.canonicalizeProductLines = canonicalizeProductLines;
 module.exports.exceedsVisitLimit = exceedsVisitLimit;
+module.exports.deductionAdvisoryMessages = deductionAdvisoryMessages;
 module.exports.isOverVisitLimitLine = (line) => OVER_VISIT_LIMIT_LINES.has(line);
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;
