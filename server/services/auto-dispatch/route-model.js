@@ -95,32 +95,34 @@ function physicalStopIndexById(phys) {
 }
 
 // Verify a 1-to-1 contiguous physical-stop correspondence between `stops` and
-// the solver's `routeOrderIds` (which flattens multi-row groups to every member ID).
+// the solver's `routeOrderIds` (which flattens multi-row groups to every member ID),
+// keeping existing stops in their relative order so the 3 neighboring legs around
+// the candidate are the only legs changed for road confirmation.
 function routeOrderCovers(stops, routeOrderIds) {
   if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return false;
   const phys = physicalStops(stops);
   const byId = physicalStopIndexById(phys);
-  const seenPhys = new Set();
   const seenIds = new Set();
-  const closed = new Set();
-  let lastIdx = null;
+  let lastIdx = -1;
+  let nextExpected = 0;
   let candCount = 0;
   for (const raw of routeOrderIds) {
     const id = String(raw);
     if (id === '__candidate__') {
-      if (lastIdx != null) closed.add(lastIdx);
-      lastIdx = null;
       candCount += 1;
+      lastIdx = -1;
       continue;
     }
     const idx = byId.get(id);
-    if (idx == null || closed.has(idx) || seenIds.has(id)) return false;
-    if (lastIdx != null && idx !== lastIdx) closed.add(lastIdx);
-    lastIdx = idx;
+    if (idx == null || seenIds.has(id)) return false;
+    if (idx !== lastIdx) {
+      if (idx !== nextExpected) return false;
+      lastIdx = idx;
+      nextExpected += 1;
+    }
     seenIds.add(id);
-    seenPhys.add(idx);
   }
-  return candCount === 1 && seenPhys.size === phys.length && seenIds.size === byId.size;
+  return candCount === 1 && nextExpected === phys.length && seenIds.size === byId.size;
 }
 
 function insertByRouteOrder(sequence, unit, routeOrderIds) {

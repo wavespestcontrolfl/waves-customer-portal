@@ -137,6 +137,10 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
       const splitCand = { ...groupedCand, route_order_ids: ['g1a', '__candidate__', 'g1b', 's2'] };
       const splitScored = scoreOnSharedModel(svc, NEAR_NORTH, splitCand, groupedDayStops, [], { targets: [] });
       expect(splitScored.route_order_ids).toBeUndefined();
+      // Reordering existing stops relative to their current sequence is also rejected.
+      const reorderedCand = { ...shiftedCand, route_order_ids: ['s2', '__candidate__', 's1'] };
+      const reorderedScored = scoreOnSharedModel(svc, NEAR_NORTH, reorderedCand, stops, [], { targets: [] });
+      expect(reorderedScored.route_order_ids).toBeUndefined();
     } finally {
       if (prevAdmin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdmin;

@@ -215,6 +215,35 @@ describe('confirmOnRoads', () => {
     expect(roadResultOf(kept.normalBest)).toMatchObject({ saving_minutes: 20, source: 'google' });
     // No road answer: it stays on the model's number.
     expect(roadResultOf((await run(ranked, {}, { current: inConflict })).normalBest)).toEqual({ source: 'estimate' });
+    // Apply mode does not spend road calls on dry-run-only overlap projections.
+    const askedApply = [];
+    const applyOut = await confirmOnRoads(ranked, {
+      service, current: inConflict, config: { ...config, mode: 'apply' }, travel: travelWith({ now: [20, 20, 10], after: [10, 10, 10] }, askedApply),
+    });
+    expect(applyOut).toBe(ranked);
+    expect(askedApply).toHaveLength(0);
+    // Fallback from a failed minutes-rule projection to a score-bar slot clears stale minutes metadata.
+    const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
+    const fallbackRanked = {
+      ...rankedOf('repair'),
+      normalBest: place('m1', { date: '2026-08-11' }),
+      normalBestScore: { total_score: 70 },
+      normalBestMinutesFloor: 10,
+      normalBestNeedsRoad: true,
+      normalRankedRows: [
+        { cand: place('m1', { date: '2026-08-11' }), sc: { total_score: 70 }, gain: -1, byMinutes: true },
+        { cand: place('bar2', { date: '2026-08-12' }), sc: { total_score: 85 }, gain: 20, byMinutes: false },
+      ],
+    };
+    const fellBack = await run(fallbackRanked, { now: [20, 20, 10], m1: [16, 16, 10], bar2: [12, 12, 10] }, { current: inConflict, config: minutesConfig });
+    expect(fellBack.normalBest.name).toBe('bar2');
+    expect(fellBack.normalBestMinutesFloor).toBeUndefined();
+    expect(fellBack.normalBestNeedsRoad).toBeUndefined();
+    // Dropping a minutes-rule projection also clears stale minutes metadata.
+    const droppedMin = await run(fallbackRanked, { now: [20, 20, 10], m1: [16, 16, 10], bar2: [18, 18, 10] }, { current: inConflict, config: minutesConfig });
+    expect(droppedMin.normalBest).toBeUndefined();
+    expect(droppedMin.normalBestMinutesFloor).toBeUndefined();
+    expect(droppedMin.normalBestNeedsRoad).toBeUndefined();
   });
 
   test('a later slot Google cannot answer for passes on the model\'s number', async () => {

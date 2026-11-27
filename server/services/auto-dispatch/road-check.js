@@ -125,8 +125,24 @@ function needsConfirmedRoad(row) {
 }
 
 function dropNormalBest(ranked) {
-  const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
+  const {
+    normalBest: _slot,
+    normalBestScore: _score,
+    normalBestMinutesFloor: _floor,
+    normalBestNeedsRoad: _needs,
+    ...rest
+  } = ranked;
   return rest;
+}
+
+function settledProjection(ranked, row, road, rowFloor) {
+  return {
+    ...dropNormalBest(ranked),
+    normalBest: { ...row.cand, [ROAD_RESULT]: road || { source: 'estimate' } },
+    normalBestScore: row.sc,
+    ...(row.byMinutes ? { normalBestMinutesFloor: rowFloor } : {}),
+    ...(needsConfirmedRoad(row) ? { normalBestNeedsRoad: true } : {}),
+  };
 }
 
 function projectionRows(ranked) {
@@ -146,7 +162,7 @@ function projectionFloor(row, floor, ranked, ctx) {
 }
 
 async function withProjectionChecked(ranked, ctx) {
-  if (!ranked.normalBest) return ranked;
+  if (!ranked.normalBest || ctx.config.mode === 'apply') return ranked;
   const moveRules = require('./move-rules');
   const floor = ctx.config.minDayMoveDriveSavingMinutes || 0;
   const toCheck = slotsToMeasure(projectionRows(ranked), moveRules.isSundayDate);
@@ -156,11 +172,7 @@ async function withProjectionChecked(ranked, ctx) {
       const requireRoad = needsConfirmedRoad(row);
       const rowFloor = projectionFloor(row, floor, ranked, ctx);
       if ((!road && !requireRoad) || (road && road.saving_minutes >= rowFloor)) {
-        return {
-          ...ranked,
-          normalBest: { ...row.cand, [ROAD_RESULT]: road || { source: 'estimate' } },
-          normalBestScore: row.sc,
-        };
+        return settledProjection(ranked, row, road, rowFloor);
       }
     }
     return dropNormalBest(ranked);
