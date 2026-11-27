@@ -1,5 +1,11 @@
 /**
- * Visit-only text recipients (GATE_CALL_GIVEN_VISIT_TEXTS; owner 2026-11-24, "yes, visit only").
+ * Call-named text recipients (GATE_CALL_GIVEN_VISIT_TEXTS; owner 2026-11-24, "yes, visit only", widened the same day PM
+ * to every visit, "auto add them", and built small on 2026-11-26, "simpler").
+ *
+ * EVERY VISIT: a person recorded from a call also goes on the customer's list (customer_reminder_contacts). Before any
+ * visit's text goes out, materializeForVisit copies that list onto the visit as ordinary visit rows, so everything below
+ * applies to them unchanged. A stop on the list (stopped_at) is sticky and blocks every visit row for that number; a call
+ * never clears it. The rest of this header describes the per-visit rows.
  *
  * A caller who books a visit and gives another person's number to be texted ("my husband Bob will
  * be home, text him too, here is his number") gives that person the texts for THAT ONE VISIT: its
@@ -44,6 +50,10 @@ const SOURCE = 'call_caller_provided';
 const CONSENT_VERSION = 'owner-ruling-2026-11-24-visit-only';
 const ROLE = 'visit_text_recipient';
 const TABLE = 'visit_text_recipients';
+// The customer's list of people named on a call for every visit (owner 2026-11-24 PM; owner 2026-11-26 "simpler").
+const REMINDER_TABLE = 'customer_reminder_contacts';
+const REMINDER_SOURCE = 'customer_reminder_contact';
+const REMINDER_CONSENT_VERSION = 'owner-ruling-2026-11-24-every-visit';
 const DEFERRED_ENTRY_POINT = 'visit_text_recipient_deferred';
 
 // The only texts a visit-only recipient gets. `purpose` is the send layer's policy purpose (it also
@@ -169,6 +179,13 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
+      // Every visit: the person also goes on the customer's list. ON CONFLICT DO NOTHING, so a later call never changes a
+      // listed person and never clears a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
+      await trx.raw(
+        `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (customer_id, phone_key) DO NOTHING`,
+        [visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
+      );
       if (existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
       if (existing) await trx(TABLE).where({ id: existing.id }).del();
       await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
@@ -204,6 +221,29 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
 }
 
 /**
+ * Copy the customer's every-visit people onto this visit, so the visit's own rows drive the send exactly as a call-recorded
+ * row does. One statement: the visit's CURRENT customer and live status are read in the same INSERT ... SELECT that writes,
+ * so a visit moved to another customer gets that customer's people, never the old one's. A person already on the visit
+ * (any row for that number) is left alone, and a stopped person is never copied. Serialized with recordForVisit by the same
+ * per-visit advisory lock. Throws on a database error (the sender treats it like an unreadable recipient list).
+ */
+async function materializeForVisit(scheduledServiceId, conn = db) {
+  if (!scheduledServiceId) return;
+  await conn.transaction(async (trx) => {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
+    await trx.raw(
+      `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
+       SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
+         FROM scheduled_services s
+         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id AND c.stopped_at IS NULL
+        WHERE s.id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
+       ON CONFLICT (scheduled_service_id, phone_key) DO NOTHING`,
+      [REMINDER_SOURCE, scheduledServiceId, ...LIVE_STATUSES],
+    );
+  });
+}
+
+/**
  * Has this person declined, by any existing route? Their own text choices as a service contact (this
  * purpose or texts altogether), a recipient_optin decline on the account, STOP or any active
  * suppression. Read only. Throws on an unreadable answer; callers fail closed.
@@ -217,6 +257,9 @@ async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, c
   if (!prefs.contactAllows(await prefs.getContactPrefRow(customerId, phoneE164, { dbh: conn, failClosed: true }), KINDS_BY_PURPOSE[purpose]?.prefsColumn ?? null, 'sms')) return true;
   const optin = await conn('recipient_optin').where({ customer_id: customerId, phone_key: phoneKey, status: 'declined' }).first('status');
   if (optin) return true;
+  // A stop on the customer's every-visit list is sticky and covers every visit row for that number, copied or call-recorded.
+  const stopped = await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNotNull('stopped_at').first('id');
+  if (stopped) return true;
   return suppressedNumber(phoneKey, conn);
 }
 // The send layer's own prefsColumn per purpose: the person's "do not send me this notice" choice is read from it.
@@ -423,6 +466,7 @@ async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones =
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
   let contacts;
   try {
+    await materializeForVisit(scheduledServiceId, conn);
     contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true });
   } catch (err) {
     // A lookup that throws is NOT "nobody is owed": the person named on the call may have been left without a text. No retry
@@ -813,6 +857,7 @@ module.exports = {
   SOURCE,
   CONSENT_VERSION,
   ROLE,
+  REMINDER_SOURCE,
   DEFERRED_ENTRY_POINT,
   LIVE_STATUSES,
   kindForNotice,
@@ -822,6 +867,7 @@ module.exports = {
   callerNumbers,
   recordForVisit,
   recordForCall,
+  materializeForVisit,
   declinedByRecipient,
   contactsForVisit,
   informationalBody,

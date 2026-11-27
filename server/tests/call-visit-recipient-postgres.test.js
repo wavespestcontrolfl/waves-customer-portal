@@ -261,7 +261,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(contacts[0].role.startsWith('service_contact')).toBe(false);
     });
 
-    test('Bob is owed nothing for another visit on the same account', async () => {
+    test('before any send copies him, another visit has no row of its own', async () => {
       await record();
       expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
       expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route')).toEqual([]);
@@ -485,12 +485,72 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       expect(sendCustomerMessage.mock.calls[0][0].body).not.toContain('Track live');
     });
 
-    test('Bob gets nothing for another visit on the account, a cancelled visit, or when the sender already texts his number', async () => {
-      await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+    test('Bob gets nothing for a cancelled visit, or when the sender already texts his number', async () => {
       await notify('confirmation', { excludePhones: [HOLDER, BOB] });
       await db('scheduled_services').where({ id: visitId }).update({ status: 'cancelled' });
       await notify('confirmation');
       expect(sendCustomerMessage).not.toHaveBeenCalled();
+    });
+
+    describe('every visit (customer_reminder_contacts; owner 2026-11-26 "simpler")', () => {
+      const listed = () => db('customer_reminder_contacts').where({ customer_id: customerId });
+      const otherRows = () => db('visit_text_recipients').where({ scheduled_service_id: otherVisitId });
+
+      test('a recorded person goes on the customer\'s list once; a retry and a second call change nothing', async () => {
+        await record();
+        await record({}, entry({ first_name: 'Robert' }));
+        const list = await listed();
+        expect(list).toHaveLength(1);
+        expect(list[0]).toMatchObject({ phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Bob', call_log_id: callLogId, stopped_at: null, consent_version: 'owner-ruling-2026-11-24-every-visit' });
+      });
+
+      test('Bob gets the texts of ANOTHER visit of the same customer, once, through a copied visit row', async () => {
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+        expect(sentTo()).toEqual([BOB]);
+        const copied = await otherRows();
+        expect(copied).toHaveLength(1);
+        expect(copied[0]).toMatchObject({ phone_key: BOB.slice(-10), customer_id: customerId, source: 'customer_reminder_contact' });
+      });
+
+      test('a visit of ANOTHER customer gets nothing, and a visit moved to another customer gets that customer\'s list only', async () => {
+        const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(43) }).returning('id');
+        try {
+          await db('scheduled_services').where({ id: otherVisitId }).update({ customer_id: otherCustomerId });
+          await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+          expect(sendCustomerMessage).not.toHaveBeenCalled();
+          expect(await otherRows()).toHaveLength(0);
+        } finally {
+          await db('scheduled_services').where({ id: otherVisitId }).update({ customer_id: customerId });
+          await db('customers').where({ id: otherCustomerId }).del();
+        }
+      });
+
+      test('a cancelled or waiting-to-rebook visit copies nobody', async () => {
+        for (const status of ['cancelled', 'rescheduled', 'completed']) {
+          await db('scheduled_services').where({ id: otherVisitId }).update({ status });
+          await VisitRecipient.materializeForVisit(otherVisitId);
+          expect(await otherRows()).toHaveLength(0);
+        }
+      });
+
+      test('a stop is sticky: it blocks every visit, rows already copied included, and a later call does not clear it', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        expect(await otherRows()).toHaveLength(1);
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ stopped_at: db.fn.now(), stop_source: 'staff' });
+        await record({}, entry({ first_name: 'Bob' }));
+        expect((await listed())[0].stopped_at).not.toBeNull();
+        await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+        await notify('reminder_72h');
+        expect(sendCustomerMessage).not.toHaveBeenCalled();
+        expect(await VisitRecipient.contactsForVisit(visitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
+      });
+
+      test('a stopped person is never copied onto a new visit', async () => {
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ stopped_at: db.fn.now(), stop_source: 'portal' });
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        expect(await otherRows()).toHaveLength(0);
+      });
     });
 
     test('an existing decline is honored by every sender: a recipient_optin decline, STOP or suppression, and his own text choices', async () => {
