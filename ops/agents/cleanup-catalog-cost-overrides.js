@@ -74,16 +74,38 @@ function catalogLiveCostPerCostUnit(product) {
   return Number((perOz * ozPerCostUnit).toFixed(4));
 }
 
-function staleOverrideCandidate(row, approvedSet) {
+function usageRowsRemainPriceableWithoutOverride(product, usageRows) {
+  for (const usage of usageRows || []) {
+    const merged = {
+      ...usage,
+      product_name: usage.product_name || product.name,
+      unit_size_oz: product.unit_size_oz,
+      container_size: product.container_size,
+      inventory_unit: product.inventory_unit,
+      best_price: product.best_price,
+      cost_per_unit: null,
+      cost_unit: null,
+    };
+    const priced = costLineFromUsage(merged, 1000);
+    if (priced.warning || !(Number(priced.cost) > 0)) return false;
+  }
+  return true;
+}
+
+function staleOverrideCandidate(row, approvedSet, usageRows = []) {
   if (!row || row.active === false) return { status: 'skip' };
   const manualCost = numberOrNull(row.cost_per_unit);
   if (manualCost == null) return { status: 'skip' };
   if (isCountBasedProduct(row)) return { status: 'count_item' };
+  // Empty cost_unit applies cost_per_unit in each usage row's own unit (e.g. bottle);
+  // never clear an implicit-unit override unless an explicit measured cost_unit exists.
+  if (!String(row.cost_unit || '').trim()) return { status: 'skip' };
   if (!row.best_vendor_pricing_id || !approvedSet.has(String(row.best_vendor_pricing_id))) return { status: 'skip' };
   const livePerUnit = catalogLiveCostPerCostUnit(row);
   if (!(Number.isFinite(livePerUnit) && livePerUnit > 0)) return { status: 'skip' };
   const ratioDiff = Math.abs(manualCost - livePerUnit) / livePerUnit;
   if (ratioDiff <= OVERRIDE_DRIFT_RATIO) return { status: 'skip' };
+  if (!usageRowsRemainPriceableWithoutOverride(row, usageRows)) return { status: 'skip' };
   return {
     status: 'stale',
     entry: {
@@ -99,12 +121,13 @@ function staleOverrideCandidate(row, approvedSet) {
   };
 }
 
-function planStaleOverrideClears(catalogRows, approvedVendorPricingIds) {
+function planStaleOverrideClears(catalogRows, approvedVendorPricingIds, usageByProduct = new Map()) {
   const approvedSet = new Set([...(approvedVendorPricingIds || [])].map(String));
   const planned = [];
   const skippedCountItems = [];
   for (const row of catalogRows || []) {
-    const verdict = staleOverrideCandidate(row, approvedSet);
+    const usages = usageByProduct instanceof Map ? (usageByProduct.get(String(row.id)) || []) : [];
+    const verdict = staleOverrideCandidate(row, approvedSet, usages);
     if (verdict.status === 'count_item') {
       skippedCountItems.push({ id: row.id, name: row.name, reason: 'count_item_preserved' });
     } else if (verdict.status === 'stale') {
@@ -173,6 +196,10 @@ function brokenLiquidBottleCandidate(row) {
   // prices this usage cleanly with no warning, leave it alone.
   const currentCosting = costLineFromUsage(row, 1000);
   if (!currentCosting.warning && Number(currentCosting.cost) > 0) return null;
+  const toAmount = hasAmount ? Number((amount * unitSizeOz).toFixed(4)) : null;
+  const toPer1000 = hasPer1000 ? Number((per1000 * unitSizeOz).toFixed(4)) : null;
+  // Reject any conversion that rounds a positive rate down to 0 at DB 4-decimal precision.
+  if ((hasAmount && !(toAmount > 0)) || (hasPer1000 && !(toPer1000 > 0))) return null;
   return {
     usageId: row.id,
     serviceType: row.service_type,
@@ -181,8 +208,8 @@ function brokenLiquidBottleCandidate(row) {
     fromAmount: hasAmount ? amount : null,
     fromPer1000: hasPer1000 ? per1000 : null,
     fromUnit: row.usage_unit,
-    toAmount: hasAmount ? Number((amount * unitSizeOz).toFixed(2)) : null,
-    toPer1000: hasPer1000 ? Number((per1000 * unitSizeOz).toFixed(2)) : null,
+    toAmount,
+    toPer1000,
     toUnit: 'fl_oz',
     unitSizeOz,
   };
@@ -198,11 +225,11 @@ function planBrokenUsageUnitFixes(usageRows) {
 }
 
 async function buildCleanupPlan(dbc, helpers = {}) {
-  const [catalogRows, approvedVpRows, unlinkedProducts, usageRows] = await Promise.all([
+  const [catalogRows, approvedVpRows, unlinkedProducts, allUsageRows] = await Promise.all([
     dbc('products_catalog')
       .where('active', true)
       .whereNotNull('cost_per_unit')
-      .select('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'inventory_unit', 'best_vendor_pricing_id'),
+      .select('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'best_vendor_pricing_id'),
     eligibleVendorPricing(dbc('vendor_pricing'))
       .leftJoin('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
       .select('vendor_pricing.*', 'vendors.name as vendor_name'),
@@ -212,7 +239,6 @@ async function buildCleanupPlan(dbc, helpers = {}) {
       .select('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit', 'best_vendor_pricing_id'),
     dbc('service_product_usage')
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
-      .whereRaw("LOWER(BTRIM(COALESCE(service_product_usage.usage_unit, ''))) IN ('bottle', 'bottles')")
       .select(
         'service_product_usage.id',
         'service_product_usage.service_type',
@@ -231,10 +257,17 @@ async function buildCleanupPlan(dbc, helpers = {}) {
       ),
   ]);
 
+  const usageByProduct = new Map();
+  for (const u of allUsageRows || []) {
+    const pid = String(u.product_id);
+    if (!usageByProduct.has(pid)) usageByProduct.set(pid, []);
+    usageByProduct.get(pid).push(u);
+  }
+  const bottleUsageRows = (allUsageRows || []).filter((u) => normalizeUnit(u.usage_unit) === 'bottle');
   const approvedIds = new Set(approvedVpRows.map((r) => String(r.id)));
-  const { planned: staleOverrides, skippedCountItems } = planStaleOverrideClears(catalogRows, approvedIds);
+  const { planned: staleOverrides, skippedCountItems } = planStaleOverrideClears(catalogRows, approvedIds, usageByProduct);
   const missingVendorLinks = planMissingVendorLinks(unlinkedProducts, approvedVpRows, helpers);
-  const brokenUsageUnits = planBrokenUsageUnitFixes(usageRows);
+  const brokenUsageUnits = planBrokenUsageUnitFixes(bottleUsageRows);
   return { staleOverrides, skippedCountItems, missingVendorLinks, brokenUsageUnits };
 }
 
@@ -242,14 +275,15 @@ async function applyStaleOverrideClear(trx, item) {
   const fresh = await trx('products_catalog')
     .where({ id: item.id })
     .forUpdate()
-    .first('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'inventory_unit', 'best_vendor_pricing_id');
+    .first('id', 'name', 'active', 'cost_per_unit', 'cost_unit', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'best_vendor_pricing_id');
   if (!fresh || numberOrNull(fresh.cost_per_unit) !== item.currentCostPerUnit) return 0;
   if (!fresh.best_vendor_pricing_id) return 0;
-  const approved = await eligibleVendorPricing(
-    trx('vendor_pricing').where({ id: fresh.best_vendor_pricing_id }),
-  ).first('id');
+  const [approved, productUsages] = await Promise.all([
+    eligibleVendorPricing(trx('vendor_pricing').where({ id: fresh.best_vendor_pricing_id })).first('id'),
+    trx('service_product_usage').where({ product_id: fresh.id }).select('id', 'usage_amount', 'usage_per_1000sf', 'usage_unit', 'notes'),
+  ]);
   if (!approved) return 0;
-  if (staleOverrideCandidate(fresh, new Set([String(approved.id)])).status !== 'stale') return 0;
+  if (staleOverrideCandidate(fresh, new Set([String(approved.id)]), productUsages).status !== 'stale') return 0;
   const updated = await trx('products_catalog')
     .where({ id: item.id })
     .whereNotNull('unit_size_oz')
@@ -258,13 +292,19 @@ async function applyStaleOverrideClear(trx, item) {
   return Number(updated) || 0;
 }
 
-async function applyMissingVendorLink(trx, link, recalcBestPrice) {
+async function applyMissingVendorLink(trx, link, { recalcBestPrice, scoreVendorRows }) {
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?))', ['inventory.best_price', String(link.productId)]);
   const fresh = await trx('products_catalog')
     .where({ id: link.productId })
     .forUpdate()
-    .first('id', 'active', 'best_vendor_pricing_id');
+    .first('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit', 'best_vendor_pricing_id');
   if (!fresh || fresh.active === false || fresh.best_vendor_pricing_id) return 0;
+  // Revalidate eligible vendor rows & package compatibility under the lock BEFORE calling recalcBestPrice,
+  // so an expired last quote can never trigger recalcBestPrice to clear an existing best_price.
+  const freshVpRows = await eligibleVendorPricing(trx('vendor_pricing').where({ product_id: link.productId }))
+    .leftJoin('vendors', 'vendor_pricing.vendor_id', 'vendors.id')
+    .select('vendor_pricing.*', 'vendors.name as vendor_name');
+  if (!previewBestVendorLink(fresh, freshVpRows, scoreVendorRows)) return 0;
   await recalcBestPrice(link.productId, trx);
   const after = await trx('products_catalog').where({ id: link.productId }).first('best_vendor_pricing_id');
   return after?.best_vendor_pricing_id ? 1 : 0;
@@ -309,7 +349,7 @@ async function runCleanup(dbc, { execute = false, helpers = {} } = {}) {
       summary.applied.overridesCleared += await applyStaleOverrideClear(trx, item);
     }
     for (const link of plan.missingVendorLinks) {
-      summary.applied.vendorLinksUpdated += await applyMissingVendorLink(trx, link, resolvedHelpers.recalcBestPrice);
+      summary.applied.vendorLinksUpdated += await applyMissingVendorLink(trx, link, resolvedHelpers);
     }
     for (const fix of plan.brokenUsageUnits) {
       summary.applied.usageUnitsConverted += await applyBrokenUsageUnitFix(trx, fix);

@@ -55,6 +55,7 @@ const WATCHED_SERVICES = Object.freeze([
   {
     engineServiceKey: 'mosquito',
     inventoryServiceKey: 'mosquito',
+    serviceTypesOverride: ['Mosquito Treatment - Essential Barrier', 'Mosquito Treatment - IGR'],
     label: 'Mosquito Control (12x)',
     engineServices: { mosquito: { tier: 'monthly12' } },
     visitsPerYear: 12,
@@ -109,6 +110,7 @@ const WATCHED_SERVICES = Object.freeze([
   {
     engineServiceKey: 'bora_care',
     inventoryServiceKey: 'bora_care',
+    costingProperty: { ...REFERENCE_PROPERTY, homeSqFt: 1500 },
     label: 'Bora-Care Wood Treatment',
     engineServices: { boraCare: { atticSqFt: 1500 } },
     visitsPerYear: 1,
@@ -124,29 +126,32 @@ function normalizedCostBasis(scoredEntry, mode) {
   return Number.isFinite(scoredEntry.price) && scoredEntry.price > 0 ? scoredEntry.price : null;
 }
 
-function priorNormalizedCostForWinner(prod, winner, mode, historyRows, scoreVendorRows) {
+function normalizedHistoryRowCost(prod, row, mode, scoreVendorRows) {
+  const hPrice = numberOrNull(row?.price);
+  if (!(Number.isFinite(hPrice) && hPrice > 0)) return null;
+  // Require each historical entry's own package quantity (never reuse the current
+  // package size on an older price, which would distort unit costs on pack changes).
+  if (mode !== 'raw' && !String(row?.quantity || '').trim()) return null;
+  const scored = scoreVendorRows([{ price_amount: hPrice, price: hPrice, quantity: row.quantity }], prod);
+  if (scored.mode !== mode) return null;
+  return normalizedCostBasis(scored.pool[0], mode);
+}
+
+function priorNormalizedCostForProduct(prod, winner, mode, historyRows, scoreVendorRows) {
   const currentCost = normalizedCostBasis(winner, mode);
   if (!(currentCost > 0)) return null;
-  const vendorId = String(winner.row.vendor_id ?? '');
-  // Look for the most recent prior distinct price_history row for the same product+vendor.
-  const vendorHist = (historyRows || []).filter((h) => String(h.vendor_id ?? '') === vendorId);
-  for (const h of vendorHist) {
-    const hPrice = numberOrNull(h.price);
-    if (!(Number.isFinite(hPrice) && hPrice > 0)) continue;
-    const scored = scoreVendorRows([{ price_amount: hPrice, price: hPrice, quantity: h.quantity || winner.row.quantity }], prod);
-    if (scored.mode !== mode) continue;
-    const hCost = normalizedCostBasis(scored.pool[0], mode);
+  // Compare against the previous catalog-wide normalized price across ALL vendors
+  // in price_history (newest-first), so both a winning vendor's own increase AND
+  // a cheaper vendor expiring (promoting a pricier backup vendor) are detected.
+  let bestPrior = null;
+  for (const h of historyRows || []) {
+    const hCost = normalizedHistoryRowCost(prod, h, mode, scoreVendorRows);
     if (!(hCost > 0)) continue;
-    // Skip the current price row (recorded alongside the latest approval).
+    // Skip rows recording the current winning price itself.
     if (Math.abs(hCost - currentCost) / currentCost < 1e-6) continue;
-    return hCost;
+    if (bestPrior == null || hCost < bestPrior) bestPrior = hCost;
   }
-  // Fallback: vendor_pricing.previous_price stamped atomically by applyPriceApproval.
-  const prevPrice = numberOrNull(winner.row.previous_price);
-  if (!(Number.isFinite(prevPrice) && prevPrice > 0)) return null;
-  const scoredPrev = scoreVendorRows([{ price_amount: prevPrice, price: prevPrice, quantity: winner.row.quantity }], prod);
-  if (scoredPrev.mode !== mode) return null;
-  return normalizedCostBasis(scoredPrev.pool[0], mode);
+  return bestPrior;
 }
 
 function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRows = [], { scoreVendorRows } = {}) {
@@ -172,7 +177,7 @@ function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRow
     const winner = pool[0];
     const currentNorm = normalizedCostBasis(winner, mode);
     if (!(currentNorm > 0)) continue;
-    const priorNorm = priorNormalizedCostForWinner(prod, winner, mode, histByProduct.get(String(prod.id)), scorer);
+    const priorNorm = priorNormalizedCostForProduct(prod, winner, mode, histByProduct.get(String(prod.id)), scorer);
     // One-way ONLY: ignore missing history and ignore cheaper generic substitutes (current <= prior).
     if (!(priorNorm > 0) || currentNorm <= priorNorm) continue;
     const pctIncrease = (currentNorm - priorNorm) / priorNorm;
@@ -210,7 +215,12 @@ function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventory
   const est = generateEstimate({ ...REFERENCE_PROPERTY, services: spec.engineServices });
   const line = (est?.lineItems || []).find((li) => li.service === spec.engineServiceKey);
   const revPerVisit = resolveServiceRevenuePerVisit(line, spec.visitsPerYear);
-  const cogs = inventoryCostFromRows(spec.inventoryServiceKey, REFERENCE_PROPERTY, inventory);
+  const cogs = inventoryCostFromRows(
+    spec.inventoryServiceKey,
+    spec.costingProperty || REFERENCE_PROPERTY,
+    inventory,
+    spec.serviceTypesOverride || null,
+  );
   const out = { lowMargin: null, missingCogs: null, incomplete: null };
   if (!(revPerVisit > 0)) {
     out.incomplete = { check: 'missing_revenue', serviceKey: spec.engineServiceKey, label: spec.label };

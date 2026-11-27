@@ -23,6 +23,8 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
     const catalog = [
       // Liquid/granular stale override (Espoma Soil Acidifier 18.2x): should be cleared.
       { id: 'p-espoma', name: 'Espoma Soil Acidifier', active: true, cost_per_unit: 2.0, cost_unit: 'oz', best_price: 52.80, unit_size_oz: 480, best_vendor_pricing_id: 'vp-1' },
+      // Empty cost_unit (implicit unit per usage row, e.g. bottle): MUST be skipped!
+      { id: 'p-implicit', name: 'Implicit Unit Chem', active: true, cost_per_unit: 25.0, cost_unit: null, best_price: 25.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-5' },
       // Count-based item (unit_size_oz NULL): MUST NEVER be touched!
       { id: 'p-station', name: 'Sentricon Bait Station', active: true, cost_per_unit: 8.69, cost_unit: 'each', best_price: 86.90, unit_size_oz: null, best_vendor_pricing_id: 'vp-2' },
       // Count cost_unit even with unit_size_oz populated: preserved!
@@ -31,8 +33,14 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       { id: 'p-unapproved', name: 'Pending Chem', active: true, cost_per_unit: 5.00, cost_unit: 'fl_oz', best_price: 20.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-unapproved' },
       // Already accurate within 5%: skipped!
       { id: 'p-fresh', name: 'Accurate Herbicide', active: true, cost_per_unit: 1.02, cost_unit: 'fl_oz', best_price: 64.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-4' },
+      // Fallback usage row in 'bottle' would break if override cleared -> MUST be skipped!
+      { id: 'p-bottle-dep', name: 'Bottle Dependent', active: true, cost_per_unit: 2.0, cost_unit: 'oz', best_price: 50.00, unit_size_oz: 64, best_vendor_pricing_id: 'vp-6' },
     ];
-    const { planned, skippedCountItems } = planStaleOverrideClears(catalog, ['vp-1', 'vp-2', 'vp-3', 'vp-4']);
+    const usageByProduct = new Map([
+      ['p-espoma', [{ usage_amount: 4, usage_unit: 'oz' }]],
+      ['p-bottle-dep', [{ usage_amount: 1, usage_unit: 'bottle' }]],
+    ]);
+    const { planned, skippedCountItems } = planStaleOverrideClears(catalog, ['vp-1', 'vp-2', 'vp-3', 'vp-4', 'vp-5', 'vp-6'], usageByProduct);
     expect(planned.map((p) => p.id)).toEqual(['p-espoma']);
     expect(planned[0].liveDerivedPerUnit).toBeCloseTo(0.11, 4);
     expect(skippedCountItems.map((s) => s.id)).toEqual(['p-station', 'p-trap']);
@@ -147,10 +155,12 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
     expect(dry.applied).toEqual({ overridesCleared: 0, vendorLinksUpdated: 0, usageUnitsConverted: 0 });
     expect(trxMock).not.toHaveBeenCalled();
 
-    // --execute: simulate admin editing p-1 cost_per_unit concurrently (should skip clear!) and recalcBestPrice linking p-lesco.
+    // --execute: simulate admin editing p-1 cost_per_unit concurrently (should skip clear!),
+    // recalcBestPrice linking p-lesco (still eligible under lock), and expired quote skipping recalcBestPrice.
     catalogCall = 0;
     const recalcBestPrice = jest.fn(async () => {});
     const updateCalls = [];
+    let currentVpRowsForLock = [{ id: 'vp-2', product_id: 'p-lesco', vendor_id: 'v-1', vendor_name: 'Target', price_amount: 42.25, quantity: '50 lb', shipping_cost: 0 }];
     dbc.transaction = async (fn) => {
       let lescoChecks = 0;
       const trx = (table) => {
@@ -160,7 +170,9 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
           whereNotNull: () => chain,
           whereIn: () => chain,
           whereRaw: () => chain,
+          leftJoin: () => chain,
           forUpdate: () => chain,
+          select: async () => (table === 'vendor_pricing' ? currentVpRowsForLock : []),
           first: async () => {
             if (table === 'products_catalog' && filter?.id === 'p-1') {
               // Concurrent admin already corrected cost_per_unit from 2.0 to 0.11!
@@ -169,7 +181,7 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
             if (table === 'products_catalog' && filter?.id === 'p-lesco') {
               lescoChecks += 1;
               return lescoChecks === 1
-                ? { id: 'p-lesco', active: true, best_vendor_pricing_id: null }
+                ? { id: 'p-lesco', name: 'LESCO Dimension', active: true, unit_size_oz: 800, container_size: '50 lb', best_price: null, best_vendor_pricing_id: null }
                 : { best_vendor_pricing_id: 'vp-2' };
             }
             return { id: 'vp-1' };
@@ -188,6 +200,14 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
     expect(execRes.applied.vendorLinksUpdated).toBe(1);
     expect(recalcBestPrice).toHaveBeenCalledWith('p-lesco', expect.any(Function));
     expect(updateCalls).toHaveLength(0);
+
+    // If the last eligible quote expires before the lock runs, recalcBestPrice MUST NOT be called!
+    catalogCall = 0;
+    recalcBestPrice.mockClear();
+    currentVpRowsForLock = [];
+    const expiredRes = await runCleanup(dbc, { execute: true, helpers: { recalcBestPrice } });
+    expect(expiredRes.applied.vendorLinksUpdated).toBe(0);
+    expect(recalcBestPrice).not.toHaveBeenCalled();
   });
 });
 
@@ -197,32 +217,45 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { id: 'p-taurus', name: 'Taurus SC', active: true, best_price: 86.63, unit_size_oz: 78, container_size: '78 fl oz' },
       { id: 'p-termidor', name: 'Termidor SC', active: true, best_price: 210.00, unit_size_oz: 78, container_size: '78 fl oz' },
       { id: 'p-pack', name: 'Bifen I/T', active: true, best_price: 120.00, unit_size_oz: 64, container_size: '64 fl oz' },
+      { id: 'p-switched', name: 'Demand CS', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-small-bump', name: 'Alpine WSG', active: true, best_price: 84.00, unit_size_oz: 17.6, container_size: '500 g' },
     ];
     const vendorRows = [
       // Cheaper generic substitute ($86.63 down from $95): MUST be ignored!
-      { id: 'vp-1', product_id: 'p-taurus', vendor_id: 'v-1', price_amount: 86.63, previous_price: 95.00, quantity: '78 fl oz' },
+      { id: 'vp-1', product_id: 'p-taurus', vendor_id: 'v-1', price_amount: 86.63, quantity: '78 fl oz' },
       // Upward vendor spike ($174.72 -> $210, +20.2%): best_price already updated to $210 in same trx, caught via price_history!
-      { id: 'vp-2', product_id: 'p-termidor', vendor_id: 'v-1', price_amount: 210.00, previous_price: 174.72, quantity: '78 fl oz' },
+      { id: 'vp-2', product_id: 'p-termidor', vendor_id: 'v-1', price_amount: 210.00, quantity: '78 fl oz' },
       // Larger container at IDENTICAL $/oz (32 fl oz @ $60 -> 64 fl oz @ $120): 0% change, MUST NOT alert!
       { id: 'vp-3', product_id: 'p-pack', vendor_id: 'v-1', price_amount: 120.00, quantity: '64 fl oz' },
+      // Cheaper $100 vendor expired, leaving unchanged $130 backup vendor (+30%): caught via catalog-wide history!
+      { id: 'vp-5', product_id: 'p-switched', vendor_id: 'v-2', price_amount: 130.00, quantity: '32 fl oz' },
       // Tiny +5% bump (<=10%): ignored.
-      { id: 'vp-4', product_id: 'p-small-bump', vendor_id: 'v-1', price_amount: 84.00, previous_price: 80.00, quantity: '500 g' },
+      { id: 'vp-4', product_id: 'p-small-bump', vendor_id: 'v-1', price_amount: 84.00, quantity: '500 g' },
     ];
     const priceHistory = [
+      { product_id: 'p-taurus', vendor_id: 'v-1', price: 86.63, quantity: '78 fl oz' },
+      { product_id: 'p-taurus', vendor_id: 'v-1', price: 95.00, quantity: '78 fl oz' },
       { product_id: 'p-termidor', vendor_id: 'v-1', price: 210.00, quantity: '78 fl oz' },
       { product_id: 'p-termidor', vendor_id: 'v-1', price: 174.72, quantity: '78 fl oz' },
       { product_id: 'p-pack', vendor_id: 'v-1', price: 120.00, quantity: '64 fl oz' },
       { product_id: 'p-pack', vendor_id: 'v-1', price: 60.00, quantity: '32 fl oz' },
+      { product_id: 'p-switched', vendor_id: 'v-2', price: 130.00, quantity: '32 fl oz' },
+      { product_id: 'p-switched', vendor_id: 'v-1', price: 100.00, quantity: '32 fl oz' },
+      { product_id: 'p-small-bump', vendor_id: 'v-1', price: 84.00, quantity: '500 g' },
+      { product_id: 'p-small-bump', vendor_id: 'v-1', price: 80.00, quantity: '500 g' },
     ];
     const spikes = detectVendorCostSpikes(catalog, vendorRows, priceHistory);
-    expect(spikes).toHaveLength(1);
+    expect(spikes.map((s) => s.productId)).toEqual(['p-termidor', 'p-switched']);
     expect(spikes[0]).toMatchObject({
       productId: 'p-termidor',
       productName: 'Termidor SC',
       basis: 'oz',
       pctIncrease: 20.2,
       unitMismatchLikely: false,
+    });
+    expect(spikes[1]).toMatchObject({
+      productId: 'p-switched',
+      pctIncrease: 30,
     });
   });
 
