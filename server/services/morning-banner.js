@@ -142,10 +142,27 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
   }
 }
 
+async function legacyDayClaimed(day) {
+  const row = await db('sms_send_claims')
+    .where({ claim_key: `${CLAIM_PREFIX}${day}` })
+    .first('id');
+  return Boolean(row);
+}
+
 // Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
 // alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
-// re-notify an audience that already received today's banner.
+// re-notify an audience that already received today's banner. Honor any legacy
+// bare-date claim (`morning_banner:<day>`) left by an earlier release during rollout.
 async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
+  try {
+    if (await legacyDayClaimed(day)) {
+      logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
+      return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
+    }
+  } catch (err) {
+    logger.error(`[morning-banner] legacy claim check failed for ${day}: ${err?.code || err?.message || 'error'}`);
+    return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
+  }
   const { ownerIds, otherAdminIds } = await splitAdminIdsByOwnerAccess();
   const audiences = [];
   if (ownerSummary.count > 0 && ownerIds.length > 0) {

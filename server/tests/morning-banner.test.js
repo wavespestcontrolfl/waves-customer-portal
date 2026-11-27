@@ -56,7 +56,12 @@ beforeEach(() => {
     if (table === 'technicians') {
       return { where: () => ({ select: async () => activeAdmins }) };
     }
-    return { where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return del(); } }) };
+    return {
+      where: ({ claim_key: key }) => ({
+        first: async () => (claimed.has(key) ? { id: 1 } : null),
+        del: async () => { claimed.delete(key); return del(); },
+      }),
+    };
   });
   mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
 });
@@ -208,16 +213,10 @@ describe('once per ET day', () => {
   });
 
   test('unread ownerOnly alerts ring only the owner and keep non-owner admin banners restricted', async () => {
-    const admins = [
+    activeAdmins = [
       { id: 1, email: 'contact@wavespestcontrol.com' },
       { id: 2, email: 'office@wavespestcontrol.com' },
     ];
-    mockDb.mockImplementation((table) => {
-      if (table === 'technicians') {
-        return { where: () => ({ select: async () => admins }) };
-      }
-      return { where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return 1; } }) };
-    });
 
     // Only an ownerOnly cash-forecast alert is unread -> only the owner gets a banner.
     mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
@@ -303,5 +302,13 @@ describe('once per ET day', () => {
       { count: 1, total: 1, areas: [{ area: 'Comms', count: 1 }], day: '2026-11-03' },
       { pushOnly: true, onlyUserIds: [2] },
     );
+
+    // Rollout compatibility: a legacy bare-date claim (`morning_banner:<day>`) written by the
+    // previous release suppresses both per-audience banners on a same-day rerun.
+    mockTrigger.mockClear();
+    claimed.clear();
+    claimed.add('morning_banner:2026-11-03');
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, skipped: 'already_claimed' });
+    expect(mockTrigger).not.toHaveBeenCalled();
   });
 });
