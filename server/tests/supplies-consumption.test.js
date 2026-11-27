@@ -24,7 +24,7 @@ jest.mock('../services/notification-service', () => ({
   _private: { openToCloser: (q) => q.where((open) => open.whereNull('done_at').orWhereRaw('COALESCE(person_done_by, false)')), doneColumns: ({ by, resolution, keepExisting, conn }) => ({ done_by: by, resolution, keepExisting: keepExisting === true, conn }) },
 }));
 
-const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine } = require('../services/supplies-consumption');
+const { consumeCompletionSupplies, settleOwedCompletionSupplies, completionSuppliesOwed, appliesToLine, noKitReason } = require('../services/supplies-consumption');
 const { notifyAdmin } = require('../services/notification-service');
 
 function fakeDb({ products, duplicate = false, throwOnInsert = false, techLogged = false, handedOff = false, settledAfterBell = false, openLookupBell = false }) {
@@ -574,5 +574,19 @@ describe('recap consumption hook — retry window (source contract)', () => {
     expect(hook).toMatch(/if \(!\(await recapSuppliesOwed\(result\)\)\) return;/);
     expect(route).toMatch(/await settleRecapSupplies\(req\.params\.serviceId, result\);/); // the recap route runs the settlement after submitRecap
     expect(route).toMatch(/if \(!result\.ok\) return res\.status\(recapStatusForReason\(result\.reason\)\)/);
+  });
+});
+
+// The weekly buy list counts a booked visit for the kit with this same function, so the two cannot drift.
+describe('noKitReason (shared with the weekly buy list)', () => {
+  test.each([
+    [{ serviceType: 'Quarterly Pest Control' }, null],
+    [{ serviceType: 'Pest Inspection Service' }, 'inspection_service'],
+    [{ serviceType: 'Termite Inspection Service', projectType: 'other' }, 'inspection_service'],
+    [{ serviceType: 'WDO Inspection', projectType: 'wdo_inspection' }, null],
+    [{ serviceType: 'Waves Assessment', isInternalOnlyCompletion: true }, 'internal_only_completion'],
+    [{ serviceType: 'Pest Inspection Service', isInternalOnlyCompletion: true }, 'internal_only_completion'],
+  ])('%j -> %s', (args, reason) => {
+    expect(noKitReason(args)).toBe(reason);
   });
 });

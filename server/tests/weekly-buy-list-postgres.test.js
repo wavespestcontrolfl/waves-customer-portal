@@ -21,7 +21,7 @@ jest.mock('../services/waveguard-inventory-forecast', () => ({
 const { buildWeeklyBuyList } = require('../services/procurement/weekly-buy-list');
 const { runWeeklyBuyList } = require('../services/procurement/weekly-buy-alert');
 
-const TABLES = ['scheduled_services', 'technicians', 'products_catalog', 'vendors', 'vendor_pricing', 'notifications'];
+const TABLES = ['scheduled_services', 'technicians', 'products_catalog', 'vendors', 'vendor_pricing', 'notifications', 'services', 'service_completion_profiles'];
 const NOW = new Date('2026-12-09T12:00:00Z'); // Wednesday; the week is Dec 7 to Dec 12
 
 jest.setTimeout(60000);
@@ -33,6 +33,9 @@ jest.setTimeout(60000);
     mockConn = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 4 } });
     await mockConn.raw('CREATE SCHEMA ??', [schema]);
     for (const table of TABLES) await mockConn.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
+    // The completion profile the Waves Assessment resolves to (internal-only), copied from the migrated catalog.
+    await mockConn.raw("INSERT INTO ??.services SELECT * FROM public.services WHERE service_key = 'lawn_inspection'", [schema]);
+    await mockConn.raw("INSERT INTO ??.service_completion_profiles SELECT * FROM public.service_completion_profiles WHERE service_key = 'lawn_inspection'", [schema]);
     // The DB-side defaults a LIKE copy loses on columns the app fills; ids are given in the inserts.
     [{ id: techId }] = await mockConn('technicians').insert({ id: randomUUID(), name: 'Alex Sample', email: 'alex@example.test', supply_store: 'Synthetic Supply North', role: 'technician' }).returning('id');
     const [vendor, other] = await mockConn('vendors').insert([{ id: randomUUID(), name: 'Synthetic Supply', code: 9998 }, { id: randomUUID(), name: 'Other Supply', code: 9999 }]).returning('id');
@@ -52,6 +55,16 @@ jest.setTimeout(60000);
       visit('Quarterly Pest Control', '2026-12-14', 'pending', techId), // next week
       visit('Quarterly Pest Control', '2026-12-12', 'pending', null),
       visit('Cockroach Control', '2026-12-10', 'pending', techId),
+      // Not real bookings: moved, no-show and skipped visits, and an estimate-slot hold (live, and one awaiting cleanup).
+      visit('Quarterly Pest Control', '2026-12-10', 'rescheduled', techId),
+      visit('Quarterly Pest Control', '2026-12-10', 'no_show', techId),
+      visit('Quarterly Pest Control', '2026-12-10', 'skipped', techId),
+      { ...visit('Quarterly Pest Control', '2026-12-10', 'pending', techId), customer_id: null, reservation_expires_at: new Date(Date.now() + 600000) },
+      { ...visit('Quarterly Pest Control', '2026-12-10', 'pending', techId), customer_id: null, reservation_expires_at: new Date(Date.now() - 600000) },
+      // A genuine pending booking: a customer, no hold stamp.
+      { ...visit('Quarterly Pest Control', '2026-12-11', 'pending', techId), customer_id: randomUUID() },
+      // The Waves Assessment is an internal-only consultation: it leaves no yard sign.
+      visit('Waves Assessment', '2026-12-10', 'pending', techId),
     ]);
   });
   afterAll(async () => {
@@ -64,16 +77,21 @@ jest.setTimeout(60000);
     expect(list).toMatchObject({ weekStart: '2026-12-07', weekEnd: '2026-12-12', fromDate: '2026-12-09' });
     const [tech] = list.technicians;
     expect(tech).toMatchObject({ technicianId: techId, technicianName: 'Alex Sample', supplyStore: 'Synthetic Supply North' });
-    // Two booked pest visits (the cancelled, completed, past and next-week ones are not counted): 5 fl oz of CrossCheck.
-    expect(tech.warnings).toEqual(['1 visit of types this list does not plan yet']); // the roach job
+    // Three booked pest visits (cancelled, completed, moved, no-show, skipped, hold, past and next-week ones are not counted;
+    // the pending booking with a customer is): 7.5 fl oz of CrossCheck.
+    expect(tech.warnings).toEqual([
+      '1 visit of types this list does not plan yet', // the roach job; the assessment applies nothing
+      'The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out', // only CrossCheck is in this fixture catalog
+    ]);
     const cross = tech.items.find((i) => i.name === 'LESCO CrossCheck Plus');
     // 0.01 gal on hand covers little of it: one 2.5 gal pack each for the technician and the unassigned visit, so no spare is owed.
     expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 10000, reasons: ['pest_mix'] });
-    expect(cross.needQty).toBeCloseTo(5 / 128, 4);
+    expect(cross.needQty).toBeCloseTo(7.5 / 128, 4);
     // The pending row at one dollar is not eligible: the approved 2.5 gal row decides the pack and the price.
     expect(list.unassigned.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 1, shortQty: 1, packs: null }); // no price on file
-    expect(tech.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 3 }); // two pest visits and the roach job
-    expect(list.warnings.join(' ')).toMatch(/taurus sc is not in the catalog/);
+    expect(tech.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 4 }); // three pest visits and the roach job; not the assessment
+    expect(list.unassigned.warnings).toEqual(['The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out']);
+    expect(list.warnings).toEqual([]);
   });
 
   test('the alert store: raise, rerun quietly, close when nothing is left, end last week', async () => {

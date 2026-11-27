@@ -60,6 +60,17 @@ const GATE = 'GATE_AUTO_REORDER';
 const INSPECTION_SERVICE_RE = /\binspection\b/i;
 const NOTICE_PROJECT_TYPE = 'wdo_inspection';
 
+// The two visit-kind rules of the list below, shared with the weekly buy list
+// (procurement/weekly-buy-list.js) so a booked visit is counted for the kit
+// exactly when its close-out would consume it: an internal-only completion
+// profile leaves no kit; an inspection service leaves none unless it is the
+// WDO inspection project. Returns the skip reason, or null.
+function noKitReason({ isInternalOnlyCompletion, serviceType, projectType }) {
+  if (isInternalOnlyCompletion === true) return 'internal_only_completion';
+  if (!!serviceType && INSPECTION_SERVICE_RE.test(String(serviceType)) && projectType !== NOTICE_PROJECT_TYPE) return 'inspection_service';
+  return null;
+}
+
 // Reasons to do nothing at all, in order, decided before any read.
 const SKIP_WHEN = [
   [() => !gateEnvValue(GATE), 'gated'],
@@ -70,8 +81,8 @@ const SKIP_WHEN = [
   // where treatment products are refused) is not an inspection by name and
   // detectServiceLine reads it as pest — the completion's own posture is the
   // authority (Codex r9 P2).
-  [(a) => a.isInternalOnlyCompletion === true, 'internal_only_completion'],
-  [(a) => !!a.serviceType && INSPECTION_SERVICE_RE.test(String(a.serviceType)) && a.projectType !== NOTICE_PROJECT_TYPE, 'inspection_service'],
+  [(a) => noKitReason(a) === 'internal_only_completion', 'internal_only_completion'],
+  [(a) => noKitReason(a) === 'inspection_service', 'inspection_service'],
 ];
 
 // SQL NULL = every line. Anything else must be an array of line keys —
@@ -425,6 +436,7 @@ module.exports = {
   completionSuppliesOwed,
   completionSuppliesOwedMarker,
   appliesToLine,
+  noKitReason,
   COMPLETION_CONSUMABLE_SOURCE: SOURCE,
   INSPECTION_SERVICE_RE,
 };

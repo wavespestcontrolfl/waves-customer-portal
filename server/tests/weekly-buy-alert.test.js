@@ -43,7 +43,7 @@ describe('alert text', () => {
     const composed = composeAdminAlert(spec); // throws when the headline or why break the alert rules
     expect(key).toBe('weekly-buy:tech-a:2026-12-07');
     expect(composed.headline).toBe("Inventory — buy Alex's supplies, week of Dec 7");
-    expect(composed.why).toBe('1 product to buy at Synthetic Supply North, about $107.00; 1 to check.');
+    expect(composed.why).toBe('1 product to buy at Synthetic Supply North, about $107.00; 1 warning to check.');
     expect(detailFor(list.technicians[0], list)).toBe([
       'Store: Synthetic Supply North',
       'Week: Dec 7 to Dec 12',
@@ -132,6 +132,74 @@ describe('Monday run', () => {
     const second = notifier();
     const result = await runWeeklyBuyList({ list: listOf([group]), io: fakeIo({ standing: { 'weekly-buy:tech-a:2026-12-07': { open: true, cleared: false, weeklyBuy: sent } } }), notify: second });
     expect(second).not.toHaveBeenCalled();
+    expect(result.unchanged).toBe(1);
+  });
+});
+
+describe('held lines, partial totals and a check-only list', () => {
+  const held = (over = {}) => item({ productId: 'f1', name: 'Held Fert', packs: 0, packLabel: null, estCostCents: null, unit: 'lb', needQty: 60, onHand: 0, shortQty: 60, ...over });
+
+  test('a fertilizer-blackout hold is not a product to buy: the sentence counts it apart and the headline says check', () => {
+    const group = entry({ items: [held()], estTotalCents: null });
+    const list = listOf([group]);
+    expect(whyFor(group)).toBe('1 held for the fertilizer blackout.');
+    expect(composeAdminAlert(specFor(group, list).spec).headline).toBe("Inventory — check Alex's supplies, week of Dec 7");
+    // beside a real purchase it stays a purchase list, and the count of products to buy leaves the hold out
+    const mixed = entry({ items: [item(), held()] });
+    expect(whyFor(mixed)).toBe('1 product to buy at Synthetic Supply North, about $107.00; 1 held for the fertilizer blackout.');
+    expect(composeAdminAlert(specFor(mixed, list).spec).headline).toMatch(/buy Alex's supplies/);
+  });
+
+  test('a line with no price makes the total partial, in the sentence and the body', () => {
+    const group = entry({ items: [item(), item({ productId: 'p2', name: 'No Price', packs: null, packLabel: null, estCostCents: null })], unpricedLines: 1 });
+    expect(whyFor(group)).toBe('2 products to buy at Synthetic Supply North, about $107.00, 1 unpriced.');
+    expect(detailFor(group, listOf([group]))).toContain('Estimated total: $107.00; 1 line has no price, so the total leaves it out');
+    const none = entry({ items: [item({ packs: null, packLabel: null, estCostCents: null })], estTotalCents: null, unpricedLines: 1 });
+    expect(detailFor(none, listOf([none]))).toContain('Estimated total: 1 line has no price, so the total leaves it out');
+  });
+
+  test('a held line that is new does not ring a recheck; a held-only list still raises its check alert once', async () => {
+    const group = entry({ items: [item(), held()] });
+    expect(growth(group, [{ productId: 'p1', packs: 1, shortQty: 1.9 }])).toBe(false);
+    const notify = notifier();
+    const result = await runWeeklyBuyList({ list: listOf([entry({ items: [held()], estTotalCents: null })]), io: fakeIo(), notify });
+    expect(result.raised).toBe(1);
+    expect(notify.mock.calls[0][1]).toBe("Inventory — check Alex's supplies, week of Dec 7");
+  });
+});
+
+describe('a corrected store, label or price refreshes the text without a ring', () => {
+  const KEY = 'weekly-buy:tech-a:2026-12-07';
+  // What the first run stored, then the same list after one text-only correction.
+  async function recheckAfter(change) {
+    const first = notifier();
+    await runWeeklyBuyList({ list: listOf([entry()]), io: fakeIo(), notify: first });
+    const stored = first.mock.calls[0][3].metadata.weeklyBuy;
+    const notify = notifier();
+    const group = change(entry());
+    const result = await runWeeklyBuyList({
+      list: listOf([group], { fromDate: '2026-12-09' }), notify,
+      io: fakeIo({ standing: { [KEY]: { open: true, cleared: false, weeklyBuy: stored } }, open: [KEY] }),
+    });
+    return { result, notify };
+  }
+
+  test.each([
+    ['the supply store', (g) => ({ ...g, supplyStore: 'Synthetic Supply South' })],
+    ['the pack label', (g) => ({ ...g, items: [item({ packLabel: '1 gal' })] })],
+    ['the price', (g) => ({ ...g, items: [item({ estCostCents: 9900 })], estTotalCents: 9900 })],
+    ['a note', (g) => ({ ...g, notes: ['A new note.'] })],
+    ['a warning', (g) => ({ ...g, warnings: ['1 lawn visit has no lawn plan'] })],
+  ])('%s: the open alert is rewritten and does not ring', async (_label, change) => {
+    const { result, notify } = await recheckAfter(change);
+    expect(result.refreshed).toBe(1);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(notify.mock.calls[0][3].ringOnRefresh()).toBe(false);
+  });
+
+  test('the moving "counted from" day alone changes nothing', async () => {
+    const { result, notify } = await recheckAfter((g) => g);
+    expect(notify).not.toHaveBeenCalled();
     expect(result.unchanged).toBe(1);
   });
 });

@@ -924,14 +924,18 @@ row's own signals.
 **Weekly buy list** (owner 2026-11-27, "once a week look at upcoming appts, and buy for the entire week, based on current inventory";
 `server/services/procurement/weekly-buy-alert.js`, job `weekly-buy-list`, Monday to Saturday 7:00 AM ET, no gate: it writes admin
 notifications only and orders, texts and charges nothing). One alert per technician (and one for visits with no technician) that has
-something to buy or a warning for the Monday-to-Saturday week, raised under category `system` with `bell: true`, headline "Inventory — buy
-<first name>'s supplies, week of Dec 7", why "<n> products to buy at <supply store>, about $<total>; <n> to check.", link
-`/admin/inventory?tab=restock`, done-when `supplies_bought`, who `person`. `detail` has the store (`technicians.supply_store`), the week and
-one line per product ("2 x 1 gal Product (need N, on hand M)"), the estimated total, notes and warnings (a lawn visit with no plan, visits
-of types the list does not plan yet). dedupeKey `weekly-buy:<technician id|unassigned>:<ET Monday>`, with `refreshOnDedupe`, raised through
-`raiseAdminAlertWithReopen`. Monday raises the week and closes every earlier week's alert. Tuesday to Saturday recounts from today: a list
-that gains a short product or more packs than the alert last stated rings once more; a list that only shrank updates quietly; an identical
-list writes nothing; a list with nothing left to buy and no warning closes (`closeAdminAlertKeys`). A person's Done stays done until the list grows.
+something to buy, a fertilizer-blackout hold or a warning for the Monday-to-Saturday week, raised under category `system` with `bell: true`,
+headline "Inventory — buy <first name>'s supplies, week of Dec 7" ("check" instead of "buy" when nothing is to be bought: only holds or
+warnings), why "<n> products to buy at <supply store>, about $<total>, <n> unpriced; <n> held for the fertilizer blackout; <n> warnings to
+check.", link `/admin/inventory?tab=restock`, done-when `supplies_bought`, who `person`. A held line (N/P fertilizer, June 1 to Sept 30) is
+not a product to buy. A line to buy with no price makes the total partial, and the body says how many lines it leaves out. `detail` has the
+store (`technicians.supply_store`), the week and one line per product ("2 x 1 gal Product (need N, on hand M)"), the estimated total, notes and
+warnings (a lawn visit with no plan, visits of types the list does not plan yet, a house-mix product missing from the catalog). Estimate-slot
+holds, moved, no-show and skipped visits are not counted. dedupeKey `weekly-buy:<technician id|unassigned>:<ET Monday>`, with
+`refreshOnDedupe`, raised through `raiseAdminAlertWithReopen`. Monday raises the week and closes every earlier week's alert. Tuesday to Saturday
+recounts from today: a list that gains a short product or more packs than the alert last stated rings once more; any other change to what the
+alert says (a store, pack label, price, note, warning, or a smaller need) rewrites it quietly; an identical list writes nothing; a list with
+nothing left to buy and no warning closes (`closeAdminAlertKeys`). A person's Done stays done until the list grows.
 Read-only preview: `node server/scripts/weekly-buy-list.js [--json] [--date YYYY-MM-DD]`.
 
 ## 7. How to raise one

@@ -6,8 +6,13 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/waveguard-inventory-forecast', () => ({ buildWaveGuardInventoryForecast: jest.fn() }));
+jest.mock('../services/service-completion-profiles', () => ({
+  resolveCompletionProfileForScheduledService: jest.fn(),
+  resolveCompletionDeliveryPosture: jest.requireActual('../services/service-completion-profiles').resolveCompletionDeliveryPosture,
+}));
 
 const forecastModule = require('../services/waveguard-inventory-forecast');
+const profiles = require('../services/service-completion-profiles');
 const {
   buildWeeklyBuyList, weekBounds, deriveDemand, planGroups, toPlanProduct, UNASSIGNED,
 } = require('../services/procurement/weekly-buy-list');
@@ -22,7 +27,7 @@ const plan = (over = {}) => ({
   pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, tax: 0, floorKey: null, ...over,
 });
 const demand = (qty, unit = 'fl_oz', reasons = ['lawn_plan']) => ({ qty, unit, reasons: new Set(reasons) });
-const group = (entries, over = {}) => ({ demand: new Map(entries), firstDate: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), ...over });
+const group = (entries, over = {}) => ({ demand: new Map(entries), firstDate: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), ...over });
 const techs = new Map([['a', { name: 'Alex Sample', supplyStore: 'Synthetic Supply North' }], ['b', { name: 'Blake Sample', supplyStore: null }]]);
 const run = (groups, products) => planGroups({ groups, products: new Map(products.map((p) => [p.id, p])), techs });
 
@@ -111,6 +116,31 @@ describe('demand per technician', () => {
     expect([...groups.get('a').demand.get('sign').reasons]).toEqual(['visit_supply']);
   });
 
+  test('per-completion supplies follow the close-out: an internal-only consultation leaves none, the WDO inspection project still leaves its notice', () => {
+    const kit = [{ id: 'notice', per_completion_usage: 1, per_completion_service_lines: ['termite'], inventory_unit: 'each' }];
+    const visitsKit = [
+      visit('w1', 'a', 'WDO Inspection', '2026-12-07', { project_type: 'wdo_inspection' }),
+      visit('w2', 'a', 'Termite Inspection Service'), // a plain inspection: no notice
+      visit('w3', 'a', 'Termite Bait Check', '2026-12-07', { internal_only: true }), // internal-only profile
+      visit('w4', 'a', 'Termite Bait Check'),
+    ];
+    const groups = deriveDemand({ visits: visitsKit, forecast: { products: [], serviceIds: [] }, mix: noMix, kit });
+    expect(groups.get('a').demand.get('notice').qty).toBe(2); // w1 and w4
+    // an inspection or an internal-only visit applies nothing, so it is not an unplanned gap either; only w4 is
+    expect(groups.get('a').unplanned).toBe(1);
+  });
+
+  test('a house-mix product missing from the catalog is a warning on each list whose visits need the mix', () => {
+    const mix = resolveHouseMix([{ id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' }]);
+    const groups = deriveDemand({
+      visits: [visit('p1', 'a', 'Quarterly Pest Control'), visit('p2', 'b', 'Lawn Care Treatment')],
+      forecast: { products: [], serviceIds: ['p2'] }, mix, kit: [],
+    });
+    const out = planGroups({ groups, products: new Map(), techs });
+    expect(out.get('a').warnings).toEqual(['The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out']);
+    expect(out.get('b').warnings).toEqual([]); // no pest visit, no mix needed
+  });
+
   test('a visit with no technician goes to the unassigned list', () => {
     const groups = deriveDemand({ visits: [visit('u1', null, 'Quarterly Pest Control')], forecast: { products: [], serviceIds: [] }, mix: resolveHouseMix([{ id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' }]), kit: [] });
     expect([...groups.keys()]).toEqual([UNASSIGNED]);
@@ -140,6 +170,16 @@ describe('stock, packs and cost', () => {
     expect(out.get(UNASSIGNED).items[0].shortQty).toBe(100);
   });
 
+  test('an unassigned visit on Monday never takes stock ahead of an assigned technician whose first visit is Tuesday', () => {
+    const groups = new Map([
+      [UNASSIGNED, group([['p1', demand(100)]], { firstDate: '2026-12-07' })],
+      ['b', group([['p1', demand(100)]], { firstDate: '2026-12-08' })],
+    ]);
+    const out = run(groups, [plan({ onHand: 100 })]);
+    expect(out.get('b').items).toEqual([]);
+    expect(out.get(UNASSIGNED).items[0]).toMatchObject({ shortQty: 100, packs: 1 });
+  });
+
   test('whole packs round up; cost is packs x price, plus tax only when the row carries one', () => {
     const at = (qty, over) => run(new Map([['a', group([['p1', demand(qty)]])]]), [plan(over)]).get('a').items[0];
     expect(at(129)).toMatchObject({ shortQty: 129, packs: 2, packLabel: '1 gal', estCostCents: 20000, vendorName: 'Synthetic Supply' });
@@ -158,6 +198,16 @@ describe('stock, packs and cost', () => {
     expect(out.items[0]).toMatchObject({ shortQty: 40, packs: null, estCostCents: null, vendorName: null });
     expect(out.notes).toContain('Synthetic Liquid: no price on file.');
     expect(out.estTotalCents).toBeNull();
+    expect(out.unpricedLines).toBe(1);
+  });
+
+  test('a priced line beside an unpriced one: the total is partial and the group says how many lines it leaves out', () => {
+    const unpriced = plan({ id: 'p2', name: 'Unpriced Liquid', picked: { row: null, vendorName: null }, pack: null, packLabel: null, price: null });
+    const out = run(new Map([['a', group([['p1', demand(10)], ['p2', demand(10)]])]]), [plan(), unpriced]).get('a');
+    expect(out).toMatchObject({ estTotalCents: 10000, unpricedLines: 1 });
+    // a fertilizer hold is not an unpriced line to buy
+    const held = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ hold: true })]).get('a');
+    expect(held.unpricedLines).toBe(0);
   });
 
   test('an uncounted product is treated as none on hand, with a note; negative stock reads as none', () => {
@@ -228,12 +278,17 @@ describe('N/P fertilizer blackout', () => {
 });
 
 describe('buildWeeklyBuyList read wiring', () => {
+  beforeEach(() => {
+    profiles.resolveCompletionProfileForScheduledService.mockReset();
+    profiles.resolveCompletionProfileForScheduledService.mockResolvedValue({ completionMode: 'service_report', findingsType: null, projectType: null });
+  });
+
   // A knex stand-in: every builder method chains; awaiting it returns the next canned result for that table.
   function fakeKnex(results) {
     const calls = [];
     const make = (table) => {
       const chain = {};
-      for (const m of ['whereBetween', 'where', 'whereNull', 'orWhereNotIn', 'whereIn', 'whereRaw', 'leftJoin', 'orderBy', 'select', 'orWhere', 'whereNotIn']) {
+      for (const m of ['whereBetween', 'where', 'whereNull', 'orWhereNotIn', 'whereIn', 'whereRaw', 'leftJoin', 'orderBy', 'select', 'orWhere', 'whereNotIn', 'whereNotNull', 'orWhereNull']) {
         chain[m] = jest.fn((...args) => { if (m === 'where' && typeof args[0] === 'function') args[0].call(chain, chain); return chain; });
       }
       chain.then = (res, rej) => Promise.resolve((results[table] || []).shift() ?? []).then(res, rej);
@@ -261,8 +316,7 @@ describe('buildWeeklyBuyList read wiring', () => {
     expect(forecastModule.buildWaveGuardInventoryForecast).toHaveBeenCalledWith({ knex, startDate: '2026-12-09', endDate: '2026-12-12', limit: 300 });
     expect(knex.calls[0].chain.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2026-12-09', '2026-12-12']);
     expect(list).toMatchObject({ weekStart: '2026-12-07', weekEnd: '2026-12-12', fromDate: '2026-12-09', unassigned: { technicianId: null, items: [] } });
-    // The fixture catalog holds only one of the three mix products: the other two are named, never skipped silently.
-    expect(list.warnings).toEqual([expect.stringMatching(/taurus sc is not in the catalog/), expect.stringMatching(/surfactant is not in the catalog/)]);
+    expect(list.warnings).toEqual([]);
     expect(list.technicians).toHaveLength(1);
     expect(list.technicians[0]).toMatchObject({
       technicianId: 'a', technicianName: 'Alex Sample', supplyStore: 'Synthetic Supply North',
@@ -270,6 +324,24 @@ describe('buildWeeklyBuyList read wiring', () => {
       items: [{ productId: 'cross', needQty: 20, onHand: 5, shortQty: 15, packs: 2, estCostCents: 18000, vendorName: 'Synthetic Supply', reasons: ['lawn_plan', 'spare_floor'] }],
       estTotalCents: 18000, notes: [], warnings: [],
     });
+  });
+
+  test('each visit\'s close-out kind is read from its completion profile and the booking read drops slot holds', async () => {
+    profiles.resolveCompletionProfileForScheduledService.mockImplementation(async (v) => (
+      v.service_type === 'Waves Assessment' ? { completionMode: 'internal_only', findingsType: null, projectType: null } : { completionMode: 'service_report', findingsType: null, projectType: null }));
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: [], serviceCount: 0, errors: [], skippedNonProgram: [], products: [] });
+    const knex = fakeKnex({
+      'scheduled_services as ss': [[visit('s1', 'a', 'Waves Assessment', '2026-12-09', { service_id: 'svc-1' }), visit('s2', 'a', 'Termite Bait Check', '2026-12-09', { service_id: 'svc-2' })]],
+      technicians: [[{ id: 'a', name: 'Alex Sample', supply_store: null }]],
+      products_catalog: [[], [{ id: 'notice', per_completion_usage: 1, per_completion_service_lines: ['termite', 'pest'], inventory_unit: 'each' }]],
+      'products_catalog as pc': [[{ id: 'notice', name: 'Notice Card', inventory_unit: 'each', inventory_on_hand: 0 }]],
+    });
+    const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    expect(profiles.resolveCompletionProfileForScheduledService).toHaveBeenCalledTimes(2);
+    // the assessment leaves no notice card; the bait check leaves one
+    expect(list.technicians[0].items).toMatchObject([{ productId: 'notice', needQty: 1 }]);
+    const holdFilter = knex.calls[0].chain.where.mock.calls.map(([f]) => f).filter((f) => typeof f === 'function');
+    expect(holdFilter).toHaveLength(2);
   });
 
   test('a forecast that fails fails the list: lawn need is never left out silently', async () => {
@@ -283,6 +355,5 @@ describe('buildWeeklyBuyList read wiring', () => {
     const knex = fakeKnex({ 'scheduled_services as ss': [[]], products_catalog: [[], []] });
     const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-07T12:00:00Z') });
     expect(list.warnings).toContain('The lawn forecast stopped at 300 visits, so lawn needs may read low.');
-    expect(list.warnings.join(' ')).toMatch(/house mix product taurus sc is not in the catalog/);
   });
 });

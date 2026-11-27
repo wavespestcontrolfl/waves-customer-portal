@@ -16,13 +16,16 @@
  *   - pest house mix: the three-product tank mix every general-pest visit records
  *     (pest-house-mix.js, a tested copy of the client's mix).
  *   - per-completion supplies (yard signs, stickers, stakes): one per booked visit
- *     of a line the product names, as supplies-consumption.js deducts them.
+ *     of a line the product names, by the close-out's own rule (supplies-consumption
+ *     noKitReason, fed by the visit's completion profile: an internal-only
+ *     consultation leaves none, the WDO inspection project still leaves its notice).
+ * Estimate-slot holds (customer_id NULL with a reservation stamp) are not bookings.
  * Visits of any other kind (roach, flea, bed bug, mosquito, rodent, tree and
  * shrub ...) are not planned; each technician's list says how many.
  *
  * Supply is products_catalog.inventory_on_hand, one company-wide count. With two
- * technicians drawing on it, stock goes to them in visit order (earliest first
- * visit, then id; unassigned visits last). Short = need minus the stock given to
+ * technicians drawing on it, stock goes to assigned technicians first (earliest
+ * first visit, then id), then to visits with no technician. Short = need minus the stock given to
  * that technician. Packs are whole vendor packs, read the way the dispatcher
  * reads them (reorder-limit-suggestions: eligible price row, packFor, packReorder).
  * Spare floor: for the everyday pest liquids, one unopened container must still
@@ -36,7 +39,7 @@ const { convertInventoryQuantity } = require('../inventory-units');
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { packFor, packReorder, pickPriceRow } = require('./reorder-limit-suggestions');
 const { fertilizerBlackoutHold, FERTILIZER_COLUMNS } = require('./fertilizer-blackout');
-const { appliesToLine, INSPECTION_SERVICE_RE } = require('../supplies-consumption');
+const { appliesToLine, noKitReason, INSPECTION_SERVICE_RE } = require('../supplies-consumption');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { isPestHouseMixVisit, resolveHouseMix, PEST_HOUSE_MIX } = require('./pest-house-mix');
 
@@ -69,7 +72,7 @@ function weekBounds(now = new Date()) {
 // ---- demand ----------------------------------------------------------------
 
 function newGroup() {
-  return { demand: new Map(), firstDate: null, lawnNoPlan: 0, unplanned: 0, unitProblems: new Set() };
+  return { demand: new Map(), firstDate: null, lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set() };
 }
 
 // Sum demand for one product, kept in the unit of its first entry.
@@ -131,34 +134,43 @@ function deriveDemand({ visits, forecast, mix, kit }) {
     const date = dateOnlyString(v.scheduled_date);
     if (date < (g.firstDate || '9999')) g.firstDate = date;
     const line = detectServiceLine(v.service_type);
-    const inspection = INSPECTION_SERVICE_RE.test(String(v.service_type || ''));
-    if (line === 'lawn') {
-      if (!forecastIds.has(String(v.id)) && !inspection) g.unplanned += 1;
-    } else if (isPestHouseMixVisit(v)) {
-      for (const m of mix.matched) {
-        if (m.perVisit == null) g.unitProblems.add(String(m.product.id));
-        else addDemand(g, m.product.id, m.perVisit, m.product.inventory_unit, 'pest_mix');
-      }
-    } else if (!inspection) {
-      g.unplanned += 1;
-    }
-    // A finished visit of a line the product names leaves the kit (an inspection leaves none).
-    if (!inspection) {
-      for (const p of kit) {
-        if (appliesToLine(p.per_completion_service_lines, line)) addDemand(g, p.id, p.per_completion_usage, p.inventory_unit, 'visit_supply');
-      }
+    addPlannedDemand(g, v, { line, mix, planned: forecastIds.has(String(v.id)) });
+    // The close-out's own rule for the kit: an inspection or an internal-only visit leaves none (noKitReason).
+    const left = !noKitReason({ isInternalOnlyCompletion: v.internal_only, serviceType: v.service_type, projectType: v.project_type });
+    for (const p of left ? kit : []) {
+      if (appliesToLine(p.per_completion_service_lines, line)) addDemand(g, p.id, p.per_completion_usage, p.inventory_unit, 'visit_supply');
     }
   }
   return groups;
 }
 
+// What a booked visit needs from the planned lines: the lawn forecast's own rows, the pest house mix, or
+// nothing planned (counted, so the list never reads complete). A visit that applies nothing (an inspection, an
+// internal-only consultation) is not a gap.
+function addPlannedDemand(g, v, { line, mix, planned }) {
+  const idle = v.internal_only === true || INSPECTION_SERVICE_RE.test(String(v.service_type || ''));
+  if (line === 'lawn') {
+    if (!planned && !idle) g.unplanned += 1;
+  } else if (isPestHouseMixVisit(v)) {
+    for (const m of mix.matched) {
+      if (m.perVisit == null) g.unitProblems.add(String(m.product.id));
+      else addDemand(g, m.product.id, m.perVisit, m.product.inventory_unit, 'pest_mix');
+    }
+    // A mix product missing from the catalog is a warning on every list whose visits need it, never a silent skip.
+    for (const entry of mix.missing) g.mixMissing.add(entry.key.replace(/_/g, ' '));
+  } else if (!idle) {
+    g.unplanned += 1;
+  }
+}
+
 // ---- planning --------------------------------------------------------------
 
+// Assigned technicians first, always; then the earlier first visit; then the lower id.
 const compareGroups = (groups) => (a, b) => {
+  if ((a === UNASSIGNED) !== (b === UNASSIGNED)) return a === UNASSIGNED ? 1 : -1;
   const da = groups.get(a).firstDate || '9999';
   const db2 = groups.get(b).firstDate || '9999';
   if (da !== db2) return da < db2 ? -1 : 1;
-  if (a === UNASSIGNED || b === UNASSIGNED) return a === UNASSIGNED ? 1 : -1;
   return a < b ? -1 : 1;
 };
 
@@ -243,10 +255,12 @@ function applySpareFloor({ order, lines }) {
   }
 }
 
+// [value read off a group (falsy = no warning), the sentence for it]
 const WARNING_TEXT = [
-  ['lawnNoPlan', (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} no lawn plan`],
-  ['unplanned', (n) => `${n} ${plural(n, 'visit', 'visits')} of types this list does not plan yet`],
-  ['unitProblems', (n) => `${n} ${plural(n, 'product has', 'products have')} units that do not convert, so its need is left out`],
+  [(g) => g.lawnNoPlan, (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} no lawn plan`],
+  [(g) => g.unplanned, (n) => `${n} ${plural(n, 'visit', 'visits')} of types this list does not plan yet`],
+  [(g) => g.unitProblems.size, (n) => `${n} ${plural(n, 'product has', 'products have')} units that do not convert, so its need is left out`],
+  [(g) => [...g.mixMissing].sort().join(', '), (names) => `The pest house mix is missing from the catalog (${names}), so it is left out`],
 ];
 
 function itemOf(l, cents) {
@@ -262,25 +276,23 @@ function groupEntry({ key, group, lines, notes, sharing, techs }) {
   const tech = key === UNASSIGNED ? null : techs.get(key);
   const items = [];
   let total = 0;
-  let unpriced = false;
   for (const l of lines.sort((a, b) => a.product.name.localeCompare(b.product.name))) {
     if (sharing.get(l.pid) > 1) notes.push(`${l.product.name}: one company count is shared by ${sharing.get(l.pid)} lists, given out by first visit.`);
     if (!(l.packs > 0 || (l.short > 0 && (l.product.hold || l.packs == null)))) continue;
     const cents = costCents(l.product, l.packs);
-    unpriced = unpriced || (cents == null && l.packs > 0);
     total += cents || 0;
     items.push(itemOf(l, cents));
   }
-  if (unpriced) notes.push('The estimated total leaves out items with no price on file.');
-  const counts = { ...group, unitProblems: group.unitProblems.size };
   return {
     technicianId: key === UNASSIGNED ? null : key,
     technicianName: tech?.name || (key === UNASSIGNED ? null : 'Technician'),
     supplyStore: tech?.supplyStore || null,
     items,
     estTotalCents: items.some((i) => i.estCostCents != null) ? total : null,
+    // Lines to buy with no price (no price row, no readable pack, or bought by count): the total leaves them out.
+    unpricedLines: items.filter((i) => i.packs !== 0 && i.estCostCents == null).length,
     notes: [...new Set(notes)],
-    warnings: WARNING_TEXT.filter(([field]) => counts[field]).map(([field, text]) => text(counts[field])),
+    warnings: WARNING_TEXT.filter(([read]) => read(group)).map(([read, text]) => text(read(group))),
   };
 }
 
@@ -308,7 +320,29 @@ function weekVisits(knex, { fromDate, weekEnd }) {
   return knex('scheduled_services as ss')
     .whereBetween('ss.scheduled_date', [fromDate, weekEnd])
     .where((q) => q.whereNull('ss.status').orWhereNotIn('ss.status', FINISHED_STATUSES))
-    .select('ss.id', 'ss.technician_id', 'ss.service_type', 'ss.scheduled_date', 'ss.is_callback', 'ss.service_key_snapshot');
+    // An estimate-slot hold (customer_id NULL with a reservation stamp, live or awaiting cleanup) is not a booking;
+    // a pending booking has a customer or no stamp. Same rule as scheduling/occupancy.js (includeHolds: false).
+    .where((q) => q.whereNotNull('ss.customer_id').orWhereNull('ss.reservation_expires_at'))
+    .select('ss.id', 'ss.technician_id', 'ss.service_type', 'ss.scheduled_date', 'ss.is_callback', 'ss.service_key_snapshot', 'ss.service_id', 'ss.is_recurring');
+}
+
+// What each visit's close-out will be, read the way the close-out reads it (its completion profile): an
+// internal-only consultation (a Waves Assessment) and a project-backed completion (the WDO inspection) change
+// which per-completion supplies it consumes. One profile read per distinct service identity.
+async function withCompletionKind(visits, knex) {
+  const { resolveCompletionProfileForScheduledService, resolveCompletionDeliveryPosture } = require('../service-completion-profiles');
+  const kinds = new Map();
+  const out = [];
+  for (const v of visits) {
+    const key = [v.service_id, v.service_key_snapshot, v.service_type, v.is_recurring].join('|');
+    if (!kinds.has(key)) {
+      const profile = await resolveCompletionProfileForScheduledService(v, knex);
+      const { isInternalOnly } = resolveCompletionDeliveryPosture({ typedFindingsType: profile.findingsType || null, completionMode: profile.completionMode });
+      kinds.set(key, { internal_only: isInternalOnly, project_type: profile.projectType || null });
+    }
+    out.push({ ...v, ...kinds.get(key) });
+  }
+  return out;
 }
 
 async function readCatalog(knex, { ids, mixRows, now }) {
@@ -339,7 +373,7 @@ async function readCatalog(knex, { ids, mixRows, now }) {
  */
 async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
   const { weekStart, weekEnd, fromDate } = weekBounds(now);
-  const visits = await weekVisits(knex, { fromDate, weekEnd });
+  const visits = await withCompletionKind(await weekVisits(knex, { fromDate, weekEnd }), knex);
   const warnings = [];
   const techIds = [...new Set(visits.map((v) => v.technician_id).filter(Boolean))];
   const techRows = techIds.length ? await knex('technicians').whereIn('id', techIds).select('id', 'name', 'supply_store') : [];
@@ -351,7 +385,6 @@ async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
 
   const mixCandidates = await knex('products_catalog').where('active', true).orderBy('name').orderBy('id').select('id', 'name', 'inventory_unit');
   const mix = resolveHouseMix(mixCandidates);
-  for (const entry of mix.missing) warnings.push(`The pest house mix product ${entry.key.replace(/_/g, ' ')} is not in the catalog, so it is left out.`);
   const kit = await knex('products_catalog').where('active', true).where('per_completion_usage', '>', 0)
     .select('id', 'per_completion_usage', 'per_completion_service_lines', 'inventory_unit');
 

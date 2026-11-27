@@ -312,8 +312,10 @@ async function ownForecastServiceIds(forecast, actor, knex) {
 async function forecastForTechnician(forecast, actor, knex = db) {
   const own = await ownForecastServiceIds(forecast, actor, knex);
   const project = (entry) => (own.has(String(entry.serviceId)) ? entry : withoutCustomerFields(entry));
+  // serviceIds is for procurement (the weekly buy list): it names every visit read, other technicians' included.
+  const { serviceIds: _internal, ...visible } = forecast;
   return {
-    ...forecast,
+    ...visible,
     products: (forecast.products || []).map((row) => ({
       ...row,
       appointments: (row.appointments || []).map(project),

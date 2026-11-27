@@ -408,6 +408,16 @@ describe('technician forecast (audit A2 / C1): product totals for all, names onl
     const projected = await forecastForTechnician(forecast, { technicianId: 'tech-1' }, db);
     expect(projected.skippedNonProgram).toEqual([{ serviceId: 'visit-1', scheduledDate: '2030-01-09', customerName: 'Pat Example' }]);
   });
+
+  test('the list of every visit read (serviceIds, for procurement) never reaches a technician: not the projection, not the route', async () => {
+    const forecast = { products: [], errors: [], skippedNonProgram: [], serviceIds: ['visit-1', 'visit-2', 'visit-3'] };
+    const projected = await forecastForTechnician(forecast, { technicianId: 'tech-1' }, db);
+    expect(projected).not.toHaveProperty('serviceIds');
+    const technician = { techRole: 'technician', technicianId: 'tech-1' };
+    const { body } = await get('/waveguard-forecast', { days: '2', limit: '20' }, technician);
+    expect(body.forecast).not.toHaveProperty('serviceIds');
+    expect((await get('/waveguard-forecast', { days: '2', limit: '20' })).body.forecast.serviceIds).toEqual(['visit-1', 'visit-2', 'visit-3']);
+  });
 });
 
 describe('explicit date range (the weekly buy list reads a Monday-Saturday week)', () => {

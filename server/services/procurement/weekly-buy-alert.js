@@ -45,23 +45,39 @@ function detailFor(group, list) {
     `Week: ${monthDay(list.weekStart)} to ${monthDay(list.weekEnd)}${list.fromDate > list.weekStart ? `, counted from ${monthDay(list.fromDate)}` : ''}`,
     ...group.items.map(itemLine),
   ];
-  if (group.estTotalCents != null) lines.push(`Estimated total: ${money(group.estTotalCents)}`);
+  if (group.estTotalCents != null || group.unpricedLines) lines.push(`Estimated total: ${totalText(group)}`);
   const check = [...group.warnings, ...list.warnings];
   if (group.notes.length) lines.push('Notes:', ...group.notes.map((n) => `- ${n}`));
   if (check.length) lines.push('Check:', ...check.map((w) => `- ${w}`));
   return lines.join('\n');
 }
 
-// One sentence, 110 characters at most: what to buy, where and about what cost.
+// A lines-to-buy count that leaves out the fertilizer-blackout holds: a held line is not bought.
+const buyLines = (group) => group.items.filter((i) => i.packs !== 0);
+const heldLines = (group) => group.items.filter((i) => i.packs === 0);
+
+// The total, and what it leaves out: lines to buy with no price make the estimate partial.
+function costParts(group) {
+  const open = group.unpricedLines;
+  return {
+    total: group.estTotalCents == null ? null : money(group.estTotalCents),
+    gap: open ? `${open} ${plural(open, 'line has', 'lines have')} no price, so the total leaves ${plural(open, 'it', 'them')} out` : null,
+  };
+}
+const totalText = (group) => { const { total, gap } = costParts(group); return [total, gap].filter(Boolean).join('; '); };
+
+// One sentence, 110 characters at most: what to buy, where and about what cost; or, with nothing to buy, what to check.
 function whyFor(group) {
-  const n = group.items.length;
-  const store = group.supplyStore && !breaksAlertRules(group.supplyStore) ? group.supplyStore : null;
+  const n = buyLines(group).length;
+  const held = heldLines(group).length;
   const w = group.warnings.length;
-  let text = n ? `${n} ${plural(n, 'product', 'products')} to buy` : `${w} ${plural(w, 'warning', 'warnings')} to check`;
-  if (store) text += ` at ${store}`;
-  if (group.estTotalCents != null) text += `, about ${money(group.estTotalCents)}`;
-  if (n && w) text += `; ${w} to check`;
-  const cut = cutAtWord(text, MAX_WHY_CHARS - 1);
+  const store = group.supplyStore && !breaksAlertRules(group.supplyStore) ? group.supplyStore : null;
+  const parts = [];
+  const { total, gap } = costParts(group);
+  if (n) parts.push([`${n} ${plural(n, 'product', 'products')} to buy${store ? ` at ${store}` : ''}`, total && `about ${total}`, gap && `${group.unpricedLines} unpriced`].filter(Boolean).join(', '));
+  if (held) parts.push(`${held} held for the fertilizer blackout`);
+  if (w) parts.push(`${w} ${plural(w, 'warning', 'warnings')} to check`);
+  const cut = cutAtWord(parts.join('; '), MAX_WHY_CHARS - 1);
   return cut.endsWith('…') ? cut : `${cut}.`;
 }
 
@@ -69,9 +85,10 @@ function specFor(group, list) {
   const key = keyFor(group, list.weekStart);
   const md = monthDay(list.weekStart);
   const first = group.technicianName ? String(group.technicianName).trim().split(/\s+/)[0] : null;
+  const verb = buyLines(group).length ? 'buy' : 'check';
   const action = first
-    ? fitAction('Inventory', first, [(n) => `buy ${n}'s supplies, week of ${md}`, (n) => `${n}: buy list, week of ${md}`])
-    : fitAction('Inventory', 'Unassigned', [(n) => `${n} visits: buy list, week of ${md}`]);
+    ? fitAction('Inventory', first, [(n) => `${verb} ${n}'s supplies, week of ${md}`, (n) => `${n}: ${verb} list, week of ${md}`])
+    : fitAction('Inventory', 'Unassigned', [(n) => `${n} visits: ${verb} list, week of ${md}`]);
   return {
     key,
     spec: { area: 'Inventory', action, why: whyFor(group), severity: 'needs-you', link: LINK, subject: { type: 'check', id: key }, doneWhen: 'supplies_bought', who: 'person' },
@@ -81,12 +98,16 @@ function specFor(group, list) {
 // What the alert states per product, for the next recheck to compare with.
 const stated = (group) => group.items.map((i) => ({ productId: i.productId, packs: i.packs, shortQty: i.shortQty }));
 const amountOf = (i) => (i.packs == null ? i.shortQty : i.packs);
-const signatureOf = (group) => JSON.stringify([stated(group), [...group.warnings].sort()]);
+// Everything the alert says, so a corrected store, pack label, price or note refreshes its text quietly. The
+// "counted from" day moves every day and is left out; growth (below) is the only reason to ring again.
+const signatureOf = (group, list) => JSON.stringify([
+  stated(group), specFor(group, list).spec, detailFor(group, { ...list, fromDate: list.weekStart }),
+]);
 
 // True when the list has a product the alert did not state, or more of one.
 function growth(group, priorItems) {
   const before = new Map((priorItems || []).map((i) => [String(i.productId), amountOf(i)]));
-  return stated(group).some((i) => !before.has(String(i.productId)) || amountOf(i) > before.get(String(i.productId)) + 1e-9);
+  return stated({ items: buyLines(group) }).some((i) => !before.has(String(i.productId)) || amountOf(i) > before.get(String(i.productId)) + 1e-9);
 }
 
 // The standing row for a key, newest first, with what it last stated.
@@ -111,7 +132,7 @@ async function raiseOne({ group, list, io, notify }) {
   // A row this module closed itself (nothing was short) states nothing: a comeback is growth.
   const known = standing && !standing.cleared ? standing : null;
   const prior = known?.weeklyBuy || null;
-  const signature = signatureOf(group);
+  const signature = signatureOf(group, list);
   const grew = growth(group, prior?.items);
   if (known && !grew && (!known.open || prior?.signature === signature)) return 'unchanged';
   const composed = composeAdminAlert(spec);
