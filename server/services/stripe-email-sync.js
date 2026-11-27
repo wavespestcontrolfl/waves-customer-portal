@@ -9,7 +9,7 @@
  *    confirmed; it is written only while the locked record still holds that address. A merge or its undo must lock this
  *    customer row to move its Stripe id, so nothing moves between the checks and the write.
  *  - Skipped with an office alert: a Stripe id another record also holds, another record's saved card uses, or a
- *    third-party payer holds, and any
+ *    third-party payer holds; a record whose own saved cards point at another Stripe profile; and any
  *    record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office sorts
  *    those out by hand instead of the app guessing.
  *  - No Stripe profile yet: re-checked over about an hour (2, 4, 8, 16, 32 minutes), then finished. A profile being
@@ -48,6 +48,10 @@ const OFFICE_COPY = {
   shared: {
     why: 'Another customer record uses the same Stripe profile, so the app left its email alone.',
     next: 'Do not change the Stripe email yet. First work out which customer record owns this Stripe profile; the other record may need its own.',
+  },
+  card_conflict: {
+    why: "This record's saved cards use a different Stripe profile, so the app left Stripe alone.",
+    next: 'Check which Stripe profile is right for this customer, then fix its email by hand only if it is wrong.',
   },
   merged: {
     why: 'This record was part of a customer merge, so the app left its Stripe email alone.',
@@ -95,6 +99,15 @@ async function processJob(jobId) {
     if (!customer || isMergeRetiredRow(customer)) {
       await finish(trx, job, 'skipped', 'gone');
       return 'gone';
+    }
+    // The record's own saved cards must agree with its link: a card on a different Stripe profile (or cards on a
+    // profile the record does not link) means ownership is unclear, and the office decides.
+    const ownCardIds = [...new Set((await trx('payment_methods').where({ customer_id: customer.id })
+      .whereNotNull('stripe_customer_id').select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
+    if (ownCardIds.some((sid) => sid !== customer.stripe_customer_id)) {
+      await finish(trx, job, 'skipped', 'card_conflict');
+      await alertOffice(trx, job, customer, 'card_conflict');
+      return 'card_conflict';
     }
     if (!customer.stripe_customer_id) {
       const rechecks = job.not_linked_checks || 0;

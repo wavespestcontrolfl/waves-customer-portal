@@ -38,7 +38,9 @@ describe('stripe-email-sync processJob', () => {
       const note = (rs) => { if (q.locked) rs.forEach((r) => locks.push(`${table}:${r.id}`)); return rs; };
       q.first = async () => { if (state.throwOn === table) throw new Error('boom'); const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
       // drainDue selects id + updated_at::text AS version; the fake's updated_at is already a text version.
-      q.select = async (...cols) => note(rows()).map((r) => (cols.length > 1 ? { id: r.id, version: r.updated_at } : { id: r.id }));
+      q.whereNotNull = (col) => { q.notNull = col; return q; };
+      q.select = async (...cols) => note(rows()).filter((r) => !q.notNull || r[q.notNull] != null)
+        .map((r) => (cols.length > 1 ? { id: r.id, version: r.updated_at } : cols[0] === 'stripe_customer_id' ? { stripe_customer_id: r.stripe_customer_id } : { id: r.id }));
       q.whereRaw = (sql, [v]) => { q.conds.push({ updated_at: v }); return q; };
       q.update = async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; };
       return q;
@@ -92,6 +94,21 @@ describe('stripe-email-sync processJob', () => {
     const own = load({ customers: [cust()] });
     state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_1' });
     await expect(own.processJob('job-1')).resolves.toBe('updated');
+  });
+
+  test("the record's own saved card on another Stripe profile (or cards with no link) goes to the office", async () => {
+    let sync = load({ customers: [cust()] });
+    state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_other' });
+    await expect(sync.processJob('job-1')).resolves.toBe('card_conflict');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    sync = load({ customers: [cust({ stripe_customer_id: null })] });
+    state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_card' });
+    await expect(sync.processJob('job-1')).resolves.toBe('card_conflict');
+    // Own cards on the linked profile are fine.
+    sync = load({ customers: [cust()] });
+    state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_1' });
+    await expect(sync.processJob('job-1')).resolves.toBe('updated');
   });
 
   test('a third-party payer on the same Stripe profile counts as shared: never written, office alerted', async () => {
