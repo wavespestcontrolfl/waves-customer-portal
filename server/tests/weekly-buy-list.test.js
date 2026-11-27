@@ -310,7 +310,7 @@ describe('stock, packs and cost', () => {
       const small = run(new Map([['a', group([['p1', demand(2.00003, 'gal')]])]]), [gal({ onHand: 1, onOrder: 1 })]).get('a').items[0];
       expect(small.packs).toBe(1);
       expect(small.shortQty).toBeCloseTo(0.00003, 10);
-      // floor: 2.00003 left after the draw is two sealed gallons; 0.99997 left is none
+      // floor: 2.00003 gal left after the week is over one pack; 0.99997 left is under one
       const liquid = (over) => gal({ floorKey: 'crosscheck_plus', ...over });
       expect(run(new Map([['a', group([['p1', demand(1, 'gal', ['pest_mix'])]])]]), [liquid({ onHand: 3.00003 })]).get('a').items).toEqual([]);
       expect(run(new Map([['a', group([['p1', demand(1, 'gal', ['pest_mix'])]])]]), [liquid({ onHand: 1.99997 })]).get('a').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix', 'spare_floor'] });
@@ -339,6 +339,15 @@ describe('stock, packs and cost', () => {
     expect(held.unpricedLines).toBe(0);
   });
 
+  test('cost is the catalog landed cost per pack (price + shipping, times tax); a delivery or hazmat estimate marks the line "plus shipping"', () => {
+    const landed = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ price: 90, shipping: 10, tax: 0.1 })]).get('a');
+    expect(landed.items[0]).toMatchObject({ estCostCents: 11000, plusShipping: false });
+    expect(landed).toMatchObject({ estTotalCents: 11000, shippingLines: 0 });
+    const shipped = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ plusShipping: true })]).get('a');
+    expect(shipped.items[0]).toMatchObject({ estCostCents: 10000, plusShipping: true });
+    expect(shipped.shippingLines).toBe(1);
+  });
+
   test('an uncounted product is treated as none on hand, with a note; negative stock reads as none', () => {
     const uncounted = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ onHand: null })]).get('a');
     expect(uncounted.items[0]).toMatchObject({ onHand: 0, shortQty: 10 });
@@ -353,22 +362,32 @@ describe('stock, packs and cost', () => {
   });
 });
 
-describe('spare floor (one unopened container of the everyday liquids)', () => {
+describe('spare floor (one container\'s worth of the everyday liquids, as a volume)', () => {
   const liquid = (over) => plan({ floorKey: 'crosscheck_plus', ...over });
   const items = (qty, over, g = {}) => run(new Map([['a', group([['p1', demand(qty, 'fl_oz', ['pest_mix'])], ...(g.more || [])])]]), [liquid(over)]).get('a').items;
+  const noteOf = (qty, over) => run(new Map([['a', group([['p1', demand(qty, 'fl_oz', ['pest_mix'])]])]]), [liquid({ packLabel: '1 gal', ...over })]).get('a');
 
-  test('adds one container when less than one would be left after the week', () => {
-    expect(items(10, { onHand: 0 })[0]).toMatchObject({ shortQty: 10, packs: 2, reasons: ['pest_mix', 'spare_floor'] }); // 1 to cover, 1 to keep
+  test('adds one container when less than one container would be left after the week', () => {
+    expect(items(10, { onHand: 0 })[0]).toMatchObject({ shortQty: 10, packs: 2, reasons: ['pest_mix', 'spare_floor'] }); // 1 to cover, 118 left: 1 more
     expect(items(10, { onHand: 100 })[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] }); // covered, but only 90 would be left
+    expect(items(100, { onHand: 200 })[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] }); // 100 left
   });
 
-  test('adds nothing when a full container would still be left', () => {
-    expect(items(10, { onHand: 300 })).toEqual([]);
-    expect(items(10, { onHand: 138 })).toEqual([]); // 128 left: exactly one container
+  test('adds nothing, and says nothing, when one container or more would be left', () => {
+    for (const onHand of [138, 200, 266, 300, 400]) { // 128, 190, 256, 290 and 390 left
+      const out = noteOf(10, { onHand });
+      expect(out.items).toEqual([]);
+      expect(out.warnings).toEqual([]);
+      expect(out.notes).toEqual([]);
+    }
+  });
+
+  test('stock on order and the volume bought both count as left over', () => {
+    expect(items(10, { onHand: 0, onOrder: 256 })).toEqual([]); // 246 left
+    expect(items(10, { onHand: 0, onOrder: 128 })[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] }); // 118 left
   });
 
   test('adds it once across two lists, to the first technician with the need', () => {
-    // 256 fl oz needed, two whole containers bought and none left over: one spare in total.
     const groups = new Map([
       ['a', group([['p1', demand(128, 'fl_oz', ['pest_mix'])]], { firstAt: '2026-12-07' })],
       ['b', group([['p1', demand(128, 'fl_oz', ['pest_mix'])]], { firstAt: '2026-12-08' })],
@@ -378,71 +397,45 @@ describe('spare floor (one unopened container of the everyday liquids)', () => {
     expect(out.get('b').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
   });
 
-  test('opened containers do not combine: two technicians with small needs each open a container, so one sealed one is added once', () => {
+  test('it is worked out company-wide: two technicians with small needs each buy a pack, and the volume left is already enough', () => {
     const groups = new Map([
       ['a', group([['p1', demand(10, 'fl_oz', ['pest_mix'])]], { firstAt: '2026-12-07' })],
       ['b', group([['p1', demand(10, 'fl_oz', ['pest_mix'])]], { firstAt: '2026-12-08' })],
     ]);
     const out = run(groups, [liquid({ onHand: 0 })]);
-    expect(out.get('a').items[0]).toMatchObject({ packs: 2, reasons: ['pest_mix', 'spare_floor'] }); // one to open, one to keep sealed
-    expect(out.get('b').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] }); // one to open
+    expect(out.get('a').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
+    expect(out.get('b').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
   });
 
-  test('stock on the shelf counts as sealed containers only as whole containers after the stock handed out', () => {
-    // 300 on hand, 10 handed out: 290 left = two whole containers, so nothing is added
-    expect(items(10, { onHand: 300 })).toEqual([]);
-    // 200 on hand, 100 handed out: 100 left is not a whole container
-    expect(items(100, { onHand: 200 })[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] });
+  test('two opened jugs read as one volume: 0.75 gal + 0.75 gal on hand with 0.1 gal used leaves 1.4 gal, so nothing', () => {
+    const gal = (over) => plan({ unit: 'gal', pack: { pack: 1 }, packLabel: '1 gal', floorKey: 'crosscheck_plus', onHand: 1.5, ...over });
+    const out = run(new Map([['a', group([['p1', demand(0.1, 'gal', ['pest_mix'])]])]]), [gal()]).get('a');
+    expect(out.items).toEqual([]);
+    expect(out.warnings).toEqual([]);
   });
 
-  describe('what the shelf can prove (a volume is not a count of sealed containers)', () => {
-    const noteOf = (qty, over) => run(new Map([['a', group([['p1', demand(qty, 'fl_oz', ['pest_mix'])]])]]), [liquid({ packLabel: '1 gal', ...over })]).get('a');
-
-    test('under one pack left after the week: buy one spare', () => {
-      const out = noteOf(10, { onHand: 100 }); // 90 left
-      expect(out.items[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] });
-      expect(out.warnings.join(' ')).not.toMatch(/Check the shelf/);
-    });
-
-    test('two packs or more left: certainly one sealed, buy nothing and say nothing', () => {
-      const out = noteOf(10, { onHand: 266 }); // 256 left = exactly two packs
-      expect(out.items).toEqual([]);
-      expect(out.warnings).toEqual([]);
-      expect(noteOf(10, { onHand: 400 }).warnings).toEqual([]);
-    });
-
-    test('one to two packs left: buy nothing, and ask for a look at the shelf', () => {
-      for (const onHand of [138, 200, 265]) { // 128, 190 and 255 left
-        const out = noteOf(10, { onHand });
-        expect(out.items).toEqual([]);
-        expect(out.warnings).toEqual(['Check the shelf: one unopened 1 gal of Synthetic Liquid should remain.']); // a warning: it keeps the list with nothing to buy
-      }
-    });
-
-    test('two opened jugs read as one: 0.75 gal + 0.75 gal on hand with 0.1 gal used is a look at the shelf, not a skip', () => {
-      const gal = (over) => plan({ unit: 'gal', pack: { pack: 1 }, packLabel: '1 gal', floorKey: 'crosscheck_plus', onHand: 1.5, ...over });
-      const out = run(new Map([['a', group([['p1', demand(0.1, 'gal', ['pest_mix'])]])]]), [gal()]).get('a');
-      expect(out.items).toEqual([]);
-      expect(out.warnings.join(' ')).toMatch(/Check the shelf/);
-    });
-
-    test('the live example still buys one spare: 1.34 gal on hand, 0.55 gal used, 1 gal packs', () => {
-      const gal = plan({ unit: 'gal', pack: { pack: 1 }, packLabel: '1 gal', floorKey: 'crosscheck_plus', onHand: 1.34 });
-      const out = run(new Map([['a', group([['p1', demand(0.55, 'gal', ['pest_mix'])]])]]), [gal]).get('a');
-      expect(out.items[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] });
-    });
-
-    test('packs bought to cover a shortage are opened for it, so they never make the spare', () => {
-      const out = noteOf(300, { onHand: 0 }); // 3 packs for 300; the third is opened for 44: none sealed, so one spare
-      expect(out.items[0]).toMatchObject({ packs: 4, reasons: ['pest_mix', 'spare_floor'] });
-      expect(noteOf(256, { onHand: 0 }).items[0].packs).toBe(3); // two packs, both used up: still one spare
-    });
+  test('the live example buys one: 1.34 gal on hand, 0.55 gal needed, 1 gal packs leaves 0.79 gal', () => {
+    const gal = plan({ unit: 'gal', pack: { pack: 1 }, packLabel: '1 gal', floorKey: 'crosscheck_plus', onHand: 1.34 });
+    const out = run(new Map([['a', group([['p1', demand(0.55, 'gal', ['pest_mix'])]])]]), [gal]).get('a');
+    expect(out.items[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] });
   });
 
-  test('never for the surfactant or a lawn product, and not when there is no pack size', () => {
+  test('packs bought to cover a shortage count in the volume left', () => {
+    expect(noteOf(300, { onHand: 0 }).items[0]).toMatchObject({ packs: 4, reasons: ['pest_mix', 'spare_floor'] }); // 3 packs leave 84: one more
+    expect(noteOf(256, { onHand: 0 }).items[0].packs).toBe(3); // two packs leave none: one more
+    expect(noteOf(200, { onHand: 0 }).items[0]).toMatchObject({ packs: 3, reasons: ['pest_mix', 'spare_floor'] }); // 2 packs leave 56: one more
+    expect(noteOf(100, { onHand: 0 }).items[0]).toMatchObject({ packs: 2, reasons: ['pest_mix', 'spare_floor'] }); // 1 pack leaves 28: one more
+  });
+
+  test('never for the surfactant or a lawn product', () => {
     expect(items(0.5, { onHand: 0, floorKey: 'surfactant' })[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
     expect(run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ onHand: 100 })]).get('a').items).toEqual([]);
-    expect(items(10, { onHand: 100, pack: { error: 'no_pack_size', message: 'No pack size on the price row.' } })).toEqual([]);
+  });
+
+  test('no pack size on file: the spare cannot be worked out, and the list says so', () => {
+    const out = run(new Map([['a', group([['p1', demand(10, 'fl_oz', ['pest_mix'])]])]]), [liquid({ onHand: 100, pack: { error: 'no_pack_size', message: 'No pack size on the price row.' } })]).get('a');
+    expect(out.items).toEqual([]);
+    expect(out.warnings).toEqual(['No pack size on file for Synthetic Liquid, so the spare cannot be worked out.']);
   });
 });
 
@@ -553,6 +546,7 @@ describe('buildWeeklyBuyList read wiring', () => {
       technicians: [[{ id: 'a', name: 'Alex Sample', supply_store: null }]],
       products_catalog: [mixRows, []],
       'products_catalog as pc': [mixRows.map((r) => ({ ...r, inventory_on_hand: 0 }))],
+      vendor_pricing: [['taurus', 'cross'].map((id) => ({ product_id: id, vendor_id: 'v', vendor_name: 'Synthetic Supply', quantity: '1 gal', is_best_price: true, price: '90', price_amount: '90', tax_rate: null }))],
     });
     const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
     // only the general-pest visits are asked about, once
@@ -587,7 +581,7 @@ describe('buildWeeklyBuyList read wiring', () => {
     expect(list.warnings).toEqual(['An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.']);
   });
 
-  test('stock, prices and what is on order are read in one REPEATABLE READ read-only snapshot; a caller\'s own transaction is kept', async () => {
+  test('every read of the list (visits, forecast, Taurus ledger, catalog, prices, on order) runs in one REPEATABLE READ read-only snapshot, opened first; a caller\'s own transaction is kept', async () => {
     forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: ['v1'], serviceCount: 1, errors: [], skippedNonProgram: [],
       products: [{ productId: 'cross', inventoryUnit: 'fl_oz', appointments: [{ serviceId: 'v1', inventoryAmount: 20 }], mismatchAppointments: [] }] });
     const results = () => ({
@@ -600,10 +594,12 @@ describe('buildWeeklyBuyList read wiring', () => {
     await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
     expect(knex.transaction).toHaveBeenCalledTimes(1);
     expect(knex.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
-    // all three supply reads ran on the snapshot, after it opened
-    const order = knex.mock.invocationCallOrder;
-    const at = (table) => knex.calls.findIndex((c) => c.table === table);
-    expect(Math.min(order[at('products_catalog as pc')], order[at('vendor_pricing')], order[at('product_restock_requests as prr')])).toBeGreaterThan(knex.transaction.mock.invocationCallOrder[0]);
+    // the snapshot opened before the first read of anything, and the forecast and Taurus ledger were handed the snapshot
+    const opened = knex.transaction.mock.invocationCallOrder[0];
+    expect(Math.min(...knex.mock.invocationCallOrder)).toBeGreaterThan(opened);
+    expect(knex.calls[0].table).toBe('scheduled_services as ss');
+    expect(forecastModule.buildWaveGuardInventoryForecast.mock.calls.at(-1)[0].knex).toBe(knex);
+    expect(forecastModule.buildWaveGuardInventoryForecast.mock.invocationCallOrder.at(-1)).toBeGreaterThan(opened);
     const own = fakeKnex(results());
     own.isTransaction = true;
     await buildWeeklyBuyList({ knex: own, now: new Date('2026-12-09T12:00:00Z') });

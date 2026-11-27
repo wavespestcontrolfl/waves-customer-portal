@@ -57,7 +57,7 @@ describe('alert text', () => {
     ].join('\n'));
   });
 
-  test('a recheck says where its count starts; a held, unpriced and spare-floor line each read plainly', () => {
+  test('a recheck says where its count starts; a held, unpriced, shipped and spare-floor line each read plainly', () => {
     const group = entry({ items: [
       item({ name: 'Held Fert', packs: 0, packLabel: null, estCostCents: null, unit: 'lb', needQty: 60, onHand: 0, shortQty: 60 }),
       item({ productId: 'p2', name: 'No Price', packs: null, packLabel: null, estCostCents: null, shortQty: 4, needQty: 4, onHand: 0 }),
@@ -67,7 +67,7 @@ describe('alert text', () => {
     expect(text).toContain('Week: Dec 7 to Dec 12, counted from Dec 9');
     expect(text).toContain('HOLD Held Fert: short 60 lb (need 60 lb, on hand 0 lb); N/P fertilizer blackout, not bought');
     expect(text).toContain('No Price: buy about 4 gal, no pack or price on file from Synthetic Supply (need 4 gal, on hand 0 gal)');
-    expect(text).toContain('2 x 1 gal House Liquid from Synthetic Supply (need 3.1 gal, on hand 1.2 gal, includes one spare sealed container)');
+    expect(text).toContain('2 x 1 gal House Liquid from Synthetic Supply (need 3.1 gal, on hand 1.2 gal, includes one extra pack so one pack of it is left after the week)');
   });
 
   test('the headline fits 60 characters for a long first name and for unassigned visits; the sentence fits 110', () => {
@@ -159,6 +159,13 @@ describe('held lines, partial totals and a check-only list', () => {
     expect(detailFor(none, listOf([none]))).toContain('Estimated total: 1 line has no price, so the total leaves it out');
   });
 
+  test('a priced line whose price row carries a shipping charge says "plus shipping", on the line and in the total', () => {
+    const group = entry({ items: [item({ plusShipping: true })], estTotalCents: 10700, shippingLines: 1 });
+    expect(detailFor(group, listOf([group]))).toContain('Estimated total: $107.00 plus shipping');
+    expect(detailFor(group, listOf([group]))).toMatch(/Synthetic Supply, plus shipping \(/);
+    expect(whyFor(group)).toBe('1 product to buy, preferred store Synthetic Supply North, about $107.00 plus shipping.');
+  });
+
   test('a held line that is new does not ring a recheck; a held-only list still raises its check alert once', async () => {
     const group = entry({ items: [item(), held()] });
     expect(growth(group, [{ productId: 'p1', packs: 1, shortQty: 1.9 }])).toBe(false);
@@ -199,9 +206,9 @@ describe('a list-wide warning is never dropped', () => {
   });
 });
 
-describe('a shelf check is content on its own, and rings once', () => {
+describe('a warning with nothing to buy is content on its own, and rings once', () => {
   const KEY = 'weekly-buy:tech-a:2026-12-07';
-  const shelf = 'Check the shelf: one unopened 1 gal of Synthetic Liquid should remain.';
+  const shelf = 'No pack size on file for Synthetic Liquid, so the spare cannot be worked out.';
   const group = () => entry({ items: [], estTotalCents: null, warnings: [shelf] });
 
   test('with nothing to buy and nothing else to say, the list still raises a check alert', async () => {
@@ -219,7 +226,7 @@ describe('a shelf check is content on its own, and rings once', () => {
     const result = await runWeeklyBuyList({ list: listOf([group()], { fromDate: '2026-12-09' }), io: fakeIo({ standing: { [KEY]: { open: true, cleared: false, weeklyBuy: stored } }, open: [KEY] }), notify: again });
     expect(again).not.toHaveBeenCalled();
     expect(result.unchanged).toBe(1);
-    // a buy alert already standing: the shelf check joins its text without a ring
+    // a buy alert already standing: the warning joins its text without a ring
     const buying = entry();
     const bought = notifier();
     await runWeeklyBuyList({ list: listOf([buying]), io: fakeIo(), notify: bought });

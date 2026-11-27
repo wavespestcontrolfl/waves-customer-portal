@@ -40,8 +40,8 @@ function itemLine(item) {
   const from = item.vendorName ? ` from ${item.vendorName}` : '';
   if (item.packs === 0) return `HOLD ${item.name}: short ${num(item.shortQty)} ${item.unit} (${stock}); N/P fertilizer blackout, not bought`;
   if (item.packs == null) return `${item.name}: buy about ${num(item.shortQty)} ${item.unit}, no pack or price on file${from} (${stock})`;
-  const spare = item.reasons.includes('spare_floor') ? ', includes one spare sealed container' : '';
-  return `${item.packs} x ${item.packLabel || 'pack'} ${item.name}${from} (${stock}${spare})`;
+  const spare = item.reasons.includes('spare_floor') ? ', includes one extra pack so one pack of it is left after the week' : '';
+  return `${item.packs} x ${item.packLabel || 'pack'} ${item.name}${from}${item.plusShipping ? ', plus shipping' : ''} (${stock}${spare})`;
 }
 
 function detailFor(group, list) {
@@ -65,7 +65,7 @@ const heldLines = (group) => group.items.filter((i) => i.packs === 0);
 function costParts(group) {
   const open = group.unpricedLines;
   return {
-    total: group.estTotalCents == null ? null : money(group.estTotalCents),
+    total: group.estTotalCents == null ? null : `${money(group.estTotalCents)}${group.shippingLines ? ' plus shipping' : ''}`,
     gap: open ? `${open} ${plural(open, 'line has', 'lines have')} no price, so the total leaves ${plural(open, 'it', 'them')} out` : null,
   };
 }

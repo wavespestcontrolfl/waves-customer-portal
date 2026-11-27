@@ -34,15 +34,16 @@
  * given to that technician. Packs are whole vendor packs, read the way the dispatcher
  * reads them (reorder-limit-suggestions: eligible price row, packFor, packReorder); each
  * line names the vendor that row is from, which may not be the technician's store.
- * Spare floor: for the everyday pest liquids, one SEALED container must remain after
- * the week. Opened containers do not combine: each purchase leaves sealed only what its
- * technician did not need to open, and the stock leaves whole containers after what was
- * handed out. When none would remain, one container is added once.
+ * Spare floor (a volume, not a container count: stock is one number, and nothing here can show
+ * that a container is unopened): after the week's booked need, at least one full container's
+ * worth of each everyday pest liquid (CrossCheck, Taurus) should remain. Remaining = on hand +
+ * on order + the volume bought - the week's need; under one pack size, one more pack is bought.
  * N/P fertilizer is held June 1 - Sept 30 (fertilizer-blackout.js): listed, not bought.
  */
 const db = require('../../models/db');
 const { etParts, etWeekStart, etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
+const { calcLandedCost } = require('../product-costing');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('../inventory-units');
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { packFor, packReorder, pickPriceRow } = require('./reorder-limit-suggestions');
@@ -223,9 +224,12 @@ function lineNotes(product, line) {
   return out;
 }
 
+// Cost of the packs: the catalog's own landed cost per pack (price + the row's shipping, times tax: calcLandedCost, as the
+// inventory price pages cost a row), times packs. A row that also carries a delivery or hazmat estimate (the catalog has no
+// landed-cost rule for those) is flagged "plus shipping": the line is never shown as fully priced.
 function costCents(product, packs) {
   if (!(packs > 0) || !(product.price > 0) || product.countOrder) return null;
-  return Math.round(packs * product.price * (1 + (product.tax > 0 ? product.tax : 0)) * 100);
+  return Math.round(calcLandedCost(product.price, product.shipping, product.tax > 0 ? product.tax : 0) * 100) * packs;
 }
 
 /**
@@ -264,18 +268,11 @@ function planGroups({ groups, products, techs }) {
   return out;
 }
 
-// One SEALED container of an everyday liquid should still be on the shelf after the week. The stock count is a
-// volume, not a count of containers, so it cannot prove one is sealed (two opened jugs at 0.75 gal each add up to
-// "one jug"). So, in plain words:
-//  - A pack this list buys and does not need to open is sealed for certain: no spare is needed.
-//  - Otherwise it rests on the stock that remains after what this week hands out (the shelf plus what is on order):
-//    * under one pack: buy one spare;
-//    * two packs or more: certainly one sealed, buy nothing;
-//    * one to two packs: buy nothing, and tell the technician to check the shelf, because it may be one sealed pack
-//      or two part-used ones;
-//    A line with demand always draws on the stock first, so whenever there is stock on the shelf something is handed out of it;
-//    whole packs on the shelf are never counted as sealed on the volume alone.
-// Opened containers never combine. The spare goes to the first technician with demand for the product.
+// The spare floor, as a VOLUME rule (owner 2026-11-27: keep one unopened container of the everyday liquids; the portal
+// counts volume, not containers, so it keeps one container's worth). Per product, company-wide, once, after every
+// technician's purchase: remaining = on hand + on order + volume bought - the week's whole need. Under one pack size
+// remaining: one more pack, on the first technician with demand for it. At least one pack size: nothing, no note.
+// A liquid with no pack size on file cannot be worked out: a warning on every list that uses it.
 function applySpareFloor({ order, lines, groups }) {
   const floorKeys = new Set(PEST_HOUSE_MIX.filter((e) => e.floor).map((e) => e.key));
   const byProduct = new Map();
@@ -287,19 +284,16 @@ function applySpareFloor({ order, lines, groups }) {
   for (const entries of byProduct.values()) {
     const { product } = entries[0];
     const size = product.pack?.pack;
-    if (product.hold || product.countOrder || !(size > 0)) continue;
-    const sealedBought = entries.reduce((sum, l) => sum + Math.max(0, (l.packs || 0) - Math.ceil(l.short / size - NOISE)), 0);
-    if (sealedBought >= 1) continue;
-    const drawn = entries.reduce((sum, l) => sum + (l.need - l.short), 0);
-    const packsLeft = exact((Math.max(0, product.onHand ?? 0) + product.onOrder - drawn) / size);
-    if (packsLeft >= 2 - NOISE) continue;
-    const first = entries[0];
-    if (packsLeft >= 1 - NOISE) {
-      // A warning, not a note: it must keep the list (and its alert) even when nothing is to be bought. It sits in the
-      // alert's own text, so it rings once when it first appears and refreshes quietly after.
-      groups.get(first.key).extra.add(`Check the shelf: one unopened ${product.packLabel || 'container'} of ${product.name} should remain.`);
+    if (product.hold || product.countOrder) continue;
+    if (!(size > 0)) {
+      for (const l of entries) groups.get(l.key).extra.add(`No pack size on file for ${product.name}, so the spare cannot be worked out.`);
       continue;
     }
+    const bought = entries.reduce((sum, l) => sum + (l.packs || 0) * size, 0);
+    const need = entries.reduce((sum, l) => sum + l.need, 0);
+    const remaining = Math.max(0, product.onHand ?? 0) + product.onOrder + bought - need;
+    if (exact(remaining / size) >= 1 - NOISE) continue;
+    const first = entries[0];
     first.packs = (first.packs || 0) + 1;
     first.label = product.packLabel || null;
     first.reasons = [...first.reasons, 'spare_floor'];
@@ -321,7 +315,7 @@ function itemOf(l, cents) {
   return {
     productId: l.pid, name: l.product.name, needQty: l.need, unit: l.product.unit,
     onHand: Math.max(0, l.product.onHand ?? 0), onOrder: l.product.onOrder, shortQty: l.short,
-    packs: l.packs, packLabel: l.label, estCostCents: cents,
+    packs: l.packs, packLabel: l.label, estCostCents: cents, plusShipping: Boolean(cents != null && l.product.plusShipping),
     vendorName: l.product.picked?.row?.vendor_name || l.product.picked?.vendorName || null, reasons: l.reasons,
   };
 }
@@ -345,6 +339,8 @@ function groupEntry({ key, group, lines, notes, sharing, techs }) {
     estTotalCents: items.some((i) => i.estCostCents != null) ? total : null,
     // Lines to buy with no price (no price row, no readable pack, or bought by count): the total leaves them out.
     unpricedLines: items.filter((i) => i.packs !== 0 && i.estCostCents == null).length,
+    // Priced lines whose row also carries a delivery or hazmat charge the estimate does not include.
+    shippingLines: items.filter((i) => i.plusShipping).length,
     notes: [...new Set(notes)],
     warnings: [...WARNING_TEXT.filter(([read]) => read(group)).map(([read, text]) => text(read(group))), ...[...group.extra].sort()],
   };
@@ -367,6 +363,8 @@ function toPlanProduct({ row, pricing, now, floorKey = null, onOrder = 0 }) {
     packLabel: String(picked.row?.quantity || '').trim() || null,
     price: Number.isFinite(price) ? price : null,
     tax: Number(picked.row?.tax_rate) || 0,
+    shipping: Number(picked.row?.shipping_cost) || 0,
+    plusShipping: Number(picked.row?.shipping_estimate) > 0 || Number(picked.row?.hazmat_fee_estimate) > 0,
     floorKey,
   };
 }
@@ -458,6 +456,7 @@ async function readCatalog(knex, { ids, mixRows, now }) {
       knex('vendor_pricing').leftJoin('vendors as pv', 'pv.id', 'vendor_pricing.vendor_id').whereIn('vendor_pricing.product_id', ids),
     ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price',
       'vendor_pricing.vendor_sku', 'vendor_pricing.price', 'vendor_pricing.price_amount', 'vendor_pricing.tax_rate',
+      'vendor_pricing.shipping_cost', 'vendor_pricing.shipping_estimate', 'vendor_pricing.hazmat_fee_estimate',
       'pv.name as vendor_name', 'pv.code as vendor_code')
     : [];
   const onOrderProblems = new Set();
@@ -501,25 +500,11 @@ const LAWN_CAPPED = `The lawn forecast stopped at ${FORECAST_VISIT_LIMIT} visits
  */
 async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
   const { weekStart, weekEnd, fromDate } = weekBounds(now);
-  const visits = await withCompletionKind(await weekVisits(knex, { fromDate, weekEnd }), knex);
-  const techIds = [...new Set(visits.map((v) => v.technician_id).filter(Boolean))];
-  const techRows = techIds.length ? await knex('technicians').whereIn('id', techIds).select('id', 'name', 'supply_store') : [];
-  const techs = new Map(techRows.map((t) => [String(t.id), { name: t.name, supplyStore: t.supply_store }]));
-
-  const { buildWaveGuardInventoryForecast } = require('../waveguard-inventory-forecast');
-  const forecast = await buildWaveGuardInventoryForecast({ knex, startDate: fromDate, endDate: weekEnd, limit: FORECAST_VISIT_LIMIT });
-  const lawnCapped = (forecast.serviceCount || 0) >= FORECAST_VISIT_LIMIT;
-
-  const mixCandidates = await knex('products_catalog').where('active', true).orderBy('name').orderBy('id').select('id', 'name', 'inventory_unit');
-  const mix = resolveHouseMix(mixCandidates);
-  const kit = await knex('products_catalog').where('active', true).where('per_completion_usage', '>', 0)
-    .select('id', 'per_completion_usage', 'per_completion_service_lines', 'inventory_unit');
-
-  const { visits: withTaurus, failed: taurusFailed } = await withTaurusAnswer(visits, { knex, now, mix });
-  const groups = deriveDemand({ visits: withTaurus, forecast, mix, kit });
-  const demandIds = new Set([...groups.values()].flatMap((g) => [...g.demand.keys()]));
-  const { products, onOrderProblems, onOrderUnsettled } = await inSnapshot(knex, (conn) => readCatalog(conn, { ids: [...demandIds], mixRows: mix, now }));
-  for (const pid of demandIds) {
+  // EVERYTHING the list reads, in one snapshot: a close-out between the visit read and the stock read would otherwise
+  // count the visit and its stock use twice. Nothing is written here.
+  const read = await inSnapshot(knex, (conn) => readWeek(conn, { now, fromDate, weekEnd }));
+  const { groups, products, techs, kit, onOrderProblems, onOrderUnsettled, taurusFailed, lawnCapped } = read;
+  for (const pid of read.demandIds) {
     if (!products.has(pid)) warnGroups(groups, (g) => g.demand.has(pid), 'A product with scheduled need is no longer in the catalog, so its need is left out.');
   }
   for (const pid of onOrderProblems) warnGroups(groups, (g) => g.demand.has(pid), 'An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.');
@@ -537,6 +522,30 @@ async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
     unassigned,
     warnings: [...new Set([...listWarnings, ...[...groups.values()].flatMap((g) => [...g.extra])])],
   };
+}
+
+// Every read of the week, on one connection (the caller's snapshot): visits and their close-out kinds, technicians, the
+// lawn forecast, the catalog (house mix, kit, stock), prices, what is on order, and Taurus's yearly ledger. Returns what
+// the pure planning needs.
+async function readWeek(conn, { now, fromDate, weekEnd }) {
+  const visits = await withCompletionKind(await weekVisits(conn, { fromDate, weekEnd }), conn);
+  const techIds = [...new Set(visits.map((v) => v.technician_id).filter(Boolean))];
+  const techRows = techIds.length ? await conn('technicians').whereIn('id', techIds).select('id', 'name', 'supply_store') : [];
+  const techs = new Map(techRows.map((t) => [String(t.id), { name: t.name, supplyStore: t.supply_store }]));
+
+  const { buildWaveGuardInventoryForecast } = require('../waveguard-inventory-forecast');
+  const forecast = await buildWaveGuardInventoryForecast({ knex: conn, startDate: fromDate, endDate: weekEnd, limit: FORECAST_VISIT_LIMIT });
+
+  const mixCandidates = await conn('products_catalog').where('active', true).orderBy('name').orderBy('id').select('id', 'name', 'inventory_unit');
+  const mix = resolveHouseMix(mixCandidates);
+  const kit = await conn('products_catalog').where('active', true).where('per_completion_usage', '>', 0)
+    .select('id', 'per_completion_usage', 'per_completion_service_lines', 'inventory_unit');
+
+  const { visits: withTaurus, failed: taurusFailed } = await withTaurusAnswer(visits, { knex: conn, now, mix });
+  const groups = deriveDemand({ visits: withTaurus, forecast, mix, kit });
+  const demandIds = new Set([...groups.values()].flatMap((g) => [...g.demand.keys()]));
+  const catalog = await readCatalog(conn, { ids: [...demandIds], mixRows: mix, now });
+  return { groups, techs, kit, demandIds, taurusFailed, lawnCapped: (forecast.serviceCount || 0) >= FORECAST_VISIT_LIMIT, ...catalog };
 }
 
 module.exports = {

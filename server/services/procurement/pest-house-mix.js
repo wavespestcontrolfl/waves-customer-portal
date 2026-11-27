@@ -19,7 +19,7 @@ const { convertInventoryQuantity } = require('../inventory-units');
 
 // Amounts are fl oz per visit. The client file states the totals only; its
 // header comments give the unit. `floor`: an everyday liquid the owner keeps one
-// unopened container of (owner 2026-11-27); the surfactant is not one.
+// container's worth of (owner 2026-11-27); the surfactant is not one.
 const PEST_HOUSE_MIX = Object.freeze([
   { key: 'taurus_sc', pattern: /^taurus\s*sc\b/i, totalAmount: 1.6, unit: 'fl_oz', floor: true },
   { key: 'crosscheck_plus', pattern: /^lesco\s*cross-?check\s*plus\b/i, totalAmount: 2.5, unit: 'fl_oz', floor: true },

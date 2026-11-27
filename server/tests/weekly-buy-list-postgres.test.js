@@ -97,9 +97,9 @@ jest.setTimeout(60000);
       'An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.', // the placing stake order
     ]);
     const cross = tech.items.find((i) => i.name === 'LESCO CrossCheck Plus');
-    // 0.01 gal on hand: the technician and the unassigned visit each open their own 2.5 gal pack, so one more
-    // sealed container is kept, once (on the technician's list).
-    expect(cross).toMatchObject({ unit: 'gal', packs: 2, packLabel: '2.5 gal', estCostCents: 20000, reasons: ['pest_mix', 'spare_floor'] });
+    // 0.01 gal on hand: the technician and the unassigned visit each buy a 2.5 gal pack; about 4.9 gal is left of
+    // the 5 gal bought, which is over one pack, so no spare is added.
+    expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 10000, reasons: ['pest_mix'] });
     expect(list.unassigned.items.find((i) => i.name === 'LESCO CrossCheck Plus')).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
     expect(cross.needQty).toBeCloseTo(7.5 / 128, 4);
     // The pending row at one dollar is not eligible: the approved 2.5 gal row decides the pack and the price.
