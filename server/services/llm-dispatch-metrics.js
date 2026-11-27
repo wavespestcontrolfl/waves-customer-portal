@@ -565,6 +565,42 @@ function ledgerCallRejected(value, errorCode) {
   }
 }
 
+function anthropicResponseErrorCode(value) {
+  if (value?.stop_reason === 'refusal') return 'anthropic_refusal';
+  if (value?.stop_reason === 'max_tokens') return 'anthropic_incomplete';
+  return endedWithoutText(value) ? 'empty_text' : null;
+}
+
+function geminiResponseErrorCode(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_response';
+  let geminiEnvelopeError;
+  try { ({ geminiEnvelopeError } = require('./llm/call')); } catch { return null; }
+  if (typeof geminiEnvelopeError !== 'function') return null;
+  try {
+    return geminiEnvelopeError(value, null);
+  } catch { return 'invalid_response'; }
+}
+
+function openAIResponseErrorCode(value) {
+  if (!value || typeof value !== 'object') return 'invalid_response';
+  let openAIVerdict;
+  let extractOpenAIText;
+  try { ({ openAIVerdict, extractOpenAIText } = require('./llm/call')); } catch { return null; }
+  if (typeof openAIVerdict !== 'function') return null;
+  try {
+    const out = typeof extractOpenAIText === 'function' ? extractOpenAIText(value) : '';
+    return openAIVerdict(value, out)?.code || null;
+  } catch { return 'invalid_response'; }
+}
+
+function providerResponseErrorCode(provider, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_response';
+  if (provider === 'anthropic') return anthropicResponseErrorCode(value);
+  if (provider === 'gemini') return geminiResponseErrorCode(value);
+  if (provider === 'openai') return openAIResponseErrorCode(value);
+  return null;
+}
+
 /**
  * Run one raw provider call under the ledger. `fn` resolves the provider's
  * own value — an SDK Message or a parsed JSON body — which is returned
@@ -584,25 +620,23 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
   try {
     value = await fn();
   } catch (err) {
-    // The adapters' own reason (`<provider>_<status>`, `<provider>_timeout`);
-    // llm/call.js requires this module, so its require is lazy.
+    // The adapters' own reason (`<provider>_<status>`, `<provider>_timeout`),
+    // plus `invalid_response` when a 200 body fails JSON decoding (`resp.json()`
+    // throws SyntaxError) — llm/call.js requires this module, so its require is lazy.
     let errorCode = 'error';
-    try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
+    if (err?.name === 'SyntaxError') {
+      errorCode = 'invalid_response';
+    } else {
+      try { errorCode = require('./llm/call').providerErrorReason(provider, err); } catch { /* keep the generic code */ }
+    }
     recordCall({ provider, requestedModel, ok: false, errorCode, latencyMs: Math.round(performance.now() - t0), promptVersion, laneId, policyLabel: policy });
     throw err;
   }
-  // An Anthropic Message that resolved with stop_reason 'refusal' is a
-  // failed call (the model declined; the DEEP helper falls over to OpenAI),
-  // billed for its tokens like any other answered request. 'max_tokens' is
-  // an incomplete one — the output was cut off (the DEEP helper warns and
-  // hands it back unchanged) — filed the way OpenAI's `incomplete` status
-  // already is, so the ledger's success rate and failure classes do not
-  // depend on which provider truncated (Codex r7 on #3846).
-  const errorCode = provider !== 'anthropic' ? null
-    : value?.stop_reason === 'refusal' ? 'anthropic_refusal'
-    : value?.stop_reason === 'max_tokens' ? 'anthropic_incomplete'
-    : endedWithoutText(value) ? 'empty_text'
-    : null;
+  // Classify provider-level outcomes (refusals, truncations, empty Anthropic
+  // answers) across Anthropic, Gemini, and OpenAI before callers parse or
+  // validate — preserving provider verdicts so downstream ledgerCallRejected
+  // calls never mask a refusal or MAX_TOKENS truncation as invalid_json.
+  const errorCode = providerResponseErrorCode(provider, value);
   const callId = recordCall({
     provider,
     requestedModel,
@@ -611,7 +645,7 @@ async function ledgerCall(provider, requestedModel, fn, { promptVersion = null, 
     errorCode,
     usage: extractUsage(provider, value),
     latencyMs: Math.round(performance.now() - t0),
-    providerRef: value?.id,
+    providerRef: provider === 'gemini' ? (value?.responseId || value?.id) : value?.id,
     promptVersion,
     laneId,
     policyLabel: policy,
