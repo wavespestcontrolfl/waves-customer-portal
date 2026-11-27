@@ -576,6 +576,18 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           } finally {
             delete process.env.GATE_CONTACT_LOGIN;
           }
+          // a person the call recorded as a tenant is never offered app access (the save stores no role; reports)
+          await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ role: 'tenant' });
+          await db('customers').where({ id: customerId }).update({ service_contact2_phone: null });
+          process.env.GATE_CONTACT_LOGIN = 'true';
+          try {
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: false, canGiveAppAccess: false })]);
+            await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ role: 'spouse_partner' });
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: true })]);
+          } finally {
+            delete process.env.GATE_CONTACT_LOGIN;
+          }
+          await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
           // sign-in off: nothing can give access
           expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false, canGiveAppAccess: false })]);
         });

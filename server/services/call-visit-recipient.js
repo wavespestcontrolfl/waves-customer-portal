@@ -950,7 +950,7 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
 async function listReminderContacts(customerId, { conn = db } = {}) {
   if (!customerId) return [];
   const rows = await conn(REMINDER_TABLE).where({ customer_id: customerId }).orderBy('created_at', 'asc')
-    .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'stopped_at', 'stopped_by', 'created_at');
+    .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'role', 'stopped_at', 'stopped_by', 'created_at');
   if (!rows.length) return [];
   const customer = await conn('customers').where({ id: customerId }).first();
   const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn } = require('./customer-contact');
@@ -970,8 +970,10 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     inContacts: slotKeys.has(row.phone_key),
     // Can actually sign in: the contact login is on and the holder attested this number (the same check the login uses).
     hasAppAccess: loginLive && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
-    // A contact save can give sign-in only while the contact login is on.
-    canGiveAppAccess: loginLive && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
+    // A contact save can give sign-in only while the contact login is on. Never for a person the call recorded as a
+    // TENANT: the contacts save stores no role, and a tenant must never reach the service reports (slotWithheldFromReports).
+    canGiveAppAccess: loginLive && String(row.role || '').trim().toLowerCase() !== 'tenant'
+      && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
   }));
 }
 

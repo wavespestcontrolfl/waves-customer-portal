@@ -5463,7 +5463,7 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
 // login. The account holder can stop or restart each one, or give one app
 // access through the on-location contacts editor (same consent tick). Holder
 // sessions only; a failed load hides the section.
-function ReminderContactsSection({ property, enabled, savedContactsKey, muted, buttonStyle, onGiveAccess }) {
+function ReminderContactsSection({ property, enabled, savedContactsKey, editorLocked, muted, buttonStyle, onGiveAccess }) {
   const profileId = property.customerId || property.id;
   const [list, setList] = useState([]);
   const [busyId, setBusyId] = useState(null);
@@ -5530,7 +5530,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
                 <button
                   type="button"
                   onClick={() => { if (onGiveAccess(person)) setAccessNote(true); }}
-                  disabled={!!busyId}
+                  disabled={!!busyId || editorLocked}
                   className="waves-focus-ring"
                   style={{ ...buttonStyle, position: 'relative' }}
                 >
@@ -6874,6 +6874,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                       property={property}
                       enabled={!contactSession}
                       savedContactsKey={contactSaves[property.id]}
+                      editorLocked={!!prefsLocked[contactLockKey]}
                       muted={muted}
                       buttonStyle={secondaryButton}
                       onGiveAccess={(person) => handleGiveAppAccess(property.id, person)}

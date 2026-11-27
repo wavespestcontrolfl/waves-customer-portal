@@ -19,7 +19,11 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(async () => false), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({ ok: true })) }));
-jest.mock('../models/db', () => Object.assign(jest.fn(), { raw: jest.fn(), fn: { now: jest.fn() } }));
+jest.mock('../models/db', () => {
+  const dbFn = Object.assign(jest.fn(), { raw: jest.fn(), fn: { now: jest.fn() } });
+  dbFn.transaction = jest.fn(async (cb) => cb('TRX'));
+  return dbFn;
+});
 jest.mock('../services/call-visit-recipient', () => ({
   listReminderContacts: jest.fn(async () => [{ id: 'r', firstName: 'Bob', stopped: false }]),
   setReminderContactStopped: jest.fn(async ({ stopped, by }) => ({ id: 'r', stopped, stoppedBy: stopped ? by : null })),
@@ -62,8 +66,9 @@ test('staff read the list', async () => {
 test('a staff stop and restart are recorded as staff and audited', async () => {
   const stop = await run('post', '/:id/reminder-contacts/:reminderId/stop', { id: CUSTOMER, reminderId: REMINDER });
   expect(stop.body.reminderContact).toMatchObject({ stopped: true, stoppedBy: 'staff' });
-  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: CUSTOMER, id: REMINDER, stopped: true, by: 'staff' });
-  expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_stopped', resource_id: CUSTOMER }));
+  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: CUSTOMER, id: REMINDER, stopped: true, by: 'staff', conn: 'TRX' });
+  // same transaction, and a failed audit write fails the change
+  expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_stopped', resource_id: CUSTOMER, critical: true, trx: 'TRX' }));
   await run('post', '/:id/reminder-contacts/:reminderId/restart', { id: CUSTOMER, reminderId: REMINDER });
   expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_restarted' }));
 });

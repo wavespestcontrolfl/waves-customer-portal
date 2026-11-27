@@ -2916,18 +2916,25 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
         return res.status(400).json({ error: 'Invalid id' });
       }
       const VisitRecipient = require('../services/call-visit-recipient');
-      const entry = await VisitRecipient.setReminderContactStopped({ customerId: req.params.id, id: req.params.reminderId, stopped, by: 'staff' });
+      // The change and its audit row commit together (a restart clears stopped_by, so the audit row is the only record).
+      const entry = await db.transaction(async (trx) => {
+        const changed = await VisitRecipient.setReminderContactStopped({ customerId: req.params.id, id: req.params.reminderId, stopped, by: 'staff', conn: trx });
+        if (!changed) return null;
+        await recordAuditEvent({
+          actor_type: 'technician',
+          actor_id: req.technicianId || null,
+          action: stopped ? 'customer.reminder_contact_stopped' : 'customer.reminder_contact_restarted',
+          resource_type: 'customer',
+          resource_id: req.params.id,
+          metadata: { reminder_contact_id: req.params.reminderId },
+          ip_address: req.ip,
+          user_agent: req.get('user-agent') || null,
+          critical: true,
+          trx,
+        });
+        return changed;
+      });
       if (!entry) return res.status(404).json({ error: 'Not found' });
-      await recordAuditEvent({
-        actor_type: 'technician',
-        actor_id: req.technicianId || null,
-        action: stopped ? 'customer.reminder_contact_stopped' : 'customer.reminder_contact_restarted',
-        resource_type: 'customer',
-        resource_id: req.params.id,
-        metadata: { reminder_contact_id: req.params.reminderId },
-        ip_address: req.ip,
-        user_agent: req.get('user-agent') || null,
-      }).catch(() => {});
       res.json({ reminderContact: entry });
     } catch (err) { next(err); }
     return undefined;
