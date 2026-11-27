@@ -6,16 +6,18 @@ import source from './PortalPage.jsx?raw';
 import { weedTreatmentsLine } from './PortalPage';
 
 describe('weedTreatmentsLine', () => {
-  it('rolling365: the count and "in the last 12 months"', () => {
+  it('rolling365: the count and "in the last 12 months", properly singularized for 1', () => {
     expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 2, celsiusWindow: 'rolling365' })).toBe('2 weed treatments in the last 12 months');
+    expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 1, celsiusWindow: 'rolling365' })).toBe('1 weed treatment in the last 12 months');
     expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 0, celsiusWindow: 'rolling365' })).toBe('0 weed treatments in the last 12 months');
   });
-  it('calendar_year: exactly the text it has always had', () => {
+  it('calendar_year: pluralizes properly', () => {
     expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 2, celsiusWindow: 'calendar_year' })).toBe('2 weed treatments');
+    expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 1, celsiusWindow: 'calendar_year' })).toBe('1 weed treatment');
   });
-  it('an old API response without the field: exactly the text it has always had (no singular form is added)', () => {
+  it('an old API response without the field: uses the count without a rolling window', () => {
     expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 3 })).toBe('3 weed treatments');
-    expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 1 })).toBe('1 weed treatments');
+    expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 1 })).toBe('1 weed treatment');
   });
   it('an unknown window value reads as the old text', () => {
     expect(weedTreatmentsLine({ celsiusApplicationsThisYear: 2, celsiusWindow: 'other' })).toBe('2 weed treatments');
