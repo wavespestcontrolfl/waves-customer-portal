@@ -193,22 +193,13 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source');
-      const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
-      if (sameCustomer && existing.source === REMINDER_SOURCE && !(await listedBy(visit.customer_id, entry.phoneKey, trx))) {
-        // A copy a merge moved here grants nothing (this customer does not list the number). This call's grant takes the row over
-        // IN PLACE: same visit, same number, now authorized by this customer's own call, so its delivery claims and its tracker
-        // link stay (nothing is sent twice, and a link already sent keeps working).
-        await trx(TABLE).where({ id: existing.id }).update({
-          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId,
-          first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,
-        });
-      } else if (sameCustomer) {
-        // A row already bound to this customer (a call's, or a copy this customer lists) stands as it is.
-        return 'kept';
-      } else {
-        if (existing) await trx(TABLE).where({ id: existing.id }).del();
-        await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
-      }
+      // A row bound to this customer stands as it is, unless it is a copy this customer does not list (a merge moved it here):
+      // that grants nothing, so like any ineligible row it is replaced by a fresh row with a NEW id (main's rule above).
+      const stands = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)
+        && (existing.source !== REMINDER_SOURCE || await listedBy(visit.customer_id, entry.phoneKey, trx));
+      if (stands) return 'kept';
+      if (existing) await trx(TABLE).where({ id: existing.id }).del();
+      await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
       // CREATES this visit's row for the number may list them: a reprocess of any call, or a second call about the same visit,
       // finds the row and lists nobody, so no replay order can widen a "just this visit" answer (the cost: a later call that
