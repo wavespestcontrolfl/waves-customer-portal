@@ -1,0 +1,199 @@
+/**
+ * Regression guards for the 18 admin alerts rescued from silent suppression
+ * under GATE_ADMIN_BELL_POLICY=true (combined Stripe refunds, held/blocked
+ * appointment notices & emails, and content email-approval exceptions).
+ *
+ * Every rescued site must:
+ *   1. Pass composeAdminAlert without rule violations (docs/admin-notifications.md).
+ *   2. Ring with bell: true under GATE_ADMIN_BELL_POLICY=true.
+ */
+const fs = require('fs');
+const path = require('path');
+
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../services/logger', () => ({
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+jest.mock('../config/feature-gates', () => ({
+  isEnabled: jest.fn((g) => g === 'adminBellPolicy'),
+}));
+jest.mock('../services/internal-test-customers', () => ({
+  isInternalTestCustomerId: jest.fn(() => false),
+}));
+jest.mock('../services/property-notification-prefs', () => ({
+  prefsForVisit: jest.fn(),
+  resolveAppointmentPrefs: jest.fn(),
+}));
+jest.mock('../services/appointment-email', () => ({
+  sendTechEnRouteEmail: jest.fn(),
+  sendAppointmentNoShowEmail: jest.fn(),
+}));
+jest.mock('../services/customer-contact', () => ({
+  getAppointmentContacts: jest.fn(() => [{ phone: '+19415550199', name: 'Alex', role: 'primary' }]),
+  getPrimaryContact: jest.requireActual('../services/customer-contact').getPrimaryContact,
+  isServiceContactRole: jest.requireActual('../services/customer-contact').isServiceContactRole,
+  firstNameFrom: jest.requireActual('../services/customer-contact').firstNameFrom,
+  prefsUnavailable: jest.requireActual('../services/customer-contact').prefsUnavailable,
+  PREFS_UNAVAILABLE: jest.requireActual('../services/customer-contact').PREFS_UNAVAILABLE,
+}));
+jest.mock('../services/recipient-optin', () => ({
+  filterRecipientsByOptin: jest.fn(async (contacts) => contacts),
+}));
+jest.mock('../services/messaging/send-customer-message', () => ({
+  sendCustomerMessage: jest.fn(),
+}));
+jest.mock('../services/short-url', () => ({
+  shortenOrPassthrough: jest.fn(async (u) => u),
+}));
+jest.mock('../routes/admin-sms-templates', () => ({
+  getTemplate: jest.fn(async () => 'Hello'),
+}));
+jest.mock('../services/content/autonomous-review-queue', () => ({
+  decideReviewItem: jest.fn(),
+}));
+
+const db = require('../models/db');
+const NotificationService = require('../services/notification-service');
+const bellPolicy = require('../services/notification-bell-policy');
+const Prefs = require('../services/property-notification-prefs');
+const AppointmentEmail = require('../services/appointment-email');
+const TwilioService = require('../services/twilio');
+const approvals = require('../services/content/email-approvals');
+
+function chain(result) {
+  const c = {};
+  for (const m of ['join', 'leftJoin', 'where', 'whereNull', 'whereNotNull', 'whereRaw', 'whereIn', 'orderBy', 'limit', 'select', 'first', 'insert', 'update', 'returning', 'onConflict', 'merge']) {
+    c[m] = jest.fn(() => c);
+  }
+  c.first = jest.fn(async () => (Array.isArray(result) ? result[0] : result));
+  c.then = (resolve, reject) => Promise.resolve(result).then(resolve, reject);
+  c.catch = (reject) => Promise.resolve(result).catch(reject);
+  return c;
+}
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  bellPolicy.clearOverrideCache();
+});
+
+describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
+  test('TwilioService._visitPrefsFor raises a structured bell:true alert when property prefs fail', async () => {
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n-1' });
+    db.mockImplementation((table) => {
+      if (table === 'notification_prefs') return chain([{ customer_id: 'cust-1', sms_enabled: true }]);
+      return chain([]);
+    });
+    Prefs.prefsForVisit.mockRejectedValueOnce(new Error('property_prefs_down'));
+
+    await expect(TwilioService._visitPrefsFor('cust-1', 'visit-1', 'reminder_24h_legacy'))
+      .rejects.toThrow('property_prefs_down');
+
+    expect(spy).toHaveBeenCalledWith(
+      'appointment',
+      'Schedule — contact customer after blocked visit text',
+      'The reminder 24h text was not sent because the property notification settings could not be read.',
+      expect.objectContaining({
+        bell: true,
+        link: '/admin/customers?customerId=cust-1',
+        dedupeKey: 'property-prefs-unreadable:visit-1:reminder_24h_legacy',
+      }),
+    );
+    spy.mockRestore();
+  });
+
+  test('TwilioService.sendTechEnRoute raises a structured bell:true alert when en-route email is held', async () => {
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n-2' });
+    db.mockImplementation((table) => {
+      if (table === 'customers') return chain([{ id: 'cust-2', first_name: 'Alex', phone: '+19415550199', email: 'alex@example.com' }]);
+      if (table === 'notification_prefs') return chain([{ customer_id: 'cust-2', tech_en_route: true, sms_enabled: true, en_route_channel: 'email' }]);
+      return chain([]);
+    });
+    Prefs.prefsForVisit.mockResolvedValueOnce({ customer_id: 'cust-2', tech_en_route: true, sms_enabled: true, en_route_channel: 'email' });
+    AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: false, held: true, reason: 'preferences_unavailable' });
+    const { sendCustomerMessage } = require('../services/messaging/send-customer-message');
+    sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+
+    await TwilioService.sendTechEnRoute('cust-2', 'Sam', 15, 'tok-1', { scheduledServiceId: 'visit-2' });
+
+    expect(spy).toHaveBeenCalledWith(
+      'appointment',
+      'Schedule — contact customer after held en-route email',
+      'Notification preferences could not be read, so the en-route email was not sent.',
+      expect.objectContaining({
+        bell: true,
+        link: '/admin/customers?customerId=cust-2',
+        dedupeKey: 'en-route-email-held:visit-2',
+      }),
+    );
+    spy.mockRestore();
+  });
+
+  test('content email-approvals raises a bell:true alert on late/changed/oversized/failed decisions and never rings on normal success', async () => {
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n-3' });
+    const reviewQueue = require('../services/content/autonomous-review-queue');
+
+    // Oversized draft approval rejected -> rings with bell: true
+    db.mockImplementation((table) => {
+      if (table === 'autonomous_runs') {
+        return chain([{ id: 'r1', action_type: 'blog', outcome: 'completed_pending_review', skip_reason: 'named_competitor_review', draft_payload: JSON.stringify({ title: 'T', body: 'B' }) }]);
+      }
+      if (table === 'opportunity_queue') return chain([{ id: 'o1', status: 'pending_review' }]);
+      return chain([]);
+    });
+    const oversizedRow = { id: 'a1', token: 'EA-12345678', run_id: 'r1', opportunity_id: 'o1', kind: 'named_competitor_review', draft_sha: null, email_truncated: true, last_error: null };
+    const res = await approvals._internals.executeDecision(oversizedRow, 'approved', 'owner@example.com');
+    expect(res).toEqual({ skipped: 'requires_portal_review' });
+    expect(spy).toHaveBeenCalledWith(
+      'content',
+      'Content — approve oversized content draft in portal',
+      'This draft exceeded email size limits, so your emailed approval was not applied.',
+      expect.objectContaining({
+        bell: true,
+        link: '/admin/seo',
+        dedupeKey: 'content-approval-oversized:EA-12345678',
+      }),
+    );
+
+    // Normal execution success -> does not ring a good-news bell
+    spy.mockClear();
+    reviewQueue.decideReviewItem.mockResolvedValueOnce({});
+    const okRow = { id: 'a2', token: 'EA-87654321', run_id: 'r2', opportunity_id: 'o2', kind: 'named_competitor_review', draft_sha: 'sha1' };
+    await approvals._internals.finishExecution(okRow, 'approved', 'owner@example.com');
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('bellAllowed permits all rescued categories when called with bell:true under GATE_ADMIN_BELL_POLICY=true', async () => {
+    db.mockImplementation(() => chain([]));
+    for (const category of ['billing', 'comms', 'appointment', 'content']) {
+      await expect(bellPolicy.bellAllowed({ category, options: { bell: true } })).resolves.toBe(true);
+    }
+  });
+
+  test('source pin: all 4 combined-refund sites in stripe-webhook.js and no-show hold sites in appointment-reminders.js use raiseAdminAlert with bell: true', () => {
+    const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+    for (const key of [
+      'combined-partial-refund:',
+      'combined-cumulative-refund:',
+      'combined-presettlement-partial:',
+      'combined-presettlement-full:',
+    ]) {
+      const idx = stripeSrc.indexOf(key);
+      expect(idx).toBeGreaterThan(-1);
+      const snippet = stripeSrc.slice(Math.max(0, idx - 950), idx + 120);
+      expect(snippet).toMatch(/raiseAdminAlert\('billing'/);
+      expect(snippet).toMatch(/bell:\s*true/);
+    }
+
+    const apptSrc = fs.readFileSync(path.join(__dirname, '../services/appointment-reminders.js'), 'utf8');
+    for (const key of ['held_notice_contact_enqueue_failed', 'no-show-notice-held:', 'no-show-email-held:']) {
+      const idx = apptSrc.indexOf(key);
+      expect(idx).toBeGreaterThan(-1);
+      const snippet = apptSrc.slice(Math.max(0, idx - 1100), idx + 120);
+      expect(snippet).toMatch(/raiseAdminAlert\(/);
+      expect(snippet).toMatch(/bell:\s*true/);
+    }
+  });
+});

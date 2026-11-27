@@ -3749,12 +3749,28 @@ async function handleChargeRefunded(charge) {
             .onConflict('stripe_payment_intent_id')
             .ignore();
           try {
-            await NotificationService.notifyAdmin(
-              'refund',
-              `Partial refund on combined payment: $${refundAmountDollars}`,
-              `Charge ${chargeId} settled multiple invoices; a partial refund can't be auto-attributed. Reconcile in /admin/revenue.`,
-              { icon: '⚠️', link: '/admin/revenue' },
-            );
+            const { raiseAdminAlert } = require('../services/admin-alert-compose');
+            const customerId = combinedRows[0]?.customer_id || null;
+            await raiseAdminAlert('billing', {
+              area: 'Billing',
+              action: 'reconcile a partial refund on a combined charge',
+              why: `A $${Number(refundAmountDollars).toFixed(2)} partial refund hit a multi-invoice charge and could not be split automatically.`,
+              severity: 'needs-you',
+              link: '/admin/revenue',
+              subject: customerId ? { type: 'customer', id: String(customerId) } : { type: 'check', id: `combined-refund:${chargeId}` },
+              doneWhen: 'refund_reconciled',
+              who: 'person',
+            }, {
+              bell: true,
+              dedupeKey: `combined-partial-refund:${chargeId}:${refundId || 'unknown'}`,
+              detail: `Partial refund ${refundId || 'unknown'} of $${refundAmountDollars} on combined charge ${chargeId} settled multiple invoices and cannot be auto-attributed. Reconcile in /admin/revenue.`,
+              metadata: {
+                stripe_charge_id: chargeId,
+                stripe_refund_id: refundId || null,
+                amount: refundAmountDollars,
+                ...(customerId ? { customer_id: customerId } : {}),
+              },
+            });
           } catch { /* non-critical */ }
           return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
         }
@@ -3783,12 +3799,28 @@ async function handleChargeRefunded(charge) {
             .onConflict('stripe_payment_intent_id')
             .ignore();
           try {
-            await NotificationService.notifyAdmin(
-              'refund',
-              `Combined charge fully refunded via partials: $${cumulativeRefundAmountDollars}`,
-              `Charge ${chargeId} is now fully refunded through multiple partial refunds. No rows were auto-unwound — reconcile the constituents in /admin/revenue.`,
-              { icon: '⚠️', link: '/admin/revenue' },
-            );
+            const { raiseAdminAlert } = require('../services/admin-alert-compose');
+            const customerId = combinedRows[0]?.customer_id || null;
+            await raiseAdminAlert('billing', {
+              area: 'Billing',
+              action: 'reconcile a combined charge refunded in parts',
+              why: `$${Number(cumulativeRefundAmountDollars).toFixed(2)} was refunded across multiple partials, so no invoices were unwound automatically.`,
+              severity: 'needs-you',
+              link: '/admin/revenue',
+              subject: customerId ? { type: 'customer', id: String(customerId) } : { type: 'check', id: `combined-refund:${chargeId}` },
+              doneWhen: 'refund_reconciled',
+              who: 'person',
+            }, {
+              bell: true,
+              dedupeKey: `combined-cumulative-refund:${chargeId}:${refundId || 'unknown'}`,
+              detail: `Combined charge ${chargeId} is now fully refunded ($${cumulativeRefundAmountDollars} total; final partial ${refundId || 'unknown'} of $${refundAmountDollars}). No rows were auto-unwound — reconcile the constituents in /admin/revenue.`,
+              metadata: {
+                stripe_charge_id: chargeId,
+                stripe_refund_id: refundId || null,
+                amount: cumulativeRefundAmountDollars,
+                ...(customerId ? { customer_id: customerId } : {}),
+              },
+            });
           } catch { /* non-critical */ }
           return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
         }
@@ -3961,12 +3993,31 @@ async function handleChargeRefunded(charge) {
               .onConflict('stripe_payment_intent_id')
               .ignore();
             try {
-              await NotificationService.notifyAdmin(
-                'refund',
-                `${cumulativeFullPreSettle ? 'Combined charge fully refunded via partials (pre-settlement)' : 'Partial refund on combined payment'}: $${refundAmountDollars}`,
-                `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? 'it is now FULLY refunded across multiple partial refunds — every constituent is parked' : 'a partial refund can\'t be auto-attributed'}. Reconcile in /admin/revenue.`,
-                { icon: '⚠️', link: '/admin/revenue' },
-              );
+              const { raiseAdminAlert } = require('../services/admin-alert-compose');
+              await raiseAdminAlert('billing', {
+                area: 'Billing',
+                action: cumulativeFullPreSettle
+                  ? 'reconcile an unsettled combined charge refund'
+                  : 'reconcile a pre-settlement partial refund',
+                why: cumulativeFullPreSettle
+                  ? `$${Number(refundAmountDollars).toFixed(2)} completed a multi-partial refund on an unsettled combined charge and was parked.`
+                  : `A $${Number(refundAmountDollars).toFixed(2)} partial refund hit an unsettled multi-invoice charge and was parked for review.`,
+                severity: 'needs-you',
+                link: '/admin/revenue',
+                subject: { type: 'check', id: `combined-refund:${chargeId}` },
+                doneWhen: 'refund_reconciled',
+                who: 'person',
+              }, {
+                bell: true,
+                dedupeKey: `combined-presettlement-partial:${chargeId}:${refundId || 'unknown'}`,
+                detail: `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? `it is now fully refunded across multiple partial refunds (final partial ${refundId || 'unknown'} of $${refundAmountDollars}) — every constituent is parked` : `partial refund ${refundId || 'unknown'} of $${refundAmountDollars} cannot be auto-attributed`}. Reconcile in /admin/revenue.`,
+                metadata: {
+                  stripe_charge_id: chargeId,
+                  stripe_payment_intent_id: charge.payment_intent || null,
+                  stripe_refund_id: refundId || null,
+                  amount: refundAmountDollars,
+                },
+              });
             } catch { /* non-critical */ }
             return null;
           }
@@ -3991,12 +4042,27 @@ async function handleChargeRefunded(charge) {
             }),
           }).returning('*');
           try {
-            await NotificationService.notifyAdmin(
-              'refund',
-              `Combined payment refunded pre-settlement: $${refundAmountDollars}`,
-              `Charge ${chargeId} (combined PI ${charge.payment_intent}) was fully refunded before settlement — settlement is fenced; no invoice was marked paid.`,
-              { icon: '⚠️', link: '/admin/revenue' },
-            );
+            const { raiseAdminAlert } = require('../services/admin-alert-compose');
+            await raiseAdminAlert('billing', {
+              area: 'Billing',
+              action: 'review a pre-settlement combined refund',
+              why: `A $${Number(refundAmountDollars).toFixed(2)} combined payment was refunded before settlement, so settlement was fenced.`,
+              severity: 'needs-you',
+              link: '/admin/revenue',
+              subject: { type: 'check', id: `combined-refund:${chargeId}` },
+              doneWhen: 'refund_reviewed',
+              who: 'person',
+            }, {
+              bell: true,
+              dedupeKey: `combined-presettlement-full:${chargeId}:${refundId || 'unknown'}`,
+              detail: `Charge ${chargeId} (combined PI ${charge.payment_intent}) was fully refunded for $${refundAmountDollars} before settlement — settlement is fenced; no invoice was marked paid.`,
+              metadata: {
+                stripe_charge_id: chargeId,
+                stripe_payment_intent_id: charge.payment_intent || null,
+                stripe_refund_id: refundId || null,
+                amount: refundAmountDollars,
+              },
+            });
           } catch { /* non-critical */ }
           return refundFence;
         }

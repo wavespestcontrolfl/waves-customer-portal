@@ -2799,22 +2799,30 @@ async function queueHeldNoticeContacts({ customer, heldContacts, messageType, pu
     }
     logger.error(`[appt-remind] held ${messageType} requeue failed for ${held.contact.role || 'contact'} (customer ${customer.id}) after 3 attempts: ${lastErr?.message}`);
     try {
-      await require('./notification-service').notifyAdmin(
-        'comms',
-        'Held appointment notice needs a manual send',
-        `A ${messageType} text to a ${held.contact.role || 'service'} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
-        {
-          link: `/admin/customers?customerId=${customer.id}`,
-          metadata: {
-            customerId: customer.id,
-            scheduledServiceId: metaExtra.scheduled_service_id || null,
-            messageType,
-            contactRole: held.contact.role || null,
-            reason: 'held_notice_contact_enqueue_failed',
-            heldForWindowOpen: held.nextAllowedAt,
-          },
+      const { raiseAdminAlert } = require('./admin-alert-compose');
+      const noticeWords = String(messageType || 'appointment').replace(/_/g, ' ').slice(0, 28);
+      const roleWords = String(held.contact.role || 'service').replace(/_/g, ' ').slice(0, 18);
+      await raiseAdminAlert('comms', {
+        area: 'Comms',
+        action: 'send a held appointment notice manually',
+        why: `A held ${noticeWords} text for a ${roleWords} contact could not be queued after 3 tries.`,
+        severity: 'needs-you',
+        link: `/admin/customers?customerId=${customer.id}`,
+        subject: { type: 'customer', id: String(customer.id) },
+        doneWhen: 'notice_sent_manually',
+        who: 'person',
+      }, {
+        bell: true,
+        detail: `A ${messageType} text to a ${held.contact.role || 'service'} contact was held for the 8 AM window but could not be queued, and the notice was already finalized for the other contact — send it from the composer.`,
+        metadata: {
+          customerId: customer.id,
+          scheduledServiceId: metaExtra.scheduled_service_id || null,
+          messageType,
+          contactRole: held.contact.role || null,
+          reason: 'held_notice_contact_enqueue_failed',
+          heldForWindowOpen: held.nextAllowedAt,
         },
-      );
+      });
     } catch (notifyErr) {
       logger.error(`[appt-remind] held-notice exception alert failed for customer ${customer.id}: ${notifyErr.message}`);
     }
@@ -6585,9 +6593,28 @@ const AppointmentReminders = {
         // "sent" over a hold (in-session review on f9945dc89).
         logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: notification preferences unreadable — office to follow up`);
         try {
-          await require('./notification-service').notifyAdmin('appointment', 'No-show notice not sent',
-            `The no-show text for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            { dedupeKey: `no-show-notice-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } });
+          const { raiseAdminAlert } = require('./admin-alert-compose');
+          const { fullName, fitAction } = require('./admin-alert-names');
+          const name = fullName(customer) || 'the customer';
+          await raiseAdminAlert('appointment', {
+            area: 'Schedule',
+            action: fitAction('Schedule', name, [
+              (w) => `send ${w}'s no-show text`,
+              (w) => `contact ${w} about a no-show`,
+              () => 'send a no-show text manually',
+            ]),
+            why: 'Notification preferences could not be read, so the no-show text was not sent.',
+            severity: 'needs-you',
+            link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
+            subject: { type: 'visit', id: String(scheduledServiceId) },
+            doneWhen: 'customer_contacted',
+            who: 'person',
+          }, {
+            bell: true,
+            dedupeKey: `no-show-notice-held:${scheduledServiceId}`,
+            detail: `The no-show text for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            metadata: { scheduledServiceId, customerId: svc.customer_id },
+          });
         } catch (bellErr) {
           logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
         }
@@ -6616,9 +6643,28 @@ const AppointmentReminders = {
         // no retry rail here either — bell the office (GitHub codex r4 P1).
         if (noShowEmail?.held) {
           logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
-          await require('./notification-service').notifyAdmin('appointment', 'No-show email not sent',
-            `The no-show email for ${customer.first_name || ''} ${customer.last_name || ''} could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            { dedupeKey: `no-show-email-held:${scheduledServiceId}`, metadata: { scheduledServiceId, customerId: svc.customer_id } })
+          const { raiseAdminAlert } = require('./admin-alert-compose');
+          const { fullName, fitAction } = require('./admin-alert-names');
+          const name = fullName(customer) || 'the customer';
+          await raiseAdminAlert('appointment', {
+            area: 'Schedule',
+            action: fitAction('Schedule', name, [
+              (w) => `send ${w}'s no-show email`,
+              (w) => `contact ${w} about a no-show`,
+              () => 'send a no-show email manually',
+            ]),
+            why: 'Notification preferences could not be read, so the no-show email was not sent.',
+            severity: 'needs-you',
+            link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
+            subject: { type: 'visit', id: String(scheduledServiceId) },
+            doneWhen: 'customer_contacted',
+            who: 'person',
+          }, {
+            bell: true,
+            dedupeKey: `no-show-email-held:${scheduledServiceId}`,
+            detail: `The no-show email for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+            metadata: { scheduledServiceId, customerId: svc.customer_id },
+          })
             .catch((bellErr) => logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`));
         }
       } catch (e) {
