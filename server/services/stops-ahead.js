@@ -299,7 +299,30 @@ async function countStopsAhead(db, serviceId, today) {
            AND sib.id <> tr.id
            AND ${placedOrLegacySql('sib')}
            AND (sib.status IN ('en_route', 'on_site', 'completed')
-                OR sib.track_state IN ('en_route', 'on_property', 'complete')))::int AS sibling_advanced
+                OR sib.track_state IN ('en_route', 'on_property', 'complete')))::int AS sibling_advanced,
+       -- Also for the peek, still the same snapshot: the target's stop identity, its open member lines, and
+       -- how many physical stops (technician + slot) the customer has open that day, by the customer-facing
+       -- tracker rule (track-transitions customerTrackState + context-aggregator liveServicesQuery): a
+       -- terminal status wins, a terminal track_state (a completed visit left 'confirmed') is closed, and a
+       -- 'rescheduled' row is open only while its tracker is live. Expired estimate-slot holds never count.
+       (SELECT technician_id::text FROM target_row) AS t_technician_id,
+       (SELECT customer_id::text FROM target_row) AS t_customer_id,
+       (SELECT scheduled_date::text FROM target_row) AS t_scheduled_date,
+       (SELECT window_start::text FROM target_row) AS t_window_start,
+       (SELECT array_agg(m.id::text ORDER BY m.id) FROM scheduled_services m, target_row tr
+         WHERE m.technician_id = tr.technician_id
+           AND m.scheduled_date = tr.scheduled_date
+           AND m.customer_id = tr.customer_id
+           AND m.window_start IS NOT DISTINCT FROM tr.window_start
+           AND m.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')) AS member_ids,
+       (SELECT COUNT(DISTINCT (COALESCE(o.technician_id::text, ''), COALESCE(o.window_start::text, '')))
+          FROM scheduled_services o, target_row tr
+         WHERE o.customer_id = tr.customer_id
+           AND o.scheduled_date = tr.scheduled_date
+           AND o.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show')
+           AND COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled', 'no_show')
+           AND (o.status <> 'rescheduled' OR o.track_state IN ('en_route', 'on_property'))
+           AND (o.reservation_expires_at IS NULL OR o.reservation_expires_at > NOW()))::int AS open_stops_today
        FROM grp g, target t`,
     // Binding order mirrors the SQL order: the group_floor subquery's
     // display date, the sibling-anchor lateral (route-excluded), the
@@ -365,6 +388,12 @@ async function countStopsAhead(db, serviceId, today) {
   return {
     svc, svcDate, groupFloor, raw, clamped, yourStop, totalStops, currentStop, atStop, headingToStop,
     tied: Number(agg?.tied), targetRows: Number(agg?.target_rows), siblingAdvanced: Number(agg?.sibling_advanced),
+    stop: {
+      technicianId: agg?.t_technician_id ?? null, customerId: agg?.t_customer_id ?? null,
+      date: agg?.t_scheduled_date ?? null, windowStart: agg?.t_window_start ?? null,
+    },
+    memberIds: Array.isArray(agg?.member_ids) ? agg.member_ids : [],
+    openStopsToday: Number(agg?.open_stops_today),
   };
 }
 
@@ -543,7 +572,12 @@ async function peekStopsAhead(db, serviceId, { today = etDateString() } = {}) {
   if (!counted || counted.svc.window_start == null || counted.tied !== 0) return null;
   if (counted.targetRows !== 1 || counted.siblingAdvanced !== 0) return null;
   if (Number.isInteger(counted.groupFloor) && counted.groupFloor < counted.raw) return null;
-  return { stopsAhead: counted.raw, atStop: counted.atStop, headingToStop: counted.headingToStop };
+  // stop / memberIds / openStopsToday come from the count's own snapshot, so a caller can check the
+  // identity and the single-stop rule without a second read (sms-route-status).
+  return {
+    stopsAhead: counted.raw, atStop: counted.atStop, headingToStop: counted.headingToStop,
+    stop: counted.stop, memberIds: counted.memberIds, openStopsToday: counted.openStopsToday,
+  };
 }
 
 // True when the visit's scheduled_date is today in ET — the only day

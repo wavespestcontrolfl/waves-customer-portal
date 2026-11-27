@@ -40,7 +40,7 @@ function baseSvc(overrides = {}) {
 function makeDb({
   svcRow, siblings = [], countN = 0, beforeAll, othersAll, doneBefore = 0,
   atBefore = 0, enrouteBefore = 0, progressedBeyond = 0, groupFloor = null,
-  reReadFloor = null, rawFloor, rawError = null, tied = 0, countError = null, targetRows = 1, siblingAdvanced = 0,
+  reReadFloor = null, rawFloor, rawError = null, tied = 0, countError = null, targetRows = 1, siblingAdvanced = 0, openStopsToday = 1, memberIds = ['svc-self'],
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -76,6 +76,9 @@ function makeDb({
           tied,
           target_rows: targetRows,
           sibling_advanced: siblingAdvanced,
+          t_technician_id: 'tech-1', t_customer_id: 'customer-1', t_scheduled_date: TODAY, t_window_start: '10:00:00',
+          member_ids: memberIds,
+          open_stops_today: openStopsToday,
           group_floor: groupFloor,
         }],
       });
@@ -422,10 +425,20 @@ describe('peekStopsAhead', () => {
   });
   test('returns the real count and the truck phase without writing the floor', async () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 2, atBefore: 1 });
-    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toEqual({ stopsAhead: 2, atStop: true, headingToStop: false });
+    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toEqual({
+      stopsAhead: 2, atStop: true, headingToStop: false,
+      // read in the SAME count statement: the stop identity, its open lines, the customer's open stops today
+      stop: { technicianId: 'tech-1', customerId: 'customer-1', date: TODAY, windowStart: '10:00:00' },
+      memberIds: ['svc-self'], openStopsToday: 1,
+    });
     expect(db.updateCalls()).toHaveLength(0);
     expect(db.reReadCalls()).toHaveLength(0);
-    expect(db.countCall()[0]).toContain('AS tied');
+    const [countSql] = db.countCall();
+    for (const col of ['AS tied', 'AS target_rows', 'AS sibling_advanced', 'AS member_ids', 'AS open_stops_today']) expect(countSql).toContain(col);
+    // the open-stop count uses the customer-facing tracker rule, not raw status alone
+    expect(countSql).toContain("COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled', 'no_show')");
+    expect(countSql).toContain("(o.status <> 'rescheduled' OR o.track_state IN ('en_route', 'on_property'))");
+    expect(db.raw).toHaveBeenCalledTimes(2); // the eligibility read + the one count statement
   });
   test('a floor below the real count (a stop was added ahead) gives no count, never the lower number', async () => {
     expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 0 }), 'svc-self', { today: TODAY })).toBeNull();

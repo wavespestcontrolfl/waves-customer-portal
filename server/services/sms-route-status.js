@@ -22,23 +22,32 @@
 // failed read refuses it as retryable. Wording about stops that is not a verbatim fact sentence refuses too.
 const logger = require('./logger');
 
-// Any wording that states the visit's place on the route: how many stops / visits / jobs come first, that the
-// visit is next or first, or where it sits in line. Deliberately broad (when in doubt it is a claim): route
-// wording the facts did not give is refused at draft and at send. Matched on folded text (lowercase, ASCII).
+// ROUTE WORDING, structural (one rule, not a phrase list): a reply states the visit's place on the route when,
+// within one short span, it pairs
+//   (a) a COUNT or an ORDER word (a digit, a number word, a few / a couple / several / more, next / first /
+//       last / second / third) with "stop(s)" — "stop" is route vocabulary on its own; or
+//   (b) a COUNT or ORDER word with another ROUTE NOUN (visit, house, home, job, customer, appointment) AND a
+//       POSITION link (before / ahead of / in front of / until / then / and then / after that) to you / yours;
+//   (c) any ROUTE NOUN or COUNT followed by "then (it's) you(rs)" / "and then you"; or
+//   (d) the customer's own position: "you're next / first / last", "next on the route / list / line".
+// Every such reply must carry its claim as a verbatim ROUTE STATUS sentence (draft check and send check).
+// Plan counts and scheduling copy carry no position link to "you" ("You have 2 visits left this year", "Your
+// next visit is Tuesday") and stay outside it. Matched on folded text (lowercase, ASCII apostrophes).
 // No "call": "Please call before your appointment" is a callback instruction, not a stop.
-const ROUTE_UNIT = '(?:stops?|visits?|jobs?|appointments?|homes?|houses?|customers?)';
+const COUNT = "(?:\\d+(?:st|nd|rd|th)?|one|two|three|four|five|six|seven|eight|nine|ten|a\\s+few|a\\s+couple(?:\\s+of)?|couple(?:\\s+of)?|several|some|more|next|first|last|second|third)";
+const ROUTE_NOUN = '(?:visits?|houses?|homes?|jobs?|customers?|appointments?|stops?)';
+const GAP = '(?:[\\w\']+[\\s,]+){0,3}?'; // up to three words between, the "short span"
+const TO_YOU = "(?:it's\\s+|it\\s+is\\s+|comes?\\s+|will\\s+be\\s+)?(?:you|yours)\\b";
+const POSITION = `(?:before|ahead\\s+of|in\\s+front\\s+of|until|prior\\s+to|then|and\\s+then|after\\s+that|after\\s+which)\\s+${TO_YOU}`;
 const STOP_COUNT_WORDING_RE = new RegExp([
-  'next\\s+stops?',
-  `${ROUTE_UNIT}\\s+(?:before|ahead\\s+of|until|left\\s+before|in\\s+front\\s+of)\\s+(?:yours|you|your)`,
-  // "before / ahead" only: "You have 2 visits left this year" is a plan count, not route wording
-  `(?:\\d+|one|two|three|four|five|six|a\\s+few|a\\s+couple(?:\\s+of)?|several|some|more)\\s+(?:more\\s+)?${ROUTE_UNIT}\\s+(?:before|ahead)`,
-  `\\d+\\s+(?:more\\s+)?stops?`,
-  `stops?\\s+(?:away|out|ahead|left|to\\s+go)`,
-  "(?:you're|you are|your (?:visit|home|house|appointment|stop)(?:'s| is)?)\\s+(?:up\\s+)?(?:next|first|last)\\b(?!\\s+(?:week|month|year|time|monday|tuesday|wednesday|thursday|friday|saturday|sunday|thing))",
-  "(?:you're|you are|your (?:visit|home|house|appointment|stop)(?:'s| is)?)\\s+(?:his|her|their|our|the)\\s+(?:next|first|last)\\b",
-  '(?:up\\s+)?next\\s+(?:on|in)\\s+(?:the\\s+|his\\s+|her\\s+|their\\s+|our\\s+)?(?:route|list|line|schedule|queue)',
-  '(?:first|last|second|third)\\s+(?:stop|on\\s+(?:the|his|her|their|our)\\s+(?:route|list|schedule))',
-  '(?:on|in)\\s+(?:the\\s+|his\\s+|her\\s+|their\\s+)?(?:route|queue|line)\\s+(?:after|before|behind)',
+  `${COUNT}[\\s,]+${GAP}stops?\\b`,
+  `stops?\\s+(?:away|out|ahead|left|to\\s+go)\\b`,
+  `${COUNT}[\\s,]+${GAP}${ROUTE_NOUN}\\b[\\s,]+${GAP}${POSITION}`,
+  `${ROUTE_NOUN}\\b[\\s,]+${GAP}(?:then|and\\s+then|after\\s+that)\\s+${TO_YOU}`,
+  "(?:you're|you\\s+are|your\\s+(?:visit|home|house|appointment|stop)(?:'s|\\s+is)?)\\s+(?:up\\s+)?(?:next|first|last)\\b(?!\\s+(?:week|month|year|time|monday|tuesday|wednesday|thursday|friday|saturday|sunday|thing))",
+  "(?:you're|you\\s+are|your\\s+(?:visit|home|house|appointment|stop)(?:'s|\\s+is)?)\\s+(?:his|her|their|our|the)\\s+(?:next|first|last)\\b",
+  '(?:up\\s+)?next\\s+(?:on|in)\\s+(?:the\\s+|his\\s+|her\\s+|their\\s+|our\\s+)?(?:route|list|line|schedule|queue)\\b',
+  '(?:first|last|second|third)\\s+on\\s+(?:the|his|her|their|our)\\s+(?:route|list|schedule)\\b',
 ].map((p) => `\\b(?:${p})`).join('|'), 'i');
 
 const NEXT_STOP_SENTENCE = "Your visit is your technician's next stop today.";
@@ -53,18 +62,23 @@ function routeStatusSentence(result) {
   return `Your technician has ${n} ${n === 1 ? 'stop' : 'stops'} before yours today.`;
 }
 
-// The current sentence for one visit. THROWS when the route cannot be read (send time holds the send as
-// retryable); null when no sentence applies.
-async function currentRouteStatusSentence(dbh, scheduledServiceId) {
+// The current route status of one visit, from ONE read (peekStopsAhead's count statement also returns the
+// stop identity, its open member lines and the customer's open stops that day): { sentence, stop, memberIds },
+// or null when no sentence applies. Only a customer with exactly ONE open physical stop that day gets one:
+// with two (a pest and a lawn visit), a reply cannot be bound to the stop a sentence is about. THROWS when
+// the route cannot be read (send time holds the send as retryable).
+async function currentRouteStatus(dbh, scheduledServiceId) {
   const { peekStopsAhead } = require('./stops-ahead');
   const result = await peekStopsAhead(dbh, scheduledServiceId);
-  return routeStatusSentence(result);
+  const sentence = routeStatusSentence(result);
+  if (!sentence || result.openStopsToday !== 1 || !result.stop?.technicianId) return null;
+  return { sentence, stop: result.stop, memberIds: result.memberIds || [] };
 }
 
 // Drafting side: fail soft. Any read failure is no sentence (logged with the visit id only).
 async function routeStatusFactFor(dbh, scheduledServiceId) {
   try {
-    return await currentRouteStatusSentence(dbh, scheduledServiceId);
+    return await currentRouteStatus(dbh, scheduledServiceId);
   } catch (err) {
     logger.warn(`[sms-route-status] route status read failed for scheduled_service ${scheduledServiceId}: ${err.message}`);
     return null;
@@ -112,50 +126,20 @@ function usableRouteStatusEntries(routeStatus) {
 // Send-time reasons. 'route_status_recheck_failed' is infrastructure (retryable); the others are verdicts.
 const ROUTE_STATUS_RECHECK_FAILED = 'route_status_recheck_failed';
 
-// The snapshot's lines must still be ONE physical stop: every listed visit still exists, is not terminal,
-// and shares the representative's technician, day, customer and arrival slot. A sibling moved to another
-// technician or window (or cancelled) means the sentence may no longer be about the service the draft named.
-// THROWS on a read failure.
-const LINE_GONE_STATUSES = ['completed', 'cancelled', 'skipped', 'no_show', 'rescheduled'];
-const sameStop = (a, b) => String(a.technician_id ?? '') === String(b.technician_id ?? '')
-  && String(a.customer_id ?? '') === String(b.customer_id ?? '')
-  && dateKey(a.scheduled_date) === dateKey(b.scheduled_date)
-  && String(a.window_start ?? '') === String(b.window_start ?? '');
-function dateKey(value) {
-  const { dateOnlyString } = require('../utils/date-only');
-  return dateOnlyString(value);
-}
-// The stop identity a route sentence was drafted for (technician, customer, day, slot), persisted with it.
-function stopIdentity(row, customerId) {
-  return { technicianId: row.technician_id ?? null, customerId: customerId ?? row.customer_id ?? null, date: dateKey(row.scheduled_date), windowStart: row.window_start ?? null };
-}
-const identityRow = (stop) => ({ technician_id: stop.technicianId, customer_id: stop.customerId, scheduled_date: stop.date, window_start: stop.windowStart });
-
-// How many physical stops (technician + arrival slot) the customer still has open on that day. A sentence is
-// given only when there is exactly ONE: with two (a pest and a lawn visit), a reply cannot be bound to the
-// stop the sentence is about. THROWS on a read failure.
-async function openStopsOnDay(dbh, customerId, day) {
-  const rows = await dbh('scheduled_services').where('customer_id', customerId).where('scheduled_date', day)
-    .whereNotIn('status', LINE_GONE_STATUSES).select('technician_id', 'window_start');
-  return new Set((rows || []).map((r) => `${r.technician_id ?? ''}:${r.window_start ?? ''}`)).size;
-}
-
-// Send time: every listed line still exists, is open, and is still the SAME stop the sentence was drafted for
-// (the persisted identity, so a stop that moved whole, or a one-line stop, is caught too); and the customer
-// still has exactly one open stop that day. THROWS on a read failure.
-async function stopMembersIntact(dbh, entry) {
-  if (!entry.stop) return false;
-  const ids = [...new Set([entry.scheduledServiceId, ...(Array.isArray(entry.scheduledServiceIds) ? entry.scheduledServiceIds : [])].filter((id) => id != null).map(String))];
-  const rows = await dbh('scheduled_services').whereIn('id', ids).select('id', 'technician_id', 'customer_id', 'scheduled_date', 'window_start', 'status');
-  if (!Array.isArray(rows) || rows.length !== ids.length) return false;
-  const drafted = identityRow(entry.stop);
-  if (!rows.every((r) => !LINE_GONE_STATUSES.includes(r.status) && sameStop(r, drafted))) return false;
-  return (await openStopsOnDay(dbh, entry.stop.customerId, entry.stop.date)) === 1;
+// Same stop as drafted: the identity read with the count equals the persisted one (so a stop that moved whole,
+// or a one-line stop, is caught), and every line the snapshot listed is still an open member of it.
+const IDENTITY_KEYS = ['technicianId', 'customerId', 'date', 'windowStart'];
+function sameStopAsDrafted(entry, now) {
+  if (!entry.stop || !now) return false;
+  if (!IDENTITY_KEYS.every((k) => String(entry.stop[k] ?? '') === String(now.stop[k] ?? ''))) return false;
+  const members = new Set(now.memberIds.map(String));
+  const listed = [entry.scheduledServiceId, ...(Array.isArray(entry.scheduledServiceIds) ? entry.scheduledServiceIds : [])].filter((id) => id != null);
+  return listed.every((id) => members.has(String(id)));
 }
 
 // null when the outgoing body may go out as far as the route status goes, else a reason string.
-//   - the body copies a snapshot sentence: every line of that stop must still be one stop, and the
-//     sentence re-derived now must match; otherwise 'route_status_changed'. A read failure =
+//   - the body copies a snapshot sentence: one read re-derives the sentence, the stop identity, its member
+//     lines and the single-stop rule; any difference = 'route_status_changed'. A read failure =
 //     'route_status_recheck_failed'.
 //   - route wording that is not a copied snapshot sentence: 'route_status_unbound'. This holds for every
 //     decision drafted with the route status opted in, which persists routeStatus as an array (empty when
@@ -171,12 +155,12 @@ async function routeStatusBlockReason({ liveEtaSnapshot, outgoingBody, dbh }) {
   for (const entry of quoted) {
     let now;
     try {
-      now = (await stopMembersIntact(dbh, entry)) ? await currentRouteStatusSentence(dbh, entry.scheduledServiceId) : null;
+      now = await currentRouteStatus(dbh, entry.scheduledServiceId);
     } catch (err) {
       logger.warn(`[sms-route-status] send-time route status read failed for scheduled_service ${entry.scheduledServiceId}: ${err.message}; holding the send (retryable)`);
       return ROUTE_STATUS_RECHECK_FAILED;
     }
-    if (now == null || fold(now) !== fold(entry.sentence)) return 'route_status_changed';
+    if (!sameStopAsDrafted(entry, now) || fold(now.sentence) !== fold(entry.sentence)) return 'route_status_changed';
   }
   return null;
 }
@@ -185,12 +169,10 @@ module.exports = {
   STOP_COUNT_WORDING_RE,
   ROUTE_STATUS_RECHECK_FAILED,
   routeStatusSentence,
-  currentRouteStatusSentence,
+  currentRouteStatus,
   routeStatusFactFor,
   routeStatusDraftViolation,
   routeStatusSentencesInFacts,
   routeStatusBlockReason,
   mentionsStopCount,
-  stopIdentity,
-  openStopsOnDay,
 };

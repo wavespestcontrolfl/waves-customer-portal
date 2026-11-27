@@ -5,12 +5,6 @@
  */
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
 jest.mock('../services/stops-ahead', () => ({ peekStopsAhead: jest.fn() }));
-// The root pool, as context-aggregator's drafting read sees it: the open stops the customer has today.
-const mockTodayStops = { rows: [{ technician_id: 't1', window_start: '10:00:00' }], fail: false };
-jest.mock('../models/db', () => jest.fn(() => {
-  const q = { where: () => q, whereNotIn: () => q, select: () => (mockTodayStops.fail ? Promise.reject(new Error('down')) : Promise.resolve(mockTodayStops.rows)) };
-  return q;
-}));
 
 const { peekStopsAhead } = require('../services/stops-ahead');
 const routeStatus = require('../services/sms-route-status');
@@ -20,13 +14,9 @@ const GATE = 'GATE_SMS_REAL_ANSWERS';
 const TWO = 'Your technician has 2 stops before yours today.';
 const STOP = { technicianId: 't1', customerId: 'c1', date: '2026-11-26', windowStart: '10:00:00' };
 const snap = (sentence = TWO, id = 'svc-1', ids = [id], stop = STOP) => [{ scheduledServiceId: id, scheduledServiceIds: ids, sentence, stop }];
-// The send-time reads (knex-shaped): the stop's own lines (whereIn) and the customer's open stops that day (where chain).
-const ROW = (id, o = {}) => ({ id, technician_id: 't1', customer_id: 'c1', scheduled_date: '2026-11-26', window_start: '10:00:00', status: 'confirmed', ...o });
-const rowsDb = (rows = [ROW('svc-1')], { fail = false, dayRows = rows } = {}) => jest.fn(() => {
-  const read = (out) => (fail ? Promise.reject(new Error('read down')) : Promise.resolve(out));
-  const day = { where: () => day, whereNotIn: () => day, select: () => read(dayRows) };
-  return { whereIn: () => ({ select: () => read(rows) }), where: () => day };
-});
+// A peekStopsAhead result: the count plus what the same read returns (stop identity, open member lines,
+// the customer's open physical stops that day).
+const P = (n, o = {}) => ({ stopsAhead: n, atStop: false, headingToStop: false, stop: { ...STOP }, memberIds: ['svc-1', 'svc-2'], openStopsToday: 1, ...o });
 
 afterEach(() => {
   delete process.env[GATE];
@@ -47,8 +37,8 @@ describe('routeStatusSentence', () => {
     expect(routeStatus.routeStatusSentence({ stopsAhead: -1 })).toBeNull();
   });
   test('the drafting read uses the no-write peek and fails soft', async () => {
-    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 2 });
-    expect(await routeStatus.routeStatusFactFor('db', 'svc-1')).toBe(TWO);
+    peekStopsAhead.mockResolvedValueOnce(P(2));
+    expect(await routeStatus.routeStatusFactFor('db', 'svc-1')).toEqual({ sentence: TWO, stop: STOP, memberIds: ['svc-1', 'svc-2'] });
     expect(peekStopsAhead).toHaveBeenCalledWith('db', 'svc-1');
     peekStopsAhead.mockRejectedValueOnce(new Error('pool'));
     expect(await routeStatus.routeStatusFactFor('db', 'svc-1')).toBeNull();
@@ -68,8 +58,20 @@ describe('routeStatusDraftViolation', () => {
     expect(routeStatus.routeStatusDraftViolation("You're next on the route!", facts)).toMatch(/ROUTE STATUS/);
     expect(routeStatus.routeStatusDraftViolation('He has two more visits before you.', facts)).toMatch(/ROUTE STATUS/);
   });
+  // The structural rule: a count / order word with stop words, or with route nouns + a position link to you.
+  const ROUTE_VARIANTS = [
+    'The technician has two more stops, then yours.',
+    'He has a couple more houses and then you.',
+    "Three jobs to go and then it's you.",
+    'Sam has one house ahead of yours.',
+    'Two homes until yours.',
+    'He is on his last stop before you.',
+  ];
+  test.each(ROUTE_VARIANTS)('route wording at draft time: %p', (reply) => {
+    expect(routeStatus.routeStatusDraftViolation(reply, facts)).toMatch(/ROUTE STATUS/);
+  });
   test('ordinary scheduling copy is not route wording', () => {
-    for (const reply of ['Please call before your appointment.', 'Call before your visit if the gate is locked.', 'Your next visit is Tuesday.', 'See you next week!', 'We will call you first thing.', 'Your visit is after lunch.', 'Are you available next Tuesday?', 'You have 2 visits left this year.', 'You have 3 visits to go on your plan.']) {
+    for (const reply of ['Please call before your appointment.', 'Call before your visit if the gate is locked.', 'Your next visit is Tuesday.', 'See you next week!', 'We will call you first thing.', 'Your visit is after lunch.', 'Are you available next Tuesday?', 'You have 2 visits left this year.', 'You have 3 visits to go on your plan.', 'Your first visit is on Monday, then the next one in March.', 'We treat the house, then the yard.', 'Your next service is due in March.']) {
       expect(routeStatus.routeStatusDraftViolation(reply, '')).toBeNull();
     }
   });
@@ -84,12 +86,12 @@ describe('routeStatusDraftViolation', () => {
 
 describe('routeStatusBlockReason (send time)', () => {
   test('no route snapshot: unchanged path, no read', async () => {
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: null, outgoingBody: TWO, dbh: rowsDb() })).toBeNull();
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: null, outgoingBody: TWO, dbh: 'db' })).toBeNull();
     expect(peekStopsAhead).not.toHaveBeenCalled();
   });
   test('the same count now passes; a body without stop wording reads nothing', async () => {
-    const trx = rowsDb();
-    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    const trx = 'trx';
+    peekStopsAhead.mockResolvedValue(P(2));
     expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: `Good morning! ${TWO}`, dbh: trx })).toBeNull();
     expect(peekStopsAhead).toHaveBeenCalledWith(trx, 'svc-1');
     peekStopsAhead.mockClear();
@@ -97,62 +99,68 @@ describe('routeStatusBlockReason (send time)', () => {
     expect(peekStopsAhead).not.toHaveBeenCalled();
   });
   test('a changed count, or no count any more, is stale', async () => {
-    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 1 });
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb() })).toBe('route_status_changed');
+    peekStopsAhead.mockResolvedValueOnce(P(1));
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
     peekStopsAhead.mockResolvedValueOnce(null);
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb() })).toBe('route_status_changed');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
   });
   test('an unreadable route refuses as retryable infrastructure', async () => {
     peekStopsAhead.mockRejectedValueOnce(new Error('timeout'));
-    const reason = await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb() });
+    const reason = await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' });
     expect(reason).toBe('route_status_recheck_failed');
     expect(isEtaInfrastructureFailure(reason)).toBe(true);
     expect(isEtaInfrastructureFailure('route_status_changed')).toBe(false);
   });
-  test('a sibling line moved to another technician or window, cancelled or missing: stale, no route read', async () => {
-    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+  test('a listed sibling line no longer an open member of the stop (moved, cancelled): stale', async () => {
     const two = snap(TWO, 'svc-1', ['svc-1', 'svc-2']);
-    for (const sibling of [ROW('svc-2', { technician_id: 't2' }), ROW('svc-2', { window_start: '14:00:00' }), ROW('svc-2', { status: 'cancelled' })]) {
-      expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1'), sibling]) })).toBe('route_status_changed');
+    peekStopsAhead.mockResolvedValueOnce(P(2, { memberIds: ['svc-1'] }));
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
+    peekStopsAhead.mockResolvedValueOnce(P(2));
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: 'db' })).toBeNull();
+  });
+  test('a stop moved whole (other technician, window or day) is stale even when the count still matches', async () => {
+    for (const moved of [{ technicianId: 't2' }, { windowStart: '13:00:00' }, { date: '2026-11-27' }]) {
+      peekStopsAhead.mockResolvedValueOnce(P(2, { stop: { ...STOP, ...moved } }));
+      expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
     }
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1')]) })).toBe('route_status_changed');
-    expect(peekStopsAhead).not.toHaveBeenCalled();
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: two }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1'), ROW('svc-2')]) })).toBeNull();
+    peekStopsAhead.mockResolvedValueOnce(P(2));
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap(TWO, 'svc-1', ['svc-1'], null) }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
   });
-  test('a one-line stop moved whole (other technician or window) is stale even when the count still matches', async () => {
-    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1', { technician_id: 't2' })]) })).toBe('route_status_changed');
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb([ROW('svc-1', { window_start: '13:00:00' })]) })).toBe('route_status_changed');
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap(TWO, 'svc-1', ['svc-1'], null) }, outgoingBody: TWO, dbh: rowsDb() })).toBe('route_status_changed');
-    expect(peekStopsAhead).not.toHaveBeenCalled();
-  });
-  test('a second open stop for the customer that day (pest + lawn) makes the sentence stale', async () => {
-    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
-    const dbh = rowsDb([ROW('svc-1')], { dayRows: [ROW('svc-1'), ROW('svc-7', { window_start: '14:00:00' })] });
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh })).toBe('route_status_changed');
-  });
-  test('an unreadable stop member read refuses as retryable', async () => {
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: rowsDb([], { fail: true }) })).toBe('route_status_recheck_failed');
+  test('a second open physical stop for the customer that day (pest + lawn): stale, from the same read', async () => {
+    peekStopsAhead.mockResolvedValueOnce(P(2, { openStopsToday: 2 }));
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
+    expect(peekStopsAhead).toHaveBeenCalledTimes(1);
   });
   test('an opted-in draft with NO sentence (empty array) refuses route wording added later; plain copy passes', async () => {
     const empty = { entries: [], routeStatus: [] };
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: empty, outgoingBody: TWO, dbh: rowsDb() })).toBe('route_status_unbound');
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: empty, outgoingBody: "You're next on the route!", dbh: rowsDb() })).toBe('route_status_unbound');
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: empty, outgoingBody: 'Your next visit is Tuesday.', dbh: rowsDb() })).toBeNull();
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: empty, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_unbound');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: empty, outgoingBody: "You're next on the route!", dbh: 'db' })).toBe('route_status_unbound');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: empty, outgoingBody: 'Your next visit is Tuesday.', dbh: 'db' })).toBeNull();
     expect(peekStopsAhead).not.toHaveBeenCalled();
   });
+  test.each([
+    'The technician has two more stops, then yours.',
+    'He has a couple more houses and then you.',
+    "Three jobs to go and then it's you.",
+    'Sam has one house ahead of yours.',
+    'Two homes until yours.',
+    'He is on his last stop before you.',
+  ])('route wording at send time, with an empty route snapshot: %p', async (body) => {
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: [] }, outgoingBody: body, dbh: 'db' })).toBe('route_status_unbound');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: body, dbh: 'db' })).toBe('route_status_unbound');
+  });
   test('next-in-line wording without the word "stop" is route wording at send', async () => {
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: "You're next on the route!", dbh: rowsDb() })).toBe('route_status_unbound');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: "You're next on the route!", dbh: 'db' })).toBe('route_status_unbound');
   });
   test('an edited count the snapshot does not hold is unbound', async () => {
-    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: 'Your technician has 1 stop before yours today.', dbh: rowsDb() })).toBe('route_status_unbound');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: 'Your technician has 1 stop before yours today.', dbh: 'db' })).toBe('route_status_unbound');
   });
   test('etaClaimBlockReason runs it on a snapshot that carries only a route status', async () => {
-    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 0 });
-    const reason = await etaClaimBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: snap() }, factsGeneratedAt: new Date().toISOString(), outgoingBody: TWO, dbh: rowsDb() });
+    peekStopsAhead.mockResolvedValueOnce(P(0));
+    const reason = await etaClaimBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: snap() }, factsGeneratedAt: new Date().toISOString(), outgoingBody: TWO, dbh: 'db' });
     expect(reason).toBe('route_status_changed');
-    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 2 });
-    expect(await etaClaimBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: snap() }, factsGeneratedAt: new Date().toISOString(), outgoingBody: TWO, dbh: rowsDb() })).toBeNull();
+    peekStopsAhead.mockResolvedValueOnce(P(2));
+    expect(await etaClaimBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: snap() }, factsGeneratedAt: new Date().toISOString(), outgoingBody: TWO, dbh: 'db' })).toBeNull();
   });
 });
 
@@ -189,7 +197,7 @@ describe('context-aggregator loadRouteStatusFacts', () => {
   const { loadRouteStatusFacts } = require('../services/context-aggregator');
   const TODAY = etDateString();
   test('today + technician + not yet en route only; one read per stop; siblings share it', async () => {
-    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    peekStopsAhead.mockResolvedValue(P(2));
     const rows = [
       { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
       { id: 'b', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: null },
@@ -197,25 +205,19 @@ describe('context-aggregator loadRouteStatusFacts', () => {
       { id: 'd', technician_id: 't1', scheduled_date: TODAY, window_start: '14:00:00', status: 'en_route', track_state: 'en_route' },
       { id: 'e', technician_id: 't1', scheduled_date: '2099-01-01', window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
     ];
-    const out = await loadRouteStatusFacts(rows, 'c1', TODAY);
+    const out = await loadRouteStatusFacts(rows, TODAY);
     expect(peekStopsAhead).toHaveBeenCalledTimes(1);
     expect(out.perRow).toEqual([TWO, TWO, null, null, null]);
-    expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO, stop: { technicianId: 't1', customerId: 'c1', date: TODAY, windowStart: '10:00:00' } }]);
+    expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO, stop: STOP }]);
   });
-  test('more than one open physical stop today, or a failed stop count read: no sentence for any visit', async () => {
-    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+  test('more than one open physical stop today (from the same read): no sentence', async () => {
+    peekStopsAhead.mockResolvedValue(P(2, { openStopsToday: 2 }));
     const row = { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' };
-    mockTodayStops.rows = [{ technician_id: 't1', window_start: '10:00:00' }, { technician_id: 't2', window_start: '14:00:00' }];
-    expect(await loadRouteStatusFacts([row], 'c1', TODAY)).toEqual({ perRow: [null], groups: [] });
-    mockTodayStops.rows = [{ technician_id: 't1', window_start: '10:00:00' }];
-    mockTodayStops.fail = true;
-    expect(await loadRouteStatusFacts([row], 'c1', TODAY)).toEqual({ perRow: [null], groups: [] });
-    mockTodayStops.fail = false;
-    expect(peekStopsAhead).not.toHaveBeenCalled();
+    expect(await loadRouteStatusFacts([row], TODAY)).toEqual({ perRow: [null], groups: [] });
   });
   test('a failed read is no sentence and no snapshot group', async () => {
     peekStopsAhead.mockRejectedValue(new Error('down'));
-    const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], 'c1', TODAY);
+    const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], TODAY);
     expect(out).toEqual({ perRow: [null], groups: [] });
   });
 });
