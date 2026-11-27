@@ -199,7 +199,9 @@ const REPORT_SENTENCE_RE = new RegExp(`The service report for your [^\\n]{1,80}?
 const flatText = (text) => String(text || '').replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
 const claimsReportDelivery = (text) => flatText(text).includes(REPORT_SENTENCE_START);
 function bodyNeedsPaymentRecheck(body, options = {}) {
-  return claimsReportDelivery(body) || photoFact.claimsPhotoCheck(body) || bodyNeedsMoneyRecheck(body, options);
+  // (a photo identification in the AI's own words too, read-free with the stricter photo-text rule: the full recheck reads the inbound's media)
+  return claimsReportDelivery(body) || photoFact.claimsPhotoCheck(body) || photoFact.photoClaimInOwnWords(body, { inboundHasPhoto: true })
+    || bodyNeedsMoneyRecheck(body, options);
 }
 async function reportDeliveryStale({ customerId, text, humanEditedBody = false, dbh = db }) {
   const flat = flatText(text);
@@ -233,25 +235,42 @@ async function livePhotoSentences(customerId, inboundSmsLogId, dbh) {
   const [checks, context] = await Promise.all([photoFact.loadPhotoChecks(customerId, { db: dbh, smsLogId: inboundSmsLogId }), loadCustomerContext(customerId, dbh)]);
   return checks && context ? [...new Set(checks.map((check) => photoFact.sentenceForContext(context, check)).filter(Boolean))] : null;
 }
+// Whether the inbound text the decision answers carried a photo (sms_log.metadata.media, as the webhook stores it). No inbound text to read:
+// assumed it did (the stricter own-words rule). A read that fails throws: the caller refuses as photo_check_recheck_failed.
+async function inboundCarriedPhoto(inboundSmsLogId, dbh) {
+  if (!inboundSmsLogId) return true;
+  const row = await dbh('sms_log').where({ id: inboundSmsLogId }).first('metadata');
+  if (!row) throw new Error(`inbound sms_log ${inboundSmsLogId} not found`);
+  const metadata = typeof row.metadata === 'string' ? JSON.parse(row.metadata || '{}') : (row.metadata || {});
+  return Array.isArray(metadata.media) && metadata.media.length > 0;
+}
+// An AI body's own photo wording, judged with the linked inbound text's media flag. null = none (or not an AI body).
+async function ownPhotoWordsReason({ rest, judge, inboundSmsLogId, dbh }) {
+  if (!judge || !photoFact.photoClaimInOwnWords(rest, { inboundHasPhoto: true })) return null;
+  const inboundHasPhoto = await inboundCarriedPhoto(inboundSmsLogId, dbh);
+  return photoFact.photoClaimInOwnWords(rest, { inboundHasPhoto }) ? 'photo_check_unverified' : null;
+}
+// The copied PHOTO CHECK sentences against the live reading of the decision's inbound text: { reason } or { rest } (live sentences removed).
+async function copiedPhotoSentences({ flat, customerId, inboundSmsLogId, humanEditedBody, dbh }) {
+  if (!customerId) return { reason: 'amount_recheck_no_customer' };
+  if (!inboundSmsLogId) return { reason: 'photo_check_no_inbound' };
+  const live = await livePhotoSentences(customerId, inboundSmsLogId, dbh);
+  if (!live) return { reason: 'photo_check_recheck_failed' };
+  // an AI body: every photo sentence it starts must be a live one, whole; a staff edit: only the rendered forms it carries
+  const forms = humanEditedBody === true ? photoFact.allRenderableSentences().filter((sentence) => flat.includes(sentence)) : null;
+  const rest = live.reduce((acc, sentence) => acc.split(sentence).join(' '), flat);
+  const unverified = forms ? forms.some((sentence) => !live.includes(sentence)) : photoFact.claimsPhotoCheck(rest);
+  return unverified ? { reason: 'photo_check_changed' } : { rest };
+}
 async function photoCheckStale({ customerId, inboundSmsLogId = null, text, humanEditedBody = false, aiBody = false, dbh = db }) {
   const flat = flatText(text);
   const claimed = photoFact.claimsPhotoCheck(flat);
-  if (!claimed) {
-    return aiBody && humanEditedBody !== true && photoFact.photoClaimInOwnWords(flat)
-      ? { stale: true, reason: 'photo_check_unverified' } : { stale: false, rest: String(text || '') };
-  }
-  if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
-  if (!inboundSmsLogId) return { stale: true, reason: 'photo_check_no_inbound' };
+  const judge = aiBody && humanEditedBody !== true;
+  if (!claimed && !(judge && photoFact.photoClaimInOwnWords(flat, { inboundHasPhoto: true }))) return { stale: false, rest: String(text || '') };
   try {
-    const live = await livePhotoSentences(customerId, inboundSmsLogId, dbh);
-    if (!live) return { stale: true, reason: 'photo_check_recheck_failed' };
-    // an AI body: every photo sentence it starts must be a live one, whole; a staff edit: only the rendered forms it carries
-    const forms = humanEditedBody === true ? photoFact.allRenderableSentences().filter((sentence) => flat.includes(sentence)) : null;
-    const rest = live.reduce((acc, sentence) => acc.split(sentence).join(' '), flat);
-    const unverified = forms ? forms.some((sentence) => !live.includes(sentence)) : photoFact.claimsPhotoCheck(rest);
-    if (unverified) return { stale: true, reason: 'photo_check_changed' };
-    if (aiBody && humanEditedBody !== true && photoFact.photoClaimInOwnWords(rest)) return { stale: true, reason: 'photo_check_unverified' };
-    return { stale: false, rest };
+    const copied = claimed ? await copiedPhotoSentences({ flat, customerId, inboundSmsLogId, humanEditedBody, dbh }) : { rest: flat };
+    const reason = copied.reason || await ownPhotoWordsReason({ rest: copied.rest, judge, inboundSmsLogId, dbh });
+    return reason ? { stale: true, reason } : { stale: false, rest: copied.rest };
   } catch (err) {
     logger.warn(`[sms-amount-recheck] photo check recheck failed for customer ${customerId}: ${err.message}; blocking send`);
     return { stale: true, reason: 'photo_check_recheck_failed' };

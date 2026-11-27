@@ -160,9 +160,16 @@ async function draftPhotoCheck({ hasMedia, smsLogId, customer, db }) {
 // "those are", "harmless", "dangerous", "safe") together with a pest or condition word, in a sentence that names the photo (or, for a reply
 // to a text that carried a photo, in any sentence). "Thanks for the photo" or "send us a picture of the bugs" carry no cue and pass.
 const PHOTO_NOUN_RE = /\b(?:photos?|pictures?|pics?|images?|snapshots?|screenshots?)\b/i;
-const ID_CUE_RE = /\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\bidentif\w*|\b(?:it|that|this|these|those|they)(?:'s|’s|'re|’re|\s+is|\s+are|\s+was|\s+were)\b|\b(?:harmless|dangerous|venomous|poisonous|safe|nothing\s+to\s+worry)\b/i;
-const STRONG_CUE_RE = /\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\bidentif\w*|\b(?:harmless|dangerous|venomous|poisonous|nothing\s+to\s+worry)\b|\b(?:those|these|they)(?:'re|\s+are)\s+(?:definitely\s+|probably\s+|likely\s+)?(?:an?\s+|some\s+)?(?:[a-z]+\s+)?(?:bugs?|insects?|roach(?:es)?|cockroach(?:es)?|ants?|termites?|swarmers?|spiders?|wasps?|bees?|fleas?|ticks?|beetles?|grubs?)\b/i;
+const ID_CUE_RE = /\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\b(?:shows?|showing|showed|pictured)\b|\bis\s+an?\b|\bidentif\w*|\b(?:it|that|this|these|those|they)(?:'s|’s|'re|’re|\s+is|\s+are|\s+was|\s+were)\b|\b(?:harmless|dangerous|venomous|poisonous|safe|nothing\s+to\s+worry)\b/i;
+const STRONG_CUE_RE = /\b(?:looks?|looked|appears?|appeared|seems?|seemed)\s+(?:like|to\s+be)\b|\b(?:shows?|showing|showed|pictured)\b|\bidentif\w*|\b(?:harmless|dangerous|venomous|poisonous|nothing\s+to\s+worry)\b|\b(?:those|these|they)(?:'re|\s+are)\s+(?:definitely\s+|probably\s+|likely\s+)?(?:an?\s+|some\s+)?(?:[a-z]+\s+)?(?:bugs?|insects?|roach(?:es)?|cockroach(?:es)?|ants?|termites?|swarmers?|spiders?|wasps?|bees?|fleas?|ticks?|beetles?|grubs?)\b/i;
 const PEST_WORD_RE = /\b(?:bugs?|insects?|pests?|roach(?:es)?|cockroach(?:es)?|palmetto|ants?|termites?|swarmers?|spiders?|widow|recluse|wasps?|hornets?|bees?|yellow ?jackets?|mosquito(?:e?s)?|fleas?|ticks?|bed ?bugs?|rodents?|rats?|mouse|mice|droppings|beetles?|weevils?|silverfish|earwigs?|millipedes?|centipedes?|stink ?bugs?|whitefl(?:y|ies)|aphids?|scale|grubs?|webworms?|armyworms?|chinch|caterpillars?|moths?|fl(?:y|ies)|gnats?|larva[e]?|scorpions?|snakes?|lizards?|frogs?|nests?|mounds?|frass|fungus|disease|mold|mildew|weeds?|damage|species)\b/i;
+
+// A safety judgment on its own ("It's harmless.", "Totally safe."): on a photo text it is a judgment of the photo even with no pest word.
+const SAFETY_JUDGMENT_RE = /\b(?:harmless|safe|dangerous|nothing\s+to\s+worry\s+about)\b/i;
+// The one text form both reply checks read: whitespace flattened, curly apostrophes straightened.
+function flatReply(text) {
+  return String(text || '').replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
+}
 
 function sentencesOf(text) {
   return String(text || '').replace(/\s+/g, ' ').split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
@@ -173,11 +180,11 @@ function sentencesOf(text) {
  * `inboundHasPhoto`: the text it answers carried a photo, so an identification with no photo word counts too.
  */
 function photoClaimInOwnWords(text, { allowed = [], inboundHasPhoto = false } = {}) {
-  let rest = String(text || '').replace(/\s+/g, ' ').replace(/[‘’]/g, "'");
+  let rest = flatReply(text);
   for (const sentence of allowed.filter(Boolean)) rest = rest.split(sentence).join(' ');
   // with no photo word in the sentence, only a strong cue counts ("it's on Friday" in a reply about an ant visit is not an identification)
-  return sentencesOf(rest).some((sentence) => PEST_WORD_RE.test(sentence)
-    && (PHOTO_NOUN_RE.test(sentence) ? ID_CUE_RE.test(sentence) : inboundHasPhoto && STRONG_CUE_RE.test(sentence)));
+  return sentencesOf(rest).some((sentence) => (inboundHasPhoto && SAFETY_JUDGMENT_RE.test(sentence)) || (PEST_WORD_RE.test(sentence)
+    && (PHOTO_NOUN_RE.test(sentence) ? ID_CUE_RE.test(sentence) : inboundHasPhoto && STRONG_CUE_RE.test(sentence))));
 }
 
 /**
@@ -191,7 +198,7 @@ function replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto }) {
   const ownWords = photoClaimInOwnWords(reply, { allowed: [sentence], inboundHasPhoto: Boolean(inboundHasPhoto) });
   if (ownWords) logger.warn(`[sms-photo-fact] draft describes a photo in its own words — kept shadow (customer=${context?.customer?.id || 'unknown'})`);
   return {
-    copies: Boolean(sentence) && String(reply || '').includes(sentence),
+    copies: Boolean(sentence) && flatReply(reply).includes(sentence),
     ownWords,
     snapshot: sentence ? { photo_check: { sms_log_id: photoCheck.smsLogId, assessment_id: photoCheck.assessmentId } } : {},
   };

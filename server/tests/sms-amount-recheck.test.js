@@ -1068,7 +1068,9 @@ describe('outgoingAmountsStale - the PHOTO CHECK sentences are rechecked at send
     jest.spyOn(photoFact, 'loadPhotoChecks').mockResolvedValue(checks);
     ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, upcomingServices: upcoming });
   };
-  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'what is this bug?', inboundSmsLogId: 'log-1', ...extra });
+  // the customers row (loadCustomerContext) and the inbound sms_log row (its media flag) by table
+  const photoDb = (inbound = { metadata: { media: [{ key: 'sms-media/x.jpg' }] } }) => dbWithTables({ customers: { id: 'c1' }, sms_log: inbound });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: photoDb(), inboundMessage: 'what is this bug?', inboundSmsLogId: 'log-1', ...extra });
   afterEach(() => jest.restoreAllMocks());
 
   test("the recheck reads only the reading of the decision's own inbound text; with none to bind to it fails closed", async () => {
@@ -1119,5 +1121,24 @@ describe('outgoingAmountsStale - the PHOTO CHECK sentences are rechecked at send
     await expect(run(`Hi! ${ROACH}`, { humanEditedBody: true })).resolves.toEqual({ stale: true, reason: 'photo_check_changed' });
     // plain photo wording with no identification passes without a read
     await expect(run('Thanks for the photo! Your technician will take a look.')).resolves.toEqual({ stale: false });
+  });
+
+  test("the linked inbound's media flag decides the photo-text rule at send", async () => {
+    live([reading()]);
+    // a photo text: an identification or a safety judgment with no photo word is held
+    await expect(run('Those look like ghost ants.')).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    await expect(run("It's harmless.")).resolves.toEqual({ stale: true, reason: 'photo_check_unverified' });
+    // a text with no photo: the same words are not a photo claim
+    const noPhoto = photoDb({ metadata: { media: [] } });
+    await expect(run('Those look like ghost ants.', { dbh: noPhoto })).resolves.toEqual({ stale: false });
+    // the inbound row cannot be read: fail closed, retryable
+    await expect(run('Those look like ghost ants.', { dbh: photoDb(new Error('db down')) })).resolves.toEqual({ stale: true, reason: 'photo_check_recheck_failed' });
+  });
+
+  test('the read-free pre-screen selects own-words photo replies, so a queued one is rechecked at fire time', () => {
+    expect(bodyNeedsPaymentRecheck('From the picture, those look like fire ants.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('Those look like ghost ants.')).toBe(true);
+    expect(bodyNeedsPaymentRecheck('See you Tuesday morning.')).toBe(false);
+    expect(bodyNeedsBillingBoundaryCheck('From the picture, those look like fire ants.')).toBe(false);
   });
 });

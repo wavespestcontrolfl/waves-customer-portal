@@ -64,6 +64,9 @@ describe('photoClaimInOwnWords - the model may not describe a photo itself', () 
     'That spider in your photo is harmless.',
     'The photo appears to be termite damage.',
     'In your pic it looks like bed bugs.',
+    'The photo shows termites.',
+    'Your picture is a German roach.',
+    'The bug pictured in your photo looks to be a wasp.',
   ])('held: %s', (text) => expect(photoFact.photoClaimInOwnWords(text)).toBe(true));
   test.each([
     'Thanks for the photo! Your technician will take a look.',
@@ -77,6 +80,12 @@ describe('photoClaimInOwnWords - the model may not describe a photo itself', () 
     expect(photoFact.photoClaimInOwnWords("Those are German roaches.", { inboundHasPhoto: true })).toBe(true);
     expect(photoFact.photoClaimInOwnWords("Your ant visit is set and it's on Friday.", { inboundHasPhoto: true })).toBe(false);
     expect(photoFact.photoClaimInOwnWords('They are covered by your pest plan.', { inboundHasPhoto: true })).toBe(false);
+  });
+  test('on a photo text a safety judgment alone is held, with no pest word', () => {
+    for (const text of ["It's harmless.", 'Totally safe.', 'That one is dangerous.', 'Nothing to worry about!']) {
+      expect([text, photoFact.photoClaimInOwnWords(text, { inboundHasPhoto: true })]).toEqual([text, true]);
+    }
+    expect(photoFact.photoClaimInOwnWords("It's harmless.")).toBe(false);
   });
 });
 
@@ -102,6 +111,23 @@ function fakeDb({ drafts = [], rows = [], fail = false } = {}) {
   db.calls = calls;
   return db;
 }
+
+describe('replyPhotoVerdict - both checks read the same flattened reply', () => {
+  const ORIGINAL = process.env.GATE_SMS_REAL_ANSWERS;
+  afterEach(() => {
+    if (ORIGINAL === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = ORIGINAL;
+  });
+  test('a copy split across lines still counts as the copy (review, never auto-send) and is not own words', () => {
+    process.env.GATE_SMS_REAL_ANSWERS = 'true';
+    const context = { upcomingServices: [{ type: 'Quarterly Pest Control' }] };
+    const photoCheck = { smsLogId: 'log-1', assessmentId: 'a-1', ...ident('german-roach') };
+    const reply = 'Thanks!\nFrom your photo, it looks like a German cockroach.\nYour technician will confirm at the visit.';
+    expect(photoFact.replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto: true }))
+      .toEqual({ copies: true, ownWords: false, snapshot: { photo_check: { sms_log_id: 'log-1', assessment_id: 'a-1' } } });
+    process.env.GATE_SMS_REAL_ANSWERS = 'false';
+    expect(photoFact.replyPhotoVerdict({ reply, context, photoCheck, inboundHasPhoto: true })).toEqual({ copies: false, ownWords: false, snapshot: {} });
+  });
+});
 
 describe('loadPhotoChecks - the stored triage result of a photo text', () => {
   const A1 = '11111111-1111-4111-8111-111111111111';
