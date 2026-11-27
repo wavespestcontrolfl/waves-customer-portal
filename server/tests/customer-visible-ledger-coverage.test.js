@@ -195,12 +195,16 @@ describe('customer_visible direct_sdk ledger closure', () => {
         errorCode: null,
       }));
 
-      mockStream.mockReturnValueOnce({ finalMessage: async () => { throw Object.assign(new Error('529'), { status: 529 }); } });
+      const partialMsg = { id: 'msg_partial', model: 'claude-sonnet-5-5', usage: { input_tokens: 95, output_tokens: 0 } };
+      mockStream.mockReturnValueOnce({
+        currentMessage: partialMsg,
+        finalMessage: async () => { throw Object.assign(new Error('529'), { status: 529 }); },
+      });
       await mkConvo()._modelTurn();
       expect(mockRecordStreamed).toHaveBeenLastCalledWith(expect.objectContaining({
         provider: 'anthropic',
         laneId: 'voice_relay_collections',
-        message: null,
+        message: partialMsg,
         errorCode: 'anthropic_529',
       }));
     });
@@ -424,15 +428,15 @@ describe('customer_visible direct_sdk ledger closure', () => {
       await ledgerCall('openai', 'gpt-5.5', async () => ({ id: 'resp_bad_output', output: {} }), { laneId: 'lawn_diag_writer' });
 
       await new Promise((r) => setImmediate(r));
-      expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code, provider_ref: r.provider_ref }))).toEqual([
-        { ok: false, error_code: 'gemini_refusal', provider_ref: 'gem_resp_blocked' },
-        { ok: false, error_code: 'gemini_incomplete', provider_ref: 'gem_resp_trunc' },
-        { ok: false, error_code: 'openai_incomplete', provider_ref: 'resp_inc' },
-        { ok: false, error_code: 'openai_refusal', provider_ref: 'resp_ref' },
-        { ok: false, error_code: 'invalid_response', provider_ref: null },
-        { ok: false, error_code: 'invalid_response', provider_ref: 'gem_bad_parts' },
-        { ok: false, error_code: 'invalid_response', provider_ref: null },
-        { ok: false, error_code: 'invalid_response', provider_ref: 'resp_bad_output' },
+      expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code, error_class: r.error_class, provider_ref: r.provider_ref }))).toEqual([
+        { ok: false, error_code: 'gemini_refusal', error_class: 'instruction', provider_ref: 'gem_resp_blocked' },
+        { ok: false, error_code: 'gemini_incomplete', error_class: 'incomplete', provider_ref: 'gem_resp_trunc' },
+        { ok: false, error_code: 'openai_incomplete', error_class: 'incomplete', provider_ref: 'resp_inc' },
+        { ok: false, error_code: 'openai_refusal', error_class: 'instruction', provider_ref: 'resp_ref' },
+        { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: null },
+        { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: 'gem_bad_parts' },
+        { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: null },
+        { ok: false, error_code: 'invalid_response', error_class: 'provider', provider_ref: 'resp_bad_output' },
       ]);
       // None of the already-classified provider failures should be overwritten by ledgerCallRejected.
       expect(updated).toEqual([]);
