@@ -194,6 +194,16 @@ function addRequestedServiceToInputs(engineInputs, estData, serviceKey, requeste
   return { added: false, updatedInputs, reason: 'unsupported_service' };
 }
 
+function savedServiceKnobReplayOverrides(estData) {
+  const knobReplay = require('./estimate-tree-shrub-knob-replay');
+  const mistingKnobs = knobReplay.mistingKnobSignalForReplay(estData);
+  return {
+    ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData),
+    ...(mistingKnobs ? { mistingPricingKnobs: mistingKnobs } : {}),
+    ...knobReplay.termiticideReplayOverrides(estData),
+  };
+}
+
 async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService) {
   const serviceKey = normalizeRequestedServiceKey(requestedService);
   const serviceLabel = requestedServiceLabel(serviceKey);
@@ -258,13 +268,11 @@ async function buildEstimateServiceRevisionDraft(estimate = {}, requestedService
   updatedInputs.addedServiceKeys = [serviceKey];
 
   try {
-    // A quoted flea package keeps the size rule it was sent under (estimate-flea-size-replay)
-    // and an existing misting installation keeps its saved installation knobs
-    // (estimate-tree-shrub-knob-replay); both ride the engine call only so stored inputs stay clean.
+    // Existing flea, misting, and termiticide lines keep the quote-time knobs/surcharges they were priced with;
+    // these ride the engine call only so stored inputs stay clean.
     const v1Result = generateEstimate({
       ...updatedInputs,
-      ...require('./estimate-flea-size-replay').fleaSizeReplayOverrides(estData),
-      ...require('./estimate-tree-shrub-knob-replay').mistingKnobSignalForReplay(estData),
+      ...savedServiceKnobReplayOverrides(estData),
     });
     const legacyResult = mapV1ToLegacyShape(v1Result);
     const newMonthly = Number(legacyResult?.recurring?.monthlyTotal || 0);

@@ -1016,11 +1016,12 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
-// One-way upward catalog ratchet for trenching termiticide bottle costs
-// (owner 2026-11-27): raises containerCost/containerOz when the approved
-// products_catalog $/oz rises above the configured basis (within the same
-// [0.5x, 2x] sanity band as pre-slab), never auto-lowering retail quotes when
-// generic swaps reduce wholesale cost. Kill switch: link_container_costs_to_catalog = false.
+// Config-floor catalog cost link for trenching termiticide bottles
+// (owner 2026-11-27): uses max(configured $/oz, approved catalog $/oz) within
+// the [0.5x, 2x] sanity band so vendor price spikes protect margin while
+// cheaper generic swaps never auto-cut below the configured basis. Stateless
+// across restarts/replicas; retains the last synced bottle cost for unchanged
+// config rows if a catalog read transiently fails. Kill switch: link_container_costs_to_catalog = false.
 function firstDefinedKey(obj, keys) {
   for (const key of keys) {
     if (obj && obj[key] != null) return obj[key];
@@ -1042,6 +1043,19 @@ const TRENCHING_PRODUCT_DEFAULTS = Object.freeze(Object.fromEntries(
     }),
 ));
 
+// Last successfully synced catalog cost per product, used ONLY to fail safe if
+// a subsequent catalog read throws (so a transient DB outage cannot silently
+// drop an active catalog price increase back to the lower configured cost).
+const lastSyncedTrenchingCatalogCost = new Map();
+
+function resetTrenchingCatalogFallbackCache() {
+  lastSyncedTrenchingCatalogCost.clear();
+}
+
+function trenchingConfigSignature(product) {
+  return `${Number(product.containerCost)}:${Number(product.containerOz)}:${String(product.catalogProductName || '').trim()}`;
+}
+
 function resetTrenchingProductDefaults() {
   const trenching = constants.SPECIALTY.trenching;
   if (!trenching) return;
@@ -1057,51 +1071,48 @@ function resetTrenchingProductDefaults() {
   }
 }
 
-const trenchingAcceptedRatchetFloor = new Map();
-
-function resetTrenchingRatchetFloor() {
-  trenchingAcceptedRatchetFloor.clear();
-}
-
-function trenchingConfigSignature(product) {
-  return `${Number(product.containerCost)}:${Number(product.containerOz)}:${String(product.catalogProductName || '').trim()}`;
-}
-
-function applyTrenchingRatchet(key, product, row) {
+function applyTrenchingCatalogPrice(key, product, row) {
   const configCost = Number(product.containerCost);
   const configOz = Number(product.containerOz);
   const configPerOz = configCost / configOz;
   const sig = trenchingConfigSignature(product);
-  const prior = trenchingAcceptedRatchetFloor.get(key);
-  let winner = prior && prior.configSignature === sig && prior.perOz > configPerOz ? prior : null;
-  if (prior && prior.configSignature !== sig) trenchingAcceptedRatchetFloor.delete(key);
-
   const price = row ? Number(row.best_price) : NaN;
   const oz = row ? Number(row.unit_size_oz) : NaN;
   const catalogPerOz = Number.isFinite(price) && price > 0 && Number.isFinite(oz) && oz > 0 ? price / oz : NaN;
-  const floorPerOz = winner ? winner.perOz : configPerOz;
-  if (Number.isFinite(catalogPerOz) && catalogPerOz > floorPerOz) {
-    if (withinCatalogSanityBand(catalogPerOz, configPerOz)) {
-      winner = { configSignature: sig, containerCost: price, containerOz: oz, perOz: catalogPerOz };
-      trenchingAcceptedRatchetFloor.set(key, winner);
-    } else {
-      warnCatalogRefusalOnce(`trenching.${key}.band`, `[pricing-engine] trenching ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`);
-    }
+  if (!Number.isFinite(catalogPerOz) || catalogPerOz <= configPerOz) {
+    lastSyncedTrenchingCatalogCost.delete(key);
+    return;
   }
-  if (!winner) return;
+  if (!withinCatalogSanityBand(catalogPerOz, configPerOz)) {
+    warnCatalogRefusalOnce(`trenching.${key}.band`, `[pricing-engine] trenching ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`);
+    lastSyncedTrenchingCatalogCost.delete(key);
+    return;
+  }
   // Keep the pre-catalog configured bottle cost separate so rising costs on
   // the included product (Taurus SC) never inflate the included chemical
   // allowance subtracted from standard/premium trenching retail prices.
   product.configuredContainerCost = configCost;
   product.configuredContainerOz = configOz;
-  product.containerCost = winner.containerCost;
-  product.containerOz = winner.containerOz;
+  product.containerCost = price;
+  product.containerOz = oz;
+  lastSyncedTrenchingCatalogCost.set(key, { configSignature: sig, containerCost: price, containerOz: oz });
+}
+
+function restoreLastSyncedTrenchingCatalogCosts(entries) {
+  for (const [key, product] of entries) {
+    const cached = lastSyncedTrenchingCatalogCost.get(key);
+    if (!cached || cached.configSignature !== trenchingConfigSignature(product)) continue;
+    product.configuredContainerCost = Number(product.containerCost);
+    product.configuredContainerOz = Number(product.containerOz);
+    product.containerCost = cached.containerCost;
+    product.containerOz = cached.containerOz;
+  }
 }
 
 async function syncTrenchingContainerCostsFromCatalog(db) {
   const trenching = constants.SPECIALTY.trenching;
   if (trenching?.linkContainerCostsToCatalog !== true) {
-    trenchingAcceptedRatchetFloor.clear();
+    lastSyncedTrenchingCatalogCost.clear();
     return;
   }
   const entries = Object.entries(trenching.products || {}).filter(
@@ -1115,10 +1126,11 @@ async function syncTrenchingContainerCostsFromCatalog(db) {
       ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'],
     );
     for (const [key, product] of entries) {
-      applyTrenchingRatchet(key, product, byName.get(product.catalogProductName.trim()) || null);
+      applyTrenchingCatalogPrice(key, product, byName.get(product.catalogProductName.trim()) || null);
     }
   } catch (err) {
-    console.warn('[pricing-engine] trenching inventory-price link skipped:', err.message);
+    restoreLastSyncedTrenchingCatalogCosts(entries);
+    console.warn('[pricing-engine] trenching inventory-price link skipped (retaining last synced costs):', err.message);
   }
 }
 
@@ -2690,7 +2702,7 @@ module.exports = {
   getLastSyncAt,
   isSyncInFlight,
   syncConstantsFromDB,
-  resetTrenchingRatchetFloor,
+  resetTrenchingCatalogFallbackCache,
   readRodentAdditionalCheckPriceFromCatalog,
   needsSync,
   invalidatePricingConfigCache,

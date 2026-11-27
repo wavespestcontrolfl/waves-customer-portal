@@ -1951,10 +1951,10 @@ const SPECIALTY = {
     trenchDepthPremiumPerHalfFt: 0.15,
     // High/problem-soil (0.125%) application rate install premium (+12%).
     highRatePriceMultiplier: 1.12,
-    // One-way inventory cost ratchet (owner 2026-11-27): db-bridge raises a
-    // bottle's containerCost/containerOz when its approved products_catalog
-    // $/oz exceeds the config basis (protecting margin against vendor price
-    // spikes without auto-cutting retail prices when generics save money).
+    // Config-floor catalog cost link (owner 2026-11-27): db-bridge uses
+    // max(configured $/oz, approved products_catalog $/oz) within the 2x sanity
+    // band — protecting margin on vendor price spikes while never auto-cutting
+    // below the configured basis when cheaper generic swaps appear.
     // Kill switch: link_container_costs_to_catalog = false on onetime_trenching.
     linkContainerCostsToCatalog: true,
     products: {

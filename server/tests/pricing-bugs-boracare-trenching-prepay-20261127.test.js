@@ -4,7 +4,7 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
 const constants = require('../services/pricing-engine/constants');
-const { syncConstantsFromDB, resetTrenchingRatchetFloor } = require('../services/pricing-engine/db-bridge');
+const { syncConstantsFromDB, resetTrenchingCatalogFallbackCache } = require('../services/pricing-engine/db-bridge');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
 const { priceTrenching } = require('../services/pricing-engine/service-pricing');
 const {
@@ -88,7 +88,7 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
   const originalPreSlab = JSON.parse(JSON.stringify(constants.SPECIALTY.preSlabTermiticide));
 
   afterEach(() => {
-    resetTrenchingRatchetFloor();
+    resetTrenchingCatalogFallbackCache();
     Object.assign(constants.SPECIALTY.trenching, JSON.parse(JSON.stringify(originalTrenching)));
     Object.assign(constants.SPECIALTY.preSlabTermiticide, JSON.parse(JSON.stringify(originalPreSlab)));
   });
@@ -199,7 +199,7 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
     expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
   });
 
-  test('keeps accepted ratchet floor across refreshes while link stays enabled, even when a cheaper vendor appears', async () => {
+  test('uses deterministic config-floor max(config, catalog) across refreshes and retains last synced cost on transient catalog failure', async () => {
     // Refresh 1: Termidor spikes $174.72 -> $250 (accepted).
     const dbRise = makePricingDb({
       pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
@@ -209,22 +209,22 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
     await expect(syncConstantsFromDB(dbRise)).resolves.toBe(true);
     expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
 
-    // Refresh 2: link stays enabled, cheaper vendor drops catalog to $160 -> one-way ratchet keeps $250.
+    // Refresh 2: transient catalog read error -> retains last synced $250 (never silently drops to config).
+    const dbFail = makePricingDb({ pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }] });
+    dbFail.schema.hasTable = jest.fn(async (table) => {
+      if (table === 'products_catalog') throw new Error('catalog timeout');
+      return table === 'pricing_config';
+    });
+    await expect(syncConstantsFromDB(dbFail)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
+
+    // Refresh 3: catalog recovers with cheaper vendor $160 (< config $174.72) -> deterministic floor stays at config $174.72 across all workers.
     const dbDrop = makePricingDb({
       pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
       catalogRows: [{ name: 'Termidor SC', best_price: 160, unit_size_oz: 78, best_vendor_pricing_id: 'vp-drop' }],
       approvedVendorPricingRows: [{ id: 'vp-drop' }],
     });
     await expect(syncConstantsFromDB(dbDrop)).resolves.toBe(true);
-    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
-
-    // Explicit pricing reset (link disabled) clears the floor cleanly back to $174.72.
-    const dbReset = makePricingDb({
-      pricingConfigRows: [{ config_key: 'onetime_trenching', data: { link_container_costs_to_catalog: false } }],
-      catalogRows: [],
-      approvedVendorPricingRows: [],
-    });
-    await expect(syncConstantsFromDB(dbReset)).resolves.toBe(true);
     expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
   });
 });
@@ -460,38 +460,107 @@ describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates
     expect(annualPrepayDiscountComponents({ recurringServices: LAWN_ONLY, estimateData: revisedPostGate }).discountRate).toBe(0);
   });
 
-  test('adding a service to an existing 30-nozzle Smart misting quote replays its saved $4,195 installation price', async () => {
-    const legacyMistingQuote = {
-      estimate_data: {
-        inputs: {
-          ...PROPERTY,
-          services: { mosquitoMisting: { tier: 'smart', nozzleCount: 30, systemCount: 1 } },
+  test('adding a service to an existing 30-nozzle Smart misting quote replays its saved $4,195 installation row directly', async () => {
+    const savedMistingGate = process.env.GATE_MOSQUITO_MISTING;
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    try {
+      const legacyMistingQuote = {
+        estimate_data: {
+          inputs: {
+            ...PROPERTY,
+            services: { mosquitoMisting: { tier: 'smart', nozzles: 30 } },
+          },
+          engineResult: {
+            lineItems: [{
+              service: 'mosquito_misting',
+              tier: 'smart',
+              nozzles: 30,
+              installation: { price: 4195 },
+              pricingKnobs: {
+                tier: 'smart',
+                tierPrice: 2995,
+                includedNozzles: 10,
+                extraNozzlePrice: 60,
+                planMonthly: 149,
+                refillPrice: 149,
+              },
+            }],
+          },
         },
-        engineResult: {
-          lineItems: [{
-            service: 'mosquito_misting',
-            tier: 'smart',
-            nozzleCount: 30,
-            systemCount: 1,
-            installation: { price: 4195 },
-            pricingBasis: {
-              tierPrice: 2995,
-              includedNozzles: 10,
-              extraNozzlePrice: 60,
-              monthlyMaintenance: 149,
+        monthly_total: 149,
+        annual_total: 1788,
+        onetime_total: 4195,
+        waveguard_tier: 'Bronze',
+      };
+      const rev = await buildEstimateServiceRevisionDraft(legacyMistingQuote, 'lawn_care');
+      expect(rev.status).toBe('priced');
+      const oneTimeItems = rev.draftEstimateData.result?.oneTime?.items || [];
+      const installRow = oneTimeItems.find((item) => item.service === 'mosquito_misting_installation');
+      expect(installRow).toBeDefined();
+      expect(installRow.price).toBe(4195);
+      // Confirm a fresh 30-nozzle Smart quote (without legacy knobs) gets the $4,295 Essential floor.
+      const fresh = generateEstimate({
+        ...PROPERTY,
+        services: { mosquitoMisting: { tier: 'smart', nozzles: 30 } },
+      });
+      expect(fresh.lineItems.find((l) => l.service === 'mosquito_misting').installation.price).toBe(4295);
+    } finally {
+      if (savedMistingGate === undefined) delete process.env.GATE_MOSQUITO_MISTING;
+      else process.env.GATE_MOSQUITO_MISTING = savedMistingGate;
+    }
+  });
+
+  test('adding a service to an existing trenching quote replays its saved trenching product surcharge after catalog spikes', async () => {
+    const originalTrenching = JSON.parse(JSON.stringify(constants.SPECIALTY.trenching));
+    try {
+      const trenchingQuote = generateEstimate({
+        ...PROPERTY,
+        services: {
+          trenching: { productKey: 'termidor_sc', perimeterLF: 200, dirtLF: 150, concreteLF: 50 },
+        },
+      });
+      const initialLine = trenchingQuote.lineItems.find((l) => l.service === 'trenching');
+      expect(initialLine).toBeDefined();
+      const savedQuote = {
+        estimate_data: {
+          inputs: {
+            ...PROPERTY,
+            services: {
+              trenching: { productKey: 'termidor_sc', perimeterLF: 200, dirtLF: 150, concreteLF: 50 },
             },
-          }],
+          },
+          engineResult: trenchingQuote,
         },
-      },
-      monthly_total: 149,
-      annual_total: 1788,
-      onetime_total: 4195,
-      waveguard_tier: 'Bronze',
-    };
-    const rev = await buildEstimateServiceRevisionDraft(legacyMistingQuote, 'lawn_care');
-    expect(rev.status).toBe('priced');
-    const mistLine = (rev.draftEstimateData.result?.lineItems || []).find((l) => l.service === 'mosquito_misting');
-    expect(mistLine?.installation?.price ?? rev.updated.oneTime).toBe(4195);
+        monthly_total: 0,
+        annual_total: 0,
+        onetime_total: initialLine.price,
+        waveguard_tier: 'Bronze',
+      };
+
+      // Simulate Termidor SC bottle cost jumping after quote was saved.
+      constants.SPECIALTY.trenching.products.termidor_sc.containerCost = 290;
+      const freshAfterSpike = generateEstimate({
+        ...PROPERTY,
+        services: {
+          trenching: { productKey: 'termidor_sc', perimeterLF: 200, dirtLF: 150, concreteLF: 50 },
+        },
+      });
+      const spikedLine = freshAfterSpike.lineItems.find((l) => l.service === 'trenching');
+      expect(spikedLine.productSurcharge).toBeGreaterThan(initialLine.productSurcharge);
+
+      const rev = await buildEstimateServiceRevisionDraft(savedQuote, 'lawn_care');
+      expect(rev.status).toBe('priced');
+      const oneTimeItems = rev.draftEstimateData.result?.oneTime?.items || [];
+      const revisedTrench = oneTimeItems.find((item) => item.service === 'trenching');
+      expect(revisedTrench).toBeDefined();
+      // Adding lawn_care unlocks bundle discount on `price`, while the pinned trenching surcharge
+      // and pre-discount subtotal must match the original quote rather than the post-spike cost.
+      expect(revisedTrench.productSurcharge).toBe(initialLine.productSurcharge);
+      expect(revisedTrench.priceBeforeWarranty).toBe(initialLine.priceBeforeWarranty);
+      expect(revisedTrench.priceBeforeDiscount).toBe(initialLine.price);
+    } finally {
+      Object.assign(constants.SPECIALTY.trenching, originalTrenching);
+    }
   });
 
   test('annual prepay invoice copy uses neutral wording when neither prepay % nor setup waiver applies', () => {
