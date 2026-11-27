@@ -166,11 +166,11 @@ describe('GET pest-recap/context carries the pest stock advisory', () => {
     expect(res.body).toEqual({ ...CONTEXT, wrapUp: true, stockAdvisory: true });
   });
 
-  test('a visit /complete still refuses below zero (mosquito): no stockAdvisory key', async () => {
+  test('a mosquito visit: stockAdvisory is true too (owner 2026-11-26: stock never blocks any visit type)', async () => {
     const mosquito = { ...CONTEXT, service: { id: 'visit-1', serviceType: 'Mosquito Control' } };
     PestRecap.buildRecapContext.mockResolvedValue(mosquito);
     const res = await invoke('get', CONTEXT_PATH, { params });
-    expect(res.body).toEqual({ ...mosquito, wrapUp: true });
+    expect(res.body).toEqual({ ...mosquito, wrapUp: true, stockAdvisory: true });
   });
 });
 

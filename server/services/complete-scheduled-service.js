@@ -595,18 +595,18 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
-// Owner 2026-10-20, "dont block": a pest visit's completion treats stock as advisory too,
-// by the server's own service line (as WaveGuard lawn above); the pest sheet's context reads the same answer, so the
-// sheet never lets through what /complete refuses.
+// Owner 2026-10-20, "dont block", and owner 2026-11-26 for every visit type: a completion treats stock as advisory, so the
+// pest sheet's context reads the same answer as /complete and no sheet holds back what /complete accepts.
+ 
 function isPestStockAdvisoryCompletion(svc) {
-  return detectServiceLine(svc?.service_type) === 'pest';
+  return true;
 }
 
 // A lawn or tree & shrub visit (services/stock-advisory.js).
 const { isLawnTsStockAdvisoryCompletion } = require('./stock-advisory');
 
-// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing: a pest, lawn
-// (any tier, WaveGuard included) or tree & shrub visit.
+// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing: every visit type
+// (owner 2026-11-26).
 const isStockAdvisoryCompletion = (svc) => isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
 
 // Plan/approval-engine block messages predate the advisory policy and can
@@ -2533,10 +2533,15 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const why = !over ? 'A visit was recorded, but its product limits could not be checked.'
         : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
       const dedupeKey = limitFindingDedupeKey(record, finding);
+      // A catalog name the alert rules refuse (a bracket tag, a code) falls back to plain words; the detail keeps it whole.
+      const labelWords = finding.limitType === lawnProhibited.LIMIT_TYPE
+        ? stockAlertWords(fullName, (n) => ({ action: `review ${n} label use`, why: FINDING_WHY[lawnProhibited.LIMIT_TYPE](n) }),
+          { action: 'review a product label use', why: 'A product was recorded on a home lawn, and its label prohibits residential use.' })
+        : null;
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : finding.limitType === lawnProhibited.LIMIT_TYPE ? `review ${name} label use` : over ? `review ${name} over its limit` : 'review product limits not checked',
-        why,
+        action: labelWords ? labelWords.action : unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
+        why: labelWords ? labelWords.why : why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
@@ -6669,6 +6674,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
+      // The saved deductions carry the flagged-amount and shortfall warnings the success view shows (owner 2026-11-26).
+      if (Array.isArray(resumedStructuredNotes.inventoryDeductions)) inventoryDeductions = resumedStructuredNotes.inventoryDeductions;
       // "Customer asked for the link" was frozen with the record — a resumed
       // retry (possibly another operator, later) must not re-stamp who/when
       // (codex #4140 r2).
@@ -9247,7 +9254,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts,
         });
 
-        if (inventoryDeductions.length) {
+        // (A lawn warning with no deduction behind it, a free-text oxadiazon name, is saved too.)
+        if (inventoryDeductions.length || lawnWarningFindings.length) {
           // Reconcile the advisory with what the FOR UPDATE deduction actually
           // saw: two concurrent visits can both pass the unlocked preflight
           // read with the stock intact, so the later one can go negative

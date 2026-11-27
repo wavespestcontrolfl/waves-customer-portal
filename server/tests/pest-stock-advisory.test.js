@@ -34,10 +34,11 @@ describe('which completions may take stock below zero', () => {
     expect(isStockAdvisoryCompletion({ service_type: 'Lawn Care', cust_waveguard_tier: 'Gold' })).toBe(true);
   });
 
-  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion'])('%s may not', (serviceType) => {
-    expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-    expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
-    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(false);
+  // Owner 2026-11-26: stock never blocks any visit type, so the flag every tech sheet reads is true for these too.
+  test.each(['Palm Injection', 'Mosquito Control', 'Termite Bait Station', 'Rodent Exclusion', undefined])('%s may', (serviceType) => {
+    expect(isPestStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
+    expect(isLawnTsStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
+    expect(isStockAdvisoryCompletion({ service_type: serviceType })).toBe(true);
   });
 });
 

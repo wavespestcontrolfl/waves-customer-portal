@@ -86,3 +86,13 @@ describe('what the technician and the office see', () => {
     expect(new Set(keys).size).toBe(2);
   });
 });
+
+describe('a name the alert rules refuse still alerts, in plain words', () => {
+  test('"Ronstar G [granular]" falls back to a plain headline and why, and the alert rules accept them', async () => {
+    await notifyOfficeOfLimitFindings({ svc, record, findings: [prohibited.lawnProhibitedProductFinding({ productName: 'Ronstar G [granular]', productId: 'r1' })] });
+    const [, spec, opts] = compose.raiseAdminAlert.mock.calls[0];
+    expect(spec).toMatchObject({ action: 'review a product label use', why: 'A product was recorded on a home lawn, and its label prohibits residential use.' });
+    expect(opts.detail).toContain('Ronstar G [granular]');
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
+  });
+});
