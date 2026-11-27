@@ -95,6 +95,22 @@ describe("MixSafetySection", () => {
     expect(screen.queryByRole("list", { name: "Tank check result" })).not.toBeInTheDocument();
   });
 
+  it("an edit sends the version it loaded, and a stale save shows the server's reload message", async () => {
+    const rules = LIST.rules.map((r) => ({ ...r, updatedAt: "2026-11-27T12:00:00.000Z" }));
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === "PUT") return respond({ error: "This rule changed. Reload it." }, false);
+      return respond({ ...LIST, rules });
+    });
+    render(<MixSafetySection />);
+    const table = await screen.findByRole("table", { name: "Mix safety rules" });
+    fireEvent.click(within(within(table).getAllByRole("row")[1]).getByRole("button", { name: "Edit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(screen.getByText("This rule changed. Reload it.")).toBeInTheDocument());
+    const put = fetch.mock.calls.find(([, opts]) => opts?.method === "PUT");
+    expect(put[0]).toBe("/api/admin/product-mix-rules/r1");
+    expect(JSON.parse(put[1].body)).toMatchObject({ updatedAt: "2026-11-27T12:00:00.000Z", groupB: "fertilizer", verdict: "never" });
+  });
+
   it("allows up to 5 tank products", async () => {
     render(<MixSafetySection />);
     await screen.findByRole("table", { name: "Mix safety rules" });

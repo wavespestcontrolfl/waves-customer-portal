@@ -41,7 +41,8 @@ function iracCodes(product) {
 const GROUPS = [
   { key: 'any', label: 'Any other product (apply alone)', test: () => true },
   // A combination product counts too (catalog subcategory such as "Pre-emergent + fertilizer combo").
-  { key: 'fertilizer', label: 'Fertilizer', test: (p) => ['fertilizer', 'liquid_fertilizer'].includes(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' || /fertili[sz]er/.test(lower(p.subcategory)) },
+  // Any category naming fertilizer counts ("fertilizer", "liquid_fertilizer", "Micronutrient Fertilizer").
+  { key: 'fertilizer', label: 'Fertilizer', test: (p) => /fertili[sz]er/.test(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' || /fertili[sz]er/.test(lower(p.subcategory)) },
   { key: 'surfactant', label: 'Surfactant or wetting agent', test: (p) => ['adjuvant', 'soil_surfactant'].includes(lower(p.category)) || /surfactant|wetting agent/.test(text(p)) },
   { key: 'oil', label: 'Spray oil', test: (p) => /spray oil|oil emulsion|horticultural oil|mineral oil|paraffinic oil|petroleum oil|neem oil/.test(text(p)) },
   { key: 'copper', label: 'Copper', test: (p) => /copper/.test(text(p)) },
@@ -245,10 +246,19 @@ async function createRule(trx, fields, actorId) {
   return row;
 }
 
-async function editRule(trx, id, fields, actorId) {
+const STALE = 'This rule changed. Reload it.';
+
+// `updatedAt` is the row's updated_at as the edit form loaded it. A save from a form older than the row is a 409, so a
+// stale form never overwrites a newer verdict. The JSON answer carries milliseconds and the column microseconds, so the
+// two match within 2 ms (the driver's parse can land 1 ms low).
+async function editRule(trx, id, fields, actorId, updatedAt) {
   if (!UUID_RE.test(String(id))) throw httpError(404, 'Rule not found');
-  const target = await trx('product_mix_rules').where({ id }).forUpdate().first();
+  const loadedAt = updatedAt ? new Date(updatedAt) : null;
+  if (!loadedAt || Number.isNaN(loadedAt.getTime())) throw httpError(400, 'Reload the rule before saving it.');
+  const target = await trx('product_mix_rules').where({ id }).forUpdate()
+    .first(trx.raw('*, (abs(extract(epoch from updated_at) * 1000 - ?) < 2) AS version_matches', [loadedAt.getTime()]));
   if (!target) throw httpError(404, 'Rule not found');
+  if (!target.version_matches) throw httpError(409, STALE);
   // A removed rule comes back only through Add rule, never by saving an edit form opened before it was removed.
   if (target.active === false) throw httpError(409, 'This rule was removed. Add it again to bring it back.');
   const same = await trx('product_mix_rules').where(keyOf(fields)).whereNot({ id }).first();
@@ -273,7 +283,7 @@ async function upsertRule(input, { id = null, actorId = null } = {}) {
   const fields = normalizeRuleInput(input);
   return db.transaction(async (trx) => {
     await assertProductsExist(trx, fields);
-    const row = id ? await editRule(trx, id, fields, actorId) : await createRule(trx, fields, actorId);
+    const row = id ? await editRule(trx, id, fields, actorId, input && input.updatedAt) : await createRule(trx, fields, actorId);
     return presentRule(row);
   });
 }

@@ -132,3 +132,21 @@ describe('up()', () => {
     expect(knex.schema.dropTableIfExists).toHaveBeenCalledWith('product_mix_rules');
   });
 });
+
+describe('20261127160000_product_mix_rules_certainty_nis_caution', () => {
+  const fix = require('../models/migrations/20261127160000_product_mix_rules_certainty_nis_caution');
+
+  test('moves the seeded Certainty + 90/10 row from ok to caution with the card\'s reason; the reason fits 200', () => {
+    expect(fix._BEFORE).toEqual({ verdict: 'ok', reason: migration._SEED.find((r) => r.verdict === 'ok').reason });
+    expect(fix._AFTER).toEqual({ verdict: 'caution', reason: 'Card leaves both out in February and June to September' });
+    expect(`migration:${fix._MIGRATION}:down`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('a missing table or product changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+  });
+});

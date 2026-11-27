@@ -267,6 +267,9 @@ export default function MixSafetySection() {
       reason: form.reason,
       source: form.source,
       jarTestRequired: form.jarTestRequired,
+      // An edit carries the version it was loaded at; the server answers 409 "This rule changed. Reload it." when the
+      // rule changed since.
+      ...(form.id ? { updatedAt: form.updatedAt } : {}),
     };
     try {
       await readJson(await (form.id
@@ -303,6 +306,7 @@ export default function MixSafetySection() {
     reason: rule.reason,
     source: rule.source || "",
     jarTestRequired: rule.jarTestRequired,
+    updatedAt: rule.updatedAt,
   });
 
   return (

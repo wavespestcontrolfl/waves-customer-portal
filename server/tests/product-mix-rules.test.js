@@ -211,6 +211,12 @@ describe('audit round 3', () => {
   });
 });
 
+test('a category naming fertilizer (Micronutrient Fertilizer) is in the fertilizer group: Celsius + Sequestar reads Never', async () => {
+  const SEQUESTAR = { id: id(14), name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient', category: 'Micronutrient Fertilizer' };
+  mockTables.products_catalog.push(SEQUESTAR);
+  expect((await mix.checkMix([SEQUESTAR.id, CELSIUS.id])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not tank mix Celsius with fertilizer.' });
+});
+
 describe('the headline entry', () => {
   const TOPCHOICE = { id: id(10), name: 'Topchoice Granular Insecticide', category: 'insecticide', formulation: 'granular' };
   const STONEWALL = { id: id(11), name: 'LESCO Stonewall 0.37% 18-0-10', category: 'herbicide', subcategory: 'Pre-emergent + fertilizer combo' };
