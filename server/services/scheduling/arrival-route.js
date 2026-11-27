@@ -108,6 +108,10 @@ function comboRouteCheckLive() {
 // fit (owner 2026-10-25).
 const INSERTION_MARGIN_MINUTES = 15;
 
+function insertionMarginFor(staffInsert, insertionMargin) {
+  return staffInsert || insertionMargin === true ? INSERTION_MARGIN_MINUTES : 0;
+}
+
 /** Where a check stands for staff route insertion: 'move' for a new
  *  visit, the save writer's own placement (`place`), or another day,
  *  technician or start than the saved row; 'saved' for the visit where it is
@@ -1026,6 +1030,10 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // every arrival promise and each such order breaks that. With `lateDays` the late-day orders are
   // tried first, under the same rule. A day on which no order keeps every promise keeps its
   // arrival-window refusal. Unset: nothing reads it and the result is exactly what it was.
+  // The night arrival search's standalone mid-route insertion (find-time.js
+  // opts.arrivalInsert): enforce the same INSERTION_MARGIN_MINUTES (15) as
+  // placeMovedVisit so search and commit agree on every inserted stop.
+  insertionMargin,
   shiftEndMin }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
@@ -1130,7 +1138,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   const endsWithout = (order, usedLegs) => simulate(order.filter(row => row.id !== target.id), usedLegs, { reportLate: true, dayEndMin: Infinity });
   const { winner, returnTooLate, tooTight, pastShiftEnd } = selectWinningOrder(orders,
     { simulate, collectLegs, returnByMin, rows, capacity, target, startMin,
-      marginMinutes: staffInsert ? INSERTION_MARGIN_MINUTES : 0, rangeForStop, shiftEndMin, endsWithout });
+      marginMinutes: insertionMarginFor(staffInsert, insertionMargin), rangeForStop, shiftEndMin, endsWithout });
   const fail = {
     feasible: false, target, reason: 'arrival_window',
     warning: `The route on ${date} cannot keep every promised arrival window with the planned service and driving times. Review the stop order or choose another window.`,

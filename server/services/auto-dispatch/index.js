@@ -683,6 +683,20 @@ function wouldMoveDescription(evalResult) {
   return `Would move${(conflict && CONFLICT_PHRASE[conflict.kind]) || ''} (${signed(evalResult.improvement)})`;
 }
 
+function roadFailedReason(ranked, routeMetrics, config) {
+  const floor = ranked.roadFloor ?? config.minDayMoveDriveSavingMinutes;
+  if (ranked.roadUnavailable || !routeMetrics.road || routeMetrics.road.saving_minutes == null) {
+    return {
+      reason_code: 'ROAD_CHECK_UNAVAILABLE',
+      reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes, but real-road confirmation (>= ${floor} min required) was unavailable`,
+    };
+  }
+  return {
+    reason_code: 'NO_ROAD_DRIVE_SAVING',
+    reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${floor} required`,
+  };
+}
+
 // Why the nearest candidate did not move the visit: a move that cleared
 // the score bar and saved too little drive, or a gain under the bar.
 function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
@@ -692,12 +706,7 @@ function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
       reason_description: `In conflict, but the nearest free slot adds ${-routeMetrics.drive_saving_minutes} drive minutes > ${config.conflictMaxAddedDriveMinutes} allowed; a person must place it`,
     };
   }
-  if (ranked.roadFailed) {
-    return {
-      reason_code: 'NO_ROAD_DRIVE_SAVING',
-      reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${ranked.roadFloor ?? config.minDayMoveDriveSavingMinutes} required`,
-    };
-  }
+  if (ranked.roadFailed) return roadFailedReason(ranked, routeMetrics, config);
   if (ranked.bounceBlocked) {
     return {
       reason_code: 'BOUNCE_COOLDOWN',

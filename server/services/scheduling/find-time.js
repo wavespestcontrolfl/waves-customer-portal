@@ -307,8 +307,12 @@ function travelAllowance(opts) {
   return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
-function allowsMidRouteInsertion(opts) {
-  return opts.capacityPlacement === true || (opts.arrivalSearch === true && opts.arrivalInsert === true);
+function insertionOptionsFor(opts) {
+  if (opts.capacityPlacement === true) return { allowInsertion: true };
+  if (opts.arrivalSearch === true && opts.arrivalInsert === true) {
+    return { allowInsertion: true, insertionMargin: true };
+  }
+  return { allowInsertion: false };
 }
 
 // When providerTravel is explicitly false (auto-dispatch arrivalSearch uses
@@ -443,9 +447,9 @@ async function findCapacitySlots(opts) {
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
           // Standalone auto-dispatch arrival searches (opts.arrivalInsert) insert the
           // moved visit into numbered destination days via apply.js placeInRoute
-          // (placeMovedVisit), so allow mid-route insertion instead of forcing every
-          // candidate behind the last numbered stop (COALESCE(route_order, 999)).
-          durationMinutes, bufferMinutes: 0, allowInsertion: allowsMidRouteInsertion(opts),
+          // (placeMovedVisit), so allow mid-route insertion with the same 15-minute
+          // insertion margin instead of forcing candidates behind route_order 999.
+          durationMinutes, bufferMinutes: 0, ...insertionOptionsFor(opts),
           // The route must also end the visit inside this technician's shift (both checks below).
           ...shiftEndOf(shift),
         } });

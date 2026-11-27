@@ -248,10 +248,16 @@ function routeCost(otherStops, visit, home = HQ) {
   }
   const chain = chainWithVisit(sequence, visit);
   const driveWithMinutes = chainDriveMinutes(chain.map((s) => s.geo), home);
+  // Measure detour against the same baseline sequence (with the candidate
+  // removed) so a stale-order repair inside insertByRouteOrder never subtracts
+  // existing-route savings from the candidate's own marginal detour.
+  const baselineDrive = Array.isArray(visit.routeOrderIds)
+    ? chainDriveMinutes(chain.filter((s) => s.id !== visit.id && !(s.memberIds || []).includes(visit.id)).map((s) => s.geo), home)
+    : driveWithoutMinutes;
   // The moving unit: the visit plus any co-located group members moving with it.
   const visitMinutes = stopPlanningMinutes(visit) + sumPlanningMinutes(visit.unitMembers);
   const routeTimeWithMinutes = driveWithMinutes + otherServiceMinutes + visitMinutes;
-  const detourMinutes = Math.max(0, driveWithMinutes - driveWithoutMinutes);
+  const detourMinutes = Math.max(0, driveWithMinutes - baselineDrive);
   return {
     driveWithoutMinutes, driveWithMinutes, detourMinutes, routeTimeWithoutMinutes, routeTimeWithMinutes,
     neighbours: neighboursOf(chain, visit, home),

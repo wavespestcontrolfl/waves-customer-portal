@@ -117,11 +117,19 @@ describe('confirmOnRoads', () => {
     const fallback = await run(ranked, { now: [20, 20, 10], second: [10, 10, 10] }, { config: minutesConfig });
     expect(fallback.qualifies).toBe(true);
     expect(fallback.best.name).toBe('second');
-    // Only a nonpositive-gain minutes-rule slot, and Google returns nothing: fails closed.
+    // Only a nonpositive-gain minutes-rule slot, and Google returns nothing: fails closed with roadUnavailable.
     const onlyNeg = rankedOf('first');
     onlyNeg.rankedRows = [{ ...onlyNeg.rankedRows[0], gain: 0, byMinutes: true }];
     const blocked = await run(onlyNeg, {}, { config: minutesConfig });
-    expect(blocked).toMatchObject({ qualifies: false, roadFailed: true, ranked: [] });
+    expect(blocked).toMatchObject({ qualifies: false, roadFailed: true, roadUnavailable: true, ranked: [] });
+    // Top 3 slots are all nonpositive-gain minutes-rule and road data is unavailable,
+    // while slot #4 is a score-bar candidate: falls back to slot #4 on estimate.
+    const four = rankedOf('m1', 'm2', 'm3', 'bar4');
+    four.rankedRows = four.rankedRows.map((row, i) => (i < 3 ? { ...row, gain: -1, byMinutes: true } : { ...row, gain: 20, byMinutes: false }));
+    const barFallback = await run(four, {}, { config: minutesConfig });
+    expect(barFallback).toMatchObject({ qualifies: true, roadFailed: false, byMinutes: false });
+    expect(barFallback.best.name).toBe('bar4');
+    expect(roadResultOf(barFallback.best)).toEqual({ source: 'estimate' });
     // Same slot WITH real Google confirmation clearing the 10-min floor: passes.
     const confirmed = await run(onlyNeg, { now: [20, 20, 10], first: [10, 10, 10] }, { config: minutesConfig });
     expect(confirmed).toMatchObject({ qualifies: true, byMinutes: true });

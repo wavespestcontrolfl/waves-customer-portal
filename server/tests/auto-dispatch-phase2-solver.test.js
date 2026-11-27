@@ -51,6 +51,24 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
     const fallback = insertByRouteOrder(dayStops, { id: 'v', geo: NEAR_NORTH, startMin: 615 }, ['s1', '__candidate__', 'unknown']);
     expect(fallback.map((s) => s.id)).toEqual(['s1', 'v', 's2']);
   });
+
+  test('routeCost measures detour against the repaired routeOrderIds baseline, never letting stale-order repair hide candidate detour', () => {
+    const FAR_EAST = { lat: 27.40, lng: -82.10 };
+    // Stored order is stale (NORTH -> SOUTH -> NEAR_NORTH backtracks), while solver
+    // repaired order is NORTH -> NEAR_NORTH -> SOUTH and appends FAR_EAST.
+    const staleStops = [
+      { id: 's1', geo: NORTH, startMin: 480, window_start: '08:00', route_order: 1 },
+      { id: 's2', geo: SOUTH, startMin: 660, window_start: '11:00', route_order: 2 },
+      { id: 's3', geo: NEAR_NORTH, startMin: 540, window_start: '09:00', route_order: 3 },
+    ];
+    const cost = routeCost(staleStops, {
+      id: 'v', geo: FAR_EAST, startMin: 780, route_order: null, insertByTime: true, routeOrderIds: ['s1', 's3', 's2', '__candidate__'],
+    });
+    const repairedBaseline = chainDriveMinutes([NORTH, NEAR_NORTH, SOUTH]);
+    const withCandidate = chainDriveMinutes([NORTH, NEAR_NORTH, SOUTH, FAR_EAST]);
+    expect(cost.detourMinutes).toBeCloseTo(withCandidate - repairedBaseline, 5);
+    expect(cost.detourMinutes).toBeGreaterThan(20);
+  });
 });
 
 describe('Phase 2: calibrated minutes-first qualification and ranking', () => {
