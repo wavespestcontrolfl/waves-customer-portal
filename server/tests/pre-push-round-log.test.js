@@ -62,7 +62,7 @@ function git(cwd, args) {
 function runHook({ cwd = work, env = {}, pushes, timeout } = {}) {
   const tuples = pushes || [['refs/heads/feature', sha, 'refs/heads/feature']];
   const base = cleanEnv();
-  for (const key of ['SKIP_CODEX_REVIEW', 'CODEX_REVIEW_ROUND_LOG', 'CODEX_REVIEW_BASE', 'CODEX_REVIEW_MAX_DIFF_BYTES']) delete base[key];
+  for (const key of ['SKIP_CODEX_REVIEW', 'CODEX_REVIEW_ROUND_LOG', 'CODEX_REVIEW_BASE', 'CODEX_REVIEW_MAX_DIFF_BYTES', 'CODEX_REVIEW_BLOCK_ROUNDS']) delete base[key];
   const result = spawnSync('bash', [HOOK, 'origin', 'unused-url'], {
     cwd, encoding: 'utf8', timeout,
     input: tuples.map(([localRef, localSha, remoteRef]) => `${localRef} ${localSha} ${remoteRef} ${ZERO}\n`).join(''),
@@ -180,6 +180,31 @@ describe('pre-push round log', () => {
     expect(run.status).toBe(1);
     expect(rounds()).toEqual([expect.objectContaining({ outcome: 'audited', p0: 1, p1: 2, exit: 1 })]);
   }, 120000);
+
+  // Owner 2026-11-27 round cap: P0s block only a branch's first 3 audited pushes; GitHub Codex decides after.
+  // Regressions pinned: the cap relaxing round 3 or earlier, counting un-audited pushes or another branch's
+  // rounds, relaxing a push to main, or ignoring CODEX_REVIEW_BLOCK_ROUNDS=0.
+  test('after 3 audited pushes of a branch its P0s stop blocking, and earlier rounds still block', () => {
+    runHook({ env: { FAKE_CODEX_EXIT: '3' } }); // un-audited: not a round
+    runHook({ pushes: [['refs/heads/feature', sha, 'refs/heads/other']], env: { FAKE_CODEX_VERDICT: BLOCKING } });
+    for (let round = 1; round <= 3; round += 1) {
+      const run = runHook({ env: { FAKE_CODEX_VERDICT: BLOCKING } });
+      expect(run.stderr).toContain('blocking push');
+      expect(run.status).toBe(1);
+    }
+    const fourth = runHook({ env: { FAKE_CODEX_VERDICT: BLOCKING } });
+    expect(fourth.stderr).toContain('round cap reached for feature (round 4)');
+    expect(fourth.stderr).toContain('GitHub Codex decides');
+    expect(fourth.status).toBe(0);
+    expect(rounds().slice(-1)).toEqual([expect.objectContaining({ ref: 'refs/heads/feature', outcome: 'audited', p0: 1, exit: 0 })]);
+    const strict = runHook({ env: { FAKE_CODEX_VERDICT: BLOCKING, CODEX_REVIEW_BLOCK_ROUNDS: '0' } });
+    expect(strict.status).toBe(1);
+  }, 240000);
+
+  test('a push to main is never relaxed by the round cap', () => {
+    const toMain = { pushes: [['refs/heads/feature', sha, 'refs/heads/main']], env: { FAKE_CODEX_VERDICT: BLOCKING } };
+    for (let round = 1; round <= 4; round += 1) expect(runHook(toMain).status).toBe(1);
+  }, 240000);
 
   test('an audit that could not run is logged as un-audited, not as a clean round', () => {
     const run = runHook({ env: { FAKE_CODEX_EXIT: '3' } });
