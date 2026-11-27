@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   ActionFeedback,
   Badge,
@@ -269,11 +269,16 @@ export default function ReportsTab() {
   const [basis, setBasis] = useState("accrual");
   const [from, setFrom] = useState(`${today.slice(0, 4)}-01-01`);
   const [to, setTo] = useState(today);
-  const [data, setData] = useState(null);
+  const [result, setResult] = useState({ key: null, reportType: null, data: null });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const requestSeqRef = useRef(0);
+
+  const requestKey = `${reportType}|${from}|${to}|${basis}`;
 
   const loadReport = useCallback(async () => {
+    const seq = requestSeqRef.current + 1;
+    requestSeqRef.current = seq;
     setLoading(true);
     setError("");
     try {
@@ -283,19 +288,22 @@ export default function ReportsTab() {
           ? `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}&basis=${encodeURIComponent(basis)}`
           : `?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
       const res = await getJson(`/reports/${reportType}${qs}`);
-      setData(res);
+      if (seq !== requestSeqRef.current) return;
+      setResult({ key: requestKey, reportType, data: res });
     } catch (err) {
+      if (seq !== requestSeqRef.current) return;
       setError(err.message || "Could not load report.");
     } finally {
-      setLoading(false);
+      if (seq === requestSeqRef.current) setLoading(false);
     }
-  }, [reportType, from, to, basis]);
+  }, [reportType, from, to, basis, requestKey]);
 
   useEffect(() => {
     loadReport();
   }, [loadReport]);
 
   const isPointInTime = reportType === "balance-sheet" || reportType === "trial-balance";
+  const activeData = result.reportType === reportType && result.key === requestKey ? result.data : null;
 
   return (
     <div className="space-y-4">
@@ -334,11 +342,17 @@ export default function ReportsTab() {
 
       {error ? <ActionFeedback error>{error}</ActionFeedback> : null}
 
-      {reportType === "pnl" ? <PnlView data={data} /> : null}
-      {reportType === "balance-sheet" ? <BalanceSheetView data={data} /> : null}
-      {reportType === "trial-balance" ? <TrialBalanceView data={data} /> : null}
-      {reportType === "cash-flow" ? <CashFlowView data={data} /> : null}
-      {reportType === "sales-tax" ? <SalesTaxView data={data} /> : null}
+      {loading && !activeData ? (
+        <Card>
+          <CardBody className="text-14 text-zinc-500 py-6">Loading financial statement...</CardBody>
+        </Card>
+      ) : null}
+
+      {reportType === "pnl" ? <PnlView data={activeData} /> : null}
+      {reportType === "balance-sheet" ? <BalanceSheetView data={activeData} /> : null}
+      {reportType === "trial-balance" ? <TrialBalanceView data={activeData} /> : null}
+      {reportType === "cash-flow" ? <CashFlowView data={activeData} /> : null}
+      {reportType === "sales-tax" ? <SalesTaxView data={activeData} /> : null}
     </div>
   );
 }

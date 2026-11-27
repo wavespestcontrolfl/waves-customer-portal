@@ -19,6 +19,7 @@ const {
   NORMAL_BALANCE_BY_TYPE,
   ensureSystemAccounts,
   naturalBalanceCents,
+  dateCellText,
 } = require('./coa-seed');
 
 const ENTRY_TYPES = new Set([
@@ -100,6 +101,7 @@ function normalizeLine(raw, index) {
     customer_id: assertOptionalUuid(pickKey(raw, 'customerId', 'customer_id'), `lines[${index}].customerId`),
     vendor_id: assertOptionalUuid(pickKey(raw, 'vendorId', 'vendor_id'), `lines[${index}].vendorId`),
     service_line: optionalText(pickKey(raw, 'serviceLine', 'service_line'), 40),
+    invoice_ref: optionalText(pickKey(raw, 'invoiceRef', 'invoice_ref'), 120),
     scheduled_service_id: assertOptionalUuid(pickKey(raw, 'scheduledServiceId', 'scheduled_service_id'), `lines[${index}].scheduledServiceId`),
     bank_transaction_id: assertOptionalUuid(pickKey(raw, 'bankTransactionId', 'bank_transaction_id'), `lines[${index}].bankTransactionId`),
   };
@@ -164,8 +166,15 @@ function validateJournalEntryInput(input) {
   };
 }
 
+async function acquirePeriodLock(trx, periodMonth) {
+  if (trx && typeof trx.raw === 'function') {
+    await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`gl-period:${periodMonth}`]);
+  }
+}
+
 async function assertPeriodOpen(trx, entryDate) {
   const periodMonth = entryDate.slice(0, 7);
+  await acquirePeriodLock(trx, periodMonth);
   const period = await trx('gl_periods').where({ period_month: periodMonth }).first('status');
   if (period && period.status === 'locked') {
     throw new AccountingError(
@@ -203,7 +212,10 @@ async function resolveLineAccounts(trx, lines) {
 }
 
 async function loadEntryWithLines(conn, entryId) {
-  const entry = await conn('gl_journal_entries').where({ id: entryId }).first();
+  const entry = await conn('gl_journal_entries')
+    .where({ id: entryId })
+    .select('*', conn.raw('entry_date::text as entry_date'))
+    .first();
   if (!entry) return null;
   const lines = await conn('gl_journal_lines as l')
     .join('gl_accounts as a', 'a.id', 'l.account_id')
@@ -220,7 +232,7 @@ async function loadEntryWithLines(conn, entryId) {
     );
   return {
     ...entry,
-    entry_date: String(entry.entry_date).slice(0, 10),
+    entry_date: dateCellText(entry.entry_date),
     lines: lines.map((l) => ({
       ...l,
       debit_cents: Number(l.debit_cents),
@@ -276,6 +288,7 @@ async function postJournalEntry(input, { conn = db, actorId = null, requestMeta 
         customer_id: l.customer_id,
         vendor_id: l.vendor_id,
         service_line: l.service_line,
+        invoice_ref: l.invoice_ref,
         scheduled_service_id: l.scheduled_service_id,
         bank_transaction_id: l.bank_transaction_id,
       })),
@@ -339,6 +352,7 @@ async function reverseJournalEntry(entryId, { reversalDate = null, reason = '', 
       customerId: l.customer_id,
       vendorId: l.vendor_id,
       serviceLine: l.service_line,
+      invoiceRef: l.invoice_ref,
       scheduledServiceId: l.scheduled_service_id,
     }));
 
@@ -576,7 +590,7 @@ async function listJournalEntries(opts = {}) {
     .orderBy('e.entry_number', 'desc')
     .limit(safeLimit)
     .offset(safeOffset)
-    .select('e.*');
+    .select('e.*', conn.raw('e.entry_date::text as entry_date'));
 
   if (!headers.length) {
     return { entries: [], total: Number(total), limit: safeLimit, offset: safeOffset };
@@ -601,7 +615,7 @@ async function listJournalEntries(opts = {}) {
       const lines = linesByEntry.get(h.id) || [];
       return {
         ...h,
-        entry_date: String(h.entry_date).slice(0, 10),
+        entry_date: dateCellText(h.entry_date),
         total_cents: lines.reduce((sum, l) => sum + l.debit_cents, 0),
         lines,
       };
@@ -610,6 +624,66 @@ async function listJournalEntries(opts = {}) {
     limit: safeLimit,
     offset: safeOffset,
   };
+}
+
+async function queryPriorRunningBalance(q, account, openingCents, safeOffset) {
+  let running = openingCents;
+  if (safeOffset <= 0) return running;
+  const prior = await q
+    .clone()
+    .orderBy('e.entry_date', 'asc')
+    .orderBy('e.entry_number', 'asc')
+    .orderBy('l.line_order', 'asc')
+    .limit(safeOffset)
+    .select('l.debit_cents', 'l.credit_cents');
+  for (const p of prior) {
+    running += naturalBalanceCents(account, p.debit_cents, p.credit_cents);
+  }
+  return running;
+}
+
+function formatRegisterTransactions(account, rows, startRunning) {
+  let running = startRunning;
+  const transactions = rows.map((r) => {
+    const debitCents = Number(r.debit_cents);
+    const creditCents = Number(r.credit_cents);
+    const deltaCents = naturalBalanceCents(account, debitCents, creditCents);
+    running += deltaCents;
+    return {
+      id: r.id,
+      entry_id: r.entry_id,
+      entry_number: Number(r.entry_number),
+      entry_date: dateCellText(r.entry_date),
+      entry_type: r.entry_type,
+      source_type: r.source_type,
+      memo: r.line_memo || r.entry_memo,
+      reference: r.reference,
+      vendor_name: r.vendor_name || null,
+      service_line: r.service_line || null,
+      debit_cents: debitCents,
+      credit_cents: creditCents,
+      delta_cents: deltaCents,
+      running_balance_cents: running,
+      reconciled: r.reconciliation_status === 'reconciled',
+      cleared: Boolean(r.reconciliation_id),
+      reversed: Boolean(r.reversed_by_entry_id),
+    };
+  });
+  return { transactions, pageClosingCents: running };
+}
+
+async function queryAccountOpeningBalance(conn, account, safeFrom) {
+  if (!safeFrom) return 0;
+  const pre = await conn('gl_journal_lines as l')
+    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+    .where('l.account_id', account.id)
+    .where('e.status', 'posted')
+    .where('e.entry_date', '<', safeFrom)
+    .first(
+      conn.raw('COALESCE(SUM(l.debit_cents), 0)::bigint as debit_cents'),
+      conn.raw('COALESCE(SUM(l.credit_cents), 0)::bigint as credit_cents'),
+    );
+  return naturalBalanceCents(account, pre?.debit_cents, pre?.credit_cents);
 }
 
 async function getAccountRegister(accountId, { from = null, to = null, limit = 100, offset = 0, conn = db } = {}) {
@@ -622,20 +696,7 @@ async function getAccountRegister(accountId, { from = null, to = null, limit = 1
   const safeTo = to ? assertValidDate(to, 'to') : null;
   const safeLimit = Math.min(Math.max(parseInt(limit, 10) || 100, 1), 500);
   const safeOffset = Math.max(parseInt(offset, 10) || 0, 0);
-
-  let openingCents = 0;
-  if (safeFrom) {
-    const pre = await conn('gl_journal_lines as l')
-      .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
-      .where('l.account_id', validId)
-      .where('e.status', 'posted')
-      .where('e.entry_date', '<', safeFrom)
-      .first(
-        conn.raw('COALESCE(SUM(l.debit_cents), 0)::bigint as debit_cents'),
-        conn.raw('COALESCE(SUM(l.credit_cents), 0)::bigint as credit_cents'),
-      );
-    openingCents = naturalBalanceCents(account, pre?.debit_cents, pre?.credit_cents);
-  }
+  const openingCents = await queryAccountOpeningBalance(conn, account, safeFrom);
 
   let q = conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -646,7 +707,17 @@ async function getAccountRegister(accountId, { from = null, to = null, limit = 1
   if (safeFrom) q = q.where('e.entry_date', '>=', safeFrom);
   if (safeTo) q = q.where('e.entry_date', '<=', safeTo);
 
-  const [{ total }] = await q.clone().count('* as total');
+  const periodSummary = await q
+    .clone()
+    .first(
+      conn.raw('COUNT(*)::int as total'),
+      conn.raw('COALESCE(SUM(l.debit_cents), 0)::bigint as debit_cents'),
+      conn.raw('COALESCE(SUM(l.credit_cents), 0)::bigint as credit_cents'),
+    );
+  const total = Number(periodSummary?.total || 0);
+  const fullClosingCents = openingCents
+    + naturalBalanceCents(account, periodSummary?.debit_cents, periodSummary?.credit_cents);
+
   const rows = await q
     .clone()
     .orderBy('e.entry_date', 'asc')
@@ -664,7 +735,7 @@ async function getAccountRegister(accountId, { from = null, to = null, limit = 1
       'l.reconciliation_id',
       'l.cleared_at',
       'e.entry_number',
-      'e.entry_date',
+      conn.raw('e.entry_date::text as entry_date'),
       'e.entry_type',
       'e.source_type',
       'e.memo as entry_memo',
@@ -674,52 +745,15 @@ async function getAccountRegister(accountId, { from = null, to = null, limit = 1
       'r.status as reconciliation_status',
     );
 
-  // If paginating past offset 0, include prior page rows in running balance.
-  let running = openingCents;
-  if (safeOffset > 0) {
-    const prior = await q
-      .clone()
-      .orderBy('e.entry_date', 'asc')
-      .orderBy('e.entry_number', 'asc')
-      .orderBy('l.line_order', 'asc')
-      .limit(safeOffset)
-      .select('l.debit_cents', 'l.credit_cents');
-    for (const p of prior) {
-      running += naturalBalanceCents(account, p.debit_cents, p.credit_cents);
-    }
-  }
-
-  const transactions = rows.map((r) => {
-    const debitCents = Number(r.debit_cents);
-    const creditCents = Number(r.credit_cents);
-    const deltaCents = naturalBalanceCents(account, debitCents, creditCents);
-    running += deltaCents;
-    return {
-      id: r.id,
-      entry_id: r.entry_id,
-      entry_number: Number(r.entry_number),
-      entry_date: String(r.entry_date).slice(0, 10),
-      entry_type: r.entry_type,
-      source_type: r.source_type,
-      memo: r.line_memo || r.entry_memo,
-      reference: r.reference,
-      vendor_name: r.vendor_name || null,
-      service_line: r.service_line || null,
-      debit_cents: debitCents,
-      credit_cents: creditCents,
-      delta_cents: deltaCents,
-      running_balance_cents: running,
-      reconciled: r.reconciliation_status === 'reconciled',
-      cleared: Boolean(r.reconciliation_id),
-      reversed: Boolean(r.reversed_by_entry_id),
-    };
-  });
+  const startRunning = await queryPriorRunningBalance(q, account, openingCents, safeOffset);
+  const { transactions, pageClosingCents } = formatRegisterTransactions(account, rows, startRunning);
 
   return {
     account,
     opening_balance_cents: openingCents,
-    closing_balance_cents: running,
-    total: Number(total),
+    page_closing_balance_cents: pageClosingCents,
+    closing_balance_cents: fullClosingCents,
+    total,
     limit: safeLimit,
     offset: safeOffset,
     transactions,
@@ -732,6 +766,7 @@ module.exports = {
   BASIS_SCOPES,
   assertValidDate,
   assertOptionalUuid,
+  acquirePeriodLock,
   validateJournalEntryInput,
   postJournalEntry,
   reverseJournalEntry,

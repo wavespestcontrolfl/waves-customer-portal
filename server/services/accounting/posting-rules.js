@@ -35,8 +35,11 @@ function posInt(value, field) {
 }
 
 /**
- * 1. Customer Invoice Issued (Accrual Revenue + FL Sales Tax Payable).
- *    - Standard service invoice: DR 1100 A/R / CR 4xxx Revenue + CR 2100 FL Sales Tax Payable
+ * 1. Customer Invoice Issued (Accrual Revenue + FL Sales Tax Payable + Deposit/Credit Release).
+ *    - Standard invoice:         DR 1100 A/R / CR 4xxx Revenue + CR 2100 FL Sales Tax Payable
+ *    - Applied estimate deposit: DR 1100 A/R (remaining due) + DR 2300 Unearned Revenue (deposit)
+ *                                / CR 4xxx full pre-tax Revenue + CR 2100 FL Sales Tax Payable
+ *    - Applied account credit:   DR 2350 Customer Credits reduces A/R billed
  *    - Annual prepay invoice:    DR 1100 A/R / CR 2300 Unearned Revenue + CR 2100 FL Sales Tax Payable
  */
 function buildInvoiceEntry({
@@ -45,6 +48,8 @@ function buildInvoiceEntry({
   issueDate,
   subtotalCents,
   taxCents = 0,
+  appliedDepositCents = 0,
+  appliedCreditCents = 0,
   serviceLine = 'pest',
   isCommercial = false,
   isAnnualPrepay = false,
@@ -52,12 +57,49 @@ function buildInvoiceEntry({
 }) {
   const sub = posInt(subtotalCents, 'subtotalCents');
   const tax = posInt(taxCents, 'taxCents');
+  const deposit = posInt(appliedDepositCents, 'appliedDepositCents');
+  const credit = posInt(appliedCreditCents, 'appliedCreditCents');
   const total = sub + tax;
   if (total <= 0) throw new AccountingError(400, 'Invoice total must be greater than $0');
+  if (deposit + credit > total) {
+    throw new AccountingError(400, 'Applied deposit and customer credit cannot exceed invoice total');
+  }
 
-  const lines = [
-    { accountCode: SYSTEM_CODES.ACCOUNTS_RECEIVABLE, debitCents: total, creditCents: 0, customerId, serviceLine },
-  ];
+  const invoiceRef = String(invoiceId);
+  const arCents = total - deposit - credit;
+  const lines = [];
+  if (arCents > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.ACCOUNTS_RECEIVABLE,
+      debitCents: arCents,
+      creditCents: 0,
+      customerId,
+      serviceLine,
+      invoiceRef,
+    });
+  }
+  if (deposit > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.UNEARNED_REVENUE,
+      debitCents: deposit,
+      creditCents: 0,
+      customerId,
+      serviceLine,
+      invoiceRef,
+      memo: 'Apply estimate deposit credit',
+    });
+  }
+  if (credit > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.CUSTOMER_CREDITS,
+      debitCents: credit,
+      creditCents: 0,
+      customerId,
+      serviceLine,
+      invoiceRef,
+      memo: 'Apply customer account credit',
+    });
+  }
   if (sub > 0) {
     lines.push({
       accountCode: isAnnualPrepay ? SYSTEM_CODES.UNEARNED_REVENUE : revenueAccountCodeFor(serviceLine, isCommercial),
@@ -65,6 +107,7 @@ function buildInvoiceEntry({
       creditCents: sub,
       customerId,
       serviceLine,
+      invoiceRef,
     });
   }
   if (tax > 0) {
@@ -74,6 +117,7 @@ function buildInvoiceEntry({
       creditCents: tax,
       customerId,
       serviceLine,
+      invoiceRef,
     });
   }
 
@@ -82,9 +126,9 @@ function buildInvoiceEntry({
     entryType: 'operational',
     basisScope: 'accrual_only',
     sourceType: 'invoice',
-    sourceId: String(invoiceId),
+    sourceId: invoiceRef,
     idempotencyKey: `invoice:${invoiceId}`,
-    reference: invoiceNumber || String(invoiceId),
+    reference: invoiceNumber || invoiceRef,
     memo: `${isAnnualPrepay ? 'Annual prepay invoice' : 'Invoice'} ${invoiceNumber || invoiceId}`,
     lines,
   };
@@ -120,54 +164,117 @@ function buildUnearnedRecognitionEntry({
   };
 }
 
-/**
- * 3. Customer Payment Captured (Stripe, Zelle, Check, Cash, or Estimate Deposit).
- *    - Stripe capture: DR 1050 Stripe Clearing (net) + DR 5400 Merchant Fees (fee) / CR 1100 A/R (gross)
- *    - Zelle/Check/Cash: DR 1010 Checking (or 1060 Undeposited Funds) / CR 1100 A/R
- *    - Estimate Deposit (unbilled): credits 2300 Unearned Revenue instead of A/R.
- *    - Cash-basis companion line isn't needed when reports read payment-settled rows;
- *      standard payment posts with basisScope: 'both' (balance sheet cash + A/R clearing + real fee).
- */
-function buildPaymentEntry({
-  paymentId,
-  paymentDate,
-  grossCents,
-  feeCents = 0,
-  method = 'stripe',
-  isDeposit = false,
-  customerId = null,
-  serviceLine = null,
-  reference = null,
-}) {
-  const gross = posInt(grossCents, 'grossCents');
-  const fee = posInt(feeCents, 'feeCents');
-  if (gross <= 0) throw new AccountingError(400, 'Payment grossCents must be > 0');
-  if (fee >= gross) throw new AccountingError(400, 'Processing fee cannot equal or exceed gross payment');
+function cashAccountForPaymentMethod(methodKey) {
+  if (methodKey === 'zelle' || methodKey === 'ach_direct') return SYSTEM_CODES.CHECKING_PRIMARY;
+  if (methodKey === 'check' || methodKey === 'cash') return SYSTEM_CODES.UNDEPOSITED_FUNDS;
+  return SYSTEM_CODES.STRIPE_CLEARING;
+}
 
-  const net = gross - fee;
-  const methodKey = String(method || 'stripe').toLowerCase();
-  let cashAccount = SYSTEM_CODES.STRIPE_CLEARING;
-  if (methodKey === 'zelle' || methodKey === 'ach_direct') cashAccount = SYSTEM_CODES.CHECKING_PRIMARY;
-  else if (methodKey === 'check' || methodKey === 'cash') cashAccount = SYSTEM_CODES.UNDEPOSITED_FUNDS;
-
-  const creditAccount = isDeposit ? SYSTEM_CODES.UNEARNED_REVENUE : SYSTEM_CODES.ACCOUNTS_RECEIVABLE;
+function buildPaymentLines({ cashAccount, creditAccount, net, fee, principal, surcharge, meta }) {
   const lines = [
-    { accountCode: cashAccount, debitCents: net, creditCents: 0, customerId, serviceLine },
+    { accountCode: cashAccount, debitCents: net, creditCents: 0, ...meta },
   ];
   if (fee > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.COGS_MERCHANT_FEES, debitCents: fee, creditCents: 0, customerId, serviceLine });
+    lines.push({ accountCode: SYSTEM_CODES.COGS_MERCHANT_FEES, debitCents: fee, creditCents: 0, ...meta });
   }
-  lines.push({ accountCode: creditAccount, debitCents: 0, creditCents: gross, customerId, serviceLine });
+  lines.push({ accountCode: creditAccount, debitCents: 0, creditCents: principal, ...meta });
+  if (surcharge > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.REV_CARD_SURCHARGE,
+      debitCents: 0,
+      creditCents: surcharge,
+      ...meta,
+      memo: 'Card surcharge recovery',
+    });
+  }
+  return lines;
+}
 
+/**
+ * 3. Customer Payment Captured (Stripe, Zelle, Check, Cash, or Estimate Deposit).
+ *    - Stripe capture: DR 1050 Stripe Clearing (net) + DR 5400 Merchant Fees (fee)
+ *                      / CR 1100 A/R (invoice principal) + CR 4085 Card Surcharge Recovery (surcharge)
+ *    - Zelle/Check/Cash: DR 1010 Checking (or 1060 Undeposited Funds) / CR 1100 A/R
+ *    - Estimate Deposit (unbilled): credits 2300 Unearned Revenue for face value + 4085 for surcharge.
+ */
+function buildPaymentEntry(input) {
+  const gross = posInt(input.grossCents, 'grossCents');
+  const fee = posInt(input.feeCents ?? 0, 'feeCents');
+  const surcharge = posInt(input.surchargeCents ?? 0, 'surchargeCents');
+  if (gross <= 0) throw new AccountingError(400, 'Payment grossCents must be > 0');
+  if (fee >= gross) throw new AccountingError(400, 'Processing fee cannot equal or exceed gross payment');
+  if (surcharge >= gross) throw new AccountingError(400, 'Card surcharge cannot equal or exceed gross payment');
+
+  const methodKey = String(input.method || 'stripe').toLowerCase();
+  const isDeposit = Boolean(input.isDeposit);
+  const lines = buildPaymentLines({
+    cashAccount: cashAccountForPaymentMethod(methodKey),
+    creditAccount: isDeposit ? SYSTEM_CODES.UNEARNED_REVENUE : SYSTEM_CODES.ACCOUNTS_RECEIVABLE,
+    net: gross - fee,
+    fee,
+    principal: gross - surcharge,
+    surcharge,
+    meta: {
+      customerId: input.customerId ?? null,
+      serviceLine: input.serviceLine ?? null,
+      invoiceRef: input.invoiceId ? String(input.invoiceId) : null,
+    },
+  });
+
+  const paymentId = String(input.paymentId);
   return {
-    entryDate: paymentDate,
+    entryDate: input.paymentDate,
     entryType: 'operational',
     basisScope: 'both',
     sourceType: 'payment',
-    sourceId: String(paymentId),
-    idempotencyKey: `payment:${paymentId}`,
-    reference: reference || String(paymentId),
-    memo: `${isDeposit ? 'Customer deposit' : 'Customer payment'} via ${methodKey}`,
+    sourceId: paymentId,
+    idempotencyKey: input.idempotencyKey || `payment:${paymentId}`,
+    reference: input.reference || paymentId,
+    memo: input.memo || `${isDeposit ? 'Customer deposit' : 'Customer payment'} via ${methodKey}`,
+    lines,
+  };
+}
+
+/**
+ * 3b. Stripe Processing Fee / Fee Reversal from stripe_payout_transactions.
+ *     - Positive fee: DR 5400 Merchant Processing & Bank Fees / CR 1050 Stripe Clearing
+ *     - Negative fee (fee credit): DR 1050 Stripe Clearing / CR 5400 Merchant Fees
+ *     Clears exact Stripe processing fees out of 1050 Stripe Clearing so payouts net to $0.00.
+ */
+function buildStripeFeeEntry({
+  txnId,
+  feeDate,
+  feeCents,
+  customerId = null,
+  invoiceId = null,
+  reference = null,
+  memo = null,
+}) {
+  const fee = Math.trunc(Number(feeCents));
+  if (!Number.isSafeInteger(fee) || fee === 0) {
+    throw new AccountingError(400, 'feeCents must be a non-zero integer in cents');
+  }
+  const absFee = Math.abs(fee);
+  const invoiceRef = invoiceId ? String(invoiceId) : null;
+  const lines = fee > 0
+    ? [
+      { accountCode: SYSTEM_CODES.COGS_MERCHANT_FEES, debitCents: absFee, creditCents: 0, customerId, invoiceRef },
+      { accountCode: SYSTEM_CODES.STRIPE_CLEARING, debitCents: 0, creditCents: absFee, customerId, invoiceRef },
+    ]
+    : [
+      { accountCode: SYSTEM_CODES.STRIPE_CLEARING, debitCents: absFee, creditCents: 0, customerId, invoiceRef },
+      { accountCode: SYSTEM_CODES.COGS_MERCHANT_FEES, debitCents: 0, creditCents: absFee, customerId, invoiceRef },
+    ];
+
+  return {
+    entryDate: feeDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType: 'stripe_fee',
+    sourceId: String(txnId),
+    idempotencyKey: `stripe-fee:${txnId}`,
+    reference: reference || String(txnId),
+    memo: memo || (fee > 0 ? `Stripe processing fee (${txnId})` : `Stripe fee reversal (${txnId})`),
     lines,
   };
 }
@@ -185,7 +292,9 @@ function buildRefundEntry({
   method = 'stripe',
   customerId = null,
   serviceLine = null,
+  invoiceId = null,
   reference = null,
+  idempotencyKey = null,
   reason = 'Customer refund',
 }) {
   const sub = posInt(subtotalCents, 'subtotalCents');
@@ -196,15 +305,16 @@ function buildRefundEntry({
   const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
     ? SYSTEM_CODES.STRIPE_CLEARING
     : SYSTEM_CODES.CHECKING_PRIMARY;
+  const invoiceRef = invoiceId ? String(invoiceId) : null;
 
   const lines = [];
   if (sub > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, debitCents: sub, creditCents: 0, customerId, serviceLine });
+    lines.push({ accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, debitCents: sub, creditCents: 0, customerId, serviceLine, invoiceRef });
   }
   if (tax > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: tax, creditCents: 0, customerId, serviceLine });
+    lines.push({ accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: tax, creditCents: 0, customerId, serviceLine, invoiceRef });
   }
-  lines.push({ accountCode: cashAccount, debitCents: 0, creditCents: total, customerId, serviceLine });
+  lines.push({ accountCode: cashAccount, debitCents: 0, creditCents: total, customerId, serviceLine, invoiceRef });
 
   return {
     entryDate: refundDate,
@@ -212,8 +322,58 @@ function buildRefundEntry({
     basisScope: 'both',
     sourceType: 'refund',
     sourceId: String(refundId),
-    idempotencyKey: `refund:${refundId}`,
+    idempotencyKey: idempotencyKey || `refund:${refundId}`,
     reference: reference || String(refundId),
+    memo: reason,
+    lines,
+  };
+}
+
+/**
+ * 4b. Dispute Won / Bounced Refund Reinstatement (funds returned to Stripe Clearing).
+ *     DR 1050 Stripe Clearing / CR 4090 Refunds & Allowances + CR 2100 FL Sales Tax Payable
+ */
+function buildRefundReversalEntry({
+  txnId,
+  reversalDate,
+  subtotalCents,
+  taxCents = 0,
+  method = 'stripe',
+  customerId = null,
+  serviceLine = null,
+  invoiceId = null,
+  reference = null,
+  idempotencyKey = null,
+  reason = 'Dispute won / refund reversed',
+}) {
+  const sub = posInt(subtotalCents, 'subtotalCents');
+  const tax = posInt(taxCents, 'taxCents');
+  const total = sub + tax;
+  if (total <= 0) throw new AccountingError(400, 'Refund reversal total must be > 0');
+
+  const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
+    ? SYSTEM_CODES.STRIPE_CLEARING
+    : SYSTEM_CODES.CHECKING_PRIMARY;
+  const invoiceRef = invoiceId ? String(invoiceId) : null;
+
+  const lines = [
+    { accountCode: cashAccount, debitCents: total, creditCents: 0, customerId, serviceLine, invoiceRef },
+  ];
+  if (sub > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, debitCents: 0, creditCents: sub, customerId, serviceLine, invoiceRef });
+  }
+  if (tax > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: 0, creditCents: tax, customerId, serviceLine, invoiceRef });
+  }
+
+  return {
+    entryDate: reversalDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType: 'refund_reversal',
+    sourceId: String(txnId),
+    idempotencyKey: idempotencyKey || `refund-reversal:${txnId}`,
+    reference: reference || String(txnId),
     memo: reason,
     lines,
   };
@@ -368,7 +528,7 @@ function buildSalesTaxRemittanceEntry({
     entryDate: paymentDate,
     entryType: 'operational',
     basisScope: 'both',
-    sourceType: 'bank_transaction',
+    sourceType: 'sales_tax_remittance',
     sourceId: String(sourceId),
     idempotencyKey: `sales-tax-remit:${sourceId}`,
     reference: periodLabel || String(sourceId),
@@ -546,7 +706,9 @@ module.exports = {
   buildInvoiceEntry,
   buildUnearnedRecognitionEntry,
   buildPaymentEntry,
+  buildStripeFeeEntry,
   buildRefundEntry,
+  buildRefundReversalEntry,
   buildStripePayoutEntry,
   buildExpenseEntry,
   buildTransferEntry,

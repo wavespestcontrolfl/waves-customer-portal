@@ -217,6 +217,7 @@ exports.up = async function up(knex) {
       t.uuid('customer_id');
       t.uuid('vendor_id').references('id').inTable('gl_vendors').onDelete('SET NULL');
       t.string('service_line', 40);
+      t.string('invoice_ref', 120);
       t.uuid('scheduled_service_id');
       t.uuid('bank_transaction_id');
       t.uuid('reconciliation_id').references('id').inTable('gl_reconciliations').onDelete('SET NULL');
@@ -227,6 +228,7 @@ exports.up = async function up(knex) {
       t.index('account_id');
       t.index('vendor_id');
       t.index('customer_id');
+      t.index('invoice_ref');
       t.index('bank_transaction_id');
       t.index('reconciliation_id');
     });
@@ -323,12 +325,38 @@ exports.up = async function up(knex) {
       EXECUTE FUNCTION gl_assert_header_has_balanced_lines();
   `);
 
-  // 7c. Period Lock Trigger on gl_journal_entries
+  // 7c. Period Lock Serialization Trigger on gl_periods + Period Lock Trigger on gl_journal_entries
+  await knex.raw(`
+    CREATE OR REPLACE FUNCTION gl_serialize_period_transition()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_month TEXT;
+    BEGIN
+      v_month := COALESCE(NEW.period_month, OLD.period_month);
+      IF v_month IS NOT NULL THEN
+        PERFORM pg_advisory_xact_lock(hashtext('gl-period:' || v_month));
+      END IF;
+      RETURN COALESCE(NEW, OLD);
+    END;
+    $$ LANGUAGE plpgsql;
+  `);
+
+  await knex.raw(`
+    DROP TRIGGER IF EXISTS trg_gl_periods_serialize ON gl_periods;
+    CREATE TRIGGER trg_gl_periods_serialize
+      BEFORE INSERT OR UPDATE OR DELETE ON gl_periods
+      FOR EACH ROW
+      EXECUTE FUNCTION gl_serialize_period_transition();
+  `);
+
   await knex.raw(`
     CREATE OR REPLACE FUNCTION gl_enforce_period_lock_on_entry()
     RETURNS TRIGGER AS $$
     DECLARE
       v_month TEXT;
+      v_old_month TEXT;
+      v_first TEXT;
+      v_second TEXT;
       v_locked BOOLEAN;
     BEGIN
       IF TG_OP = 'UPDATE' AND OLD.entry_date = NEW.entry_date
@@ -342,6 +370,21 @@ exports.up = async function up(knex) {
       END IF;
 
       v_month := to_char(COALESCE(NEW.entry_date, OLD.entry_date), 'YYYY-MM');
+
+      IF TG_OP = 'UPDATE' AND OLD.entry_date <> NEW.entry_date THEN
+        v_old_month := to_char(OLD.entry_date, 'YYYY-MM');
+        IF v_old_month <> v_month THEN
+          v_first := LEAST(v_month, v_old_month);
+          v_second := GREATEST(v_month, v_old_month);
+          PERFORM pg_advisory_xact_lock(hashtext('gl-period:' || v_first));
+          PERFORM pg_advisory_xact_lock(hashtext('gl-period:' || v_second));
+        ELSE
+          PERFORM pg_advisory_xact_lock(hashtext('gl-period:' || v_month));
+        END IF;
+      ELSE
+        PERFORM pg_advisory_xact_lock(hashtext('gl-period:' || v_month));
+      END IF;
+
       SELECT EXISTS(
         SELECT 1 FROM gl_periods WHERE period_month = v_month AND status = 'locked'
       ) INTO v_locked;
@@ -351,13 +394,12 @@ exports.up = async function up(knex) {
           USING ERRCODE = 'P0001';
       END IF;
 
-      IF TG_OP = 'UPDATE' AND OLD.entry_date <> NEW.entry_date THEN
-        v_month := to_char(OLD.entry_date, 'YYYY-MM');
+      IF v_old_month IS NOT NULL AND v_old_month <> v_month THEN
         SELECT EXISTS(
-          SELECT 1 FROM gl_periods WHERE period_month = v_month AND status = 'locked'
+          SELECT 1 FROM gl_periods WHERE period_month = v_old_month AND status = 'locked'
         ) INTO v_locked;
         IF v_locked THEN
-          RAISE EXCEPTION 'Accounting period % is locked — cannot move entry out of a locked period', v_month
+          RAISE EXCEPTION 'Accounting period % is locked — cannot move entry out of a locked period', v_old_month
             USING ERRCODE = 'P0001';
         END IF;
       END IF;
@@ -397,6 +439,7 @@ exports.up = async function up(knex) {
            OR OLD.debit_cents <> NEW.debit_cents
            OR OLD.credit_cents <> NEW.credit_cents
            OR OLD.entry_id <> NEW.entry_id THEN
+          PERFORM pg_advisory_xact_lock(hashtext('gl-period:' || v_month));
           SELECT EXISTS(
             SELECT 1 FROM gl_periods WHERE period_month = v_month AND status = 'locked'
           ) INTO v_locked;
@@ -464,6 +507,8 @@ exports.down = async function down(knex) {
   await knex.raw('DROP FUNCTION IF EXISTS gl_enforce_line_immutability()');
   await knex.raw('DROP TRIGGER IF EXISTS trg_gl_entries_period_lock ON gl_journal_entries');
   await knex.raw('DROP FUNCTION IF EXISTS gl_enforce_period_lock_on_entry()');
+  await knex.raw('DROP TRIGGER IF EXISTS trg_gl_periods_serialize ON gl_periods');
+  await knex.raw('DROP FUNCTION IF EXISTS gl_serialize_period_transition()');
   await knex.raw('DROP TRIGGER IF EXISTS trg_gl_entry_header_balanced ON gl_journal_entries');
   await knex.raw('DROP FUNCTION IF EXISTS gl_assert_header_has_balanced_lines()');
   await knex.raw('DROP TRIGGER IF EXISTS trg_gl_lines_balanced ON gl_journal_lines');

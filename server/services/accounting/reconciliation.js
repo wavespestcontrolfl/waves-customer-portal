@@ -8,7 +8,7 @@
 
 const db = require('../../models/db');
 const { recordAuditEvent } = require('../audit-log');
-const { naturalBalanceCents } = require('./coa-seed');
+const { naturalBalanceCents, dateCellText } = require('./coa-seed');
 const { AccountingError, assertValidDate, assertOptionalUuid } = require('./ledger');
 
 const RECONCILABLE_SUB_TYPES = new Set([
@@ -38,6 +38,8 @@ async function listReconciliations({ accountId = null, conn = db } = {}) {
     .orderBy('r.created_at', 'desc')
     .select(
       'r.*',
+      conn.raw('r.statement_start_date::text as statement_start_date'),
+      conn.raw('r.statement_end_date::text as statement_end_date'),
       'a.code as account_code',
       'a.name as account_name',
       'a.account_type',
@@ -48,8 +50,8 @@ async function listReconciliations({ accountId = null, conn = db } = {}) {
   const rows = await q;
   return rows.map((r) => ({
     ...r,
-    statement_start_date: r.statement_start_date ? String(r.statement_start_date).slice(0, 10) : null,
-    statement_end_date: String(r.statement_end_date).slice(0, 10),
+    statement_start_date: dateCellText(r.statement_start_date),
+    statement_end_date: dateCellText(r.statement_end_date),
     opening_balance_cents: Number(r.opening_balance_cents),
     ending_balance_cents: Number(r.ending_balance_cents),
     cleared_balance_cents: Number(r.cleared_balance_cents),
@@ -98,7 +100,19 @@ async function startReconciliation({
     const prior = await trx('gl_reconciliations')
       .where({ account_id: validAcctId, status: 'reconciled' })
       .orderBy('statement_end_date', 'desc')
-      .first('statement_end_date', 'ending_balance_cents');
+      .select(trx.raw('statement_end_date::text as statement_end_date'), 'ending_balance_cents')
+      .first();
+
+    if (prior) {
+      const priorEndDate = dateCellText(prior.statement_end_date);
+      if (priorEndDate && endDate <= priorEndDate) {
+        throw new AccountingError(
+          409,
+          `Statement end date (${endDate}) must be after the latest finalized statement (${priorEndDate}). Reopen the later statement first to reconcile an earlier period.`,
+          'STATEMENT_DATE_ORDER',
+        );
+      }
+    }
 
     let openingCents;
     if (openingBalanceCents != null) {
@@ -152,10 +166,17 @@ async function getReconciliationWorkspace(reconciliationId, { conn = db } = {}) 
   const validId = assertOptionalUuid(reconciliationId, 'reconciliationId');
   if (!validId) throw new AccountingError(400, 'reconciliationId is required');
 
-  const rec = await conn('gl_reconciliations').where({ id: validId }).first();
+  const rec = await conn('gl_reconciliations')
+    .where({ id: validId })
+    .select(
+      '*',
+      conn.raw('statement_start_date::text as statement_start_date'),
+      conn.raw('statement_end_date::text as statement_end_date'),
+    )
+    .first();
   if (!rec) throw new AccountingError(404, 'Reconciliation not found');
   const account = await conn('gl_accounts').where({ id: rec.account_id }).first();
-  const endDate = String(rec.statement_end_date).slice(0, 10);
+  const endDate = dateCellText(rec.statement_end_date);
 
   const lines = await conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -180,7 +201,7 @@ async function getReconciliationWorkspace(reconciliationId, { conn = db } = {}) 
       'l.memo as line_memo',
       'l.reconciliation_id',
       'e.entry_number',
-      'e.entry_date',
+      conn.raw('e.entry_date::text as entry_date'),
       'e.entry_type',
       'e.source_type',
       'e.memo as entry_memo',
@@ -195,7 +216,7 @@ async function getReconciliationWorkspace(reconciliationId, { conn = db } = {}) 
       id: l.id,
       entry_id: l.entry_id,
       entry_number: Number(l.entry_number),
-      entry_date: String(l.entry_date).slice(0, 10),
+      entry_date: dateCellText(l.entry_date),
       entry_type: l.entry_type,
       source_type: l.source_type,
       memo: l.line_memo || l.entry_memo,
@@ -214,7 +235,7 @@ async function getReconciliationWorkspace(reconciliationId, { conn = db } = {}) 
   return {
     reconciliation: {
       ...rec,
-      statement_start_date: rec.statement_start_date ? String(rec.statement_start_date).slice(0, 10) : null,
+      statement_start_date: dateCellText(rec.statement_start_date),
       statement_end_date: endDate,
       opening_balance_cents: Number(rec.opening_balance_cents),
       ending_balance_cents: Number(rec.ending_balance_cents),
@@ -235,14 +256,18 @@ async function toggleClearedLines(reconciliationId, { lineIds, cleared, conn = d
   const shouldClear = Boolean(cleared);
 
   return conn.transaction(async (trx) => {
-    const rec = await trx('gl_reconciliations').where({ id: validId }).forUpdate().first();
+    const rec = await trx('gl_reconciliations')
+      .where({ id: validId })
+      .forUpdate()
+      .select('*', trx.raw('statement_end_date::text as statement_end_date'))
+      .first();
     if (!rec) throw new AccountingError(404, 'Reconciliation not found');
     if (rec.status !== 'in_progress') {
       throw new AccountingError(409, 'Only an in-progress reconciliation can clear or unclear lines');
     }
 
     const account = await trx('gl_accounts').where({ id: rec.account_id }).first();
-    const endDate = String(rec.statement_end_date).slice(0, 10);
+    const endDate = dateCellText(rec.statement_end_date);
 
     if (shouldClear) {
       await trx('gl_journal_lines')
@@ -286,7 +311,11 @@ async function finishReconciliation(reconciliationId, { actorId = null, requestM
   if (!validId) throw new AccountingError(400, 'reconciliationId is required');
 
   return conn.transaction(async (trx) => {
-    const rec = await trx('gl_reconciliations').where({ id: validId }).forUpdate().first();
+    const rec = await trx('gl_reconciliations')
+      .where({ id: validId })
+      .forUpdate()
+      .select('*', trx.raw('statement_end_date::text as statement_end_date'))
+      .first();
     if (!rec) throw new AccountingError(404, 'Reconciliation not found');
     if (rec.status !== 'in_progress') {
       throw new AccountingError(409, 'Reconciliation is not in progress');
@@ -326,7 +355,7 @@ async function finishReconciliation(reconciliationId, { actorId = null, requestM
       resource_id: validId,
       metadata: {
         account_code: account.code,
-        statement_end_date: String(rec.statement_end_date).slice(0, 10),
+        statement_end_date: dateCellText(rec.statement_end_date),
         ending_balance_cents: Number(rec.ending_balance_cents),
         cleared_line_count: math.cleared_line_count,
       },
@@ -347,7 +376,11 @@ async function reopenReconciliation(reconciliationId, { reason = '', actorId = n
   if (!cleanReason) throw new AccountingError(400, 'A reason is required to reopen a reconciliation');
 
   return conn.transaction(async (trx) => {
-    const rec = await trx('gl_reconciliations').where({ id: validId }).forUpdate().first();
+    const rec = await trx('gl_reconciliations')
+      .where({ id: validId })
+      .forUpdate()
+      .select('*', trx.raw('statement_end_date::text as statement_end_date'))
+      .first();
     if (!rec) throw new AccountingError(404, 'Reconciliation not found');
     if (rec.status !== 'reconciled') {
       throw new AccountingError(409, 'Only a finalized reconciliation can be reopened');
@@ -376,7 +409,7 @@ async function reopenReconciliation(reconciliationId, { reason = '', actorId = n
       action: 'accounting.reconciliation.reopen',
       resource_type: 'gl_reconciliation',
       resource_id: validId,
-      metadata: { reason: cleanReason, statement_end_date: String(rec.statement_end_date).slice(0, 10) },
+      metadata: { reason: cleanReason, statement_end_date: dateCellText(rec.statement_end_date) },
       ip_address: requestMeta.ip || null,
       user_agent: requestMeta.userAgent || null,
       critical: true,

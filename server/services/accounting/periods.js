@@ -7,7 +7,7 @@
 
 const db = require('../../models/db');
 const { recordAuditEvent } = require('../audit-log');
-const { AccountingError } = require('./ledger');
+const { AccountingError, acquirePeriodLock } = require('./ledger');
 
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/;
 
@@ -54,6 +54,7 @@ async function transitionPeriod(periodMonth, targetStatus, { notes = null, actor
   const cleanNotes = notes ? String(notes).trim().slice(0, 500) : null;
 
   return conn.transaction(async (trx) => {
+    await acquirePeriodLock(trx, month);
     const existing = await trx('gl_periods').where({ period_month: month }).forUpdate().first();
     const prevStatus = existing ? existing.status : 'open';
 

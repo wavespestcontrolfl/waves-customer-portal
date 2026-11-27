@@ -107,4 +107,96 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
     fireEvent.click(screen.getByRole("button", { name: "View Register" }));
     await waitFor(() => expect(screen.getByText("Stripe payout settled")).toBeTruthy());
   });
+
+  it("switches from Profit & Loss to Balance Sheet without crashing and ignores stale responses", async () => {
+    let resolveBalanceSheet;
+    const balanceSheetPromise = new Promise((resolve) => {
+      resolveBalanceSheet = resolve;
+    });
+
+    global.fetch = vi.fn((url) => {
+      const u = String(url);
+      if (u.endsWith("/admin/accounting/status")) return jsonResponse({ enabled: true });
+      if (u.endsWith("/admin/accounting/overview")) {
+        return jsonResponse({
+          as_of: "2026-11-27",
+          posted_entries: 4,
+          trial_balance_ok: true,
+          balance_sheet_ok: true,
+          cash_total_cents: 100000,
+          accounts_receivable_cents: 0,
+          sales_tax_payable_cents: 0,
+          unearned_revenue_cents: 0,
+          ytd: { net_income_cents: 100000 },
+          locked_through: null,
+        });
+      }
+      if (u.includes("/admin/accounting/reports/pnl")) {
+        return jsonResponse({
+          from: "2026-01-01",
+          to: "2026-11-27",
+          basis: "accrual",
+          sections: {
+            revenue: [{ id: "a1", code: "4000", name: "Residential Pest & Mosquito Revenue", amount_cents: 100000, deductible_pct: 100 }],
+            cogs: [],
+            expenses: [],
+          },
+          totals: {
+            revenue_cents: 100000,
+            cogs_cents: 0,
+            gross_profit_cents: 100000,
+            gross_margin_pct: 100,
+            operating_expenses_cents: 0,
+            ebitda_cents: 100000,
+            net_income_cents: 100000,
+            net_margin_pct: 100,
+          },
+        });
+      }
+      if (u.includes("/admin/accounting/reports/balance-sheet")) {
+        return balanceSheetPromise;
+      }
+      return jsonResponse({});
+    });
+
+    render(<AccountingPage />);
+    expect(await screen.findByText(/Residential Pest & Mosquito Revenue/)).toBeTruthy();
+
+    // Switching immediately while Balance Sheet request is still pending must NOT pass P&L shape to BalanceSheetView.
+    fireEvent.change(screen.getByLabelText("Report"), { target: { value: "balance-sheet" } });
+    expect(await screen.findByText(/Loading financial statement/i)).toBeTruthy();
+
+    resolveBalanceSheet({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({
+        as_of: "2026-11-27",
+        sections: {
+          current_assets: [{ id: "c1", code: "1010", name: "Capital One Operating Checking", amount_cents: 100000 }],
+          fixed_assets: [],
+          other_assets: [],
+          current_liabilities: [],
+          long_term_liabilities: [],
+          equity: [],
+        },
+        totals: {
+          current_assets_cents: 100000,
+          fixed_assets_net_cents: 0,
+          total_assets_cents: 100000,
+          current_liabilities_cents: 0,
+          long_term_liabilities_cents: 0,
+          total_liabilities_cents: 0,
+          recorded_equity_cents: 0,
+          net_income_cents: 100000,
+          total_equity_cents: 100000,
+          liabilities_and_equity_cents: 100000,
+          discrepancy_cents: 0,
+          balanced: true,
+        },
+      }),
+    });
+
+    expect(await screen.findByText(/Balanced \(Assets = Liabilities \+ Equity\)/)).toBeTruthy();
+    expect(screen.getByText(/Capital One Operating Checking/)).toBeTruthy();
+  });
 });

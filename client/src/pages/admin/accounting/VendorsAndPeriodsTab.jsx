@@ -188,18 +188,23 @@ export default function VendorsAndPeriodsTab({ onChanged }) {
               <div className="font-medium">
                 {syncResult.dry_run ? "Dry Run Preview" : "Sync Results"} ({syncResult.from} to {syncResult.to})
               </div>
-              {["invoices", "payments", "stripe_payouts", "expenses", "payroll_runs"].map((k) => {
+              {["invoices", "deposits", "payments", "refunds", "stripe_fees", "stripe_payouts", "expenses", "payroll_runs"].map((k) => {
                 const b = syncResult[k];
                 if (!b) return null;
                 return (
                   <div key={k} className="flex flex-wrap gap-3 font-mono text-zinc-700">
-                    <span className="w-36 font-sans font-medium">{k.replace("_", " ")}:</span>
+                    <span className="w-36 font-sans font-medium">{k.replace(/_/g, " ")}:</span>
                     {syncResult.dry_run
-                      ? <span>would post {b.would_post}</span>
-                      : <span>posted {b.posted} · skipped {b.skipped} · errors {b.errors.length}</span>}
+                      ? <span>would post {b.would_post}{b.would_reverse ? ` · would reverse ${b.would_reverse}` : ""} · skipped {b.skipped} · errors {b.errors.length}</span>
+                      : <span>posted {b.posted}{b.reversed ? ` · reversed ${b.reversed}` : ""} · skipped {b.skipped} · errors {b.errors.length}</span>}
                   </div>
                 );
               })}
+              {syncResult.expenses?.unmatched_contractor_vendors?.length ? (
+                <div className="pt-1 text-14 text-amber-800">
+                  Unlinked contractor vendors ({syncResult.expenses.unmatched_contractor_vendors.length}): add them in Vendor Master below so 1099-NEC totals are complete.
+                </div>
+              ) : null}
             </div>
           ) : null}
         </CardBody>
@@ -275,8 +280,9 @@ export default function VendorsAndPeriodsTab({ onChanged }) {
           <CardTitle>Vendor Master &amp; {currentYear} 1099-NEC Readiness</CardTitle>
           <div className="flex items-center gap-2">
             {summary1099 ? (
-              <Badge tone={summary1099.missing_w9_count > 0 ? "alert" : "neutral"}>
+              <Badge tone={summary1099.missing_w9_count > 0 || summary1099.unlinked_contractor_count > 0 ? "alert" : "neutral"}>
                 Threshold: {formatCents(summary1099.threshold_cents)} · Missing W-9s: {summary1099.missing_w9_count}
+                {summary1099.unlinked_contractor_count > 0 ? ` · Unlinked contractor JEs: ${summary1099.unlinked_contractor_count}` : ""}
               </Badge>
             ) : null}
             <Button variant="primary" size="sm" onClick={() => setVendorOpen(true)}>Add Vendor</Button>

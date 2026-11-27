@@ -10,6 +10,7 @@
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { recordAuditEvent } = require('../audit-log');
+const { dateCellText } = require('./coa-seed');
 const { AccountingError, assertValidDate, assertOptionalUuid } = require('./ledger');
 
 const ENTITY_TYPES = new Set([
@@ -47,7 +48,7 @@ function publicVendor(row) {
   delete copy.tin_enc;
   return {
     ...copy,
-    w9_received_at: row.w9_received_at ? String(row.w9_received_at).slice(0, 10) : null,
+    w9_received_at: dateCellText(row.w9_received_at),
     has_tin: Boolean(row.tin_enc),
   };
 }
@@ -56,7 +57,12 @@ async function listVendors({ includeInactive = false, conn = db } = {}) {
   let q = conn('gl_vendors as v')
     .leftJoin('gl_accounts as a', 'a.id', 'v.default_account_id')
     .orderBy('v.display_name', 'asc')
-    .select('v.*', 'a.code as default_account_code', 'a.name as default_account_name');
+    .select(
+      'v.*',
+      conn.raw('v.w9_received_at::text as w9_received_at'),
+      'a.code as default_account_code',
+      'a.name as default_account_name',
+    );
   if (!includeInactive) q = q.where('v.active', true);
   const rows = await q;
   return rows.map(publicVendor);

@@ -33,16 +33,31 @@ const {
   ACCOUNT_TYPES,
   naturalBalanceCents,
   sectionSignedBalanceCents,
+  dateCellText,
 } = require('../services/accounting/coa-seed');
-const { validateJournalEntryInput, AccountingError } = require('../services/accounting/ledger');
+const {
+  validateJournalEntryInput,
+  AccountingError,
+  getAccountRegister,
+  postJournalEntry,
+} = require('../services/accounting/ledger');
 const rules = require('../services/accounting/posting-rules');
 const {
   computeTrialBalance,
   computeProfitAndLoss,
   computeBalanceSheet,
   computeCashFlowStatement,
+  allocateCashReceiptToRevenue,
+  summarizeSalesTaxLines,
 } = require('../services/accounting/statements');
-const { computeReconciliationMath } = require('../services/accounting/reconciliation');
+const { computeReconciliationMath, startReconciliation } = require('../services/accounting/reconciliation');
+const { lockPeriod } = require('../services/accounting/periods');
+const {
+  syncSubledgersToGl,
+  extractAppliedDepositCents,
+  extractSurchargeCents,
+  computeProratedRefundTaxCents,
+} = require('../services/accounting/sync-bridge');
 const { encryptTin, publicVendor } = require('../services/accounting/vendors');
 
 function makeSyntheticAccounts() {
@@ -508,5 +523,348 @@ describe('Admin Accounting Router security & dark-gate contract', () => {
     });
     expect(writeRes.status).toBe(403);
     expect(writeRes.body.error).toMatch(/owner account/i);
+  });
+});
+
+describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Basis, Sales Tax, Locks, Sync)', () => {
+  test('dateCellText preserves PostgreSQL DATE values without weekday truncation or timezone shift', () => {
+    const localNov1 = new Date(2026, 10, 1, 0, 0, 0);
+    expect(dateCellText(localNov1)).toBe('2026-11-01');
+    expect(dateCellText('2026-11-27')).toBe('2026-11-27');
+    expect(dateCellText('2026-11-27T00:00:00.000Z')).toBe('2026-11-27');
+    expect(dateCellText(null)).toBeNull();
+    expect(dateCellText('Fri Nov 27 2026')).toBeNull();
+  });
+
+  test('applied estimate deposits release 2300 Unearned Revenue and recognize full earned revenue', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+
+    const depositLines = [
+      { description: 'Pest treatment', amount: 100.0, category: 'service' },
+      { description: 'Deposit credit (paid at acceptance)', amount: -30.0, category: 'deposit_credit' },
+    ];
+    expect(extractAppliedDepositCents(depositLines)).toBe(3000);
+
+    const entries = [
+      // Deposit collected ($30 face value)
+      rules.buildPaymentEntry({
+        paymentId: 'dep-1',
+        paymentDate: '2026-11-01',
+        grossCents: 3000,
+        method: 'stripe',
+        isDeposit: true,
+      }),
+      // $100 service invoice with $30 deposit applied -> $70 A/R + $30 DR 2300 / $100 CR 4000
+      rules.buildInvoiceEntry({
+        invoiceId: 'inv-dep-1',
+        invoiceNumber: 'WPC-2026-2001',
+        issueDate: '2026-11-05',
+        subtotalCents: 10000,
+        taxCents: 0,
+        appliedDepositCents: 3000,
+        serviceLine: 'pest',
+      }),
+      // Remaining $70 paid via Stripe
+      rules.buildPaymentEntry({
+        paymentId: 'pay-dep-1',
+        paymentDate: '2026-11-06',
+        grossCents: 7000,
+        method: 'stripe',
+        invoiceId: 'inv-dep-1',
+        serviceLine: 'pest',
+      }),
+    ];
+
+    const sums = accumulateEntries(accounts, entries);
+    const bal = (code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+    expect(bal(SYSTEM_CODES.UNEARNED_REVENUE)).toBe(0);
+    expect(bal(SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(10000);
+    expect(bal(SYSTEM_CODES.STRIPE_CLEARING)).toBe(10000);
+  });
+
+  test('card surcharges split to 4085 and Stripe fees clear 1050 Stripe Clearing cleanly to $0.00', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+
+    expect(extractSurchargeCents({ amount: '102.90', surcharge_amount_cents: 290 }, 10290)).toBe(290);
+    expect(extractSurchargeCents({ amount: '102.90', base_amount_cents: 10000 }, 10290)).toBe(290);
+
+    const entries = [
+      rules.buildInvoiceEntry({
+        invoiceId: 'inv-card-1',
+        issueDate: '2026-11-02',
+        subtotalCents: 10000,
+        taxCents: 0,
+        serviceLine: 'pest',
+      }),
+      rules.buildPaymentEntry({
+        paymentId: 'pay-card-1',
+        paymentDate: '2026-11-02',
+        grossCents: 10290,
+        surchargeCents: 290,
+        feeCents: 0,
+        method: 'stripe',
+        invoiceId: 'inv-card-1',
+      }),
+      rules.buildStripeFeeEntry({
+        txnId: 'txn_fee_1',
+        feeDate: '2026-11-02',
+        feeCents: 328,
+      }),
+      rules.buildStripePayoutEntry({
+        payoutId: 'po-card-1',
+        arrivalDate: '2026-11-04',
+        amountCents: 9962, // 10290 - 328
+      }),
+    ];
+
+    const sums = accumulateEntries(accounts, entries);
+    const bal = (code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+    expect(bal(SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+    expect(bal(SYSTEM_CODES.REV_CARD_SURCHARGE)).toBe(290);
+    expect(bal(SYSTEM_CODES.COGS_MERCHANT_FEES)).toBe(328);
+    expect(bal(SYSTEM_CODES.CHECKING_PRIMARY)).toBe(9962);
+  });
+
+  test('pro-rata refund sales tax allocation handles full, partial, and card-surcharged refunds', () => {
+    const inv = { total: '107.00', tax_amount: '7.00' };
+    expect(computeProratedRefundTaxCents(10700, inv, '107.00')).toBe(700);
+    expect(computeProratedRefundTaxCents(5350, inv, '107.00')).toBe(350);
+    // Card-surcharged payment ($110.10 charged on $107 invoice)
+    expect(computeProratedRefundTaxCents(11010, inv, '110.10')).toBe(700);
+    expect(computeProratedRefundTaxCents(5505, inv, '110.10')).toBe(350);
+  });
+
+  test('cash-basis revenue allocation excludes collected sales tax (full & partial) and offsets reversals', () => {
+    const accounts = makeSyntheticAccounts();
+    const revIdByCode = new Map(accounts.filter((a) => a.account_type === 'revenue').map((a) => [a.code, a.id]));
+    const commId = revIdByCode.get(SYSTEM_CODES.REV_COMMERCIAL_PEST);
+    const profile = {
+      arDebitedCents: 10700,
+      taxCents: 700,
+      revenueSplits: [{ accountId: commId, amountCents: 10000 }],
+    };
+
+    // Full $107 payment -> $100 pre-tax revenue (excludes $7 sales tax)
+    expect(allocateCashReceiptToRevenue(10700, profile, 'commercial', revIdByCode))
+      .toEqual([{ accountId: commId, signedCents: 10000 }]);
+
+    // Partial $53.50 payment -> $50 pre-tax revenue
+    expect(allocateCashReceiptToRevenue(5350, profile, 'commercial', revIdByCode))
+      .toEqual([{ accountId: commId, signedCents: 5000 }]);
+
+    // Reversal of $107 payment -> -$100 pre-tax revenue offset on reversal date
+    expect(allocateCashReceiptToRevenue(-10700, profile, 'commercial', revIdByCode))
+      .toEqual([{ accountId: commId, signedCents: -10000 }]);
+  });
+
+  test('FL sales tax summary classifies reversed taxable invoices as accrued reduction, never FL DOR remittance', () => {
+    const out = summarizeSalesTaxLines(0, [
+      { source_type: 'invoice', debit_cents: 0, credit_cents: 7000 },
+      { source_type: 'reversal', reversed_source_type: 'invoice', debit_cents: 7000, credit_cents: 0 },
+      { source_type: 'invoice', debit_cents: 0, credit_cents: 3500 },
+      { source_type: 'refund', debit_cents: 500, credit_cents: 0 },
+      { source_type: 'sales_tax_remittance', idempotency_key: 'sales-tax-remit:1', debit_cents: 3000, credit_cents: 0 },
+    ]);
+    expect(out.tax_accrued_cents).toBe(3500);
+    expect(out.tax_reversed_on_refunds_cents).toBe(500);
+    expect(out.net_tax_due_for_period_cents).toBe(3000);
+    expect(out.tax_remitted_cents).toBe(3000);
+    expect(out.ending_payable_cents).toBe(0);
+  });
+
+  test('postJournalEntry and lockPeriod both acquire the same month advisory lock before checking gl_periods', async () => {
+    const rawCalls = [];
+    const makeTrx = (periodRow) => {
+      const trx = (table) => {
+        const chain = {
+          where: () => chain,
+          orWhereIn: () => chain,
+          forUpdate: () => chain,
+          select: () => Promise.resolve(table === 'gl_accounts'
+            ? [
+              { id: '00000000-0000-4000-8000-000000000001', code: '1010', name: 'Checking', active: true, account_type: 'asset', normal_balance: 'debit' },
+              { id: '00000000-0000-4000-8000-000000000002', code: '4000', name: 'Revenue', active: true, account_type: 'revenue', normal_balance: 'credit' },
+            ]
+            : []),
+          first: () => Promise.resolve(table === 'gl_periods' ? periodRow : null),
+          insert: () => ({ returning: () => Promise.resolve([{ id: '00000000-0000-4000-8000-000000000099', period_month: '2026-11', status: 'locked' }]) }),
+          update: () => ({ returning: () => Promise.resolve([{ id: '00000000-0000-4000-8000-000000000099', period_month: '2026-11', status: 'locked' }]) }),
+        };
+        return chain;
+      };
+      trx.raw = (sql, bindings) => { rawCalls.push({ sql, bindings }); return Promise.resolve(); };
+      trx.fn = { now: () => new Date() };
+      trx.isTransaction = true;
+      trx.transaction = (cb) => cb(trx);
+      return trx;
+    };
+
+    const lockedTrx = makeTrx({ status: 'locked' });
+    await expect(postJournalEntry({
+      entryDate: '2026-11-15',
+      memo: 'Blocked post',
+      lines: [
+        { accountCode: '1010', debitCents: 100, creditCents: 0 },
+        { accountCode: '4000', debitCents: 0, creditCents: 100 },
+      ],
+    }, { conn: lockedTrx })).rejects.toThrow(/locked/i);
+
+    const openTrx = makeTrx(null);
+    await lockPeriod('2026-11', { conn: openTrx, notes: 'Month closed' });
+
+    const lockCalls = rawCalls.filter((c) => c.sql.includes('pg_advisory_xact_lock'));
+    expect(lockCalls).toHaveLength(2);
+    expect(lockCalls[0].bindings).toEqual(['gl-period:2026-11']);
+    expect(lockCalls[1].bindings).toEqual(['gl-period:2026-11']);
+  });
+
+  test('getAccountRegister computes closing_balance_cents across the full period beyond the page limit', async () => {
+    const acctId = '00000000-0000-4000-8000-000000000001';
+    const fakeConn = (table) => {
+      const chain = {
+        join: () => chain,
+        leftJoin: () => chain,
+        where: () => chain,
+        orderBy: () => chain,
+        limit: () => chain,
+        offset: () => chain,
+        clone: () => chain,
+        first: () => {
+          if (table === 'gl_accounts') {
+            return Promise.resolve({ id: acctId, code: '1010', name: 'Checking', account_type: 'asset', normal_balance: 'debit' });
+          }
+          // Full period has 3 transactions totaling $300 debit, even though page limit returns 2 ($200).
+          return Promise.resolve({ total: 3, debit_cents: 30000, credit_cents: 0 });
+        },
+        select: () => Promise.resolve([
+          { id: 'l1', entry_id: 'e1', entry_number: 1, entry_date: '2026-11-01', entry_type: 'operational', source_type: 'manual', entry_memo: 'Tx 1', debit_cents: 10000, credit_cents: 0 },
+          { id: 'l2', entry_id: 'e2', entry_number: 2, entry_date: '2026-11-02', entry_type: 'operational', source_type: 'manual', entry_memo: 'Tx 2', debit_cents: 10000, credit_cents: 0 },
+        ]),
+      };
+      return chain;
+    };
+    fakeConn.raw = (sql) => sql;
+
+    const reg = await getAccountRegister(acctId, { limit: 2, offset: 0, conn: fakeConn });
+    expect(reg.total).toBe(3);
+    expect(reg.page_closing_balance_cents).toBe(20000);
+    expect(reg.closing_balance_cents).toBe(30000);
+  });
+
+  test('startReconciliation rejects statement dates at or before the latest finalized statement', async () => {
+    const acctId = '00000000-0000-4000-8000-000000000001';
+    const fakeConn = (table) => {
+      const state = { whereObj: null };
+      const chain = {
+        where: (obj) => { state.whereObj = obj; return chain; },
+        orderBy: () => chain,
+        select: () => chain,
+        first: () => {
+          if (table === 'gl_accounts') {
+            return Promise.resolve({ id: acctId, code: '1010', name: 'Checking', sub_type: 'checking', account_type: 'asset', normal_balance: 'debit' });
+          }
+          if (table === 'gl_reconciliations' && state.whereObj?.status === 'in_progress') {
+            return Promise.resolve(null);
+          }
+          if (table === 'gl_reconciliations' && state.whereObj?.status === 'reconciled') {
+            return Promise.resolve({ statement_end_date: '2026-02-28', ending_balance_cents: 500000 });
+          }
+          return Promise.resolve(null);
+        },
+      };
+      return chain;
+    };
+    fakeConn.raw = (sql) => sql;
+    fakeConn.transaction = (cb) => cb(fakeConn);
+
+    await expect(startReconciliation({
+      accountId: acctId,
+      statementEndDate: '2026-01-31',
+      endingBalanceCents: 400000,
+      conn: fakeConn,
+    })).rejects.toThrow(/must be after the latest finalized statement \(2026-02-28\)/i);
+  });
+
+  test('syncSubledgersToGl dryRun checks existing keys & locked periods and uses injected conn exclusively', async () => {
+    const accounts = makeSyntheticAccounts();
+    const existingKeys = new Set(['invoice:inv-already-posted']);
+    const lockedMonths = new Set(['2026-10']);
+
+    const makeBuilder = (table) => {
+      const state = { whereObj: null };
+      const chain = {
+        leftJoin: () => chain,
+        join: () => chain,
+        where: (a) => { if (a && typeof a === 'object') state.whereObj = a; return chain; },
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'gl_periods') return Promise.resolve([...lockedMonths].map((m) => ({ period_month: m, status: 'locked' })));
+          if (table === 'invoices as i') {
+            return Promise.resolve([
+              { id: 'inv-already-posted', invoice_number: 'WPC-1', customer_id: null, subtotal: '100', discount_amount: '0', tax_amount: '0', total: '100', credit_applied: '0', line_items: '[]', service_type: 'pest', service_date: '2026-11-05', property_type: 'single_family' },
+              { id: 'inv-locked', invoice_number: 'WPC-2', customer_id: null, subtotal: '100', discount_amount: '0', tax_amount: '0', total: '100', credit_applied: '0', line_items: '[]', service_type: 'pest', service_date: '2026-10-15', property_type: 'single_family' },
+              { id: 'inv-new', invoice_number: 'WPC-3', customer_id: null, subtotal: '100', discount_amount: '0', tax_amount: '0', total: '100', credit_applied: '0', line_items: '[]', service_type: 'pest', service_date: '2026-11-10', property_type: 'single_family' },
+            ]);
+          }
+          if (table === 'gl_vendors') {
+            return Promise.resolve([{ id: '00000000-0000-4000-8000-000000000777', display_name: 'Registered Sub', legal_name: null, is_1099_eligible: true, active: true }]);
+          }
+          if (table === 'expenses as e') {
+            return Promise.resolve([
+              { id: 'exp-1', category_id: null, description: 'Sub work', amount: '250.00', tax_deductible_amount: null, expense_date: '2026-11-12', vendor_name: 'Unregistered Sub', payment_method: 'check', category_name: 'Contract Labor' },
+            ]);
+          }
+          if (table === 'payroll_runs as pr') {
+            return Promise.resolve([
+              { id: '00000000-0000-4000-8000-000000000888', reversed_by_entry_id: null, run_id: 'run-void-1', pay_date: '2026-11-06', voided_at: '2026-11-08T15:00:00Z', void_reason: 'Corrected hours' },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+        first: () => {
+          if (table === 'gl_journal_entries' && state.whereObj?.idempotency_key) {
+            return Promise.resolve(existingKeys.has(state.whereObj.idempotency_key) ? { id: 'existing-je' } : null);
+          }
+          return Promise.resolve(null);
+        },
+      };
+      return chain;
+    };
+
+    const injectedConn = (table) => makeBuilder(table);
+    injectedConn.raw = (sql) => sql;
+    injectedConn.schema = { hasTable: () => Promise.resolve(true) };
+
+    const preview = await syncSubledgersToGl({ fromDate: '2026-10-01', toDate: '2026-11-30', dryRun: true, conn: injectedConn });
+    expect(preview.invoices.would_post).toBe(1);
+    expect(preview.invoices.skipped).toBe(1);
+    expect(preview.invoices.errors).toHaveLength(1);
+    expect(preview.invoices.errors[0].message).toMatch(/2026-10 is locked/i);
+    expect(preview.expenses.unmatched_contractor_vendors).toEqual([
+      { vendor_name: 'Unregistered Sub', count: 1, total_cents: 25000 },
+    ]);
+    expect(preview.payroll_runs.would_reverse).toBe(1);
   });
 });

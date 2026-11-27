@@ -48,6 +48,7 @@ const SYSTEM_CODES = {
   REV_LAWN_TREE_SHRUB: '4020',
   REV_TERMITE_PROJECTS: '4030',
   REV_OTHER: '4080',
+  REV_CARD_SURCHARGE: '4085',
   REV_REFUNDS_ALLOWANCES: '4090',
 
   COGS_FIELD_WAGES: '5100',
@@ -321,6 +322,17 @@ const SYSTEM_ACCOUNTS = [
     form_1120s_line: '1a',
     description: 'Miscellaneous service revenue',
     sort_order: 4080,
+  },
+  {
+    code: SYSTEM_CODES.REV_CARD_SURCHARGE,
+    name: 'Card Surcharge Recovery',
+    account_type: 'revenue',
+    sub_type: 'surcharge_recovery',
+    normal_balance: 'credit',
+    schedule_c_line: '1',
+    form_1120s_line: '1a',
+    description: 'Credit card surcharge amounts collected alongside invoice or deposit payments (keeps 1100 A/R exact)',
+    sort_order: 4085,
   },
   {
     code: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES,
@@ -683,6 +695,26 @@ function centsToDollars(cents) {
 }
 
 /**
+ * Convert a PostgreSQL DATE cell (ISO string or node-postgres local-midnight Date)
+ * to 'YYYY-MM-DD' WITHOUT timezone shifting. Never pass a DATE cell through
+ * etDateString() or String(d).slice(0, 10) ("Fri Nov 27").
+ */
+function dateCellText(value) {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const m = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim());
+    return m ? m[1] : null;
+  }
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    const y = value.getFullYear();
+    const m = String(value.getMonth() + 1).padStart(2, '0');
+    const d = String(value.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+}
+
+/**
  * Idempotently guarantees all system Chart of Accounts rows exist and bridges
  * legacy expense_categories rows where not already mapped.
  */
@@ -736,5 +768,6 @@ module.exports = {
   sectionSignedBalanceCents,
   dollarsToCents,
   centsToDollars,
+  dateCellText,
   ensureSystemAccounts,
 };
