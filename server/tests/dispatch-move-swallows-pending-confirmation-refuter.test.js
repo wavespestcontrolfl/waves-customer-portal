@@ -52,6 +52,19 @@ describeOrSkip('r2-reschedule-move-engine-reminders-1: silent dispatch move keep
 
   afterAll(async () => {
     if (server) await new Promise((r) => server.close(r));
+    // This suite commits to the shared database, on tomorrow's date before noon ET
+    // (tomorrowET is now + 36 h). Remove what it made, so the gap-window suite's
+    // stop count on that day does not read these stops.
+    if (db && cust) {
+      const ids = (await db('scheduled_services').where({ customer_id: cust.id }).select('id')).map((r) => r.id);
+      if (ids.length) {
+        await db('appointment_reminders').whereIn('scheduled_service_id', ids).del();
+        await db('reschedule_log').whereIn('scheduled_service_id', ids).del();
+        await db('scheduled_services').whereIn('id', ids).del();
+      }
+      await db('customers').where({ id: cust.id }).del();
+    }
+    if (db && admin) await db('technicians').where({ id: admin.id }).del();
     if (db) await db.destroy();
   });
 

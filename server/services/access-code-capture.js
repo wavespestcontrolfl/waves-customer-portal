@@ -2558,6 +2558,7 @@ async function addByStaff(conn, { customerId, kind, life, code, instructions, sc
 }
 
 module.exports = {
+  VERIFICATION_CONTEXT,
   suggestedHome,
   listForVisit,
   VERSION,

@@ -975,6 +975,45 @@ describe('open-loop commitments recheck', () => {
       }
     });
 
+    test('SCHEDULE CHANGES: a draft carrying `schedule` is rebuilt with them; a move, skip or cancel recorded since refuses', async () => {
+      const move = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false };
+      const drew = { moves: [move], stopped: [] };
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: facts.scheduleChangesSignature(drew), scheduleVisits: [{ id: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }, { id: 'v2', date: '2026-12-09', start: null, window: null, dayOnly: true }] } }) });
+      nowFacts({ ...drafted, scheduleChanges: drew });
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
+      // the rebuild asks about the same listed visits, in the same order
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true, withScheduleChanges: true, upcomingServices: [{ scheduledServiceId: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }, { scheduledServiceId: 'v2', date: '2026-12-09', start: null, window: null, dayOnly: true }] }));
+      for (const changed of [
+        { moves: [], stopped: [] },
+        { moves: [{ ...move, logId: 'rl-2', toDate: '2026-12-05' }], stopped: [] },
+        { moves: [move], stopped: [{ visitIds: ['v2'], type: 'Lawn Care', date: '2026-12-10', lastDate: '2026-12-10', status: 'skipped', count: 1 }] },
+      ]) {
+        spy.mockRestore();
+        nowFacts({ ...drafted, scheduleChanges: changed });
+        await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('schedule_changed');
+      }
+      // drafted beside no change at all: a move recorded since refuses too
+      const none = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: '' } }) });
+      spy.mockRestore();
+      nowFacts({ ...drafted, scheduleChanges: drew });
+      await expect(openLoopsBlockReason({ decision: none })).resolves.toBe('schedule_changed');
+      // drafted when the read failed ('unread'): never matches a rebuild, so it refuses
+      const unread = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: 'unread' } }) });
+      spy.mockRestore();
+      nowFacts({ ...drafted, scheduleChanges: { moves: [], stopped: [] } });
+      await expect(openLoopsBlockReason({ decision: unread })).resolves.toBe('schedule_changed');
+      // a failed rebuild is retryable, never "changed"
+      spy.mockRestore();
+      spy = jest.spyOn(facts, 'loadVisitLoops').mockRejectedValue(new Error('db down'));
+      await expect(openLoopsBlockReason({ decision: d })).resolves.toBe('open_loops_recheck_failed');
+    });
+
+    test('a draft from before SCHEDULE CHANGES (no `schedule` key) is not asked about them', async () => {
+      nowFacts({ ...drafted, scheduleChanges: { moves: [{ logId: 'rl-9', visitId: 'v1' }], stopped: [] } });
+      await expect(openLoopsBlockReason({ decision: withStatus() })).resolves.toBeNull();
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ withScheduleChanges: false }));
+    });
+
     test('a null signature (section rendered, nothing time-sensitive) is still rechecked: a delay that appeared refuses', async () => {
       const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature: null } }) });
       nowFacts(loops());

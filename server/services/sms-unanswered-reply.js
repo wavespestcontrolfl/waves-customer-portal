@@ -159,6 +159,8 @@ async function factsFingerprintFor(customer, at, dbh = db) {
   if (staffFacts && context?.prepGuide === null) throw new Error('prep guide could not be read');
   // the same for the REPORT DELIVERY sentences (texting AI gap 2): a failed read must not hash as "no report delivery"
   if (staffFacts && context?.reportDeliveries === null) throw new Error('report delivery could not be read');
+  // SCHEDULE CHANGES that could not be read hash as "none": the same refusal as a failed guide read
+  if (staffFacts && context?.visitLoops && context.visitLoops.scheduleChanges === null) throw new Error('schedule changes could not be read');
   const block = buildFactsBlock(context, { now: at });
   return require('node:crypto').createHash('sha256').update(String(block)).digest('hex');
 }
