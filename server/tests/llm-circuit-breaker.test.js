@@ -37,7 +37,7 @@ describe('llm/circuit-breaker', () => {
     for (let i = 0; i < 10; i += 1) {
       circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1000 + i });
     }
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: 1020 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: null });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: 1020 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: null, disabled: true });
   });
 
   test('classifies only 429, 5xx, and provider timeouts as outage failures', () => {
@@ -549,9 +549,26 @@ describe('llm/circuit-breaker', () => {
     cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 14000, credential: 'rotated-key-2' });
     expect(cb.isAvailable('anthropic', { now: 14100 })).toBe(true);
 
-    // An injected client (credential: null) returning 401 never suppresses the env credential.
-    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 14200, credential: null });
+    // An injected client returning 401 cools down THAT client instance without
+    // suppressing unrelated injected clients or the shared env credential.
+    const injectedA = { messages: { create: jest.fn() } };
+    const injectedB = { messages: { create: jest.fn() } };
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 14200, credential: injectedA });
+    expect(cb.isAvailable('anthropic', { now: 14300, credential: injectedA })).toBe(false);
+    expect(cb.isAvailable('anthropic', { now: 14300, credential: injectedB })).toBe(true);
     expect(cb.isAvailable('anthropic', { now: 14300 })).toBe(true);
+    expect(cb.isAvailable('anthropic', { now: 24200, credential: injectedA })).toBe(true);
+
+    // Completions from calls admitted while the gate was OFF must be ignored
+    // even if the gate turns ON before they finish (never bypass generation guard).
+    delete process.env.GATE_LLM_CIRCUIT_BREAKER;
+    const disabledGate = cb.beforeAttempt('openai', { hasBackup: true, now: 25000 });
+    expect(disabledGate.disabled).toBe(true);
+    process.env.GATE_LLM_CIRCUIT_BREAKER = 'true';
+    cb.resetCircuitBreakers();
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_503', disabled: disabledGate.disabled, generation: disabledGate.generation, now: 25100 });
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_503', disabled: disabledGate.disabled, generation: disabledGate.generation, now: 25200 });
+    expect(cb.getCircuitBreakerSnapshot(25300).openai).toBeUndefined();
 
     // Cloudflare uses CF_ACCOUNT_ID + CF_WORKERS_AI_TOKEN / CF_API_TOKEN (matching callWorkersAIDecision).
     const savedCfAcct = process.env.CF_ACCOUNT_ID;

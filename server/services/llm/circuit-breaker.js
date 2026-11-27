@@ -47,6 +47,10 @@ const breakers = new Map();
 // recently failed auth (401/403). Kept strictly separate from provider-wide
 // outage counting so an auth failure never trips the outage breaker.
 const authFailures = new Map();
+// Separate per-instance auth cooldown for injected SDK clients (e.g. a lane's
+// own Anthropic client) so a failed client becomes ineligible without
+// suppressing unrelated clients or the shared env key, and without leaking.
+let clientAuthFailures = new WeakMap();
 
 function providerCredential(provider) {
   if (provider === 'openai') return process.env.OPENAI_API_KEY || '';
@@ -80,6 +84,15 @@ function isModelResponseReason(provider, reason) {
 }
 
 function isAuthCoolingDown(provider, now, credential) {
+  if (credential && typeof credential === 'object') {
+    const expiresAt = clientAuthFailures.get(credential);
+    if (!expiresAt) return false;
+    if (now >= expiresAt) {
+      clientAuthFailures.delete(credential);
+      return false;
+    }
+    return true;
+  }
   if (credential === null) return false;
   const entry = authFailures.get(provider);
   if (!entry) return false;
@@ -176,7 +189,7 @@ function releaseReservation(reservation) {
  */
 function beforeAttempt(provider, { hasBackup = false, backupProviders = null, now = null } = {}) {
   if (!llmCircuitBreakerLive() || !provider) {
-    return { allow: true, isProbe: false, probeId: null, generation: null };
+    return { allow: true, isProbe: false, probeId: null, generation: null, disabled: true };
   }
   const breaker = breakerFor(provider);
   if (breaker.state === 'closed') {
@@ -206,7 +219,16 @@ function releaseDisabledProbe(provider, probeId) {
   if (existing) existing.releaseProbe(probeId);
 }
 
+function recordClientAuthOutcome(client, { ok, providerResponded, authFailed, ts }) {
+  if (authFailed) clientAuthFailures.set(client, ts + cooldownMs());
+  else if (ok || providerResponded) clientAuthFailures.delete(client);
+}
+
 function recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential }) {
+  if (credential && typeof credential === 'object') {
+    recordClientAuthOutcome(credential, { ok, providerResponded, authFailed, ts });
+    return;
+  }
   const usedCred = credential === undefined ? providerCredential(provider) : credential;
   if (!usedCred) return;
   if (authFailed) {
@@ -232,36 +254,39 @@ function isActiveProbe(breaker, probeId) {
  * Callers must pass `aborted: true` when the caller's own AbortSignal fired so
  * caller-side cancellations (e.g. barge-in or client disconnect) never trip,
  * `legMs` so tight caller deadlines do not trip the provider-wide breaker,
- * `credential` captured before dispatch (or `null` for an injected client) so
- * delayed auth failures never mark a rotated or unrelated credential broken,
- * and `generation` from `beforeAttempt` so stale pre-recovery completions never
- * immediately reopen a recovered circuit.
+ * `disabled: true` when admitted while the gate was off so delayed completions
+ * cannot count after a mid-flight gate flip, `credential` captured before
+ * dispatch (env string or injected client instance) so auth cooldowns stay
+ * scoped to the credential actually used, and `generation` from `beforeAttempt`
+ * so stale pre-recovery completions never immediately reopen a recovered circuit.
  */
-function afterAttempt(provider, {
-  ok = false, reason = null, aborted = false, probeId = null, generation = null, legMs = null, now = null, credential,
-} = {}) {
-  if (!provider) return;
+function afterAttempt(provider, opts = {}) {
+  if (!provider || opts.disabled) return;
+  const probeId = opts.probeId ?? null;
   if (!llmCircuitBreakerLive()) {
     // Release a matching in-flight probe even after the gate turns off so
     // re-enabling the gate in the same process never leaves recovery wedged.
     releaseDisabledProbe(provider, probeId);
     return;
   }
+  const ok = Boolean(opts.ok);
+  const aborted = Boolean(opts.aborted);
+  const reason = opts.reason ?? null;
   const breaker = breakerFor(provider);
-  const outage = !ok && isProviderOutageReason(provider, reason, { legMs });
+  const outage = !ok && isProviderOutageReason(provider, reason, { legMs: opts.legMs ?? null });
   const providerResponded = !ok && !aborted && isModelResponseReason(provider, reason);
   const authFailed = !ok && !aborted && isCredentialFailureReason(provider, reason);
   // Avoid calling Date.now() when nothing needs a timestamp.
   const needsClock = outage || authFailed || isActiveProbe(breaker, probeId);
-  const ts = needsClock ? (now ?? Date.now()) : 0;
-  recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential });
+  const ts = needsClock ? (opts.now ?? Date.now()) : 0;
+  recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential: opts.credential });
   breaker.settleAttempt({
     ok,
     providerResponded,
     outage,
     aborted,
     probeId,
-    generation,
+    generation: opts.generation ?? null,
     now: ts,
     failureThreshold: failureThreshold(),
     windowMs: windowMs(),
@@ -281,6 +306,7 @@ function getCircuitBreakerSnapshot(now = Date.now()) {
 function resetCircuitBreakers() {
   breakers.clear();
   authFailures.clear();
+  clientAuthFailures = new WeakMap();
 }
 
 module.exports = {

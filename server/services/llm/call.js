@@ -950,9 +950,9 @@ const PROVIDER_CAN_SERVE = {
 };
 
 function credentialForPayload(provider, payload = {}) {
-  // An injected Anthropic client carries its own credentials separate from
-  // process.env.ANTHROPIC_API_KEY and must never share env-key auth cooldown.
-  if (provider === 'anthropic' && payload?.anthropicClient) return null;
+  // Track injected Anthropic clients by instance identity so a failed client
+  // cools down on its own without suppressing unrelated clients or the env key.
+  if (provider === 'anthropic' && payload?.anthropicClient) return payload.anthropicClient;
   return circuitBreaker.providerCredential(provider);
 }
 
@@ -1005,6 +1005,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ba
     ok: Boolean(result?.ok),
     reason: result?.reason || null,
     aborted: Boolean(signal?.aborted),
+    disabled: Boolean(gate.disabled),
     probeId: gate.probeId,
     generation: gate.generation,
     legMs,
