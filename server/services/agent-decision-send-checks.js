@@ -647,9 +647,11 @@ async function visitStatusReason(conn, status, customerId, refs) {
   // the same UPCOMING SERVICES visits the draft listed, in its order, each with the slot the draft verified
   const upcomingServices = withSchedule
     ? [].concat(status.scheduleVisits || []).filter((e) => e && typeof e.id === 'string' && e.id)
-      .map((e) => ({ scheduledServiceId: e.id, date: e.date ?? null, start: e.start ?? null }))
+      .map((e) => ({ scheduledServiceId: e.id, date: e.date ?? null, start: e.start ?? null, window: e.window ?? null, dayOnly: e.dayOnly === true }))
     : [];
-  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true, withScheduleChanges: withSchedule, upcomingServices });
+  // the window text is re-derived the way UPCOMING SERVICES derives it (context-aggregator deriveWindow)
+  const deriveWindow = withSchedule ? (row) => require('./context-aggregator').deriveWindow(row) : null;
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true, withScheduleChanges: withSchedule, upcomingServices, deriveWindow });
   if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
   if (withSchedule && facts.scheduleChangesSignature(fresh.scheduleChanges) !== status.schedule) return 'schedule_changed';
   // the displayed commitments, from this same rebuild (a second read could miss one

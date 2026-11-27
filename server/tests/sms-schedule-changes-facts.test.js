@@ -5,6 +5,11 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../models/db', () => jest.fn());
+// the send-time rebuild reads the day-only verdict again (the context form carries it)
+jest.mock('../services/time-promise', () => ({ loadTimeDisplay: jest.fn() }));
+jest.mock('../services/call-commitments', () => ({ listOpenCommitments: jest.fn(async () => []) }));
+jest.mock('../services/sms-operational-actions', () => ({ smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []) }));
+const { loadTimeDisplay } = require('../services/time-promise');
 
 const facts = require('../services/visit-loops-facts');
 const drafter = require('../services/sms-shadow-drafter');
@@ -43,22 +48,31 @@ const listed = (id, over = {}) => {
   return entry;
 };
 // visits: every row the db holds; the id query returns the asked ones, the horizon query all of them
+// (other scheduled_services reads, such as the passed-window scan, see none)
+const isStoppedQuery = (ops) => ops.some((o) => o.op === 'select' && o.args.includes('cancelled_at'));
 const conn = (visits, logs) => fakeConn({
-  scheduled_services: (ops) => { const ids = idsAsked(ops); return ids ? visits.filter((v) => ids.includes(v.id)) : visits; },
+  scheduled_services: (ops) => {
+    const ids = idsAsked(ops);
+    if (ids) return visits.filter((v) => ids.includes(v.id));
+    return isStoppedQuery(ops) ? visits : [];
+  },
   reschedule_log: () => logs,
 });
 // the aggregator's deriveWindow, by start (window_start first, as context-aggregator derives it)
 const deriveWindow = (row) => ({ '09:00:00': '9–11 AM', '13:00:00': '1–3 PM', '15:00:00': '3–5 PM' }[String(row.window_start)] || null);
 // a listed entry that agrees with its row: the row's day and its derived window
 const listedFor = (v, over = {}) => listed(v.id, { date: v.scheduled_date, window: deriveWindow(v), ...over });
+beforeEach(() => {
+  loadTimeDisplay.mockReset().mockImplementation(async (_c, rows) => new Map(rows.map((r) => [r.id, { showHour: true }])));
+});
 const read = (visits, logs, upcomingServices = visits.filter((v) => v.status === 'confirmed').slice(0, 1).map((v) => listedFor(v))) => facts.loadScheduleChanges({ conn: conn(visits, logs), customerId: 'c1', now: NOW, deriveWindow, upcomingServices });
 
 describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () => {
   test('the last logged move, when it is the slot the row holds now; the old slot by day only, the new window as listed', async () => {
     expect(await read([visit()], [move()])).toEqual({
-      moves: [{ logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, listedDate: '2026-12-04', listedStart: '13:00:00', toWindow: '1–3 PM' }],
+      moves: [{ logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, toWindow: '1–3 PM' }],
       stopped: [],
-      listed: [{ id: 'v1', date: '2026-12-04', start: '13:00:00' }],
+      listed: [{ id: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }],
     });
     // a day-only visit (UPCOMING SERVICES shows no hour) names no window
     const dayOnly = await read([visit()], [move()], [listed('v1', { window: 'texted the day before', windowDayOnly: true })]);
@@ -89,9 +103,17 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     const staleWindow = await read([sameDayNow], [move({ new_window: '15:00:00-16:00:00' })], [listed('v1', { date: '2026-12-04', window: '1–3 PM' })]);
     expect(staleWindow).toMatchObject({ moves: [], listed: [] });
     // the send-time form carries the raw slot the draft verified: a row off it states no move
-    const rebuilt = (start) => facts.loadScheduleChanges({ conn: conn([visit()], [move()]), customerId: 'c1', now: NOW, upcomingServices: [{ scheduledServiceId: 'v1', date: '2026-12-04', start }] });
-    expect((await rebuilt('13:00:00')).moves).toHaveLength(1);
-    expect((await rebuilt('09:00:00')).moves).toEqual([]);
+    const slot = { scheduledServiceId: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false };
+    const rebuilt = (over) => facts.loadScheduleChanges({ conn: conn([visit()], [move()]), customerId: 'c1', now: NOW, deriveWindow, upcomingServices: [{ ...slot, ...over }] });
+    expect((await rebuilt({})).moves).toHaveLength(1);
+    expect((await rebuilt({ start: '09:00:00' })).moves).toEqual([]);
+    // the customer-visible window text and the day-only state are rechecked too
+    expect((await rebuilt({ window: '9–11 AM' })).moves).toEqual([]);
+    loadTimeDisplay.mockImplementationOnce(async () => new Map([['v1', { showHour: false }]]));
+    expect((await rebuilt({})).listed).toEqual([]);
+    // a failed day-only read at send throws (a retryable refusal), never a change
+    loadTimeDisplay.mockImplementationOnce(async () => new Map([['v1', { showHour: true, failed: true }]]));
+    await expect(rebuilt({})).rejects.toThrow(/day-only read failed/);
   });
 
   test('a technician-only row (same slot) is not a move: the move before it still speaks', async () => {
@@ -109,6 +131,14 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     expect((await read([v15], [move()], [listedFor(v15)])).moves).toEqual([]);
     // a listed visit cancelled since states no move
     expect((await read([visit({ status: 'cancelled' })], [move()], [listedFor(visit())])).moves).toEqual([]);
+  });
+
+  test('a cross-day row that logged no window (the package date edit) is a day-only fact, whatever start the row holds', async () => {
+    const dateOnly = move({ original_window: null, new_window: null });
+    const out = await read([visit()], [dateOnly]);
+    expect(out.moves[0]).toMatchObject({ logId: 'rl-1', toStart: null, sameDay: false, toWindow: null });
+    // a same-day row with no window proves nothing
+    expect((await read([visit()], [move({ original_date: '2026-12-04', original_window: null, new_window: null })])).moves).toEqual([]);
   });
 
   test('a bare logged start (the day re-plan writes no end), a windowless move, and a same-day move', async () => {
@@ -156,11 +186,16 @@ describe('loadVisitLoops wiring', () => {
   });
 
   test('the signature keys on raw values (never the window label) and changes with a new move, skip or cancel', () => {
-    const m = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, listedDate: '2026-12-04', listedStart: '13:00:00', toWindow: '1–3 PM' };
-    const base = facts.scheduleChangesSignature({ moves: [m], stopped: [] });
-    expect(facts.scheduleChangesSignature({ moves: [{ ...m, toWindow: null }], stopped: [] })).toBe(base);
-    // the listed slot is part of it
-    expect(facts.scheduleChangesSignature({ moves: [{ ...m, listedStart: '15:00:00' }], stopped: [] })).not.toBe(base);
+    const m = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, toWindow: '1–3 PM' };
+    const l = { id: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false };
+    const base = facts.scheduleChangesSignature({ moves: [m], stopped: [], listed: [l] });
+    expect(facts.scheduleChangesSignature({ moves: [m], stopped: [], listed: [l] })).toBe(base);
+    // the quoted window and every listed slot field are part of it
+    expect(facts.scheduleChangesSignature({ moves: [{ ...m, toWindow: null }], stopped: [], listed: [l] })).not.toBe(base);
+    for (const change of [{ start: '15:00:00' }, { window: '3–5 PM' }, { dayOnly: true }, { date: '2026-12-05' }]) {
+      expect(facts.scheduleChangesSignature({ moves: [m], stopped: [], listed: [{ ...l, ...change }] })).not.toBe(base);
+    }
+    expect(facts.scheduleChangesSignature({ moves: [m], stopped: [], listed: [] })).not.toBe(base);
     expect(facts.scheduleChangesSignature({ moves: [{ ...m, logId: 'rl-2' }], stopped: [] })).not.toBe(base);
     expect(facts.scheduleChangesSignature({ moves: [m], stopped: [{ visitIds: ['v2'], type: 'Lawn Care', status: 'skipped', date: '2026-12-10', lastDate: '2026-12-10', count: 1 }] })).not.toBe(base);
     expect(facts.scheduleChangesSignature({ moves: [], stopped: [] })).toBe('');
@@ -230,10 +265,10 @@ describe('the SCHEDULE CHANGES section', () => {
   });
 
   test('the persisted status names the listed visit slots, so the send-time rebuild asks about the same ones', () => {
-    const withListed = { ...sc, listed: [{ id: 'v1', date: '2026-12-04', start: '13:00:00' }] };
+    const withListed = { ...sc, listed: [{ id: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }] };
     const block = withGate(() => drafter.buildFactsBlock(context({ ...facts.emptyVisitLoops(), scheduleChanges: withListed }), { now: NOW }));
     const status = drafter.visitLoopStatus(context({ ...facts.emptyVisitLoops(), scheduleChanges: withListed }), block);
-    expect(status.scheduleVisits).toEqual([{ id: 'v1', date: '2026-12-04', start: '13:00:00' }]);
+    expect(status.scheduleVisits).toEqual([{ id: 'v1', date: '2026-12-04', start: '13:00:00', window: '1–3 PM', dayOnly: false }]);
     expect(status.schedule).toBe(facts.scheduleChangesSignature(withListed));
   });
 
@@ -244,5 +279,33 @@ describe('the SCHEDULE CHANGES section', () => {
     const prev = process.env[GATE];
     delete process.env[GATE];
     try { expect(drafter.buildSystemPrompt()).not.toContain('SCHEDULE CHANGES'); } finally { if (prev !== undefined) process.env[GATE] = prev; }
+  });
+});
+
+describe('the send boundary, with the real loader', () => {
+  const { openLoopsBlockReason } = require('../services/agent-decision-send-checks');
+  // the aggregator's own deriveWindow (the send-time rebuild uses it)
+  const aggregatorWindow = (row) => require('../services/context-aggregator').deriveWindow(row);
+
+  test("a listed visit's FIRST move while the card waits refuses the send (the visit drops out of the rebuilt list)", async () => {
+    const before = visit({ scheduled_date: '2026-12-02', window_start: '09:00:00' });
+    // the draft: UPCOMING SERVICES listed it on Dec 2 with its window; no move logged yet
+    const drafted = await facts.loadScheduleChanges({ conn: conn([before], []), customerId: 'c1', now: NOW, deriveWindow: aggregatorWindow,
+      upcomingServices: [listed('v1', { date: '2026-12-02', window: aggregatorWindow(before) })] });
+    expect(drafted).toMatchObject({ moves: [], stopped: [] });
+    expect(drafted.listed).toHaveLength(1);
+    const decision = { id: 'd1', customer_id: 'c1', input_snapshot: JSON.stringify({ visit_loop_status: { signature: null, schedule: facts.scheduleChangesSignature(drafted), scheduleVisits: drafted.listed } }) };
+    // unchanged: passes
+    await expect(openLoopsBlockReason({ decision, dbh: conn([before], []) })).resolves.toBeNull();
+    // moved since, with its first log row: refused
+    const after = visit({ scheduled_date: '2026-12-04', window_start: '13:00:00' });
+    await expect(openLoopsBlockReason({ decision, dbh: conn([after], [move({ original_window: '09:00:00-10:00:00' })]) })).resolves.toBe('schedule_changed');
+    // moved by a writer that logs nothing: refused too
+    await expect(openLoopsBlockReason({ decision, dbh: conn([after], []) })).resolves.toBe('schedule_changed');
+    // re-windowed on the same day: refused
+    await expect(openLoopsBlockReason({ decision, dbh: conn([visit({ scheduled_date: '2026-12-02', window_start: '13:00:00' })], []) })).resolves.toBe('schedule_changed');
+    // a failed day-only read: retryable
+    loadTimeDisplay.mockImplementationOnce(async () => { throw new Error('promise read down'); });
+    await expect(openLoopsBlockReason({ decision, dbh: conn([before], []) })).resolves.toBe('open_loops_recheck_failed');
   });
 });

@@ -544,18 +544,23 @@ function logMovedSlot(row) {
 }
 // The visit's newest slot-changing log row, when it is the slot the row holds now
 // ({ last, movedAt, toStart }); null when there is none or it is not proven.
+// A cross-day row that logged no window (the package follow-up date edit logs only the
+// days) proves the day, not the hour: it is a day-only fact (`dateOnly`), whatever
+// start the row holds. A same-day move always needs its logged start.
 function provenLastMove(visit, logs) {
   const last = logs.find((l) => String(l.scheduled_service_id) === String(visit.id) && logMovedSlot(l));
   if (!last || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
-  const toStart = loggedStart(last.new_window);
-  const sameStart = toStart == null ? visit.window_start == null : startMinutes(toStart) === startMinutes(visit.window_start);
   const movedAt = toDate(last.created_at);
-  return sameStart && movedAt ? { last, movedAt, toStart } : null;
+  if (!movedAt) return null;
+  const toStart = loggedStart(last.new_window);
+  const crossDay = calendarDay(last.original_date) !== calendarDay(last.new_date);
+  if (toStart == null && last.new_window == null && crossDay) return { last, movedAt, toStart: null, dateOnly: true };
+  const sameStart = toStart == null ? visit.window_start == null : startMinutes(toStart) === startMinutes(visit.window_start);
+  return sameStart ? { last, movedAt, toStart, dateOnly: false } : null;
 }
 // UPCOMING SERVICES' window for a listed visit, as it shows it: null for a day-only
 // visit or one with no window (the send-time rebuild lists ids only, so null there:
 // the window is not part of the signature, UPCOMING SERVICES owns it).
-const listedWindow = (entry) => (entry && !entry.windowDayOnly && typeof entry.window === 'string' && entry.window.trim() ? entry.window.trim() : null);
 const listedId = (entry) => {
   const id = entry && (entry.scheduledServiceId ?? entry.id);
   return id == null ? null : String(id);
@@ -565,15 +570,47 @@ const listedId = (entry) => {
 // from the fresh row the same way (day only for a day-only visit). The persisted form (the
 // send-time rebuild) carries the raw date and start the draft verified. A visit moved
 // between the two reads would glue the listed window onto the new day: it states no move.
-function listedSlotHolds(entry, visit, deriveWindow) {
-  if (calendarDay(entry.date) !== calendarDay(visit.scheduled_date)) return false;
-  if ('start' in entry) return startMinutes(entry.start) === startMinutes(visit.window_start);
-  if (entry.windowDayOnly) return true;
-  if (typeof deriveWindow !== 'function') return false;
-  const norm = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
-  return norm(deriveWindow(visit)) === norm(entry.window);
+const normWindow = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+// The slot a listed entry stands for, as { id, date, start, window, dayOnly }: what the
+// customer sees (day, window text, day-only state) plus the raw start. Built from the
+// FRESH row: the window is the one deriveWindow gives it (none when day-only). null
+// when the row no longer holds what the entry showed (a visit moved, re-windowed or
+// flipped day-only between the two reads), so no move is stated for it.
+//  - the context form (UPCOMING SERVICES' own row: date, window label, windowDayOnly):
+//    its day-only state is the context's own verdict;
+//  - the persisted form (the send-time rebuild: date, start, window, dayOnly): the
+//    day-only state is read again (dayOnlyNow), and every field must match.
+function listedSlot(entry, visit, deriveWindow, dayOnlyNow) {
+  const persisted = 'start' in entry;
+  const dayOnly = persisted ? dayOnlyNow(visit) : entry.windowDayOnly === true;
+  if (typeof deriveWindow !== 'function' && !dayOnly) return null;
+  const slot = {
+    id: String(visit.id),
+    date: calendarDay(visit.scheduled_date),
+    start: visit.window_start ?? null,
+    window: dayOnly ? null : normWindow(deriveWindow(visit)),
+    dayOnly,
+  };
+  if (slot.date !== calendarDay(entry.date)) return null;
+  if (persisted) {
+    const same = startMinutes(entry.start) === startMinutes(slot.start) && normWindow(entry.window) === slot.window && (entry.dayOnly === true) === dayOnly;
+    return same ? slot : null;
+  }
+  return dayOnly || normWindow(entry.window) === slot.window ? slot : null;
 }
-async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow) {
+// The day-only verdict for the send-time rebuild (persisted entries only): the AI-context
+// rule (time-promise loadTimeDisplay), but a failed read throws, so an outage refuses
+// retryably instead of reading as a change.
+async function dayOnlyNowFor(conn, rows, now, needed) {
+  if (!needed || !rows.length) return () => false;
+  const display = await require('./time-promise').loadTimeDisplay(conn, rows, now);
+  return (row) => {
+    const verdict = display.get(row.id);
+    if (!verdict || verdict.failed === true) throw new Error(`day-only read failed for visit ${row.id}`);
+    return verdict.showHour === false;
+  };
+}
+async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow, now) {
   const entries = (Array.isArray(upcomingServices) ? upcomingServices : []).filter((e) => listedId(e));
   if (!entries.length) return { moves: [], listed: [] };
   const ids = [...new Set(entries.map(listedId))];
@@ -591,15 +628,16 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow)
   ]);
   const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
   const byId = new Map((rows || []).map((r) => [String(r.id), r]));
+  const liveRows = entries.map((e) => byId.get(listedId(e))).filter((v) => v && UPCOMING_SERVICE_STATUSES.includes(v.status));
+  const dayOnlyNow = await dayOnlyNowFor(conn, liveRows, now, entries.some((e) => 'start' in e));
   const moves = [];
   const listed = [];
   for (const entry of entries) {
     const visit = byId.get(listedId(entry));
     // a listed visit that is gone or no longer live (cancelled since) states no move
-    if (!visit || !UPCOMING_SERVICE_STATUSES.includes(visit.status) || !listedSlotHolds(entry, visit, deriveWindow)) continue;
-    const listedDate = calendarDay(visit.scheduled_date);
-    const listedStart = visit.window_start ?? null;
-    listed.push({ id: String(visit.id), date: listedDate, start: listedStart });
+    const slot = visit && UPCOMING_SERVICE_STATUSES.includes(visit.status) ? listedSlot(entry, visit, deriveWindow, dayOnlyNow) : null;
+    if (!slot) continue;
+    listed.push(slot);
     const proof = provenLastMove(visit, logs || []);
     if (!proof) continue;
     const fromDate = calendarDay(proof.last.original_date);
@@ -613,9 +651,8 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow)
       toDate: toDay,
       toStart: proof.toStart,
       sameDay: fromDate === toDay,
-      listedDate,
-      listedStart,
-      toWindow: listedWindow(entry),
+      // a date-only log proves the day, not the hour: the sentence names no window
+      toWindow: proof.dateOnly ? null : slot.window,
     });
   }
   return { moves, listed };
@@ -661,21 +698,24 @@ async function loadStopped(conn, customerId, now) {
 // checks each still holds the slot the draft verified.
 async function loadScheduleChanges({ conn, customerId, now, deriveWindow = null, upcomingServices = [] }) {
   const [{ moves, listed }, stopped] = await Promise.all([
-    loadListedMoves(conn, customerId, upcomingServices, deriveWindow),
+    loadListedMoves(conn, customerId, upcomingServices, deriveWindow, now),
     loadStopped(conn, customerId, now),
   ]);
   return { moves, stopped, listed };
 }
 // The schedule facts as one comparable string ('' when there are none, 'unread' when
 // the read failed): the send boundary rebuilds them and refuses when this changed, so
-// a later move, skip or cancel retires a reply written before it. Raw values only (the
-// window label belongs to UPCOMING SERVICES).
+// a later move, skip or cancel, or any change to a listed visit's slot, retires a reply
+// written before it.
 function scheduleChangesSignature(scheduleChanges) {
   if (!scheduleChanges || typeof scheduleChanges !== 'object') return 'unread';
   const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
-  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`, `${m.listedDate ?? ''}T${m.listedStart ?? ''}`)}`);
+  // every listed slot (day, start, window text, day-only state): any slot change refuses,
+  // a first move included (the moved visit drops out of the rebuilt list)
+  const listed = (scheduleChanges.listed || []).map((l) => `listed:${key(l.id, l.date, l.start, l.window, l.dayOnly === true)}`);
+  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`, m.toWindow)}`);
   const stopped = (scheduleChanges.stopped || []).map((g) => `stopped:${key(g.status, g.type, [].concat(g.visitIds || []).join(','), g.date, g.lastDate)}`);
-  return [...moves, ...stopped].join('|');
+  return [...listed, ...moves, ...stopped].join('|');
 }
 
 // ── open promises / asks ────────────────────────────────────────────────────

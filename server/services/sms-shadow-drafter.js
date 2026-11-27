@@ -5467,7 +5467,7 @@ function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
   const facts = require('./visit-loops-facts');
   const v = context && context.visitLoops;
-  // scheduleVisits: the listed visits whose slot held ({ id, date, start }), so the send-time rebuild asks about the same ones
+  // scheduleVisits: the listed visits whose slot held ({ id, date, start, window, dayOnly }), so the send-time rebuild asks about the same ones
   const sc = v && v.scheduleChanges;
   return {
     signature: facts.visitStatusSignature(v),
