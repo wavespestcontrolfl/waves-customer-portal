@@ -6842,6 +6842,7 @@ async function deleteDraftEstimateInTransaction(trx, estimateId) {
   if (!locked) throw draftDeleteError(404, 'Estimate not found');
   if (
     locked.status !== 'draft'
+    || !estimateNeverIssued(locked)
     || locked.price_locked_at
     || deliveryClaimFresh(parseEstimateData(locked.estimate_data)?.estimatorEngine)
   ) {
@@ -6867,6 +6868,8 @@ async function deleteDraftEstimateInTransaction(trx, estimateId) {
     .update({ estimate_id: null, updated_at: new Date() });
   const deletedCount = await trx('estimates')
     .where({ id: estimateId, status: 'draft' })
+    .whereNull('sent_at')
+    .whereNull('viewed_at')
     .whereNull('price_locked_at')
     .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
     .del();
@@ -6884,6 +6887,9 @@ router.delete('/:id', async (req, res, next) => {
     if (!estimate) return res.status(404).json({ error: 'Estimate not found' });
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
+    }
+    if (!estimateNeverIssued(estimate)) {
+      return res.status(400).json({ error: 'Previously issued estimates cannot be deleted. Archive them instead.' });
     }
     if (estimate.price_locked_at || deliveryClaimFresh(parseEstimateData(estimate.estimate_data)?.estimatorEngine)) {
       return res.status(409).json({ error: 'This estimate is locked or being sent and cannot be deleted.' });

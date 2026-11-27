@@ -185,6 +185,7 @@ describe('Estimates & Bids security hardening (PR 1)', () => {
       requireAdmin: (_req, _res, next) => next(),
     }));
     let throwOnGet = false;
+    let attachmentFilename = '../rfp\r\n"2026".pdf';
     jest.doMock('../services/email/gmail-client', () => ({
       getAttachment: jest.fn(async () => {
         if (throwOnGet) throw Object.assign(new Error('raw token leak'), { code: 'ECONNRESET' });
@@ -196,7 +197,7 @@ describe('Estimates & Bids security hardening (PR 1)', () => {
         return { where: () => ({ first: jest.fn().mockResolvedValue({ id: '11111111-1111-4111-8111-111111111111', gmail_id: 'gm-1' }) }) };
       }
       if (table === 'email_attachments') {
-        return { where: () => ({ first: jest.fn().mockResolvedValue({ filename: '../rfp\r\n"2026".pdf', mime_type: 'application/pdf' }) }) };
+        return { where: () => ({ first: jest.fn().mockResolvedValue({ filename: attachmentFilename, mime_type: 'application/pdf' }) }) };
       }
       return { where: () => ({ first: jest.fn().mockResolvedValue(null) }) };
     }));
@@ -207,6 +208,14 @@ describe('Estimates & Bids security hardening (PR 1)', () => {
       expect(ok.status).toBe(200);
       expect(ok.headers.get('cache-control')).toBe('private, no-store');
       expect(ok.headers.get('content-disposition')).toBe('attachment; filename=".._rfp___2026_.pdf"');
+      expect(ok.headers.get('content-type')).toMatch(/^application\/pdf/);
+
+      attachmentFilename = 'RFP – 2026.pdf';
+      const unicode = await fetch(`${baseUrl}/api/admin/email/message/11111111-1111-4111-8111-111111111111/attachment/att1`);
+      expect(unicode.status).toBe(200);
+      expect(unicode.headers.get('content-disposition')).toContain("filename*=UTF-8''RFP%20%E2%80%93%202026.pdf");
+      expect(unicode.headers.get('content-type')).toMatch(/^application\/pdf/);
+
       throwOnGet = true;
       const errRes = await fetch(`${baseUrl}/api/admin/email/message/11111111-1111-4111-8111-111111111111/attachment/att1`);
       expect(errRes.status).toBe(500);

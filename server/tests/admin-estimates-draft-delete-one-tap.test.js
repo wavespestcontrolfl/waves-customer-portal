@@ -78,7 +78,8 @@ function makeTableDb({ estimate, lockedEstimate = undefined, oneTapRows = [], lo
         return b;
       });
     }
-    const estRow = inTrx && lockedEstimate !== undefined ? lockedEstimate : estimate;
+    const rawEstRow = inTrx && lockedEstimate !== undefined ? lockedEstimate : estimate;
+    const estRow = rawEstRow ? { sent_at: null, viewed_at: null, ...rawEstRow } : rawEstRow;
     b.first = jest.fn(async () => (table === 'estimates' ? estRow : undefined));
     const otpRows = inTrx && lockedOneTapRows !== undefined ? lockedOneTapRows : oneTapRows;
     const listFor = { one_tap_purchases: otpRows, scheduled_services: holdRows };
@@ -254,6 +255,25 @@ describe('draft delete with one-tap ledger rows', () => {
       const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
       expect(res.status).toBe(409);
       expect(calls.deleted).not.toContain('estimates');
+    });
+  });
+
+  test('refuses with 400 and keeps holds when an archived draft has sent_at set (previously issued)', async () => {
+    const calls = makeTableDb({
+      estimate: {
+        id: 'est-1',
+        status: 'draft',
+        archived_at: '2026-10-01T00:00:00.000Z',
+        sent_at: '2026-09-20T00:00:00.000Z',
+      },
+      holdRows: [{ id: 'ss-hold-1' }],
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
+      expect(res.status).toBe(400);
+      expect(slotReservation.releaseEstimateHolds).not.toHaveBeenCalled();
+      expect(calls.deleted).toEqual([]);
+      expect(calls.updated).toEqual([]);
     });
   });
 });

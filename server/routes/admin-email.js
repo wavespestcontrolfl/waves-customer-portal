@@ -283,7 +283,7 @@ router.get('/message/:id/attachment/:attachmentId', async (req, res) => {
     // stay out of application logs (the id resolves the record when needed).
     logger.info(`[email] Attachment downloaded: actor=${req.technicianId || 'unknown'} email=${email.id} attachment=${req.params.attachmentId}`);
     res.setHeader('Cache-Control', 'private, no-store');
-    res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
+    res.attachment(safeName);
     res.setHeader('Content-Type', att.mime_type || 'application/octet-stream');
     res.send(data);
   } catch (err) {
