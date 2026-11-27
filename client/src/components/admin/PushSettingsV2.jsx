@@ -55,6 +55,11 @@ function adminFetch(path, options = {}) {
   });
 }
 
+// Gateway/timeout statuses can arrive while the server's PUT transaction is
+// still running (or after it committed), so treat them as unknown outcomes
+// just like a dropped network connection.
+const AMBIGUOUS_SAVE_STATUSES = new Set([408, 502, 503, 504]);
+
 const PRIORITY_CLASS = {
   urgent: "bg-alert-fg",
   high: "bg-zinc-700",
@@ -193,11 +198,13 @@ export default function PushSettingsV2() {
       });
       showToast("Preferences saved");
     } catch (e) {
-      // Distinguish confirmed HTTP responses (the server transaction finished
-      // and rolled back) from dropped connections / timeouts (unknown outcome:
-      // the server request may still be in flight, so keep controls locked
-      // until the user explicitly reloads via Try again).
-      if (e?.status) {
+      // Distinguish confirmed HTTP rejections (4xx/500 where the server
+      // finished and rolled back) from unknown outcomes (dropped connections,
+      // timeouts, or 408/502/503/504 gateway responses where the PUT
+      // transaction may still be running). For unknown outcomes, keep controls
+      // locked until the user explicitly reloads via Try again.
+      const confirmedRejection = Boolean(e?.status && !AMBIGUOUS_SAVE_STATUSES.has(e.status));
+      if (confirmedRejection) {
         const reloaded = await loadPreferences();
         setPushError(
           reloaded
@@ -207,7 +214,7 @@ export default function PushSettingsV2() {
       } else {
         setPrefsFailed(true);
         setPushError(
-          `Connection dropped while saving notification preferences (${e?.message || "network error"}). Try again once connected to reload saved settings before making changes.`,
+          `Couldn't confirm saving notification preferences (${e?.message || "network error"}). Try again once connected to reload saved settings before making changes.`,
         );
       }
     } finally {
