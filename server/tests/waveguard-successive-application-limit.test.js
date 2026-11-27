@@ -268,7 +268,7 @@ describe('the approval engine names a third Velista in a row', () => {
   });
 });
 
-describe('Fast Complete and the treatment guide pass the Velista row over at its limit, and give Artavia', () => {
+describe('at the Velista limit the guide suggests Artavia; Velista stays on the list and in the search (an alert, never a stop)', () => {
   const featureGates = require('../config/feature-gates');
   const guide = require('../services/lawn-treatment-guide');
   const fastComplete = require('../services/lawn-fast-complete');
@@ -289,110 +289,67 @@ describe('Fast Complete and the treatment guide pass the Velista row over at its
   test('the guide: a take-all lawn gets Velista; at the Velista limit with the Group 11 run ended it gets Artavia', () => {
     expect(guide.pickAddOns(candidates, rows, { takeAllMapped: true }).fungus.item.productId).toBe('vel');
     expect(guide.pickAddOns(candidates, rows, { takeAllMapped: false, successiveHeld: [VELISTA] }).fungus.item.productId).toBe('art');
-    expect(guide.successiveHeldAddOns(candidates, rows, { successiveHeld: [VELISTA] }).map((c) => c.item.productId)).toEqual(['vel']);
-    expect(guide.successiveHeldAddOns(candidates, rows)).toEqual([]);
-    // Both runs full (the latest application carried Group 11 too): no fungicide is offered.
+    expect(guide.successiveHeldAddOns).toBeUndefined();
+    // Both runs full (the latest application carried Group 11 too): no fungicide is suggested.
     expect(guide.pickAddOns(candidates, rows, { takeAllMapped: true, successiveHeld: [VELISTA] }).fungus).toBeNull();
   });
 
-  test('fungicideHolds: October and November Velista hold the Velista row and release December\'s Artavia row', async () => {
+  test('fungicideHolds: October and November Velista mark the limit and release December\'s Artavia row', async () => {
     const holds = await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: fall }) });
-    expect(holds).toEqual({ takeAllMapped: false, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
-    // Velista once this fall: the row is open and the Group 11 pass-over stands, as before.
+    expect(holds).toEqual({ takeAllMapped: false, successiveHeld: [VELISTA] });
+    // Velista once this fall: no limit, and the Group 11 pass-over stands, as before.
     expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: fall.filter((entry) => entry.service_date !== '2026-11-03') }) }))
-      .toEqual({ takeAllMapped: true, successiveHeld: [], heldProductIds: [] });
+      .toEqual({ takeAllMapped: true, successiveHeld: [] });
     // The limit reached while the latest application carried Group 11 (Headway beside the Velista): both stay passed over.
     const stacked = [velista('2026-11-03'), headway('2026-11-03'), velista('2026-10-06')];
-    expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: stacked }) })).toEqual({ takeAllMapped: true, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
-    // Two Velista records that name no property: Velista is held, and nothing at this property ended the Group 11 run.
+    expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: stacked }) })).toEqual({ takeAllMapped: true, successiveHeld: [VELISTA] });
+    // Two Velista records that name no property: the limit counts them, and nothing at this property ended the Group 11 run.
     const unplaced = [velista('2026-11-03', { treated_property_id: null }), velista('2026-10-06', { treated_property_id: null }), headway('2026-09-20'), artavia('2026-09-08')];
-    expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: unplaced }) })).toEqual({ takeAllMapped: true, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
+    expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: unplaced }) })).toEqual({ takeAllMapped: true, successiveHeld: [VELISTA] });
     // October and November keep the Group 11 pass-over whatever the Velista run: the release is December's alone.
     const early = [velista('2026-09-22'), velista('2026-08-11')];
     for (const date of ['2026-10-06', '2026-11-03']) {
-       
       expect(await fastComplete.fungicideHolds({ svc: { ...svc, scheduled_date: date }, knex: fakeKnex({ catalog: CATALOG, history: early }) }))
-        .toEqual({ takeAllMapped: true, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
+        .toEqual({ takeAllMapped: true, successiveHeld: [VELISTA] });
     }
-    // Outside the Group 11 window nothing was passed over; the Velista limit still holds its row.
+    // Outside the Group 11 window nothing was passed over.
     expect(await fastComplete.fungicideHolds({ svc: { ...svc, scheduled_date: '2027-01-12' }, knex: fakeKnex({ catalog: CATALOG, history: fall }) }))
-      .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
+      .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA] });
   });
 
   test('a visit with no property: the history is read at the property its address resolves to', async () => {
     const resolver = jest.spyOn(require('../services/property-service-areas'), 'resolveVisitPropertyId').mockResolvedValue(HOME);
     const seen = {};
     expect(await fastComplete.fungicideHolds({ svc: { ...svc, property_id: null }, knex: fakeKnex({ catalog: CATALOG, history: fall, seen }) }))
-      .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
+      .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA] });
     expect(seen.property).toBe(HOME);
     expect(resolver).toHaveBeenCalled();
   });
 
-  test('a failed history read holds Velista (nobody read its run) and keeps the Group 11 pass-over', async () => {
+  test('a failed history read: Velista is not suggested (nobody read its run) and the Group 11 pass-over stays', async () => {
     expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: fall, fail: true }) }))
-      .toEqual({ takeAllMapped: true, successiveHeld: [VELISTA], heldProductIds: ['vel'] });
-    // The catalog read fails too: the month's own Velista row is still held by its name (successiveHeldAddOns).
-    expect(await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ history: fall, failCatalog: true }) }))
-      .toEqual({ takeAllMapped: false, successiveHeld: [VELISTA], heldProductIds: [] });
+      .toEqual({ takeAllMapped: true, successiveHeld: [VELISTA] });
   });
 
-  test('a visit with no program rows (one-time, per application): the Velista catalog row is still held from its search', async () => {
+  test('a visit with no program rows (one-time, per application): nothing is held from the search', async () => {
     jest.spyOn(featureGates, 'lawnV13Live').mockReturnValue(true);
     const knex = fakeKnex({ catalog: CATALOG, history: fall });
     for (const visitType of ['one_time', 'unknown']) {
-       
-      expect(await fastComplete.loadPlannedProducts(svc, knex, visitType, new Set(), null)).toMatchObject({ source: null, items: [], group11HeldProductIds: ['vel'] });
+      const out = await fastComplete.loadPlannedProducts(svc, knex, visitType, new Set(), null);
+      expect(out).toMatchObject({ source: null, items: [], addOns: [] });
+      expect(out.group11HeldProductIds).toBeUndefined();
     }
-    // The recurring plan fails to load: the sheet still has the search, and it keeps the held ids.
-    jest.spyOn(require('../services/lawn-completion-defaults'), 'lawnCompletionDefaultsEnabled').mockReturnValue(true);
-    jest.spyOn(require('../services/waveguard-plan-engine'), 'buildPlanForService').mockRejectedValue(new Error('plan read failed'));
-    const failures = new Set();
-    expect(await fastComplete.loadPlannedProducts(svc, knex, 'recurring', failures, null)).toMatchObject({ source: null, unavailable: 'planned_products_lookup_failed', group11HeldProductIds: ['vel'] });
-    expect([...failures]).toEqual(['planned_products']);
-    // Nothing reached: the payload is as before.
-    expect(await fastComplete.loadPlannedProducts(svc, fakeKnex({ catalog: CATALOG, history: [] }), 'one_time', new Set(), null)).toEqual({ source: null, items: [], addOns: [], unavailable: null });
   });
 
-  test('completion defaults not eligible for the property: no picks, and the held rows are still governed, so the search leaves them out', async () => {
-    jest.spyOn(featureGates, 'lawnTreatmentGuideLive').mockReturnValue(true);
-    jest.spyOn(featureGates, 'lawnV13Live').mockReturnValue(true);
-    jest.spyOn(require('../services/lawn-completion-defaults'), 'lawnCompletionDefaultsEnabled').mockReturnValue(true);
-    jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
-    // The plan as the engine returns it when its defaults do not apply to this property: no rows to offer.
-    jest.spyOn(require('../services/waveguard-plan-engine'), 'buildPlanForService').mockResolvedValue({ protocol: { structured: {} }, mixCalculator: { items: [], conditionalOptions: [] }, completionDefaults: { eligible: false } });
-    const out = await fastComplete.loadPlannedProducts(svc, fakeKnex({ catalog: CATALOG, history: fall }), 'recurring', new Set(), null);
-    // A plan, so the sheet runs with the guide on: there its governed set is the picks and takeAllProductIds.
-    expect(out.source).toBe('plan');
-    expect(out.guidedProductIds).toBeUndefined();
-    expect(out.group11HeldProductIds).toEqual(['vel']);
-    expect(out.takeAllProductIds).toEqual(['vel']);
-  });
-
-  test('the guide\'s answer fails when the held catalog rows cannot be read, so the sheet keeps its own holds', async () => {
-    await expect(fastComplete.fungicideHolds({ svc, knex: fakeKnex({ history: fall, failCatalog: true }), strict: true })).rejects.toThrow('catalog read failed');
-  });
-
-  test('a month whose rows do not list Velista: its catalog row is still held from the search', async () => {
-    jest.spyOn(featureGates, 'lawnTreatmentGuideLive').mockReturnValue(true);
-    jest.spyOn(featureGates, 'lawnV13Live').mockReturnValue(true);
-    const artaviaOnly = new Map([['art', rows.get('art')]]);
-    jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(artaviaOnly);
-    const loaded = { eligible: true, plan: { protocol: { structured: {} } }, addOns: [{ product: { id: 'art', name: N.ART } }] };
-    const sheet = { addOns: [{ productId: 'art', name: N.ART }] };
-    const holds = await fastComplete.fungicideHolds({ svc: { ...svc, scheduled_date: '2027-01-12' }, knex: fakeKnex({ catalog: CATALOG, history: fall }) });
-    expect(fastComplete.guidedProductIds(loaded, sheet, holds)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: ['vel'] });
-    expect(await fastComplete.group11HeldContext({ loaded, sheet, svc, knex: null, holds })).toEqual({ group11HeldProductIds: ['vel'] });
-  });
-
-  test('the sheet context: Artavia is the guided pick, and the Velista row is held from the list and the search', async () => {
+  test('the sheet context: Artavia is the guided pick, and the Velista row stays on the list and in the search', async () => {
     jest.spyOn(featureGates, 'lawnTreatmentGuideLive').mockReturnValue(true);
     jest.spyOn(featureGates, 'lawnV13Live').mockReturnValue(true);
     jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
     const loaded = { eligible: true, plan: { protocol: { structured: {} } }, addOns: [{ product: { id: 'vel', name: N.VEL } }, { product: { id: 'art', name: N.ART } }] };
     const sheet = { addOns: [{ productId: 'vel', name: N.VEL }, { productId: 'art', name: N.ART }] };
     const holds = await fastComplete.fungicideHolds({ svc, knex: fakeKnex({ catalog: CATALOG, history: fall }) });
-    expect(fastComplete.guidedProductIds(loaded, sheet, holds)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: ['vel'] });
-    expect(await fastComplete.group11HeldContext({ loaded, sheet, svc, knex: fakeKnex({ history: fall }), holds })).toEqual({ group11HeldProductIds: ['vel'] });
+    expect(fastComplete.guidedProductIds(loaded, sheet, holds)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [] });
+    expect(await fastComplete.group11HeldContext({ loaded, sheet, svc, knex: fakeKnex({ history: fall }), holds })).toEqual({});
     // The Group 11 pass-over alone, as before.
     expect(fastComplete.guidedProductIds(loaded, sheet, { takeAllMapped: true })).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
   });

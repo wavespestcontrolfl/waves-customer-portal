@@ -158,9 +158,9 @@ async function addOnOffers({ candidates, rows, svc, knex, places = null, takeAll
   // The passed-over Group 11 rows are blocked outright: no limit read is needed, and no list or search offers them.
   // `limitWarned` (owner 2026-10-30: a yearly limit is a warning, never a block): the picks closed ONLY by a limit that was READ,
   // `{ [productId]: the limit's own words }`. They are offered (card, list, search) and are in neither `blocked` nor `unreadable`.
-  // So is a row whose label limit on applications in a row is reached (successiveHeldAddOns).
-  const held = [...group11HeldAddOns(candidates, rows, { takeAllMapped }), ...successiveHeldAddOns(candidates, rows, { successiveHeld })];
-  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: [...new Set(held.map((c) => idOf(c.raw.product.id)))], unreadable: [], limitWarned: {} };
+  // A row whose label limit on applications in a row is reached (a third Velista) is only not suggested: it stays on the list and
+  // in the search, and the job card warns (owner 2026-11-26: such alerts never stop the job).
+  const offers = { fungus: null, caterpillars: null, dry_spots: null, blocked: group11HeldAddOns(candidates, rows, { takeAllMapped }).map((c) => idOf(c.raw.product.id)), unreadable: [], limitWarned: {} };
   if (!chosen.length) return offers;
   const wide = await readCaps({ products: chosen.map(([, c]) => c.raw.product), rows, svc, knex });
   if (!wide) return { ...offers, unreadable: chosen.map(([, c]) => idOf(c.raw.product.id)) };
@@ -226,8 +226,8 @@ const PREVENTION_ONLY_TRIGGERS = Object.freeze(['mapped_large_patch_spring', 'ma
 
 // A fungicide row whose label limit on applications in a row is reached on this lawn (waveguard-approval-engine.js
 // SUCCESSIVE_USE_LIMITS: Velista, two in a row). `successiveHeld` is the list of limits reached before this visit. The guide
-// passes the row over, as it does the Group 11 row above, and the next fungicide in program order is the suggestion: in
-// December that is Artavia, on a lawn that took Velista in October and November.
+// does not suggest the row, and the next fungicide in program order is the suggestion: in December that is Artavia, on a
+// lawn that took Velista in October and November. Unlike the Group 11 row, it is not held: list, search and close-out keep it.
 const isSuccessiveHeldRow = (row, candidate, successiveHeld) => (successiveHeld || []).some((limit) => isLimitedProduct(limit, {
   epa: candidate.raw?.product?.epa_reg_number ?? candidate.raw?.product?.epaRegNumber,
   name: row.productName || row.product_name || candidate.raw?.product?.name || '',
@@ -257,16 +257,6 @@ function group11HeldAddOns(candidates, rows, { takeAllMapped = false } = {}) {
   return (candidates || []).filter((candidate) => {
     const row = stagedRowOf(rows, candidate.raw);
     return row && row.role === FUNGICIDE_ROLE && isGroup11LargePatchRow(row, candidate);
-  });
-}
-
-// The fungicide rows passed over for a label limit on applications in a row: governed like the Group 11 rows above (never listed
-// with the plain add-ons, never reachable by the search). Empty unless a limit is reached.
-function successiveHeldAddOns(candidates, rows, { successiveHeld = [] } = {}) {
-  if (!successiveHeld?.length) return [];
-  return (candidates || []).filter((candidate) => {
-    const row = stagedRowOf(rows, candidate.raw);
-    return row && row.role === FUNGICIDE_ROLE && isSuccessiveHeldRow(row, candidate, successiveHeld);
   });
 }
 
@@ -798,7 +788,6 @@ module.exports = {
   pickAddOns,
   PREVENTION_ONLY_TRIGGERS,
   group11HeldAddOns,
-  successiveHeldAddOns,
   takeAllAddOns,
   weedOffer,
   blockedProductIds,

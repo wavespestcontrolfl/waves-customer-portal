@@ -369,9 +369,9 @@ function repeatGroupFinding({ product, input, groupType, groupValue, last }) {
 //   - the approval engine raises successive_application_limit with the dates. On the job card's tank search it is a
 //     warning beside the amount, like a group repeat (job-card.js ROTATION_CODES; owner 2026-10-09, "show the mix
 //     amount"). `approvable: false` rides to the close-out's record: an approval there does not permit it;
-//   - Fast Complete and the treatment guide pass the product's row over (no card, no list, no search), as they do the
-//     Group 11 row on a take-all lawn (owner 2026-10-23), and give the next fungicide (lawn-fast-complete.js
-//     fungicideHolds).
+//   - the treatment guide does not suggest the product and suggests the next fungicide (lawn-fast-complete.js
+//     fungicideHolds). The row stays on the list and in the search, and the close-out never stops on it (owner
+//     2026-11-26: "alerts like this should just be alerts, they should not stop the job from being completed").
 const SUCCESSIVE_USE_LIMITS = Object.freeze([
   Object.freeze({ epa: '100-1534', name: /^velista\b/, category: 'fungicide', group: '7', max: 2, source: 'Velista label, EPA 100-1534, Resistance Management' }),
 ]);
