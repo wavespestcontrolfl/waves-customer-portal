@@ -97,15 +97,22 @@ describe('set_customer_service_contact preview', () => {
     expect(p.contacts_after).toEqual(['Ava Example (+19415550111)', 'Lee Example (lee@example.invalid)']);
     const lines = effectText(p);
     expect(lines).toMatch(/Sam Example stops getting/);
-    expect(lines).toMatch(/Clears the texting consent on file/);
+    expect(lines).toMatch(/every contact, including the ones who stay, loses app sign-in/);
     expect(lines).toMatch(/Sam Example on \+19415550122 is signed out of the app/);
   });
 
   test('a tenant is recorded as a tenant and the card says they get no service reports', async () => {
     const p = await preview({ action: 'add', relationship: 'tenant', name: 'Tess Tenant', email: 'tess@example.invalid' });
-    expect(p._version.roles).toEqual({ 0: 'tenant' });
+    expect(p._version.roles).toEqual({ service_contact_role: 'tenant' });
     expect(p.contacts_after).toEqual(['Tess Tenant (tenant, tess@example.invalid)']);
     expect(effectText(p)).toMatch(/appointment emails but no service reports/);
+  });
+
+  test('a change of every detail without a relationship shows the role the save clears, not the old one', async () => {
+    Object.assign(state.customer, { service_contact_name: 'Tess Tenant', service_contact_email: 'tess@example.invalid', service_contact_role: 'tenant' });
+    const p = await preview({ action: 'change', slot: 1, name: 'New Person', email: 'new@example.invalid' });
+    expect(p.contacts_after).toEqual(['New Person (new@example.invalid)']);
+    expect(effectText(p)).toMatch(/appointment emails and service reports/);
   });
 
   test('without a slot, the reply lists the numbered contacts on file', async () => {
@@ -133,7 +140,7 @@ describe('set_customer_service_contact commit', () => {
     const call = Customers.setServiceContactsFromBar.mock.calls[0][0];
     expect(call.customerId).toBe(CUST);
     expect(call.slots).toEqual(p._version.body);
-    expect(call.roles).toEqual({ 0: 'family_member' });
+    expect(call.roles).toEqual({ service_contact_role: 'family_member' });
     expect(call.actor).toEqual({ technicianId: 'staff-1' });
   });
 

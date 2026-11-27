@@ -23,11 +23,13 @@ const TOOL = 'set_customer_service_contact';
 
 (!SKIP && usable ? describe : describe.skip)('IB set_customer_service_contact (real PG)', () => {
   const created = [];
+  const accounts = [];
   afterAll(async () => {
     for (const id of created) {
       await db('activity_log').where({ customer_id: id }).del().catch(() => {});
       await db('customers').where({ id }).del();
     }
+    if (accounts.length) await db('customer_accounts').whereIn('id', accounts).del();
     await db.destroy();
   });
 
@@ -64,6 +66,16 @@ const TOOL = 'set_customer_service_contact';
     expect(row.service_contact_name).toBe('Sam Fixture');
     expect(row.service_contact_role).toBe('tenant');
     expect(row.service_contact2_name).toBeNull();
+  });
+
+  test('a property profile reads the report rule from its account primary, as the report sender does', async () => {
+    const [account] = await db('customer_accounts').insert({ first_name: 'Fixture' }).returning('id');
+    accounts.push(account.id);
+    await customer({ account_id: account.id, is_primary_profile: true, contact_role: null });
+    const property = await customer({ account_id: account.id, is_primary_profile: false, phone: '+12025550166', contact_role: 'tenant' });
+    const card = await executeServiceContactTool(TOOL, { customer_id: property, action: 'add', relationship: 'family_member', name: 'Kim Fixture', email: 'kim.fixture@example.invalid' }, ADMIN);
+    expect(card.preview).toBe(true);
+    expect(card.effects.map((e) => e.text).join('\n')).toMatch(/appointment emails and service reports/);
   });
 
   test('a contact edit after the card refuses and writes nothing', async () => {

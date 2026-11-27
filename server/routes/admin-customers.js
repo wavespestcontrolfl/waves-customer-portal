@@ -4527,9 +4527,9 @@ const customerUpdateHandler = async (req, res, next) => {
       Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
     }
     // req.ibServiceContactRoles is set only by setServiceContactsFromBar (never an HTTP field): the relationship the bar
-    // card recorded for a slot ({ slotIndex: role }), applied before compaction so it travels with its person, as the
-    // call pipeline's explicit role does.
-    for (const [index, role] of Object.entries(req.ibServiceContactRoles || {})) updates[SERVICE_CONTACT_SLOT_FIELDS[index][3]] = role;
+    // card recorded, as role columns ({ service_contact2_role: 'tenant' }), applied before compaction so it travels with
+    // its person, as the call pipeline's explicit role does.
+    Object.assign(updates, req.ibServiceContactRoles);
     compactServiceContactSlots(updates, before);
     // If the primary phone is changing, drop the stale line_type cache so the
     // SMS landline guard re-evaluates the new number instead of acting on the
@@ -7365,9 +7365,9 @@ function setCustomerBillToFromBar({ customerId, payerId, expectedPayerId, verify
 }
 // set_customer_service_contact (IB gap #28): the three service-contact slots' name, phone and email, exactly what the
 // customer page's contact editor sends (it posts every slot on every save), plus the relationship the card recorded
-// for a slot (roles: { slotIndex: role }), which the page's editor cannot set.
+// for a slot (roles: role columns, e.g. { service_contact2_role: 'tenant' }), which the page's editor cannot set.
 function setServiceContactsFromBar({ customerId, slots, roles, verifyPlan, actor }) {
-  return runCustomerUpdateFromBar({ customerId, body: slots, verifyPlan, actor, ib: { ibServiceContactRoles: roles || {} } });
+  return runCustomerUpdateFromBar({ customerId, body: slots, verifyPlan, actor, ib: { ibServiceContactRoles: roles } });
 }
 module.exports.setCustomerBillToFromBar = setCustomerBillToFromBar;
 module.exports.setServiceContactsFromBar = setServiceContactsFromBar;

@@ -144,13 +144,11 @@ function plannedWrite(customer, next, roles) {
   });
   const problem = normalizeChangedServiceContacts(updates, customer);
   if (problem) return { problem };
-  // The handler applies the card's roles the same way, before compaction (req.ibServiceContactRoles).
-  for (const [index, role] of Object.entries(roles)) updates[SERVICE_CONTACT_SLOT_FIELDS[index][3]] = role;
-  // Each slot as the save formats it, before compaction moves anyone up. A slot the card gives no role keeps the role
-  // its person had (the compactor's rule), shown from the stored row.
-  const formatted = storedSlots(updates).map((slot, i) => (roles[i] ? slot : { ...slot, role: text(customer[SERVICE_CONTACT_SLOT_FIELDS[i][3]]) || null }));
+  // The role columns the handler applies the same way, before compaction (req.ibServiceContactRoles).
+  const roleColumns = Object.fromEntries(Object.entries(roles).map(([index, role]) => [SERVICE_CONTACT_SLOT_FIELDS[index][3], role]));
+  Object.assign(updates, roleColumns);
   compactServiceContactSlots(updates, customer);
-  return { updates, formatted, after: storedSlots(updates) };
+  return { updates, roleColumns, after: storedSlots(updates) };
 }
 
 // A person already on the account (the holder or another slot) by phone or email.
@@ -166,27 +164,29 @@ function duplicateOf(customer, slots, index, person) {
 
 // What the contact gets by email, in the senders' own terms: appointment emails follow the account's notification
 // settings and the contact's own choices; service reports also skip a tenant (slotWithheldFromReports).
-function emailLine(customer, target) {
+function emailLine(account, target) {
   if (!target.email) return null;
   const { slotWithheldFromReports } = require('../customer-contact');
-  const reports = slotWithheldFromReports(customer, { contactRole: target.role })
+  const reports = slotWithheldFromReports(account, { contactRole: target.role })
     ? 'but no service reports (a tenant, or an account a property manager holds)'
     : 'and service reports';
   return { kind: 'comms', text: `${target.email} can get this account's appointment emails ${reports}, as the account's notification settings and the contact's own choices allow.` };
 }
 
 // Texts, by the senders' consent rule (customer-contact.js serviceContactsConsented, which its kill switch can turn off).
-function textLine({ plan, consentOnFile, consentCleared }) {
+// The consent stamp also gates a contact's app sign-in (contactSlotMayLogIn), with no kill switch.
+function textLines({ plan, consentOnFile, consentCleared }) {
   const { serviceContactsConsented } = require('../customer-contact');
-  if (serviceContactsConsented({ service_contacts_consent_at: null })) {
-    return { kind: 'comms', text: 'Texts to contacts follow the account\'s notification settings (the contact consent check is switched off).' };
-  }
-  if (consentCleared) return { kind: 'comms', text: 'Clears the texting consent on file for this account\'s contacts: no contact gets texts until they agree again in the app. The account holder\'s texts do not change.' };
-  if (!consentOnFile && plan.action !== 'remove') return { kind: 'comms', text: 'No contact gets texts until they agree to texts in the app. The account holder\'s texts do not change.' };
-  return null;
+  const checkOff = serviceContactsConsented({ service_contacts_consent_at: null });
+  return [
+    consentCleared ? { kind: 'comms', text: 'Clears the consent on file for this account\'s contacts: every contact, including the ones who stay, loses app sign-in until they agree again in the app. The account holder is not affected.' } : null,
+    checkOff ? { kind: 'comms', text: 'Texts to contacts follow the account\'s notification settings (the contact texting consent check is switched off).' } : null,
+    !checkOff && consentCleared ? { kind: 'comms', text: 'No contact gets texts until they agree again in the app.' } : null,
+    !checkOff && !consentOnFile && plan.action !== 'remove' ? { kind: 'comms', text: 'No contact gets texts until they agree to texts in the app. The account holder\'s texts do not change.' } : null,
+  ];
 }
 
-function planEffects({ customer, name, before, after, target, plan, consentOnFile, consentCleared }) {
+function planEffects({ account, name, before, after, target, plan, consentOnFile, consentCleared }) {
   const listed = after.filter(isFilled);
   const lines = [
     { kind: 'operational', text: listed.length
@@ -196,9 +196,9 @@ function planEffects({ customer, name, before, after, target, plan, consentOnFil
   if (plan.action === 'remove') {
     lines.push({ kind: 'comms', text: `${target.name || 'This contact'} stops getting this account's emails and texts.` });
   } else {
-    lines.push(emailLine(customer, target));
+    lines.push(emailLine(account, target));
   }
-  lines.push(textLine({ plan, consentOnFile, consentCleared }));
+  lines.push(...textLines({ plan, consentOnFile, consentCleared }));
   // The handler prunes the removed phone's own notification choices and revokes its app sessions; a later re-add
   // starts fresh.
   const oldPhone = before[plan.index].phone;
@@ -222,14 +222,19 @@ async function buildPlan(input, { database = db } = {}) {
     const dupe = duplicateOf(customer, before, plan.index, plan.next[plan.index]);
     if (dupe) return refusal(`That phone or email is already on this account as ${dupe}. Change that contact instead.`, 'already_on_account');
   }
-  const { problem, updates, formatted, after } = plannedWrite(customer, plan.next, plan.roles);
+  const { problem, updates, roleColumns, after } = plannedWrite(customer, plan.next, plan.roles);
   if (problem) return refusal(problem.error, 'invalid_contact');
+  // Compaction keeps slot order and drops empty slots, so the changed person lands after the filled slots before it;
+  // the card describes them as stored there (the role the compactor kept or cleared included).
+  const target = plan.action === 'remove' ? before[plan.index] : after[plan.next.slice(0, plan.index).filter(isFilled).length];
+  // The report rule reads the ACCOUNT holder's role; a property profile takes it from the account primary, as the
+  // report sender does (withAccountPrimaryContactStrict).
+  const account = await require('../customer-contact').withAccountPrimaryContactStrict(customer, { db: database });
   const name = customerName(customer);
   const consentOnFile = !!customer.service_contacts_consent_at;
   const consentCleared = consentOnFile && updates.service_contacts_consent_at === null;
   const body = {};
   BODY_KEYS.forEach((keys, i) => keys.forEach((key, k) => { body[key] = [plan.next[i].name, plan.next[i].phone, plan.next[i].email][k]; }));
-  const target = plan.action === 'remove' ? before[plan.index] : formatted[plan.index];
   const verb = { add: 'Add', change: 'Change', remove: 'Remove' }[plan.action];
   return {
     preview: true,
@@ -240,10 +245,11 @@ async function buildPlan(input, { database = db } = {}) {
     summary: `${verb} contact${plan.action === 'add' ? '' : ` ${plan.index + 1}`}: ${describe(target)}`,
     contacts_before: before.filter(isFilled).map(describe),
     contacts_after: after.filter(isFilled).map(describe),
-    effects: planEffects({ customer, name, before, after, target, plan, consentOnFile, consentCleared }).filter(Boolean),
+    effects: planEffects({ account, name, before, after, target, plan, consentOnFile, consentCleared }).filter(Boolean),
     sends_to_customer: false,
     // What the confirm and the locked re-check compare: the customer, the stored slots, the stamp and the write.
-    _version: { customer_id: customer.id, customer_name: name, before, consent_on_file: consentOnFile, body, roles: plan.roles, after },
+    _version: { customer_id: customer.id, customer_name: name, account_role: text(account.account_contact_role ?? account.contact_role) || null,
+      before, consent_on_file: consentOnFile, body, roles: roleColumns, after },
     note: 'PREVIEW ONLY — nothing was changed. Confirm saves exactly these contacts; if anything changed it refuses.',
   };
 }
