@@ -261,7 +261,7 @@ describe('a commercial building keeps the footprint path (the whole-home rule is
     expect(sp.pricePestInitialRoach(commercial, { roachType: 'regular' })).toMatchObject({ homeSizeBasis: 'ground_floor', footprintUsed: 6000 });
     expect(sp.pricePestInitialRoach({ ...commercial, wholeHomeSizingCommercial: false }, { roachType: 'regular' }))
       .toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2000 });
-    expect(sp.resolveGuaranteeHomeSize(commercial)).toEqual({ homeSqFt: 6000, reviewFields: {} });
+    expect(sp.resolveGuaranteeHomeSize(commercial)).toEqual({ homeSqFt: 6000, lineFields: {} });
   });
 });
 
@@ -659,6 +659,39 @@ describe('website quote: the server lookup\'s measured home replaces the wizard\
     expect(lineOf(forgedReplay.rawEngineResult, 'pest_initial_roach').price).toBe(239);
   });
 
+  test('the rodent guarantee row records the measured home that chose its tier, and a replay reads it: $299 stays $299, not $249 on the placeholder', async () => {
+    // A two-story home the lookup measured at 4,500 sq ft, behind the wizard's 2,000 sq ft placeholder.
+    const measured = (services = GUARANTEE_SERVICES) => ({ ...website(services), fleaMeasuredHomeSqFt: 4500 });
+    const line = lineOf(generateEstimate(measured()), 'rodent_guarantee');
+    expect(line).toMatchObject({
+      price: 299, tier: 'estate', homeSizeBasis: 'total_living_area', footprintUsed: 4500, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000,
+    });
+    expect(lineOf(generateEstimate(placeholderOnly(GUARANTEE_SERVICES)), 'rodent_guarantee')).toMatchObject({ price: 249, footprintUsed: 2000, footprintSource: 'homeSqFt' });
+    // The guarantee row alone (no flea, cockroach or bed bug row beside it) restores the measurement on a view or accept.
+    const published = { engineInputs: measured(), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [compact(line)] } };
+    expect(fleaSizeReplayOverrides(published)).toMatchObject({ fleaMeasuredHomeSqFt: 4500, homeSqFtIsDefault: true });
+    expect(fleaSizeReplayOverrides({ result: mapV1ToLegacyShape(generateEstimate(measured())) })).toMatchObject({ fleaMeasuredHomeSqFt: 4500 });
+    const replayed = await serverRecomputeFromEstimateData(published, { needsSync: () => false, replaySavedPricingKnobs: true });
+    expect(lineOf(replayed.rawEngineResult, 'rodent_guarantee')).toMatchObject({ price: 299, footprintUsed: 4500 });
+    // A staff revision that leaves the size alone keeps it; an edited size prices as typed.
+    const record = fleaPriceRecord({ status: 'sent', address: '1 Sample Way' }, { ...published, engineInputs: placeholderOnly(GUARANTEE_SERVICES) });
+    expect(record).toMatchObject({ basis: 'measured_home', measuredHomeSqFt: 4500, postedHomeSqFt: 2000 });
+    const revised = (inputs) => lineOf(generateWithFleaRecord(generateEstimate, inputs, record), 'rodent_guarantee');
+    expect(revised(placeholderOnly(GUARANTEE_SERVICES))).toMatchObject({ price: 299, footprintUsed: 4500 });
+    expect(revised({ ...placeholderOnly(GUARANTEE_SERVICES), homeSqFt: 2400 })).toMatchObject({ price: 249, footprintUsed: 2400 });
+    // The Admin V2 path copies the profile's size into the guarantee's own options. A copy of the placeholder is not a size:
+    // the measured home still tiers the line. A size the operator typed for the guarantee (not the placeholder) is read as given.
+    const eligibility = GUARANTEE_SERVICES.rodentGuarantee.eligibility;
+    const ownSize = (homeSqFt) => ({ rodentGuarantee: { homeSqFt, stories: 2, eligibility } });
+    expect(revised(placeholderOnly(ownSize(2000)))).toMatchObject({ price: 299, footprintUsed: 4500, footprintSource: 'lookup_measured_home' });
+    expect(lineOf(generateEstimate(measured(ownSize(3000))), 'rodent_guarantee')).toMatchObject({ price: 249, footprintUsed: 3000, footprintSource: 'service_home_sqft' });
+    expect(lineOf(generateEstimate(measured(ownSize(3000))), 'rodent_guarantee')).not.toHaveProperty('fleaPostedHomeSqFt');
+    // A quote priced before the rule: main's line, no size field added, and the measurement is not read.
+    const legacy = lineOf(generateEstimate({ ...measured(), legacyWholeHomeSizing: true }), 'rodent_guarantee');
+    expect(legacy.price).toBe(249);
+    for (const key of ['homeSizeBasis', 'footprintUsed', 'footprintSource', 'footprintWasDefaulted', 'fleaPostedHomeSqFt']) expect(legacy).not.toHaveProperty(key);
+  });
+
   test('a staff revision keeps the measured home while the home size is left alone, and re-prices when it is edited', () => {
     const row = compact(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach'));
     const stored = { engineInputs: placeholderOnly(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
@@ -735,53 +768,54 @@ describe('the deprecated browser estimator mirrors the server on total living ar
     const stampOf = (save) => replay.savedLegacyWholeHomeSizingSignal(save).legacyWholeHomeSizing;
     const guard = (save, storedEstimateData = null) => guardWholeHomeSizingOnClientFallbackSave(save, { storedEstimateData });
 
-    test('a cached page cannot save a new cockroach quote at the footprint price: refused, never stored as a legacy quote', () => {
-      const stale = cachedBundle();
-      expect(stampOf(stale)).toBe(true);
-      expect(() => guard(stale)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      // A posted legacy stamp does not help: only a stored estimate can be on the footprint basis.
+    test('a browser-priced save with a cockroach or rodent guarantee row is refused, whatever stamp it posts', () => {
+      // A page cached before the rule (footprint price, no stamp) and the current page (whole-home price, stamp false) alike:
+      // the browser's cockroach brackets are hard-coded, so its stamp cannot prove the price matches Settings.
+      for (const save of [cachedBundle(), currentBundle(), cachedBundle({ stories: 1 }), currentBundle({ stories: 1 })]) {
+        expect(() => guard(save)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      }
+      expect(stampOf(currentBundle())).toBe(false);
       const forged = cachedBundle();
       forged.result.pricingMetadata.legacyWholeHomeSizing = true;
       expect(() => guard(forged)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      // The same for a rodent guarantee row in any shape, and whatever the story count says.
+      // The cockroach treatment a pest plan adds is refused the same way.
+      const planRoach = currentBundle({ svcRoach: false, svcPest: true, pestFreq: 4, roachModifier: 'REGULAR' });
+      expect([...(planRoach.result.oneTime.items || []), ...(planRoach.result.oneTime.specItems || [])].some((row) => row.service === 'pest_initial_roach')).toBe(true);
+      expect(() => guard(planRoach)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // A rodent guarantee row, a row known only by its name, a camelCase block, a list: every posted shape is read.
       expect(() => guard({ result: { lineItems: [{ service: 'rodent_guarantee', price: 249 }] } })).toThrow(expect.objectContaining({ statusCode: 409 }));
       expect(() => guard({ result: { oneTime: { specItems: [{ name: 'Cockroach Treatment Service', price: 239 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard(cachedBundle({ stories: 1 }))).toThrow(expect.objectContaining({ statusCode: 409 }));
-      // A list is read like any other posted shape (the revise route takes any object).
+      expect(() => guard({ result: { pestInitialRoach: { price: 239 } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard({ result: { oneTime: { items: [{ name: 'German Roach Cleanout', price: 450 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
       expect(() => guard([{ service: 'pest_initial_roach', price: 202.5 }])).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard([{ service: 'lawn_care', price: 60 }])).not.toThrow();
-      // A stored send snapshot or a line stamp posted back by the cached page is not the browser saying it priced the new rule.
-      const withSnapshot = { ...cachedBundle(), sendSnapshot: { legacyWholeHomeSizing: false } };
-      expect(() => guard(withSnapshot)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      const withLineStamp = cachedBundle();
-      withLineStamp.result.lineItems = [{ service: 'pest_initial_roach', price: 202.5, legacyWholeHomeSizing: false }];
-      expect(() => guard(withLineStamp)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // Not a cockroach row: "approach" in a note, a lawn row, the pest plan's own roach option with no treatment added.
+      expect(() => guard([{ service: 'lawn_care', price: 60, detail: 'A new approach to weeds' }])).not.toThrow();
+      expect(() => guard({ result: { lineItems: [{ service: 'pest_control', roachType: 'none', price: 39 }] } })).not.toThrow();
     });
 
-    test('the current page saves at the whole-home price and is stamped new', () => {
-      const save = currentBundle();
-      expect(() => guard(save)).not.toThrow();
-      expect(save.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
-      expect([...(save.result.oneTime.items || []), ...(save.result.oneTime.specItems || [])].find((row) => row.service === 'pest_initial_roach').price).toBe(289);
-    });
-
-    test('the footprint basis comes only from the stored estimate: a legacy quote re-saved by a cached page stays legacy, by the current page it takes the new price and stamp', () => {
+    test('a stored estimate re-saved this way is refused too (no unchanged-resave exception): the server must price it', () => {
       const storedLegacy = cachedBundle();
-      const resaved = cachedBundle();
-      expect(() => guard(resaved, storedLegacy)).not.toThrow();
-      expect(stampOf(resaved)).toBe(true);
-      const repriced = currentBundle();
-      expect(() => guard(repriced, storedLegacy)).not.toThrow();
-      expect(stampOf(repriced)).toBe(false);
-      // A stored estimate priced under the new rule gives a cached page no footprint basis.
-      const storedNew = currentBundle();
-      expect(() => guard(cachedBundle(), storedNew)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard(cachedBundle(), storedLegacy)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard(currentBundle(), storedLegacy)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard(currentBundle(), currentBundle())).toThrow(expect.objectContaining({ statusCode: 409 }));
     });
 
-    test('a save with no cockroach or guarantee row is not refused, and is stamped by the server: new on a first save', () => {
-      const pestOnly = cachedBundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 });
-      expect(() => guard(pestOnly)).not.toThrow();
-      expect(pestOnly.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+    test('a save with none of the rows is not refused, and its stamp is the server\'s reading: new on a first save, the stored estimate\'s on a revision', () => {
+      const pestOnly = (bundle) => bundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 });
+      for (const bundle of [cachedBundle, currentBundle]) {
+        const first = pestOnly(bundle);
+        expect(() => guard(first)).not.toThrow();
+        expect(first.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+        // A revision of an estimate sold before the rule stays on it (one of the three added later by the server keeps the footprint).
+        const revision = pestOnly(bundle);
+        expect(() => guard(revision, cachedBundle())).not.toThrow();
+        expect(stampOf(revision)).toBe(true);
+        // A posted stamp is never read: a forged legacy stamp on a first save is overwritten.
+        const forged = pestOnly(bundle);
+        forged.result.pricingMetadata.legacyWholeHomeSizing = true;
+        guard(forged);
+        expect(forged.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+      }
     });
 
     test('the check sits on the CLIENT_FALLBACK decision; a server price is untouched', async () => {
@@ -791,10 +825,11 @@ describe('the deprecated browser estimator mirrors the server on total living ar
       for (const reason of ['NO_INPUTS', 'ENGINE_ERROR']) {
         const recompute = async () => ({ recomputed: false, reason, ...(reason === 'ENGINE_ERROR' ? { error: new Error('down') } : {}) });
         await expect(price(cachedBundle(), recompute)).rejects.toMatchObject({ statusCode: 409 });
-        const current = currentBundle();
-        const out = await price(current, recompute);
+        await expect(price(currentBundle(), recompute)).rejects.toMatchObject({ statusCode: 409 });
+        const pestOnly = currentBundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 });
+        const out = await price(pestOnly, recompute);
         expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
-        expect(stampOf(current)).toBe(false);
+        expect(stampOf(pestOnly)).toBe(false);
       }
       const served = cachedBundle();
       const out = await price(served, async () => ({ recomputed: true, serverResult: { recurring: {} }, serverTotals: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 289 } }));

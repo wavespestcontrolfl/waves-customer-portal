@@ -1595,7 +1595,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   assertSpecialtyClientFallbackSave(estimateData);
   stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData });
   stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
-  // Whole-home sizing: a browser bundle cached before the rule may not save a new cockroach or rodent guarantee row (see the function).
+  // A cockroach treatment or rodent guarantee row is refused too: the browser cannot set either price (see the function).
   guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
@@ -2227,33 +2227,27 @@ function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData =
   }
 }
 
-// Whole-home sizing (owner 2026-11-26, new quotes only: the cockroach treatment and the rodent guarantee size on the home's total
-// living area; the bed bug row of a browser-priced save is refused above). The current browser estimator prices the cockroach
-// treatment on the whole home and says so (pricingMetadata.legacyWholeHomeSizing false). A browser bundle cached before the rule
-// prices the ground-floor footprint and posts no stamp, and the replay reads a priced estimate with no stamp as sold before the
-// rule. So on a save the server could not price (the CLIENT_FALLBACK authority):
-//  - the footprint basis is kept only when the STORED estimate was on it (its own stamp, read by the replay's reader), never
-//    because a posted blob lacks a stamp; a stored legacy estimate re-saved by the current bundle takes the whole-home prices it
-//    posted and the new stamp;
-//  - any other save that names a cockroach or rodent guarantee row must say it priced the new rule, or it is refused (409, reload).
-//    The check does not read the home's story count: a row cannot prove how it was priced, and a one-story home refused here
-//    costs one reload of a stale page. A row is named the way the specialty check reads names (any string, or a block's key).
-//  - "says it priced the new rule" is the stamp `false` in the metadata of the result the save prices from (the browser writes it
-//    there). A stamp on a line or in a send snapshot is not the browser's word: a cached page can post back a stored snapshot.
-//  - the stamp written is the server's reading, on every result container, so the reader finds it whichever one it picks.
-// Every posted shape is checked (the revise route takes any object, a list included, as the specialty check reads it): only a
-// plain record can carry the browser's stamp, and only a plain record is stamped.
-const WHOLE_HOME_SIZING_ROW_WORDS = /roach|rodent[ _-]?guarantee/i;
+// Cockroach treatment and rodent guarantee rows on a save the server could not price (the CLIENT_FALLBACK authority). The browser
+// cannot set either price: its cockroach brackets are hard-coded dollars (a Settings change to pest_base.initial_roach never reaches
+// it), a page cached before the whole-home rule (owner 2026-11-26) prices the ground-floor footprint, and it has no rodent guarantee
+// price at all. A rule stamp posted by the browser proves none of that. So, the same rule as the specialty rows above: such a save
+// is refused (409, reload and let the server price it) when it NAMES a cockroach treatment (stand-alone or added by a pest plan) or
+// a rodent guarantee anywhere outside its inputs, whatever stamp it posts, new or re-saved, changed or not.
+// "roach" is read as a word or a camelCase part (pest_initial_roach, Cockroach Treatment, pestInitialRoach), never inside "approach".
+const WHOLE_HOME_SIZING_ROW_WORDS = {
+  test: (text) => /cockroach|(?<![a-z])roach|rodent[ _-]?guarantee/i.test(text) || /[a-z]Roach/.test(text),
+};
+// The whole-home rule stamp of a browser-priced save that passed the refusal (it holds none of the three rows: bed bug is refused by
+// the specialty check) is the server's reading, never the browser's: a revision keeps the stored estimate's stamp, so one of the
+// three added later by the server stays on the basis the estimate was sold on; a first save is new. Written on every result
+// container, so the reader finds it whichever one it picks.
 function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  const replay = require('./estimate-floor-signal-replay');
-  const posted = isPlainRecord(estimateData) ? replay.readRuleStamp(estimateData, 'legacyWholeHomeSizing') : {};
-  const postedNewRule = posted.from === 'metadata' && posted.flag === false;
-  const legacy = !!storedEstimateData && !postedNewRule
-    && replay.savedLegacyWholeHomeSizingSignal(storedEstimateData).legacyWholeHomeSizing === true;
-  if (!legacy && !postedNewRule && saveHoldsRowNamed(estimateData, WHOLE_HOME_SIZING_ROW_WORDS)) {
-    throw errorWithStatus('This estimator is out of date for cockroach and rodent guarantee pricing (they now price on the whole home) — reload the page and regenerate the estimate.', 409);
+  if (saveHoldsRowNamed(estimateData, WHOLE_HOME_SIZING_ROW_WORDS)) {
+    throw errorWithStatus('This estimate has a cockroach treatment or rodent guarantee price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
   }
   if (!isPlainRecord(estimateData)) return;
+  const legacy = !!storedEstimateData
+    && require('./estimate-floor-signal-replay').savedLegacyWholeHomeSizingSignal(storedEstimateData).legacyWholeHomeSizing === true;
   const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
   for (const container of containers.length ? containers : [estimateData]) {
     container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyWholeHomeSizing: legacy };

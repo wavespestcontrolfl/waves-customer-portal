@@ -26,11 +26,11 @@ const isFleaPackageRow = (row) => isRecord(row)
   && (row.service === 'flea_package' || row.serviceKey === 'flea' || row.service === 'flea'
     || (!row.service && !row.serviceKey && row.name === 'Flea (2-visit)'));
 
-// The other lines that record the whole-home size they priced on (owner 2026-11-26 "whole home"): the engine's cockroach treatment
-// and bed bug treatment (the rodent guarantee line records no size). Their legacy basis is the estimate's own stamp
+// The other lines that record the whole-home size they priced on (owner 2026-11-26 "whole home"): the engine's cockroach treatment,
+// bed bug treatment and rodent guarantee. Their legacy basis is the estimate's own stamp
 // (estimate-floor-signal-replay savedLegacyWholeHomeSizingSignal), not this module; this module only restores a lookup-measured
 // home from their rows.
-const WHOLE_HOME_ROW_SERVICES = new Set(['pest_initial_roach', 'bed_bug']);
+const WHOLE_HOME_ROW_SERVICES = new Set(['pest_initial_roach', 'bed_bug', 'rodent_guarantee']);
 const isWholeHomeSizedRow = (row) => isRecord(row) && WHOLE_HOME_ROW_SERVICES.has(row.service);
 
 function rowsIn(container, isRow) {
@@ -92,11 +92,11 @@ function fleaSizeBasisSignalForReplay(estData) {
 }
 
 // The measured whole home a website quote priced with when it had no posted home size (public-quote.js sets fleaMeasuredHomeSqFt +
-// homeSqFtIsDefault from the SERVER lookup, for flea and for the cockroach and bed bug treatments). The save path's identity sanitizer
+// homeSqFtIsDefault from the SERVER lookup, for flea, the cockroach and bed bug treatments and the rodent guarantee). The save path's identity sanitizer
 // strips both from every replay, so the replay restores them from a stored ROW, the only record: the engine stamps footprintSource
 // 'lookup_measured_home' and the measured area in footprintUsed on every row it priced with it, and the compact wizard writers carry
 // both. A browser-supplied copy in any stored input carrier is never read. A flea row backs it only while every stored flea row is
-// stamped whole-home; a cockroach or bed bug row carries that source only when it was priced on the whole home.
+// stamped whole-home; a cockroach, bed bug or rodent guarantee row carries that source only when it was priced on the whole home.
 function storedMeasuredHomeRow(estData) {
   const fleaRows = storedFleaRows(estData);
   const backing = [
@@ -159,7 +159,7 @@ function fleaPriceRecord(estimateRow, estData, { translate, nextAddress } = {}) 
     priorAddress: addressKeyOf(estimateRow && estimateRow.address),
     nextAddress: addressKeyOf(nextAddress === undefined ? (estimateRow && estimateRow.address) : nextAddress),
   };
-  // A website quote priced on the server lookup's measured whole home (its flea, cockroach or bed bug row is the record).
+  // A website quote priced on the server lookup's measured whole home (its flea, cockroach, bed bug or rodent guarantee row is the record).
   const measuredRow = storedMeasuredHomeRow(data);
   if (measuredRow) {
     return {
@@ -180,7 +180,7 @@ function fleaPriceRecord(estimateRow, estData, { translate, nextAddress } = {}) 
 
 const fleaLineOf = (estimate) => (estimate && Array.isArray(estimate.lineItems) ? estimate.lineItems : [])
   .find((line) => line && line.service === 'flea_package');
-// The first line that reports the whole-home size it priced on (flea, cockroach or bed bug; they share one resolver).
+// The first line that reports the whole-home size it priced on (flea, cockroach, bed bug or rodent guarantee; they share one resolver).
 const wholeHomeSizedLineOf = (estimate) => (estimate && Array.isArray(estimate.lineItems) ? estimate.lineItems : [])
   .find((line) => line && (line.service === 'flea_package' || isWholeHomeSizedRow(line)) && Number(line.footprintUsed) > 0);
 

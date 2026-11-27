@@ -108,9 +108,8 @@ environment that carries the row (prod does), **editing
   (`pricingMetadata.legacyWholeHomeSizing`; an unstamped priced estimate, or
   inputs-only asking for one of the three, reads the same). Plan-wide stamp:
   a service added to a legacy estimate stays on the footprint. A browser-priced
-  save naming a cockroach or guarantee row needs the stamp `false` unless the
-  stored estimate is legacy (409 otherwise: a cached page cannot save a new
-  footprint-priced quote). Homes only: a commercial property keeps the
+  save naming a cockroach or guarantee row is always refused (409: the
+  browser's cockroach brackets are hard-coded, the server must price it). Homes only: a commercial property keeps the
   footprint path for all three. An unmeasured rodent guarantee (2,000
   fallback) goes to review.
 - **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not

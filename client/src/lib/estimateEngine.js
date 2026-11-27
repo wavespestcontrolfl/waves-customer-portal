@@ -2164,7 +2164,8 @@ export function calculateEstimate(inputs) {
     // claim the new rule (the stamp is left MISSING). The server refuses that save by the home size (409) and prices it itself.
     ...((svcPest || svcOnetimePest) && footprint > 5500 ? {} : { legacyPestAboveTable: false }),
     // Whole-home sizing (2026-11-26): this fallback sizes the cockroach and bed bug treatments on total living area, as the
-    // server does, so the saved quote never replays on the ground-floor footprint.
+    // server does, and says so. It is the preview's own record only: the server never stores a browser-priced cockroach, bed bug
+    // or rodent guarantee row (409), and writes its own reading of this stamp on a save it could not price.
     legacyWholeHomeSizing: false,
     // Resolved program minimum for THIS run (0 = disarmed) — same replay
     // rule: estimate-public and the converter clamp/protect a saved fallback

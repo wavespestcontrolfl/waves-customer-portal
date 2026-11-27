@@ -2824,6 +2824,7 @@ function generateEstimate(input) {
     // A caller's own homeSqFt is the total living area (the Admin V2 path passes it). The fallback is the home's TOTAL living
     // area too (owner 2026-11-26 "whole home"), with a review mark when that size may be the ground floor only; a quote priced
     // before that falls back to the ground-floor footprint, as sold (resolveGuaranteeHomeSize reads wholeHomeSizingLegacy).
+    // The line records the size it tiered on and its source (lineFields), as the cockroach and bed bug lines do.
     const guaranteeSize = resolveGuaranteeHomeSize({ ...property, ...wholeHomeSizing, stories: guaranteeStories }, opts.homeSqFt);
     const guaranteeOpts = {
       homeSqFt: guaranteeSize.homeSqFt || 2000,
@@ -2842,7 +2843,7 @@ function generateEstimate(input) {
         + (services.exclusion?.specialty || 0)
       );
     }
-    const result = { ...priceRodentGuarantee(guaranteeOpts), ...guaranteeSize.reviewFields };
+    const result = { ...priceRodentGuarantee(guaranteeOpts), ...guaranteeSize.lineFields };
     // A held exclusion (barrel footage pending) is not warranty eligible, so no separate guarantee is added either.
     if (result.eligible && exclusionResult?.warrantyEligible !== false) lineItems.push(result);
   }

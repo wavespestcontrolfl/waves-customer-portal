@@ -9046,24 +9046,41 @@ function resolveWholeHomeSize(property = {}) {
   return resolvePestFootprint(property);
 }
 
-// The home size the rodent guarantee tiers on, and the review fields its line carries (reviewFields: empty when the size is clear).
-// A caller's own homeSqFt is the total living area and is read as given. Without one: homeSqFt is null when the property
-// carries no size evidence (the 2,000 fallback is not a measurement). Live rule: the total living area, and when there is no
-// usable size, or that size may be the ground floor only (a building measurement on a multi-story home), the shared resolver's
-// review reasons and warnings go on the line. The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
-// same count that picks the tier. A quote priced before the rule (property.wholeHomeSizingLegacy): the profile's own
-// ground-floor footprint exactly as the guarantee read it then, and no review mark.
+// The home size the rodent guarantee tiers on, and the fields its line carries about that size (lineFields).
+// Live rule: the home's total living area. A caller's own homeSqFt (the Admin V2 path passes the profile's) is the total living
+// area and is read as given, with one exception: when the server lookup's measured home replaced the route's placeholder, a
+// caller's copy of that same placeholder is not a size, and the measured home tiers the guarantee as it sizes the other lines.
+// Without a caller size: the shared resolver's size, null when the property carries no size evidence (the 2,000 fallback is not a
+// measurement). The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
+// same count that picks the tier.
+// lineFields: the size evidence a cockroach or bed bug row carries (basis, size, source, and the posted size a measured home
+// replaced: the replay restores the measurement from the row, estimate-flea-size-replay.js), plus the resolver's review reasons
+// and warnings when there is no usable size or the size may be the ground floor only.
+// Ground-floor basis (a quote priced before the rule, property.wholeHomeSizingLegacy, or a commercial building): the caller's
+// size, else the profile's ground-floor footprint, exactly as the guarantee read it then, and no added field.
 function resolveGuaranteeHomeSize(property = {}, callerHomeSqFt) {
-  if (callerHomeSqFt) return { homeSqFt: callerHomeSqFt, reviewFields: {} };
-  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return { homeSqFt: property.footprint || null, reviewFields: {} };
+  if (wholeHomeBasisOf(property) === HOME_SIZE_BASIS_GROUND_FLOOR) return { homeSqFt: callerHomeSqFt || property.footprint || null, lineFields: {} };
   const sized = resolveWholeHomeBasisSize(property);
+  const callerIsPlaceholder = sized.source === 'lookup_measured_home' && Number(callerHomeSqFt) === Number(property.homeSqFt);
+  if (callerHomeSqFt && !callerIsPlaceholder) {
+    return {
+      homeSqFt: callerHomeSqFt,
+      lineFields: {
+        homeSizeBasis: HOME_SIZE_BASIS_TOTAL, footprintUsed: positiveFiniteNumber(callerHomeSqFt), footprintSource: 'service_home_sqft', footprintWasDefaulted: false,
+      },
+    };
+  }
   // The resolver's own reasons (no usable size at all: the 2,000 fallback) and the unclear-size reason alike.
   const manualReviewReasons = uniqueList([...sized.manualReviewReasons, ...sized.sizeReviewReasons]);
   return {
     homeSqFt: sized.wasDefaulted ? null : sized.footprint,
-    reviewFields: manualReviewReasons.length
-      ? { requiresManualReview: true, manualReviewReasons, warnings: uniqueList([...sized.warnings, ...sized.sizeWarnings]) }
-      : {},
+    lineFields: {
+      homeSizeBasis: sized.homeSizeBasis, footprintUsed: sized.footprint, footprintSource: sized.source, footprintWasDefaulted: sized.wasDefaulted,
+      ...sized.postedSizeFields,
+      ...(manualReviewReasons.length
+        ? { requiresManualReview: true, manualReviewReasons, warnings: uniqueList([...sized.warnings, ...sized.sizeWarnings]) }
+        : {}),
+    },
   };
 }
 

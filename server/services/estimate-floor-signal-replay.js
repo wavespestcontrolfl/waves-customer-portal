@@ -636,7 +636,6 @@ module.exports = {
   savedLegacyOneTimePestBufferSignal,
   savedLegacyPestAboveTableSignal,
   savedLegacyWholeHomeSizingSignal,
-  readRuleStamp,
   savedLegacySpecialty1126Signal,
   savedSpecialty1126CurrentServices,
   savedOneTimePestRuleLegacy,
