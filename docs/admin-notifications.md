@@ -956,6 +956,21 @@ alert says (a store, pack label, price, note, warning, or a smaller need) rewrit
 nothing left to buy and no warning closes (`closeAdminAlertKeys`). A person's Done stays done until the list grows.
 Read-only preview: `node server/scripts/weekly-buy-list.js [--json] [--date YYYY-MM-DD]`.
 
+**Automatic restock request open over 7 days** (owner 2026-11-27, "build fixes"; `server/services/procurement/stale-request-alert.js`, run by the
+server's daily `runVendorOrderDispatch` reconcile step, no gate: it writes admin notifications only). One standing bell per request from the
+auto-reorder sweep (`source` `auto_reorder`, any status but received or cancelled) older than 7 days. Category `system` with `bell: true`, area
+Inventory, headline "Inventory — check the <product> restock, open N days", why "Open since Nov 23; nothing ordered yet." (or "marked ordered,
+nothing received"), link `/admin/inventory?tab=restock`, done-when `request_closed`, who `person`. dedupeKey `restock-open:<request id>`, raised
+through `raiseAdminAlertWithReopen` with `refreshOnDedupe` and a `ringOnRefresh` that is always false: it rings once, the day count then refreshes
+the row quietly, and a person's Done stays done. Each run closes (`closeAdminAlertKeys`) the alert of a request that is received, cancelled or
+gone. It does not overlap `macWatchdog` (a SiteOne request the Mac did not touch for 30 hours goes to the office); this one reports any
+automatic request that stays open a week, whatever stalled it. No `RERING` entry is owed (no `dedupeOpenOnly`).
+
+The auto-order park alert (`auto-order:<ledger id>:<version>`) of a park BEFORE the buy click that the dispatcher retries (`server/services/procurement/order-dispatch.js`:
+over the monthly cap, SKU or item not found, unavailable, price jump) is kept open through each retry. A retry that parks for the same reason
+refreshes the same alert quietly (same version, `ringOnRefresh` false); a different reason rings a new one and closes the old; a retry that buys
+(or may have) closes it. A park after the click is never retried and never refreshed this way.
+
 ## 7. How to raise one
 
 `composeAdminAlert(spec)` is pure. It validates the eight parts and returns

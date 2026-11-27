@@ -27,6 +27,8 @@
  */
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/vendor-credentials', () => ({ getVendorLoginCredentials: jest.fn(async () => ({ email: 'a@b.c', password: 'x', accountNumber: '123' })) }));
+// The open-request alert's own SQL runs against Postgres (autobuy-retry-postgres.test.js); here only the wiring is checked.
+jest.mock('../services/procurement/stale-request-alert', () => ({ syncStaleRequestAlerts: jest.fn(async () => ({ stale: 0, closed: 0 })) }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 jest.mock('../services/procurement/auto-reorder', () => ({
   vendorPricingFor: jest.fn(async () => mockState.pricing),
@@ -1440,3 +1442,20 @@ test('in the fertilizer blackout the claim holds a product whose N shows only in
   expect(r.skipped).toBe('fertilizer_blackout');
 });
 
+
+describe('open-request alert wiring (runVendorOrderDispatch)', () => {
+  const { syncStaleRequestAlerts } = require('../services/procurement/stale-request-alert');
+  beforeEach(() => syncStaleRequestAlerts.mockClear());
+
+  test('the server run (reconcile) syncs the alerts once; the Mac run (reconcile false) leaves them to it', async () => {
+    await dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV });
+    expect(syncStaleRequestAlerts).toHaveBeenCalledTimes(1);
+    await dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV, reconcile: false });
+    expect(syncStaleRequestAlerts).toHaveBeenCalledTimes(1);
+  });
+
+  test('a failed alert write turns the run red but does not stop the dispatch', async () => {
+    syncStaleRequestAlerts.mockRejectedValueOnce(new Error('alert not persisted'));
+    await expect(dispatch.runVendorOrderDispatch({ notify, adapters: {}, env: ENV })).rejects.toThrow('open-request alerts failed: alert not persisted');
+  });
+});

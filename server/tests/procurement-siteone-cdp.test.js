@@ -1062,3 +1062,43 @@ test('R7 cleanup: the remove click goes to the link handle inside the verified r
   expect(replaced.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]);
   for (const r of [exact, replaced]) expectSafe(r.w);
 });
+
+// Price check before the click (owner 2026-11-27): the cart total over the package count (here $105.93 / 2 =
+// $52.97 a package, tax included) against the price on file; more than 15% above parks `price_jump`.
+describe('price check against the price on file', () => {
+  test('over 15% above the price on file parks; at or under it goes on to the click', async () => {
+    // The line is 2 packages x price x 1.15: 4600 gives 10580 (the cart's 10593 is over it), 4700 gives 10810 (under it).
+    const over = await run({}, { args: { priceOnFileCents: 4600 } });
+    expect(over.error.refuse).toBe('price_jump');
+    const under = await run({}, { args: { priceOnFileCents: 4700 } });
+    expect(under.result).toMatchObject({ externalOrderNumber: '7700123' });
+    expect(under.result.evidence.priceCheck).toEqual({ onFileCents: 4700, seenUnitCents: 5297, limitPercent: 15 });
+    expectSafe(under.w);
+  });
+
+  test('a jump parks price_jump before any cap check or click, names both prices, and cleans the cart', async () => {
+    const { w, error, beforeSubmit } = await run({}, { args: { priceOnFileCents: 3000 } });
+    expect(error.refuse).toBe('price_jump');
+    expect(error.message).toContain('$52.97');
+    expect(error.message).toContain('$30.00');
+    expect(error.cents).toBe(10593);
+    expect(beforeSubmit).not.toHaveBeenCalled();
+    expect(w.placed).toBe(0);
+    expect(w.cart).toEqual([]); // the line this run added is removed again
+    expect(error.evidence.cleanup).toBe('row_removed');
+    expectSafe(w);
+  });
+
+  test('no price on file keeps today\'s behavior and says so in evidence', async () => {
+    for (const args of [{}, { priceOnFileCents: null }, { priceOnFileCents: 0 }]) {
+      const { result } = await run({}, { args });
+      expect(result.externalOrderNumber).toBe('7700123');
+      expect(result.evidence.priceCheck).toBe('no_price_on_file');
+    }
+  });
+
+  test('the adapter declares the check, and the limit is 15 percent', () => {
+    expect(adapter.checksPrice).toBe(true);
+    expect(adapter._internals.PRICE_JUMP_LIMIT_PERCENT).toBe(15);
+  });
+});
