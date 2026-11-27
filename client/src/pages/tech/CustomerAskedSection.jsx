@@ -23,6 +23,7 @@ const KIND_LABELS = {
   reservice_reason: 'Return visit reason',
   reservice_words: "Customer's words",
   booking_note: 'Booking note',
+  portal_message: 'Portal message',
   portal_request: 'Portal request',
 };
 

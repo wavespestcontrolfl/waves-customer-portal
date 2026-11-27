@@ -35,16 +35,17 @@ const SVC = {
 };
 
 // A stub dbh: service_requests resolves to `rows`, self_booked_appointments to `booking`; `fail` makes every read throw.
-function fakeDbh({ rows = [], booking, props = [], customer, fail = false } = {}) {
+function fakeDbh({ rows = [], booking, props = [], customer, messages = [], fail = false } = {}) {
   const calls = [];
   const dbh = (table) => {
     calls.push(['table', table]);
     const q = {};
-    for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit']) {
+    for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'join']) {
       q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; return q; };
     }
     q.select = async () => {
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
+      if (table === 'messages as m') return messages;
       return table === 'customer_properties' ? props : rows;
     };
     q.first = async () => {
@@ -81,7 +82,7 @@ describe('customerAskedFacts: the sources', () => {
       askItem({ id: 'booking:svc-1', source: 'request_form', at: '2026-11-20T15:00:00.000Z', text: 'Ants in the kitchen.', pests: ['Ants'] }),
       askItem({ id: 'text:9', at: '2026-11-22T14:00:00.000Z', text: 'They are worse today.', pests: [] }),
     ]));
-    const svc = { ...SVC, notes: 'Self-booked. Notes: Please text before you arrive — Unit: 5' };
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Please text before you arrive — Unit: 5' };
     const dbh = fakeDbh({ rows: [formRow({ subject: 'Lawn Care', description: 'Brown patch by the gate' })] });
     const facts = await customerAskedFacts(svc, dbh);
     expect(facts.items.map((i) => i.kind)).toEqual(['portal_request', 'reservice_words', 'reservice_reason', 'booking_note']);
@@ -107,7 +108,7 @@ describe('customerAskedFacts: the sources', () => {
 
   test('with the gate off the re-service gather never runs; no money keys', async () => {
     process.env.GATE_RESERVICE_ASKS = 'false';
-    const facts = await customerAskedFacts({ ...SVC, notes: 'Self-booked. Notes: Gate is open' }, fakeDbh());
+    const facts = await customerAskedFacts({ ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Gate is open' }, fakeDbh());
     expect(mockGather).not.toHaveBeenCalled();
     expect(Object.keys(facts.items[0]).sort()).toEqual(['at', 'kind', 'text']);
     expect(JSON.stringify(facts)).not.toMatch(/price|total|amount|discount|invoice|pricing/i);
@@ -123,7 +124,7 @@ describe('customerAskedFacts: booking note', () => {
   });
 
   test('without the booking row, continuation lines of the notes line are kept up to the appendix', async () => {
-    const svc = { ...SVC, notes: 'Self-booked. Notes: Side gate sticks.\nPlease text first. — Unit: 5' };
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Side gate sticks.\nPlease text first. — Unit: 5' };
     const facts = await customerAskedFacts(svc, fakeDbh());
     expect(facts.items[0].text).toBe('Side gate sticks. Please text first.');
   });
@@ -151,7 +152,8 @@ describe('customerAskedFacts: portal requests', () => {
     expect(sql).toMatch(/"status" is null or "status" not in \(\?, \?, \?\)/);
     expect(sql).toMatch(/"category" in \(\?, \?, \?, \?, \?, \?\)/);
     expect(sql).toMatch(/"source" in \(\?, \?, \?\) or \("source" is null and \(metadata->>'writer' = 'portal_form'/);
-    expect(sql).toMatch(/order by GREATEST\(created_at, COALESCE\(updated_at, created_at\)\) DESC limit \?/);
+    expect(sql).toMatch(/order by CASE WHEN source = 'customer_portal_reschedule' THEN GREATEST\(created_at, .*\) ELSE created_at END DESC limit \?/);
+    expect(sql).not.toMatch(/updated_at/);
     expect(sql).toMatch(/select "subject", "description", "source", "created_at", "metadata" from/);
     expect(sql).not.toMatch(/pricing_revision/);
     expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'resolved', 'closed', 'cancelled', 'pest_issue']));
@@ -337,6 +339,90 @@ describe('customerAskedFacts: the generated self-serve note', () => {
   });
 });
 
+describe('customerAskedFacts: a seeded follow-up does not repeat the booking note', () => {
+  test('the visit the customer booked shows it; a recurring child that copied the notes does not', async () => {
+    const notes = 'Self-booked. Notes: Please text first — Unit: 5';
+    expect((await customerAskedFacts({ ...SVC, self_booking_id: 'sb-1', notes }, fakeDbh())).items).toHaveLength(1);
+    expect(await customerAskedFacts({ ...SVC, self_booking_id: null, recurring_parent_id: 'svc-0', notes }, fakeDbh())).toBeNull();
+  });
+});
+
+describe('customerAskedFacts: portal messages', () => {
+  const GATE = 'GATE_PORTAL_MESSAGES';
+  const VISIT = { ...SVC, scheduled_date: '2026-11-27' };
+  const message = (body, over) => ({ body, created_at: '2026-11-24T15:00:00.000Z', ...over });
+  beforeEach(() => { process.env[GATE] = 'true'; });
+  afterAll(() => { delete process.env[GATE]; });
+
+  test('the customer\'s own messages show, newest first, kind portal_message, no home flag on a single-premises account', async () => {
+    const rows = [message('Please come after noon', { created_at: '2026-11-25T15:00:00.000Z' }), message('Dog is in the yard')];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: rows }));
+    expect(facts.items.map((i) => [i.kind, i.text])).toEqual([['portal_message', 'Please come after noon'], ['portal_message', 'Dog is in the yard']]);
+    expect(facts.items[0]).toEqual({ kind: 'portal_message', at: '2026-11-25T15:00:00.000Z', text: 'Please come after noon', source: 'portal' });
+  });
+
+  test('on an account that may have several homes the message is marked account-wide', async () => {
+    mockSingle.mockResolvedValue(false);
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: [message('Please come after noon')], props: [HOME, RENTAL] }));
+    expect(facts.items.find((i) => i.kind === 'portal_message').accountWide).toBe(true);
+  });
+
+  test('the query reads only the customer\'s inbound portal messages of the 7 days before the visit', async () => {
+    const dbh = fakeDbh({ messages: [] });
+    await customerAskedFacts(VISIT, dbh);
+    const where = dbh.calls.find((c) => c[0] === 'messages as m' && c[1] === 'where');
+    expect(where[2]).toEqual({ 'c.customer_id': 'cust-1', 'c.channel': 'portal', 'm.channel': 'portal', 'm.direction': 'inbound', 'm.author_type': 'customer', 'm.message_type': 'portal_message' });
+    const { since, until } = _test.messageWindow(VISIT, new Date('2026-12-30T00:00:00Z'));
+    expect(since.toISOString()).toBe('2026-11-20T05:00:00.000Z'); // ET midnight, 7 days before the visit day
+    expect(until.toISOString()).toBe('2026-11-28T05:00:00.000Z'); // end of the visit day
+    expect(_test.messageWindow(VISIT, new Date('2026-11-25T12:00:00Z')).until.toISOString()).toBe('2026-11-25T12:00:00.000Z');
+  });
+
+  test.each([
+    ['a money word', 'How much will it cost?'],
+    ['a price sign', 'Is it $50 for the extra spot'],
+    ['a refund', 'I want a refund'],
+    ['a link', 'see www.example.com please'],
+    ['a link with a scheme', 'look at https://example.org/x'],
+    ['a run of 3 digits', 'My gate code is 4455'],
+    ['an office-only complaint', 'Nobody came today and your tech was rude'],
+  ])('a message with %s is left out', async (_name, body) => {
+    expect(await customerAskedFacts(VISIT, fakeDbh({ messages: [message(body)] }))).toBeNull();
+  });
+
+  test('a message with two digits and no money word stays; an empty body does not', async () => {
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: [message('Come at 9 if you can, the dog is out by 10'), message('   ')] }));
+    expect(facts.items).toHaveLength(1);
+  });
+
+  test('with the portal messages gate off nothing is read', async () => {
+    process.env[GATE] = 'false';
+    const dbh = fakeDbh({ messages: [message('Please come after noon')] });
+    expect(await customerAskedFacts(VISIT, dbh)).toBeNull();
+    expect(dbh.calls.filter((c) => c[0] === 'messages as m')).toEqual([]);
+  });
+});
+
+describe('customerAskedFacts: portal entries rank by their own date', () => {
+  test('entries are ranked by the date derived from the request, not the row order, before the cap of five', async () => {
+    // Row order (SQL order) puts an older ask first; the revised reschedule note is the newest ask.
+    const stale = (n) => formRow({ subject: `Ask ${n}`, description: `Words ${n}`, created_at: `2026-11-0${n}T10:00:00.000Z` });
+    const rows = [1, 2, 3, 4, 5].map(stale).concat(formRow({
+      subject: 'Reschedule', source: 'customer_portal_reschedule', created_at: '2026-10-01T10:00:00.000Z',
+      description: 'Appointment svc-1: Pest Control on 2026-12-01\nCustomer notes: first\nCustomer updated 2026-11-25:\nCustomer notes: moved to Friday',
+    }));
+    const facts = await customerAskedFacts(SVC, fakeDbh({ rows }));
+    expect(facts.items).toHaveLength(MAX_ITEMS - 3);
+    expect(facts.items[0]).toMatchObject({ text: 'moved to Friday', appointment: true });
+  });
+
+  test('the SQL read order is the creation time (reschedule: its newest update date), never updated_at', () => {
+    const { sql } = _test.portalRowsQuery(knexLib({ client: 'pg' }), SVC, null).toSQL();
+    expect(sql).toContain("regexp_matches(COALESCE(description, ''), 'Customer updated (\\d{4}-\\d{2}-\\d{2}):', 'g')");
+    expect(sql).not.toContain('updated_at');
+  });
+});
+
 describe('customerAskedFacts: account-wide re-service messages', () => {
   test('the account-wide flag is kept, on the texts that carry it only', async () => {
     mockGather.mockResolvedValue(asks([
@@ -361,7 +447,7 @@ describe('customerAskedFacts: failures and caps', () => {
   });
 
   test('one failed source leaves the others', async () => {
-    const facts = await customerAskedFacts({ ...SVC, notes: 'Self-booked. Notes: Beware of the dog' }, fakeDbh({ fail: true }));
+    const facts = await customerAskedFacts({ ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Beware of the dog' }, fakeDbh({ fail: true }));
     expect(facts.items.map((i) => i.kind)).toEqual(['booking_note']);
   });
 

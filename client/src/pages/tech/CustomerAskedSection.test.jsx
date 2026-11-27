@@ -15,6 +15,7 @@ const ITEMS = [
   { kind: 'reservice_reason', at: '2026-11-20T15:00:00.000Z', text: 'Ants in the kitchen.', pests: ['Ants', 'Spiders'], source: 'picker' },
   { kind: 'reservice_words', at: '2026-11-22T14:00:00.000Z', text: 'They are worse today.', source: 'text' },
   { kind: 'booking_note', at: '2026-11-20T15:00:00.000Z', text: 'Please text before you arrive' },
+  { kind: 'portal_message', at: '2026-11-21T15:00:00.000Z', text: 'Dog is in the yard', source: 'portal', accountWide: true },
 ];
 
 const bits = (...customerAsked) => customerAsked.map((c) => ({ facts: c === undefined ? null : { customer_asked: c } }));
@@ -27,6 +28,8 @@ describe('CustomerAskedSection', () => {
     expect(screen.getByText('Return visit reason · Nov 20 · Ants, Spiders')).toBeInTheDocument();
     expect(screen.getByText("Customer's words · Nov 22")).toBeInTheDocument();
     expect(screen.getByText('Booking note · Nov 20')).toBeInTheDocument();
+    expect(screen.getByText('Portal message · Nov 21 · may be about another home')).toBeInTheDocument();
+    expect(screen.getByText('Dog is in the yard')).toBeInTheDocument();
     expect(screen.getByText('Ants in the kitchen.')).toBeInTheDocument();
     expect(screen.getByText('Please text before you arrive')).toBeInTheDocument();
   });

@@ -9,6 +9,9 @@
  *                                       2026-11-04).
  *   booking_note                        the note a customer typed when self-booking: the original booking's
  *                                       customer_notes, else the visit's notes line.
+ *   portal_message                      what the customer typed on the portal Messages screen in the 7 days before the
+ *                                       visit: their own messages only, never an office or AI reply, never one with a
+ *                                       money word, a link or a run of 3+ digits.
  *   portal_request                      the customer's open portal requests for THIS property (or this appointment,
  *                                       for a reschedule request): the service and their own words, never a price,
  *                                       a pricing snapshot or an office-written description.
@@ -21,7 +24,7 @@
  */
 
 const logger = require('./logger');
-const { parseETDateTime } = require('../utils/datetime-et');
+const { parseETDateTime, etCalendarDayOf, addETDays, etDateString } = require('../utils/datetime-et');
 
 const MAX_ITEMS = 8;
 const MAX_TEXT_CHARS = 280;
@@ -39,10 +42,12 @@ const RESCHEDULE_SOURCE = 'customer_portal_reschedule';
 const PORTAL_FORM_SQL = "(metadata->>'writer' = 'portal_form' OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL)";
 // The reschedule route (routes/schedule.js) writes the description as "Appointment <id>: <type> on <date>", then the
 // preferred date and "Customer notes: <text>" lines; each later update appends a "Customer updated <ET date>:" block.
+const ASKED_AT_SQL = "CASE WHEN source = 'customer_portal_reschedule' THEN GREATEST(created_at, COALESCE((SELECT max(m[1])::date FROM regexp_matches(COALESCE(description, ''), 'Customer updated (\\d{4}-\\d{2}-\\d{2}):', 'g') AS m), created_at::date)::timestamptz) ELSE created_at END";
 const RESCHEDULE_UPDATE_SPLIT_RE = /\n(?=Customer updated \d{4}-\d{2}-\d{2}:)/;
 const RESCHEDULE_UPDATE_DATE_RE = /^Customer updated (\d{4}-\d{2}-\d{2}):/;
 const RESCHEDULE_NOTE_RE = /Customer notes: ([\s\S]*)$/;
 
+const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
 const compact = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
 
 function clip(text, max = MAX_TEXT_CHARS) {
@@ -100,7 +105,10 @@ async function typedBookingNote(svc, dbh) {
   return row?.customer_notes || null;
 }
 
+// Only on the visit the customer booked (linked to the self-booking): the recurring seeder copies the parent's notes
+// onto every follow-up it seeds, and the customer typed that note once.
 async function bookingNoteItems(svc, dbh) {
+  if (!svc.self_booking_id) return [];
   const typed = await typedBookingNote(svc, dbh).catch((err) => {
     logger.warn(`[visit-customer-asked] booking row unreadable: ${err?.code || err?.name || 'Error'}`);
     return null;
@@ -223,8 +231,9 @@ function portalRowsQuery(dbh, svc, propertyIds) {
           .whereRaw('left(COALESCE(description, \'\'), ?) = ?', [appointmentHeader(svc).length, appointmentHeader(svc)]);
       });
     })
-    // Newest by last change: a revised reschedule note appends to an old row and bumps updated_at.
-    .orderByRaw('GREATEST(created_at, COALESCE(updated_at, created_at)) DESC')
+    // Newest by when the customer asked, never by last change: an office edit bumps updated_at and must not displace
+    // a newer ask. A reschedule request counts from its newest "Customer updated <date>:" block.
+    .orderByRaw(ASKED_AT_SQL + ' DESC')
     .limit(PORTAL_READ_LIMIT)
     .select('subject', 'description', 'source', 'created_at', 'metadata');
 }
@@ -246,8 +255,8 @@ function rescheduleNote(description, createdAt) {
 // Open requests the customer made in the portal or the app. A portal form row is their own subject and note; a card
 // or chat row (CTA sources) carries a server-written description, so only its subject (the service) shows; a
 // reschedule request for this appointment shows only the note the customer typed, dated by the update that supplied it.
-async function portalItems(svc, dbh) {
-  const single = await singlePremises(svc, dbh);
+async function portalItems(svc, dbh, singleSoon) {
+  const single = await singleSoon;
   const scope = await visitScope(svc, dbh);
   const rows = await portalRowsQuery(dbh, svc, single ? null : await visitPropertyIds(svc, dbh, scope));
   // An unstamped visit resolves its premises only when a row has an address to check against.
@@ -266,10 +275,9 @@ async function portalItems(svc, dbh) {
       return entry('portal_request', row.created_at, note ? `${subject}: ${note}` : subject, { source: 'portal' });
     })
     .filter(Boolean)
+    .sort(newestFirst)
     .slice(0, PORTAL_ROW_LIMIT);
 }
-
-const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
 
 // At most MAX_ITEMS: the return reason (why the visit exists) always has its slot, the newest others fill the rest,
 // then everything is ordered newest first for display.
@@ -279,15 +287,56 @@ function pickItems(items) {
   return [...(reason ? [reason] : []), ...others.slice(0, MAX_ITEMS - (reason ? 1 : 0))].sort(newestFirst);
 }
 
+// The customer's own words on the portal Messages screen (channel 'portal', inbound, authored by the customer): the
+// 7 ET days up to the visit's day, never past now. An office or AI reply, an internal note and the SMS channel are
+// never read. A message about money, a link or a number run is left out, as is an office-only message (a refund, a
+// complaint). The portal names no home: on an account that may have several, it may be about another one.
+const PORTAL_MESSAGE_WINDOW_DAYS = 7;
+const MONEY_WORD_RE = /[$€£]|\b(?:price|prices|pricing|priced|cost|costs|costing|charge|charged|charges|refund\w*|invoice\w*|bill|billed|billing|pay|paid|payment\w*|dollars?|bucks?|fees?|quote\w*|estimate\w*|discount\w*|total|balance|deposit|owe|owed|credit|card)\b/i;
+const LINK_RE = /https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|net|org|co|io|app|link|us|info|biz|me)\b/i;
+const NUMBER_RUN_RE = /\d{3,}/;
+
+function messageWindow(svc, now = new Date()) {
+  const day = etCalendarDayOf(svc.scheduled_date) || etDateString(now);
+  const noon = parseETDateTime(`${day}T12:00`);
+  const since = parseETDateTime(`${etDateString(addETDays(noon, -PORTAL_MESSAGE_WINDOW_DAYS))}T00:00`);
+  const dayEnd = parseETDateTime(`${etDateString(addETDays(noon, 1))}T00:00`);
+  return { since, until: dayEnd < now ? dayEnd : now };
+}
+
+const safeMessage = (text) => !MONEY_WORD_RE.test(text) && !LINK_RE.test(text) && !NUMBER_RUN_RE.test(text)
+  && !require('./reservice-office-only').officeOnlyReason(text);
+
+async function portalMessageItems(svc, dbh, singleSoon) {
+  if (!require('../config/feature-gates').portalMessagesLive()) return [];
+  const { since, until } = messageWindow(svc);
+  const rows = await dbh('messages as m')
+    .join('conversations as c', 'c.id', 'm.conversation_id')
+    .where({ 'c.customer_id': svc.customer_id, 'c.channel': 'portal', 'm.channel': 'portal', 'm.direction': 'inbound', 'm.author_type': 'customer', 'm.message_type': 'portal_message' })
+    .where('m.created_at', '>=', since)
+    .where('m.created_at', '<=', until)
+    .orderBy('m.created_at', 'desc')
+    .limit(PORTAL_READ_LIMIT)
+    .select('m.body', 'm.created_at');
+  const accountWide = !(await singleSoon);
+  return (rows || [])
+    .filter((row) => compact(row.body) && safeMessage(compact(row.body)))
+    .slice(0, PORTAL_ROW_LIMIT)
+    .map((row) => entry('portal_message', row.created_at, row.body, { source: 'portal', ...(accountWide ? { accountWide: true } : {}) }));
+}
+
 /**
  * @param {object} svc the visit's scheduled_services row
  * @returns {Promise<{ items: object[] } | null>} Newest first, one entry per wording, at most 8; null when nothing.
  */
 async function customerAskedFacts(svc, dbh) {
+  // The premises proof is read once for both portal sources; it never rejects (a failed read is "not single").
+  const single = singlePremises(svc, dbh);
   const lists = await Promise.all([
     safely('re-service asks', () => reserviceItems(svc, dbh)),
     safely('booking note', () => bookingNoteItems(svc, dbh)),
-    safely('portal requests', () => portalItems(svc, dbh)),
+    safely('portal requests', () => portalItems(svc, dbh, single)),
+    safely('portal messages', () => portalMessageItems(svc, dbh, single)),
   ]);
   const seen = new Set();
   const items = lists.flat().filter(Boolean).filter((item) => {
@@ -300,4 +349,4 @@ async function customerAskedFacts(svc, dbh) {
   return picked.length ? { items: picked } : null;
 }
 
-module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };
+module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { portalMessageItems, safeMessage, messageWindow, portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };

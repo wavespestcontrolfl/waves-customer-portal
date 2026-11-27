@@ -45,8 +45,9 @@ const OFFICE_LEAD = 'As reported to our office:';
 // What the booking flow appends to a notes line after the customer's words.
 const NOTE_APPENDIX_RE = /\s+—\s+(?=Unit: |booked beside |self-booked plan |first visit reserved |auto-seeded |series activation never completed)/;
 // What other writers append to the visit's notes after the customer's words: routes/schedule.js's " | RESCHEDULE
-// REQUEST: ..." and time-tracking's " [auto-closed ...]" suffix.
-const NOTE_RECORD_BOUNDARY_RE = /\s+\|\s+RESCHEDULE REQUEST:|\s+\[auto-closed/;
+// REQUEST: ...", time-tracking's " [auto-closed ...]" suffix, and the office's own entries on a new line: schedule-tools'
+// "Moved from <date>: <reason>" and tools.js' "Rescheduled: <reason>".
+const NOTE_RECORD_BOUNDARY_RE = /\s+\|\s+RESCHEDULE REQUEST:|\s+\[auto-closed|\n\s*(?:Moved from |Rescheduled: )/;
 // The note reservice-public.js writes when the customer gave no details: not their words.
 const GENERATED_BOOKING_NOTE_RE = /^Re-service requested via self-serve link\.?$/i;
 const LEGACY_NOTE_RE = /^Re-service request(?: \([^)]*\))?: (.+)$/;

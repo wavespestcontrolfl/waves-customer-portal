@@ -643,3 +643,19 @@ describe('selfBookedNoteText: the generated self-serve note', () => {
     expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link, gate code is open')).toBe('Re-service requested via self-serve link, gate code is open');
   });
 });
+
+describe('selfBookedNoteText: stops at the office entries', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  const real = 'Self-booked. Notes: Side gate sticks.\nPlease text first.';
+  test('"Moved from <date>: <reason>" ends the note, beside a real multiline note', () => {
+    expect(selfBookedNoteText(`${real}\nMoved from 2026-11-20: customer asked for Friday`)).toBe('Side gate sticks. Please text first.');
+    expect(selfBookedNoteText(`${real} — Unit: 5\nMoved from 2026-11-20: customer asked for Friday`)).toBe('Side gate sticks. Please text first.');
+  });
+  test('"Rescheduled: <reason>" ends the note, beside a real multiline note', () => {
+    expect(selfBookedNoteText(`${real}\nRescheduled: tech out sick`)).toBe('Side gate sticks. Please text first.');
+    expect(selfBookedNoteText('Self-booked via portal\nRescheduled: tech out sick')).toBeNull();
+  });
+  test('both entries together, and a later reschedule request', () => {
+    expect(selfBookedNoteText(`${real}\nMoved from 2026-11-20: a\nRescheduled: b | RESCHEDULE REQUEST: c`)).toBe('Side gate sticks. Please text first.');
+  });
+});
