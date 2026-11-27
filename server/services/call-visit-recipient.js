@@ -196,9 +196,10 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
       if (sameCustomer && existing.source === REMINDER_SOURCE && !(await listedBy(visit.customer_id, entry.phoneKey, trx))) {
         // A copy a merge moved here grants nothing (this customer does not list the number). This call's grant takes the row over
-        // IN PLACE: its delivery claims stay (nothing is sent twice) and its tracker token is cleared (a new one is minted).
+        // IN PLACE: same visit, same number, now authorized by this customer's own call, so its delivery claims and its tracker
+        // link stay (nothing is sent twice, and a link already sent keeps working).
         await trx(TABLE).where({ id: existing.id }).update({
-          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, track_token: null,
+          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId,
           first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,
         });
       } else if (sameCustomer) {
