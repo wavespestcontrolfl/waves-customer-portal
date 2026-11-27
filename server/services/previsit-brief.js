@@ -121,17 +121,35 @@ function visitFactsGateEnabled() {
 // "ALL REC"): a past visit is a completed service_record dated STRICTLY BEFORE the
 // viewed visit's scheduled_date (ET calendar day), so nothing from the viewed day,
 // this stop's own members included, is ever listed. Each entry: date, service name,
-// the technician's note (the day payload's own previewText cut, same as
-// lastLineServiceNotes), product NAMES only (no rates, no money) and a free
+// the visit's note as the customer's own report shows it (customerSafeVisitNotes,
+// the reviewed parse this file already uses for history; never the raw technician
+// note), the product NAMES recorded that day (no rates, no money) and a free
 // re-service mark. Fail-soft: an unreadable scheduled_date or a read failure returns
 // null so the key is omitted and the client keeps its single-visit section; a
 // product read failure only empties the names.
 const PAST_VISITS_LIMIT = 5;
-// An old note as a technician may read it: access codes masked (history spans the whole account, so a
-// code may belong to another home) and money amounts removed (no prices on technician screens).
-const NOTE_MONEY_RE = /\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|bucks|usd)\b/gi;
-function pastVisitNoteText(notes) {
-  return redactAccessCodes(String(notes || '')).replace(NOTE_MONEY_RE, '[amount]');
+// An old visit's note for the technician: the customer-safe report copy (it fails closed, scrubs the
+// inspection-fee cues and masks access codes), put on one line and masked again (a code split across
+// lines), with money amounts removed. History spans the whole account, so the raw note is never shown.
+const NOTE_MONEY_RE = /(?:\$|\busd\s?)\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|bucks|usd)\b/gi;
+function pastVisitNoteText(record) {
+  const safe = customerSafeVisitNotes(record, { projectLine: true });
+  if (!safe) return null;
+  return redactAccessCodes(String(safe).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]');
+}
+// The product names recorded on that visit, as written that day (the catalog name only when none was
+// recorded), each once.
+function pastVisitProductNames(productRows) {
+  const seen = new Set();
+  const names = [];
+  for (const row of productRows) {
+    const name = cleanText(row.product_name || row.catalog_name, 120);
+    const key = (name || '').toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    names.push({ name });
+  }
+  return names;
 }
 
 // The record's own frozen key (service_data.completedServiceKey, stamped when the visit closed; present
@@ -168,8 +186,8 @@ async function loadPastVisits(dbh, svc) {
       .orderBy('sr.created_at', 'desc')
       .orderBy('sr.id', 'desc')
       .limit(PAST_VISITS_LIMIT)
-      .select('sr.id', 'sr.service_type', 'sr.service_date', 'sr.technician_notes', 'sr.is_callback', 'sr.service_data',
-        'catalog.service_key', 'ss.service_key_snapshot');
+      // sr.*: customerSafeVisitNotes reads the record's own report columns.
+      .select('sr.*', 'catalog.service_key', 'ss.service_key_snapshot');
     let productRows = [];
     try {
       productRows = await loadProductHistory(dbh, rows.map((r) => r.id));
@@ -181,10 +199,8 @@ async function loadPastVisits(dbh, svc) {
       // The label recorded for that visit, only its duration/price suffixes stripped: never re-labelled.
       type: cleanText(briefServiceIdentity(r.service_type), 120),
       // History spans the whole account: a code written in a note for another home is masked.
-      notes: previewText(pastVisitNoteText(r.technician_notes)),
-      // Every distinct product name of that visit: no cap here (the cap of 8 is for the brief's guidance).
-      products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)), Infinity)
-        .map((p) => ({ name: p.name })),
+      notes: previewText(pastVisitNoteText(r)),
+      products: pastVisitProductNames(productRows.filter((p) => String(p.service_record_id) === String(r.id))),
       callback: isReserviceVisit({ is_callback: r.is_callback === true, service_key: pastVisitServiceKey(r) }),
     }));
   } catch (err) {
@@ -356,7 +372,7 @@ function shapeHistoryProduct(row) {
 
 // Newest-first product dedupe (by name, cap 8) shared by the primary
 // history-guidance path and combined-visit companion blocks.
-function dedupeHistoryProducts(productRows, max = 8) {
+function dedupeHistoryProducts(productRows) {
   const seen = new Set();
   const products = [];
   for (const row of productRows) {
@@ -365,7 +381,7 @@ function dedupeHistoryProducts(productRows, max = 8) {
     if (!key || seen.has(key)) continue;
     seen.add(key);
     products.push(shaped);
-    if (products.length >= max) break;
+    if (products.length >= 8) break;
   }
   return products;
 }

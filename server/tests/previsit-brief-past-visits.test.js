@@ -11,6 +11,14 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
+// The reviewed customer-safe parse is its own module with its own suites. Here it stands in as "the report
+// copy of this record" (the stub's technician_notes), so these tests cover what past_visits adds on top:
+// the one-line fold, the second access-code mask and the money scrub. A record marked `unsafe` has no copy.
+const mockSafeNotes = jest.fn((record) => (record.unsafe ? null : record.technician_notes || null));
+jest.mock('../services/context-aggregator', () => ({
+  ...jest.requireActual('../services/context-aggregator'),
+  customerSafeVisitNotes: (...args) => mockSafeNotes(...args),
+}));
 
 const { deterministicVisitFacts } = require('../services/previsit-brief');
 
@@ -131,6 +139,37 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(visits[0].notes).toContain('Fed both palms.');
     expect(visits[0].notes).not.toMatch(/1,250|\$/);
     expect(visits[0].type).toMatch(/^Palm Fertilization/);
+  });
+
+  test('notes come from the customer-safe report copy, never the raw note; a code split across lines is masked', async () => {
+    const rows = [
+      rec('nl', '2026-11-13', 'Pest Control Service', { technician_notes: 'Treated the garage.\nGate:\n4521' }),
+      rec('raw', '2026-11-12', 'Pest Control Service', { technician_notes: 'Office only: customer disputes the bill.', unsafe: true }),
+      ...ROWS,
+    ];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(mockSafeNotes).toHaveBeenCalledWith(expect.objectContaining({ id: 'nl' }), { projectLine: true });
+    expect(visits[0].notes).toContain('Treated the garage.');
+    expect(visits[0].notes).not.toContain('4521');
+    expect(visits[1].notes).toBeNull();
+  });
+
+  test('a fee-labelled amount with a currency prefix is removed', async () => {
+    const rows = [rec('fee', '2026-11-13', 'Pest Control Service', { technician_notes: 'Inspection fee: USD 250. Checked the attic.' }), ...ROWS];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(visits[0].notes).toContain('Checked the attic.');
+    expect(visits[0].notes).not.toContain('250');
+  });
+
+  test('the product name recorded that day wins over the catalog name', async () => {
+    const rows = [rec('r1', '2026-11-10', 'Lawn Care Treatment')];
+    const dbh = fakeDbh({ rows });
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, (table) => {
+      const q = dbh(table);
+      if (table === 'service_products as sp') q.select = async () => [{ service_record_id: 'r1', product_name: 'Example Herbicide', catalog_name: 'Renamed Herbicide' }];
+      return q;
+    });
+    expect(visits[0].products).toEqual([{ name: 'Example Herbicide' }]);
   });
 
   test('an older stop never lists a later visit', async () => {
