@@ -689,8 +689,8 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       // The label-rate row states no rate: the recipe line's 0.147 oz, never the catalog's 0.29 oz.
       ratePer1000: 0.147, rateSource: 'recipe_line_rate',
       backpack4Gal: { amount: 0.147, amountUnit: 'oz', metricAmount: 4.2, metricUnit: 'g', carrierGalPer1000: 4, carrierSource: 'line' },
-      // The FlowZone was tested at 1.33, not the line's 4 gal: the card warns; the spot row needs no big-tank check.
-      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3, otherSprayerName: null }],
+      // The FlowZone puts out 1.33, not the line's 4 gal: the card says how to put the dose on; the spot row needs no big-tank check.
+      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, sprayerGalPer1000: 1.33 }],
     });
     expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
       ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
@@ -703,6 +703,38 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       code: 'backpack_calibration_overdue_or_estimated',
       message: 'Sprayer not field tested: FlowZone Typhoon Backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
     }));
+  });
+
+  test('no sprayer picked and the big tanks differ (owner 2026-11-27: 2.0 and 4.0): a named amount per tank and each tank\'s line', async () => {
+    const tanks = [
+      { id: 'cal-1', equipment_system_id: 'tank1', system_name: '110-Gallon Spray Tank #1', system_type: 'tank', carrier_gal_per_1000: 2, tank_capacity_gal: 110, calibration_status: 'field_verified', expires_at: null, verification_notes: 'Tank counts.' },
+      { id: 'cal-2', equipment_system_id: 'tank2', system_name: 'Udor tank #2', system_type: 'tank', carrier_gal_per_1000: 4, tank_capacity_gal: 110, calibration_status: 'owner_estimate', expires_at: null },
+    ];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'equipment_calibrations as ec' ? readQuery(tanks) : base(table)));
+    const body = await lawnMix({ month: '5' });
+    const { tankOptions } = itemFor(body, TETRINO).tankAmounts;
+    expect(tankOptions.map((option) => [option.sprayerName, option.fullTank.amount])).toEqual([['110-Gallon Spray Tank #1', 20.185], ['Udor tank #2', 10.092]]);
+    expect(body.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'sprayer_number', message: '110-Gallon Spray Tank #1: 2 gal per 1,000 sq ft, from tank counts.' }),
+      expect.objectContaining({ code: 'other_tank_sprayer_number', message: 'Udor tank #2: 4 gal per 1,000 sq ft, owner estimate.' }),
+    ]));
+    // A picked sprayer: its own amount only.
+    const picked = await lawnMix({ month: '5', equipmentSystemId: 'tank1' });
+    expect(itemFor(picked, TETRINO).tankAmounts.tankOptions).toBeUndefined();
+    expect(picked.warnings.map((warning) => warning.code)).not.toContain('other_tank_sprayer_number');
+  });
+
+  test('the FlowZone on the owner\'s standing number (no expiry, owner 2026-11-27) gets a neutral note, not a test prompt', async () => {
+    Object.assign(BACKPACK, { carrier_gal_per_1000: 2, calibration_status: 'owner_estimate', expires_at: null });
+    try {
+      const body = await lawnMix({ month: '5' });
+      expect(body.warnings).toContainEqual({ code: 'backpack_sprayer_number', severity: 'note', equipmentSystemId: 'backpack', message: 'FlowZone Typhoon Backpack: 2 gal per 1,000 sq ft, owner estimate.' });
+      expect(body.warnings.filter((warning) => /FlowZone/.test(warning.message)).map((warning) => warning.code)).toEqual(['backpack_sprayer_number']);
+      expect(itemFor(body, 'Celsius WG').tankAmounts.backpack4Gal).toMatchObject({ amount: 0.17, carrierGalPer1000: 2, carrierSource: 'calibration' });
+    } finally {
+      Object.assign(BACKPACK, { carrier_gal_per_1000: 1.33, calibration_status: 'estimated', expires_at: '2099-01-01T00:00:00Z' });
+    }
   });
 
   test('a granular bag is a spreader line: its rate, no tank amount', async () => {

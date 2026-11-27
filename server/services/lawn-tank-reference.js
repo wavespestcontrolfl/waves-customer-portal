@@ -18,6 +18,7 @@ const { calculateProductAmount, v13RateOptions } = require('./waveguard-plan-eng
 const { etDateString } = require('../utils/datetime-et');
 const roundsCatchUp = require('./lawn-rounds-catchup');
 const { SURFACTANT_CHECK_NOTE } = require('./lawn-weed-mix');
+const { labelUseRate, labelRateHoldText, perGallonRate } = require('../utils/protocol-label-rate');
 
 const BIG_TANK_GAL = 100;
 const BACKPACK_GAL = 4;
@@ -68,21 +69,9 @@ function mixFields(row, percent) {
   return { mixWith, applyAlone: row?.gates?.applyAlone === true, surfactantNote };
 }
 
-// Whole passes that put the label volume down with a sprayer that puts out less: only when that many passes land at or under the
-// label volume and within 5% below it (4 on 2 = 2 passes; 4 on 1.33 = 3 passes, 3.99 gal). Never a count that goes over
-// (4 on 2.09: two passes put down 4.18) or far under (2 on 1.33: one pass puts down 1.33); a sprayer that puts out more gets none.
-const PASS_TOLERANCE = 0.05;
-function passesFor(label, tested) {
-  const passes = Math.floor(label / tested + 1e-9);
-  return passes >= 2 && passes * tested <= label + 1e-9 && passes * tested >= (1 - PASS_TOLERANCE) * label ? passes : null;
-}
-
-// The other sprayer on this sheet whose test puts out the label volume (within 2%, the rounding of a test output), else null.
-const SAME_VOLUME = 0.02;
-const sprayerAt = (label, sprayers, except) => sprayers.find((other) => other !== except && Math.abs(rigCarrier(other) - label) <= SAME_VOLUME * label)?.system_name || null;
-
-// Each sprayer whose tested output differs from a volume the program fixes (Arena at 4 gal per 1,000 sq ft on a FlowZone tested
-// at 1.33), with the use it applies to (null = the whole line): the fill stays; the card says how to reach the label volume.
+// Each sprayer number that differs from a volume the program fixes (Arena at 4 gal per 1,000 sq ft on a sprayer at 2), with the use
+// it applies to (null = the whole line): the fill stays (it is sized on the label volume); the card says to mix one 1,000 sq ft dose
+// in the label volume and how to put it on (owner 2026-11-27: no pass counts). One check per use and sprayer, with its name.
 const fixedVolumes = (lineCarrier, useFills) => [
   ...(lineCarrier ? [{ use: null, label: lineCarrier }] : []),
   ...useFills.map((entry) => ({ use: entry.use, label: entry.carrierGalPer1000 })),
@@ -90,10 +79,7 @@ const fixedVolumes = (lineCarrier, useFills) => [
 function volumeChecks(volumes, sprayers) {
   return volumes.flatMap(({ use, label }) => sprayers
     .filter((sprayer) => rigCarrier(sprayer) > 0 && Math.abs(rigCarrier(sprayer) - label) > 1e-9)
-    .map((sprayer) => ({
-      use, sprayerName: sprayer.system_name || null, labelGalPer1000: label, testedGalPer1000: rigCarrier(sprayer),
-      passes: passesFor(label, rigCarrier(sprayer)), otherSprayerName: sprayerAt(label, sprayers, sprayer),
-    })));
+    .map((sprayer) => ({ use, sprayerName: sprayer.system_name || null, labelGalPer1000: label, sprayerGalPer1000: rigCarrier(sprayer) })));
 }
 
 const isTwoAndHalfGallonJug = (product) => /^\s*2\.5\s*-?\s*gal/i.test(String(product?.container_size || ''));
@@ -128,6 +114,37 @@ function fill({ gallons, carrier, carrierSource, rateArgs, percent, sprayer }) {
 }
 
 const rigCarrier = (calibration) => Number(calibration?.carrier_gal_per_1000 || 0);
+
+// A spot product's label rate per gallon of finished spray (owner 2026-11-27: "Spot products mix per gallon from the label"): the
+// line's own declared rate (lineMeta.labelRatePerGallon, for that product's EPA number: protocol-label-rate.js), else the catalog's
+// per-gallon rate when the line, its staged row and the catalog give no rate per 1,000 sq ft (as job-card.js reads it). Else null,
+// and always null for a big-tank line or a percent-of-spray line (already per gallon). A weaker-mix line the shared hold covers
+// (protocol-label-rate.js labelRateHeld) gets no dose at all: { held: <the reason> }, never the catalog's or the area math's.
+function spotRatePerGallon({ lineMeta, product, ratePer1000, bigTank, percent }) {
+  if (bigTank || percent) return null;
+  const held = labelRateHoldText(lineMeta, product);
+  if (held) return { held };
+  const declared = labelUseRate(lineMeta, product);
+  if (declared) return { lo: declared.amount, hi: declared.amount, unit: declared.unit };
+  return Number(ratePer1000) > 0 ? null : perGallonRate(product);
+}
+
+// The FlowZone 4 gal fill and the sprayer number it is sized on: a per-gallon label rate x 4 with no sprayer in it (so no label
+// volume check either), none at all with the hold's reason for a held line, else the area math on the FlowZone's number.
+function flowZoneFill(spot, sized, backpack) {
+  if (spot?.held) return { fill: null, sprayer: null, labelRateHold: spot.held };
+  if (spot) return { fill: perGallonFill(spot), sprayer: null, labelRateHold: null };
+  return { fill: sized(BACKPACK_GAL, backpack), sprayer: backpack, labelRateHold: null };
+}
+
+// The FlowZone 4 gal fill at a per-gallon label rate: the rate x 4, with no sprayer volume in it.
+function perGallonFill(spot) {
+  const amount = Number((spot.lo * BACKPACK_GAL).toFixed(3));
+  const amountMax = spot.hi > spot.lo ? Number((spot.hi * BACKPACK_GAL).toFixed(3)) : null;
+  // A range shows no metric: one metric figure would read as the whole band.
+  const metric = amountMax == null ? metricFor(amount, spot.unit) : {};
+  return { gallons: BACKPACK_GAL, carrierGalPer1000: null, carrierSource: 'label_per_gallon', sprayerName: null, amount, amountMax, amountUnit: spot.unit, ...metric };
+}
 
 // The spray volume a line's amount is stated over, read as the job calculation reads it, so the sheet and the job card agree:
 //   'row'   the staged row's own carrier: the spring catch-up's hose pass (roundsCatchUp.carrierFor, as the plan sizes it), or a spot
@@ -195,14 +212,14 @@ function noTankCard(base, { product, item, rate, percent }) {
  * no 100 gal or full-tank fill), `backpack` the FlowZone's;
  * `v13Line` the plan's own decision for the line (v13LineState: its staged row and state), absent with the gate off.
  */
-function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack }) {
+function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack, lineMeta }) {
   if (!product) return null;
   const { row, state: planState } = v13Line || {};
   const recipe = recipeRateOptions(row, item.raw);
   const rateArgs = { product, ...nutrientTargets, ...recipe.options };
   const rate = calculateProductAmount({ ...rateArgs, lawnSqft: 1000, carrierGalPer1000: 0 });
   const percent = concentrationPercent(row, item.raw);
-  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false, useFills: [], volumeChecks: [] };
+  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false, labelRateHold: null, useFills: [], volumeChecks: [] };
   const base = {
     ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: recipe.lineRate ? 'recipe_line_rate' : rate.rateSource,
     concentrationPercent: percent, planState: planState || null, ...mixFields(row, percent), ...none,
@@ -218,7 +235,9 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     gallons, carrier: lineCarrier || rigCarrier(calibration), carrierSource: lineSource || 'calibration', rateArgs, percent, sprayer: calibration,
   });
   const fullGallons = fullTankGallons(rig);
-  const backpack4Gal = sized(BACKPACK_GAL, backpack);
+  // A spot product (not the big tank) with a per-gallon label rate mixes per gallon on the FlowZone, never on its gal per 1,000.
+  const flowZone = flowZoneFill(spotRatePerGallon({ lineMeta, product, ratePer1000: rate.ratePer1000, bigTank, percent }), sized, backpack);
+  const backpack4Gal = flowZone.fill;
   const useFills = percent ? [] : lineUses(item.raw).map((use) => useFill(use, { product, row, nutrientTargets, tankFills }));
   return {
     ...base,
@@ -229,8 +248,9 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     per100Gal: tankFills ? sized(BIG_TANK_GAL, tankRig) : null,
     fullTank: bigTank && fullGallons > 0 ? sized(fullGallons, tankRig) : null,
     backpack4Gal,
+    labelRateHold: flowZone.labelRateHold,
     useFills,
-    volumeChecks: volumeChecks(fixedVolumes(lineCarrier, useFills), [tankFills && tankRig, backpack].filter(Boolean)),
+    volumeChecks: volumeChecks(fixedVolumes(lineCarrier, useFills), [tankFills && tankRig, flowZone.sprayer].filter(Boolean)),
     // The FlowZone has no sprayer test on file, so its amount cannot be sized (a rate exists, the line fixes no volume).
     backpackMissing: !backpack4Gal && rate.ratePer1000 > 0 && !(lineCarrier || percent || rigCarrier(backpack) > 0),
   };
@@ -239,10 +259,29 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
 // Why a calibration is not a field test: an estimated (or any other non-verified) status, or no status on file at all.
 const notFieldTested = (status) => (status == null ? 'field test not on file' : status !== 'field_verified' ? 'estimated, not field tested' : null);
 
-// The sheet warning for a sprayer whose test is overdue or is not a field test. The amounts stay; this line says what they assume.
-function sprayerTestWarning(calibration, { code, now = new Date() } = {}) {
+// The sprayer numbers the owner set with no expiry (owner 2026-11-27, "we will use the best guess"): tank #1 from its tank counts
+// (field_verified) and each owner estimate. Their sheet line is a neutral note of the number the amounts use, never a test prompt.
+// Its basis: an owner estimate says so; a field-verified row says "from tank counts" only when its notes record tank counts, else
+// "field test".
+const STANDING_BASIS = {
+  field_verified: (calibration) => (/tank count/i.test(calibration.verification_notes || '') ? 'from tank counts' : 'field test'),
+  owner_estimate: () => 'owner estimate',
+};
+function standingNumberNote(calibration, carrier, code) {
+  const basisOf = calibration.expires_at == null ? STANDING_BASIS[calibration.calibration_status] : null;
+  if (!basisOf) return null;
+  const basis = basisOf(calibration);
+  const name = calibration.system_name || 'The selected sprayer';
+  return { code, severity: 'note', equipmentSystemId: calibration.equipment_system_id || null, message: `${name}: ${Number(carrier)} gal per 1,000 sq ft, ${basis}.` };
+}
+
+// The sheet line for a sprayer: a standing number with no expiry gets its neutral note; a test past its expiry (old data) or one
+// that is not a field test gets a warning. The amounts stay; the line says what they assume.
+function sprayerTestWarning(calibration, { code, noteCode = code, now = new Date() } = {}) {
   const carrier = rigCarrier(calibration);
   if (!calibration || !(carrier > 0)) return null;
+  const standing = standingNumberNote(calibration, carrier, noteCode);
+  if (standing) return standing;
   const overdue = Boolean(calibration.expires_at) && new Date(calibration.expires_at) <= now;
   const untested = notFieldTested(calibration.calibration_status);
   if (!overdue && !untested) return null;
@@ -255,4 +294,21 @@ function sprayerTestWarning(calibration, { code, now = new Date() } = {}) {
   return { code, severity: 'warning', equipmentSystemId: calibration.equipment_system_id || null, message };
 }
 
-module.exports = { tankReference, sprayerTestWarning, lineCarrierGalPer1000, BIG_TANK_GAL, BACKPACK_GAL };
+// A sheet opened with no sprayer picked, while the big tanks on file differ (owner 2026-11-27: tank #1 at 2.0, tank #2 at 4.0): one
+// named 100 gal and full-tank line per tank, and each tank's label volume check, never one tank's number for both. The rest of
+// the reference (the FlowZone fill, the rate) is the one `tankReference` gives for the first tank. Any other sheet: unchanged.
+const tanksDiffer = (tanks) => tanks.length > 1 && new Set(tanks.map((tank) => rigCarrier(tank))).size > 1;
+function tankReferenceAcrossTanks({ tanks = [], ...args }) {
+  const reference = tankReference(args);
+  if (!reference?.bigTank || !tanksDiffer(tanks)) return reference;
+  const perTank = tanks.map((tank) => ({ tank, ref: tankReference({ ...args, rig: tank }) }));
+  const checks = [...reference.volumeChecks, ...perTank.flatMap(({ ref }) => ref.volumeChecks)];
+  return {
+    ...reference,
+    tankOptions: perTank.map(({ tank, ref }) => ({ sprayerName: tank.system_name || null, per100Gal: ref.per100Gal, fullTank: ref.fullTank })),
+    volumeChecks: checks.filter((check, index) => checks.findIndex((other) => other.use === check.use && other.sprayerName === check.sprayerName
+      && other.labelGalPer1000 === check.labelGalPer1000) === index),
+  };
+}
+
+module.exports = { tankReference, tankReferenceAcrossTanks, sprayerTestWarning, lineCarrierGalPer1000, BIG_TANK_GAL, BACKPACK_GAL };

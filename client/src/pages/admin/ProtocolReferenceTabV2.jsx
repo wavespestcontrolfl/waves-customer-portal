@@ -508,6 +508,12 @@ function LabelLinks({ product, className }) {
   );
 }
 
+// A sprayer number's neutral note (severity note: owner 2026-11-27) shows as plain text; every other warning is an alert.
+function splitWarnings(warnings) {
+  const list = warnings || [];
+  return { notes: list.filter((w) => w.severity === "note"), alerts: list.filter((w) => w.severity !== "note") };
+}
+
 export function ProtocolMixCard({
   plan,
   selectedConditionalIds,
@@ -527,6 +533,7 @@ export function ProtocolMixCard({
     ? `${fmtNumber(plan.equipment.tankCapacityGal, " gal")} tank`
     : "Full tank";
   const items = plan.items || [];
+  const warnings = splitWarnings(plan.warnings);
   // Without calibrated equipment every rate cell is "—"; the columns (and
   // the phone card's rate strip) are dropped in favour of one explanation.
   const hasAnyMix = items.some(
@@ -680,10 +687,15 @@ export function ProtocolMixCard({
           ))}
         </div>
       )}
-      {plan.warnings?.length > 0 && (
+      {warnings.notes.length > 0 && (
+        <div className="text-14 text-ink-secondary leading-normal">
+          {warnings.notes.map((w, index) => <div key={`${w.code}-${index}`}>{w.message}</div>)}
+        </div>
+      )}
+      {warnings.alerts.length > 0 && (
         <div className="rounded-md border border-hairline border-alert-fg/30 bg-alert-bg px-3 py-2">
-          {plan.warnings.map((w) => (
-            <div key={w.code} className="text-12 text-alert-fg leading-normal">
+          {warnings.alerts.map((w, index) => (
+            <div key={`${w.code}-${index}`} className="text-12 text-alert-fg leading-normal">
               {" "}
               <span className="font-medium">{w.code.replace(/_/g, " ")}:</span>
               {w.message}

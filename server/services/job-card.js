@@ -56,7 +56,7 @@ const { getAreaRainfall } = require('./lawn-water-area');
 const { latestComparableGroupApplication, evaluateWaveGuardManagerApprovals } = require('./waveguard-approval-engine');
 const { fertilizerSafetyRules } = require('./lawn-fertilizer-safety');
 const { resolveProductIn, noProductSentence, governedRateFor, addOnKeyOfVisit } = require('./area-addon-governed-rate');
-const { labelUseRate, labelRateCarrier, labelRateHoldText } = require('../utils/protocol-label-rate');
+const { labelUseRate, labelRateCarrier, labelRateHoldText, perGallonRate } = require('../utils/protocol-label-rate');
 const spreaderSettings = require('./spreader-settings');
 
 // Office fallback when a property has no coordinates — the same point the
@@ -2710,15 +2710,6 @@ function narrowBand(label, line) {
   return lo <= hi ? { lo, hi, unit: label.unit } : null;
 }
 
-function perGallonRate(product) {
-  const m = String(product.default_unit || '').trim().toLowerCase().match(/^([a-z_]+)\/gal$/);
-  const r = String(product.default_rate || '').trim().match(/^(\d+(?:\.\d+)?)(?:\s*-\s*(\d+(?:\.\d+)?))?$/);
-  if (!m || !r) return null;
-  const lo = Number(r[1]);
-  const hi = r[2] != null ? Number(r[2]) : lo;
-  if (!(lo > 0)) return null;
-  return { lo, hi: hi > lo ? hi : lo, unit: m[1] };
-}
 
 // `carrierGalPer1000`: the spray volume a card's label rate is stated over, when it has one. The answer then names it
 // (sprayVolumeGalPer1000) and the area the tank covers at that volume, so the amount is tied to a treated area. (A named rig at

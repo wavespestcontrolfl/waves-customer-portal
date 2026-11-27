@@ -63,7 +63,7 @@ const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/
 const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../services/protocol-reader');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
-const { tankReference, sprayerTestWarning } = require('../services/lawn-tank-reference');
+const { tankReferenceAcrossTanks, sprayerTestWarning } = require('../services/lawn-tank-reference');
 const { spreaderForLine } = require('../services/spreader-settings');
 
 // Only a spreader card (not a hand-shaker bait, a sprayed product or a SKIP line) gets a spreader number.
@@ -768,6 +768,27 @@ async function getActiveCalibration(equipmentSystemId) {
   return query.first().catch(() => null);
 }
 
+// The sprayer line of each other big tank the sheet names an amount for (tankOptions: no sprayer picked, the tanks differ).
+function otherTankLines(calibration, bigTanks, items) {
+  if (!items.some((item) => item.tankAmounts?.tankOptions)) return [];
+  return bigTanks.filter((tank) => tank.equipment_system_id !== calibration?.equipment_system_id)
+    .map((tank) => sprayerTestWarning(tank, { code: 'other_tank_calibration_overdue_or_estimated', noteCode: 'other_tank_sprayer_number' }))
+    .filter(Boolean);
+}
+
+// Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them); [] when none can be read.
+async function getActiveBigTanks() {
+  return db('equipment_calibrations as ec')
+    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+    .where({ 'ec.active': true, 'es.active': true, 'es.system_type': 'tank' })
+    .where('es.tank_capacity_gal', BIG_TANK_CAPACITY_GAL)
+    .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
+    .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 else 1 end")
+    .orderBy('es.name', 'asc')
+    .catch(() => []);
+}
+const BIG_TANK_CAPACITY_GAL = 110;
+
 // The 4 gal FlowZone backpack's active calibration, for the tank sheet's "FlowZone 4 gal" amounts (lawn-tank-reference.js): the
 // sprayer is found by what it is (an active backpack system, 4 gal, named FlowZone), never by name order. With more than one, a field
 // verified test first, then the newest test. A FlowZone picked as the rig (`selected`) sizes its own fill. null when none is on file.
@@ -1046,7 +1067,7 @@ function lawnMixRig(calibration) {
 // The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
 // selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
 // the restriction on every gated row), then the cadence and limit warnings.
-function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
+function lawnMixWarnings({ calibration, backpack, bigTanks = [], items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
   const warnings = [];
   if (!calibration) {
     warnings.push({
@@ -1054,12 +1075,14 @@ function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipa
       message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.',
     });
   }
-  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide).
-  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated' });
+  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide). A standing
+  // number with no expiry (owner 2026-11-27) gets a neutral note instead.
+  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated', noteCode: 'sprayer_number' });
   if (rigWarning) warnings.push(rigWarning);
+  warnings.push(...otherTankLines(calibration, bigTanks, items));
   const usesBackpackTest = items.some((item) => item.tankAmounts?.backpack4Gal?.carrierSource === 'calibration');
   const backpackWarning = usesBackpackTest && backpack?.equipment_system_id !== calibration?.equipment_system_id
-    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated' }) : null;
+    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated', noteCode: 'backpack_sprayer_number' }) : null;
   if (backpackWarning) warnings.push(backpackWarning);
   const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
   if (unmatchedPricedLines.length) {
@@ -1215,10 +1238,14 @@ router.get('/lawn-mix', async (req, res, next) => {
     };
     const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }), scout });
     const { visit, targets: nutrientTargets, chinchRate, productSwap } = nitrogen;
+    // A line's own declared label rate per gallon (its spot fill on the FlowZone: lawn-tank-reference.js).
+    const lineMeta = visit.lineMeta || {};
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
     const backpack = await getBackpackCalibration(calibration);
+    // No sprayer picked: every active 110 gal tank, so the sheet names each tank's amount when their numbers differ.
+    const bigTanks = req.query.equipmentSystemId ? [] : await getActiveBigTanks();
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
@@ -1327,7 +1354,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       };
       const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
       const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
-      const tankAmounts = tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack });
+      const tankAmounts = tankReferenceAcrossTanks({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack, lineMeta: lineMeta[line.raw], tanks: bigTanks });
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
@@ -1363,7 +1390,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
+    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, backpack, bigTanks, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
 
     res.json(lawnMixResponse({
       seesPricing: viewerSeesPricing(req),
