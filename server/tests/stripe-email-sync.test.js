@@ -222,7 +222,7 @@ describe('stripe-email-sync processJob', () => {
     expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', expect.any(Object));
   });
 
-  test('a job a confirm re-armed since the failed try keeps its schedule (push-back matches the seen version only)', async () => {
+  test('a job changed since the failed try keeps its schedule (push-back matches the seen version only)', async () => {
     const sync = load({ customers: [cust()] });
     state.throwOn = 'customer_merge_journal';
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
@@ -323,18 +323,11 @@ describe('stripe-email-sync enqueue', () => {
     return require('../services/stripe-email-sync');
   };
 
-  test('a pending job is re-armed with a fresh retry budget and the new source, not duplicated', async () => {
+  test('every confirm inserts its own job on the caller handle (even with one pending)', async () => {
     const { enqueue } = load();
     const { trx, calls } = handle(true);
-    await enqueue(trx, 'c1', ' new@example.test ', 'app_email_change');
-    expect(calls).toEqual([['update', 'stripe_email_sync_jobs', { customer_id: 'c1', status: 'pending' },
-      expect.objectContaining({ email: 'new@example.test', attempts: 0, not_linked_checks: 0, last_error: null, source: 'app_email_change', next_attempt_at: 'NOW' })]]);
-  });
-
-  test('no pending job: inserts one on the caller handle', async () => {
-    const { enqueue } = load();
-    const { trx, calls } = handle(false);
     await enqueue(trx, 'c1', 'new@example.test', 'app_email_change');
-    expect(calls[1]).toEqual(['insert', 'stripe_email_sync_jobs', { customer_id: 'c1', email: 'new@example.test', source: 'app_email_change' }]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(['insert', 'stripe_email_sync_jobs', { customer_id: 'c1', email: 'new@example.test', source: 'app_email_change' }]);
   });
 });

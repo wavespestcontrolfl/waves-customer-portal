@@ -28,14 +28,11 @@ const MAX_ATTEMPTS = 6; // Stripe errors after the profile is linked (not-linked
 const STRIPE_TIMEOUT_MS = 10000;
 const { isMergeRetiredRow } = require('./merge-retired');
 
-// Queue a job on the caller's transaction handle for the address the customer just confirmed. A pending job for this
-// customer is re-armed instead, with the new address and a fresh retry budget. The caller holds the customer row lock
-// (it just wrote the row), so two callers cannot both insert.
+// Queue a job on the caller's transaction handle for the address the customer just confirmed. Every confirm gets its
+// own job (a merge or its undo can move jobs between records by id): an older job whose address the record no longer
+// holds finishes as superseded, so only the newest confirmed address ever reaches Stripe.
 async function enqueue(trx, customerId, email, source) {
-  const confirmed = String(email || '').trim();
-  const rearmed = await trx(TABLE).where({ customer_id: customerId, status: 'pending' })
-    .update({ email: confirmed, attempts: 0, not_linked_checks: 0, last_error: null, source, next_attempt_at: trx.fn.now(), updated_at: trx.fn.now() });
-  if (!rearmed) await trx(TABLE).insert({ customer_id: customerId, email: confirmed, source });
+  await trx(TABLE).insert({ customer_id: customerId, email: String(email || '').trim(), source });
 }
 
 const NOT_LINKED_RECHECKS = 5;
@@ -234,7 +231,7 @@ async function drainDue({ limit = 20 } = {}) {
         processed += 1;
         counts.error = (counts.error || 0) + 1;
         logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
-        // Only the version this drain saw: a job re-armed or rescheduled since keeps its own schedule.
+        // Only the version this drain saw: a job changed or rescheduled since keeps its own schedule.
         await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
           .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
           .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
