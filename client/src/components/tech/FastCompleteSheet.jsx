@@ -1637,17 +1637,32 @@ const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
 // tech's own note, tidied by one model call and screened by the server ({ ok, text, source: 'cleaned' | 'fixed' }), in
 // place of the writer's report (the completion drops the writer's text on such a visit). The gate off (404), a visit
 // the step does not take (409) or a failed call writes the report the old way, so the note step never holds Complete.
-// A 404 is kept for the sheet, so a gate that is off costs one call.
+// The gate's own 404 ({ enabled: false }) is kept for the sheet, so a gate that is off costs one call. A visit the
+// route no longer gives this tech (403) or no longer finds (404 not_found) writes nothing: the sheet says so.
 const isNoteAnswer = (answer) => answer?.ok === true && ['cleaned', 'fixed'].includes(answer.source)
   && typeof answer.text === 'string' && answer.text.trim() !== '';
-async function readOwnNote({ request, base, note, offRef }) {
-  if (offRef.current) return null;
+const NOTE_VISIT_GONE = {
+  403: 'This visit is no longer yours to complete. Close the sheet and open your schedule again.',
+  404: 'This visit was not found. Close the sheet and open your schedule again.',
+};
+// Only a plain pest visit asks (a lane or typed visit, `mode`, keeps its own record and report).
+// { text, reportNote, noteReason } | { stop: message } | null (write the writer's report).
+async function readOwnNote({ request, base, note, mode, offRef }) {
+  if (mode || offRef.current) return null;
   try {
     const answer = await request(`${base}/pest-recap/report-note`, { method: 'POST', body: JSON.stringify({ note }) });
-    return isNoteAnswer(answer) ? answer : null;
+    if (!isNoteAnswer(answer)) return null;
+    return {
+      text: answer.text.trim(),
+      reportNote: { source: answer.source, text: answer.text },
+      noteReason: typeof answer.reason === 'string' ? answer.reason : null,
+    };
   } catch (err) {
-    if (err?.status === 404) offRef.current = true;
-    return null;
+    if (err?.status === 404 && err.details?.enabled === false) {
+      offRef.current = true;
+      return null;
+    }
+    return NOTE_VISIT_GONE[err?.status] ? { stop: NOTE_VISIT_GONE[err.status] } : null;
   }
 }
 
@@ -1689,16 +1704,12 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     // lane visit's record fills from the read).
     const draftSignature = signature(facts, extra);
     const payload = buildPayload(facts, extra);
-    // Only a plain pest visit takes the note step (a lane or typed visit keeps its own record and report).
-    const noted = mode ? null : await readOwnNote({ request, base, note, offRef: noteOffRef });
+    const noted = await readOwnNote({ request, base, note, mode, offRef: noteOffRef });
     if (sequence !== sequenceRef.current) return;
     if (noted) {
-      const text = noted.text.trim();
       setWriting(false);
-      setDraft({
-        text, base: text, signature: draftSignature, deterministic: false, facts, reportNote: { source: noted.source, text: noted.text },
-        noteReason: typeof noted.reason === 'string' ? noted.reason : null,
-      });
+      if (noted.stop) setWriteError(noted.stop);
+      else setDraft({ ...noted, base: noted.text, signature: draftSignature, deterministic: false, facts });
       return;
     }
     let written = null;
@@ -1718,7 +1729,16 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     setDraft({ text, base: text, signature: draftSignature, deterministic: written.deterministic === true, facts });
   }, [request, base, mode, houseMix]);
   const editText = useCallback((text) => setDraft((prev) => ({ ...prev, text })), []);
-  return { draft, writing, writeError, write, editText };
+  // The server refused a note because the note step went off after the preview (409 REPORT_NOTE_OFF): the note draft
+  // goes, and the next write is the writer's report from the same form.
+  const noteTurnedOff = useCallback(() => {
+    noteOffRef.current = true;
+    sequenceRef.current += 1;
+    setWriting(false);
+    setWriteError('The report note is turned off. Write the report again, then send.');
+    setDraft((prev) => (prev?.reportNote ? null : prev));
+  }, []);
+  return { draft, writing, writeError, write, editText, noteTurnedOff };
 }
 
 // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
@@ -1964,6 +1984,7 @@ function ReportFlowForm({
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
+  useEffect(() => { if (submitCode === 'REPORT_NOTE_OFF') report.noteTurnedOff(); }, [submitCode]);
   // The Wrap-up: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A re-service
   // (not in ctx.wrapUp) keeps its fixed text.

@@ -35,14 +35,18 @@ const NOTE = '  Ghost ants on the kitchen counter, light. Baited the counter edg
 const TIDIED = 'Our technician said ghost ants were on the kitchen counter and baited the counter edge.';
 const FACTS = { available: true, status: 'read', areas: ['Inside'], pests: ['ghost ants'] };
 
-function httpError(status) {
-  const err = new Error(`HTTP ${status}`);
+// As utils/admin-fetch throws: the status, the server's code and its parsed body.
+function httpError(status, details = null) {
+  const err = new Error(details?.error || `HTTP ${status}`);
   err.status = status;
+  if (details?.code) err.code = details.code;
+  if (details) err.details = details;
   return err;
 }
+const GATE_OFF = () => httpError(404, { enabled: false });
 
 // `reportNote`: the note step's answer, an Error it throws, or a function of the call count.
-function makeRequest({ reportNote }) {
+function makeRequest({ reportNote, complete = () => ({ success: true }) }) {
   const calls = [];
   const request = vi.fn(async (path, options) => {
     calls.push({ path, body: options?.body ? JSON.parse(options.body) : null });
@@ -62,7 +66,7 @@ function makeRequest({ reportNote }) {
     }
     if (path === '/admin/schedule/generate-report') return { report: REPORT };
     if (path.endsWith('/voice-facts')) return FACTS;
-    if (path.endsWith('/complete')) return { success: true };
+    if (path.endsWith('/complete')) return complete(calls.filter((c) => c.path.endsWith('/complete')).length);
     return {};
   });
   request.bodies = (suffix) => calls.filter((call) => call.path.endsWith(suffix)).map((call) => call.body);
@@ -120,7 +124,7 @@ describe('the note step answers', () => {
 
 describe('the note step off or failing writes the report the old way', () => {
   test('gate off (404): the writer report, no note on /complete, and the sheet does not ask again', async () => {
-    const request = makeRequest({ reportNote: httpError(404) });
+    const request = makeRequest({ reportNote: GATE_OFF() });
     await writeReport(request, 'Report the customer will see');
     expect(request.bodies('/generate-report')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Write again' }));
@@ -150,6 +154,45 @@ describe('the note step off or failing writes the report the old way', () => {
     expect(body).not.toHaveProperty('reportNote');
   });
 });
+
+describe('a visit the note step no longer gives this tech', () => {
+  test.each([
+    ['reassigned (403)', httpError(403, { code: 'service_not_assigned' }), 'This visit is no longer yours to complete. Close the sheet and open your schedule again.'],
+    ['gone (404 not_found)', httpError(404, { code: 'not_found' }), 'This visit was not found. Close the sheet and open your schedule again.'],
+  ])('%s: no writer call, the sheet says so, and the next write asks again', async (_label, refusal, message) => {
+    const request = makeRequest({ reportNote: refusal });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByText(/Taurus SC 1.6 fl oz/);
+    fireEvent.change(screen.getByLabelText('Tell me about the visit'), { target: { value: NOTE } });
+    fireEvent.click(screen.getByRole('button', { name: '3, moderate' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate AI report' }).disabled).toBe(false), { timeout: 10000 });
+    fireEvent.click(screen.getByRole('button', { name: 'Generate AI report' }));
+    expect(await screen.findByText(message, {}, { timeout: 10000 })).toBeTruthy();
+    expect(request.bodies('/generate-report')).toEqual([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await waitFor(() => expect(request.bodies('/report-note')).toHaveLength(2));
+    expect(request.bodies('/generate-report')).toEqual([]);
+  }, 30000);
+});
+
+test('the note step turned off between the preview and the send: the form stays, the writer report goes out under a new key', async () => {
+  const off = httpError(409, { code: 'REPORT_NOTE_OFF', error: 'The report note is turned off. Write the report again, then send.' });
+  const request = makeRequest({
+    reportNote: { ok: true, source: 'cleaned', text: TIDIED },
+    complete: (n) => { if (n === 1) throw off; return { success: true }; },
+  });
+  await writeReport(request, 'Your note on the customer’s report');
+  fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+  expect(await screen.findByText('The report note is turned off. Write the report again, then send.', {}, { timeout: 10000 })).toBeTruthy();
+  fireEvent.click(await screen.findByRole('button', { name: 'Try again' }));
+  await screen.findByText('Report the customer will see', {}, { timeout: 10000 });
+  expect(request.bodies('/report-note')).toHaveLength(1);
+  const [first, second] = [await send(request), request.bodies('/complete')[1]];
+  expect(first.reportNote).toEqual({ source: 'cleaned', text: TIDIED });
+  expect(second).not.toHaveProperty('reportNote');
+  expect(second.technicianNotes).toBe(REPORT);
+  expect(second.idempotencyKey).not.toBe(first.idempotencyKey);
+}, 30000);
 
 test('each standard-sentence reason has its own line', () => {
   const lines = ['timeout', 'no_note', 'note_too_long', 'nothing_for_customer', 'stored_code'].map(fixedNoteLine);
