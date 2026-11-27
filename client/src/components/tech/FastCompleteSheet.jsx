@@ -1638,7 +1638,8 @@ const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
 // place of the writer's report (the completion drops the writer's text on such a visit). The gate off (404), a visit
 // the step does not take (409) or a failed call writes the report the old way, so the note step never holds Complete.
 // The gate's own 404 ({ enabled: false }) is kept for the sheet, so a gate that is off costs one call. A visit the
-// route no longer gives this tech (403) or no longer finds (404 not_found) writes nothing: the sheet says so.
+// route no longer gives this tech (403), no longer finds (404 not_found) or finds with no customer (409
+// visit_has_no_customer: /complete refuses it too) writes nothing: the sheet says so.
 const isNoteAnswer = (answer) => answer?.ok === true && ['cleaned', 'fixed'].includes(answer.source)
   && typeof answer.text === 'string' && answer.text.trim() !== '';
 const NOTE_VISIT_GONE = {
@@ -1646,6 +1647,7 @@ const NOTE_VISIT_GONE = {
   404: 'This visit was not found. Close the sheet and open your schedule again.',
 };
 // Only a plain pest visit asks (a lane or typed visit, `mode`, keeps its own record and report).
+const NOTE_VISIT_NO_CUSTOMER = 'This visit has no customer on it now. Close the sheet and ask the office.';
 // { text, reportNote, noteReason } | { stop: message } | null (write the writer's report).
 async function readOwnNote({ request, base, note, mode, offRef }) {
   if (mode || offRef.current) return null;
@@ -1662,7 +1664,8 @@ async function readOwnNote({ request, base, note, mode, offRef }) {
       offRef.current = true;
       return null;
     }
-    return NOTE_VISIT_GONE[err?.status] ? { stop: NOTE_VISIT_GONE[err.status] } : null;
+    const gone = err?.code === 'visit_has_no_customer' ? NOTE_VISIT_NO_CUSTOMER : NOTE_VISIT_GONE[err?.status];
+    return gone ? { stop: gone } : null;
   }
 }
 

@@ -160,6 +160,7 @@ describe('a visit the note step no longer gives this tech', () => {
   test.each([
     ['reassigned (403)', httpError(403, { code: 'service_not_assigned' }), NOTE_GONE_403],
     ['gone (404 not_found)', httpError(404, { code: 'not_found' }), 'This visit was not found. Close the sheet and open your schedule again.'],
+    ['left with no customer (409)', httpError(409, { code: 'visit_has_no_customer' }), 'This visit has no customer on it now. Close the sheet and ask the office.'],
   ])('%s: no writer call, the sheet says so, and the next write asks again', async (_label, refusal, message) => {
     const request = makeRequest({ reportNote: refusal });
     render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
