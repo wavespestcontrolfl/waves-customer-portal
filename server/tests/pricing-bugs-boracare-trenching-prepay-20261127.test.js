@@ -813,4 +813,141 @@ describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates
       {},
     )).toBe(true);
   });
+
+  test('annual-prepay billing switch honors stamped year1PrepayNoPercent on source estimate', () => {
+    const { computeSeriesPrepayPricing } = require('../services/secure-appointment-plans');
+    const stamped = computeSeriesPrepayPricing({
+      perVisit: 100,
+      visitsPerYear: 10,
+      planClass: 'discount',
+      noYear1PrepayPercent: true,
+    });
+    expect(stamped.annualBase).toBe(1000);
+    expect(stamped.prepay.total).toBe(1000);
+    expect(stamped.prepay.discount).toBe(0);
+    expect(stamped.prepay.ratePctLabel).toBe('');
+
+    const preGate = computeSeriesPrepayPricing({
+      perVisit: 100,
+      visitsPerYear: 10,
+      planClass: 'discount',
+      noYear1PrepayPercent: false,
+    });
+    expect(preGate.prepay.total).toBe(950);
+    expect(preGate.prepay.discount).toBe(50);
+  });
+
+  test('staff revisions preserve unchanged misting, Bora-Care, and trenching lines while repricing edited scopes', async () => {
+    const origBora = { ...constants.SPECIALTY.boraCare };
+    const prevMistingGate = process.env.GATE_MOSQUITO_MISTING;
+    process.env.GATE_MOSQUITO_MISTING = 'true';
+    const { applyUnchangedRevisionPricingKnobs } = require('../services/estimate-tree-shrub-knob-replay');
+    try {
+      // Sent 30-nozzle Smart misting install quoted at pre-floor $4,195 (without essentialTierPrice knob).
+      const sentMistingBlob = {
+        result: {
+          recurring: {
+            services: [{
+              service: 'mosquito_misting',
+              tier: 'smart',
+              solution: 'standard',
+              nozzles: 30,
+              risers: 0,
+              refill: { solution: 'standard', refillsPerYear: 4 },
+              pricingKnobs: {
+                tier: 'smart',
+                tierPrice: 4195,
+                hardwareCost: 1850,
+                includedNozzles: 30,
+                extraNozzlePrice: 95,
+                extraNozzleCost: 22,
+                includedRisers: 0,
+                extraRiserPrice: 75,
+                extraRiserCost: 15,
+                installTechs: 2,
+                installHours: 8,
+                laborRate: 35,
+                planMonthly: 95,
+                planVisitsPerYear: 6,
+                laborMinutesPerVisit: 30,
+                partsReservePerMonth: 10,
+                refillSolution: 'standard',
+                refillPrice: 275,
+                refillProductCost: 85,
+                serviceCallNoPlan: 125,
+                minNozzles: 15,
+                maxNozzles: 40,
+                maxRisers: 20,
+                maxRefillsPerYear: 12,
+                defaultRefillsPerYear: 4,
+              },
+            }],
+          },
+        },
+      };
+      // Unchanged 30-nozzle Smart revision -> preserves $4,195 via stored mistingPricingKnobs!
+      const unchangedInput = { ...PROPERTY, services: { mosquitoMisting: { tier: 'smart', solution: 'standard', nozzles: 30, risers: 0, refillsPerYear: 4 } } };
+      applyUnchangedRevisionPricingKnobs(unchangedInput, sentMistingBlob);
+      expect(unchangedInput.mistingPricingKnobs).toBeTruthy();
+      const unchangedEst = generateEstimate(unchangedInput);
+      const unchangedLine = unchangedEst.lineItems.find((li) => li.service === 'mosquito_misting');
+      expect(unchangedLine.installation.price).toBe(4195);
+
+      // Edited scope (adding 1 riser) -> drops stored knobs and reprices live with Smart>=Essential floor!
+      const editedInput = { ...PROPERTY, services: { mosquitoMisting: { tier: 'smart', solution: 'standard', nozzles: 30, risers: 1, refillsPerYear: 4 } } };
+      applyUnchangedRevisionPricingKnobs(editedInput, sentMistingBlob);
+      expect(editedInput.mistingPricingKnobs).toBeUndefined();
+      const editedEst = generateEstimate(editedInput);
+      const editedLine = editedEst.lineItems.find((li) => li.service === 'mosquito_misting');
+      const essentialComparable = generateEstimate({
+        ...PROPERTY,
+        services: { mosquitoMisting: { tier: 'essential', solution: 'standard', nozzles: 30, risers: 1, refillsPerYear: 4 } },
+      }).lineItems.find((li) => li.service === 'mosquito_misting');
+      expect(editedLine.installation.price).toBeGreaterThanOrEqual(essentialComparable.installation.price);
+      expect(editedLine.installation.price).toBeGreaterThan(4195 + 75);
+    } finally {
+      Object.assign(constants.SPECIALTY.boraCare, origBora);
+      if (prevMistingGate === undefined) delete process.env.GATE_MOSQUITO_MISTING;
+      else process.env.GATE_MOSQUITO_MISTING = prevMistingGate;
+    }
+  });
+
+  test('legacy Bora-Care replay recovers flat boracareSqft from V2 engineRequest.options', () => {
+    const { boraCareKnobSignalForReplay } = require('../services/estimate-tree-shrub-knob-replay');
+    const v2Saved = {
+      engineRequest: {
+        profile: { ...PROPERTY },
+        selectedServices: ['BORACARE'],
+        options: { boracareSqft: 1650 },
+      },
+      result: {
+        oneTime: {
+          items: [],
+          specItems: [{ name: 'Bora-Care Wood Treatment Service', price: 1420 }],
+        },
+      },
+    };
+    const signal = boraCareKnobSignalForReplay(v2Saved);
+    expect(signal).toMatchObject({ pinnedPrice: 1420, pinnedAtticSqFt: 1650 });
+  });
+
+  test('db-bridge resets Bora-Care constants from immutable defaults when a DB override key is removed', async () => {
+    const origBora = { ...constants.SPECIALTY.boraCare };
+    try {
+      await syncConstantsFromDB(makePricingDb({
+        pricingConfigRows: [{ config_key: 'onetime_boracare', data: { bc_gal: 125, bc_cov: 310 } }],
+      }));
+      expect(constants.SPECIALTY.boraCare.galCost).toBe(125);
+      expect(constants.SPECIALTY.boraCare.coverage).toBe(310);
+
+      // Removing bc_gal from DB row restores the immutable code default (91.98) while applying bc_cov.
+      await syncConstantsFromDB(makePricingDb({
+        pricingConfigRows: [{ config_key: 'onetime_boracare', data: { bc_cov: 290 } }],
+      }));
+      expect(constants.SPECIALTY.boraCare.galCost).toBe(91.98);
+      expect(constants.SPECIALTY.boraCare.coverage).toBe(290);
+    } finally {
+      Object.assign(constants.SPECIALTY.boraCare, origBora);
+    }
+  });
 });

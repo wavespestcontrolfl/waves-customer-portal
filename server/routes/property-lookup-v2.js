@@ -6537,7 +6537,11 @@ router.post('/calculate-estimate', async (req, res) => {
         const storedBlob = storedRow && (typeof storedRow.estimate_data === 'string'
           ? (() => { try { return JSON.parse(storedRow.estimate_data); } catch { return null; } })()
           : storedRow.estimate_data);
-        if (storedBlob) fleaRecord = require('../services/estimate-flea-size-replay').fleaPriceRecord(storedRow, storedBlob, { translate: translateV2CallToV1Input, nextAddress: options?.address });
+        if (storedBlob) {
+          fleaRecord = require('../services/estimate-flea-size-replay').fleaPriceRecord(storedRow, storedBlob, { translate: translateV2CallToV1Input, nextAddress: options?.address });
+          v1Input.year1PrepayNoPercent = require('../services/estimate-converter').estimateHasNoYear1PrepayPercent(storedBlob);
+          require('../services/estimate-tree-shrub-knob-replay').applyUnchangedRevisionPricingKnobs(v1Input, storedBlob);
+        }
       }
     }
     const v1 = require('../services/estimate-flea-size-replay').generateWithFleaRecord(pricingEngine.generateEstimate, v1Input, fleaRecord);

@@ -408,13 +408,54 @@ function firstFiniteVal(...values) {
 
 const plainRecord = (value) => (value && typeof value === 'object' ? value : {});
 
+function translateStoredV2Request(estData) {
+  const req = estData?.engineRequest;
+  if (!req || typeof req !== 'object' || !req.profile) return null;
+  try {
+    const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+    const selected = Array.isArray(req.selectedServices) ? req.selectedServices : [];
+    const withBoraCare = selected.includes('BORACARE') ? selected : [...selected, 'BORACARE'];
+    return translateV2CallToV1Input(req.profile, withBoraCare, req.options || {});
+  } catch {
+    return null;
+  }
+}
+
 function boraCareStoredInputs(estData) {
-  const primary = estData?.engineInputs || estData?.engineRequest || estData?.inputs;
+  const translated = !estData?.engineInputs ? translateStoredV2Request(estData) : null;
+  const primary = estData?.engineInputs || translated || estData?.engineRequest || estData?.inputs;
   if (!primary || typeof primary !== 'object') return null;
   const raw = plainRecord(estData?.inputs);
   const reqOpts = plainRecord(estData?.engineRequest?.options);
   const svc = primary.services?.boraCare || primary.services?.bora_care || reqOpts.boraCare || reqOpts.bora_care;
-  return { primary, raw, opts: plainRecord(svc) };
+  return { primary, raw, reqOpts, opts: plainRecord(svc) };
+}
+
+function boraCareScopeFromInputs(primary, opts, extra = {}) {
+  const { resolveBoraCareSqFt, resolveBoraCareSurfaceSqFt } = require('./pricing-engine/service-pricing');
+  const attic = resolveBoraCareSqFt(primary, opts);
+  const surface = resolveBoraCareSurfaceSqFt(primary, {
+    ...opts,
+    surfaceLinearFt: firstFiniteVal(
+      opts.surfaceLinearFt, opts.wallLinearFt,
+      extra.boracareSurfaceLinearFt, extra.boraCareSurfaceLinearFt, extra.surfaceLinearFt,
+      primary.boraCareSurfaceLinearFt, primary.boracareSurfaceLinearFt, primary.boraCareWallLinearFt,
+    ),
+    surfaceHeightFt: firstFiniteVal(
+      opts.surfaceHeightFt, opts.wallHeightFt,
+      extra.boracareSurfaceHeightFt, extra.boraCareSurfaceHeightFt, extra.surfaceHeightFt,
+      primary.boraCareSurfaceHeightFt, primary.boracareSurfaceHeightFt, primary.boraCareWallHeightFt,
+    ),
+  });
+  const legacyBcSqFt = positiveOrNull(firstFiniteVal(
+    primary.boracareSqft, primary.boraCareSqft, primary.bcSqft, primary.bcSqFt,
+    extra.boracareSqft, extra.boraCareSqft, extra.bcSqft,
+    opts.boracareSqft, opts.bcSqft, opts.bcSqFt,
+  ));
+  return {
+    pinnedAtticSqFt: attic.value !== null ? attic.value : legacyBcSqFt,
+    pinnedSurfaceSqFt: surface.surfaceSqFt > 0 ? surface.surfaceSqFt : null,
+  };
 }
 
 function boraCareStoredScope(row, estData) {
@@ -426,30 +467,8 @@ function boraCareStoredScope(row, estData) {
   }
   const stored = boraCareStoredInputs(estData);
   if (!stored) return {};
-  const { primary, raw, opts } = stored;
-  const { resolveBoraCareSqFt, resolveBoraCareSurfaceSqFt } = require('./pricing-engine/service-pricing');
-  const attic = resolveBoraCareSqFt(primary, opts);
-  const surface = resolveBoraCareSurfaceSqFt(primary, {
-    ...opts,
-    surfaceLinearFt: firstFiniteVal(
-      opts.surfaceLinearFt, opts.wallLinearFt,
-      primary.boraCareSurfaceLinearFt, primary.boracareSurfaceLinearFt, primary.boraCareWallLinearFt,
-      raw.boraCareSurfaceLinearFt, raw.boracareSurfaceLinearFt,
-    ),
-    surfaceHeightFt: firstFiniteVal(
-      opts.surfaceHeightFt, opts.wallHeightFt,
-      primary.boraCareSurfaceHeightFt, primary.boracareSurfaceHeightFt, primary.boraCareWallHeightFt,
-      raw.boraCareSurfaceHeightFt, raw.boracareSurfaceHeightFt,
-    ),
-  });
-  const legacyBcSqFt = positiveOrNull(firstFiniteVal(
-    primary.boracareSqft, primary.boraCareSqft, primary.bcSqft, primary.bcSqFt,
-    raw.boracareSqft, raw.boraCareSqft, raw.bcSqft,
-    opts.boracareSqft, opts.bcSqft, opts.bcSqFt,
-  ));
-  const pinnedAtticSqFt = attic.value !== null ? attic.value : legacyBcSqFt;
-  const pinnedSurfaceSqFt = surface.surfaceSqFt > 0 ? surface.surfaceSqFt : null;
-  return pinnedAtticSqFt !== null || pinnedSurfaceSqFt !== null ? { pinnedAtticSqFt, pinnedSurfaceSqFt } : {};
+  const scope = boraCareScopeFromInputs(stored.primary, stored.opts, { ...stored.raw, ...stored.reqOpts });
+  return scope.pinnedAtticSqFt !== null || scope.pinnedSurfaceSqFt !== null ? scope : {};
 }
 
 function stampedBoraCareKnobs(rows) {
@@ -593,6 +612,64 @@ function applyTreeShrubPalmReplay(v1Input, estData = {}) {
   return v1Input;
 }
 
+const lowerToken = (v) => String(v || '').trim().toLowerCase();
+const matchesOptionalToken = (stored, next) => !stored || !next || stored === next;
+const matchesOptionalNumber = (stored, next) => !Number.isFinite(stored) || next === stored;
+
+function mistingRowMatchesInput(row, inputOpt) {
+  if (!row || !inputOpt || typeof inputOpt !== 'object') return false;
+  const knobs = plainRecord(row.pricingKnobs);
+  const refill = plainRecord(row.refill);
+  const storedTier = lowerToken(row.tier || knobs.tier);
+  const storedSol = lowerToken(row.solution || refill.solution || knobs.refillSolution);
+  const storedNozzles = positiveOrNull(row.nozzles);
+  const storedRisers = storedFigure(row.risers);
+  const storedRefills = storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear));
+  return matchesOptionalToken(storedTier, lowerToken(inputOpt.tier))
+    && matchesOptionalToken(storedSol, lowerToken(inputOpt.solution))
+    && (storedNozzles === null || inputOpt.nozzles == null || positiveOrNull(inputOpt.nozzles) === storedNozzles)
+    && matchesOptionalNumber(storedRisers, inputOpt.risers == null ? storedRisers : storedFigure(inputOpt.risers))
+    && matchesOptionalNumber(storedRefills, inputOpt.refillsPerYear == null ? storedRefills : storedFigure(inputOpt.refillsPerYear));
+}
+
+function boraCareScopeMatchesInput(row, v1Input, storedEstimateData) {
+  const prior = boraCareStoredScope(row, storedEstimateData);
+  if (prior.pinnedAtticSqFt === undefined && prior.pinnedSurfaceSqFt === undefined) return false;
+  const next = boraCareScopeFromInputs(v1Input, plainRecord(v1Input.services?.boraCare));
+  return prior.pinnedAtticSqFt === next.pinnedAtticSqFt && prior.pinnedSurfaceSqFt === next.pinnedSurfaceSqFt;
+}
+
+// Staff revisions reprice changed services on live config, but MUST preserve
+// unchanged Bora-Care, mosquito misting, and termite trenching lines from the
+// trusted stored estimate on both revision preview and save.
+function applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData) {
+  if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return v1Input;
+  const services = v1Input.services || {};
+  const { storedMistingRows, storedBoraCareRows } = require('./estimate-result-container');
+  if (services.mosquitoMisting && !v1Input.mistingPricingKnobs) {
+    const mRows = storedMistingRows(storedEstimateData).filter(
+      (r) => r.service === 'mosquito_misting' || r.service === 'mosquito_misting_installation',
+    );
+    const mKnobs = mistingKnobSignalForReplay(storedEstimateData);
+    if (mKnobs && mRows.some((row) => mistingRowMatchesInput(row, services.mosquitoMisting))) {
+      v1Input.mistingPricingKnobs = mKnobs;
+    }
+  }
+  if (services.boraCare && !v1Input.boraCarePricingKnobs) {
+    const bcRows = storedBoraCareRows(storedEstimateData);
+    const bcKnobs = boraCareKnobSignalForReplay(storedEstimateData);
+    if (bcKnobs && bcRows.some((row) => boraCareScopeMatchesInput(row, v1Input, storedEstimateData))) {
+      v1Input.boraCarePricingKnobs = bcKnobs;
+    }
+  }
+  if (services.trenching && !v1Input.trenchingTermiticidePricingKnobs) {
+    // Engine already gates trenching surcharge replay on exact (productKey, applicationRate, productOz) match.
+    const trKnobs = trenchingKnobSignalForReplay(storedEstimateData);
+    if (trKnobs) v1Input.trenchingTermiticidePricingKnobs = trKnobs;
+  }
+  return v1Input;
+}
+
 module.exports = {
   termiteKnobSignalForReplay,
   mistingKnobSignalForReplay,
@@ -600,6 +677,7 @@ module.exports = {
   trenchingKnobSignalForReplay,
   boraCareKnobSignalForReplay,
   termiticideReplayOverrides,
+  applyUnchangedRevisionPricingKnobs,
   PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,
   NEUTRAL_TREE_SHRUB_KNOBS,

@@ -1261,7 +1261,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
-  applyStoredYear1PrepaySignal(v1Input, deps.storedEstimateData);
+  applyStoredYear1PrepaySignal(v1Input, deps.storedEstimateData, deps.replaySavedPricingKnobs);
   // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
   // below): a browser-posted copy of either field is never honored.
   delete v1Input.savedEstimateReplay;
@@ -2277,9 +2277,12 @@ function stripYear1PrepayStamp(estimateData) {
   }
 }
 
-function applyStoredYear1PrepaySignal(v1Input, storedEstimateData) {
+function applyStoredYear1PrepaySignal(v1Input, storedEstimateData, replaySavedPricingKnobs = false) {
   if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return;
   v1Input.year1PrepayNoPercent = require('./estimate-converter').estimateHasNoYear1PrepayPercent(storedEstimateData);
+  if (replaySavedPricingKnobs !== true) {
+    require('./estimate-tree-shrub-knob-replay').applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData);
+  }
 }
 
 // Year-1 no-5% annual prepay stamp (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27):

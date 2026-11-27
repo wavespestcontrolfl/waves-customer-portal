@@ -42,6 +42,7 @@ const RODENT_BRACKET_DEFAULTS = JSON.parse(JSON.stringify({
 // Dead Rodent Removal & Odor Treatment: the pristine prices and minutes, so a deleted or
 // malformed pricing_config row restores them on the next sync instead of pinning an old edit.
 const DEAD_ANIMAL_REMOVAL_DEFAULTS = JSON.parse(JSON.stringify(constants.RODENT.deadAnimalRemoval));
+const DEFAULT_BORACARE_CONSTANTS = Object.freeze({ ...constants.SPECIALTY.boraCare });
 const r = (val) => Math.round(val * constants.PROCESSING_ADJUSTMENT);
 const money = (val) => Math.round(Number(val) * constants.PROCESSING_ADJUSTMENT * 100) / 100;
 
@@ -2357,6 +2358,9 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       }
       applyRetreatOnlyTrenchingCopy(constants.SPECIALTY.trenching);
     }
+    // Reset Bora-Care constants from immutable defaults on every sync so removing
+    // a DB override restores identical behavior across all workers.
+    Object.assign(constants.SPECIALTY.boraCare, DEFAULT_BORACARE_CONSTANTS);
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
       const setPositive = (key, raw, max = Infinity) => {
