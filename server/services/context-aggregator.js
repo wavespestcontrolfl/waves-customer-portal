@@ -46,7 +46,7 @@ const { DAY_ONLY_ARRIVAL_NOTE, loadDayOnlyCheck } = require('./day-only-ai-conte
 // (545/545 upcoming in prod); en_route/on_site cover the same-day in-progress
 // case a texting customer may hit. The value lives in the canonical
 // visit-context module; the rationale above is this consumer's.
-const { UPCOMING_SERVICE_STATUSES, TERMINAL_ROW_STATUSES } = require('./visit-context/statuses');
+const { UPCOMING_SERVICE_STATUSES, TERMINAL_ROW_STATUSES, LIVE_TRACK_STATES } = require('./visit-context/statuses');
 
 // Calls the extractor affirmatively classified as not-a-real-conversation
 // with this customer — their summaries must never ground an SMS reply.
@@ -268,7 +268,7 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 // reads and the keys. The drafting callers pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck
 // asks regardless, so a reviewed card keeps its live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows,
 // never an earlier day's.
-async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn }) {
+async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn, prepGuideFamily }) {
   if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null, prepGuide: null, reportFacts: {}, olderVisitFindings: [] };
   const want = optedIn === true ? { estimate: true, prepaid: true, guide: true, reports: true, findings: true } : optedIn;
   const staffFacts = require('./sms-staff-facts');
@@ -281,7 +281,7 @@ async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, as
   const [estimateFacts, prepaidPlans, prepGuide] = await Promise.all([
     want.estimate ? staffFacts.loadEstimateFacts(pendingEstimate, { db }) : null,
     want.prepaid ? staffFacts.loadPrepaidPlanFacts(customer.id, { db }) : null,
-    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db }) : null,
+    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db, family: prepGuideFamily }) : null,
   ]);
   const [reportFacts, olderVisitFindings] = await Promise.all([
     // the latest completed visits' report emails (the key is absent unless asked for, so other callers' contexts keep their shape)
@@ -989,7 +989,8 @@ function perVisitLiveEtas(upcomingServices, liveEtaKeys, liveEtaResultByKey) {
 // limit(3), so "where's the tech" reported no live location while the public
 // tracker was active. A customer with no live row, or whose live row is
 // already in the first three, gets EXACTLY the old rows in the old order.
-const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+// LIVE_TRACK_STATES lives in visit-context/statuses.js with isUpcomingListedRow,
+// the row form of these two queries' status rule.
 function upcomingServicesBase(customer) {
   return db('scheduled_services as ss').leftJoin('technicians as tech', 'ss.technician_id', 'tech.id').where('ss.customer_id', customer.id).where('ss.scheduled_date', '>=', etDateString()).whereIn('ss.status', UPCOMING_SERVICE_STATUSES);
 }
@@ -1142,6 +1143,46 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
     ...(result && result.fixExpiresAtMs != null ? { fixExpiresAtMs: result.fixExpiresAtMs } : {}),
     ...(result && Number.isFinite(result.fixAtMs) ? { fixAtMs: result.fixAtMs } : {}),
   };
+}
+// TODAY ROUTE STATUS (texting AI gap 4, owner 2026-11-26; sms-route-status.js): before the tech is en route, the
+// tracker's stops-before-you count as one finished sentence for each of TODAY's visits that is still scheduled
+// and has a technician. One read per physical stop (technician + arrival slot); grouped siblings share it. A
+// failed read is no sentence. Returns per-row sentences (null = none), the send-time snapshot groups, and the
+// keys getContextForCustomer spreads in (none when the caller did not opt in: no read, no key).
+async function routeStatusContextKeys(upcomingServices, enabled, customerId) {
+  if (!enabled) return { context: {}, rows: [] };
+  const { perRow, groups } = await loadRouteStatusFacts(upcomingServices, customerId);
+  return { context: { routeStatusGroups: groups }, rows: perRow.map((sentence) => (sentence ? { routeStatus: sentence } : {})) };
+}
+// The route read's stop identity must be the visit row the prompt shows (technician, customer, day, slot): a
+// dispatch change between the visit list read and the route read would otherwise hand the old line the new
+// stop's sentence. Any difference = no sentence.
+function routeFactMatchesRow(fact, row, customerId) {
+  const stop = fact?.stop;
+  return Boolean(stop)
+    && String(stop.technicianId ?? '') === String(row.technician_id ?? '')
+    && String(stop.customerId ?? '') === String(customerId ?? '')
+    && String(stop.date ?? '') === String(calendarDay(row.scheduled_date) ?? '')
+    && String(stop.windowStart ?? '') === String(row.window_start ?? '');
+}
+async function loadRouteStatusFacts(upcomingServices, customerId, todayStr = etDateString()) {
+  const { customerTrackState } = require('./track-transitions');
+  const { routeStatusFactFor } = require('./sms-route-status');
+  const keyOf = (s) => (s && s.technician_id && calendarDay(s.scheduled_date) === todayStr && (customerTrackState(s) || 'scheduled') === 'scheduled'
+    ? `${s.technician_id}:${s.window_start ?? ''}` : null);
+  const keys = upcomingServices.map(keyOf);
+  const groups = [];
+  const sentenceByKey = new Map();
+  for (const key of [...new Set(keys.filter(Boolean))]) {
+    const members = upcomingServices.filter((s, i) => keys[i] === key);
+    // One read: the sentence, the stop identity it is about, and the single-open-stop-today rule (no sentence
+    // when the customer has two physical stops today, or the read fails).
+    const read = await routeStatusFactFor(db, members[0].id);
+    const fact = read && routeFactMatchesRow(read, members[0], customerId) ? read : null;
+    sentenceByKey.set(key, fact ? fact.sentence : null);
+    if (fact) groups.push({ scheduledServiceId: members[0].id, scheduledServiceIds: members.map((m) => m.id), sentence: fact.sentence, stop: fact.stop });
+  }
+  return { perRow: keys.map((k) => (k ? sentenceByKey.get(k) || null : null)), groups };
 }
 function liveEtaOnSite(row, todayStr = etDateString()) {
   const { customerTrackState } = require('./track-transitions');
@@ -1363,6 +1404,8 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, the prepaid visits left and the booked visit's prep guide,
   // for the texting AI's draft, its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
+  // `smsPrepGuideFamily` (texting AI gap 5): the prep guide family the customer's text names ("the lawn treatment"); with it, the PREP GUIDE is
+  // the guide of the soonest upcoming visit that carries that family when the booked visit does not. Read only with the guide itself.
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
   // Distance Matrix call, so it defaults OFF and every caller that discards
@@ -1379,7 +1422,9 @@ class ContextAggregator {
   // open promises the visit loops list) drops rows created after it, so a draft written minutes after
   // a customer's text cannot see the reply staff sent in between. Unset = today's reads, unchanged.
   // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, asOf = null } = {}) {
+  // `includeRouteStatus` (texting AI gap 4): TODAY's pre-en-route stop count sentence (loadRouteStatusFacts). Only the shadow drafter
+  // opts in, with the real-answers gate on; every other caller pays no read and gets no key.
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, smsPrepGuideFamily, asOf = null } = {}) {
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
@@ -1504,7 +1549,7 @@ class ContextAggregator {
 
     const lastService = serviceHistory[0] || null;
     const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
-        const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts });
+        const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts, prepGuideFamily: smsPrepGuideFamily });
     const visitFindings = [latestVisitFindings, ...olderVisitFindings];
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
@@ -1650,6 +1695,7 @@ class ContextAggregator {
     // ids each distinct minutes figure actually came from. Threaded through
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
+    const routeStatus = await routeStatusContextKeys(upcomingServices, includeRouteStatus, customer.id);
 
     // GATE_DAY_ONLY_PROMISE (part D): ONE bulk read for the listed visits. A visit whose customer was told only the day
     // carries the date and DAY_ONLY_ARRIVAL_NOTE in place of the hour. Gate off: no read, the same context as today.
@@ -1660,6 +1706,8 @@ class ContextAggregator {
       // where this is built) — [{ minutes, scheduledServiceIds }], never
       // rendered into any prompt.
       liveEtaGroups,
+      // TODAY ROUTE STATUS send-time snapshot input ([{ scheduledServiceId, scheduledServiceIds, sentence }]); opt-in only.
+      ...routeStatus.context,
       customer: {
         id: customer.id, name: `${customer.first_name} ${customer.last_name}`,
         firstName: customer.first_name, phone: customer.phone, email: customer.email,
@@ -1705,6 +1753,7 @@ class ContextAggregator {
         tech: s.technician_name || null,
         isToday: this.calendarDay(s.scheduled_date) === etDateString(),
         liveEta: liveEtas[i] || null,
+        ...routeStatus.rows[i],
       }, s.id), s)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable
@@ -1844,7 +1893,8 @@ class ContextAggregator {
     // email replies, briefs and assistant snapshots never read it.
     if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
       try {
-        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), ...(asOfDate ? { asOf: asOfDate } : {}) });
+        // upcomingServices: SCHEDULE CHANGES names exactly the visits UPCOMING SERVICES lists (the rows it renders: those with a date)
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), upcomingServices: context.upcomingServices.filter((s) => s && s.date), ...(asOfDate ? { asOf: asOfDate } : {}) });
       } catch (err) {
         logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
         visitLoops = emptyVisitLoops();
@@ -2104,6 +2154,7 @@ module.exports.resolveLiveEtaMinutesUncached = resolveLiveEtaMinutesUncached;
 module.exports.liveEtaDestination = liveEtaDestination;
 module.exports.liveEtaDedupeKey = liveEtaDedupeKey;
 module.exports.liveEtaEligible = liveEtaEligible;
+module.exports.loadRouteStatusFacts = loadRouteStatusFacts;
 module.exports._resetLiveEtaMemoForTests = _resetLiveEtaMemoForTests;
 module.exports.perVisitLiveEtas = perVisitLiveEtas;
 module.exports.buildLiveEtaGroups = buildLiveEtaGroups;

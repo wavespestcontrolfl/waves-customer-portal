@@ -90,8 +90,10 @@ test('a technician is pinned to an assigned visit for EVERY plan read, not only 
 test.each([
   ['Lawn Care', true],
   ['Tree & Shrub Care', true],
-  ['Pest Control', false],
-])('a %s plan carries stockAdvisory only when a lawn or tree & shrub visit is advisory (%s)', async (service, advisory) => {
+  ['Pest Control', true],
+  ['Palm Injection', true],
+  ['Mosquito Control', true],
+])('a %s plan carries stockAdvisory: stock never blocks any visit type (owner 2026-11-26) (%s)', async (service, advisory) => {
   buildPlanForService.mockResolvedValue({ serviceId: 'visit', propertyGate: { service, serviceTier: 'Commercial' } });
   const res = await run({ query: {} });
   if (advisory) expect(res.body.plan.stockAdvisory).toBe(true);

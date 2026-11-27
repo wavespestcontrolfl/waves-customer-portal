@@ -211,6 +211,9 @@ const createSchema = Joi.object({
   locationOnProperty: Joi.string().valid(...VALID_LOCATIONS).allow(null, '').optional(),
   source: Joi.string().trim().max(50).optional(),
   type: Joi.string().trim().max(50).optional(),
+  // The portal's own pricing assistant and tier explorer file their request through this endpoint with a GENERATED description that
+  // holds prices; they name themselves here. Nothing else sets it.
+  flow: Joi.string().valid('pricing_assistant', 'tier_explorer').optional(),
   // The saved property the customer SAW this ticket filed under
   // (GATE_APP_PROPERTY_SCOPE, uncapped codex r1o P1): the server refuses the
   // ticket when its resolved scope names a different house — the selected
@@ -754,7 +757,12 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
         location_on_property: validLocation,
         photos: JSON.stringify(photoData),
         status: 'new',
-        ...((requestProperty || value.photoIdSource || isCancellation) ? { metadata: JSON.stringify({
+        metadata: JSON.stringify({
+          // The writer's mark, for the tech Visit Brief: 'portal_flow' only when the request names itself one of the portal's generated
+          // pricing flows (the pricing assistant, the tier explorer), whose description holds prices; everything else is a typed
+          // request, whose description is the customer's own words. The cancel flow's rows carry neither mark: their description is
+          // office text.
+          writer: value.flow ? 'portal_flow' : 'portal_form',
           ...(requestProperty ? { propertyId: requestProperty.id, property: requestProperty } : {}),
           ...(value.photoIdSource ? { photoIdSource: value.photoIdSource } : {}),
           // The submission as made: retries read it (submittedCancel).
@@ -764,7 +772,7 @@ router.post('/', authenticateAllowInactive, createLimiter, async (req, res, next
             adverseEvent: value.adverseEvent === true,
             safetyComplaint: value.safetyComplaint === true,
           } } : {}),
-        }) } : {}),
+        }),
       })
       .returning('*');
 

@@ -34,6 +34,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Camera, ClipboardCheck, ClipboardList, FileText, Flag, Map, MessageSquare, Phone } from 'lucide-react';
 import { DEAD_ASSIGNMENT_STATUSES, stopPropertyAlerts, TERMINAL_STATUSES } from './routeStops';
 import { withPassLinks } from './passLinks';
+import CustomerAskedSection from './CustomerAskedSection';
 import { canRecordConsultationOutcome } from '../../lib/consultationVisit';
 import { isProjectBackedCompletion, projectReportClosed } from '../../lib/dispatchCompletionRouting';
 import { isMlUnit, mlToFlOz } from '../../lib/measure-units';
@@ -51,7 +52,9 @@ import {
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
+import VisitTextsSection from './VisitTextsSection';
 import { detectServiceCategory } from '../../lib/service-colors';
+import HomeNoteSection from './HomeNoteSection';
 import PastVisitsSection from './PastVisitsSection';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
@@ -1402,6 +1405,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
+      <HomeNoteSection request={request} stopKey={stop.key} services={stop.services} byService={byService} onSaved={onRetry} />
+      <CustomerAskedSection memberBits={memberBits} />
       <AccessFlagsSection members={accessFlags} grouped={stop.services.length > 1} request={request} onChanged={onRetry} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>
@@ -1430,6 +1435,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         request={request}
         onRefresh={onRetry}
       />
+
+      <VisitTextsSection service={service} byService={byService} request={request} />
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>

@@ -754,17 +754,33 @@ function normalizedTetrinoScout(value) {
   };
 }
 
-function tetrinoScoutFreeze(lawnFast) {
+// `applied`: when given, whether Tetrino is among the final submitted rows (tetrinoScoutFreezeFor reads it), not the sheet's own
+// flag: an older sheet may send applied=false beside a Tetrino row now that the row is never refused (owner 2026-11-26).
+function tetrinoScoutFreeze(lawnFast, { applied: onRows = null } = {}) {
   const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
   if (!scout.tetrinoTarget) return {};
+  const applied = typeof onRows === 'boolean' ? onRows : scout.tetrinoApplied;
   return { lawnTetrinoScout: {
     v: 1,
     target: scout.tetrinoTarget,
     currentObservations: scout.tetrinoCurrentObservations,
     pressure: scout.tetrinoPressure || null,
     grubTimingEvidence: scout.grubTimingEvidence || null,
-    applied: scout.tetrinoApplied,
+    applied,
   } };
+}
+
+// The freeze above with `applied` read from the submitted rows (a catalog read by id). A failed read keeps the sheet's flag.
+async function tetrinoScoutFreezeFor(lawnFast, products, knex = db) {
+  if (!normalizedTetrinoScout(lawnFast?.tetrinoScout).tetrinoTarget) return {};
+  const ids = (Array.isArray(products) ? products : []).map((row) => row?.productId).filter(isUuid);
+  try {
+    const hit = ids.length ? await knex('products_catalog').whereIn('id', ids).where({ name: TETRINO_NAME }).first('id') : null;
+    return tetrinoScoutFreeze(lawnFast, { applied: !!hit });
+  } catch (err) {
+    logger.warn(`[lawn-fast] Tetrino catalog read failed at the freeze: ${err?.code || err?.name || 'Error'}`);
+    return tetrinoScoutFreeze(lawnFast);
+  }
 }
 
 async function loadPlan(svc, knex, tetrinoScout) {
@@ -1382,6 +1398,19 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
+// The Tetrino row's rate per 1,000 sq ft in fl oz: its stated rate, else its typed amount (fl oz or gal) over its area. NaN when
+// neither can be read. Only the warning above reads it.
+function tetrinoRatePer1000(row) {
+  const rate = Number(row?.rate);
+  if (Number.isFinite(rate) && rate > 0) return rate;
+  const amount = Number(row?.totalAmount);
+  const area = Number(row?.areaValue);
+  if (!(amount > 0) || !(area > 0) || (row?.areaUnit && row.areaUnit !== 'sqft')) return NaN;
+  const unit = String(row?.amountUnit || '').toLowerCase().replace(/\s+/g, '');
+  const flOz = unit === 'gal' ? amount * 128 : unit === 'floz' || unit === 'fl_oz' ? amount : NaN;
+  return (flOz / area) * 1000;
+}
+
 async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
@@ -1484,22 +1513,17 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   }
   const productIds = (Array.isArray(products) ? products : []).map((row) => row?.productId).filter(isUuid);
   const tetrino = productIds.length ? await knex('products_catalog').whereIn('id', productIds).where({ name: TETRINO_NAME }).first('id') : null;
+  // Tetrino without the May scout record, or at the high rate without high chinch pressure: a warning in the log, never a
+  // refusal (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"). The sheet still asks
+  // for the scout record; the visit completes either way.
   if (tetrino && await requiresTetrinoScoutEvidence(svc, knex, lawnFast?.tetrinoScout)) {
     const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
     const decision = require('./waveguard-plan-engine').tetrinoScoutDecision(scout);
-    if (!decision.eligible || !scout.tetrinoApplied) {
-      return { status: 400, payload: {
-        error: 'Record the May target and current observations before using Tetrino. Grubs also need local peak-flight or egg-hatch timing.',
-        code: 'tetrino_scout_evidence_required',
-      } };
-    }
     const applied = (products || []).find((row) => String(row?.productId).toLowerCase() === String(tetrino.id).toLowerCase());
-    if (Number(applied?.rate) > 0.367 && !decision.highRateEligible) {
-      return { status: 400, payload: {
-        error: 'The high Tetrino rate needs high current chinch pressure recorded on this visit.',
-        code: 'tetrino_high_pressure_required',
-      } };
-    }
+    // Tetrino is on the submitted products, so it was applied, whatever an older sheet sent as tetrinoApplied.
+    if (!decision.eligible) logger.warn(`[lawn-fast] Tetrino on ${svc.id} without the scout record (warning only)`);
+    // Judged on its own: a high dose with no scout record warns twice.
+    if (tetrinoRatePer1000(applied) > 0.367 && !decision.highRateEligible) logger.warn(`[lawn-fast] high Tetrino rate on ${svc.id} without high chinch pressure (warning only)`);
   }
   // An empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
@@ -1602,5 +1626,6 @@ module.exports = {
   preflightLawnFastCompletion,
   normalizedTetrinoScout,
   tetrinoScoutFreeze,
+  tetrinoScoutFreezeFor,
   assertLawnFastVisitTypeUnderLock,
 };

@@ -100,7 +100,7 @@ describe('LawnPlanTab', () => {
   });
 
   it('at a non-primary address shows the Job card\'s address block, and none of the primary home\'s facts or lines', () => {
-    const addressNotice = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, amounts withheld' };
+    const addressNotice = { code: 'alternate_address', message: 'Visit is at a non-primary address — the lawn plan on file is the primary home\'s, so its amounts may not fit this address' };
     render(<LawnPlanTab plan={{ ...plan, addressNotice }} jobTab />);
     expect(screen.getByText('Plan not shown')).toBeTruthy();
     expect(screen.getByText(/the lawn plan on file is the primary home's/)).toBeTruthy();

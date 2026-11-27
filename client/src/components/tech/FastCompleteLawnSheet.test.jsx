@@ -232,6 +232,8 @@ const completeCalls = () => requests.filter((r) => r.path.endsWith('/complete'))
 const confirmCalls = () => requests.filter((r) => r.path.endsWith('/lawn-assessment/confirm'));
 const AREA_LABEL = 'Area sprayed (sq ft), if you know it';
 const editorFor = (name) => screen.getByRole('group', { name });
+// The warning under a row of a product the latest decision holds (owner 2026-11-26: only warned, never blocked).
+const HELD_ROW_NOTE = 'Not suggested for this lawn today. You can still use it and complete; the visit record keeps it.';
 // The product card's method dropdown ("How"), its selected label, and a pick by label.
 const methodSelect = (editor) => within(editor).getByRole('combobox', { name: /^Method for / });
 const pressedMethod = (editor) => { const sel = methodSelect(editor); return sel.value ? sel.options[sel.selectedIndex].textContent : null; };
@@ -292,6 +294,123 @@ describe('May Tetrino scouting', () => {
     const body = completeCalls().at(-1).body;
     expect(body.products).toEqual([]);
     expect(body.lawnFast.tetrinoScout).toMatchObject({ target: 'none', tetrinoApplied: false });
+  });
+
+  // Owner 2026-11-26, "everything should only be warned, never blocked from using, for now": the server accepts Tetrino without the
+  // scout record, so the sheet keeps asking for it as a warning line and never holds Complete.
+  const footerWarnings = () => [...document.querySelectorAll('.tech-visit-footer .tech-visit-status--warn')].map((node) => node.textContent);
+
+  test('Tetrino added through Search with no scout record: the scout prompt stays, a warning shows, Complete is on and the visit submits without a scout record', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: PLANNED, tetrinoScout: offer } });
+    // The search lists lawn products: the catalog entry carries its service line.
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    expect(screen.getByRole('button', { name: 'Record scout-only decision' })).toBeTruthy();
+    await addProductByName('Tetrino Insecticide');
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(footerNote()).toBe('Record the May insect scouting decision. You can still complete.');
+    expect(footerWarnings()).toEqual(['Record the May insect scouting decision. You can still complete.']);
+    await submit();
+    const body = completeCalls().at(-1).body;
+    expect(body.products.find((row) => row.productId === P_TETRINO)).toBeTruthy();
+    expect(body.lawnFast.tetrinoScout).toBeUndefined();
+  });
+
+  test('a recorded Tetrino decision whose product the tech then removed warns and still completes', async () => {
+    const ctx = (path) => path.includes('tetrinoTarget=chinch')
+      ? context({ plannedProducts: { source: 'plan', items: [...PLANNED, plannedTetrino(0.735)], tetrinoScout: { ...offer, selected: true, ratePer1000: 0.735 } } })
+      : context({ plannedProducts: { source: 'plan', items: PLANNED, tetrinoScout: offer } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Chinch bugs' }));
+    fireEvent.change(screen.getByPlaceholderText(/Counts at the damaged edge/), { target: { value: '14 counted at the south damaged edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'High' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this decision in the plan' }));
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Tetrino Insecticide' })).getByRole('button', { name: 'Remove' }));
+    await analyze();
+    await waitFor(() => expect(footerWarnings()).toEqual(['Update the plan with the recorded Tetrino decision. You can still complete.']));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    // The record follows the final product list: Tetrino was removed, so it says not applied.
+    expect(completeCalls().at(-1).body.lawnFast.tetrinoScout).toMatchObject({ target: 'chinch', tetrinoApplied: false });
+  });
+
+  test('a scout-only decision with Tetrino then added through Search records it as applied', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [], tetrinoScout: offer } });
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    fireEvent.click(screen.getByRole('button', { name: 'Scout only' }));
+    fireEvent.change(screen.getByPlaceholderText(/What you checked/), { target: { value: 'Checked damaged edges and roots; no current insects found' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Record scout-only decision' }));
+    await screen.findByText('Recorded');
+    await addProductByName('Tetrino Insecticide');
+    // The scout-only record does not cover the product: a warning, and the visit still completes.
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(footerWarnings()).toEqual(['The recorded scout-only decision does not cover Tetrino. Record what you found, or take Tetrino off. You can still complete.']);
+    await submit();
+    expect(completeCalls().at(-1).body.lawnFast.tetrinoScout).toMatchObject({ target: 'none', tetrinoApplied: true });
+  });
+
+  test('a typed Tetrino amount over the high rate warns the same as the plan\'s high rate', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [], tetrinoScout: offer } });
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    await addProductByName('Tetrino Insecticide');
+    expect(footerWarnings()).toEqual(['Record the May insect scouting decision. You can still complete.']);
+    fireEvent.change(within(editorFor('Tetrino Insecticide')).getByLabelText('Tetrino Insecticide'), { target: { value: '12' } });
+    expect(footerWarnings()).toEqual([
+      'Record the May insect scouting decision. You can still complete.',
+      'The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.',
+    ]);
+  });
+
+  test('a typed Tetrino amount in gallons is read in fl oz for the high-rate warning', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [], tetrinoScout: offer } });
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    await addProductByName('Tetrino Insecticide');
+    const row = editorFor('Tetrino Insecticide');
+    fireEvent.change(within(row).getByLabelText('Unit for Tetrino Insecticide'), { target: { value: 'gal' } });
+    fireEvent.change(within(row).getByLabelText('Tetrino Insecticide'), { target: { value: '1' } });
+    expect(footerWarnings()).toContain('The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.');
+  });
+
+  test('Complete waits while the scout decision is saving and the plan is read again', async () => {
+    let release;
+    const gate = new Promise((resolve) => { release = resolve; });
+    const ctx = (path) => path.includes('tetrinoTarget=chinch')
+      ? context({ plannedProducts: { source: 'plan', items: [...PLANNED, plannedTetrino(0.735)], tetrinoScout: { ...offer, selected: true, ratePer1000: 0.735 } } })
+      : context({ plannedProducts: { source: 'plan', items: PLANNED, tetrinoScout: offer } });
+    const base = makeRequest({ ctx });
+    const request = async (path, options) => { if (path.includes('tetrinoTarget=chinch')) await gate; return base(path, options); };
+    await openSheet({ request });
+    await analyze();
+    fireEvent.click(screen.getByRole('button', { name: 'Chinch bugs' }));
+    fireEvent.change(screen.getByPlaceholderText(/Counts at the damaged edge/), { target: { value: '14 counted at the south damaged edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'High' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this decision in the plan' }));
+    await waitFor(() => expect(footerNote() || completeButton().textContent).toMatch(/Wait for the scout decision to save\./));
+    expect(completeButton().disabled).toBe(true);
+    release();
+    await screen.findByRole('group', { name: 'Tetrino Insecticide' });
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+  });
+
+  test('the high Tetrino rate without high chinch pressure recorded warns before Complete, which stays on; with the pressure recorded there is no warning', async () => {
+    const high = { ...offer, selected: true, ratePer1000: 0.735 };
+    const ctx = context({ plannedProducts: { source: 'plan', items: [...PLANNED, plannedTetrino(0.735)], tetrinoScout: high } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Chinch bugs' }));
+    fireEvent.change(screen.getByPlaceholderText(/Counts at the damaged edge/), { target: { value: '2 counted at the south damaged edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ordinary' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this decision in the plan' }));
+    await screen.findByText('Recorded');
+    await analyze();
+    await waitFor(() => expect(footerWarnings()).toEqual(['The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.']));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'High' }));
+    expect(footerWarnings()).toEqual(['Record the May insect scouting decision. You can still complete.', 'The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.']);
   });
 });
 
@@ -3179,7 +3298,7 @@ describe('suggested from this lawn', () => {
       expect(completeCalls()[0].body.lawnFast).toEqual({ visitType: 'recurring' });
     });
 
-    test('a second answer drops the rows it no longer offers, and says so; rows it still offers stay', async () => {
+    test('a second answer keeps the rows it no longer offers, each with the held warning and no "Removed" line; Complete is free', async () => {
       let calls = 0;
       const first = { enabled: true, v: 1, assessmentId: 'assessment-1', cards: [CARDS.weeds(), CARDS.chinch()], weedMix: WEED_MIX, chinch: { item: ARENA_ITEM, note: null } };
       // The limits changed: Arena is capped (the bifenthrin product is offered) and the lead is capped (nothing to add).
@@ -3196,12 +3315,16 @@ describe('suggested from this lawn', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Retake' }));
       await screen.findByTestId('lawn-shot-list');
       await analyze();
-      await screen.findByText('Removed: Lead WG, Cert Herbicide, Arena 50 WDG. The limits changed.');
-      expect(screen.queryByRole('group', { name: 'Lead WG' })).toBeNull();
-      expect(screen.queryByRole('group', { name: 'Cert Herbicide' })).toBeNull();
-      expect(screen.queryByRole('group', { name: 'Arena 50 WDG' })).toBeNull();
-      // A row the tech added from the generic list is not the guide's and stays.
-      expect(screen.getByRole('group', { name: 'Vel Fungicide' })).toBeTruthy();
+      await waitFor(() => expect(guideCalls()).toHaveLength(2));
+      await suggested();
+      // Owner 2026-11-26: only warned, never blocked. The rows the tech chose stay, each says it is no longer suggested.
+      for (const name of ['Lead WG', 'Cert Herbicide', 'Arena 50 WDG']) {
+        expect(within(editorFor(name)).getByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeTruthy();
+      }
+      expect(screen.queryByText(/^Removed:/)).toBeNull();
+      // A row the tech added from the generic list is not the guide's and carries no such warning.
+      expect(within(editorFor('Vel Fungicide')).queryByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeNull();
+      expect(footerNote()).not.toMatch(/not offered for this lawn|Wait for the lawn guide/);
       expect(guideCalls()).toHaveLength(2);
     });
 
@@ -3265,19 +3388,21 @@ describe('suggested from this lawn', () => {
       expect(await screen.findByRole('button', { name: /^Arena 50 WDG/ })).toBeTruthy();
     });
 
-    test('a take-all card holds its product: no add button anywhere, and it stays out of the list and the search', async () => {
+    test('a take-all card holds its product: no add button on the card or the list; the search still finds it, with a warning, and Complete is free', async () => {
       answer([CARDS.takeAll()]);
       await open();
       await analyze();
       const group = await suggested();
       expect(within(group).queryByRole('button')).toBeNull();
       expect(GENERIC('Art Fungicide')).toBeNull();
+      // Owner 2026-11-26: a hold only warns. The search lists the held product and the row carries the warning.
       searchFor('Art Fungicide');
-      expect(screen.queryByRole('button', { name: /^Art Fungicide/ })).toBeNull();
+      fireEvent.click(await screen.findByRole('button', { name: /^Art Fungicide/ }));
+      const row = await screen.findByRole('group', { name: 'Art Fungicide' });
+      expect(within(row).getByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeTruthy();
       await waitFor(() => expect(completeButton().disabled).toBe(false));
       await submit();
-      expect(sentProduct(P_ART)).toBeUndefined();
-      expect(sentGuide().cards).toEqual([{ kind: 'fungus', shown: true, checked: null, taken: false, productIds: [] }]);
+      expect(sentProduct(P_ART)).toBeTruthy();
     });
 
     test('a product on the sheet through its card is recorded as checked', async () => {
@@ -3414,9 +3539,10 @@ describe('suggested from this lawn', () => {
         const note = 'The yearly weed-spray limit is reached for this lawn.';
         guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [], note, blockedIds: [P_LEAD, P_CERT, P_BLIND] }, { item: null, note: 'The chinch bug product limits could not be checked.', rungIds: RUNGS, blockedIds: RUNGS }, [P_ART, P_ACE, P_DISP, P_ARENA, P_BIF, P_LEAD, P_CERT, P_BLIND]);
         await mxOpen(); await analyze(); await suggested();
-        // The picks stay blocked here (the answer's blockedProductIds: a hold). The weed group and the chinch rungs are only at a
-        // limit (a warning): the entries are lines, and the search keeps the products.
-      }, { art: 'hidden', artSearch: 'hidden', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
+        // The picks stay held here (the answer's blockedProductIds: a hold): never suggested, off the list, but the search still lists
+        // them (owner 2026-11-26: only warned, never blocked). The weed group and the chinch rungs are only at a limit (a warning):
+        // the entries are lines, and the search keeps the products.
+      }, { art: 'hidden', artSearch: 'addable', leadSearch: 'addable', arenaSearch: 'addable', talak: 'hidden', vel: 'addable', weedEntry: 'line', chinchEntry: 'line', ...NO_CARDS }],
       ['answered, no finding and nothing blocked', async () => {
         guideAnswer = answerOf([], MX_WEED, CLEAN_CHINCH);
         await mxOpen(); await analyze(); await suggested();
@@ -3564,24 +3690,33 @@ describe('suggested from this lawn', () => {
       for (const name of ['Blind Herbicide', 'Atticus Talak 7.9 F', 'Art Fungicide', 'Vel Fungicide']) expect(present(name)).toBe(true);
     };
 
+    // Owner 2026-11-26: a new decision never drops a row the tech chose. A row the new decision no longer offers (or holds)
+    // stays and carries the held warning; there is no "Removed" line.
+    const HELD_RE = new RegExp(HELD_ROW_NOTE.slice(0, 40));
+    const ALL_ROWS = ['Blind Herbicide', 'Atticus Talak 7.9 F', 'Art Fungicide', 'Vel Fungicide'];
     test.each([
-      ['a retake (no decision yet): every row stays, the taps lock again', async () => { await retake(); }, ['Blind Herbicide', 'Atticus Talak 7.9 F', 'Art Fungicide', 'Vel Fungicide'], [], null],
-      ['answered, then the same answer again: every row is still offered', async () => { await retake(); await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(2)); await suggested(); }, ['Blind Herbicide', 'Atticus Talak 7.9 F', 'Art Fungicide', 'Vel Fungicide'], [], null],
-      ['answered, then a refresh that failed: the context decides, so the rows it does not offer go', async () => {
+      ['a retake (no decision yet): every row stays, the taps lock again', async () => { await retake(); }, []],
+      ['answered, then the same answer again: every row is still offered', async () => { await retake(); await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(2)); await suggested(); }, []],
+      ['answered, then a refresh that failed: the context decides, the rows it does not offer stay with the warning', async () => {
         await retake(); guideAnswer = refusal(500, 'boom', 'Internal error'); await analyze();
-        await screen.findByText(/The limits could not be checked\./);
-      }, ['Art Fungicide', 'Vel Fungicide'], ['Blind Herbicide', 'Atticus Talak 7.9 F'], 'Removed: Blind Herbicide, Atticus Talak 7.9 F. The limits could not be checked.'],
-      ['answered, then a changed answer: blocked and unoffered rows go, a generic row stays', async () => {
+        await waitFor(() => expect(guideCalls()).toHaveLength(2));
+        await waitFor(() => expect(listState('Weed spots')).toBe('addable'));
+      }, ['Blind Herbicide', 'Atticus Talak 7.9 F']],
+      ['answered, then a changed answer: blocked and unoffered rows stay with the warning, a generic row has none', async () => {
         await retake();
         guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [] }, CLEAN_CHINCH, [P_ART, P_ACE, P_DISP]);
-        await analyze(); await screen.findByText(/The limits changed\./);
-      }, ['Vel Fungicide'], ['Blind Herbicide', 'Atticus Talak 7.9 F', 'Art Fungicide'], 'Removed: Blind Herbicide, Atticus Talak 7.9 F, Art Fungicide. The limits changed.'],
-    ])('rows after: %s', async (_name, move, kept, dropped, line) => {
+        await analyze(); await waitFor(() => expect(guideCalls()).toHaveLength(2)); await suggested();
+      }, ['Blind Herbicide', 'Atticus Talak 7.9 F', 'Art Fungicide']],
+    ])('rows after: %s', async (_name, move, warned) => {
       await takeFirstAnswer();
       await move();
-      for (const name of kept) expect(present(name)).toBe(true);
-      for (const name of dropped) expect(present(name)).toBe(false);
-      if (line) expect(screen.getByText(line)).toBeTruthy(); else expect(screen.queryByText(/^Removed:/)).toBeNull();
+      for (const name of ALL_ROWS) expect(present(name)).toBe(true);
+      for (const name of ALL_ROWS) {
+        const has = !!within(editorFor(name)).queryByText(HELD_RE);
+        expect([name, has]).toEqual([name, warned.includes(name)]);
+      }
+      expect(screen.queryByText(/^Removed:/)).toBeNull();
+      expect(footerNote()).not.toMatch(/not offered for this lawn/);
     });
 
     test('answered offered, then unreadable: the rows stay (we cannot say the products are forbidden) and Complete is not held by the guide', async () => {
@@ -3595,7 +3730,7 @@ describe('suggested from this lawn', () => {
       expect(footerNote()).not.toMatch(/not offered for this lawn|Wait for the lawn guide/);
     });
 
-    test('answered unreadable, then held and limited: the held pick goes with "The limits changed."; a row at a limit stays with its warning; a generic row stays', async () => {
+    test('answered unreadable, then held and limited: the held pick stays with the held warning (no "Removed" line); a row at a limit stays with its limit warning; a generic row stays', async () => {
       guideAnswer = UNREADABLE_ANSWER();
       await mxOpen(); await analyze(); await suggested();
       // The tech records what he applied: a pick from the list, a weed product from the search.
@@ -3612,8 +3747,12 @@ describe('suggested from this lawn', () => {
         limitWarned: { [P_DISP]: 'Disp: 3/3 applications in 2026 — LIMIT REACHED.' },
       };
       await analyze();
-      await screen.findByText('Removed: Art Fungicide. The limits changed.');
-      expect(present('Art Fungicide')).toBe(false);
+      await waitFor(() => expect(guideCalls()).toHaveLength(2));
+      await suggested();
+      // Owner 2026-11-26: the city hold only warns. The row stays, says so, and the visit record keeps it.
+      expect(screen.queryByText(/^Removed:/)).toBeNull();
+      expect(present('Art Fungicide')).toBe(true);
+      expect(within(editorFor('Art Fungicide')).getByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeTruthy();
       expect(present('Lead WG')).toBe(true);
       expect(present('Disp Wetting Agent')).toBe(true);
       expect(present('Vel Fungicide')).toBe(true);
@@ -3645,7 +3784,7 @@ describe('suggested from this lawn', () => {
       expect(screen.queryByRole('group', { name: 'Suggested from this lawn' })).toBeNull();
     });
 
-    test('failed on the first read, then a changed answer: rows taken from the context are dropped', async () => {
+    test('failed on the first read, then a changed answer: rows taken from the context stay with the held warning', async () => {
       guideAnswer = refusal(500, 'boom', 'Internal error');
       await mxOpen(); await analyze();
       await waitFor(() => expect(guideCalls()).toHaveLength(1));
@@ -3658,23 +3797,31 @@ describe('suggested from this lawn', () => {
       await retake();
       guideAnswer = answerOf([], { ...MX_WEED, mode: 'none', productIds: [] }, { item: null, note: 'The yearly limit is reached for the chinch bug products on this lawn.', rungIds: RUNGS }, [P_ART, P_ARENA, P_BIF, P_LEAD, P_CERT]);
       await analyze();
-      await screen.findByText(/The limits changed\./);
-      for (const name of ['Lead WG', 'Cert Herbicide', 'Arena 50 WDG', 'Art Fungicide']) expect(present(name)).toBe(false);
+      await waitFor(() => expect(guideCalls()).toHaveLength(2));
+      await suggested();
+      // Nothing is dropped (owner 2026-11-26): each row the new decision no longer offers keeps its place and says so.
+      expect(screen.queryByText(/^Removed:/)).toBeNull();
+      for (const name of ['Lead WG', 'Cert Herbicide', 'Arena 50 WDG', 'Art Fungicide']) {
+        expect(present(name)).toBe(true);
+        expect(within(editorFor(name)).getByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeTruthy();
+      }
       expect(present('Vel Fungicide')).toBe(true);
+      expect(within(editorFor('Vel Fungicide')).queryByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeNull();
     });
 
-    test('the belt: a governed row the latest decision does not offer blocks Complete with the plain line', async () => {
-      // A planned default that is also a blocked pick: impossible by construction, so the state is forced.
+    test('the belt is a warning only: a planned row of a held pick stays, says so, and never holds Complete', async () => {
+      // A planned default that is also a held pick: it used to block Complete with "Remove Art Fungicide: it is not offered".
+      // Owner 2026-11-26: only warned, never blocked. The row keeps its place with HELD_ROW_NOTE and the product is sent.
       const planned = [PLANNED[0], { productId: P_ART, name: 'Art Fungicide', applicationMethod: 'broadcast_spray', amount: 1, amountUnit: 'fl_oz', treatedSqft: 5000, areaUnit: 'sqft' }];
       guideAnswer = answerOf([], MX_WEED, CLEAN_CHINCH, [P_ART]);
       await mxOpen(mxContext({ plannedProducts: { source: 'plan', items: planned, addOns: ADD_ONS, month: 7, weedMix: MX_WEED, guidedProductIds: [P_ART, P_ACE, P_DISP], chinch: CLEAN_CHINCH } }));
       await analyze();
       await suggested();
-      await waitFor(() => expect(footerNote()).toBe('Remove Art Fungicide: it is not offered for this lawn right now.'));
-      expect(completeButton().disabled).toBe(true);
-      // Removing the row clears the hold.
-      fireEvent.click(within(editorFor('Art Fungicide')).getByRole('button', { name: 'Remove' }));
+      await waitFor(() => expect(within(editorFor('Art Fungicide')).getByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeTruthy());
+      expect(footerNote()).not.toMatch(/not offered for this lawn/);
       await waitFor(() => expect(completeButton().disabled).toBe(false));
+      await submit();
+      expect(sentProduct(P_ART)).toBeTruthy();
     });
 
     test('the same row is fine when the decision offers it (no finding, nothing blocked)', async () => {
@@ -3765,7 +3912,8 @@ describe('suggested from this lawn', () => {
       ['before the guide has decided', () => { guideAnswer = () => new Promise(() => {}); }, { list: false, search: false }],
       ['no finding, nothing blocked', () => { answer([]); }, { list: false, search: true }],
       ['a take-all check-only card', () => { answer([takeAllHeld()]); }, { list: false, search: true }],
-      ['a limit that was read forbids it', () => { answer([], WEED_MIX, { blockedProductIds: [P_HEAD] }); }, { list: false, search: false }],
+      // A limit that was read (a hold) only warns: the search still lists the product, the row carries HELD_ROW_NOTE (owner 2026-11-26).
+      ['a limit that was read holds it (warned, not blocked)', () => { answer([], WEED_MIX, { blockedProductIds: [P_HEAD] }); }, { list: false, search: true }],
       ['the guide request failed', () => { guideAnswer = refusal(500, 'boom', 'Internal error'); }, { list: false, search: true }],
       ['the limit could not be read', () => { answer([], WEED_MIX, { unreadableProductIds: [P_HEAD], unreadableNote: UNREAD_NOTE }); }, { list: false, search: true }],
     ];
@@ -3783,7 +3931,7 @@ describe('suggested from this lawn', () => {
     }
 
     // Group 11 stacking: October's large patch Artavia row on a take-all lawn is passed over. The context names it (takeAllProductIds, held, and
-    // group11HeldProductIds, blocked), so it is out of the list AND the search from the start, even when the guide request fails.
+    // group11HeldProductIds, blocked), so it is out of the list from the start, even when the guide request fails. The search still finds it, with a warning.
     describe('a Group 11 row the plan passed over (blocked from the start)', () => {
       const group11Context = (extra = {}) => guideContext({
         plannedProducts: {
@@ -3796,24 +3944,27 @@ describe('suggested from this lawn', () => {
         ['the guide request failed', () => { guideAnswer = refusal(500, 'boom', 'Internal error'); }],
         ['the guide answered with the row blocked', () => { answer([], WEED_MIX, { takeAllProductIds: [P_HEAD], blockedProductIds: [P_HEAD] }); }],
       ];
-      test.each(G11_CASES)('%s: not in the protocol list and not found by the search', async (name, arrange) => {
+      test.each(G11_CASES)('%s: not in the protocol list, but the search finds it (warned, not blocked)', async (name, arrange) => {
         arrange();
         await openG11();
         await analyze();
         await waitFor(() => expect(document.querySelector('.tech-protocol-addons')).toBeTruthy());
         if (name !== 'before the guide has decided') await waitFor(() => expect(guideCalls()).toHaveLength(1));
         expect(inList(10)).toBe(false);
-        expect(await inSearch()).toBe(false);
-        // Not even listed held before the answer: the context's Group 11 hold is already a decision.
-        expect(await heldInSearch()).toBe(false);
+        // Before the answer the search lists it held with the add-ons' line; after it, it takes a tap (owner 2026-11-26).
+        const before = name === 'before the guide has decided';
+        expect(await inSearch()).toBe(!before);
+        expect(await heldInSearch()).toBe(before);
       });
 
-      test('the guide is OFF: the held row is still out of the protocol list and the search (a plain add-on without the hold)', async () => {
+      test('the guide is OFF: the held row stays out of the protocol list but the search finds it', async () => {
         const planned = { source: 'plan', items: [PLANNED[0]], addOns: [...ADD_ONS, addOn(P_HEAD, 'Head Fungicide', MONTHS[3][1])], month: 10, weedMix: WEED_MIX };
         await openSheet({ request: makeRequest({ ctx: guideContext({ treatmentGuide: false, plannedProducts: { ...planned, group11HeldProductIds: [P_HEAD] } }) }), props: { catalog: TA_CATALOG } });
         await analyze();
         expect(inList(10)).toBe(false);
-        expect(await inSearch()).toBe(false);
+        expect(await inSearch()).toBe(true);
+        fireEvent.click((await headRows())[0]);
+        expect(within(editorFor('Head Fungicide')).getByText(new RegExp(HELD_ROW_NOTE.slice(0, 40)))).toBeTruthy();
       });
 
       test('the guide is OFF and nothing is held: the row stays a plain add-on and searchable', async () => {
@@ -3847,8 +3998,10 @@ describe('suggested from this lawn', () => {
       await analyze();
       await suggested();
       await addProductByName('Head Fungicide');
-      expect(within(editorFor('Head Fungicide')).getByText(HEAD_NOTE)).toBeTruthy();
+      // The take-all note and the held note both show (the card holds the product).
+      expect(within(editorFor('Head Fungicide')).getByText(`${HEAD_NOTE} ${HELD_ROW_NOTE}`)).toBeTruthy();
       expect(footerNote()).not.toMatch(/not offered for this lawn/);
+      await waitFor(() => expect(completeButton().disabled).toBe(false));
     });
 
     test('the check-only card still names no product to tap', async () => {
