@@ -1112,6 +1112,7 @@ function publishStagedTrenchingCatalogState(staged) {
     if (nextProduct.configuredContainerCost === undefined) delete target.configuredContainerCost;
     if (nextProduct.configuredContainerOz === undefined) delete target.configuredContainerOz;
   }
+  applyRetreatOnlyTrenchingCopy(trenching);
 }
 
 function applyTrenchingCatalogPrice(key, product, row) {

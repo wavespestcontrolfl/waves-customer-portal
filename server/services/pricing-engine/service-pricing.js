@@ -7330,7 +7330,10 @@ const namesCrosscheckPlus = (product = {}) => namesBottle(product, CROSSCHECK_PL
 // the same Volume Adjustment Chart as Crosscheck Plus, so the trench half volume holds for it too (priceTrenching).
 const TALAK_79F_NAMES = new Set(['talak79f', 'talak79fbifenthrin', 'atticustalak79f', 'atticustalak79fbifenthrin']);
 // A bottle whose label was read for the trench half volume: a product an admin renamed to any other bottle keeps the full volume.
-const namesHalfVolumeLabel = (product = {}) => namesCrosscheckPlus(product) || namesBottle(product, TALAK_79F_NAMES);
+// Both Crosscheck Plus and the earlier Atticus Talak 7.9 F carry the same chart, so a partial overlay mixing Crosscheck's
+// catalog link with a Talak label still qualifies while any third bottle (e.g. Bifen I/T, Crosscheck G) stays full volume.
+const HALF_VOLUME_LABEL_NAMES = new Set([...CROSSCHECK_PLUS_NAMES, ...TALAK_79F_NAMES]);
+const namesHalfVolumeLabel = (product = {}) => namesBottle(product, HALF_VOLUME_LABEL_NAMES);
 function labelCheckCounts(options, productKey, product) {
   if (!optionBooleanTrue(options.labelConfirmed)) return false;
   return !BIFENTHRIN_TERMITICIDE_KEYS.has(productKey)
