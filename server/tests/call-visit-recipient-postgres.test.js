@@ -622,6 +622,25 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(row).toMatchObject({ id: copy.id, source: 'customer_reminder_contact', track_token: `vr_${'a'.repeat(48)}` });
       });
 
+      test('a copy moved to an account that does not list the number grants nothing: no text, no link', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        const [{ id: winnerId }] = await db('customers').insert({ first_name: 'Win', last_name: 'Ner', phone: phone(49) }).returning('id');
+        try {
+          // what a merge does: the visit and its rows move to the winner; the list stays on the old account
+          await db('scheduled_services').where({ id: otherVisitId }).update({ customer_id: winnerId });
+          await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).update({ customer_id: winnerId });
+          expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
+          expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
+          // once the winner itself lists the number, the copy is a grant again
+          await db('customer_reminder_contacts').insert({ customer_id: winnerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x' });
+          expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+        } finally {
+          await db('scheduled_services').where({ id: otherVisitId }).update({ customer_id: customerId });
+          await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).del();
+          await db('customers').where({ id: winnerId }).del();
+        }
+      });
+
       test('a customer merge never moves the list: the loser\'s entries stay on the loser', async () => {
         const { REPOINT_EXCLUDED_TABLES } = require('../services/customer-dedupe');
         expect(REPOINT_EXCLUDED_TABLES.has('customer_reminder_contacts')).toBe(true);
@@ -1469,6 +1488,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           'the row given a new token': ({ id }) => db('visit_text_recipients').where({ id }).update({ track_token: `vr_${'9'.repeat(48)}` }),
           'the row rebound to another customer': ({ id }) => db('visit_text_recipients').where({ id }).update({ customer_id: otherCustomerId }),
           'the row moved to another visit': ({ id }) => db('visit_text_recipients').where({ id }).update({ scheduled_service_id: otherVisitId }),
+          'a list copy whose customer does not list the number': async ({ id }) => {
+            await db('visit_text_recipients').where({ id }).update({ source: 'customer_reminder_contact' });
+            await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+          },
         };
         let spy;
         beforeEach(async () => {

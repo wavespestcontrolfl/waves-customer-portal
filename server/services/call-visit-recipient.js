@@ -4,7 +4,7 @@
  *
  * EVERY VISIT: a person recorded from a call also goes on the customer's list (customer_reminder_contacts). Before any
  * visit's text goes out, materializeForVisit copies that list onto the visit as ordinary visit rows, so everything below
- * applies to them unchanged: once written, a copy is a plain visit grant. List entries are never deleted or changed by a
+ * applies to them unchanged, plus one rule: a copy grants only while the visit's current customer lists the number. List entries are never deleted or changed by a
  * call. Every existing stop route
  * (STOP, suppression, opt-in decline, own choices, a "no texts" call) is read at each send, as for every row. A caller who limits the texts to the booked visit ("just this visit": the extraction's
  * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The staff and portal
@@ -291,6 +291,11 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
   });
 }
 
+// The customer lists the number for every visit.
+async function listedBy(customerId, phoneKey, conn) {
+  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).first('id'));
+}
+
 /**
  * Has this person declined, by any existing route? Their own text choices as a service contact (this
  * purpose or texts altogether), a recipient_optin decline on the account, STOP or any active
@@ -363,6 +368,10 @@ function rowBelongsToVisitCustomer(row, visit) {
 // visit was reassigned) or to none, or a person who has declined.
 async function ownedContact(row, visit, kind, conn, taken) {
   if (taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit)) return null;
+  // A copy of the every-visit list grants only while the visit's CURRENT customer lists the number: a merge moves the visit
+  // (and the copy) to an account that may not list them. Entries are never deleted, so this answer only ever widens when that
+  // customer itself lists the person.
+  if (row.source === REMINDER_SOURCE && !(await listedBy(visit.customer_id, row.phone_key, conn))) return null;
   if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS[kind].purpose, conn })) return null;
   const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
   const scheduledDate = dateOnlyString(visit.scheduled_date);
@@ -545,6 +554,8 @@ async function notifyVisitRecipients({ scheduledServiceId, kind, customerId, exc
 // The every-visit copy for the notice's customer, then the people owed this text. Throws on any failed read.
 async function copyThenList(scheduledServiceId, kind, { customerId, excludePhones, conn }) {
   const copiedFor = await materializeForVisit(scheduledServiceId, conn, { expectedCustomerId: customerId });
+  // A visit with no customer has nobody to text.
+  if (!copiedFor) return [];
   return contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true, copiedFor });
 }
 
