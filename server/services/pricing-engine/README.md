@@ -551,7 +551,7 @@ tiers, bracket tables, or fixed floors as identified below.
 | Wasp / hornet / yellow jacket | — | tiered $150/$275/$435/$775 (level 2 was $250 before 2026-11-26) | free with recurring pest (tier-1 paper wasp / mud dauber only) |
 | Rodent exclusion V2 | fixed item/bracket model | $195 point-only; $295 with linear mesh | mesh points, bird boxes, and linear feet from `RODENT.exclusionV2`; $75 inspection subject to waiver rules |
 | Legacy exclusion V1 | fixed item/bracket model | home-size minimums from $395 | $50/$95/$195 simple/moderate/advanced points from `SPECIALTY.exclusion`; $75 inspection subject to waiver rules |
-| WDO inspection | fixed | $250 | flat code default for every footprint; database pricing may override defaults |
+| WDO inspection | table | $150 to $275 | new quotes (2026-11-26): by footprint and construction, `SPECIALTY.wdo.sizeTable`; quotes saved before keep the $250 flat default (`legacyWdoFlat` stamp), which database pricing may override |
 
 The recurring first-visit cockroach line uses the separate
 `pest_initial_roach` scales in §3. The legacy explicit

@@ -313,4 +313,4 @@ function lintFlags(text, context = {}) {
   return toFlags(lintComms(text, context));
 }
 
-module.exports = { lintComms, lintFlags, toFlags, smsSegmentCount, isGsm7, RULES, URL_SHORTENER_HOSTS };
+module.exports = { lintComms, lintFlags, toFlags, smsSegmentCount, isGsm7, RULES, URL_SHORTENER_HOSTS, findShortenerHost };

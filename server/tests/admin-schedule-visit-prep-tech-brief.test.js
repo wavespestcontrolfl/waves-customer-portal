@@ -53,6 +53,7 @@ const mockVisitPrepPhotosLive = jest.fn(() => true);
 jest.mock('../config/feature-gates', () => ({
   visitPrepPhotosLive: (...args) => mockVisitPrepPhotosLive(...args),
   visitAccessCardsLive: () => false,
+  techVisitTextsLive: () => false,
 }));
 const mockStopPhotoViewUrls = jest.fn(async () => []);
 jest.mock('../services/visit-prep', () => ({

@@ -1153,6 +1153,8 @@ jest.setTimeout(30000);
       'service_outline_packet_products.product_id',
       // this lane's own receipt lines
       'purchase_receipt_lines.product_id', 'purchase_receipt_lines.agent_created_product_id',
+      // tank mix safety rules: a verdict and a reason for a product pair, no rate, unit or stock
+      'product_mix_rules.product_a_id', 'product_mix_rules.product_b_id',
     ];
     const classified = new Set([...operational, ...notOperational]);
     expect(rows.map((row) => row.ref).filter((ref) => !classified.has(ref)).sort()).toEqual([]);

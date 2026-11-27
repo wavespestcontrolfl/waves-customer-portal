@@ -190,6 +190,25 @@ describe('Customer 360 → Property → Access & Preferences', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('account-updated'))).toBe(false);
   });
 
+  it('an open About this home draft survives switching Access & Preferences into its editor', async () => {
+    vi.stubGlobal('fetch', vi.fn((url) => {
+      const path = String(url);
+      if (path.endsWith('/admin/payers')) return response({ payers: [] });
+      if (path.split('?')[0].endsWith('/timeline')) return response({ timeline: [] });
+      if (path.endsWith('/admin/customers/customer-a/home-note')) return response({ note: null, editable: true, customerId: 'customer-a' });
+      if (path.endsWith('/admin/customers/customer-a')) return response(customerDetail());
+      return response({});
+    }));
+    render(<Customer360ProfileV2 customerId="customer-a" onClose={vi.fn()} />);
+    await screen.findAllByText('Avery Customer');
+    await openPropertyTab();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add note' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Typed before editing prefs' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Access & Preferences' }));
+    await screen.findByText('Access Notes');
+    expect(screen.getByLabelText('About this home')).toHaveValue('Typed before editing prefs');
+  });
+
   it('shows server-reported rejected fields without discarding the rest of the edit', async () => {
     let prefsOverride = {};
     vi.stubGlobal('fetch', vi.fn((url, options) => {

@@ -735,6 +735,17 @@ describe('mixForProduct', () => {
     } finally { delete process.env.GATE_LABEL_PIPELINE; }
   });
 
+  test('a categoryless visit with no protocol card gets the searched dose with the no-protocol warning; a categoryless general pest visit is judged as before (owner pick D18; owner 2026-11-26: warned, never blocked)', async () => {
+    const noCard = 'No treatment protocol for this visit (no catalog identity)';
+    const search = async (serviceType) => {
+      const dbh = makeDb({ scheduled_services: [{ ...visit, service_type: serviceType, service_category: null, service_key: null }], products_catalog: [product], equipment_calibrations: [live] });
+      return jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), evaluateApprovals: approve() }, ...at });
+    };
+    expect((await search('Barrier Treatment')).warnings).toContain(noCard);
+    expect((await search('Wildlife Trapping')).warnings).toContain(noCard);
+    expect((await search('Quarterly Pest Control')).warnings || []).not.toContain(noCard);
+  });
+
   test('a categoryless (legacy/manual) misting-system visit gets the searched dose with a no-protocol warning (Codex #4779 r8 P1, owner 2026-11-26)', async () => {
     const mistingVisit = { ...visit, service_type: 'Mosquito Misting System Service', service_category: null, service_key: null };
     const dbh = makeDb({ scheduled_services: [mistingVisit], products_catalog: [product], equipment_calibrations: [live] });
