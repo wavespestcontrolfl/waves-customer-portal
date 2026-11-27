@@ -659,3 +659,30 @@ describe('selfBookedNoteText: stops at the office entries', () => {
     expect(selfBookedNoteText(`${real}\nMoved from 2026-11-20: a\nRescheduled: b | RESCHEDULE REQUEST: c`)).toBe('Side gate sticks. Please text first.');
   });
 });
+
+describe('gatherReserviceAsks: holdText screens the ORIGINAL text, before the scrub and the caps', () => {
+  const filler = `${'The ants keep coming in by the back door. '.repeat(8)}`; // past 280 characters
+  const hold = (text) => /photos\.example\.dev|blue42/.test(text);
+
+  test('a candidate whose original text is held never becomes an item, whatever the cut left of it', async () => {
+    const late = `${filler}Photos are at photos.example.dev/yard`;
+    const out = await gatherReserviceAsks('visit-1', {
+      knex: fakeKnex({ visit: baseVisit({ customer_request: late, customer_request_source: 'text' }), sms: [sms('s1', late), sms('s2', 'Ants are back in the kitchen.')] }),
+      now: NOW,
+      holdText: hold,
+    });
+    expect(out.items.map((i) => i.id)).toEqual(['text:s2']);
+  });
+
+  test('the whole text body is screened, not only the capped suggestion', async () => {
+    const late = `Ants are back in the kitchen. ${'x '.repeat(300)} lockbox is blue42`;
+    const out = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ sms: [sms('s1', late)] }), now: NOW, holdText: hold });
+    expect(out.items).toEqual([]);
+  });
+
+  test('without holdText the result is unchanged', async () => {
+    const late = `${filler}Photos are at photos.example.dev/yard`;
+    const out = await gatherReserviceAsks('visit-1', { knex: fakeKnex({ sms: [sms('s1', late)] }), now: NOW });
+    expect(out.items).toHaveLength(1);
+  });
+});

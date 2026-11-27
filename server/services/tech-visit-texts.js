@@ -343,4 +343,4 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   return { texts, hidden };
 }
 
-module.exports = { screenBodyForTechnician, readStoredCodes, textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };
+module.exports = { sequenceHeldIds, screenBodyForTechnician, readStoredCodes, textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };

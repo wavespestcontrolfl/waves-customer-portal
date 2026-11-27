@@ -49,7 +49,7 @@ function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct'
         return table === 'property_preferences' ? prefs : filed;
       }
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
-      if (table === 'messages as m') return messages;
+      if (table === 'messages as m') return messages.map((m, n) => ({ id: `m${n}`, ...m }));
       if (table === 'service_requests') return rows.filter((r) => (r.source === 'customer_portal_reschedule') === Boolean(q.resched));
       return table === 'customer_properties' ? props : rows;
     };
@@ -105,7 +105,7 @@ describe('customerAskedFacts: the sources', () => {
     ]));
     const dbh = fakeDbh();
     const facts = await customerAskedFacts(SVC, dbh);
-    expect(mockGather).toHaveBeenCalledWith('svc-1', { knex: dbh, skipCalls: true });
+    expect(mockGather).toHaveBeenCalledWith('svc-1', { knex: dbh, skipCalls: true, holdText: expect.any(Function) });
     expect(facts.items).toHaveLength(1);
     expect(facts.items[0]).toMatchObject({ kind: 'reservice_reason', text: 'Ants in the kitchen.' });
     expect(JSON.stringify(facts)).not.toMatch(/refund/);
@@ -742,6 +742,46 @@ describe('customerAskedFacts: the texts feature\'s body screen on every free-tex
     await customerAskedFacts(SVC, ok);
     expect(ok.calls.filter((c) => c[0] === 'property_preferences' && c[1] === 'where')).toHaveLength(1);
     expect(ok.calls.filter((c) => c[0] === 'customer_access_codes' && c[1] === 'where')).toHaveLength(1);
+  });
+});
+
+describe('customerAskedFacts: portal messages are screened as a sequence, like the texts', () => {
+  const VISIT = { ...SVC, scheduled_date: '2026-11-27' };
+  const at = (n) => `2026-11-24T1${n}:00:00.000Z`;
+  beforeEach(() => { process.env.GATE_PORTAL_MESSAGES = 'true'; });
+  afterAll(() => { delete process.env.GATE_PORTAL_MESSAGES; });
+
+  test('"my verification code is" / "48" / "1": all dropped, the later ordinary ask stays', async () => {
+    // Read newest first, as the query returns them.
+    const messages = [
+      { body: 'Please come after noon', created_at: at(5) },
+      { body: '1', created_at: at(3) },
+      { body: '48', created_at: at(2) },
+      { body: 'my verification code is', created_at: at(1) },
+    ];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Please come after noon']);
+  });
+
+  test('a card number sent a few digits at a time is dropped, the pieces included', async () => {
+    const messages = [
+      { body: '1111', created_at: at(4) }, { body: '1111', created_at: at(3) }, { body: '4111', created_at: at(2) },
+      { body: 'Dog is in the yard', created_at: at(1) },
+    ];
+    expect((await customerAskedFacts(VISIT, fakeDbh({ messages }))).items.map((i) => i.text)).toEqual(['Dog is in the yard']);
+  });
+
+  test('the sequence runs over the whole window before the display cap, so a held message past the five shown still holds its reply', async () => {
+    const ordinary = Array.from({ length: 5 }, (_, n) => ({ body: `Gate is open ${'a'.repeat(n)}`, created_at: `2026-11-25T1${n}:00:00.000Z` }));
+    const messages = [...ordinary.reverse(), { body: '7', created_at: at(2) }, { body: 'my verification code is', created_at: at(1) }];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages }));
+    expect(facts.items).toHaveLength(5);
+    expect(JSON.stringify(facts)).not.toMatch(/verification|"7"/);
+  });
+
+  test('an ordinary short reply after an ordinary message is not held', async () => {
+    const messages = [{ body: '9', created_at: at(2) }, { body: 'How many techs will come', created_at: at(1) }];
+    expect((await customerAskedFacts(VISIT, fakeDbh({ messages }))).items.map((i) => i.text).sort()).toEqual(['9', 'How many techs will come']);
   });
 });
 

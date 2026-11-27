@@ -376,7 +376,11 @@ function dedupeItems(items, bookingId) {
 // call-sourced items (a call's quotes, and booking words that came from a call) taken out of what is returned. So
 // every item id a technician sees exists in the completion gather, and its answer is never dropped as unknown.
 // Left off, the result is unchanged.
-async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false } = {}) {
+//
+// `holdText` (the technician Visit Brief's own screen): a function over the ORIGINAL text of a candidate, before the scrub and
+// the caps cut it. A candidate whose original text it holds is never built into an item: the scrub keeps only some sentences,
+// so a link, a code or a price past the cut would otherwise pass. Left off, the result is unchanged.
+async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Date(), skipCalls = false, holdText = null } = {}) {
   const visit = await readVisit(knex, scheduledServiceId);
   if (!visit) return { ok: false, reason: 'not_found' };
   if (!isReserviceVisit(visit)) return { ok: false, reason: 'not_reservice' };
@@ -389,7 +393,8 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 
   const booking = bookingWords(visit, lane);
   const bookingId = `booking:${visit.id}`;
-  const bookingItem = booking ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
+  const held = (candidate) => Boolean(holdText) && [candidate.text, candidate.screenText].some((text) => text && holdText(String(text)));
+  const bookingItem = booking && !held(booking) ? buildItem({ id: bookingId, at: anchor, ...booking }) : null;
   // A text that repeats the booking words (before or after the scrub) is the
   // same ask, not a second one.
   const bookingKeys = new Set([booking && normalizedWords(booking.text), bookingItem && normalizedWords(bookingItem.text)].filter(Boolean));
@@ -403,7 +408,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 
   // `accountWide` (only when set): the visit's own booking words are this property's; the rest may not be.
   const severalProperties = customerId ? await accountMayHaveSeveralPremises(knex, customerId) : false;
-  const items = [bookingItem, ...channels.flat().map(buildItem)].filter(Boolean)
+  const items = [bookingItem, ...channels.flat().filter((candidate) => !held(candidate)).map(buildItem)].filter(Boolean)
     .map((item) => (severalProperties && item.id !== bookingId ? { ...item, accountWide: true } : item));
   const kept = limitItems(dedupeItems(items, bookingId), bookingId);
   return {

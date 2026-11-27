@@ -114,7 +114,8 @@ async function safely(name, read) {
 // included.
 async function reserviceItems(svc, dbh, codes) {
   if (!require('../config/feature-gates').reserviceAsksLive()) return [];
-  const gathered = await require('./reservice-asks').gatherReserviceAsks(svc.id, { knex: dbh, skipCalls: true });
+  // holdText: the body screen runs on each message's ORIGINAL text, before the gather scrubs and caps it.
+  const gathered = await require('./reservice-asks').gatherReserviceAsks(svc.id, { knex: dbh, skipCalls: true, holdText: (text) => !screenOk(compact(text), codes) });
   if (!gathered?.ok) return [];
   const bookingId = `booking:${svc.id}`;
   return gathered.items
@@ -386,9 +387,15 @@ async function portalMessageItems(svc, dbh, singleSoon, codes) {
     .where('m.created_at', '<=', until)
     .orderBy('m.created_at', 'desc')
     .limit(PORTAL_READ_LIMIT)
-    .select('m.body', 'm.created_at');
+    .select('m.id', 'm.body', 'm.created_at');
   const accountWide = !(await singleSoon);
+  // The texts feature's own sequence step, over the whole window in time order, BEFORE any filter or the display cap: a card
+  // number sent a few digits at a time, and a 1-2 digit reply right after a held message ("my verification code is" ... "48").
+  const sequenceHeld = require('./tech-visit-texts').sequenceHeldIds(
+    (rows || []).map((row) => ({ id: row.id, direction: 'inbound', message_body: row.body, created_at: row.created_at })),
+  );
   return (rows || [])
+    .filter((row) => !sequenceHeld.has(row.id))
     .filter((row) => compact(row.body) && safeMessage(compact(row.body), codes))
     .slice(0, PORTAL_ROW_LIMIT)
     .map((row) => entry('portal_message', row.created_at, row.body, { source: 'portal', ...(accountWide ? { accountWide: true } : {}) }, codes));
