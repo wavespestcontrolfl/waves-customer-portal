@@ -20,7 +20,7 @@ const WEEKLY_CLAIM_PREFIXES = ['bi_briefing_sms:'];
 // Keyed push dedupe leases & per-device partial-delivery markers
 // (notification-triggers.js): retained 30 days so webhook/call replays across
 // the full replay window stay single-shot even after daily SMS claim cleanup runs.
-const MONTHLY_CLAIM_PREFIXES = ['notif_push_dedupe:', 'notif_push_sub:'];
+const MONTHLY_CLAIM_PREFIXES = ['notif_push_dedupe:', 'notif_push_sub:', 'notif_push_partial:'];
 
 // async: a sync throw while building the query becomes a rejection, which
 // the routes' fire-and-forget `.catch(() => {})` already swallows.
@@ -99,12 +99,14 @@ async function acquirePushDedupeLease(claimKey, { leaseMinutes = 5 } = {}, conn 
   return { state: 'in_flight', ownerToken: null };
 }
 
-async function isPushDedupeLeaseOwner(claimKey, ownerToken, conn = db) {
+// Atomically verify lease ownership and renew created_at before each device
+// handoff so a slow fan-out cannot be reclaimed while still actively sending.
+async function renewPushDedupeLease(claimKey, ownerToken, conn = db) {
   if (!claimKey || !ownerToken) return false;
-  const row = await conn('sms_send_claims')
+  const updated = await conn('sms_send_claims')
     .where({ claim_key: claimKey, outcome: ownerToken })
-    .first('id');
-  return Boolean(row);
+    .update({ created_at: conn.fn ? conn.fn.now() : new Date() });
+  return Number(updated) > 0;
 }
 
 async function markPushDedupeDelivered(claimKey, ownerToken, conn = db) {
@@ -123,14 +125,21 @@ async function releasePushDedupeLease(claimKey, ownerToken, conn = db) {
   return Number(deleted) > 0;
 }
 
-function pushSubClaimPrefix(claimKey) {
-  const hash = crypto.createHash('sha256').update(String(claimKey)).digest('hex').slice(0, 16);
-  return `notif_push_sub:${hash}:`;
+function pushClaimHash(claimKey) {
+  return crypto.createHash('sha256').update(String(claimKey)).digest('hex').slice(0, 16);
 }
 
-// Per-device partial-delivery marker stored in sms_send_claims (retained 30d)
-// so a retry after a partial fan-out skips devices that already accepted the
-// push without double-notifying them.
+function pushSubClaimPrefix(claimKey) {
+  return `notif_push_sub:${pushClaimHash(claimKey)}:`;
+}
+
+function pushPartialMarkerKey(claimKey) {
+  return `notif_push_partial:${pushClaimHash(claimKey)}`;
+}
+
+// Per-device partial-delivery marker + exact-key partial sentinel stored in
+// sms_send_claims (retained 30d). Both lookups hit the UNIQUE index on
+// claim_key directly (no prefix table scans).
 async function recordPushDedupeSubDelivered(claimKey, subscriptionId, conn = db) {
   if (!claimKey || !subscriptionId) return;
   const subKey = `${pushSubClaimPrefix(claimKey)}${subscriptionId}`;
@@ -139,20 +148,32 @@ async function recordPushDedupeSubDelivered(claimKey, subscriptionId, conn = db)
      ON CONFLICT (claim_key) DO NOTHING`,
     [subKey],
   );
+  await conn.raw(
+    `INSERT INTO sms_send_claims (claim_key, outcome) VALUES (?, 'partial')
+     ON CONFLICT (claim_key) DO NOTHING`,
+    [pushPartialMarkerKey(claimKey)],
+  );
 }
 
-async function listPushDedupeDeliveredSubs(claimKey, conn = db) {
+async function listPushDedupeDeliveredSubs(claimKey, candidateSubIds = [], conn = db) {
   if (!claimKey) return [];
+  const marker = await conn('sms_send_claims')
+    .where({ claim_key: pushPartialMarkerKey(claimKey) })
+    .first('id');
+  if (!marker) return [];
+  const ids = [...new Set((candidateSubIds || []).filter(Boolean))];
+  if (ids.length === 0) return [];
   const prefix = pushSubClaimPrefix(claimKey);
+  const subKeys = ids.map((id) => `${prefix}${id}`);
   const rows = await conn('sms_send_claims')
-    .whereRaw('left(claim_key, ?) = ?', [prefix.length, prefix])
+    .whereIn('claim_key', subKeys)
     .select('claim_key');
   return (rows || []).map((r) => String(r.claim_key).slice(prefix.length)).filter(Boolean);
 }
 
 module.exports = {
   pruneSmsSendClaims, takeSendClaim, releaseSendClaim,
-  acquirePushDedupeLease, isPushDedupeLeaseOwner, markPushDedupeDelivered, releasePushDedupeLease,
-  recordPushDedupeSubDelivered, listPushDedupeDeliveredSubs, pushSubClaimPrefix,
+  acquirePushDedupeLease, renewPushDedupeLease, markPushDedupeDelivered, releasePushDedupeLease,
+  recordPushDedupeSubDelivered, listPushDedupeDeliveredSubs, pushSubClaimPrefix, pushPartialMarkerKey,
   WEEKLY_CLAIM_PREFIXES, MONTHLY_CLAIM_PREFIXES,
 };

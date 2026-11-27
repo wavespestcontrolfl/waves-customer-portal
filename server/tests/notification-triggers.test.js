@@ -1736,6 +1736,7 @@ describe('registry labels on the bell row', () => {
           const row = store.get(cond.claim_key);
           if (!row || (cond.outcome !== undefined && row.outcome !== cond.outcome)) return 0;
           if (patch.outcome) row.outcome = patch.outcome;
+          row.stale = false;
           return 1;
         },
         del: async () => {
@@ -1745,10 +1746,8 @@ describe('registry labels on the bell row', () => {
           return 1;
         },
       }),
-      whereRaw: (_sql, [len, prefix]) => ({
-        select: async () => [...store.entries()]
-          .filter(([k]) => k.slice(0, len) === prefix)
-          .map(([claim_key]) => ({ claim_key })),
+      whereIn: (_col, keys) => ({
+        select: async () => keys.filter((k) => store.has(k)).map((claim_key) => ({ claim_key })),
       }),
     });
     return { store, claimsTable };
@@ -1857,6 +1856,10 @@ describe('registry labels on the bell row', () => {
       if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
       if (table === 'notification_preferences') {
         return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'push_subscriptions') {
+        const subs = [{ id: 'sub-1' }, { id: 'sub-2' }];
+        return { whereIn: () => ({ where: () => ({ select: async () => subs }) }) };
       }
       if (table === 'sms_send_claims') return claimsTable();
       return tableMock([]);
@@ -2026,15 +2029,19 @@ describe('registry labels on the bell row', () => {
     expect(skippedPartial.deliveredSubscriptionIds).toEqual(['sub-ios-1']);
     expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-partial-skip')).toBeUndefined();
 
-    // Failed lease ownership check during beforeHandoff returns retryable pushFailed instead of superseded_before_push.
+    // Failed lease renewal during beforeHandoff returns retryable pushFailed instead of superseded_before_push.
     const dbErrKey = 'notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-lease-err';
     const baseClaimsTable = claimsTable;
-    let failOwnerCheck = false;
+    let failOwnerRenew = false;
     let failSubList = false;
     db.mockImplementation((table) => {
       if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
       if (table === 'notification_preferences') {
         return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'push_subscriptions') {
+        const subs = [{ id: 'sub-1' }, { id: 'sub-2' }];
+        return { whereIn: () => ({ where: () => ({ select: async () => subs }) }) };
       }
       if (table === 'sms_send_claims') {
         const base = baseClaimsTable();
@@ -2045,17 +2052,16 @@ describe('registry labels on the bell row', () => {
             return {
               ...w,
               first: async () => {
-                if (failOwnerCheck && cond.outcome) throw Object.assign(new Error('owner check lost'), { code: '57P01' });
+                if (failSubList && String(cond.claim_key || '').startsWith('notif_push_partial:')) {
+                  throw Object.assign(new Error('sub list lost'), { code: '57P01' });
+                }
                 return w.first();
               },
-            };
-          },
-          whereRaw: (sql, params) => {
-            const wr = base.whereRaw(sql, params);
-            return {
-              select: async () => {
-                if (failSubList) throw Object.assign(new Error('sub list lost'), { code: '57P01' });
-                return wr.select();
+              update: async (patch) => {
+                if (failOwnerRenew && cond.outcome && !patch.outcome) {
+                  throw Object.assign(new Error('owner renew lost'), { code: '57P01' });
+                }
+                return w.update(patch);
               },
             };
           },
@@ -2064,7 +2070,7 @@ describe('registry labels on the bell row', () => {
       return tableMock([]);
     });
 
-    failOwnerCheck = true;
+    failOwnerRenew = true;
     PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
       const ok = await opts.beforeHandoff();
       expect(ok).toBe(false);
@@ -2079,7 +2085,7 @@ describe('registry labels on the bell row', () => {
     expect(ownerErrRes.pushFailed).toBe('before_handoff');
     expect(ownerErrRes.push?.skipped).not.toBe('superseded_before_push');
     expect(store.get(dbErrKey)).toBeUndefined();
-    failOwnerCheck = false;
+    failOwnerRenew = false;
 
     // Failed persisted delivery-history lookup aborts before send, releases lease, and returns retryable.
     failSubList = true;
@@ -2094,6 +2100,29 @@ describe('registry labels on the bell row', () => {
     expect(subErrRes.pushFailed).toBe('before_handoff');
     expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-sub-err')).toBeUndefined();
     failSubList = false;
+
+    // If a delivered device's marker write fails during partial delivery (and retry confirm also fails),
+    // retain the pending lease rather than releasing it and letting an immediate retry double-push.
+    const markerFailKey = 'notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-marker-fail';
+    const rawImpl = db.raw.getMockImplementation();
+    db.raw.mockImplementation(async (sql, params) => {
+      if (String(params?.[0] || '').startsWith('notif_push_sub:')) {
+        throw Object.assign(new Error('marker write down'), { code: '57P01' });
+      }
+      return rawImpl(sql, params);
+    });
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      opts?.onDelivered?.({ id: 'sub-1' });
+      return { sent: 1, failed: 1, subscriptions: 2 };
+    });
+    const markerFailRes = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-marker-fail' },
+      { dedupeKey: 'relay-unbooked:CA-marker-fail' },
+    );
+    expect(markerFailRes.retryable).toBe(true);
+    expect(store.get(markerFailKey)?.outcome).toMatch(/^pending:/);
+    db.raw.mockImplementation(rawImpl);
   });
 
   test('sandy_transfer_no_context pushOnly banner sends committed row words with waves-missed-call.caf sound', async () => {

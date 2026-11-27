@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const {
   takeSendClaim, releaseSendClaim, pruneSmsSendClaims,
-  acquirePushDedupeLease, isPushDedupeLeaseOwner, markPushDedupeDelivered, releasePushDedupeLease,
+  acquirePushDedupeLease, renewPushDedupeLease, markPushDedupeDelivered, releasePushDedupeLease,
   recordPushDedupeSubDelivered, listPushDedupeDeliveredSubs, MONTHLY_CLAIM_PREFIXES,
 } = require('../services/sms-send-claims');
 
@@ -55,8 +55,8 @@ test('both daily banners take and release their claim through this module', () =
   }
 });
 
-test('pruneSmsSendClaims retains notif_push_dedupe: and notif_push_sub: claims for 30 days instead of daily cleanup', async () => {
-  expect(MONTHLY_CLAIM_PREFIXES).toEqual(expect.arrayContaining(['notif_push_dedupe:', 'notif_push_sub:']));
+test('pruneSmsSendClaims retains notif_push_dedupe:, notif_push_sub:, and notif_push_partial: claims for 30 days', async () => {
+  expect(MONTHLY_CLAIM_PREFIXES).toEqual(expect.arrayContaining(['notif_push_dedupe:', 'notif_push_sub:', 'notif_push_partial:']));
   const clauses = [];
   const makeBuilder = () => {
     const b = {
@@ -80,15 +80,16 @@ test('pruneSmsSendClaims retains notif_push_dedupe: and notif_push_sub: claims f
   const conn = jest.fn(() => makeBuilder());
   conn.raw = jest.fn((sql) => sql);
   await pruneSmsSendClaims(conn);
-  for (const prefix of ['notif_push_dedupe:', 'notif_push_sub:']) {
+  for (const prefix of ['notif_push_dedupe:', 'notif_push_sub:', 'notif_push_partial:']) {
     expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) <> ?', [prefix.length, prefix]]);
     expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) = ?', [prefix.length, prefix]]);
   }
   expect(clauses).toContainEqual(['where', 'created_at', '<', "NOW() - interval '30 days'"]);
 });
 
-test('push dedupe leases enforce owner tokens so an expired owner cannot release or complete a replacement lease', async () => {
+test('push dedupe leases enforce owner tokens, renew on handoff, and look up sub markers via exact indexed keys', async () => {
   const store = new Map();
+  let renewCalls = 0;
   const conn = jest.fn(() => ({
     where: (cond) => ({
       first: async () => {
@@ -101,6 +102,8 @@ test('push dedupe leases enforce owner tokens so an expired owner cannot release
         const row = store.get(cond.claim_key);
         if (!row || (cond.outcome !== undefined && row.outcome !== cond.outcome)) return 0;
         if (patch.outcome) row.outcome = patch.outcome;
+        else renewCalls += 1;
+        row.stale = false;
         return 1;
       },
       del: async () => {
@@ -110,10 +113,8 @@ test('push dedupe leases enforce owner tokens so an expired owner cannot release
         return 1;
       },
     }),
-    whereRaw: (_sql, [len, prefix]) => ({
-      select: async () => [...store.entries()]
-        .filter(([k]) => k.slice(0, len) === prefix)
-        .map(([claim_key]) => ({ claim_key })),
+    whereIn: (_col, keys) => ({
+      select: async () => keys.filter((k) => store.has(k)).map((claim_key) => ({ claim_key })),
     }),
   }));
   conn.raw = jest.fn(async (sql, params) => {
@@ -140,7 +141,9 @@ test('push dedupe leases enforce owner tokens so an expired owner cannot release
   const first = await acquirePushDedupeLease(key, {}, conn);
   expect(first.state).toBe('acquired');
   expect(first.ownerToken).toMatch(/^pending:[0-9a-f]{16}$/);
-  await expect(isPushDedupeLeaseOwner(key, first.ownerToken, conn)).resolves.toBe(true);
+  // Active owner renews lease atomically.
+  await expect(renewPushDedupeLease(key, first.ownerToken, conn)).resolves.toBe(true);
+  expect(renewCalls).toBe(1);
 
   // Lease expires and worker 2 reclaims it with a new owner token.
   store.get(key).stale = true;
@@ -148,16 +151,17 @@ test('push dedupe leases enforce owner tokens so an expired owner cannot release
   expect(second.state).toBe('acquired');
   expect(second.ownerToken).not.toBe(first.ownerToken);
 
-  // Worker 1 (stale owner) is rejected on owner check, release, and mark-delivered.
-  await expect(isPushDedupeLeaseOwner(key, first.ownerToken, conn)).resolves.toBe(false);
+  // Worker 1 (stale owner) is rejected on renew, release, and mark-delivered.
+  await expect(renewPushDedupeLease(key, first.ownerToken, conn)).resolves.toBe(false);
   await expect(releasePushDedupeLease(key, first.ownerToken, conn)).resolves.toBe(false);
   await expect(markPushDedupeDelivered(key, first.ownerToken, conn)).resolves.toBe(false);
   expect(store.get(key).outcome).toBe(second.ownerToken);
 
-  // Per-device sub markers round-trip and Worker 2 completes delivery cleanly.
+  // Per-device sub markers round-trip via exact key lookup (no prefix scan) and Worker 2 completes cleanly.
+  await expect(listPushDedupeDeliveredSubs(key, ['sub-a', 'sub-b'], conn)).resolves.toEqual([]);
   await recordPushDedupeSubDelivered(key, 'sub-a', conn);
   await recordPushDedupeSubDelivered(key, 'sub-b', conn);
-  await expect(listPushDedupeDeliveredSubs(key, conn)).resolves.toEqual(['sub-a', 'sub-b']);
+  await expect(listPushDedupeDeliveredSubs(key, ['sub-a', 'sub-b', 'sub-c'], conn)).resolves.toEqual(['sub-a', 'sub-b']);
   await expect(markPushDedupeDelivered(key, second.ownerToken, conn)).resolves.toBe(true);
   expect(store.get(key).outcome).toBe('delivered');
 });
