@@ -307,18 +307,9 @@ function travelAllowance(opts) {
   return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
-function dayIncompatibleWithInsertion(context) {
-  if (typeof hasInsertionIncompatibleRow === 'function') return hasInsertionIncompatibleRow(context);
-  const techId = context && context.target && context.target.technician_id;
-  return Boolean(context && Array.isArray(context.rows)
-    && context.rows.some((r) => r && r.status !== 'completed'
-      && (r.technician_id === null
-        || (techId != null && String(r.technician_id) === String(techId) && !r.window_start && Boolean(r.time_window)))));
-}
-
 function insertionOptionsFor(opts, context) {
   if (opts.capacityPlacement === true) return { allowInsertion: true };
-  if (opts.arrivalSearch === true && opts.arrivalInsert === true && !dayIncompatibleWithInsertion(context)) {
+  if (opts.arrivalSearch === true && opts.arrivalInsert === true && !hasInsertionIncompatibleRow(context)) {
     return { allowInsertion: true, insertionMargin: true, preserveExistingOrder: true };
   }
   return { allowInsertion: false };

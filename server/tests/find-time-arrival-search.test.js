@@ -24,6 +24,7 @@ jest.mock('../services/route-optimizer', () => ({
   createSchedulingTravel: jest.fn(() => ({ preload: async () => {}, diagnostics: () => ({}) })),
 }));
 jest.mock('../services/scheduling/arrival-route', () => ({
+  hasInsertionIncompatibleRow: jest.requireActual('../services/scheduling/arrival-route').hasInsertionIncompatibleRow,
   arrivalWindowRoutingEnabled: () => false,
   loadArrivalRouteContext: jest.fn(async () => ({
     target: { id: 'candidate', service_type: 'pest_control' },
