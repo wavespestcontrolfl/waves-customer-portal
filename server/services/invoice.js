@@ -5138,6 +5138,15 @@ async function claimAlreadyHeld(invoiceId, current, { claimToken, firstDeliveryO
   return { invoice: current, previousStatus: current.status, claimed: false, consumedQueuedSendRows };
 }
 
+function isReleasingChemicalReviewHold(current, overridesReviewHold) {
+  const invoiceHelpers = require("./invoice-helpers");
+  return Boolean(
+    overridesReviewHold
+    && typeof invoiceHelpers.invoiceHeldForChemicalReview === "function"
+    && invoiceHelpers.invoiceHeldForChemicalReview(current),
+  );
+}
+
 // The claim's own UPDATE. The guards evaluated before it saw a snapshot; the flip carries them as predicates too, so a
 // same-status ABA transition between the read and the flip (another worker claims, reaches an uncertain outcome, and stale-claim
 // recovery parks the row back to 'scheduled' with a delivery stamp) cannot pass a first delivery or an unauthorized reclaim.
@@ -5151,7 +5160,11 @@ function buildClaimFlip(database, invoiceId, current, { firstDeliveryOnly, overr
       "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
       [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
     );
-    flip.whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'");
+    flip.whereRaw("NOT (COALESCE(scheduled_send_error, '') LIKE ?)", ["chemical_addon_review:%"]);
+  } else if (isReleasingChemicalReviewHold(current, overridesReviewHold)) {
+    // Pin the exact reviewed hold stamp: a newer closeout hold or payer withdrawal that landed
+    // between the read and this flip causes 0 rows matched so the newer hold wins.
+    flip.where({ scheduled_send_error: current.scheduled_send_error });
   }
   if (!expectedVersion) return flip;
   // The approved edit time, in the claim's own locked UPDATE: an edit after the card was shown stamps updated_at.
@@ -5226,35 +5239,58 @@ async function claimInvoiceForSend(invoiceId, {
 
   await refuseUnclaimableInvoice(invoiceId, current, database, options);
 
+  const releasingChemicalHold = isReleasingChemicalReviewHold(current, overridesReviewHold);
   const token = crypto.randomUUID();
   const [invoice] = await buildClaimFlip(database, invoiceId, current, options)
     .update({
       status: "sending", send_claim_token: token, updated_at: new Date(),
+      // An explicit office override atomically clears the exact reviewed chemical hold stamp
+      // in the claim flip so selfPayAtDispatch allows this authorized send, while any newer
+      // hold stamped after the flip still blocks delivery and survives finalization.
+      ...(releasingChemicalHold ? { scheduled_send_error: null } : {}),
       // A first delivery after the bill's due day takes the send day, before the text, email and PDF are built (invoice-helpers.js).
       due_date: require("./invoice-helpers").firstDeliveryDueDate(database, etDateString()),
     })
     .returning("*");
   if (!invoice) await refuseFailedClaim(invoiceId, current, database, options);
   invoice.send_claim_token = token;
+  const restoreReleasedChemicalHold = async () => {
+    if (!releasingChemicalHold) return;
+    try {
+      await database("invoices")
+        .where({ id: invoiceId })
+        .whereNull("scheduled_send_error")
+        .update({ scheduled_send_error: current.scheduled_send_error, updated_at: new Date() });
+    } catch (restoreErr) {
+      logger.warn(`[invoice] Could not restore chemical review hold after claim refusal for ${invoiceId}: ${restoreErr.message}`);
+    }
+  };
   const giveBack = async (error) => {
     await restoreSendClaim(invoiceId, current.status, true, [], database, token);
+    await restoreReleasedChemicalHold();
     throw error;
   };
-  const ctx = { invoiceId, invoice, current, expectedVersion, database, token };
-  const approvedRefusal = expectedVersion && await runApprovedClaimChecks(ctx);
-  if (approvedRefusal) await giveBack(approvedRefusal);
-  const summaryRefusal = await firstSendAfterSummaryRefusal(ctx, firstDeliveryOnly);
-  if (summaryRefusal) await giveBack(summaryRefusal);
-  await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
-  const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, token, adoptsQueuedInvoiceSend, database);
-  // The closeout pin is the claim's LAST write: every refusal above (and the ones thrown by the two calls before it) leaves
-  // no pin behind. A pin that cannot be written gives back the claim AND any queued text this claim adopted.
-  const pinRefusal = expectedVersion && await recordApprovedPinOrRefusal(ctx);
-  if (pinRefusal) {
-    await restoreSendClaim(invoiceId, current.status, true, consumedQueuedSendRows, database, token);
-    throw pinRefusal;
+  try {
+    const ctx = { invoiceId, invoice, current, expectedVersion, database, token };
+    const approvedRefusal = expectedVersion && await runApprovedClaimChecks(ctx);
+    if (approvedRefusal) await giveBack(approvedRefusal);
+    const summaryRefusal = await firstSendAfterSummaryRefusal(ctx, firstDeliveryOnly);
+    if (summaryRefusal) await giveBack(summaryRefusal);
+    await reverifyClaimedVisitInvoice(invoiceId, invoice, current.status, database);
+    const consumedQueuedSendRows = await reconcileQueuedSendUnderClaim(invoiceId, current.status, token, adoptsQueuedInvoiceSend, database);
+    // The closeout pin is the claim's LAST write: every refusal above (and the ones thrown by the two calls before it) leaves
+    // no pin behind. A pin that cannot be written gives back the claim AND any queued text this claim adopted.
+    const pinRefusal = expectedVersion && await recordApprovedPinOrRefusal(ctx);
+    if (pinRefusal) {
+      await restoreSendClaim(invoiceId, current.status, true, consumedQueuedSendRows, database, token);
+      await restoreReleasedChemicalHold();
+      throw pinRefusal;
+    }
+    return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
+  } catch (err) {
+    await restoreReleasedChemicalHold();
+    throw err;
   }
-  return { invoice, previousStatus: current.status, claimed: true, consumedQueuedSendRows };
 }
 
 // A combined-visit invoice minted self-pay is re-checked against live Bill-To

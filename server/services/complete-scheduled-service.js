@@ -5610,7 +5610,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
     } catch (addOnErr) {
       if (addOnErr?.code === areaAddOnGovernedRate.ACTUALS_CODE) {
-        logger.warn(`[dispatch] non-blocking add-on actuals warning for ${svc.id}: ${addOnErr.message}`);
+        const missingFields = Array.isArray(addOnErr.missing) && addOnErr.missing.length ? addOnErr.missing.join(',') : 'unknown';
+        logger.warn(`[dispatch] non-blocking add-on actuals warning for ${svc.id}: addOnKey=${addOnErr.addOnKey || 'unknown'} missing=${missingFields}`);
         lawnWarningFindings.push({
           code: addOnErr.code,
           limitType: addOnErr.code,
@@ -5630,7 +5631,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           ? addOnErr.missingAddOns
           : [{ addOnKey: addOnErr.addOnKey || 'Area add-on', name: addOnErr.addOnKey || 'Area add-on', message: addOnErr.message }];
         for (const item of missingItems) {
-          logger.warn(`[dispatch] non-blocking chemical add-on warning for ${svc.id}: ${item.message}`);
+          logger.warn(`[dispatch] non-blocking chemical add-on warning for ${svc.id}: addOnKey=${item.addOnKey || 'unknown'}`);
           lawnWarningFindings.push({
             code: addOnErr.code,
             limitType: addOnErr.code,

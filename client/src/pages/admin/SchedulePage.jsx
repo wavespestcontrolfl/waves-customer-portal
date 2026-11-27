@@ -14903,13 +14903,16 @@ export function CompletionPanel({
   );
   // Protocol checklist / default-product disposition were removed with the
   // read-only protocol redesign — they no longer gate completion.
+  // Tagged area add-on rows warn without blocking submission (matching AreaAddOnFields
+  // and server non-blocking warnings), while ordinary products keep required actuals.
   const selectedProductsMissingActualAmount = selectedProducts.filter(
     (product) =>
-      !product.totalAmount ||
-      !Number.isFinite(Number(product.totalAmount)) ||
-      Number(product.totalAmount) <= 0 ||
-      !product.amountUnit ||
-      (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product))),
+      !product.areaAddOnKey &&
+      (!product.totalAmount ||
+        !Number.isFinite(Number(product.totalAmount)) ||
+        Number(product.totalAmount) <= 0 ||
+        !product.amountUnit ||
+        (product.lawnPlanDefaults && !productApplicationMethod(product, typeFor(product)))),
   );
   // The protocol is now a read-only reference (mixing ratios), so the checklist
   // and default-product-disposition no longer gate completion. Real safeguards

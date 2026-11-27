@@ -19,7 +19,13 @@ const {
   CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
 } = require('../services/payment-method-consent-text');
 const logger = require('../services/logger');
-const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = require('../services/invoice-helpers');
+const invoiceHelpers = require('../services/invoice-helpers');
+const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = invoiceHelpers;
+const invoiceHeldForChemicalReview = (invoice) => (
+  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
+    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
+    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
+);
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');
@@ -355,10 +361,11 @@ async function isZelleTransferEligible(invoice, { creditWillCoverAnchor, hasPrev
   return true;
 }
 
-// Collectibility, withdrawn packet invoice and account credit that settles the whole invoice.
+// Collectibility, withdrawn packet invoice, chemical add-on review hold, and account credit that settles the whole invoice.
 async function zelleDeniedByInvoiceState(invoice, { creditWillCoverAnchor, database }) {
   if (!isInvoiceCollectibleStatus(invoice.status)) return true;
   if (invoiceWithdrawnFromCustomer(invoice)) return true;
+  if (invoiceHeldForChemicalReview(invoice)) return true;
   const creditCovers = creditWillCoverAnchor != null ? creditWillCoverAnchor : await invoiceCreditWouldFullyCover(invoice, { database });
   return !!creditCovers;
 }

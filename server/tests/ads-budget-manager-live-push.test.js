@@ -1007,6 +1007,43 @@ describe('in-lock rechecks (requireLivePush)', () => {
     expect(staleRes.noop).toBe(true);
     expect(mockUpdateBudget).not.toHaveBeenCalled();
     expect(mockCampaignUpdate).not.toHaveBeenCalled();
+
+    // P0-3 (r6): clearing a legacy branded hold when a newer manual 'stop' superseded the hold
+    // clears ONLY metadata.budget_hold without pushing base spend to Google Ads.
+    jest.clearAllMocks();
+    campaignFirstRow = {
+      ...baseCampaign(),
+      is_branded: true,
+      budget_mode: 'stop',
+      daily_budget_current: '0.40',
+      metadata: { budget_hold: { mode: 'stop', until: '2099-01-01' }, keep: true },
+    };
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Manual stop by owner', trigger: 'manual' };
+    const supersededClearRes = await BudgetManager.setMode('c-1', 'base', 'Hold cleared', {
+      requireLivePush: true,
+      requireActive: true,
+      clearHold: { at: '2026-11-27T00:00:00Z', by: 'admin-1', requireIneligibleRestore: true, expectedMode: 'stop', expectedUntil: '2099-01-01' },
+    });
+    expect(supersededClearRes.noop).toBe(true);
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).toHaveBeenCalledTimes(1);
+    expect(mockCampaignUpdate.mock.calls[0][0].budget_mode).toBeUndefined();
+    const clearedOnlyMeta = JSON.parse(mockCampaignUpdate.mock.calls[0][0].metadata);
+    expect(clearedOnlyMeta.budget_hold).toBeUndefined();
+    expect(clearedOnlyMeta.keep).toBe(true);
+
+    // When the audit log proves the hold itself caused the throttle, clearing restores base.
+    jest.clearAllMocks();
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2099-01-01 (set in the portal)', trigger: 'manual' };
+    mockUpdateBudget.mockResolvedValue({ ok: true });
+    const ownedClearRes = await BudgetManager.setMode('c-1', 'base', 'Hold cleared', {
+      requireLivePush: true,
+      requireActive: true,
+      clearHold: { at: '2026-11-27T00:00:00Z', by: 'admin-1', requireIneligibleRestore: true, expectedMode: 'stop', expectedUntil: '2099-01-01' },
+    });
+    expect(ownedClearRes.noop).toBeUndefined();
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    expect(mockCampaignUpdate).toHaveBeenCalledWith(expect.objectContaining({ budget_mode: 'base', daily_budget_current: 40 }));
   });
 
   test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {

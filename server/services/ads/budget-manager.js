@@ -222,6 +222,21 @@ function holdLogReason(hold) {
   return `Hold: ${hold.mode} until ${hold.until} (set in the portal)`;
 }
 
+// Verify under FOR UPDATE that the given timed 'stop' hold itself caused the campaign's
+// current 'stop' throttle and no newer budget change (manual, advisor, or auto) superseded it.
+async function holdCausedCurrentThrottle(trx, campaign, hold) {
+  if (!hold || hold.mode !== 'stop' || campaign?.budget_mode !== 'stop') return false;
+  const latestLog = await trx('ad_budget_log')
+    .where({ campaign_id: campaign.id })
+    .orderBy('created_at', 'desc')
+    .first('new_mode', 'reason', 'created_at');
+  return Boolean(
+    latestLog
+    && latestLog.new_mode === 'stop'
+    && String(latestLog.reason || '').startsWith(holdLogReason(hold)),
+  );
+}
+
 // Weekday of an ET calendar-date string (0 = Sunday). Noon UTC keeps the
 // date's own weekday whatever the zone or DST.
 function etDateWeekday(dateStr) {
@@ -382,19 +397,7 @@ class BudgetManager {
           });
           // Verify under the lock that the expired hold itself caused the current throttle
           // and no newer budget change superseded it before restoring ad spend.
-          let holdCausedThrottle = false;
-          if (rawHold.mode === 'stop' && campaign.budget_mode === 'stop') {
-            const latestLog = await trx('ad_budget_log')
-              .where({ campaign_id: campaign.id })
-              .orderBy('created_at', 'desc')
-              .first('new_mode', 'reason', 'created_at');
-            const expectedPrefix = holdLogReason(rawHold);
-            holdCausedThrottle = Boolean(
-              latestLog
-              && latestLog.new_mode === 'stop'
-              && String(latestLog.reason || '').startsWith(expectedPrefix),
-            );
-          }
+          const holdCausedThrottle = await holdCausedCurrentThrottle(trx, campaign, rawHold);
           if (holdCausedThrottle) {
             const restoredBudget = this.calculateBudget(campaign, 'base');
             const linked = Boolean(campaign.platform_campaign_id);
@@ -1150,14 +1153,19 @@ class BudgetManager {
             throw err;
           }
           if (clearHold?.requireIneligibleRestore) {
-            // Re-verify the hold, eligibility, and throttled state on the LOCKED row:
-            // if a concurrent request already cleared the hold (or manually re-stopped
-            // the campaign after release), never push base over the newer manual state.
+            // Re-verify the hold, eligibility, and audit-log throttle ownership on the LOCKED row:
+            // restore 'base' ONLY when this exact hold still stands and caused the current 'stop'
+            // throttle (no newer manual/advisor/auto change superseded it). Otherwise clear only
+            // metadata.budget_hold without pushing ad spend to Google.
             const lockedHold = parseJsonObject(parseJsonObject(campaign.metadata)?.budget_hold);
             const sameHold = Boolean(lockedHold)
               && (!clearHold.expectedMode || lockedHold.mode === clearHold.expectedMode)
               && (!clearHold.expectedUntil || lockedHold.until === clearHold.expectedUntil);
-            if (!sameHold || isCapacityEligibleCampaign(campaign) || campaign.budget_mode === mode) {
+            const shouldRestore = sameHold
+              && !isCapacityEligibleCampaign(campaign)
+              && campaign.budget_mode !== mode
+              && await holdCausedCurrentThrottle(trx, campaign, lockedHold);
+            if (!shouldRestore) {
               if (sameHold) {
                 await trx('ad_campaigns').where({ id: campaignId }).update({
                   ...withHold(campaign),

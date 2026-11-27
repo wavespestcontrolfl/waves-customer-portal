@@ -189,7 +189,9 @@ function selfPayAtDispatch(invoiceId, database) {
 }
 
 function preserveWithdrawalStamp(database) {
-  return database.raw("CASE WHEN scheduled_send_error LIKE 'payer_billed:%' THEN scheduled_send_error ELSE NULL END");
+  return database.raw(
+    "CASE WHEN scheduled_send_error LIKE 'payer_billed:%' OR scheduled_send_error LIKE 'chemical_addon_review:%' THEN scheduled_send_error ELSE NULL END",
+  );
 }
 
 // A bill's first delivery never carries a due date before the day it goes out (owner 2026-11-06,

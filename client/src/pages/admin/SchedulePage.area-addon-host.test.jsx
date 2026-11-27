@@ -366,4 +366,13 @@ describe("the add-on's row starts at the GOVERNED rate, never the catalog defaul
   it("the completion body carries the row's add-on tag, which the server keeps only for an add-on on the visit", () => {
     expect(pageSource).toMatch(/areaAddOnKey: p\.areaAddOnKey,\n\s+targets: Array\.isArray\(p\.targets\) \? p\.targets : \[\],\n\s+\}\)\),\n\s+\/\/ The existing completion field/);
   });
+
+  it("tagged area add-on rows missing actuals do not trip selectedProductsMissingActualAmount while ordinary products still do (P1-3)", () => {
+    const start = pageSource.indexOf("const selectedProductsMissingActualAmount = selectedProducts.filter(");
+    expect(start).toBeGreaterThan(-1);
+    const block = pageSource.slice(start, start + 420);
+    expect(block).toContain("!product.areaAddOnKey");
+    expect(block).toContain("!product.totalAmount");
+    expect(block).toContain("!product.amountUnit");
+  });
 });

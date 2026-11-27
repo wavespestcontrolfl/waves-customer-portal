@@ -635,7 +635,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       const january = await lawn({ date: '2027-01-10' });
       await spray(january.customerId, january.property.id, '2026-12-20');
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: january.visit.id })))
-        .resolves.toEqual({ kind: 'limit', message: expect.stringMatching(/only 21 days since last app \(min 42\)/) });
+        .resolves.toEqual([{ kind: 'limit', message: expect.stringMatching(/only 21 days since last app \(min 42\)/) }]);
       const february = await lawn({ date: '2027-02-05' });
       await spray(february.customerId, february.property.id, '2026-12-20');
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: february.visit.id }))).resolves.toBeUndefined();
@@ -647,7 +647,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       await spray(late.customerId, late.property.id, '2026-05-01');
       expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: late.visit.id })).toMatch(/only 17 days before the next recorded app on 5\/1\/2026 \(min 42\)\. Latest allowed before it: 3\/20\/2026\./);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: late.visit.id })))
-        .resolves.toEqual({ kind: 'limit', message: expect.any(String) });
+        .resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       const full = await lawn({ date: '2026-04-14', bermuda: true });
       await spray(full.customerId, full.property.id, '2026-06-20');
       await spray(full.customerId, full.property.id, '2026-08-20');
@@ -713,7 +713,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await spray(f, '2026-04-20');
         expect(await bermudaLimitViolation(knex, submitted(rec, fus), { serviceId: f.visit.id })).toMatch(/LIMIT REACHED/);
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id })))
-          .resolves.toEqual({ kind: 'limit', message: expect.any(String) });
+          .resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
       });
     });
 
@@ -724,9 +724,9 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
       expect(await bermudaPairViolation(knex, submitted(fus), { serviceId: f.visit.id })).toBeNull();
       await knex('customer_turf_profiles').where({ customer_id: f.customerId, active: true }).update({ bermuda_removal: true });
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id })))
-        .resolves.toEqual({ kind: 'pair', message: expect.stringMatching(/without Recognition/) });
+        .resolves.toEqual([{ kind: 'pair', message: expect.stringMatching(/without Recognition/) }]);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id })))
-        .resolves.toEqual({ kind: 'pair', message: expect.stringMatching(/Recognition goes on with Fusilade II/) });
+        .resolves.toEqual([{ kind: 'pair', message: expect.stringMatching(/Recognition goes on with Fusilade II/) }]);
       await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toBeUndefined();
     });
 
@@ -762,7 +762,7 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
         await spray(f, '2026-03-01');
         await spray(f, '2026-03-02');
         await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec), { serviceId: f.visit.id })))
-          .resolves.toEqual({ kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|min 42/) });
+          .resolves.toEqual([{ kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|min 42/) }]);
       });
 
       test('a lawn visit pinned to 2026.05 is not a step visit; pinned to v13 or unpinned it is, and is enforced', async () => {
@@ -779,9 +779,12 @@ describeDb('lawn bermuda removal through PostgreSQL', () => {
           expect(await bermudaPairViolation(knex, submitted(rec), { serviceId: f.visit.id })).toMatch(/with Fusilade II/);
           await spray(f, '2026-03-01');
           await spray(f, '2026-03-02');
-          // Fusilade II alone on a step visit returns the typed pair warning; the complete pair meets the cap warning.
-          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toEqual({ kind: 'pair', message: expect.stringMatching(/without Recognition/) });
-          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toEqual({ kind: 'limit', message: expect.any(String) });
+          // Fusilade II alone on a 3rd step visit returns BOTH pair and locked cap warnings; the complete pair meets the cap warning.
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(fus), { serviceId: f.visit.id }))).resolves.toEqual([
+            { kind: 'pair', message: expect.stringMatching(/without Recognition/) },
+            { kind: 'limit', message: expect.stringMatching(/LIMIT REACHED|days since last app/) },
+          ]);
+          await expect(knex.transaction((trx) => enforceStepLimitsInTransaction(trx, submitted(rec, fus), { serviceId: f.visit.id }))).resolves.toEqual([{ kind: 'limit', message: expect.any(String) }]);
         }
       });
     });

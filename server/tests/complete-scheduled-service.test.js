@@ -1355,6 +1355,18 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(svc.id)');
     expect(source).toContain("where({ invoice_id: heldId, status: 'active' })");
     expect(source).toContain('if (Number(stamped) > 0)');
+    // P1-2: add-on warning logs must never interpolate caller-supplied product text.
+    expect(source).not.toContain('add-on actuals warning for ${svc.id}: ${addOnErr.message}');
+    expect(source).not.toContain('chemical add-on warning for ${svc.id}: ${item.message}');
+    // P0-1: delivery finalization preserves chemical_addon_review:% stamps stamped mid-send.
+    const rawMock = { raw: jest.fn((sql) => sql) };
+    const preserveSql = invoiceHelpers.preserveWithdrawalStamp(rawMock);
+    expect(preserveSql).toContain("scheduled_send_error LIKE 'payer_billed:%'");
+    expect(preserveSql).toContain("scheduled_send_error LIKE 'chemical_addon_review:%'");
+    // P1-1: explicit office override pins and atomically clears the reviewed chemical hold in claimInvoiceForSend.
+    const invoiceSrc = require('fs').readFileSync(require.resolve('../services/invoice'), 'utf8');
+    expect(invoiceSrc).toContain('isReleasingChemicalReviewHold(current, overridesReviewHold)');
+    expect(invoiceSrc).toContain('flip.where({ scheduled_send_error: current.scheduled_send_error })');
     const holdAppliesAt = source.indexOf('const chemicalAddOnBillingHoldApplies =');
     expect(source.slice(holdAppliesAt, holdAppliesAt + 350)).not.toContain('!prepaidCovered &&');
   });
