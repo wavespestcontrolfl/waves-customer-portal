@@ -2,7 +2,7 @@
 // Visit Brief "Customer texts · last 7 days" (GATE_TECH_VISIT_TEXTS). Synthetic data only.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import VisitTextsSection from './VisitTextsSection';
 import VisitBriefPanel from './VisitBriefPanel';
@@ -75,6 +75,44 @@ describe('one visit at a time', () => {
     rerender(<VisitTextsSection serviceId="svc-2" byService={ON} request={request} />);
     expect(screen.queryByText('Visit one text')).toBeNull();
     expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/visit-texts');
+  });
+});
+
+describe('signed photo links expire after an hour', () => {
+  const answer = (n) => ({ enabled: true, hidden: 0, texts: [{ id: `t${n}`, direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: `Read ${n}`, photos: [{ url: `https://signed.example/${n}`, contentType: 'image/jpeg' }] }] });
+
+  it('withholds stale links on resume and reads again', async () => {
+    let n = 0;
+    const request = vi.fn(async () => answer(++n));
+    renderWith(request);
+    expect(await screen.findByText('Read 1')).toBeInTheDocument();
+    const realNow = Date.now();
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(realNow + 51 * 60 * 1000);
+    window.dispatchEvent(new Event('focus'));
+    expect(await screen.findByText('Read 2')).toBeInTheDocument();
+    expect(request).toHaveBeenCalledTimes(2);
+    spy.mockRestore();
+  });
+
+  it('does not read again on a resume inside the hour', async () => {
+    const request = vi.fn(async () => answer(1));
+    renderWith(request);
+    await screen.findByText('Read 1');
+    window.dispatchEvent(new Event('focus'));
+    await wait();
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+
+  it('reads again before the hour ends while the panel stays open', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let n = 0;
+      const request = vi.fn(async () => answer(++n));
+      renderWith(request);
+      await screen.findByText('Read 1');
+      await act(async () => { vi.advanceTimersByTime(50 * 60 * 1000 + 10); });
+      await screen.findByText('Read 2');
+    } finally { vi.useRealTimers(); }
   });
 });
 

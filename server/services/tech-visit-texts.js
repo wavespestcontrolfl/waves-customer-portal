@@ -6,7 +6,7 @@
  *   show    a plain customer reply, or an office text of a visit-related type with no money word in it;
  *   hidden  money or unknown: counted, the body never leaves this module;
  *   skip    noise the technician does not need (reminders, tapbacks, opt-in words, failed sends): not counted.
- * A card number or labeled card / bank detail hides the whole text. An outbound type that is in neither list is hidden, so a type added later stays out until someone lists it here.
+ * A card number, a labeled card / bank detail or a link hides the whole text. An outbound type that is in neither list is hidden, so a type added later stays out until someone lists it here.
  */
 const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
@@ -20,7 +20,9 @@ const MAX_PAGES = 5;
 // Only these image types are ever signed: a PDF or any other document is never linked.
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif']);
 
-const SHOW_INBOUND_TYPES = new Set(['inbound', 'domain_lead', 'van_lead']);
+const SHOW_INBOUND_TYPES = new Set(['inbound', 'domain_lead', 'van_lead', 'reschedule_reply']);
+// 'manual' is also what marketing, retention and follow-up sends are stored as: it shows only when a staff member wrote it
+// (sms_log.admin_user_id set), so an automated send of that type stays hidden.
 const SHOW_OUTBOUND_TYPES = new Set([
   'manual', 'ai_approved', 'ai_revised', 'ai_autosent', 'ai_assistant_reply', 'auto_reply', 'customer_reply',
   'appointment_rescheduled', 'appointment_cancelled', 'reschedule_reply', 'reschedule_series_confirmation',
@@ -42,7 +44,10 @@ const MONEY_WORDS = /\b(bills?|billed|billing|invoices?|invoiced|charges?|charge
 const DOLLAR_AMOUNT = /\$\s?\d|\b\d[\d,]*(\.\d{1,2})?\s*(dollars?|bucks)\b/i;
 
 // Card or bank details a customer may text: a labeled CVV / security code / expiry, a routing or account number.
-const CREDENTIAL_WORDS = /\b(?:cvv2?|cvc2?|cid|security code|card code|expir(?:y|es|ation|ing)|exp\.? date|routing)\b|\b(?:account|acct\.?)\s*(?:number|no\.?|#)/i;
+const CREDENTIAL_WORDS = /\b(?:cvv2?|cvc2?|cid|security code|card code|expir(?:y|es|ation|ing)|exp\.? date|routing)\b|\b(?:account|acct|acc)\b[^\n]{0,24}?\d{6,}|\b(?:account|acct)\.?\s*(?:number|no\.?|#)|\b(?:checking|savings)\b[^\n]{0,24}?\d{6,}|\b\d{8,17}\b/i;
+// A link: a customer-action link (reschedule, pay, estimate, portal) works without a login, and a technician must never
+// read one that belongs to another visit of the customer. Any text carrying a URL, a www. address or a short link is held back.
+const LINK = /https?:\/\/|\bwww\.|\b[a-z0-9-]+\.(?:com|net|org|io|co|us|app|link|ly|me|info|biz)\b/i;
 
 function hasMoneyWords(body) {
   const text = String(body || '');
@@ -50,6 +55,10 @@ function hasMoneyWords(body) {
 }
 
 // A card number (the repo's PAN detector, spoken and spaced forms included) or a labeled card / bank detail.
+function hasLink(body) {
+  return LINK.test(String(body || ''));
+}
+
 function hasCardCredentials(body) {
   const text = String(body || '');
   return CREDENTIAL_WORDS.test(text) || scrubPansDetailed(text).count > 0;
@@ -81,7 +90,8 @@ function textVerdict(row) {
   if (QUIET_TYPES.has(type) || (inbound && isSmsReaction(row.message_body))) return 'skip';
   if (!inbound && UNSENT_STATUSES.has(row.status)) return 'skip';
   if (!(inbound ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(type)) return 'hidden';
-  if (hasMoneyWords(row.message_body) || hasCardCredentials(row.message_body)) return 'hidden';
+  if (hasMoneyWords(row.message_body) || hasCardCredentials(row.message_body) || hasLink(row.message_body)) return 'hidden';
+  if (type === 'manual' && !inbound && !row.admin_user_id) return 'hidden';
   if (!String(row.message_body || '').trim() && !photosOf(row).length) return 'skip';
   return 'show';
 }
@@ -119,7 +129,7 @@ async function windowRows(db, customerId, start, now) {
       .orderBy('id', 'desc')
       .limit(PAGE_SIZE)
       .offset(page * PAGE_SIZE)
-      .select('id', 'direction', 'message_body', 'message_type', 'status', 'metadata', 'created_at');
+      .select('id', 'direction', 'message_body', 'message_type', 'status', 'admin_user_id', 'metadata', 'created_at');
     for (const row of batch) if (!seen.has(row.id)) { seen.add(row.id); rows.push(row); }
     if (batch.length < PAGE_SIZE) break;
   }
@@ -148,4 +158,4 @@ async function visitTexts(db, svc, { now = new Date(), sign = null } = {}) {
   return { texts, hidden };
 }
 
-module.exports = { textVerdict, hasMoneyWords, hasCardCredentials, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };
+module.exports = { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };

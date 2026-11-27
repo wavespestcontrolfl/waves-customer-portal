@@ -2,7 +2,7 @@
 // One read of GET /admin/schedule/:id/visit-texts, which the server scopes to the technician's own visit. Gate off
 // (404), no texts and no hidden count render nothing; a failed read renders one muted line, never a banner.
 // Photos are short-lived signed links the server mints for this request; they open full size in a new tab.
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { formatETDateTime } from '../../lib/timezone';
 
 // Same tokens as VisitBriefPanel's DARK palette (resolved inside .tech-field).
@@ -40,21 +40,45 @@ function PhotoThumbs({ photos }) {
   );
 }
 
-// `byService` is the panel's per-visit brief map: the brief answer carries `visitTexts: true` while the gate is on, and
-// only then is the read made. The loaded answer is stored with the visit it was read for and shown only for that visit.
-export default function VisitTextsSection({ serviceId, byService, request }) {
-  const [state, setState] = useState({ id: null, data: null, failed: false });
-  const enabled = byService?.[serviceId]?.brief?.visitTexts === true;
+// The server signs the photo links for one hour. They are read again before that ends, and when a locked phone or a
+// background tab wakes up past that point the stale links are withheld at once and read again (as the Visit Brief's
+// visit-prep photos do), so a tap never opens an expired link.
+const REFRESH_MS = 50 * 60 * 1000;
+
+function useVisitTexts(serviceId, enabled, request) {
+  const [state, setState] = useState({ id: null, data: null, failed: false, at: 0 });
+  const [tick, setTick] = useState(0);
+  const atRef = useRef(0);
+  atRef.current = state.at;
   useEffect(() => {
     if (!enabled || !serviceId || typeof request !== 'function') return undefined;
     let live = true;
     Promise.resolve(request(`/admin/schedule/${serviceId}/visit-texts`))
-      .then((data) => { if (live) setState({ id: serviceId, data, failed: false }); })
+      .then((data) => { if (live) setState({ id: serviceId, data, failed: false, at: Date.now() }); })
       // 404 is the gate off or a visit that is not his: show nothing. Any other failure gets one muted line.
-      .catch((err) => { if (live) setState({ id: serviceId, data: null, failed: err?.status !== 404 }); });
-    return () => { live = false; };
-  }, [enabled, serviceId, request]);
+      .catch((err) => { if (live) setState({ id: serviceId, data: null, failed: err?.status !== 404, at: Date.now() }); });
+    const refresh = setTimeout(() => setTick((n) => n + 1), REFRESH_MS);
+    return () => { live = false; clearTimeout(refresh); };
+  }, [enabled, serviceId, request, tick]);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const onResume = () => {
+      if (document.visibilityState === 'hidden' || !atRef.current || Date.now() - atRef.current < REFRESH_MS) return;
+      setState((prev) => ({ ...prev, id: null, data: null, at: 0 }));
+      setTick((n) => n + 1);
+    };
+    document.addEventListener('visibilitychange', onResume);
+    window.addEventListener('focus', onResume);
+    return () => { document.removeEventListener('visibilitychange', onResume); window.removeEventListener('focus', onResume); };
+  }, [enabled]);
+  return state;
+}
 
+// `byService` is the panel's per-visit brief map: the brief answer carries `visitTexts: true` while the gate is on, and
+// only then is the read made. The loaded answer is stored with the visit it was read for and shown only for that visit.
+export default function VisitTextsSection({ serviceId, byService, request }) {
+  const enabled = byService?.[serviceId]?.brief?.visitTexts === true;
+  const state = useVisitTexts(serviceId, enabled, request);
   if (!enabled || state.id !== serviceId) return null;
   if (state.failed) return <p style={{ ...mutedStyle, marginTop: 10 }}>Couldn't load texts</p>;
   const data = state.data;

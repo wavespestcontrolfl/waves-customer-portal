@@ -3,10 +3,10 @@
  * verdict + window rules and the sms_log read. Synthetic data only. The route's gate, ownership and payload are in
  * tech-visit-texts-route.test.js.
  */
-const { textVerdict, hasMoneyWords, hasCardCredentials, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
+const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
 
 const inbound = (over = {}) => ({ direction: 'inbound', message_type: 'inbound', status: 'received', message_body: 'The gate code changed', metadata: null, ...over });
-const outbound = (over = {}) => ({ direction: 'outbound', message_type: 'manual', status: 'sent', message_body: 'We will be there Tuesday', metadata: null, ...over });
+const outbound = (over = {}) => ({ direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: null, ...over });
 
 describe('textVerdict', () => {
   test('a plain customer reply and a plain office text show', () => {
@@ -60,11 +60,29 @@ describe('textVerdict', () => {
 
   test.each([
     '4111 1111 1111 1111', '4111111111111111', 'the number is 5555-5555-5555-4444', 'cvv 123', 'security code is 456', 'expires 08/27',
-    'my routing is 021000021', 'account number 123456789', 'acct # 99887766',
+    'my routing is 021000021', 'account number 123456789', 'acct # 99887766', 'checking acct 12345678', 'account 12345678', 'acct: 998877', 'savings 123456789', '021000021',
   ])('a card or bank detail hides the whole text even with no money word: %s', (body) => {
     expect(hasCardCredentials(body)).toBe(true);
     expect(textVerdict(inbound({ message_body: body }))).toBe('hidden');
     expect(textVerdict(outbound({ message_body: body }))).toBe('hidden');
+  });
+
+  test.each([
+    'https://example.com/r/abc123', 'http://x.test/pick', 'www.example.com/pick', 'wavespestcontrol.com/reschedule/abc', 'tap bit.ly/3xyz to move your visit', 'go to example.co/r/1',
+  ])('a text with a link is hidden, so no customer-action link reaches a technician: %s', (body) => {
+    expect(hasLink(body)).toBe(true);
+    expect(textVerdict(outbound({ message_type: 'appointment_rescheduled', message_body: body }))).toBe('hidden');
+    expect(textVerdict(outbound({ message_type: 'rain_out_customer_pick_v1', message_body: body }))).toBe('hidden');
+  });
+
+  test('a manual text shows only when a staff member wrote it', () => {
+    expect(textVerdict(outbound({ message_type: 'manual', admin_user_id: null, message_body: 'Spring special for you' }))).toBe('hidden');
+    expect(textVerdict(outbound({ message_type: 'manual', message_body: 'We will be there Tuesday' }))).toBe('show');
+    expect(textVerdict(outbound({ message_type: 'ai_approved', admin_user_id: null, message_body: 'We will be there Tuesday' }))).toBe('show');
+  });
+
+  test("a customer's handled reschedule reply (retyped by the webhook) shows", () => {
+    expect(textVerdict(inbound({ message_type: 'reschedule_reply', message_body: 'Thursday morning works' }))).toBe('show');
   });
 
   test('an ordinary number is not a card number', () => {
@@ -125,7 +143,7 @@ describe('visitTexts', () => {
     const db = fakeDb([
       row('before', '2026-11-19T04:59:59Z'),
       row('edge', '2026-11-19T05:00:00Z'),
-      row('mid', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', status: 'sent' }),
+      row('mid', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent' }),
       row('money', '2026-11-23T15:00:00Z', { message_body: 'what is my balance' }),
       row('invoice', '2026-11-24T15:00:00Z', { direction: 'outbound', message_type: 'invoice', status: 'sent' }),
       row('late', '2026-11-27T12:00:01Z'),

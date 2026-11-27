@@ -95,7 +95,7 @@ beforeEach(() => {
   smsWhere = [];
   smsRows = [
     row('a', '2026-11-20T15:00:00Z', { message_body: 'please skip the back yard' }),
-    row('b', '2026-11-20T16:00:00Z', { direction: 'outbound', message_type: 'manual', status: 'sent', message_body: 'Got it, thanks' }),
+    row('b', '2026-11-20T16:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'Got it, thanks' }),
     row('c', '2026-11-20T17:00:00Z', { message_body: 'can you send me the bill again' }),
     row('d', '2026-11-20T18:00:00Z', { direction: 'outbound', message_type: 'receipt', status: 'sent', message_body: 'Thanks for your visit' }),
     row('e', '2026-11-20T19:00:00Z', { direction: 'outbound', message_type: 'brand_new_type_2027', status: 'sent', message_body: 'hello there' }),
