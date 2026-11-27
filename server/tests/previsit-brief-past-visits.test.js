@@ -18,7 +18,7 @@ const SVC = { id: 'svc-now', customer_id: 'cust-1', service_type: 'Pest Control 
 
 const rec = (id, date, type, extra = {}) => ({
   id, customer_id: 'cust-1', service_type: type, service_line: null, service_date: date,
-  technician_notes: null, is_callback: false, service_key: null, service_key_snapshot: null, service_data: null, scheduled_service_id: `sched-${id}`, ...extra,
+  status: 'completed', technician_notes: null, is_callback: false, service_key: null, service_key_snapshot: null, service_data: null, scheduled_service_id: `sched-${id}`, ...extra,
 });
 
 // Newest first, mixed lines, so the cap and the strictly-before rule matter.
@@ -48,11 +48,15 @@ const PRODUCTS = [
 // strictly-before date bound and the limit to ROWS.
 function fakeDbh({ throws = {}, rows = ROWS } = {}) {
   return (table) => {
-    const state = { beforeDay: null, limit: null, notVisit: undefined };
+    const state = { beforeDay: null, limit: null, notVisit: undefined, customerId: undefined, status: undefined };
     const q = {};
     for (const m of ['whereIn', 'whereNotIn', 'orderBy', 'offset', 'leftJoin', 'modify']) q[m] = () => q;
     q.where = (arg, op, val) => {
       if (arg === 'sr.service_date' && op === '<') state.beforeDay = val;
+      if (arg && typeof arg === 'object') {
+        if ('sr.customer_id' in arg) state.customerId = arg['sr.customer_id'];
+        if ('sr.status' in arg) state.status = arg['sr.status'];
+      }
       return q;
     };
     q.whereRaw = (sql, bindings) => {
@@ -66,7 +70,10 @@ function fakeDbh({ throws = {}, rows = ROWS } = {}) {
       if (table === 'service_products as sp') return PRODUCTS;
       if (table !== 'service_records as sr') return [];
       // No bound given = every row: a test fails if the code ever drops the bound.
+      // A predicate the code never sent filters nothing: a dropped customer or status filter fails a test.
       return rows
+        .filter((r) => state.customerId === undefined || r.customer_id === state.customerId)
+        .filter((r) => state.status === undefined || r.status === state.status)
         .filter((r) => !state.beforeDay || r.service_date < state.beforeDay)
         .filter((r) => state.notVisit === undefined || !state.notVisit.includes(r.scheduled_service_id))
         .slice(0, state.limit ?? rows.length);
@@ -98,6 +105,17 @@ describe('deterministicVisitFacts past_visits', () => {
     ];
     const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
     expect(visits.map((v) => v.date)).toEqual(['2026-11-15', '2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01']);
+  });
+
+  test('another customer\'s record and an unfinished record are never listed', async () => {
+    const rows = [
+      rec('other', '2026-11-24', 'Pest Control Service', { customer_id: 'cust-2', technician_notes: 'Another home.' }),
+      rec('draft', '2026-11-23', 'Pest Control Service', { status: 'in_progress' }),
+      ...ROWS,
+    ];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(visits.map((v) => v.date)).toEqual(['2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01']);
+    expect(JSON.stringify(visits)).not.toContain('Another home');
   });
 
   test('an older stop never lists a later visit', async () => {
