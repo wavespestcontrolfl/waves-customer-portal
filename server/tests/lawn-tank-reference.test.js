@@ -85,6 +85,32 @@ describe('a several-use line and a hand-shaker bait', () => {
   });
 });
 
+describe('a fixed volume the sprayer test does not put out, and the Celsius heat rule', () => {
+  const arena = { name: 'Arena', default_rate_per_1000: 0.29, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
+  test('Arena at 4 gal per 1,000 sq ft on a tank tested at 2 and a FlowZone at 1.33: one check per sprayer, the amounts stay', () => {
+    const item = { raw: 'Arena 50 WDG — chinch, 0.147 oz per 1,000 sq ft in 4 gal per 1,000 sq ft', role: 'base', conditional: false };
+    const ref = tankReference({ product: arena, item, rig: TANK, backpack: BACKPACK });
+    expect(ref.volumeChecks).toEqual([
+      { sprayerName: 'Fixture tank', labelGalPer1000: 4, testedGalPer1000: 2 },
+      { sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 4, testedGalPer1000: 1.33 },
+    ]);
+    expect(ref).toMatchObject({ per100Gal: { amount: 3.675, carrierSource: 'line' }, backpack4Gal: { amount: 0.147 } });
+    // The sprayer's own volume needs no check; neither does a line volume the sprayer was tested at.
+    expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft' }, rig: TANK, backpack: BACKPACK }).volumeChecks).toEqual([]);
+    expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft in 2 gal per 1,000 sq ft' }, rig: TANK }).volumeChecks).toEqual([]);
+  });
+  test('a surfactant in the Celsius mix carries the Celsius label rule from the weed mix; another adjuvant does not', () => {
+    const { SURFACTANT_CHECK_NOTE } = require('../services/lawn-weed-mix');
+    const nis = { name: 'Surfactant', default_rate_per_1000: 0.25, rate_unit: 'fl oz', mixing_order_category: 'adjuvant_last' };
+    const row = { applicationMode: 'spot', gates: { tankMixWith: 'Celsius WG', concentration: '0.25% v/v' } };
+    const ref = tankReference({ product: nis, item: conditional('Surfactant — with Celsius'), v13Line: { row, state: 'spot' }, backpack: BACKPACK });
+    expect(ref.surfactantNote).toBe(SURFACTANT_CHECK_NOTE);
+    expect(SURFACTANT_CHECK_NOTE).toMatch(/90°F/);
+    const other = tankReference({ product: nis, item: conditional('Surfactant'), v13Line: { row: { ...row, gates: { ...row.gates, tankMixWith: 'Talak' } }, state: 'spot' }, backpack: BACKPACK });
+    expect(other.surfactantNote).toBeNull();
+  });
+});
+
 describe('the carrier the job calculation already uses', () => {
   const dimension = { name: 'Dimension 2EW', default_rate_per_1000: 0.5, rate_unit: 'fl oz', mixing_order_category: 'ec_ew' };
   test('the spring catch-up hose pass sizes on its row carrier (1 gal), not the rig at 2 gal, as roundsCatchUp.carrierFor does', () => {

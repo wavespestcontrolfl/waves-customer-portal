@@ -31,6 +31,18 @@ function applicationMethod(item, products) {
   const partners = products.filter((other) => mixable(other) && mixesInto(other, item));
   return partners.length ? `Tank with: ${partners.map((other) => other.product.name).join(", ")}` : neutral;
 }
+
+// The Celsius label's heat rule (server: lawn-weed-mix.js), on the surfactant card and the Celsius card whenever the sheet tells
+// them to mix.
+function surfactantNote(item, products) {
+  if (!mixable(item)) return null;
+  const own = item.tankAmounts?.surfactantNote;
+  if (own) return products.some((base) => mixable(base) && mixesInto(item, base)) ? own : null;
+  return products.find((other) => mixable(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
+}
+
+// A program volume the sprayer's test does not put out: change the pass, so the label volume goes down.
+const volumeText = ({ sprayerName, labelGalPer1000: label, testedGalPer1000: tested }) => `Label volume is ${num(label)} gal per 1,000. ${sprayerName || "This sprayer"} was tested at ${num(tested)}. ${tested < label ? "Slow the pass or make two passes." : "Speed up the pass."}`;
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",
@@ -43,6 +55,17 @@ const useRows = (useFills = []) => useFills.flatMap((use) => [["100 gal", use.pe
   .map(([label, fill]) => [`${label}, ${use.use}`, `${fillText(fill)} at ${num(use.carrierGalPer1000)} gal per 1,000 sq ft`]));
 
 // One product's fill amounts (server: lawn-tank-reference.js) as [label, text] rows, and the one amount the heading shows.
+const headingFill = (fill, backpack) => `${fillText(fill)} / ${num(fill.gallons)} gal${fill === backpack ? " FlowZone" : ""}`;
+
+// The card heading: the full tank, else 100 gal, else FlowZone. A card with only per-use fills (October Velista with no FlowZone
+// test) shows the first of them, never "No amount".
+function amountHeading(amounts) {
+  const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
+  if (main) return headingFill(main, amounts.backpack4Gal);
+  const use = (amounts.useFills || []).find((entry) => entry.per100Gal || entry.backpack4Gal);
+  return use ? `${headingFill(use.per100Gal || use.backpack4Gal, use.backpack4Gal)}, ${use.use}` : "No amount";
+}
+
 function amountRows(amounts) {
   if (!amounts) return { rows: [], heading: "No amount" };
   const rate = amounts.ratePer1000 ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} per 1,000 sq ft` : null;
@@ -57,12 +80,11 @@ function amountRows(amounts) {
   else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
   if (amounts.fixedCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.fixedCarrierGalPer1000)} gal per 1,000 sq ft (${CARRIER_SOURCE[amounts.fixedCarrierSource]})`]);
   rows.push(...useRows(amounts.useFills));
-  const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
-  return { rows, heading: main ? `${fillText(main)} / ${num(main.gallons)} gal${main === amounts.backpack4Gal ? " FlowZone" : ""}` : "No amount" };
+  return { rows, heading: amountHeading(amounts) };
 }
 
 // The checks that once withheld a product's amount, now short warnings beside it (owner 2026-11-26: warn, never hide).
-function productCautions(item, exclusions) {
+function productCautions(item, exclusions, products) {
   const { product, tankAmounts: amounts = {} } = item;
   // The whole species only: a named cultivar exclusion (Floratam, an unknown cultivar) stays on the excluded-turf line.
   const excludesDefaultTurf = exclusions.some((species) => ["staugustine", "staugustinegrass"].includes(nameKey(species)));
@@ -76,6 +98,8 @@ function productCautions(item, exclusions) {
     item.fieldHold && "On hold: see the warning above.",
     // The program's required notes for this product, selected or not (the sheet-wide warnings list only the selected ones).
     ...(item.gateNotes || []).filter((note) => note.severity === "required").map((note) => note.text),
+    surfactantNote(item, products),
+    ...(amounts?.volumeChecks || []).map(volumeText),
   ].filter(Boolean);
 }
 
@@ -120,7 +144,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         const { rows: fills, heading } = amountRows(amounts);
         const labelLink = productLabelLink(product);
         const exclusions = product.excludedTurfSpecies || [];
-        const cautions = productCautions(item, exclusions);
+        const cautions = productCautions(item, exclusions, products);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
           ["Active ingredient", product.activeIngredient],

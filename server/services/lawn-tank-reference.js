@@ -17,6 +17,7 @@
 const { calculateProductAmount, v13RateOptions } = require('./waveguard-plan-engine');
 const { etDateString } = require('../utils/datetime-et');
 const roundsCatchUp = require('./lawn-rounds-catchup');
+const { SURFACTANT_CHECK_NOTE } = require('./lawn-weed-mix');
 
 const BIG_TANK_GAL = 100;
 const BACKPACK_GAL = 4;
@@ -59,8 +60,21 @@ function recipeRateOptions(row, raw) {
   return { options: { protocolRate: { rate: Number(found[1]), unit: found[3].replace(/\.\s*|\s+/g, ' ').trim() } }, lineRate: true };
 }
 
-// How the program mixes the product: added to another product's mix (gates.tankMixWith), or applied alone (gates.applyAlone).
-const mixFields = (row) => ({ mixWith: row?.gates?.tankMixWith || null, applyAlone: row?.gates?.applyAlone === true });
+// How the program mixes the product: added to another product's mix (gates.tankMixWith), or applied alone (gates.applyAlone). A
+// surfactant in the Celsius mix carries the Celsius label's heat rule (lawn-weed-mix.js), for its card and the Celsius card.
+function mixFields(row, percent) {
+  const mixWith = row?.gates?.tankMixWith || null;
+  const surfactantNote = percent && /celsius/i.test(mixWith || '') ? SURFACTANT_CHECK_NOTE : null;
+  return { mixWith, applyAlone: row?.gates?.applyAlone === true, surfactantNote };
+}
+
+// Each sprayer whose tested output differs from a volume the program fixes for this line (Arena at 4 gal per 1,000 sq ft on a
+// FlowZone tested at 1.33): the fill stays; the card says to change the pass so the label volume goes down.
+function volumeChecks(carriers, sprayers) {
+  return carriers.flatMap((label) => sprayers
+    .filter((sprayer) => rigCarrier(sprayer) > 0 && Math.abs(rigCarrier(sprayer) - label) > 1e-9)
+    .map((sprayer) => ({ sprayerName: sprayer.system_name || null, labelGalPer1000: label, testedGalPer1000: rigCarrier(sprayer) })));
+}
 
 const isTwoAndHalfGallonJug = (product) => /^\s*2\.5\s*-?\s*gal/i.test(String(product?.container_size || ''));
 
@@ -160,10 +174,10 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   const rateArgs = { product, ...nutrientTargets, ...recipe.options };
   const rate = calculateProductAmount({ ...rateArgs, lawnSqft: 1000, carrierGalPer1000: 0 });
   const percent = concentrationPercent(row, item.raw);
-  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false, useFills: [] };
+  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false, useFills: [], volumeChecks: [] };
   const base = {
     ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: recipe.lineRate ? 'recipe_line_rate' : rate.rateSource,
-    concentrationPercent: percent, planState: planState || null, ...mixFields(row), ...none,
+    concentrationPercent: percent, planState: planState || null, ...mixFields(row, percent), ...none,
   };
   if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader', applicator: granularApplicator(item.raw) };
   const [lineCarrier, lineSource] = fixedCarrier(item, row);
@@ -176,6 +190,7 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   });
   const fullGallons = fullTankGallons(rig);
   const backpack4Gal = sized(BACKPACK_GAL, backpack);
+  const useFills = percent ? [] : lineUses(item.raw).map((use) => useFill(use, { product, row, nutrientTargets, tankFills }));
   return {
     ...base,
     application: 'spray',
@@ -185,7 +200,8 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     per100Gal: tankFills ? sized(BIG_TANK_GAL, tankRig) : null,
     fullTank: bigTank && fullGallons > 0 ? sized(fullGallons, tankRig) : null,
     backpack4Gal,
-    useFills: percent ? [] : lineUses(item.raw).map((use) => useFill(use, { product, row, nutrientTargets, tankFills })),
+    useFills,
+    volumeChecks: volumeChecks([...new Set([lineCarrier, ...useFills.map((use) => use.carrierGalPer1000)].filter(Boolean))], [tankFills && tankRig, backpack].filter(Boolean)),
     // The FlowZone has no sprayer test on file, so its amount cannot be sized (a rate exists, the line fixes no volume).
     backpackMissing: !backpack4Gal && rate.ratePer1000 > 0 && !(lineCarrier || percent || rigCarrier(backpack) > 0),
   };

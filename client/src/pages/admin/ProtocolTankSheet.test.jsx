@@ -232,6 +232,43 @@ describe("110-gallon tank reference", () => {
     expect(within(container).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent("0.12 oz (3.4 g)");
   });
 
+  it("a card whose only amounts are per-use fills heads with the first of them, never No amount", () => {
+    const plan = fixture();
+    Object.assign(plan.items[0].tankAmounts, { per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: true, useFills: [{ use: "mapped large patch", carrierGalPer1000: 2, per100Gal: null,
+      backpack4Gal: { gallons: 4, amount: 0.454, amountUnit: "oz", carrierGalPer1000: 2, carrierSource: "line" } }] });
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("0.454 oz / 4 gal FlowZone, mapped large patch").length).toBeGreaterThan(0);
+      expect(within(surface).queryByText("No amount")).not.toBeInTheDocument();
+    }
+  });
+
+  it("a program volume the sprayer test does not put out warns on the card and keeps the amounts", () => {
+    const plan = fixture();
+    plan.items[0].tankAmounts.volumeChecks = [{ sprayerName: null, labelGalPer1000: 4, testedGalPer1000: 2 }, { sprayerName: "FlowZone fixture", labelGalPer1000: 1, testedGalPer1000: 1.33 }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Label volume is 4 gal per 1,000. This sprayer was tested at 2. Slow the pass or make two passes.")).toBeInTheDocument();
+      expect(within(surface).getByText("Label volume is 1 gal per 1,000. FlowZone fixture was tested at 1.33. Speed up the pass.")).toBeInTheDocument();
+      expect(within(surface).getAllByText("12.5 oz / 110 gal").length).toBeGreaterThan(0);
+    }
+  });
+
+  it("the Celsius heat rule shows on the surfactant card and the Celsius card when they mix, and not when they do not", () => {
+    const plan = fixture();
+    const rule = "Leave the surfactant out if it is 90°F or hotter.";
+    const item = (id, name, extra, selected) => ({ selected, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "adjuvant_last" },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
+    plan.items = [item("cel", "Celsius WG", {}, true), item("nis", "Synthetic surfactant", { mixWith: "Celsius WG", surfactantNote: rule }, true)];
+    const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getAllByText(rule)).toHaveLength(2);
+    expect(within(document.querySelector(".protocol-print-sheet")).getAllByText(rule)).toHaveLength(2);
+    unmount();
+    plan.items[0].selected = false;
+    const again = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(again.container).queryByText(rule)).not.toBeInTheDocument();
+  });
+
   it("a hand-shaker bait says Hand shaker, on screen and in print", () => {
     const plan = fixture();
     plan.items = [{ selected: false, conditional: true, product: { id: "adv", name: "Synthetic bait granule", labelVerifiedAt: "2026-01-01" },
