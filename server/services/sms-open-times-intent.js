@@ -161,20 +161,38 @@ function isCustomerAppointmentAsk(body) {
   return true;
 }
 
+function isCustomerTopicBarrier(text) {
+  return (
+    CUSTOMER_WITHDRAWAL_RE.test(text)
+    || NON_APPOINTMENT_SUBJECT_RE.test(text)
+    || NON_SCHEDULING_ADMIN_TOPIC_RE.test(text)
+    || PEST_REPORT_TOPIC_RE.test(text)
+  );
+}
+
+function isContinuingStaffQuestion(recent, idx) {
+  const body = String(recent[idx]?.body || '');
+  if (!isStaffAppointmentQuestion(body)) return false;
+  return STAFF_EXPLICIT_VISIT_SUBJECT_RE.test(body) || !precedingCustomerIsNonAppointment(recent, idx);
+}
+
 function collectCurrentCustomerTurns(recent, startIdx) {
   const collected = [];
-  for (let j = startIdx; j < recent.length && collected.length < 2; j += 1) {
-    // Stop collecting at any intervening outbound staff message, withdrawal, or
-    // non-appointment topic so an older closed discussion never supplies the
-    // service for a newer scheduling turn. Explicit booking requests that name
-    // a service ("reschedule my mosquito treatment") are preserved.
-    if (recent[j].direction === 'outbound') break;
+  for (let j = startIdx; j < recent.length && collected.length < 3; j += 1) {
+    // Continue through preceding staff scheduling questions in the same active
+    // thread so multi-turn exchanges preserve the requested service, while
+    // stopping at any staff closure, non-appointment question, withdrawal, or
+    // topic switch.
+    if (recent[j].direction === 'outbound') {
+      if (isContinuingStaffQuestion(recent, j)) continue;
+      break;
+    }
     const text = String(recent[j].body).trim();
     if (isCustomerAppointmentAsk(text)) {
       collected.push(text);
       continue;
     }
-    if (CUSTOMER_WITHDRAWAL_RE.test(text) || NON_SCHEDULING_ADMIN_TOPIC_RE.test(text) || PEST_REPORT_TOPIC_RE.test(text)) break;
+    if (isCustomerTopicBarrier(text)) break;
     collected.push(text);
   }
   return collected.reverse();
@@ -237,7 +255,7 @@ function threadSchedulingFollowUp({ inboundMessage, inboundPhone, smsHistory, no
     if (isCustomerAppointmentAsk(turn.body)) {
       return { carried: true, reason: 'prior_customer_booking_ask', anchorText: String(turn.body).trim() };
     }
-    if (CUSTOMER_WITHDRAWAL_RE.test(turn.body) || NON_SCHEDULING_ADMIN_TOPIC_RE.test(turn.body) || PEST_REPORT_TOPIC_RE.test(turn.body)) {
+    if (isCustomerTopicBarrier(turn.body)) {
       return { carried: false, reason: 'customer_changed_topic', anchorText: '' };
     }
   }

@@ -388,5 +388,35 @@ describe('threadSchedulingFollowUp', () => {
       ],
     });
     expect(genericStaffAfterCallAsk).toEqual({ carried: false, reason: 'non_appointment_subject', anchorText: '' });
+
+    // Codex P2: customer switching from a lawn reschedule to a phone-call request stops lookback
+    const switchedToPhoneCall = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'inbound', body: 'Can we schedule a phone call?', date: minsAgo(10), fromPhone: ME, toPhone: WAVES },
+        { direction: 'inbound', body: 'Can we reschedule my lawn visit?', date: minsAgo(20), fromPhone: ME, toPhone: WAVES },
+      ],
+    });
+    expect(switchedToPhoneCall).toEqual({ carried: false, reason: 'customer_changed_topic', anchorText: '' });
+
+    // Codex P2: successive staff scheduling questions preserve the original service anchor
+    const multiTurnServiceContext = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: 'Morning or afternoon for your visit?', date: minsAgo(5), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+        { direction: 'inbound', body: 'Tuesday works', date: minsAgo(10), fromPhone: ME, toPhone: WAVES },
+        { direction: 'outbound', body: 'What day works best?', date: minsAgo(15), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+        { direction: 'inbound', body: 'Can we reschedule my lawn care visit?', date: minsAgo(25), fromPhone: ME, toPhone: WAVES },
+      ],
+    });
+    expect(multiTurnServiceContext.carried).toBe(true);
+    expect(multiTurnServiceContext.reason).toBe('staff_scheduling_question');
+    expect(multiTurnServiceContext.anchorText).toContain('reschedule my lawn care visit');
+    expect(multiTurnServiceContext.anchorText).toContain('Tuesday works');
+    expect(multiTurnServiceContext.anchorText).toContain('Morning or afternoon for your visit?');
   });
 });
