@@ -36,18 +36,19 @@ export function formatMixAmount(amount, unit, amountMax) {
   return text;
 }
 
-export function mixTable(mixRates) {
+// `sprayers` defaults to the pest cards' three; a card with its own tanks (Tree & Shrub: its rig is 110 gal) passes them.
+export function mixTable(mixRates, sprayers = SPRAYERS) {
   const rows = (Array.isArray(mixRates) ? mixRates : []).filter((row) => row && row.product);
   const used = new Set();
   const out = rows.map((row) => {
     const amount = Number(row.perGallon?.amount);
     const amountMax = Number(row.perGallon?.amountMax);
     const unit = row.perGallon?.unit;
-    const sprayers = Array.isArray(row.sprayers) ? row.sprayers : [];
+    const rowSprayers = Array.isArray(row.sprayers) ? row.sprayers : [];
     const amounts = {};
     if (amount > 0 && unit) {
-      for (const sprayer of SPRAYERS) {
-        if (!sprayers.includes(sprayer.key)) continue;
+      for (const sprayer of sprayers) {
+        if (!rowSprayers.includes(sprayer.key)) continue;
         used.add(sprayer.key);
         amounts[sprayer.key] = formatMixAmount(
           amount * sprayer.gallons,
@@ -58,5 +59,5 @@ export function mixTable(mixRates) {
     }
     return { ...row, amounts };
   });
-  return { rows: out, columns: SPRAYERS.filter((sprayer) => used.has(sprayer.key)) };
+  return { rows: out, columns: sprayers.filter((sprayer) => used.has(sprayer.key)) };
 }
