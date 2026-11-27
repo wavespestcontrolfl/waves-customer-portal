@@ -192,13 +192,33 @@ describe('once per ET day', () => {
     mockTrigger.mockRejectedValueOnce(new Error('boom'));
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
     expect(claimed.size).toBe(0);
-    // Provider handoff may already have happened -> keep the claim so rerun does not duplicate.
+    // Provider handoff may already have happened -> keep both claims to avoid duplicates,
+    // but report uncertain delivery instead of claiming sent: true.
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'push_dispatch' });
-    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: true });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, uncertain: true });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
     expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('delivery uncertain'));
     mockTrigger.mockClear();
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'already_claimed' });
     expect(mockTrigger).not.toHaveBeenCalled();
+  });
+
+  test('a failed recipient lookup leaves no stranded daily claim so a rerun succeeds', async () => {
+    mockOpenRows.mockResolvedValue(many(2));
+    let failOnce = true;
+    const origImpl = mockDb.getMockImplementation();
+    mockDb.mockImplementation((table) => {
+      if (table === 'technicians' && failOnce) {
+        failOnce = false;
+        return { where: () => ({ select: async () => { throw new Error('technicians lookup failed'); } }) };
+      }
+      return origImpl(table);
+    });
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, error: 'dispatch_failed' });
+    expect(claimed.size).toBe(0);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
   });
 
   test('a claim that cannot be taken sends nothing', async () => {

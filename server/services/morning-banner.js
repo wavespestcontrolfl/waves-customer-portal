@@ -102,14 +102,14 @@ async function splitAdminIdsByOwnerAccess() {
   return { ownerIds, otherAdminIds };
 }
 
-function deliverySucceeded(result) {
-  return Boolean(
-    result
-    && !result.error
-    && !result.prefsUnavailable
-    && result.pushFailed !== 'recipient_lookup'
-    && result.pushFailed !== 'before_handoff',
-  );
+function classifyDelivery(result) {
+  if (!result || result.error || result.prefsUnavailable
+    || result.pushFailed === 'recipient_lookup'
+    || result.pushFailed === 'before_handoff') {
+    return 'failed';
+  }
+  if (result.pushFailed) return 'uncertain';
+  return 'sent';
 }
 
 async function sendClaimedAudience({ key, payload, triggerOptions }) {
@@ -124,7 +124,8 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
   try {
     const { triggerNotification } = require('./notification-triggers');
     const result = await triggerNotification('waiting_summary', payload, triggerOptions);
-    if (!deliverySucceeded(result)) {
+    const verdict = classifyDelivery(result);
+    if (verdict === 'failed') {
       await releaseKey(key);
       const reason = result?.error
         ? 'dispatch error'
@@ -133,6 +134,10 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
           : result?.pushFailed || 'no result';
       logger.error(`[morning-banner] ${key}: banner not sent (${reason})`);
       return { status: 'dispatch_failed' };
+    }
+    if (verdict === 'uncertain') {
+      logger.warn(`[morning-banner] ${key}: banner delivery uncertain (${result.pushFailed}); keeping claim to avoid duplicates`);
+      return { status: 'uncertain', result };
     }
     return { status: 'sent', result };
   } catch (err) {
@@ -151,26 +156,12 @@ async function hasAudienceClaim(day) {
 
 // Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
 // alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
-// re-notify an audience that already received today's banner. On the first run
-// of a day (no audience claim yet), also atomically reserve the legacy
-// bare-date key (`morning_banner:<day>`) so both rollout directions (old->new
-// and new->old) never duplicate a banner during a rolling deploy.
+// re-notify an audience that already received today's banner. Look up
+// recipients BEFORE reserving any claim so a DB lookup failure leaves no
+// stranded daily claim; on the first run of a day, atomically reserve the
+// legacy bare-date key (`morning_banner:<day>`) so both rollout orders never
+// duplicate a banner during a rolling deploy.
 async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
-  const legacyKey = `${CLAIM_PREFIX}${day}`;
-  let reservedLegacyHere = false;
-  try {
-    const alreadyScoped = await hasAudienceClaim(day);
-    if (!alreadyScoped) {
-      reservedLegacyHere = await claimKey(legacyKey);
-      if (!reservedLegacyHere) {
-        logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
-        return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
-      }
-    }
-  } catch (err) {
-    logger.error(`[morning-banner] legacy claim gate failed for ${day}: ${err?.code || err?.message || 'error'}`);
-    return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
-  }
   const { ownerIds, otherAdminIds } = await splitAdminIdsByOwnerAccess();
   const audiences = [];
   if (ownerSummary.count > 0 && ownerIds.length > 0) {
@@ -187,17 +178,35 @@ async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
       triggerOptions: { pushOnly: true, onlyUserIds: otherAdminIds },
     });
   }
-  if (audiences.length === 0) {
-    if (reservedLegacyHere) await releaseKey(legacyKey);
-    return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
+  if (audiences.length === 0) return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
+
+  const legacyKey = `${CLAIM_PREFIX}${day}`;
+  let reservedLegacyHere = false;
+  try {
+    const alreadyScoped = await hasAudienceClaim(day);
+    if (!alreadyScoped) {
+      reservedLegacyHere = await claimKey(legacyKey);
+      if (!reservedLegacyHere) {
+        logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
+        return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
+      }
+    }
+  } catch (err) {
+    logger.error(`[morning-banner] legacy claim gate failed for ${day}: ${err?.code || err?.message || 'error'}`);
+    return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
   }
+
   const outcomes = await Promise.all(audiences.map(sendClaimedAudience));
-  const anySucceededOrClaimed = outcomes.some((o) => o.status === 'sent' || o.status === 'already_claimed');
-  if (reservedLegacyHere && !anySucceededOrClaimed) {
+  const anyClaimedOrKept = outcomes.some((o) => o.status === 'sent' || o.status === 'uncertain' || o.status === 'already_claimed');
+  if (reservedLegacyHere && !anyClaimedOrKept) {
     await releaseKey(legacyKey);
   }
   if (outcomes.some((o) => o.status === 'claim_failed')) return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
   if (outcomes.some((o) => o.status === 'dispatch_failed')) return { count: ownerSummary.count, sent: false, error: 'dispatch_failed' };
+  const uncertain = outcomes.find((o) => o.status === 'uncertain');
+  if (uncertain) {
+    return { count: ownerSummary.count, sent: false, uncertain: true, result: uncertain.result };
+  }
   const sent = outcomes.find((o) => o.status === 'sent');
   if (!sent) {
     logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
