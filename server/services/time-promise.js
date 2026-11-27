@@ -684,6 +684,7 @@ module.exports = {
   dayOnlyEligibility,
   dayOnlySendDecision,
   loadTimeDisplay,
+  ENDED_STATUSES,
   loadOfficeToldFields,
   TOLD_HORIZON_DAYS,
   dayOnlyMoveDecision,
