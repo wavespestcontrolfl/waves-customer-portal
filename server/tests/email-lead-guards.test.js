@@ -449,6 +449,52 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(leadInsert.row.phone).toBe('941-555-2222');
   });
 
+  test('Google Local Services receipt emails (localservices-noreply@google.com) skip silently with no lead, bell, or draft (owner ruling 2026-11-27)', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    const state = setupDb();
+
+    const result = await handleLeadInquiry(
+      makeEmail({
+        from_address: 'localservices-noreply@google.com',
+        from_name: 'Local Services by Google',
+        reply_to: 'localservices-noreply@google.com',
+        subject: 'New call from a potential customer',
+      }),
+      makeClassification({
+        extracted: {
+          person_name: '',
+          email: 'localservices-noreply@google.com',
+          phone: '',
+        },
+      }),
+    );
+
+    expect(result).toEqual({ action: 'skipped_automated_sender' });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(insertsFor(state, 'notifications')).toHaveLength(0);
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    expect(emailUpdates(state)).toContainEqual(
+      expect.objectContaining({ auto_action: 'lead_skipped_automated_sender' }),
+    );
+    expect(state.firstTables).toHaveLength(0);
+  });
+
+  test('prefixed no-reply sender with no real extracted contact never mints a lead or Gmail draft', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    const state = setupDb();
+
+    const result = await handleLeadInquiry(
+      makeEmail({ from_address: 'forms-noreply@example.com', from_name: 'Form Relay' }),
+      makeClassification({ extracted: { person_name: '', email: 'forms-noreply@example.com', phone: '' } }),
+    );
+
+    expect(result).toEqual({ action: 'lead_needs_review', reason: 'automated_sender_no_contact' });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
   test('automated sender with no real extracted contact routes to needs-review', async () => {
     const state = setupDb();
 
@@ -630,6 +676,8 @@ describe('lead-guard helpers', () => {
   test('isHardSkippedLeadSender matches the machine-noise list', () => {
     expect(isHardSkippedLeadSender('voicemail@twimlets.com')).toBe(true);
     expect(isHardSkippedLeadSender('anything@twimlets.com')).toBe(true);
+    expect(isHardSkippedLeadSender('localservices-noreply@google.com')).toBe(true);
+    expect(isHardSkippedLeadSender('LocalServices-NoReply@google.com')).toBe(true);
     // Marketplace-solicitor domains match by registrable domain, any local
     // part, subdomains included.
     expect(isHardSkippedLeadSender('team@bark.com')).toBe(true);
@@ -643,12 +691,20 @@ describe('lead-guard helpers', () => {
     expect(isHardSkippedLeadSender(null)).toBe(false);
   });
 
-  test('isAutomatedSender matches no-reply local parts', () => {
+  test('isAutomatedSender matches exact and prefixed/suffixed no-reply local parts', () => {
     expect(isAutomatedSender('do-not-reply@thumbtack.com')).toBe(true);
     expect(isAutomatedSender('noreply@anything.example.com')).toBe(true);
     expect(isAutomatedSender('no-reply@anything.example.com')).toBe(true);
     expect(isAutomatedSender('donotreply@anything.example.com')).toBe(true);
     expect(isAutomatedSender('notifications@anything.example.com')).toBe(true);
+    expect(isAutomatedSender('notifications+leads@anything.example.com')).toBe(true);
+    expect(isAutomatedSender('localservices-noreply@google.com')).toBe(true);
+    expect(isAutomatedSender('billing.no-reply@example.com')).toBe(true);
+    expect(isAutomatedSender('alerts_do_not_reply@example.com')).toBe(true);
+    expect(isAutomatedSender('noreply-forms@example.com')).toBe(true);
+    expect(isAutomatedSender('donotreply+123@example.com')).toBe(true);
+    expect(isAutomatedSender('monoreply@example.com')).toBe(false);
+    expect(isAutomatedSender('noah.reply@example.com')).toBe(false);
     expect(isAutomatedSender('jane.prospect@example.com')).toBe(false);
     expect(isAutomatedSender('')).toBe(false);
   });

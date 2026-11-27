@@ -622,6 +622,11 @@ async function findEmailLeadSourceId() {
 // which email-sync honors (auto-trash) before an email is ever classified.
 const LEAD_HARD_SKIP_SENDERS = [
   '@twimlets.com', // Twilio voicemail relay robots
+  // Google Local Services Ads automated call-receipt notifications ("New call
+  // from a potential customer"): caller details live behind a dashboard link,
+  // never in the email body, and the inbound Twilio call already creates the
+  // real lead and bell. Owner ruling 2026-11-27.
+  'localservices-noreply@google.com',
 ];
 
 // Lead-marketplace solicitors (pay-to-unlock model, e.g. Bark): their
@@ -646,6 +651,10 @@ const LEAD_MARKETPLACE_SOLICITOR_DOMAINS = ['bark.com', 'thumbtack.com'];
 // contact — but the automated from_address must never be stored as the
 // lead's email.
 const AUTOMATED_SENDER_LOCAL_PARTS = ['do-not-reply', 'no-reply', 'noreply', 'donotreply', 'notifications'];
+// Matches prefixed/suffixed no-reply mailboxes (e.g. localservices-noreply@,
+// billing.no-reply@, alerts_donotreply@, noreply-leads@) on token boundaries
+// so human addresses stay unaffected.
+const AUTOMATED_NOREPLY_TOKEN_RE = /(?:^|[._+-])(?:do[-_.]?not[-_.]?reply|no[-_.]?reply|noreply|donotreply)(?:$|[._+-])/i;
 const AUTOMATED_RELAY_DOMAINS = [];
 
 // Subject of the Waves auto-acknowledgment automation email
@@ -679,7 +688,9 @@ function isAutomatedSender(fromAddress) {
   const at = normalized.lastIndexOf('@');
   if (at < 1) return false;
   const localPart = normalized.slice(0, at);
-  if (AUTOMATED_SENDER_LOCAL_PARTS.includes(localPart)) return true;
+  const baseLocalPart = localPart.split('+')[0];
+  if (AUTOMATED_SENDER_LOCAL_PARTS.includes(baseLocalPart)) return true;
+  if (AUTOMATED_NOREPLY_TOKEN_RE.test(localPart)) return true;
   return domainMatches(normalized.slice(at + 1), AUTOMATED_RELAY_DOMAINS);
 }
 
@@ -1223,6 +1234,17 @@ const DRAFT_TONE_RULES = Object.freeze({
   lead: 'This is a NEW CUSTOMER INQUIRY from someone who is not a Waves customer yet. Thank them for reaching out, answer only what the COMPANY FACTS answer, and ask only for what Waves still needs to quote: the service address if the message has none, and a phone number if the message has none. Never quote a price, a visit date or a time.',
 });
 
+// Resolves the actionable reply recipient for an auto-draft, or null when the
+// message should never get a draft (self-sent/self-targeted or addressed to an
+// automated no-reply mailbox with no real Reply-To).
+function resolveDraftReplyAddress(email) {
+  const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
+  if (ownMailboxAddress(email.from_address) === ownAddress) return null;
+  const replyAddress = email.reply_to || email.from_address;
+  if (!replyAddress || ownMailboxAddress(replyAddress) === ownAddress || isAutomatedSender(replyAddress)) return null;
+  return replyAddress;
+}
+
 async function draftReplyForEmail(email, { customer = null, tone = 'service' } = {}) {
   if (!emailAutoDraftsEnabled()) return null;
   // INBOUND mail only: the sync ingests the whole mailbox, so Waves-authored
@@ -1232,10 +1254,8 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
   if (typeof labels === 'string') { try { labels = JSON.parse(labels); } catch { labels = []; } }
   labels = Array.isArray(labels) ? labels : [];
   if (labels.includes('SENT') || labels.includes('DRAFT')) return null;
-  // Both sides read as the base mailbox: a tag on the sender or on the
-  // configured address is the same contact@ mailbox.
-  const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
-  if (ownMailboxAddress(email.from_address) === ownAddress) return null;
+  const replyAddress = resolveDraftReplyAddress(email);
+  if (!replyAddress) return null;
   // ATOMIC idempotency claim in Postgres — the in-memory row is stale by the
   // time reclassification (which runs auto-actions twice with the same
   // object) or a concurrent worker gets here. Only the caller that flips
@@ -1415,10 +1435,6 @@ async function draftReplyForEmail(email, { customer = null, tone = 'service' } =
       logger.warn(`[email-actions] post-LLM thread re-check failed (email ${email.id}) — claim retained: ${e.message}`);
       return null;
     }
-    // Reply-To (validated to a single plain mailbox at parse time) beats
-    // From — relayed mail (contact forms, ticketing) carries the actionable
-    // recipient there while From is a provider-owned no-reply mailbox.
-    const replyAddress = email.reply_to || email.from_address;
     let draft;
     try {
       draft = await gmailClient.createDraft(

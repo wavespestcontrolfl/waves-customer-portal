@@ -986,6 +986,27 @@ describe('reply drafts honor Reply-To', () => {
       '<relay-123@forms-relay.example>'
     );
   });
+
+  test('skips drafting when the resolved reply recipient is a no-reply mailbox', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    const result = await draftReplyForEmail({
+      id: 'e-lsa-noreply',
+      gmail_id: 'g-lsa-noreply',
+      gmail_thread_id: 't-lsa-noreply',
+      from_address: 'localservices-noreply@google.com',
+      from_name: 'Local Services by Google',
+      subject: 'New call from a potential customer',
+      body_text: 'A potential customer called you.',
+      label_ids: JSON.stringify(['INBOX']),
+      message_id: '<lsa-123@google.com>',
+      reply_to: 'localservices-noreply@google.com',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: null,
+    });
+    expect(result).toBeNull();
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
 });
 
 describe('stripPlaceholderSignOff', () => {
