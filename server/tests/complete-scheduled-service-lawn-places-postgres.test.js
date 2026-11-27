@@ -285,7 +285,7 @@ postgres('closeout: the place of a spot treatment', () => {
       const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
       const row = (source) => spot(f, { productId: fungicide.id, areaPlace: 'front', troubleType: 'take_all', troubleSource: source });
       const areas = require('../services/lawn-trouble-areas');
-      expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [row('guide_card')] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+      expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [row('guide_card')] })).toBeNull(); // owner 2026-11-26: a warning, never a refusal
       expect(await areasOf(f)).toEqual([]);
       expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [row('tech_tap')] })).toBeNull();
       const out = await complete(f, { products: [row('tech_tap')] });
@@ -469,8 +469,8 @@ postgres('closeout: the place of a spot treatment', () => {
         const svc = await mockPg('scheduled_services').where({ id: f.serviceId }).first();
         const areas = require('../services/lawn-trouble-areas');
         const card = (extra = {}) => spot(f, { productId: product.id, areaPlace: 'front', troubleSource: 'guide_card', ...extra });
-        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card()] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
-        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card({ troubleType: 'fungus' })] })).toMatchObject({ status: 400, payload: { code: 'lawn_place_not_mapped' } });
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card()] })).toBeNull(); // owner 2026-11-26: a warning, never a refusal
+        expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [card({ troubleType: 'fungus' })] })).toBeNull(); // owner 2026-11-26: a warning, never a refusal
         // A row from Search maps its place; a row with no source is the Search path too.
         expect(await areas.preflightPlaces({ knex: mockPg, svc, products: [spot(f, { productId: product.id, areaPlace: 'front' })] })).toBeNull();
         lookup.mockRestore();

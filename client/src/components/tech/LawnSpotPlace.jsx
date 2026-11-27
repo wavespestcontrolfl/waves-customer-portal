@@ -4,7 +4,7 @@
 // (GATE_LAWN_TROUBLE_AREAS, owner 2026-10-09). The server decides every word and every closed place
 // (lib/lawn-trouble-places.js reads it); this file renders:
 //   - PlaceControl         "Where" with one chip per place of the closed list (any number pressed), under a spot row's area. A place
-//                          a hold closes for the row (a take-all row on an unmapped place) is off, with the reason under the chips.
+//                          the maps do not take for the row (a take-all row on an unmapped place) stays open; its words ride the Complete footer.
 //                          A yearly limit never closes a chip: its words are a warning on the Complete footer.
 //   - PlaceAddButtons      the place buttons of a one-tap entry (Weed spots, Chinch bugs found): the tap names the
 //                          place and adds what that place takes, so the place costs no extra tap there.
@@ -18,8 +18,8 @@ import { knownPlacesOfType, troubleTypeOfRow } from '../../lib/lawn-trouble-plac
 // The reason line under a row's chips: why a place is off (a hold; a yearly limit is only a warning, on the Complete footer), or that
 // the place came from a known trouble area.
 function placeNote(row) {
-  if (row.placeNowhere) return `${row.name} cannot go anywhere on this lawn right now. ${row.placeNowhere}`;
-  if (row.placeBlock) return row.placeBlock;
+  // A place the maps do not take only warns (owner 2026-11-26): the chips stay open and the warning rides the Complete footer.
+  if (row.placeNowhere && !row.places?.length) return `${row.placeNowhere} You can still pick a place and complete.`;
   if (row.placeUnreadable) return 'The limits could not be checked for this place. Record what you applied; the office will review it.';
   if (row.placeDefaulted) return 'Set from the known trouble area. Tap another place to change it.';
   return null;
@@ -45,7 +45,7 @@ export function PlaceControl({ areas, row, title = null, locked, onChange }) {
         {areas.places.map((place) => (
           <Chip
             key={place.id}
-            disabled={locked || (!!row.placeHolds?.[place.id] && !current.includes(place.id))}
+            disabled={locked}
             label={known.has(place.id) ? `${place.label} · known` : place.label}
             pressed={current.includes(place.id)}
             onClick={() => toggle(place.id)}
