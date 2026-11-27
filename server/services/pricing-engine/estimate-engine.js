@@ -1054,6 +1054,17 @@ function legacyTwoStoryRoof(input, serviceKey = null) {
     && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
+// WDO inspection by home size and construction (owner 2026-11-26: $150 to $275, new quotes only). It rides the same replay
+// mechanism with its own stamp (pricingMetadata.legacyWdoFlat): input.legacyWdoFlat is derived from the estimate's own stamp
+// (estimate-floor-signal-replay.js savedLegacyWdoFlatSignal), a priced estimate with no stamp (or inputs asking for a WDO
+// inspection) predates the rule and keeps the $250 flat price. A fresh quote never sets it. The size and construction the
+// table reads are the stored inputs' own, so a replay never re-reads a live lookup.
+const WDO_FLAT_SERVICES = new Set(['wdo_inspection']);
+function legacyWdoFlat(input, serviceKey = null) {
+  return input?.legacyWdoFlat === true
+    && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
 // One-time pest for NEW quotes (owner 2026-11-26, "only new estimtes": 1.8x the quarterly visit, a 10% minimum over the first visit
 // of a plan, no home-age step in any pest price). It rides the same replay mechanism with its own stamp
 // (pricingMetadata.legacyOneTimePestBuffer): input.legacyOneTimePestBuffer is derived from the estimate's own stamp
@@ -1283,6 +1294,11 @@ function generateEstimate(input) {
     yearBuilt: input.yearBuilt,
     constructionMaterial: input.constructionMaterial,
     foundationType: input.foundationType,
+    // The lookup's trust verdict on those two (false = the record's own evidence marks the value weak), and on the home size (false =
+    // a wrong-premise lookup's size no person confirmed): only the WDO price reads them.
+    constructionTrusted: input.constructionTrusted,
+    foundationTrusted: input.foundationTrusted,
+    homeSizeTrusted: input.homeSizeTrusted,
     roofType: input.roofType,
     nearWater: input.nearWater,
     waterDistance: input.waterDistance,
@@ -1353,6 +1369,8 @@ function generateEstimate(input) {
     legacyPricingRules: legacyPricingRules(input),
     // Two-story roof-point stamp (see legacyTwoStoryRoof above): true = priced before the rule, no factor.
     legacyTwoStoryRoof: legacyTwoStoryRoof(input),
+    // WDO size + construction stamp (see legacyWdoFlat above): true = priced before the rule, the $250 flat price.
+    legacyWdoFlat: legacyWdoFlat(input, 'wdo_inspection'),
     // One-time pest stamp (see legacyOneTimePestBuffer above): true = priced before the rule (2.2 multiple, plan age step).
     legacyOneTimePestBuffer: legacyOneTimePestBuffer(input),
     // Pest-above-table stamp (see legacyPestAboveTable above): true = priced before the rule (flat above 5,500 sq ft).
@@ -1370,7 +1388,7 @@ function generateEstimate(input) {
       : {}),
     // On a legacy estimate: the services priced under the CURRENT rules (added by this or an earlier revision), so the
     // next revision and replay keep them there while the older lines keep theirs.
-    ...(legacyPricingRules(input) || legacyTwoStoryRoof(input)
+    ...(legacyPricingRules(input) || legacyTwoStoryRoof(input) || legacyWdoFlat(input)
       ? { currentRulesServices: [...new Set([...(input.currentRulesServices || []), ...(input.addedServiceKeys || [])])] }
       : {}),
     pestProgramFloorArmed,
@@ -2357,7 +2375,19 @@ function generateEstimate(input) {
   // synthetic 2,000 sqft homeSqFt for an unmeasured commercial building —
   // an unmeasured warehouse would get a firm residential price (codex #3594 P1).
   if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
-    const result = priceWDO(property);
+    // Staff revisions re-price on current rules; customer replays keep the sent price (owner 09-26 ruling, same decision as #8626):
+    // a revision posts fresh inputs with the server-derived stamp stripped (estimate-client-identity-fields), so a delivered $250
+    // quote a staff member edits and re-sends prices off the table. Only a replay carries input.legacyWdoFlat from the saved stamp.
+    // A service object can carry a staff-entered construction (like the exclusion's constructionType); the lookup's value and its
+    // trust verdict ride the property profile. A quote saved before the rule keeps the flat price (input.legacyWdoFlat).
+    const wdoOptions = typeof services.wdo === 'object' && services.wdo !== null ? services.wdo : {};
+    const result = priceWDO(property, {
+      legacyWdoFlat: legacyWdoFlat(input, 'wdo_inspection'),
+      constructionType: wdoOptions.constructionType,
+      constructionTrusted: wdoOptions.constructionType ? true : undefined,
+      foundationType: wdoOptions.foundationType,
+      foundationTrusted: wdoOptions.foundationType ? true : undefined,
+    });
     lineItems.push(result);
   }
   if ((services.flea || services.fleaExterior) && !useCommercialManualQuote(services.flea || services.fleaExterior, 'pest_control')) {
@@ -3592,6 +3622,7 @@ function generateEstimate(input) {
   // the rules that priced them.
   for (const line of lineItems) {
     if (line && TWO_STORY_ROOF_SERVICES.has(line.service)) line.legacyTwoStoryRoof = legacyTwoStoryRoof(input, line.service);
+    if (line && WDO_FLAT_SERVICES.has(line.service)) line.legacyWdoFlat = legacyWdoFlat(input, line.service);
     if (line && SPECIALTY_1126_SERVICES.has(line.service)) line.legacySpecialty1126 = legacySpecialty1126(input, line.service);
     if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
     if (line && PEST_ABOVE_TABLE_SERVICES.has(line.service)) line.legacyPestAboveTable = legacyPestAboveTable(input);
