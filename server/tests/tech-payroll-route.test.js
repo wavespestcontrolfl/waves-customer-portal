@@ -1,6 +1,5 @@
-// GATE_TECH_PAY_STUBS (payroll item 7): a technician reads only their own finalized pay stubs.
-// Route behavior with the service mocked: gate off answers 404 after the login check and before any query,
-// the technician id comes from the session, and the service's 404 passes through.
+// Payroll item 7: a technician reads only their own finalized pay stubs.
+// Route behavior with the service mocked: the technician id comes from the session, and the service's 404 passes through.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/payroll-runs', () => ({ listOwnChecks: jest.fn(), getOwnStub: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
@@ -31,25 +30,8 @@ beforeAll(async () => {
   server = await new Promise((resolve) => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
   base = `http://127.0.0.1:${server.address().port}/api/tech/payroll`;
 });
-afterAll(async () => { delete process.env.GATE_TECH_PAY_STUBS; await new Promise((resolve) => server.close(resolve)); });
-beforeEach(() => { jest.clearAllMocks(); process.env.GATE_TECH_PAY_STUBS = 'true'; });
-
-test.each(['/checks', `/checks/${checkId}/stub`])('gate off answers 404 after the login check and before any query: %s', async (path) => {
-  for (const off of [undefined, '1', 'TRUE', 'on', 'false']) {
-    if (off === undefined) delete process.env.GATE_TECH_PAY_STUBS; else process.env.GATE_TECH_PAY_STUBS = off;
-    const response = await call(path);
-    expect(response.status).toBe(404);
-    expect(await response.json()).toEqual({ enabled: false });
-  }
-  expect(payrollRuns.listOwnChecks).not.toHaveBeenCalled();
-  expect(payrollRuns.getOwnStub).not.toHaveBeenCalled();
-});
-
-test('gate off still needs the staff login: no route here is public', async () => {
-  delete process.env.GATE_TECH_PAY_STUBS;
-  expect((await call('/checks', null)).status).toBe(401);
-  expect((await call(`/checks/${checkId}/stub`, 'customer')).status).toBe(403);
-});
+afterAll(async () => { await new Promise((resolve) => server.close(resolve)); });
+beforeEach(() => { jest.clearAllMocks(); });
 
 test.each([null, 'customer'])('rejects %s before reading any pay record', async (role) => {
   expect((await call('/checks', role)).status).toBe(role ? 403 : 401);

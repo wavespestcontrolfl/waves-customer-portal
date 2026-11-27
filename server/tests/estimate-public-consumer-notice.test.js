@@ -1,10 +1,10 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 
 // POST /api/estimates/:token/consumer-notice, the cta.consumerNotice block on GET /:token/data and the accept refusal on
-// PUT /:token/accept (GATE_ESTIMATE_CONSUMER_NOTICE). The route decides eligibility and nothing else: the notice itself is
+// PUT /:token/accept. The route decides eligibility and nothing else: the notice itself is
 // the service's job (estimate-consumer-notice.test.js), so the issuer and the state reads are stubbed at the seam while the
 // termite-line detection stays real.
-// Invariants: gate off = generic 404 and no database read, /data carries nothing new and accept is unchanged; only an open,
+// Invariants: only an open,
 // customer-viewable estimate WITH a termite line reaches the issuer; a staff preview never does; a refused accept writes
 // nothing and runs nothing after the check.
 
@@ -44,11 +44,13 @@ jest.mock('../services/estimate-consumer-notice', () => ({
   consumerNoticeBlocksAccept: (...args) => mockBlocksAccept(...args),
 }));
 // Every limiter becomes a pass-through (this suite posts more than the real hourly cap) and its options are kept
-// so the gate-aware skip can be asserted directly.
+// so the limiter's settings can be asserted directly.
 const mockLimiterOptions = [];
 jest.mock('express-rate-limit', () => (options) => {
   mockLimiterOptions.push(options);
-  return (_req, _res, next) => next();
+  const passThrough = (_req, _res, next) => next();
+  passThrough.limiterOptions = options;
+  return passThrough;
 });
 
 const express = require('express');
@@ -124,10 +126,7 @@ const post = (estimate, query = '') => call(`${estimate.token}/consumer-notice${
 const data = (estimate) => call(`${estimate.token}/data`, { estimate });
 const accept = (estimate) => call(`${estimate.token}/accept`, { method: 'PUT', estimate, body: {} });
 
-const ORIGINAL_GATE = process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-const gateOn = () => { process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true'; };
 beforeEach(() => {
-  delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
   dbWrites.length = 0;
   dbTables.length = 0;
   mockEnsure.mockReset().mockResolvedValue({ ok: true, status: 201, signingUrl: 'https://portal.example.test/contract/abc' });
@@ -136,22 +135,9 @@ beforeEach(() => {
   db.mockClear();
   db.transaction.mockClear();
 });
-afterAll(() => {
-  if (ORIGINAL_GATE === undefined) delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-  else process.env.GATE_ESTIMATE_CONSUMER_NOTICE = ORIGINAL_GATE;
-});
 
 describe('POST /:token/consumer-notice', () => {
-  test('gate off: the generic 404, no database read, no service call', async () => {
-    const res = await post(makeEstimate());
-    expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'Estimate not found' });
-    expect(db).not.toHaveBeenCalled();
-    expect(mockEnsure).not.toHaveBeenCalled();
-  });
-
-  test('gate on: an open estimate with a termite line gets the signing URL, no-store, and nothing is written here', async () => {
-    gateOn();
+  test('an open estimate with a termite line gets the signing URL, no-store, and nothing is written here', async () => {
     const estimate = makeEstimate();
     const res = await post(estimate);
     expect(res.status).toBe(201);
@@ -163,21 +149,18 @@ describe('POST /:token/consumer-notice', () => {
   });
 
   test('a pest plan with a Bora-Care add-on is a termite estimate', async () => {
-    gateOn();
     const withBora = { result: { recurring: { services: [{ service: 'pest_control', name: 'Pest Control' }] }, oneTime: { items: [{ service: 'bora_care', name: 'Bora-Care Attic Treatment', price: 900 }] } } };
     const res = await post(makeEstimate({ estimate_data: withBora }));
     expect(res.status).toBe(201);
   });
 
   test('an existing notice answers 200 with the same shape', async () => {
-    gateOn();
     mockEnsure.mockResolvedValue({ ok: true, status: 200, signingUrl: 'https://portal.example.test/contract/def' });
     const res = await post(makeEstimate());
     expect(res).toMatchObject({ status: 200, body: { signingUrl: 'https://portal.example.test/contract/def' } });
   });
 
   test('a stale tab on a customer\'s own plan quote that staff changed gets the accept\'s 409 and no form (codex pre-push P1)', async () => {
-    gateOn();
     const res = await post(makeEstimate({ source: 'plan_start', bill_by_invoice: true }));
     expect(res.status).toBe(409);
     expect(res.body).toMatchObject({ code: 'PLAN_START_STATE_CHANGED', error: expect.any(String) });
@@ -186,7 +169,6 @@ describe('POST /:token/consumer-notice', () => {
   });
 
   test('the service judges that refusal again on the estimate row it locks (codex pre-push P1)', async () => {
-    gateOn();
     await post(makeEstimate());
     expect(mockEnsure).toHaveBeenCalledTimes(1);
     expect(mockEnsure.mock.calls[0][0].quoteRefusalFor)
@@ -194,7 +176,6 @@ describe('POST /:token/consumer-notice', () => {
   });
 
   test('an estimate with no termite line is the generic 404 and never reaches the service', async () => {
-    gateOn();
     const res = await post(makeEstimate({ estimate_data: PEST_DATA }));
     expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
     expect(mockEnsure).not.toHaveBeenCalled();
@@ -209,7 +190,6 @@ describe('POST /:token/consumer-notice', () => {
     ['a past expiry date', { expires_at: '2020-01-01T00:00:00.000Z' }],
     ['an archived estimate', { archived_at: '2026-10-01T00:00:00.000Z' }],
   ])('%s is the generic 404 and never reaches the service', async (_label, overrides) => {
-    gateOn();
     const res = await post(makeEstimate(overrides));
     expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
     expect(mockEnsure).not.toHaveBeenCalled();
@@ -217,14 +197,12 @@ describe('POST /:token/consumer-notice', () => {
   });
 
   test('a staff preview tap is the generic 404', async () => {
-    gateOn();
     const res = await post(makeEstimate(), '?adminPreview=1');
     expect(res.status).toBe(404);
     expect(mockEnsure).not.toHaveBeenCalled();
   });
 
   test('an unknown token is the generic 404', async () => {
-    gateOn();
     const res = await call('unknowntoken1234567890/consumer-notice', { method: 'POST', estimate: undefined });
     expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
     expect(mockEnsure).not.toHaveBeenCalled();
@@ -235,33 +213,27 @@ describe('POST /:token/consumer-notice', () => {
     ['no representative', 'no_representative', 'Please call us and we will finish it with you.'],
     ['already signed', 'already_signed', 'Your consumer notice is already signed. Please reload the page.'],
   ])('the service refusal for %s is a 409 the page can show', async (_label, code, error) => {
-    gateOn();
     mockEnsure.mockResolvedValue({ ok: false, status: 409, code, error });
     const res = await post(makeEstimate());
     expect(res).toMatchObject({ status: 409, body: { code, error } });
   });
 
   test('the service not-found stays the generic body (no code leaks)', async () => {
-    gateOn();
     mockEnsure.mockResolvedValue({ ok: false, status: 404, code: 'not_available', error: 'Estimate not found' });
     const res = await post(makeEstimate());
     expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
   });
 
-  test('the route limiter is skipped while the gate is dark (a probe never sees a 429) and counts once it is on', () => {
-    const flips = mockLimiterOptions.filter((o) => typeof o?.skip === 'function' && (() => {
-      delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-      const dark = o.skip({ body: {} });
-      gateOn();
-      const live = o.skip({ body: {} });
-      delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE;
-      return dark === true && live === false;
-    })());
-    expect(flips.some((o) => o.max === 10 && o.windowMs === 60 * 60 * 1000)).toBe(true);
+  test('the route itself carries a limiter that counts every probe: 10 an hour, never skipped', () => {
+    const layer = estimatePublicRouter.stack.find((l) => l.route && l.route.path === '/:token/consumer-notice' && l.route.methods.post);
+    expect(layer).toBeDefined();
+    const [limiter] = layer.route.stack;
+    expect(limiter.handle.limiterOptions).toMatchObject({ max: 10, windowMs: 60 * 60 * 1000 });
+    expect(limiter.handle.limiterOptions.skip).toBeUndefined();
   });
 });
 
-// The pre-guard is mounted in server/index.js before the global /api limiter, so privacy headers and the dark gate's 404
+// The pre-guard is mounted in server/index.js before the global /api limiter, so privacy headers
 // land ahead of it. The global limiter here is a stand-in that always answers 429.
 describe('consumer-notice pre-guard (mounted before the global /api limiter)', () => {
   async function guarded(path, { method = 'POST' } = {}) {
@@ -292,28 +264,17 @@ describe('consumer-notice pre-guard (mounted before the global /api limiter)', (
     expect(limiterAt).toBeGreaterThan(guardAt);
   });
 
-  test('gate off: the generic 404 with the privacy headers, ahead of the limiter (never a 429)', async () => {
-    for (let i = 0; i < 3; i += 1) {
-      const res = await guarded('abcdefghijklmnopqrstu/consumer-notice');
-      expect(res).toMatchObject({ status: 404, body: { error: 'Estimate not found' } });
-      expectPrivacyHeaders(res);
-    }
-  });
-
-  test('gate on: a limiter 429 still carries the privacy headers', async () => {
-    gateOn();
+  test('a limiter 429 still carries the privacy headers', async () => {
     const res = await guarded('abcdefghijklmnopqrstu/consumer-notice');
     expect(res.status).toBe(429);
     expectPrivacyHeaders(res);
   });
 
   test('the handler stamps the headers itself too (correct without the mount)', async () => {
-    gateOn();
     expectPrivacyHeaders(await post(makeEstimate()));
   });
 
   test('other routes and methods pass through untouched', () => {
-    gateOn();
     const next = jest.fn();
     const res = { set: jest.fn() };
     estimatePublicRouter.consumerNoticePreGuard({ method: 'GET', path: '/abcdefghijklmnopqrstu/consumer-notice' }, res, next);
@@ -324,22 +285,13 @@ describe('consumer-notice pre-guard (mounted before the global /api limiter)', (
 });
 
 describe('GET /:token/data cta.consumerNotice', () => {
-  test('gate off: the payload carries nothing new and the service is not asked', async () => {
-    const res = await data(makeEstimate());
-    expect(res.status).toBe(200);
-    expect(res.body.cta).not.toHaveProperty('consumerNotice');
-    expect(mockCtaFor).not.toHaveBeenCalled();
-  });
-
-  test('gate on: an open estimate carries the service block', async () => {
-    gateOn();
+  test('an open estimate carries the service block', async () => {
     mockCtaFor.mockResolvedValue({ state: 'awaiting', canSign: true });
     const res = await data(makeEstimate());
     expect(res.body.cta.consumerNotice).toEqual({ state: 'awaiting', canSign: true });
   });
 
-  test('gate on: a customer\'s own plan quote that staff changed offers no form to sign (codex pre-push P1)', async () => {
-    gateOn();
+  test('a customer\'s own plan quote that staff changed offers no form to sign (codex pre-push P1)', async () => {
     const res = await data(makeEstimate({ source: 'plan_start', bill_by_invoice: true }));
     expect(res.status).toBe(200);
     expect(res.body.estimate.quoteRefusal).toMatchObject({ code: 'PLAN_START_STATE_CHANGED' });
@@ -347,8 +299,7 @@ describe('GET /:token/data cta.consumerNotice', () => {
     expect(mockCtaFor).not.toHaveBeenCalled();
   });
 
-  test('gate on: an estimate the service has nothing to say about leaves the key off', async () => {
-    gateOn();
+  test('an estimate the service has nothing to say about leaves the key off', async () => {
     mockCtaFor.mockResolvedValue(null);
     const res = await data(makeEstimate({ estimate_data: PEST_DATA }));
     expect(res.body.cta).not.toHaveProperty('consumerNotice');
@@ -357,8 +308,7 @@ describe('GET /:token/data cta.consumerNotice', () => {
   test.each([
     ['an accepted estimate', { status: 'accepted' }],
     ['a declined estimate', { status: 'declined' }],
-  ])('gate on: %s offers nothing', async (_label, overrides) => {
-    gateOn();
+  ])('%s offers nothing', async (_label, overrides) => {
     const res = await data(makeEstimate(overrides));
     expect(res.status).toBe(200);
     expect(res.body.cta).not.toHaveProperty('consumerNotice');
@@ -369,8 +319,7 @@ describe('GET /:token/data cta.consumerNotice', () => {
 describe('PUT /:token/accept consumer notice refusal', () => {
   const NOTICE_MESSAGE = 'Please sign the Florida consumer notice above before you accept.';
 
-  test('gate on, notice not on file: 409 consumer_notice_required, and nothing after the check ran', async () => {
-    gateOn();
+  test('notice not on file: 409 consumer_notice_required, and nothing after the check ran', async () => {
     const estimate = makeEstimate();
     const res = await accept(estimate);
     expect(res).toMatchObject({ status: 409, body: { error: NOTICE_MESSAGE, code: 'consumer_notice_required' } });
@@ -382,8 +331,7 @@ describe('PUT /:token/accept consumer notice refusal', () => {
     expect(dbTables.filter((t) => t !== 'estimates')).toEqual([]);
   });
 
-  test('gate on: a customer\'s own plan quote that staff changed answers its own 409 first, never the notice (codex pre-push P1)', async () => {
-    gateOn();
+  test('a customer\'s own plan quote that staff changed answers its own 409 first, never the notice (codex pre-push P1)', async () => {
     const res = await accept(makeEstimate({ source: 'plan_start', bill_by_invoice: true }));
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PLAN_START_STATE_CHANGED');
@@ -391,8 +339,7 @@ describe('PUT /:token/accept consumer notice refusal', () => {
     expect(dbWrites).toEqual([]);
   });
 
-  test('gate on, notice on file: the check passes and the accept goes on past it', async () => {
-    gateOn();
+  test('notice on file: the check passes and the accept goes on past it', async () => {
     mockBlocksAccept.mockResolvedValue(false);
     const res = await accept(makeEstimate());
     expect(mockBlocksAccept).toHaveBeenCalledTimes(1);
@@ -400,14 +347,7 @@ describe('PUT /:token/accept consumer notice refusal', () => {
     expect(res.body?.error).not.toBe(NOTICE_MESSAGE);
   });
 
-  test('gate off: the check is not even asked (accept unchanged)', async () => {
-    const res = await accept(makeEstimate());
-    expect(mockBlocksAccept).not.toHaveBeenCalled();
-    expect(res.body?.code).not.toBe('consumer_notice_required');
-  });
-
   test('a read error in the check fails the accept closed', async () => {
-    gateOn();
     mockBlocksAccept.mockRejectedValue(new Error('db down'));
     const res = await accept(makeEstimate());
     expect(res.status).toBe(500);
@@ -415,13 +355,11 @@ describe('PUT /:token/accept consumer notice refusal', () => {
   });
 
   test('an already-accepted estimate (a retry) is never asked for the notice', async () => {
-    gateOn();
     await accept(makeEstimate({ status: 'accepted' }));
     expect(mockBlocksAccept).not.toHaveBeenCalled();
   });
 
   test('a declined estimate keeps its own answer ahead of the notice', async () => {
-    gateOn();
     const res = await accept(makeEstimate({ status: 'declined' }));
     expect(mockBlocksAccept).not.toHaveBeenCalled();
     expect(res.status).not.toBe(200);

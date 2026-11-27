@@ -11528,7 +11528,7 @@ async function applyRescheduleFollowUps({ call, callSid, result, procGeneration 
     .catch((err) => logger.warn(`[call-proc] post-reschedule disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
 }
 
-// Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22). The decision runs
+// Make-up move (owner 2026-10-22). The decision runs
 // inside the booking transaction, at its fresh insert
 // (planCallMakeupForBooking). These steps run outside any transaction: the
 // reprocess check before the booking branch, and the move itself after the
@@ -13908,12 +13908,10 @@ const CallRecordingProcessor = {
       // lead: the send validator still resolves it by sid, so the draft
       // must be INVALIDATED. Runs after the token-fenced terminal write
       // (the pass no longer owns processing_token) and never blocks.
-      if (isEnabled('rescheduleProposalCard')) {
-        try {
-          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
-        } catch (err) {
-          logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
-        }
+      try {
+        await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
+      } catch (err) {
+        logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
       }
       logger.info(`[call-proc] Skipping ${callSid}: ${extracted.is_spam ? 'spam' : 'voicemail'}`);
       return { success: true, skipped: true, reason: extracted.is_spam ? 'spam' : 'voicemail' };
@@ -15535,12 +15533,10 @@ const CallRecordingProcessor = {
         { procGeneration },
       );
       await updateUnifiedVoiceMessage({ ...call, transcription }, { body: transcription });
-      if (isEnabled('rescheduleProposalCard')) {
-        try {
-          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
-        } catch (err) {
-          logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
-        }
+      try {
+        await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration, retireOnly: true });
+      } catch (err) {
+        logger.warn(`[call-proc] proposal retirement failed for ${call.id}: ${err.code || err.name || 'error'}`);
       }
       logger.info(`[call-proc] V2 hard veto for ${callSid}; skipped canonical writes (customer/lead/appointment)`);
       // An out-of-area-only hold still keeps the call's promises, label and one alert
@@ -20480,16 +20476,16 @@ const CallRecordingProcessor = {
         addressValidation: effectiveAddressValidation, v2Extraction: v2CanonicalExtraction, extracted, onFile: onFileGeo,
       });
     }
-    // Make-up move (GATE_CALL_MAKEUP_MOVE): a booking confirmed by an existing
+    // Make-up move: a booking confirmed by an existing
     // customer whose recurring visit was MISSED moves that visit instead of
     // inserting a new one beside it. Only where the booking branch below would
     // run (every earlier veto keeps today's behavior). The decision is the
     // booking transaction's, at its fresh insert, after every booking guard;
     // here only a reprocess of a call whose move already applied.
-    const makeupGateOn = isEnabled('callMakeupMove') && !v2RoutingBlocked && !legacyGeoVeto && !extracted.is_spam
+    const makeupMoveInPlay = !v2RoutingBlocked && !legacyGeoVeto && !extracted.is_spam
       && v2Result?.status === 'valid' && extracted.appointment_confirmed && extracted.preferred_date_time
       && customerId && hasSpecificTime && canCreateAppointmentFromCall;
-    const makeupPrior = makeupGateOn
+    const makeupPrior = makeupMoveInPlay
       ? await callMakeupStep('prior', callSid, (makeup) => makeup.priorCallMakeupDecision(db, { call: { ...call, customer_id: customerId }, procToken }))
       : null;
     // A make-up outcome becomes the call's booking result. Moved (applied, or
@@ -22680,14 +22676,14 @@ const CallRecordingProcessor = {
                     },
                   };
                 }
-                // Make-up move (GATE_CALL_MAKEUP_MOVE, owner 2026-10-22): every
+                // Make-up move (owner 2026-10-22): every
                 // booking guard above passed and this fresh row is about to be
                 // inserted. When the customer has a MISSED recurring visit of
                 // the call's line at this property, the row is not inserted:
                 // that visit moves to this slot after this transaction (the
                 // rebooker opens its own), or the booking holds for review.
                 // Nothing above wrote on this path, so ending here writes nothing.
-                if (makeupGateOn) {
+                if (makeupMoveInPlay) {
                   const makeup = await require('./call-reschedule-apply').planCallMakeupForBooking(trx, {
                     call, procToken, procGeneration,
                     booking: { ...insertData, followUpPlanned: Boolean(callFollowUpPlan), reService: isReServiceCatalogRow(callBookingCatalogRow),
@@ -26065,12 +26061,10 @@ const CallRecordingProcessor = {
         await reviseDispositionAfterAppliedMove({ call, callSid, procGeneration, reason: 'makeup_move_applied' })
           .catch((err) => logger.warn(`[call-proc] post-makeup disposition revision failed for ${maskSid(callSid)}: ${err.message}`));
       }
-      if (isEnabled('rescheduleProposalCard')) {
-        try {
-          await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration });
-        } catch (err) {
-          logger.warn(`[call-proc] proposal staging failed for ${call.id}: ${err.code || err.name || 'error'}`);
-        }
+      try {
+        await require('./call-reschedule-proposals').stageProposal(db, { callId: call.id, procGeneration });
+      } catch (err) {
+        logger.warn(`[call-proc] proposal staging failed for ${call.id}: ${err.code || err.name || 'error'}`);
       }
 
       // Suggest a last name to the office (GATE_CALL_LAST_NAME_LOOKUP): fire-and-forget, never awaited.

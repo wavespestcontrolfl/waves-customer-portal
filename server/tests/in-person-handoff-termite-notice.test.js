@@ -9,7 +9,6 @@
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
 process.env.GATE_IN_PERSON_CARD = 'true';
 process.env.GATE_ESTIMATE_ACCEPTANCE_TERMS = 'true';
-process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true';
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
@@ -65,14 +64,11 @@ describe('termite estimate notice in the hand-off block', () => {
     expect(await block()).toEqual({ consumerNotice: { text: HANDOFF_NOTICE_TEXT } });
   });
 
-  test('a signed notice on file, or the notice gate off, adds nothing', async () => {
+  test('a signed notice on file adds nothing', async () => {
     est = TERMITE;
     findConsumerNotice.mockResolvedValue({ id: 'signed-1' });
     expect(await block()).toBeNull();
     findConsumerNotice.mockResolvedValue(null);
-    process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'false';
-    expect(await block()).toBeNull();
-    process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true';
   });
 
   test('a non-termite estimate gets terms and no notice', async () => {

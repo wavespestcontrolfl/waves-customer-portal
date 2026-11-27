@@ -6,7 +6,7 @@ import { adminFetch } from '../../lib/adminFetch';
 import { centsToDollars, dayLabel, weekLabel } from './payrollFormat';
 import { StubDialog } from './PayRuns';
 
-// Staff page, Pay stubs tab (GATE_TECH_PAY_STUBS, owner 2026-10-28, payroll item 7). A technician opens their
+// Staff page, Pay stubs tab (owner 2026-10-28, payroll item 7). A technician opens their
 // own finalized pay stubs. The same stub the admin sees, no employer taxes. Nothing here changes pay or sends
 // a message. The list comes from useTechPayStubs, which reads only the signed-in person's own checks.
 

@@ -434,7 +434,7 @@ describe('source order (the cells above that HTTP cannot reach, and a guard agai
     for (const needle of ['if (gatedAddOn) return res.status(409).json(gatedAddOn);', 'contactLastNameError', 'HOLD_EXPIRED_409', 'No appointment is needed for this renewal', 'quoteRequirement.quoteRequired', 'estimateTrenchingReviewRequired(estData)']) {
       expect([needle, at(needle) > park]).toEqual([needle, true]);
     }
-    // The Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE) follows the blocking decision and the Bermuda gate, and is ahead of every
+    // The Florida consumer notice follows the blocking decision and the Bermuda gate, and is ahead of every
     // validation, hold, card and write.
     const notice = at("consumerNotice.consumerNoticeBlocksAccept(estimate)");
     expect(notice).toBeGreaterThan(at('if (gatedAddOn) return res.status(409).json(gatedAddOn);'));

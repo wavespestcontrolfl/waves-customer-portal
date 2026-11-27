@@ -67,12 +67,10 @@ postgres('prepay year end bell (PostgreSQL)', () => {
   });
   beforeEach(async () => {
     jest.clearAllMocks();
-    process.env.GATE_PREPAY_YEAR_END_BELL = 'true';
     trx = await database.transaction();
     require('../models/db').connection = trx;
   });
   afterEach(async () => {
-    delete process.env.GATE_PREPAY_YEAR_END_BELL;
     if (trx) await trx.rollback();
   });
   afterAll(async () => { await database?.destroy(); });

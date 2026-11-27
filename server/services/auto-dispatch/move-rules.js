@@ -34,6 +34,7 @@
  * hour on the visit's own day still comes first for an overlap.
  */
 const { weekdayOf } = require('./scoring');
+const { isBounceBackDate } = require('./bounce-guard');
 
 function round2(v) { return Math.round(v * 100) / 100; }
 
@@ -142,41 +143,66 @@ function mustMove(service, current) {
   return isUnplacedDueDate(service) || !!(current && current.conflict);
 }
 
+function scoreCandidateRow({ cand, sc }, index, {
+  service, current, currentScore, threshold, config, forced, conflict, recentLeftDates,
+}) {
+  const gain = moveGain({ service, current, currentScore, cand, candScore: sc });
+  const normalFloorOk = meetsDriveFloor({ current, cand, config });
+  const floorOk = forced || normalFloorOk;
+  const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
+  const dayMove = isDayMove(current, cand);
+  const bounceBlocked = dayMove && isBounceBackDate(recentLeftDates, cand.date);
+  // Qualifies on minutes alone (no conflict to force it). A visit in conflict
+  // still uses it for the move it would make once the conflict is gone (normalOk).
+  const minutesOk = normalFloorOk && gain < threshold
+    && minutesRuleOk({ service, current, cand, currentScore, candScore: sc, gain, config });
+  const byMinutes = !forced && minutesOk;
+  const ordinaryQualifies = normalFloorOk && (gain >= threshold || minutesOk);
+  return {
+    cand, sc, gain, index, floorOk, ceilingOk, bounceBlocked, ordinaryQualifies,
+    // Would this slot move the visit with no conflict to force it?
+    normalOk: !bounceBlocked && ordinaryQualifies,
+    minutesOk,
+    saving: driveSavingMinutes(current, cand),
+    qualifies: forced ? ceilingOk : (!bounceBlocked && floorOk && (gain >= threshold || byMinutes)),
+    byMinutes,
+    sameDay: !dayMove,
+    sunday: isSundayDate(cand.date),
+  };
+}
+
+function pickBouncedTop(rows, forced, qualifying, byGain) {
+  if (forced || qualifying.length > 0) return null;
+  const bounced = rows.filter((r) => r.bounceBlocked && r.ordinaryQualifies);
+  return bounced.sort((a, b) => byBarThenSaving(a, b, 'byMinutes', byGain))[0] || null;
+}
+
+function noQualifyingFlags({ qualifying, bouncedTop, top, forced, conflict, threshold }) {
+  const none = qualifying.length === 0 && Boolean(top);
+  return {
+    bounceBlocked: Boolean(bouncedTop),
+    floorFailed: none && !bouncedTop && !forced && !top.floorOk && top.gain >= threshold,
+    ceilingFailed: none && Boolean(conflict) && !top.ceilingOk,
+  };
+}
+
 /**
  * Rank scored candidates for one visit. Returns
- *   { best, bestScore, gain, qualifies, floorFailed, ranked }
+ *   { best, bestScore, gain, qualifies, floorFailed, bounceBlocked, ranked }
  * `best` is the candidate the audit describes: the top qualifying one, else
- * the top one by gain (so a no-change row still shows the nearest miss).
+ * the top bounce-blocked qualifying candidate (if any), else the top one by
+ * gain (so a no-change row still shows the nearest miss).
  * `ranked` holds every qualifying candidate, best first (the SLOT_TAKEN
  * fallback list). `floorFailed` says the nearest miss was a move that
- * saved too little drive.
+ * saved too little drive; `bounceBlocked` says every otherwise-qualifying
+ * candidate would bounce the visit back onto a recently-left date.
  */
-function rankCandidates({ service, current, currentScore, scored, threshold, config }) {
+function rankCandidates({ service, current, currentScore, scored, threshold, config, recentLeftDates = null }) {
   const forced = mustMove(service, current);
   const conflict = (current && current.conflict) || null;
-  const sameDayFirst = !!(conflict && conflict.kind === 'overlap');
-  const rows = scored.map(({ cand, sc }, index) => {
-    const gain = moveGain({ service, current, currentScore, cand, candScore: sc });
-    const normalFloorOk = meetsDriveFloor({ current, cand, config });
-    const floorOk = forced || normalFloorOk;
-    const ceilingOk = !conflict || withinConflictCeiling({ current, cand, config });
-    // Qualifies on minutes alone (no conflict to force it). A visit in conflict
-    // still uses it for the move it would make once the conflict is gone (normalOk).
-    const minutesOk = normalFloorOk && gain < threshold
-      && minutesRuleOk({ service, current, cand, currentScore, candScore: sc, gain, config });
-    const byMinutes = !forced && minutesOk;
-    return {
-      cand, sc, gain, index, floorOk, ceilingOk,
-      // Would this slot move the visit with no conflict to force it?
-      normalOk: (normalFloorOk && gain >= threshold) || minutesOk,
-      minutesOk,
-      saving: driveSavingMinutes(current, cand),
-      qualifies: forced ? ceilingOk : (floorOk && (gain >= threshold || byMinutes)),
-      byMinutes,
-      sameDay: !isDayMove(current, cand),
-      sunday: isSundayDate(cand.date),
-    };
-  });
+  const sameDayFirst = Boolean(conflict && conflict.kind === 'overlap');
+  const rowCtx = { service, current, currentScore, threshold, config, forced, conflict, recentLeftDates };
+  const rows = scored.map((entry, index) => scoreCandidateRow(entry, index, rowCtx));
   // Stable: ties keep encounter order (Array#sort is stable in V8). A
   // conflict move ranks by least added drive before score. A Sunday ranks
   // after every other day (the last resort, see the header).
@@ -186,22 +212,20 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   // A same-day free hour still comes first for an overlap; then Sunday last, then bar before minutes rule.
   const qualifying = rows.filter((r) => r.qualifies).sort((a, b) => (sameDayFirst ? Number(b.sameDay) - Number(a.sameDay) : 0)
     || byBarThenSaving(a, b, 'byMinutes', byGain));
-  // Nothing qualifies: the audit shows the nearest miss.
-  const top = qualifying[0] || rows.slice().sort(byGain)[0] || null;
+  const bouncedTop = pickBouncedTop(rows, forced, qualifying, byGain);
+  // Nothing qualifies: the audit shows the bounced winner (if any), else the nearest miss.
+  const top = qualifying[0] || bouncedTop || rows.slice().sort(byGain)[0] || null;
   return {
     best: top && top.cand,
     bestScore: top && top.sc,
     gain: top ? top.gain : 0,
     qualifies: qualifying.length > 0,
     // The slot taken qualifies only by the minutes rule (audit + road floor).
-    byMinutes: !!(qualifying[0] && qualifying[0].byMinutes),
-    // The nearest miss cleared the score bar and was refused by the drive floor.
-    floorFailed: qualifying.length === 0 && !!top && !forced && !top.floorOk && top.gain >= threshold,
-    // A visit in conflict whose every slot adds too much drive.
-    ceilingFailed: qualifying.length === 0 && !!top && !!conflict && !top.ceilingOk,
+    byMinutes: Boolean(qualifying[0] && qualifying[0].byMinutes),
+    ...noQualifyingFlags({ qualifying, bouncedTop, top, forced, conflict, threshold }),
     // A visit in conflict that an ordinary optimization would move anyway:
     // it still moves after its overlapping partner has left.
-    movesWithoutConflict: !!conflict && rows.some((r) => r.normalOk && !r.cand.past_cap),
+    movesWithoutConflict: Boolean(conflict) && rows.some((r) => r.normalOk && !r.cand.past_cap),
     // ...and the slot it would take then: ranked by gain alone, the order of
     // a visit with no conflict (Codex #6207 r10 P2).
     ...normalBestOf(conflict, rows, service, config),

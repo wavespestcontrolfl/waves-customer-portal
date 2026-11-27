@@ -682,7 +682,7 @@ describe('writeTechDayOrder explicit positions (rollback) — persisted values',
 
 describe('schedule-quality alert reconciliation is the nightly band\'s alone (codex PRRT_kwDOR3YQi86mQTC2)', () => {
   const { refreshScheduleQualityAlerts } = jest.requireMock('../services/scheduling/quality-alerts');
-  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'];
+  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
   beforeEach(() => {
     for (const g of GATES) process.env[g] = 'true';
     refreshScheduleQualityAlerts.mockResolvedValue({ status: 'reconciled' });

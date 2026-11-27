@@ -486,15 +486,21 @@ it('together + a technician change on a recurring combo: the scope picker is hid
   expect(body(0)).toMatchObject({ comboMove: 'together', technicianId: 'tech-2', assignmentScope: 'this_only' });
 });
 
-// Auto-dispatch lock box: recurring occurrences only; its value rides the one save.
+// Auto-dispatch lock box: shown on every visit auto-dispatch can move (hides only booster-month rows); its value rides the one save.
 const occurrence = { ...service, isRecurring: true, recurringParentId: 'fixture-parent', autoDispatchLocked: true };
 const savedBody = () => JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/update-details'))[1].body);
 
-it('shows the auto-dispatch box checked for a locked recurring occurrence and hides it for a one-off visit', () => {
+it('shows the auto-dispatch box for recurring, first-visit, and one-time visits, and hides it for a booster-month row', () => {
   const view = render(<EditServiceModal service={occurrence} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
   expect(screen.getByLabelText(/Keep auto-dispatch off this visit/)).toBeChecked();
   view.unmount();
-  render(<EditServiceModal service={service} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  const parentView = render(<EditServiceModal service={{ ...service, isRecurring: true, recurringParentId: null }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText(/Keep auto-dispatch off this visit/)).not.toBeChecked();
+  parentView.unmount();
+  const oneTimeView = render(<EditServiceModal service={service} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
+  expect(screen.getByLabelText(/Keep auto-dispatch off this visit/)).not.toBeChecked();
+  oneTimeView.unmount();
+  render(<EditServiceModal service={{ ...service, isRecurring: false, recurringParentId: 'fixture-parent' }} technicians={[]} onClose={vi.fn()} onSaved={vi.fn()} />);
   expect(screen.queryByText('Keep auto-dispatch off this visit')).not.toBeInTheDocument();
 });
 

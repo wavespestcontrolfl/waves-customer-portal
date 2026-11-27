@@ -123,7 +123,7 @@ Done fence). A changed row, a second tap or a refusal by the step answers 409 wi
 and the bell reloads its list.
 
 Kinds today:
-- `referral_inbound` (`server/services/referral-inbound-bell.js`, `GATE_REFERRAL_INBOUND_BELL`): the
+- `referral_inbound` (`server/services/referral-inbound-bell.js`): the
   row for a card in Referrals → Queue, with **Confirm <referrer>** and **Not a referral**, the
   Queue's own `confirmInboundReferral` and `dismissInboundReferral`. Confirm is offered only for one
   sure referrer (the link code's owner, or the one customer whose first and last name match the name
@@ -605,7 +605,7 @@ the other order (a two-part one, from a panel left open across a deploy) restart
 | Body over 110 chars moves to `detail`, read from the bell's "Show full text" (with `GATE_ALERT_EXPLAINER` on: "What to do", the original under "Show original text") | `notification-service.js`, kill switch `ADMIN_BODY_GUARD_ALL` | enforced, all categories |
 | The bell names the customer a row is about, and "What to do" explains it in plain words (section 2) | `server/services/admin-alert-customer.js`, `server/services/admin-alert-explainer.js`, `POST /api/admin/notifications/:id/explain`, admin role only | enforced: the customer line always; "What to do" while `GATE_ALERT_EXPLAINER` is on (dark by default) |
 | Send to Claude (section 5): a bell alert our own code wrote (system with no customer, marked Claude's, or a reviewed check class) can be moved to Claude's queue from the bell with an optional note, and un-sent for 10 seconds (`POST /api/admin/notifications/:id/unsend-from-claude`, while no Mac tab has started on it); fenced on the served version and the alert's dedupe lock; a refresh keeps an open sent row in Claude's queue; `needs-me` gives each alert's customer id and marks sent rows | `server/services/admin-alert-send-to-claude.js` behind `POST /api/admin/notifications/:id/send-to-claude` (admin only), `keepSentToClaude` in `server/services/admin-alert-routing.js`, `withCustomers` in `server/services/needs-me.js` | live (no explainer gate); `needs-me` adds customer ids |
-| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced per kind while its gate is on (`referral_inbound`: `GATE_REFERRAL_INBOUND_BELL`, dark by default; `call_back`: `GATE_ALERT_CALL_BUTTON`, dark by default, the one kind that leaves its row open) |
+| Buttons (section 2, part 9): only a button the row carries runs; its handler reads the record again; a tap is admin only, claims the row against the version the bell served (one tap at a time), is recorded on the row, and closes it | `server/services/admin-alert-buttons.js` (`withAlertButtons`, `runAlertButton`) behind `POST /api/admin/notifications/:id/actions/:actionId`; the shape is checked by `composeAdminAlert` | enforced (`referral_inbound` always; `call_back` while `GATE_ALERT_CALL_BUTTON` is on, dark by default, the one kind that leaves its row open) |
 
 Alert sounds (owner 2026-11-03): a Waves Admin iPhone push plays a sound per alert type. The map from
 trigger key to sound file lives in `server/services/alert-sounds.js`; `triggerNotification` and the

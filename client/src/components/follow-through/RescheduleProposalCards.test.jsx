@@ -41,7 +41,7 @@ const ROW = {
   matched_visit_id: null,
   candidates: [FIRST, SECOND],
 };
-const FEED = { proposals_enabled: true, proposals: [ROW], has_more: false, next_offset: 100 };
+const FEED = { proposals: [ROW], has_more: false, next_offset: 100 };
 const PREVIEW = {
   preview_hash: 'a'.repeat(64),
   visit_id: SECOND.id,
@@ -83,13 +83,6 @@ afterEach(() => {
 });
 
 describe('reschedule proposal review', () => {
-  it('stays absent while the independent server proposal gate is off', async () => {
-    adminFetch.mockResolvedValue({ proposals_enabled: false, proposals: [], has_more: false });
-    const { container } = render(<RescheduleProposalCards ui={ui} />);
-    await waitFor(() => expect(adminFetch).toHaveBeenCalledWith(LIST));
-    expect(container).toBeEmptyDOMElement();
-  });
-
   // Owner 2026-11-04 (D1 A): a technician's proposal has no transcript quote and no phone.
   it('reads the request in plain words when the feed carries no quote or phone', async () => {
     const { phone: _phone, proposal, ...rest } = ROW;

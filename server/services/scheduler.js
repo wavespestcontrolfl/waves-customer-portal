@@ -3358,11 +3358,10 @@ function initScheduledJobs() {
 
   // EVERY 15 MIN — the new-referral bell (owner 2026-10-29 "ok go"): one admin row per card waiting in
   // Referrals → Queue, with Confirm / Not a referral buttons; a row whose card was answered or left the list
-  // closes. Dark behind GATE_REFERRAL_INBOUND_BELL, read at each tick. The lease keeps one sweep at a time;
+  // closes. The lease keeps one sweep at a time;
   // each card's row is written under its own advisory lock. Logs counts only, never a name.
   cron.schedule('12,27,42,57 * * * *', async () => {
     try {
-      if (!require('../config/feature-gates').referralInboundBellLive()) return;
       const result = await runExclusive('referral-inbound-bell', () => require('./referral-inbound-bell').syncReferralInboundBells());
       if (result && (result.raised || result.closed || result.failed)) logger.info(`[referral-inbound-bell] ${JSON.stringify(result)}`);
     } catch (err) {
@@ -11062,8 +11061,7 @@ function initScheduledJobs() {
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
-  // starts, so a price gap rings first. Dark behind
-  // GATE_SCHEDULE_INTEGRITY_WATCHDOG. See
+  // starts, so a price gap rings first. See
   // server/services/schedule-integrity-watchdog.js.
   // =========================================================================
   cron.schedule('40 6 * * *', async () => {
@@ -11082,11 +11080,9 @@ function initScheduledJobs() {
   // booking with a visit TODAY or TOMORROW that has no time or technician
   // rings now, not at the next 6:40 run (by then a today visit is history).
   // Catches bookings made, and technicians removed, after the daily tick, and
-  // retries a failed write. Same gate as the watchdog it belongs to.
+  // retries a failed write.
   cron.schedule('25 7-20 * * *', async () => {
     try {
-      const { isEnabled } = require('../config/feature-gates');
-      if (!isEnabled('scheduleIntegrityWatchdog')) return;
       const result = await runExclusive('combined-booking-check-urgent', () =>
         require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
       if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);

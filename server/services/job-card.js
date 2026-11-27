@@ -2238,11 +2238,11 @@ async function buildJobCard(serviceId, { dbh = db, deps = {}, now = new Date(), 
     visit: visit ? { number: visit.visit || null, month: visit.month || null } : null,
     lineNote: note || null,
     addons: addons.map(({ procedure: addonProcedure, ...addon }) => addon),
-    ...(gateEnvValue('GATE_PROTOCOL_SOP') ? { protocol: {
+    protocol: {
       enabled: true,
       procedure: procedure || null,
       addons: addons.map(({ name, procedure: addonProcedure, note: addonNote }) => ({ name, procedure: addonProcedure || null, note: addonNote || null })),
-    } } : {}),
+    },
   };
 }
 

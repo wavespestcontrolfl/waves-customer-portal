@@ -80,7 +80,7 @@ const CHECK_BROKE = new Set(['model_failed', 'bad_answer', 'check_failed']);
 // record too long to send, an answer kept from an earlier run: keptAnswer) or
 // the check broke. Every other answer is a usable one, the proof that the
 // check works (check-down-notice.js reads `answered`).
-const NOT_ANSWERED = new Set([...CHECK_BROKE, 'deadline', 'record_too_long', 'kept_hold', 'kept_unsure']);
+const NOT_ANSWERED = new Set([...CHECK_BROKE, 'deadline', 'record_too_long', 'kept_hold', 'kept_unsure', 'empty_record']);
 // The unsure answers a later run keeps for the same question (keptAnswer): the
 // model said it was unsure, or it allowed a move on a record with an unread
 // part (index.js judge). Both come from the question alone. Every other
@@ -199,6 +199,16 @@ function stopped(kind, answer) {
 
 const readFailed = (record) => record.unread.some((row) => row.reason === 'read_failed');
 
+// A complete customer record with zero entries has nothing for the model to
+// read or quote (judge() cannot validate a hold without an entry). Fast-allow
+// without spending a model call; assertStillApproved still fences the customer
+// row FOR UPDATE NOWAIT and verifies the record stays empty through commit.
+function isEmptyCompleteRecord(record) {
+  return Array.isArray(record.entries) && record.entries.length === 0
+    && Array.isArray(record.unread) && record.unread.length === 0
+    && !record.tooLong;
+}
+
 // Why no model is asked about a record that was built, or null to ask.
 function notAskable(record, state) {
   // A source the record builder could not query (it lists the source as
@@ -218,6 +228,13 @@ async function ask({ service, best }, { conn, proofreader, state }) {
     const move = proofreader.moveFacts(planned);
     const skip = notAskable(record, state);
     if (skip) return { answer: withUnread(skip, record) };
+    if (isEmptyCompleteRecord(record)) {
+      const promptVersion = proofreader.PROMPT_VERSION || require('./prompt').PROMPT_VERSION;
+      return {
+        answer: { verdict: 'allow', why: 'empty_record', entry_id: null, quote: null, model: null, prompt_version: promptVersion },
+        recordPrint: recordPrint(record),
+      };
+    }
     const question = questionPrint(move, record);
     const kept = await keptAnswer(conn, service, question, record);
     if (kept) return { answer: withUnread(kept, record) };

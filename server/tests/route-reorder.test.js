@@ -26,11 +26,10 @@ jest.mock('../models/db', () => {
   fn.transaction = jest.fn();
   return fn;
 });
-// Lazily required by runScheduleQualityAlertsOnly — no existing test in this
-// file sets GATE_SCHEDULE_QUALITY_ALERTS, so the real module is never
-// otherwise exercised here.
+// Lazily required by the nightly pass and runScheduleQualityAlertsOnly — the real
+// module is never exercised here.
 jest.mock('../services/scheduling/quality-alerts', () => ({
-  refreshScheduleQualityAlerts: jest.fn(),
+  refreshScheduleQualityAlerts: jest.fn(async () => ({ status: 'reconciled' })),
 }));
 
 const db = require('../models/db');
@@ -889,12 +888,12 @@ test('GATE_ROUTE_REORDER off ⇒ hard no-op (no queries, no ledger)', async () =
 });
 
 // With GATE_ROUTE_REORDER off, runRouteReorder (and the nightly alert
-// reconciliation folded into it) never runs — so with the measurement +
-// alert gates ON, existing route-quality defects never got an initial card
+// reconciliation folded into it) never runs — so with the measurement
+// gate ON, existing route-quality defects never got an initial card
 // and no card ever expired. runScheduleQualityAlertsOnly is the standalone
 // nightly trigger for exactly that case (codex #4295 r2 P2).
-describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the nightly reconciliation)', () => {
-  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'];
+describe('runScheduleQualityAlertsOnly (reorder off, the measurement gate owns the nightly reconciliation)', () => {
+  const GATES = ['GATE_SCHEDULE_QUALITY_MEASUREMENTS'];
   let saved;
   beforeEach(() => {
     jest.clearAllMocks();
@@ -908,18 +907,14 @@ describe('runScheduleQualityAlertsOnly (reorder off, quality gates own the night
     }
   });
 
-  test('either gate off ⇒ gate_off, no reconciliation call', async () => {
+  test('gate off ⇒ gate_off, no reconciliation call', async () => {
     const res = await runScheduleQualityAlertsOnly(NOW);
     expect(res).toEqual({ status: 'gate_off' });
-    process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
-    const res2 = await runScheduleQualityAlertsOnly(NOW);
-    expect(res2).toEqual({ status: 'gate_off' });
     expect(refreshScheduleQualityAlerts).not.toHaveBeenCalled();
   });
 
-  test('both gates on ⇒ reconciles the same six-date band the full nightly pass would use', async () => {
+  test('gate on ⇒ reconciles the same six-date band the full nightly pass would use', async () => {
     process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     refreshScheduleQualityAlerts.mockResolvedValue({ status: 'reconciled', created: 1, resolved: 2 });
 
     const res = await runScheduleQualityAlertsOnly(NOW, db);

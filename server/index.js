@@ -650,7 +650,7 @@ app.use('/api/estimates', estimatePublicRoutes.mapImagePreGuard);
 app.use('/api/estimates', estimatePublicRoutes.contactPhonePreGuard);
 // Commercial proposal signing (GATE_COMMERCIAL_PROPOSAL_SIGN): same reason. Privacy headers and the dark gate's generic 404 land before the global limiter.
 app.use('/api/estimates', estimatePublicRoutes.commercialAgreementPreGuard);
-// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): same reason, same shape.
+// Florida consumer notice: same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.consumerNoticePreGuard);
 // Commercial first visit picker: same reason, same shape.
 app.use('/api/estimates', estimatePublicRoutes.commercialFirstVisitPreGuard);
@@ -1762,7 +1762,7 @@ primeGuardrails.then(() => httpServer.listen(PORT, process.env.WAVES_LOCAL_DEV =
 
     // WDO report attention sweep — exception-based bell for reports stalled
     // BEFORE send (inspection never closed out, signed-but-unsent drafts,
-    // holds failing release). Quiet when clean; gated + cross-replica
+    // holds failing release). Quiet when clean; cross-replica
     // serialized inside the sweep itself. Every 6h with an early first run
     // so a fresh deploy surfaces existing stalls the same morning.
     {

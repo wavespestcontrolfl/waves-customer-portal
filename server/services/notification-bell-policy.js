@@ -130,7 +130,7 @@ const CATEGORY_BELL_ALLOWLIST = new Set([
 // switch; once it is on, the item must reach the owner, who can still silence
 // the category here.
 // review_low_rating: a new 1-4 star Google review (services/review-low-rating-alert.js,
-// owner CW-D4 2026-10-02). The dark GATE_REVIEW_ALERT is the switch; same treatment.
+// owner CW-D4 2026-10-02). Same treatment.
 // truck_kit: one bell per truck when a technician's truck check finds a tool
 // missing or damaged (services/truck-kit.js). The item must reach the
 // office, who can still silence it.

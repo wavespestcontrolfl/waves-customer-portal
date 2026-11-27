@@ -3,7 +3,6 @@
 // Customer names below are synthetic.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../config/feature-gates', () => ({
-  referralInboundBellLive: jest.fn(() => true),
   isEnabled: jest.fn(() => false),
 }));
 jest.mock('../services/referral-inbound', () => ({
@@ -89,7 +88,6 @@ beforeEach(() => {
   mockReviews = {};
   mockPromoters = {};
   mockLocks.length = 0;
-  gates.referralInboundBellLive.mockReturnValue(true);
   gates.isEnabled.mockReturnValue(false);
   inbound.listInboundReferrals.mockResolvedValue([]);
   episodes.openAdminAlertKeys.mockResolvedValue([]);
@@ -182,13 +180,6 @@ describe('the row for one card', () => {
 });
 
 describe('syncReferralInboundBells: the fifteen-minute sweep', () => {
-  test('off: nothing is read', async () => {
-    gates.referralInboundBellLive.mockReturnValue(false);
-    await expect(bell.syncReferralInboundBells()).resolves.toEqual({ skipped: 'disabled' });
-    expect(episodes.openAdminAlertKeys).not.toHaveBeenCalled();
-    expect(inbound.listInboundReferrals).not.toHaveBeenCalled();
-  });
-
   test('a listed card rings under its own lock, read again inside it; a row whose card was answered closes', async () => {
     episodes.openAdminAlertKeys.mockResolvedValue([`referral-inbound:${OTHER}`]);
     inbound.listInboundReferrals.mockImplementation(async (_conn, opts = {}) => {
@@ -272,10 +263,8 @@ describe('a tap', () => {
     inbound.listInboundReferrals.mockResolvedValue([card()]);
   });
 
-  test('the buttons are live only while the bell gate is on', () => {
+  test('the buttons are always live', () => {
     expect(bell.buttonHandler.live()).toBe(true);
-    gates.referralInboundBellLive.mockReturnValue(false);
-    expect(bell.buttonHandler.live()).toBe(false);
   });
 
   test('Not a referral runs the Queue\'s own dismiss for the row\'s customer', async () => {

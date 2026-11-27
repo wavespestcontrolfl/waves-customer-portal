@@ -25,7 +25,6 @@ jest.mock('../config/feature-gates', () => ({
   commercialProposalSignLive: () => false,
   commercialAutopayLive: jest.fn(() => false),
   buildingUseTaxLive: jest.fn(() => false),
-  lawnSprayNoTaxLive: jest.fn(() => true),
 }));
 jest.mock('../services/email-fallback-gate', () => ({ smtpFallbackAllowed: jest.fn(() => false) }));
 jest.mock('../services/sendgrid-mail', () => ({
@@ -1852,14 +1851,6 @@ describe('building-use tax gate on the builder read', () => {
     expect((await invoke('/:id/proposal', 'get')).body.buildingUseTaxLive).toBe(true);
     buildingUseTaxLive.mockReturnValue(false);
     expect((await invoke('/:id/proposal', 'get')).body.buildingUseTaxLive).toBe(false);
-  });
-
-  test('GET /:id/proposal says whether GATE_LAWN_SPRAY_NO_TAX is live (lawn and tree & shrub bill untaxed only then)', async () => {
-    Object.assign(row, { status: 'draft', estimate_data: { proposal: { enabled: true, buildings: [] } } });
-    const { lawnSprayNoTaxLive } = require('../config/feature-gates');
-    expect((await invoke('/:id/proposal', 'get')).body.lawnSprayNoTaxLive).toBe(true);
-    lawnSprayNoTaxLive.mockReturnValueOnce(false);
-    expect((await invoke('/:id/proposal', 'get')).body.lawnSprayNoTaxLive).toBe(false);
   });
 });
 

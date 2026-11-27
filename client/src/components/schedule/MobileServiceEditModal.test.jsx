@@ -118,11 +118,17 @@ describe('MobileServiceEditModal save payload', () => {
     const LABEL = 'Keep auto-dispatch off this visit';
     const saveBody = () => JSON.parse(fetch.mock.calls.find(([url]) => String(url).endsWith('/update-details'))[1].body);
 
-    it('shows the box checked for a locked recurring occurrence and hides it otherwise', () => {
+    it('shows the box for recurring occurrences, plan first visits, and one-time visits, and hides it for booster-month rows', () => {
       const view = render(<MobileServiceEditModal desktopVisible service={OCCURRENCE} onClose={vi.fn()} onSaved={vi.fn()} />);
       expect(screen.getByLabelText(new RegExp(LABEL))).toBeChecked();
       view.unmount();
-      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, isRecurring: false, recurringParentId: null }} onClose={vi.fn()} onSaved={vi.fn()} />);
+      const parentView = render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, isRecurring: true, recurringParentId: null, autoDispatchLocked: false }} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(screen.getByLabelText(new RegExp(LABEL))).not.toBeChecked();
+      parentView.unmount();
+      const oneTimeView = render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, isRecurring: false, recurringParentId: null, autoDispatchLocked: true }} onClose={vi.fn()} onSaved={vi.fn()} />);
+      expect(screen.getByLabelText(new RegExp(LABEL))).toBeChecked();
+      oneTimeView.unmount();
+      render(<MobileServiceEditModal desktopVisible service={{ ...SERVICE, isRecurring: false, recurringParentId: 'parent-1' }} onClose={vi.fn()} onSaved={vi.fn()} />);
       expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
     });
 
