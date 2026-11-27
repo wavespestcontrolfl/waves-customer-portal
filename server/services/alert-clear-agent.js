@@ -385,6 +385,13 @@ function callsAfter(conn, anchor, key, ownCallId) {
 // also a customer never sends a recruiting reply into the prompt (the same exclusion smsBase gives the text log).
 const messagesBase = (conn) => hideRecruitingThreadsFromNonAdmin(conn('messages as m').join('conversations as c', 'c.id', 'm.conversation_id'), null, 'm.message_type');
 const MESSAGE_PHONE = "COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, ''))";
+const MESSAGE_ENDPOINT = canonicalSmsFallbackAddressSql({ messageAlias: 'm', conversationAlias: 'c', customerAlias: 'c' }).endpointSql;
+// One inbound text's two numbers by the canonical address rule (sms-response-policy.js canonicalSmsAddressProjectionSql): its
+// SID-linked text-log row first (from_phone the customer's, to_phone the Waves line), then the message's own stamps, then the thread's.
+const addressesOf = (legacy, canonical) => ({
+  phone: legacy.find((x) => x.phone)?.phone || canonical.find((x) => x.phone)?.phone || null,
+  line: legacy.find((x) => x.line)?.line || canonical.find((x) => x.line)?.line || null,
+});
 function canonicalInboundAfter(conn, anchor, key) {
   const q = messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.created_at', '>', anchor)
@@ -453,12 +460,12 @@ async function customerRecordsAfter(r, anchor, customerId) {
       .whereRaw('COALESCE(s.status, \'\') NOT IN (' + VISIT_NEVER_RAN_STATUSES.map(() => '?').join(', ') + ')', VISIT_NEVER_RAN_STATUSES)
       .orderBy('rl.created_at', 'asc').limit(ROW_CAP)
       .select('rl.id', 'rl.created_at', 'rl.reason_code', 'rl.initiated_by', 'rl.original_date', 'rl.new_date', 'rl.original_window', 'rl.new_window',
-        's.id as visit_id', 's.scheduled_date as visit_date', 's.window_start', 's.customer_pick_by as visit_pick_by',
+        's.id as visit_id', 's.status as visit_status', 's.scheduled_date as visit_date', 's.window_start', 's.customer_pick_by as visit_pick_by',
         conn.raw('COALESCE(rl.notes = ?, false) AS pick_handoff', [require('./rain-out').PICK_LOG_MARKER]))),
   ]);
   const handed = estimates.map((row) => ({ row, at: witnessAt(row, anchor) })).filter((x) => x.at).map((x) => estimateEvent(x.row, x.at));
   const moved = moves.filter(realMove);
-  const asVisit = (m) => ({ id: m.visit_id, scheduled_date: m.visit_date, window_start: m.window_start });
+  const asVisit = (m) => ({ id: m.visit_id, scheduled_date: m.visit_date, window_start: m.window_start, status: m.visit_status });
   const dayOnly = await dayOnlyVisits(r, [...booked, ...moved.map(asVisit)]);
   return [...booked.map((row) => visitEvent(row, dayOnly(row))), ...done.map(doneVisitEvent), ...handed,
     ...moved.map((row) => rescheduleEvent(row, dayOnly(asVisit(row))))];
@@ -468,11 +475,15 @@ async function customerRecordsAfter(r, anchor, customerId) {
 // behind day-only-ai-context.js loadDayOnlyCheck. That helper treats a failed read as day-only, which is right for a customer-facing
 // AI; here a failed read (a throw, or a visit the read marks failed or did not judge) is a failed read like any other: the timeline is
 // incomplete, so the alert is skipped and looked at again on the next sweep.
+// An ended visit (time-promise.js ENDED_STATUSES; here a completed one, as the readers drop the others) is no stop the customer
+// is told about now: the read would mark it unverified, so it is never asked, and its line keeps the slot it ran in.
 async function dayOnlyVisits(r, visits) {
-  if (!visits.length) return () => false;
+  const { loadTimeDisplay, ENDED_STATUSES } = require('./time-promise');
+  const live = visits.filter((v) => !ENDED_STATUSES.includes(String(v.status || '')));
+  if (!live.length) return () => false;
   try {
-    const display = await require('./time-promise').loadTimeDisplay(r.conn, visits, r.now);
-    if (visits.some((v) => !display.get(v.id) || display.get(v.id).failed === true)) throw new Error('time display unread');
+    const display = await loadTimeDisplay(r.conn, live, r.now);
+    if (live.some((v) => !display.get(v.id) || display.get(v.id).failed === true)) throw new Error('time display unread');
     return (row) => display.get(row.id)?.showHour === false;
   } catch (err) {
     r.state.complete = false;
@@ -511,18 +522,16 @@ async function resolveInboundText(r, sid) {
   const { conn, read } = r;
   const canonical = await read('trigger-message', () => messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.twilio_sid', sid)
-    .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone"),
-      conn.raw(`${canonicalSmsFallbackAddressSql({ messageAlias: 'm', conversationAlias: 'c', customerAlias: 'c' }).endpointSql} as line`)));
+    .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw(`${MESSAGE_PHONE} as phone`), conn.raw(`${MESSAGE_ENDPOINT} as line`)));
   // Through smsBase: the same recruiting exclusion and reservation filter as every other text-log read.
   const legacy = await read('trigger-sms', () => smsBase(conn).where('os.direction', 'inbound').where('os.twilio_sid', sid)
     .select('os.created_at', 'os.customer_id', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone'), 'os.to_phone as line'));
   const found = [...canonical, ...legacy].filter((x) => x.created_at);
   if (!found.length) return null;
   const first = found.sort((a, b) => toDate(a.created_at) - toDate(b.created_at))[0];
-  // `line`: the Waves number the text came to, by the canonical address rule (sms-response-policy.js canonicalSmsAddressProjectionSql):
-  // the SID-linked text-log row's to_phone first, then the message's own endpoint, then the thread's.
-  return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id), phone: found.find((x) => x.phone)?.phone || null,
-    line: legacy.find((x) => x.line)?.line || canonical.find((x) => x.line)?.line || null, body: first.body ?? found.find((x) => x.body)?.body ?? null };
+  // `phone` (the customer's number) and `line` (the Waves number the text came to) by the canonical address rule (addressesOf).
+  return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id),
+    ...addressesOf(legacy, canonical), body: first.body ?? found.find((x) => x.body)?.body ?? null };
 }
 
 // What came before the text, and the pair a bare "yes" is judged on: the triggering text (carried from the canonical message the SID
@@ -536,15 +545,33 @@ async function smsContext(r, anchor, key, trigger) {
   const hasTrigger = typeof trigger?.body === 'string';
   const shown = hasTrigger ? ordered.filter((x) => !(x.direction === 'inbound' && toDate(x.created_at).getTime() === anchor.getTime())) : ordered;
   const ctx = shown.map((x) => smsEvent(x, false).line);
-  // The reply: the text the bell names, or (a thread bell with no message id) the latest text in at or before the bell, by its own
-  // query, never only what the capped excerpt holds, with its own two numbers.
+  // The reply: the text the bell names, or (a thread bell with no message id) the latest text in at or before the bell (latestReplyIn).
   const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor, from_phone: trigger.phone, to_phone: trigger.line }
-    : (await r.read('reply-in', () => scopeToContact(smsBase(r.conn), key, SMS_SCOPE).where('os.direction', 'inbound').where('os.created_at', '<=', anchor)
-      .orderBy('os.created_at', 'desc').limit(1).select('os.created_at', 'os.from_phone', 'os.to_phone', r.conn.raw('left(os.message_body, 1500) as message_body'))))[0];
+    : await latestReplyIn(r, anchor, key);
   if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
   const lastAt = lastIn ? toDate(lastIn.created_at) : null;
   const offer = lastAt ? await lastDeliveredText(r, lastAt, key, lastIn.from_phone, lastIn.to_phone) : { body: '', at: null, whole: false };
   return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer.body, prevAt: offer.at, whole: offer.whole } : null };
+}
+
+// A thread bell's reply: the newest text in at or before the bell, from either store, by its own query (never only what the capped
+// excerpt holds). The webhook writes the canonical message first and the text log is best effort, so a text may be in one store
+// only. The same text in both (one SID) takes its numbers by the canonical rule; a text one store holds speaks for itself.
+async function latestReplyIn(r, anchor, key) {
+  const { conn, read } = r;
+  const [canonical, legacy] = await Promise.all([
+    read('reply-in-message', () => scopeToContact(messagesBase(conn).where('m.channel', 'sms').where('m.direction', 'inbound').where('m.created_at', '<=', anchor),
+      key, { customerColumn: 'c.customer_id', phoneColumns: [MESSAGE_PHONE] }).orderBy('m.created_at', 'desc').limit(1)
+      .select('m.created_at', 'm.twilio_sid', conn.raw('left(m.body, 1500) as body'), conn.raw(`${MESSAGE_PHONE} as phone`), conn.raw(`${MESSAGE_ENDPOINT} as line`))),
+    read('reply-in', () => scopeToContact(smsBase(conn).where('os.direction', 'inbound').where('os.created_at', '<=', anchor), key, SMS_SCOPE)
+      .orderBy('os.created_at', 'desc').limit(1)
+      .select('os.created_at', 'os.twilio_sid', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone'), 'os.to_phone as line')),
+  ]);
+  const newest = [...canonical, ...legacy].sort((a, b) => toDate(b.created_at) - toDate(a.created_at))[0];
+  if (!newest) return null;
+  const same = (rows) => rows.filter((x) => x === newest || (newest.twilio_sid && x.twilio_sid === newest.twilio_sid));
+  const { phone, line } = addressesOf(same(legacy), same(canonical));
+  return { message_body: newest.body, created_at: newest.created_at, from_phone: phone, to_phone: line };
 }
 
 // The last outbound text the customer actually received (delivered, or accepted by their app) before the reply, found by its own query:
