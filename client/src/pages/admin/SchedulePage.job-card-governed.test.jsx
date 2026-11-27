@@ -56,6 +56,14 @@ describe("the spreader number on a granular card", () => {
       unmount();
     }
   });
+
+  it("hides the number while a Use tick is read again, like the amounts", () => {
+    const card = cardOf({ ...bag({ setting: 12, text: "Spreader: LESCO #12 (field tested)" }), planOption: true, selectionId: "bag", conditional: true });
+    render(<JobCardTab card={card} D={theme} lawn={{ pending: true, selectedIds: ["bag"], onSet: () => {} }} />);
+    fireEvent.click(document.getElementById("job-card-product-bag"));
+    expect(screen.getByText("Checking the amounts…")).toBeInTheDocument();
+    expect(screen.queryByText("Spreader: LESCO #12 (field tested)")).toBeNull();
+  });
 });
 
 describe("two cards of one product (a host and a sold add-on)", () => {

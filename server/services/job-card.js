@@ -1264,9 +1264,10 @@ function isTankMixable(product = {}) {
 // The LESCO spreader number for a granular line (spreader-settings.js), at the rate the plan puts down (else the line's own lb
 // rate, else the catalog rate when the line states none; a ranged line takes no catalog rate): every lawn granular, and another
 // service's granular only when a row names its product. `withheld`: the card withholds the dose (a spray-check hold, an
-// unverified label, a block), so it gives no number either.
+// unverified label, a block), so it gives no number either; nor does an unverified label with no plan mix, or a line the
+// plan marks unavailable.
 function spreaderForCard(facts, line, product, withheld) {
-  if (withheld || isTankMixable(product)) return null;
+  if (withheld || !product.label_verified_at || line.planUnavailable || isTankMixable(product)) return null;
   const substituted = Boolean(line.substitutedFor);
   const names = substituted ? [product.name] : [product.name, String(line.raw || '').split(' \u2014 ')[0]];
   if (!facts.isLawn && !spreaderSettings.rowsFor(names).length) return null;
@@ -1414,6 +1415,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
         product,
         planMix: item.mix || null,
         substitutedFor: item.substitution?.originalProductName || null,
+        // The plan's own per-line state: a v13 line it marks unavailable (no linked row) gets no spreader number.
+        ...(item.unavailable ? { planUnavailable: true } : {}),
         // Only the primary lawn plan's lines take the "Use" tick: the ids ride to the plan engine, never to an add-on's protocol.
         ...(takesUseTick(item) ? { planOption: true } : {}),
         // The id the engine matches a Use tick against: the original product's when an approved substitution swaps it.

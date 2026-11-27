@@ -7217,9 +7217,10 @@ function JobCardRequired({ title, notes, D }) {
   );
 }
 
-// A granular card's LESCO spreader number, or why it has none (server: spreader-settings.js). Nothing for a sprayed product.
-function JobCardSpreader({ spreader, D }) {
-  if (!spreader?.text) return null;
+// A granular card's LESCO spreader number, or why it has none (server: spreader-settings.js). Nothing for a sprayed product,
+// nor while a "Use" tick is read again (`pending`: the number belongs to the old selection, like the amounts).
+function JobCardSpreader({ spreader, pending, D }) {
+  if (pending || !spreader?.text) return null;
   return <div style={{ fontSize: 14, color: D.text }}>{spreader.text}</div>;
 }
 
@@ -7242,7 +7243,7 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
     <JobCardCollapsible title={jobCardProductTitle(p)} right={right} aside={use && <JobCardUse name={p.name} use={use} D={D} />} defaultOpen={Boolean(p.governed)} D={D} domId={`job-card-product-${jobCardRowId(p)}`}>
       <div style={{ fontSize: 13, color: D.text, marginTop: 10, display: "grid", gap: 8 }}>
         {p.line && <div style={{ color: D.muted }}>{p.line}</div>}
-        <JobCardSpreader spreader={p.spreader} D={D} />
+        <JobCardSpreader spreader={p.spreader} pending={pending} D={D} />
         <JobCardGoverned governed={p.governed} D={D} pending={pending} />
         {p.verdict !== "ok" && p.verdictReason && (
           <div style={{ color: p.verdict === "hold" ? "#C8312F" : D.muted }}>Spray check: {p.verdictReason}</div>

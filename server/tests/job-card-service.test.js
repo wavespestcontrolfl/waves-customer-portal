@@ -1142,6 +1142,17 @@ describe('PR review r5', () => {
     // An approved swap: the swapped-in bag's identity only.
     const [swapped] = await build({ isLawn: true }, { raw, role: 'base', selected: true, substitutedFor: bag.name, product: { id: 's', name: 'Synthetic swap bag', rate_unit: 'lb', default_rate_per_1000: 4.5, label_verified_at: '2026-08-01' } });
     expect(swapped.spreader).toMatchObject({ setting: null, text: 'No spreader number for this product: weigh test.' });
+    // An unverified label with no plan mix (a yard add-on at its catalog rate) gives no number either.
+    const [noMix] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: { ...bag, label_verified_at: null } });
+    expect(noMix.spreader).toBeNull();
+    // A line the plan marks unavailable (a v13 line with no linked row) carries that state to the card: no number.
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Dec', visit: 12, blocks: [] }, mixCalculator: { items: [
+      { raw, role: 'base', conditional: false, selected: true, product: { id: 'f' }, mix: null, unavailable: { kind: 'no_protocol_row', reason: 'Synthetic' } },
+    ], conditionalOptions: [] } });
+    const resolved = await jobCard.resolveVisitLines({ facts: { serviceId: 'svc1', isLawn: true, strip: { program: 'Lawn Care' } }, protocols: {}, catalog: [bag], dbh: () => ({}), deps: { buildPlan } });
+    expect(resolved.lines[0]).toMatchObject({ planUnavailable: true });
+    const [unavailableCard] = await build({ isLawn: true }, resolved.lines[0]);
+    expect(unavailableCard.spreader).toBeNull();
     const [pest] = await build({ isLawn: false }, { raw: 'Synthetic ant bait granule', role: 'base', selected: true, product: { id: 'a', name: 'Synthetic ant bait granule', rate_unit: 'lb', label_verified_at: '2026-08-01' } });
     expect(pest.spreader).toBeNull();
   });
