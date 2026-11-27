@@ -419,6 +419,20 @@ describe('weekly timesheet approval safety', () => {
     expect(events).toContain('transaction.rollback');
   });
 
+  test('rejects non-string, single-character, or single-word signatures before opening a transaction', async () => {
+    for (const badSignature of ['x', 'Jordan', '   ', {}, ['Tech', 'One'], 123, null]) {
+      await expect(approval.signWeek({
+        technicianId: 'tech-1',
+        weekStart: '2020-01-06',
+        signature: badSignature,
+        reviewToken: 'tok-1',
+      })).rejects.toMatchObject({
+        statusCode: 400,
+        message: expect.stringMatching(/Full name signature/i),
+      });
+    }
+  });
+
   test('refuses sign-off while a day is disputed', async () => {
     const events = [];
     const entries = [{
