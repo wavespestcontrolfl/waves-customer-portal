@@ -95,97 +95,96 @@ async function giveUp(trx, job, customer) {
   return 'gave_up';
 }
 
+// The ownership checks that stop a write and hand the case to the office, in order. Each answers true when this record
+// cannot be shown to be the one owner of its Stripe profile. Checked without locking other rows (locking them after
+// our own row could invert a merge's sorted lock order).
+const OWNERSHIP_CHECKS = {
+  // The record's own saved cards must agree with its link: a card on another Stripe profile (or cards on a profile
+  // the record does not link) means ownership is unclear.
+  card_conflict: async (trx, c) => (await trx('payment_methods').where({ customer_id: c.id }).whereNotNull('stripe_customer_id')
+    .select('stripe_customer_id')).some((r) => r.stripe_customer_id !== c.stripe_customer_id),
+  // Merges move Stripe profiles between records: a record ever on either side is the office's.
+  merged: async (trx, c) => Boolean(await trx('customer_merge_journal')
+    .where((q) => q.where({ winner_customer_id: c.id }).orWhere({ loser_customer_id: c.id })).first('id')),
+  // Another customer row, another customer's saved card (the merge code treats a card as ownership evidence), or a
+  // third-party payer (its statements bill through the profile) on the same Stripe id.
+  shared: async (trx, c) => Boolean(
+    await trx('customers').where({ stripe_customer_id: c.stripe_customer_id }).whereNot({ id: c.id }).first('id')
+    || await trx('payment_methods').where({ stripe_customer_id: c.stripe_customer_id }).whereNot({ customer_id: c.id }).first('id')
+    || await trx('payers').where({ stripe_customer_id: c.stripe_customer_id }).first('id')),
+};
+
+async function firstOwnershipProblem(trx, customer, names) {
+  for (const name of names) {
+    if (await OWNERSHIP_CHECKS[name](trx, customer)) return name;
+  }
+  return null;
+}
+
+// Customer first, then the job (the confirm's order). A peek finds the customer; the claim re-checks everything: still
+// pending, still due (an overlapping drain may have just rescheduled it), still this customer's (a merge may have moved
+// it). Null = busy, including a customer row another transaction holds (it reads as undefined under SKIP LOCKED).
+// customer is null when the record no longer exists.
+async function claim(trx, jobId) {
+  const peek = await trx(TABLE).where({ id: jobId }).first('customer_id');
+  if (!peek) return null;
+  const customer = await trx('customers').where({ id: peek.customer_id }).forUpdate().skipLocked()
+    .first('id', 'email', 'stripe_customer_id', 'deleted_at', 'phone');
+  const job = await trx(TABLE).where({ id: jobId, status: 'pending', customer_id: peek.customer_id })
+    .where('next_attempt_at', '<=', trx.fn.now()).forUpdate().skipLocked().first();
+  if (!job) return null;
+  if (customer) return { job, customer };
+  return (await trx('customers').where({ id: peek.customer_id }).first('id')) ? null : { job, customer: null };
+}
+
+const normEmail = (v) => String(v || '').trim().toLowerCase();
+
 async function processJob(jobId) {
   return db.transaction(async (trx) => {
-    // Customer first, then the job (the confirm's order). A peek finds the customer; the claim re-checks everything.
-    const peek = await trx(TABLE).where({ id: jobId }).first('customer_id');
-    if (!peek) return 'busy';
-    const customer = await trx('customers').where({ id: peek.customer_id }).forUpdate().skipLocked()
-      .first('id', 'email', 'stripe_customer_id', 'deleted_at', 'phone');
-    // The claim: still pending, still due (an overlapping drain may have just rescheduled it), still this customer's
-    // (a merge may have moved it).
-    const job = await trx(TABLE).where({ id: jobId, status: 'pending', customer_id: peek.customer_id })
-      .where('next_attempt_at', '<=', trx.fn.now()).forUpdate().skipLocked().first();
-    if (!job) return 'busy';
-    if (customer === undefined && await trx('customers').where({ id: peek.customer_id }).first('id')) return 'busy';
-    if (!customer || isMergeRetiredRow(customer)) {
-      await finish(trx, job, 'skipped', 'gone');
-      return 'gone';
-    }
+    const claimed = await claim(trx, jobId);
+    if (!claimed) return 'busy';
+    const { job, customer } = claimed;
+
+    const end = async (status, result, alert = false) => {
+      await finish(trx, job, status, result);
+      if (alert) await alertOffice(trx, job, customer, result);
+      return result;
+    };
+    const later = async (minutes, patch) => {
+      await trx(TABLE).where({ id: job.id }).update({ ...patch, updated_at: trx.fn.now(), next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [minutes]) });
+    };
+
+    if (!customer || isMergeRetiredRow(customer)) return end('skipped', 'gone');
     // Only the address the customer confirmed goes to Stripe: a record that holds anything else now (an office edit
     // since) is left alone, before any other check, so a stale job never raises an alert.
     const email = String(job.email || '').trim();
-    if (!email || String(customer.email || '').trim().toLowerCase() !== email.toLowerCase()) {
-      await finish(trx, job, 'done', 'superseded');
-      return 'superseded';
-    }
+    if (!email || normEmail(customer.email) !== normEmail(email)) return end('done', 'superseded');
     // A job whose Stripe tries ran out earlier but whose office alert could not be written: retry only the alert.
     if (job.attempts >= MAX_ATTEMPTS) return giveUp(trx, job, customer);
-    // The record's own saved cards must agree with its link: a card on a different Stripe profile (or cards on a
-    // profile the record does not link) means ownership is unclear, and the office decides.
-    const ownCardIds = [...new Set((await trx('payment_methods').where({ customer_id: customer.id })
-      .whereNotNull('stripe_customer_id').select('stripe_customer_id')).map((r) => r.stripe_customer_id))];
-    if (ownCardIds.some((sid) => sid !== customer.stripe_customer_id)) {
-      await finish(trx, job, 'skipped', 'card_conflict');
-      await alertOffice(trx, job, customer, 'card_conflict');
-      return 'card_conflict';
-    }
-    if (!customer.stripe_customer_id) {
+    // Unlinked: the card check still runs (cards on a profile the record does not link), then re-checks for a link.
+    const linked = Boolean(customer.stripe_customer_id);
+    const problem = await firstOwnershipProblem(trx, customer, linked ? ['card_conflict', 'merged', 'shared'] : ['card_conflict']);
+    if (problem) return end('skipped', problem, true);
+    if (!linked) {
       const rechecks = job.not_linked_checks || 0;
-      if (rechecks < NOT_LINKED_RECHECKS) {
-        await trx(TABLE).where({ id: job.id }).update({
-          not_linked_checks: rechecks + 1, updated_at: trx.fn.now(),
-          next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [2 ** (rechecks + 1)]),
-        });
-        return 'recheck';
-      }
-      await finish(trx, job, 'done', 'not_linked');
-      return 'not_linked';
+      if (rechecks >= NOT_LINKED_RECHECKS) return end('done', 'not_linked');
+      await later(2 ** (rechecks + 1), { not_linked_checks: rechecks + 1 });
+      return 'recheck';
     }
-    const merged = await trx('customer_merge_journal')
-      .where((q) => q.where({ winner_customer_id: customer.id }).orWhere({ loser_customer_id: customer.id })).first('id');
-    if (merged) {
-      await finish(trx, job, 'skipped', 'merged');
-      await alertOffice(trx, job, customer, 'merged');
-      return 'merged';
-    }
-    // Shared ownership, checked without locking other rows (locking them after our own row could invert a merge's
-    // sorted lock order): another customer row on the same Stripe id, or another customer's saved card on it (the
-    // merge code treats a card as ownership evidence). Either way the job is skipped and the office decides.
-    const otherRow = await trx('customers').where({ stripe_customer_id: customer.stripe_customer_id })
-      .whereNot({ id: customer.id }).first('id');
-    const otherCard = otherRow ? null : await trx('payment_methods').where({ stripe_customer_id: customer.stripe_customer_id })
-      .whereNot({ customer_id: customer.id }).first('id');
-    // A third-party payer (a property manager, a family member who pays) on the same Stripe profile: its statements
-    // bill through that profile, so the homeowner's email must not land on it.
-    const payer = otherRow || otherCard ? null : await trx('payers').where({ stripe_customer_id: customer.stripe_customer_id }).first('id');
-    if (otherRow || otherCard || payer) {
-      await finish(trx, job, 'skipped', 'shared');
-      await alertOffice(trx, job, customer, 'shared');
-      return 'shared';
-    }
-    const StripeService = require('./stripe');
+
     let outcome;
     try {
-      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email, { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 });
+      outcome = await require('./stripe').updateCustomerEmail(customer.stripe_customer_id, email, { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 });
     } catch (err) {
       const attempts = job.attempts + 1;
       const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
-      if (attempts >= MAX_ATTEMPTS) {
-        // Out of tries: the spent budget commits on its own; the alert runs in a savepoint. When the alert cannot be
-        // written, the job stays pending with its budget spent, and the next tick retries only the alert (below).
-        await trx(TABLE).where({ id: job.id }).update({ attempts, last_error: code, updated_at: trx.fn.now() });
-        return giveUp(trx, job, customer);
-      }
-      await trx(TABLE).where({ id: job.id }).update({
-        attempts, last_error: code, updated_at: trx.fn.now(),
-        next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [backoffMinutes(attempts)]),
-      });
-      return 'retry';
+      // Out of tries: the spent budget commits on its own and the alert runs in a savepoint (giveUp); when the alert
+      // cannot be written, the next tick retries only the alert (above).
+      await later(backoffMinutes(attempts), { attempts, last_error: code });
+      return attempts >= MAX_ATTEMPTS ? giveUp(trx, job, customer) : 'retry';
     }
-    if (outcome === 'not_configured') return 'not_configured'; // untouched: a process with a key takes it (drainDue)
-    await finish(trx, job, 'done', 'updated');
-    return 'updated';
+    // No Stripe key on this process: untouched, a process with a key takes it (drainDue).
+    return outcome === 'not_configured' ? 'not_configured' : end('done', 'updated');
   });
 }
 
