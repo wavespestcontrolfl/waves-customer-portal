@@ -44,6 +44,7 @@ const row = (id, at, over = {}) => ({ id, customer_id: 'cust-1', direction: 'inb
 
 let smsRows;
 let storedCodes = {};
+let failCodes = false;
 let visits;
 let onSmsRead;
 const colOf = (name) => String(name).replace(/^(scheduled_services|sl|twin)\./, '');
@@ -72,7 +73,7 @@ function scheduledServices() {
 
 // property_preferences / customer_access_codes: the stored codes the reader matches against
 function codeTable(table) {
-  const q = { where: () => q, whereNotNull: () => q, select: async () => storedCodes[table] || [] };
+  const q = { where: () => q, whereNotNull: () => q, select: async () => { if (failCodes) throw new Error('read failed'); return storedCodes[table] || []; } };
   return q;
 }
 
@@ -132,6 +133,7 @@ beforeEach(() => {
   mockPhotos.mockReturnValue(true);
   onSmsRead = null;
   storedCodes = {};
+  failCodes = false;
   visits = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: '2026-11-26' }];
   smsRows = [
     row('a', '2026-11-20T15:00:00Z', { message_body: 'please skip the back yard' }),
@@ -230,6 +232,14 @@ describe('GET /:id/visit-texts', () => {
     expect(body.texts.map((t) => t.id)).not.toContain('k');
     expect(body.hidden).toBe(4);
     expect(JSON.stringify(body)).not.toMatch(/abcd/i);
+  });
+
+  test('a failed read of the stored codes answers unavailable: no bodies, no photos, nothing signed', async () => {
+    failCodes = true;
+    const { status, body } = await get('technician');
+    expect(status).toBe(200);
+    expect(body).toEqual({ enabled: true, texts: [], hidden: 0, unavailable: true });
+    expect(db.mock.calls.some((c) => String(c[0]).startsWith('sms_log'))).toBe(false);
   });
 
   test('an admin reaches any visit, whoever it is assigned to', async () => {

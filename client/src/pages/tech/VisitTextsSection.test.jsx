@@ -64,6 +64,13 @@ describe('VisitTextsSection', () => {
   });
 });
 
+describe('texts unavailable', () => {
+  it('says so in one muted line, with no texts', async () => {
+    renderWith(vi.fn(async () => ({ enabled: true, unavailable: true, hidden: 0, texts: [] })));
+    expect(await screen.findByText('Texts are not available right now. Ask the office.')).toBeInTheDocument();
+  });
+});
+
 describe('photos held back by the server', () => {
   it('says how many photos are not shown instead of leaving a gap', async () => {
     renderWith(vi.fn(async () => ({ enabled: true, hidden: 0, texts: [

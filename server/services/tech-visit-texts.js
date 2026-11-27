@@ -88,10 +88,20 @@ function hasSignInCode(body) {
   return SIGN_IN_CODE.test(text) || require('./access-code-capture').VERIFICATION_CONTEXT.test(text);
 }
 
+// Any Unicode decimal digit (Arabic-Indic, Devanagari, full-width, ...) as its ASCII digit: Nd characters sit in contiguous sets of ten
+// starting at zero, so the value is the distance from the start of the run, modulo ten.
+function asciiDigit(ch) {
+  const cp = ch.codePointAt(0);
+  let start = cp;
+  while (/\p{Nd}/u.test(String.fromCodePoint(start - 1))) start -= 1;
+  return String((cp - start) % 10);
+}
+
 // One reading of a body for every number screen: NFKC (full-width digits and letters), zero-width characters removed, typographic
 // dashes as "-".
 function normalizedBody(body) {
-  return String(body || '').normalize('NFKC').replace(/[\u00ad\u200b-\u200f\u2060\ufeff]/g, '').replace(/[\u2010-\u2015\u2212]/g, '-');
+  return String(body || '').normalize('NFKC').replace(/[\u00ad\u200b-\u200f\u2060\ufeff]/g, '').replace(/[\u2010-\u2015\u2212]/g, '-')
+    .replace(/\p{Nd}/gu, asciiDigit);
 }
 
 // What cannot be a credential: a clock time (h:mm, h:mm am/pm), a numeric date (11/26, 11/26/2026) and a month-name date (Nov 26).
@@ -105,7 +115,7 @@ const NAMED_DATE = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a
 // access block (which enforces property and visit) is where a technician gets a code.
 function hasNumberRun(body) {
   const text = normalizedBody(body).replace(NAMED_DATE, ' x ').replace(NUMERIC_DATE, ' x ').replace(TIME_OF_DAY, ' x ');
-  return /\d{3,}/.test(text.replace(/(?<=\d)[\s.-]{1,3}(?=\d)/g, ''));
+  return /\p{Nd}{3,}/u.test(text.replace(/(?<=\p{Nd})[\s.-]{1,3}(?=\p{Nd})/gu, ''));
 }
 
 function hasCardCredentials(body) {
@@ -161,12 +171,27 @@ function isNoise(row) {
 }
 
 // Held back and counted: a type off the allow-list, money, card or bank details, a number, a link, or one of the customer's STORED
-// access codes (every property's, job-card.js's own matcher: case-insensitive, whole token). `codes` is that matcher as a RegExp, null
-// when there is nothing stored, or false when the stored codes could not be read: then fail closed on any digit or all-caps token.
+// access codes (every property's). `codes` is the list of stored codes, normalized (NFKC, digits as ASCII, lowercase).
+// A code matches when it stands alone: a non-letter, non-digit character or the edge of the text on both sides ("gate is 12.",
+// "(ab7)", "'blue'"); a code of 1 character is ignored. A code stored with punctuation also matches without it ("1234#" as "1234").
+function normalizedCode(code) {
+  return normalizedBody(code).toLowerCase().trim();
+}
+
+function matcherFor(codes) {
+  const esc = (c) => c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const terms = new Set();
+  for (const code of codes.map(normalizedCode)) {
+    if (code.length > 1) terms.add(code);
+    const bare = code.replace(/[^\p{L}\p{N}]/gu, '');
+    if (bare.length > 1) terms.add(bare);
+  }
+  if (!terms.size) return null;
+  return new RegExp(`(?<![\\p{L}\\p{N}])(?:${[...terms].map(esc).join('|')})(?![\\p{L}\\p{N}])`, 'u');
+}
+
 function mentionsStoredCode(body, codes) {
-  const text = normalizedBody(body);
-  if (codes === false) return /\d|\b[A-Z]{3,}\b/.test(text);
-  return Boolean(codes) && codes.test(text);
+  return Boolean(codes) && codes.test(normalizedBody(body).toLowerCase());
 }
 
 function isHeldBack(row, codes = null) {
@@ -253,7 +278,7 @@ async function windowRows(db, customerId, start, now) {
 // cross-segment detector reads the customer's inbound texts in order, on normalized bodies; each text it masks or empties took part), and
 // a reply of only 1-2 digits right after an inbound text that a credential, secret, sign-in, card or number screen held back ("my
 // verification code is" ... "48").
-const SHORT_DIGITS_ONLY = /^[^\p{L}\p{N}]*\d{1,2}[^\p{L}\p{N}]*$/u;
+const SHORT_DIGITS_ONLY = /^[^\p{L}\p{N}]*\p{Nd}{1,2}[^\p{L}\p{N}]*$/u;
 function sequenceHeldIds(rows) {
   const inbound = rows
     .filter((row) => row.direction === 'inbound' && typeof row.message_body === 'string' && row.message_body)
@@ -270,16 +295,15 @@ function sequenceHeldIds(rows) {
   return held;
 }
 
-// The customer's stored access codes as job-card.js's matcher: every property's gate, garage and lockbox codes (property_preferences) and
-// every code filed in customer_access_codes (any status: a dismissed code is still a code). null = none stored; false = a read failed.
-async function storedCodePattern(db, customerId) {
+// The customer's stored access codes: every property's gate, garage and lockbox codes (property_preferences, all rows) and every code
+// filed in customer_access_codes (any status: a dismissed code is still a code). Returns the matcher (null = none stored), or false when
+// either read failed: then nothing about the customer's texts is returned at all.
+async function readStoredCodes(db, customerId) {
   try {
-    const jobCard = require('./job-card');
     const prefs = await db('property_preferences').where({ customer_id: customerId })
       .select('neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code');
     const filed = await db('customer_access_codes').where({ customer_id: customerId }).whereNotNull('code').select('code');
-    const codes = [...prefs.flatMap((row) => jobCard.accessCodes(row)), ...filed.map((row) => ({ code: row.code }))];
-    return jobCard.knownCodePattern(codes, 'i');
+    return matcherFor(prefs.flatMap((row) => Object.values(row)).concat(filed.map((row) => row.code)).filter(Boolean));
   } catch {
     return false;
   }
@@ -289,10 +313,12 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   const start = windowStart(svc.scheduled_date);
   if (!svc.customer_id || !start) return { texts: [], hidden: 0 };
   const signer = sign || ((media) => require('./sms-media').signMediaForClient(media));
+  // The stored codes first: when they cannot be read, no text is read, shown or signed.
+  const codes = await readStoredCodes(db, svc.customer_id);
+  if (codes === false) return { unavailable: true, texts: [], hidden: 0 };
   const rows = await windowRows(db, svc.customer_id, start, now);
   let hidden = 0;
   const shown = [];
-  const codes = await storedCodePattern(db, svc.customer_id);
   const sequenceRows = sequenceHeldIds(rows);
   for (const row of rows) {
     const verdict = sequenceRows.has(row.id) ? 'hidden' : textVerdict(row, { withPhotos, codes });

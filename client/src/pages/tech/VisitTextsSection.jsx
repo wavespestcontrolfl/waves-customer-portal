@@ -103,6 +103,7 @@ export default function VisitTextsSection({ service, byService, request }) {
   if (state.failed) return <p style={{ ...mutedStyle, marginTop: 10 }}>Couldn't load texts</p>;
   const data = state.data;
   if (!data?.enabled) return null;
+  if (data.unavailable) return <p style={{ ...mutedStyle, marginTop: 10 }}>Texts are not available right now. Ask the office.</p>;
   const texts = data.texts || [];
   const hidden = Number(data.hidden) || 0;
   if (!texts.length && !hidden) return null;

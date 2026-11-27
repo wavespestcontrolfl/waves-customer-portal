@@ -451,15 +451,43 @@ describe('visitTexts', () => {
     expect(JSON.stringify(out)).not.toMatch(/abcd|blue|pelican/i);
   });
 
-  test('a failed read of the stored codes fails closed: any digit or all-caps token hides the text', async () => {
+  test.each(['customer_access_codes', 'property_preferences'])('a failed read of the stored codes (%s) answers unavailable: no text read, shown or signed', async (failTable) => {
+    const sign = jest.fn();
+    const rows = [row('f1', '2026-11-22T10:00:00Z', { message_body: 'the dogs are friendly' })];
+    const db = fakeDb(rows, { failTable });
+    const out = await visitTexts(db, SVC, { now: NOW, sign, withPhotos: true });
+    expect(out).toEqual({ unavailable: true, texts: [], hidden: 0 });
+    expect(db.calls.tables.some((t) => String(t).startsWith('sms_log'))).toBe(false);
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  test('a stored code stands alone at either edge or beside punctuation: short codes hidden, a 1-character code ignored', async () => {
+    const stored = { property_preferences: [{ garage_code: '12' }, { lockbox_code: 'ab7' }, { property_gate_code: 'Blue' }, { neighborhood_gate_code: 'x' }], customer_access_codes: [] };
+    const hiddenBodies = ['gate is 12.', 'it is 12, ok', 'use 12!', '(ab7)', 'try "ab7"', "the 'blue' one", 'BLUE?', '12', 'ab7)', 'code: (12)', 'gate is \u0661\u0662.'];
+    const shownBodies = ['I have x dogs', 'bring 120 feet of hose'.replace('120', 'two'), 'the blueberry bush', 'flab7ulous', 'abc12def', 'dogs are fine'];
     const rows = [
-      row('f1', '2026-11-22T10:00:00Z', { message_body: 'the lockbox is ABCD' }),
-      row('f2', '2026-11-22T11:00:00Z', { message_body: 'gate is 12' }),
-      row('f3', '2026-11-22T12:00:00Z', { message_body: 'the dogs are friendly' }),
+      ...hiddenBodies.map((body, i) => row(`h${String(i).padStart(2, '0')}`, `2026-11-22T10:${String(i).padStart(2, '0')}:00Z`, { message_body: body })),
+      ...shownBodies.map((body, i) => row(`s${i}`, `2026-11-23T10:${String(i).padStart(2, '0')}:00Z`, { message_body: body })),
     ];
-    const out = await visitTexts(fakeDb(rows, { failTable: 'customer_access_codes' }), SVC, { now: NOW, sign: async () => [] });
-    expect(out.texts.map((t) => t.id)).toEqual(['f3']);
-    expect(out.hidden).toBe(2);
+    const out = await visitTexts(fakeDb(rows, { tables: stored }), SVC, { now: NOW, sign: async () => [] });
+    expect(out.texts.map((t) => t.body)).toEqual(shownBodies);
+    expect(out.hidden).toBe(hiddenBodies.length);
+  });
+
+  test('digits of any script are read as digits: Arabic-Indic, Devanagari and full-width runs, and a card split across texts', async () => {
+    const arabic = '\u0661\u0662\u0663\u0664';
+    const devanagari = '\u0967\u0968\u0969\u096a';
+    expect(hasNumberRun(arabic)).toBe(true);
+    expect(hasNumberRun(devanagari)).toBe(true);
+    expect(hasNumberRun('\u0661 \u0662-\u0663')).toBe(true);
+    expect(hasNumberRun('\u0662 dogs')).toBe(false);
+    expect(textVerdict(inbound({ message_body: `gate ${arabic}` }))).toBe('hidden');
+    const sign = jest.fn();
+    const card = ['\u0664\u0661\u0661\u0661', '\u0661\u0661\u0661\u0661', '\u0661\u0661\u0661\u0661', '\u0661\u0661\u0661\u0661'];
+    const rows = card.map((digits, i) => row(`d${i}`, `2026-11-22T1${i}:00:00Z`, { message_body: digits, metadata: { media: [{ key: `sms-media/inbound/d${i}`, contentType: 'image/jpeg' }] } }));
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
+    expect(out).toEqual({ texts: [], hidden: 4 });
+    expect(sign).not.toHaveBeenCalled();
   });
 
   test('ties and order: created_at decides first, id breaks a tie, never the id alone', async () => {
