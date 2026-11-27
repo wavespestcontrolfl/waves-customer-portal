@@ -44,7 +44,13 @@ describe('stripe-email-sync processJob', () => {
         .filter((r) => !q.notIn || !q.notIn[1].includes(r[q.notIn[0]])).slice(0, q._lim || undefined)
         .map((r) => (cols.length > 1 ? { id: r.id, version: r.updated_at } : cols[0] === 'stripe_customer_id' ? { stripe_customer_id: r.stripe_customer_id } : { id: r.id }));
       q.whereRaw = (sql, [v]) => { q.conds.push({ updated_at: v }); return q; };
-      q.update = async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; };
+      q.update = (patch) => {
+        const hit = rows();
+        hit.forEach((r) => Object.assign(r, patch, patch.attempts && patch.attempts.sql === 'attempts + 1' ? { attempts: (r._attempts = (r._attempts ?? r.attempts ?? 0) + 1) } : {}));
+        const p = Promise.resolve(hit.length);
+        p.returning = async () => hit.map((r) => ({ id: r.id, customer_id: r.customer_id, attempts: r.attempts }));
+        return p;
+      };
       return q;
     };
     const trx = Object.assign((t) => builder(t), { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
@@ -199,7 +205,7 @@ describe('stripe-email-sync processJob', () => {
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
     await expect(sync.drainDue()).resolves.toEqual({ error: 1 });
     expect(updateEmail).not.toHaveBeenCalled();
-    expect(state.jobs[0]).toMatchObject({ status: 'pending', last_error: 'Error', attempts: { sql: 'attempts + 1' } });
+    expect(state.jobs[0]).toMatchObject({ status: 'pending', last_error: 'Error', attempts: 1 });
     expect(state.jobs[0].next_attempt_at).toEqual({ sql: "now() + interval '15 minutes'" });
   });
 
@@ -245,6 +251,16 @@ describe('stripe-email-sync processJob', () => {
     const sameCase = load({ customers: [cust({ email: 'New@Example.test' })] });
     await expect(sameCase.processJob('job-1')).resolves.toBe('updated');
     expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', expect.any(Object));
+  });
+
+  test('a job that keeps failing outside the Stripe call stops as failed with an office alert, never writing', async () => {
+    const sync = load({ job: { attempts: 8 }, customers: [cust()] });
+    state.throwOn = 'customer_merge_journal';
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    await expect(sync.drainDue()).resolves.toEqual({ error: 1 });
+    expect(state.jobs[0]).toMatchObject({ status: 'failed', result: 'worker_error', attempts: 9 });
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(updateEmail).not.toHaveBeenCalled();
   });
 
   test('a job changed since the failed try keeps its schedule (push-back matches the seen version only)', async () => {

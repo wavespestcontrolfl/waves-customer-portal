@@ -215,6 +215,23 @@ async function processJob(jobId) {
 // Up to `limit` jobs a tick, oldest due first. A job whose customer row another transaction holds answers 'busy' and
 // does not count: the drain moves past it (up to MAX_SCAN jobs a tick), so a few locked customers never starve the rest.
 const MAX_SCAN = 200;
+// A job that threw outside the Stripe call (its transaction rolled back): 15 minutes later, and a spent try. Past
+// MAX_ATTEMPTS + WORKER_ERROR_GRACE such tries it stops as failed with a verify alert, whatever keeps failing.
+const WORKER_ERROR_GRACE = 3;
+async function pushBack(id, seen, err) {
+  const [row] = await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
+    .update({ attempts: db.raw('attempts + 1'), last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
+    .returning(['id', 'customer_id', 'attempts']);
+  if (!row || row.attempts < MAX_ATTEMPTS + WORKER_ERROR_GRACE) return;
+  await db.transaction(async (trx) => {
+    const job = await trx(TABLE).where({ id, status: 'pending' }).forUpdate().first();
+    if (!job) return;
+    const customer = (await trx('customers').where({ id: job.customer_id }).first('id', 'email')) || { id: job.customer_id, email: null };
+    await alertOffice(trx, job, customer, 'gave_up');
+    await finish(trx, job, 'failed', 'worker_error');
+  });
+}
+
 // One drain at a time in this process: a slow batch (two short Stripe calls per job) must not stack minute ticks, each
 // holding more database connections. Row locks still keep processes apart.
 let draining = false;
@@ -255,10 +272,8 @@ async function drainOnce({ limit = 20 } = {}) {
         counts.error = (counts.error || 0) + 1;
         logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
         // Only the version this drain saw: a job changed or rescheduled since keeps its own schedule.
-        // It spends a try too, so a job that keeps failing here reaches the give-up alert like a Stripe failure.
-        await db(TABLE).where({ id, status: 'pending' }).whereRaw('updated_at::text = ?', [seen])
-          .update({ attempts: db.raw('attempts + 1'), last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
-          .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
+        // It spends a try too; a job that keeps failing here stops for good with an office alert (no Stripe write).
+        await pushBack(id, seen, err).catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
       }
     }
     if (page.length < limit) break;
