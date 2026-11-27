@@ -269,12 +269,14 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
       }),
     );
 
-    // Normal execution success -> does not ring a good-news bell
+    // Normal execution success -> does not ring a good-news bell (verified in finishExecution and pollReplies).
     spy.mockClear();
     reviewQueue.decideReviewItem.mockResolvedValueOnce({});
     const okRow = { id: 'a2', token: 'EA-87654321', run_id: 'r2', opportunity_id: 'o2', kind: 'named_competitor_review', draft_sha: 'sha1' };
     await approvals._internals.finishExecution(okRow, 'approved', 'owner@example.com');
     expect(spy).not.toHaveBeenCalled();
+    const emailApprovalsSrc = fs.readFileSync(path.join(__dirname, '../services/content/email-approvals.js'), 'utf8');
+    expect(emailApprovalsSrc).not.toMatch(/Content approved by email|Content rejected by email/);
     spy.mockRestore();
   });
 

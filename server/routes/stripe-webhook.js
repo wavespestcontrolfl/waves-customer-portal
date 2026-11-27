@@ -4207,17 +4207,6 @@ async function handleChargeRefunded(charge) {
     });
   }
 
-  // Notify admin bell + push of refund
-  try {
-    await triggerNotification('payment_refunded', {
-      amount: refundAmountDollars,
-      isFullRefund,
-      invoiceId: refundedPayment?.invoice_id || null,
-    });
-  } catch (e) {
-    logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
-  }
-
   // Annual-prepay claw-back after a full refund — CRITICAL lifecycle
   // write, no .catch (codex r15 P1): a swallowed failure acknowledges the
   // webhook with active coverage still riding on refunded money, and no
@@ -4258,6 +4247,22 @@ async function handleChargeRefunded(charge) {
   // a transient bell failure never skips coverage revocation while still
   // propagating HTTP 500 to Stripe to retry the deduped alert.
   await emitCombinedRefundAlerts(combinedRefundAlerts);
+
+  // Notify admin bell + push of refund (after retryable combined-refund alert
+  // dispatch, and keyed per refund so a webhook retry cannot repeat it).
+  try {
+    await triggerNotification('payment_refunded', {
+      amount: refundAmountDollars,
+      isFullRefund,
+      invoiceId: refundedPayment?.invoice_id || null,
+    }, { dedupeKey: refundNotificationDedupeKey(chargeId, refundId) });
+  } catch (e) {
+    logger.warn(`[stripe-webhook] refund triggerNotification failed: ${e.message}`);
+  }
+}
+
+function refundNotificationDedupeKey(chargeId, refundId) {
+  return `payment-refunded:${chargeId}:${refundId || 'unknown'}`;
 }
 
 /**
@@ -7463,8 +7468,8 @@ async function emitCombinedRefundAlerts(alerts) {
 }
 
 function combinedRefundAlertLink({ customerId = null, anchorInvoiceId = null } = {}) {
-  if (customerId) return `/admin/customers?customerId=${encodeURIComponent(customerId)}&tab=billing`;
   if (anchorInvoiceId) return `/admin/invoices?invoice=${encodeURIComponent(anchorInvoiceId)}`;
+  if (customerId) return `/admin/customers?customerId=${encodeURIComponent(customerId)}`;
   return '/admin/invoices';
 }
 
