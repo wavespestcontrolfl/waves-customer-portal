@@ -118,7 +118,7 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     await del('customers', made.customerIds);
     await db.destroy();
   });
-  beforeEach(() => { delete process.env.PROMISE_EVIDENCE_CLOSE; delete process.env.GATE_CALLBACK_CARD; });
+  beforeEach(() => { delete process.env.PROMISE_EVIDENCE_CLOSE; });
 
   // One customer, one call that ended three days ago, one open promise.
   async function world({ kind = 'other', party = 'waves', customer = true, human_state = null, status = 'open', customerExtra = {}, channel = null, description = null } = {}) {
@@ -719,7 +719,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const { gates } = require('../config/feature-gates');
     const gateWas = gates.callCommitments;
     gates.callCommitments = true;
-    process.env.GATE_CALLBACK_CARD = 'true';
     try {
       const cb = await world({ kind: 'callback' });
       await visit(cb);
@@ -788,7 +787,6 @@ maybeDescribe('promises close on proof (live Postgres)', () => {
     const { gates } = require('../config/feature-gates');
     const gateWas = gates.callCommitments;
     gates.callCommitments = true;
-    process.env.GATE_CALLBACK_CARD = 'true';
     try {
       const w = await world({ kind: 'callback', human_state: 'confirmed', customerExtra: churnedStage(1) });
       await inbound(w);

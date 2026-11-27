@@ -3,7 +3,7 @@
  * zero conversions across a window (the July slot_sig outage signature),
  * raises one keyed open-only bell (state is the row, so a restart re-rings
  * nothing), texts the owner only for a fresh row, closes the row on recovery,
- * rethrows read errors, and no-ops entirely while the gate is unset.
+ * rethrows read errors.
  */
 
 jest.mock('../services/logger', () => ({
@@ -29,10 +29,6 @@ jest.mock('../models/db', () => {
   return fn;
 });
 
-jest.mock('../config/feature-gates', () => ({
-  isEnabled: jest.fn(() => true),
-}));
-
 jest.mock('../services/admin-alert-compose', () => ({
   raiseAdminAlert: jest.fn(async () => ({ id: 'notif-1' })),
 }));
@@ -47,7 +43,6 @@ jest.mock('../services/twilio', () => ({
 }));
 
 const db = require('../models/db');
-const { isEnabled } = require('../config/feature-gates');
 const { raiseAdminAlert } = require('../services/admin-alert-compose');
 const episodes = require('../services/admin-alert-episodes');
 const TwilioService = require('../services/twilio');
@@ -70,17 +65,7 @@ beforeEach(() => {
   episodes.openAdminAlertKeys.mockReset().mockResolvedValue([]);
   episodes.closeAdminAlertKeys.mockReset().mockResolvedValue(1);
   TwilioService.sendSMS.mockClear();
-  isEnabled.mockReturnValue(true);
   process.env.ADAM_PHONE = '+19415550001';
-});
-
-test('no-ops while the gate is off (standard feature-gate registry)', async () => {
-  isEnabled.mockReturnValue(false);
-  const result = await runBookingFunnelCanary();
-  expect(result).toEqual({ skipped: true });
-  expect(isEnabled).toHaveBeenCalledWith('bookingFunnelCanary');
-  expect(db).not.toHaveBeenCalled();
-  expect(raiseAdminAlert).not.toHaveBeenCalled();
 });
 
 test('stays quiet when the funnel is converting', async () => {

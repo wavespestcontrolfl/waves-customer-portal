@@ -31,9 +31,8 @@ run('callback bridge on PostgreSQL', () => {
     db.mockImplementation((...args) => conn(...args));
     db.raw = conn.raw.bind(conn);
     db.transaction = conn.transaction.bind(conn);
-    originalGates = { commitments: gates.callCommitments, card: process.env.GATE_CALLBACK_CARD };
+    originalGates = { commitments: gates.callCommitments };
     gates.callCommitments = true;
-    process.env.GATE_CALLBACK_CARD = 'true';
     originalFrom = numbers.mainLine.number;
     numbers.mainLine.number = from;
     const router = require('../routes/admin-communications');
@@ -57,12 +56,10 @@ run('callback bridge on PostgreSQL', () => {
     await conn('customers').where({ id: customerId }).del();
     await conn('technicians').where({ id: staffId }).del();
     callIds.length = commitmentIds.length = 0;
-    process.env.GATE_CALLBACK_CARD = 'true';
+    gates.callCommitments = true;
   });
   afterAll(async () => {
     gates.callCommitments = originalGates.commitments;
-    if (originalGates.card === undefined) delete process.env.GATE_CALLBACK_CARD;
-    else process.env.GATE_CALLBACK_CARD = originalGates.card;
     numbers.mainLine.number = originalFrom;
     await conn.destroy();
   });
@@ -200,7 +197,7 @@ run('callback bridge on PostgreSQL', () => {
 
   test.each(['gate', 'version', 'extraction', 'staff_phone'])('%s refusal cannot contact the provider', async (reason) => {
     const row = await seed();
-    if (reason === 'gate') process.env.GATE_CALLBACK_CARD = 'false';
+    if (reason === 'gate') gates.callCommitments = false;
     if (reason === 'version') await conn('call_commitments').where({ id: row.id }).update({ updated_at: new Date() });
     if (reason === 'extraction') {
       const id = randomUUID(); commitmentIds.push(id);
@@ -253,7 +250,7 @@ run('callback bridge on PostgreSQL', () => {
     // The card attempt for `row` (both keys), unanswered; then the gate is rolled back.
     await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone, status: 'no-answer',
       created_at: new Date(Date.now() + 1000), metadata: { relatedCommitmentId: row.id, relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } } });
-    process.env.GATE_CALLBACK_CARD = 'false';
+    gates.callCommitments = false;
     // An ordinary returned call afterwards: legacy proof for a refreshable row only.
     await conn('call_log').insert({ customer_id: customerId, direction: 'outbound', from_phone: from, to_phone: phone, status: 'completed',
       duration_seconds: 120, created_at: new Date(Date.now() + 2000) });
@@ -335,7 +332,7 @@ run('callback bridge on PostgreSQL', () => {
       metadata: kind === 'policy'
         ? { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'no-answer', duration_seconds: 0 } }
         : { relatedCallId: row.call_log_id } });
-    process.env.GATE_CALLBACK_CARD = 'false';
+    gates.callCommitments = false;
     const source = await conn('call_log').where({ id: row.call_log_id }).first();
     const proof = await require('../services/call-commitments').resolveFulfillment(conn, row, source);
     // Under the card policy the unanswered leg is not proof; a pre-policy
@@ -354,7 +351,7 @@ run('callback bridge on PostgreSQL', () => {
       status: 'completed', v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_voicemail: false } },
       created_at: new Date(Date.now() + 1000),
       metadata: { relatedCallId: row.call_log_id, callback_policy: 'card', customer_leg: { status: 'completed', duration_seconds: 90, ended_at: legEnded } } });
-    process.env.GATE_CALLBACK_CARD = 'false';
+    gates.callCommitments = false;
     expect(await require('../services/call-commitments').refreshFulfillment(conn, row.call_log_id)).toMatchObject({ fulfilled: 1 });
     expect((await conn('call_commitments').where({ id: row.id }).first()).status).toBe('fulfilled');
   });
@@ -388,7 +385,7 @@ run('callback bridge on PostgreSQL', () => {
       metadata: { relatedCommitmentId: row.id, customer_leg: {
         status: evidence === 'unanswered' ? 'no-answer' : 'completed', duration_seconds: evidence === 'unanswered' ? 0 : 90,
       } } }).returning('id');
-    process.env.GATE_CALLBACK_CARD = 'false';
+    gates.callCommitments = false;
     const source = await conn('call_log').where({ id: row.call_log_id }).first();
     const proof = await require('../services/call-commitments').resolveFulfillment(conn, row, source);
     if (evidence === 'conversation') expect(proof).toMatchObject({ record_id: outbound.id, basis: 'callback_customer_conversation' });

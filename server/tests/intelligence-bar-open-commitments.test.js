@@ -72,20 +72,18 @@ test('resolves a customer by name; an unknown name answers with a note, never an
   expect(listOpenCommitments).toHaveBeenCalledTimes(1);
 });
 
-test.each([[false, false], [true, false], [false, true], [true, true]])(
-  'callback gates %s/%s report the same deadline policy and explanation', async (cardsEnabled, commitmentsEnabled) => {
-  require('../config/feature-gates').gateEnvValue.mockImplementation((key) => key === 'GATE_CALLBACK_CARD' && cardsEnabled);
+test.each([[false], [true]])(
+  'callback gate (commitments) %s reports the same deadline policy and explanation', async (commitmentsEnabled) => {
   require('../config/feature-gates').isEnabled.mockImplementation((key) => key !== 'callCommitments' || commitmentsEnabled);
   listOpenCommitments.mockResolvedValue([row('callback', { kind: 'callback', callback_due_at: '2099-09-01T17:00:00Z' })]);
   const out = await executeCommsTool('get_open_commitments', {});
-  const enabled = cardsEnabled && commitmentsEnabled;
+  const enabled = commitmentsEnabled;
   expect(out.implicit_due_rules.callback).toBe(enabled ? 'four staffed hours after the call, using office hours and blackout dates' : "the end of the call's day (Eastern)");
   expect(out.commitments[0].effective_due_at).toBe(enabled ? '2099-09-01 1:00 PM ET' : '2026-09-02 12:00 AM ET');
   expect(out.commitments[0].snoozed_until).toBeNull();
 });
 
 test('a snoozed callback card reports the snooze end as the deadline the queue judges', async () => {
-  require('../config/feature-gates').gateEnvValue.mockImplementation((key) => key === 'GATE_CALLBACK_CARD');
   listOpenCommitments.mockResolvedValue([row('callback', { kind: 'callback', callback_due_at: '2026-09-01T17:00:00Z', snoozed_until: '2099-09-01T19:30:00Z' })]);
   const out = await executeCommsTool('get_open_commitments', {});
   expect(out.commitments[0].effective_due_at).toBe('2099-09-01 3:30 PM ET');

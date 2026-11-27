@@ -16,11 +16,10 @@ run('callback reminder transitions on PostgreSQL', () => {
   beforeAll(() => {
     if (process.env.WAVES_LOCAL_DEV !== '1' || !/^\/waves_qa_[a-f0-9]+$/.test(new URL(process.env.DATABASE_URL).pathname)) throw new Error('Managed synthetic QA database required');
     conn = require('knex')({ client: 'pg', connection: process.env.DATABASE_URL, pool: { min: 0, max: 2 } });
-    original = { commitments: gates.callCommitments, card: process.env.GATE_CALLBACK_CARD };
+    original = { commitments: gates.callCommitments };
     gates.callCommitments = true;
   });
   beforeEach(async () => {
-    process.env.GATE_CALLBACK_CARD = 'true';
     delete process.env.PROMISE_EVIDENCE_CLOSE;
     trx = await conn.transaction();
     db.mockImplementation((...args) => trx(...args));
@@ -38,7 +37,6 @@ run('callback reminder transitions on PostgreSQL', () => {
   afterEach(async () => { jest.restoreAllMocks(); await trx.rollback(); });
   afterAll(async () => {
     gates.callCommitments = original.commitments;
-    if (original.card === undefined) delete process.env.GATE_CALLBACK_CARD; else process.env.GATE_CALLBACK_CARD = original.card;
     await conn.destroy();
   });
   async function seed(patch = {}) {
@@ -214,22 +212,6 @@ run('callback reminder transitions on PostgreSQL', () => {
     await runSweep(); expect(await unread()).toHaveLength(1);
   });
 
-  test('mixed callback and non-callback backlogs share one identity through both gate transitions', async () => {
-    const callbacks = [];
-    for (let i = 0; i < 5; i += 1) callbacks.push(await seed());
-    const other = await seed({ kind: 'other', due_at: ago });
-    process.env.GATE_CALLBACK_CARD = 'false'; await runSweep();
-    const [original] = await unread();
-    process.env.GATE_CALLBACK_CARD = 'true'; await runSweep();
-    expect((await unread()).map((r) => r.id)).toEqual([original.id]);
-    process.env.GATE_CALLBACK_CARD = 'false'; await runSweep();
-    expect((await unread()).map((r) => r.id)).toEqual([original.id]);
-    process.env.GATE_CALLBACK_CARD = 'true';
-    await trx('call_commitments').whereIn('id', callbacks.map((r) => r.id)).update({ status: 'fulfilled' });
-    await runSweep(); const active = await unread();
-    expect(active).toHaveLength(1); expect(active[0].metadata.commitment_id).toBe(other.id);
-  });
-
   test('an undated open card is judged by the legacy implicit deadline: counted as a card, rung by the watchdog, not duplicated in the fallback', async () => {
     const ledger = require('../services/call-commitments');
     const row = await seed({ callback_due_at: null });
@@ -314,24 +296,5 @@ run('callback reminder transitions on PostgreSQL', () => {
     expect((await unread()).map((row) => row.metadata.commitment_id)).toEqual([changed.id]);
     await runSweep();
     expect((await unread()).map((row) => row.metadata.commitment_id)).toEqual([changed.id]);
-  });
-
-  test.each([[1, false], [1, true], [6, false], [6, true]])('an empty gate transition restores %i reminders after rollback (read: %s)', async (count, read) => {
-    for (let i = 0; i < count; i += 1) await seed({ callback_due_at: future });
-    process.env.GATE_CALLBACK_CARD = 'false';
-    await runSweep(); const [first] = await unread();
-    if (read) await unread().update({ read_at: now });
-    process.env.GATE_CALLBACK_CARD = 'true';
-    await runSweep(); expect(await unread()).toHaveLength(0);
-    process.env.GATE_CALLBACK_CARD = 'false';
-    await runSweep();
-    const active = await unread();
-    expect(active).toHaveLength(1); expect(active[0].id).toBe(first.id);
-    if (count > 5) expect(active[0].metadata.retired).toBe(false);
-  });
-
-  test('gate rollback keeps one shared reminder for the same callback', async () => {
-    await seed(); await runSweep(); process.env.GATE_CALLBACK_CARD = 'false';
-    await runSweep(); expect(await unread()).toHaveLength(1);
   });
 });

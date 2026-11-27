@@ -1238,8 +1238,7 @@ function initScheduledJobs() {
   // BOOT (+90s, then EVERY 6H at :37) — booking-funnel conversion canary:
   // alerts Adam when real /book visitors keep entering the funnel but ZERO
   // bookings confirm across a whole window (the July slot_sig outage ran 8
-  // days unnoticed exactly because this signal had no alarm). Dark until
-  // GATE_BOOKING_FUNNEL_CANARY=true (feature-gates registry); read-only on
+  // days unnoticed exactly because this signal had no alarm). Read-only on
   // booking_intents.
   const bookingFunnelCanaryTick = async () => {
     try {
@@ -11038,15 +11037,15 @@ function initScheduledJobs() {
   // extraction confirmed a concrete appointment slot that never became a
   // scheduled_services row
   // (outbound skip / v2 routing block / missing fields all park silently in
-  // triage otherwise). Dark behind GATE_CALL_BOOKING_MISS_WATCHDOG.
+  // triage otherwise).
   // See server/services/call-booking-miss-watchdog.js.
   // =========================================================================
   cron.schedule('3,13,23,33,43,53 * * * *', async () => {
     try {
       const { runCallBookingMissWatchdog } = require('./call-booking-miss-watchdog');
       const result = await runCallBookingMissWatchdog();
-      if (!result.skipped && (result.misses > 0 || result.alerted > 0 || result.repeated > 0)) {
-        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted} repeated=${result.repeated || 0}`);
+      if (!result.skipped && (result.misses > 0 || result.alerted > 0)) {
+        logger.warn(`[call-booking-miss] scanned=${result.scanned} misses=${result.misses} alerted=${result.alerted}`);
       }
     } catch (err) {
       logger.error(`Call booking-miss watchdog tick failed: ${err.message}`);
