@@ -1,12 +1,13 @@
 /**
  * Owner ruling 2026-11-27 "yes booking": a NEW WDO inspection booking fills the home size and construction table price
  * ($150 to $275, PR #8631's priceWDO), not the flat catalog $250. A typed price and a price agreed on a call win.
- * Behavior: the office booking (buildAppointmentPricing, GET /wdo-inspection-quote), the new caller booked by address and
+ * Behavior: the office booking (buildAppointmentPricing, POST /wdo-inspection-quote), the new caller booked by address and
  * the phone bookings (wdoCallBookingPrice; the call pipeline's read before its transaction) price a blank WDO line from
  * the cached property record of the home the visit is booked at, through the estimate tool's own translator and engine.
  * Regressions it guards: the flat $250 on a new booking; a typed or quoted price replaced by the table; a commercial site or
  * another customer's property priced off the table; a property record read inside a booking transaction; a booked visit or
- * an invoice read or repriced. Fixtures are fictitious.
+ * an invoice read or repriced; a WDO main line with add-ons table-priced (its WDO filing bills the flat fee); a save that
+ * books a price the screen did not show. Fixtures are fictitious.
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../middleware/admin-auth', () => ({
@@ -19,6 +20,12 @@ jest.mock('../services/discount-engine', () => ({
   clearCache: jest.fn(),
 }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// Book for a new caller runs only with its gate on (GATE_NEW_CALLER_BOOKING, read once at load): on here, as in
+// new-caller-visit.test.js.
+jest.mock('../config/feature-gates', () => {
+  const actual = jest.requireActual('../config/feature-gates');
+  return { ...actual, isEnabled: (gate) => (gate === 'newCallerBooking' ? true : actual.isEnabled(gate)) };
+});
 // The property record: the lookup's own cache, read strictly (no live or paid lookup). Each test says what it holds.
 jest.mock('../services/service-report/start-offer-lookup', () => ({ strictCacheOnlyPropertyLookup: jest.fn() }));
 
@@ -28,6 +35,7 @@ const dbMock = require('../models/db');
 const { strictCacheOnlyPropertyLookup: lookup } = require('../services/service-report/start-offer-lookup');
 const {
   wdoBookingPrice, wdoCallBookingPrice, wdoCallPriceBeforeBooking, wdoCallPriceForBooking, callBookingPriceNote, wdoTableNote,
+  wdoExpectedPriceFrom, WDO_WITH_OTHER_LINES_NOTE,
 } = require('../services/wdo-booking-price');
 const adminSchedule = require('../routes/admin-schedule');
 
@@ -195,17 +203,61 @@ describe('the office booking keeps the price a person gives', () => {
     expect(lookup).not.toHaveBeenCalled();
     expect(trx).not.toHaveBeenCalled();
   });
+
+  test('a WDO main line with add-on lines keeps the catalog price, and nothing is read (its WDO filing bills the flat fee)', async () => {
+    lookup.mockResolvedValue(record(1600, 'block'));
+    const PEST = { id: 'svc-pest', service_key: 'one_time_pest', category: 'pest_control', base_price: '150.00' };
+    wireDb({ customer_properties: undefined, customers: HOME, services: (cond) => (cond.id === 'svc-pest' ? PEST : WDO) });
+    const pricing = await bookBlankWdo({ serviceAddons: [{ serviceId: 'svc-pest', name: 'One-Time Pest', basePrice: 150, price: 150 }] });
+    expect(pricing.finalPrice).toBe(400);
+    expect(lookup).not.toHaveBeenCalled();
+    // The same inspection alone on its visit takes the table price.
+    expect((await bookBlankWdo()).finalPrice).toBe(150);
+  });
+
+  test('the save books the WDO price the screen showed, or refuses with nothing written; a typed price is not checked', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    expect((await bookBlankWdo({ wdoExpectedPrice: 200 })).finalPrice).toBe(200);
+    await expect(bookBlankWdo({ wdoExpectedPrice: 175 })).rejects.toMatchObject({
+      status: 409, code: 'WDO_PRICE_CHANGED', isOperational: true,
+      message: 'The WDO price for this home is now $200.00, not the $175.00 shown. This visit was not booked. Check the price and save again.',
+    });
+    // A blank WDO add-on line is checked the same way.
+    const pest = { service_key: 'general_pest', category: 'pest_control', base_price: 150 };
+    const withAddon = (wdoExpectedPrice) => buildAppointmentPricing({
+      serviceRecord: pest, estimatedPrice: null, primaryLinePrice: 150, customer: HOME, wdoExpectedPrice,
+      serviceAddons: [{ serviceId: 'svc-wdo', name: 'WDO Inspection Service', basePrice: null, price: null }],
+    });
+    expect((await withAddon(200)).addonLines[0].base).toBe(200);
+    await expect(withAddon(250)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    // A typed price, or a screen that showed no price (the Intelligence Bar, the preview), books without the check.
+    expect((await bookBlankWdo({ primaryLinePrice: 300, wdoExpectedPrice: 175 })).finalPrice).toBe(300);
+    expect((await bookBlankWdo()).finalPrice).toBe(200);
+    expect(touched.filter((table) => /scheduled_services|invoice/.test(table))).toEqual([]);
+  });
+
+  test('the shown price is read from the request as a price, or refused', () => {
+    for (const absent of [undefined, null, '']) expect(wdoExpectedPriceFrom(absent)).toBeUndefined();
+    expect(wdoExpectedPriceFrom('200')).toBe(200);
+    expect(wdoExpectedPriceFrom(175.5)).toBe(175.5);
+    for (const bad of ['abc', -1, {}]) expect(() => wdoExpectedPriceFrom(bad)).toThrow(expect.objectContaining({ status: 400 }));
+  });
 });
 
-describe('GET /wdo-inspection-quote (the booking screen shows the price before save)', () => {
-  const layer = adminSchedule.stack.find((l) => l.route && l.route.path === '/wdo-inspection-quote' && l.route.methods.get);
+describe('POST /wdo-inspection-quote (the booking screen shows the price before save)', () => {
+  const layer = adminSchedule.stack.find((l) => l.route && l.route.path === '/wdo-inspection-quote' && l.route.methods.post);
   const handler = layer.route.stack[layer.route.stack.length - 1].handle;
-  const run = async (query) => {
+  // The question is a POST body, never a query string, so no address reaches a request log.
+  const run = async (body) => {
     const res = { json: jest.fn() };
     const next = jest.fn();
-    await handler({ query }, res, next);
+    await handler({ body, query: {} }, res, next);
     return { res, next };
   };
+
+  test('is a POST only: no GET route answers it', () => {
+    expect(adminSchedule.stack.some((l) => l.route?.path === '/wdo-inspection-quote' && l.route.methods.get)).toBe(false);
+  });
 
   test('answers the table price, what it was read at and the office note for the customer\'s home', async () => {
     lookup.mockResolvedValue(record(2600, 'frame'));
@@ -220,8 +272,8 @@ describe('GET /wdo-inspection-quote (the booking screen shows the price before s
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ price: 200, source: 'wdo_table' }));
     expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
     touched.length = 0;
-    for (const query of [{ customerId: 'nope' }, { customerId: CUSTOMER_ID, propertyId: 'nope' }, { customerId: CUSTOMER_ID, estimateId: 'nope' }]) {
-      const bad = await run(query);
+    for (const body of [{ customerId: 'nope' }, { customerId: CUSTOMER_ID, propertyId: 'nope' }, { customerId: CUSTOMER_ID, estimateId: 'nope' }]) {
+      const bad = await run(body);
       expect(bad.next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
     }
     expect(touched).toEqual([]);
@@ -250,6 +302,17 @@ describe('GET /wdo-inspection-quote (the booking screen shows the price before s
     wireDb({ customers: undefined });
     const { next } = await run({ customerId: CUSTOMER_ID });
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 404 }));
+  });
+
+  test('a WDO main line with other lines answers the catalog price and why, and reads no home', async () => {
+    lookup.mockResolvedValue(record(1600, 'block'));
+    for (const body of [{ customerId: CUSTOMER_ID, withOtherLines: '1' }, { line1: '300 Sample Ct', zip: '34285', withOtherLines: '1' }]) {
+      touched.length = 0;
+      const { res } = await run(body);
+      expect(res.json).toHaveBeenCalledWith({ price: 250, source: 'catalog_base', basis: null, staffNote: WDO_WITH_OTHER_LINES_NOTE });
+      expect(touched).toEqual(['services']);
+    }
+    expect(lookup).not.toHaveBeenCalled();
   });
 });
 
@@ -332,6 +395,24 @@ describe('phone bookings (the call pipeline, the voice agent, the new caller boo
     const book = newCaller.slice(newCaller.indexOf('async function bookNewCallerVisit('), newCaller.indexOf('async function linkNewCallerVisit('));
     const [callerRead, callerTrx] = order(book, 'await wdoCallBookingPrice(', 'conn.transaction(');
     expect(callerRead).toBeLessThan(callerTrx);
+  });
+
+  test('Book for a new caller books the WDO price the screen showed, or refuses before its booking transaction', async () => {
+    const { bookNewCallerVisit } = require('../services/booking/new-caller-visit');
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    const transaction = jest.fn(async () => ({ id: 'visit-1' }));
+    const conn = Object.assign((table) => ({ where: () => ({ first: async () => (table === 'services' ? WDO : null) }) }), { transaction });
+    const input = {
+      scheduledDate: '2027-01-20', windowStart: '10:00', serviceId: 'svc-wdo',
+      address: { line1: '300 Sample Ct', city: 'Venice', state: 'FL', zip: '34285', lat: 27.09, lng: -82.44 },
+    };
+    await expect(bookNewCallerVisit({ input: { ...input, wdoExpectedPrice: 175 }, conn }))
+      .rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    expect(transaction).not.toHaveBeenCalled();
+    await bookNewCallerVisit({ input: { ...input, wdoExpectedPrice: 200 }, conn });
+    // A typed price is not checked.
+    await bookNewCallerVisit({ input: { ...input, linePrice: 260, wdoExpectedPrice: 175 }, conn });
+    expect(transaction).toHaveBeenCalledTimes(2);
   });
 });
 

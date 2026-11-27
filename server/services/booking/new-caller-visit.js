@@ -173,6 +173,8 @@ function validateNewCallerInput(input = {}) {
     notes: text(input.notes, 2000),
     internalNotes: text(input.internalNotes, 2000),
     createInvoice: input.createInvoice !== false,
+    // The WDO price the screen showed for a blank WDO line (wdo-booking-price.js assertWdoPriceAsShown); absent = no check.
+    wdoExpectedPrice: require('../wdo-booking-price').wdoExpectedPriceFrom(input.wdoExpectedPrice),
   };
 }
 
@@ -290,11 +292,13 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
   // a typed price wins, else the catalog base price — for a WDO inspection,
   // the home size and construction table price at this address instead,
   // read here, before the booking transaction (wdo-booking-price.js).
-  const { wdoCallBookingPrice, wdoTableNote } = require('../wdo-booking-price');
+  const { wdoCallBookingPrice, wdoTableNote, assertWdoPriceAsShown, isWdoInspectionService } = require('../wdo-booking-price');
   const priced = await wdoCallBookingPrice(v.linePrice != null
     ? { price: v.linePrice, source: 'typed' }
     : { price: (serviceRecord.base_price != null && Number.isFinite(Number(serviceRecord.base_price)) ? Number(serviceRecord.base_price) : null), source: 'catalog' },
   { catalogRow: serviceRecord, linkage: { address: v.address }, conn });
+  // Book books the WDO price the screen showed, or refuses here, before the booking transaction.
+  if (v.linePrice == null && isWdoInspectionService(serviceRecord)) assertWdoPriceAsShown(priced.price, v.wdoExpectedPrice);
   const estimatedPrice = priced.price;
 
   return conn.transaction(async (trx) => {

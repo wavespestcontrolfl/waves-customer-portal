@@ -980,8 +980,11 @@ export function newCallerBookBlockReason({ serviceCount = 0, hasDiscount = false
 export function newCallerRequestBody({
   serviceId, linePrice = null, durationMinutes, scheduledDate, windowStart, techMode, techId,
   quickAdd = {}, quickAddTarget = null, callLogId, customerNotes, internalNotes,
+  // The WDO price the line showed for a blank WDO line: the server books that price or refuses (WDO_PRICE_CHANGED).
+  wdoExpectedPrice,
 }) {
   return {
+    ...wdoExpectedPriceField(wdoExpectedPrice),
     scheduledDate: String(scheduledDate || '').split('T')[0],
     windowStart,
     serviceId: serviceId || null,
@@ -1034,8 +1037,11 @@ export function appointmentGroupRequestBody({
   // "Book another anyway" button — never a persisted flag on the form, so
   // it never rides along on a later, unrelated submit).
   callBookingReviewedIds = null,
+  // The WDO price a blank WDO line of this group showed: the server books that price or refuses (WDO_PRICE_CHANGED).
+  wdoExpectedPrice,
 }) {
   return {
+    ...wdoExpectedPriceField(wdoExpectedPrice),
     ...(appointmentDiscount ? {
       discountId: appointmentDiscount.id,
       discountType: appointmentDiscount.discount_type,
@@ -1370,20 +1376,35 @@ export async function mosquitoSubmitGate({ quotePending, needsRevalidation, mosq
 }
 
 // WDO inspection table price (owner 2026-11-27 "yes booking"): a WDO line left blank books at the price the server reads
-// for the home the visit is booked at (GET /admin/schedule/wdo-inspection-quote: the table price by home size and
-// construction, else the catalog price). wdoQuoteQuery is that question for the booking home, as its query string, and
-// the key the answer belongs to; '' = nothing to ask yet. A customer's booking asks once the property picker has settled
-// (the booking property is not known before), with the same property and linked estimate the save posts. A new caller
-// booked by address asks with the picked address, as Book posts it.
-export function wdoQuoteQuery({ customerId = '', propertySettled = false, propertyId = '', estimateId = '', newCallerAddress = null } = {}) {
+// for the home the visit is booked at (POST /admin/schedule/wdo-inspection-quote: the table price by home size and
+// construction, else the catalog price). wdoQuoteQuery is that question for the booking home, as a stable text key the
+// answer belongs to; '' = nothing to ask yet. A customer's booking asks once the property picker has settled (the
+// booking property is not known before), with the same property and linked estimate the save posts. A new caller booked
+// by address asks with the picked address, as Book posts it. withOtherLines: the WDO line is the main line of an
+// appointment with other lines, so it keeps the catalog price.
+export function wdoQuoteQuery({ customerId = '', propertySettled = false, propertyId = '', estimateId = '', newCallerAddress = null, withOtherLines = false } = {}) {
   const present = (value) => value !== null && value !== undefined && String(value).trim() !== '';
+  let fields;
   if (present(customerId)) {
     if (!propertySettled) return '';
-    const fields = { customerId, propertyId, estimateId };
-    return new URLSearchParams(Object.entries(fields).filter(([, v]) => present(v)).map(([k, v]) => [k, String(v)])).toString();
+    fields = { customerId, propertyId, estimateId };
+  } else {
+    if (!newCallerAddress) return '';
+    fields = { ...newCallerAddress };
   }
-  if (!newCallerAddress) return '';
-  return new URLSearchParams(Object.entries(newCallerAddress).filter(([, v]) => present(v)).map(([k, v]) => [k, String(v)])).toString();
+  if (withOtherLines) fields.withOtherLines = '1';
+  return new URLSearchParams(Object.entries(fields).filter(([, v]) => present(v)).map(([k, v]) => [k, String(v)])).toString();
+}
+
+// The question as the POST body it is sent in, never a query string, so the address never reaches a request log
+// (pre-push audit P1).
+export function wdoQuoteBody(key) {
+  return JSON.stringify(Object.fromEntries(new URLSearchParams(key)));
+}
+
+// The save and Book bodies' wdoExpectedPrice field: the price a blank WDO line showed, or no field (nothing was shown).
+export function wdoExpectedPriceField(price) {
+  return price != null ? { wdoExpectedPrice: price } : {};
 }
 
 // The quote route's answer as the line keeps it, for the question `key`.
@@ -1417,7 +1438,7 @@ export async function wdoSubmitGate({ needsPrice, quote, query, fetchQuote = adm
   }
   let fresh;
   try {
-    fresh = await fetchQuote(`/admin/schedule/wdo-inspection-quote?${query}`);
+    fresh = await fetchQuote('/admin/schedule/wdo-inspection-quote', { method: 'POST', body: wdoQuoteBody(query) });
   } catch {
     return {
       message: 'Could not re-check the WDO price for this home — retrying; submit again in a moment or type a price',
@@ -1425,6 +1446,11 @@ export async function wdoSubmitGate({ needsPrice, quote, query, fetchQuote = adm
     };
   }
   const answer = wdoQuoteAnswer(query, fresh);
+  // No price for this home (pre-push audit P1): a blank line never books without one, even when both reads agree. An
+  // entered price, $0 included (a waiver), is not blank, so it never reaches this gate.
+  if (answer.price == null) {
+    return { message: 'No WDO price for this home — type a price', holdMs: 3200, retry: false, refresh: answer };
+  }
   if (answer.price === quote.price) return null;
   return {
     message: 'The WDO price for this home changed — totals updated, review and submit again',
@@ -1436,10 +1462,10 @@ export async function wdoSubmitGate({ needsPrice, quote, query, fetchQuote = adm
 export function wdoLineHintText({ quote, query }) {
   if (!query) return 'Priced by home size and construction once the customer and address are set.';
   if (quote?.key !== query) return 'Reading the price for this home…';
-  if (quote.status === 'error') return 'Could not read the price for this home. Type a price, or save again to retry.';
+  if (quote.status === 'error') return 'Could not read the price for this home. Type a price, or retry.';
   if (quote.price == null) return 'No price for this home. Type a price.';
   const amount = `$${quote.price.toFixed(2)}`;
-  if (!quote.tablePriced) return `Catalog price: ${amount}. The home size table has no price for this home.`;
+  if (!quote.tablePriced) return `Catalog price: ${amount}. ${quote.staffNote || 'The home size table has no price for this home.'}`;
   return [`Table price: ${amount} (${quote.basis}).`, quote.staffNote].filter(Boolean).join(' ');
 }
 
@@ -2738,6 +2764,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const lineIsServerPriced = (svc) => isOneTimeMosquitoLine(svc) || isWdoInspectionLine(svc);
   const lineIsBlankServerPriced = (svc) => lineIsServerPriced(svc) && !lineHasEnteredPrice(svc);
   const hasBlankWdoLine = services.some(lineIsBlankWdo);
+  // The appointments this form saves (the grouping helpers below are hoisted). A WDO line that is the main line of an
+  // appointment with other lines keeps the catalog price (the server's rule: the WDO filing's invoice could not carry
+  // the table price), so the question says so. A WDO add-on line keeps the table price.
+  const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
+  const wdoWithOtherLines = appointmentSubmitGroups.some((group) => group.lines.length > 1 && lineIsBlankWdo(group.lines[0]));
   const wdoQuoteKey = hasBlankWdoLine ? wdoQuoteQuery({
     customerId: selectedCustomer?.id,
     propertySettled: ['ready', 'hidden', 'error'].includes(bookingPropertyState),
@@ -2747,16 +2778,17 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       line1: quickAdd.address, city: quickAdd.city, state: quickAdd.state, zip: quickAdd.zip,
       lat: quickAddTarget?.lat, lng: quickAddTarget?.lng,
     } : null,
+    withOtherLines: wdoWithOtherLines,
   }) : '';
   const [wdoQuote, setWdoQuote] = useState(null);
-  // Bumped to ask the same question again after a failed read (wdoSubmitGate).
+  // Bumped to ask the same question again after a failed read (wdoSubmitGate, the line's Retry, a refused save).
   const [wdoQuoteAttempt, setWdoQuoteAttempt] = useState(0);
   useEffect(() => {
     if (!wdoQuoteKey) return undefined;
     let current = true;
     (async () => {
       try {
-        const r = await adminFetch(`/admin/schedule/wdo-inspection-quote?${wdoQuoteKey}`);
+        const r = await adminFetch('/admin/schedule/wdo-inspection-quote', { method: 'POST', body: wdoQuoteBody(wdoQuoteKey) });
         if (current) setWdoQuote(wdoQuoteAnswer(wdoQuoteKey, r));
       } catch {
         if (current) setWdoQuote({ key: wdoQuoteKey, status: 'error', price: null, tablePriced: false, basis: null, staffNote: null });
@@ -2771,6 +2803,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const applyWdoHold = (hold) => {
     if (hold.retry) setWdoQuoteAttempt((n) => n + 1);
     if (hold.refresh) setWdoQuote(hold.refresh);
+  };
+  // A read that failed: the line offers Retry (pre-push audit P1). Until the line shows a price, Book stays disabled and
+  // Save holds (wdoSubmitGate).
+  const wdoQuoteFailed = !!wdoQuoteKey && wdoQuote?.key === wdoQuoteKey && wdoQuote?.status === 'error';
+  // The price these lines showed for a blank WDO line, posted so the save books it or refuses (WDO_PRICE_CHANGED).
+  const wdoExpectedPriceFor = (lines) => (lines.some(lineIsBlankWdo) && wdoQuoteShown ? wdoQuote.price : null);
+  // A save or Book the server refused because the WDO price changed (nothing was booked): read it again for the line.
+  const rereadWdoIfPriceChanged = (error) => {
+    if (error?.body?.code === 'WDO_PRICE_CHANGED') setWdoQuoteAttempt((n) => n + 1);
   };
   const lineEffectiveBaseAmount = (svc) => (
     lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? wdoAutoAmount(svc) ?? 0)
@@ -3379,7 +3420,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     const found = CADENCE_OPTIONS.find((o) => o.value === group.cadence);
     return found ? found.label : group.cadence;
   };
-  const cadenceRankDays = (svc) => {
+  // The three grouping helpers below are function declarations, hoisted, because the WDO quote question (above) reads
+  // the groups during render, before these lines run. They read only their arguments.
+  function cadenceRankDays(svc) {
     const cadence = svc?.cadence || 'one_time';
     if (cadence === 'one_time') return Number.POSITIVE_INFINITY;
     if (cadence === 'custom') return Math.max(1, parseInt(svc.intervalDays) || 30);
@@ -3405,8 +3448,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       yearly: 365,
     };
     return months[cadence] || 91;
-  };
-  const serviceCadenceConfig = (s) => {
+  }
+  function serviceCadenceConfig(s) {
     const cadence = s?.cadence || 'one_time';
     const wd = Number.isFinite(parseInt(s?.weekday)) ? parseInt(s.weekday) : 3;
     return {
@@ -3415,8 +3458,8 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       recurringNth: cadence === 'monthly_nth_weekday' ? parseInt(s.nth) || 3 : null,
       recurringWeekday: cadence === 'monthly_nth_weekday' ? wd : null,
     };
-  };
-  const groupServicesForAppointmentSubmit = (rows) => {
+  }
+  function groupServicesForAppointmentSubmit(rows) {
     const buildGroup = (subset) => {
       const sorted = [...subset].sort((a, b) => {
         const rank = cadenceRankDays(a) - cadenceRankDays(b);
@@ -3469,11 +3512,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       if (g) groups.push({ ...g, seasonalIndex: i + 1 });
     });
     return groups.filter(Boolean);
-  };
+  }
 
-  // Placed AFTER the cadence-grouping helpers below: these read them
-  // during render, so they must not run before those consts initialize.
-  const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
+  // appointmentSubmitGroups is computed above, beside the WDO quote question (the grouping helpers are hoisted).
   // "Customer's words" shows only when the words would actually be saved: the
   // server stamps a group's PRIMARY row, and grouping can promote a recurring
   // service ahead of a one-time re-service, so a re-service line riding as an
@@ -4574,6 +4615,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               internalNotes,
               appointmentDiscount: carriesAppointmentDiscount ? appointmentDiscount : undefined,
               callBookingReviewedIds: callBookingOverrides.get(key),
+              wdoExpectedPrice: wdoExpectedPriceFor(group.lines),
             }),
             // The office ticked "Customer asked for this time" (a set time). Absent unless true.
             ...askedTimeCreateFields(customerAskedTime),
@@ -4773,6 +4815,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         } catch (e) {
           // A late failure must not update a closed draft.
           assertSubmitCurrent();
+          rereadWdoIfPriceChanged(e);
           const decision = classifySubmitGroupFailure(e, {
             group, linkedEstimate, separateProgram, key, groupLabelText: groupLabel(group),
             carriesAppointmentDiscount,
@@ -5403,6 +5446,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           callLogId: newCallerCallId,
           customerNotes,
           internalNotes,
+          wdoExpectedPrice: wdoExpectedPriceFor([newCallerLine]),
         })),
       });
       const scheduledDate = String(apptDate || '').split('T')[0];
@@ -5410,6 +5454,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       onCreated?.({ id: result?.id, scheduledDate });
       onChange?.({ id: result?.id, scheduledDate });
     } catch (err) {
+      if (modalMountedRef.current) rereadWdoIfPriceChanged(err);
       if (modalMountedRef.current) setNewCallerError(err?.message || 'The visit was not booked. Try again.');
     } finally {
       if (modalMountedRef.current) setNewCallerSubmitting(false);
@@ -6485,6 +6530,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     style={{ gridColumn: '1 / -1', fontSize: 14, lineHeight: 1.45, color: D.muted }}
                   >
                     {wdoLineHintText({ quote: wdoQuote, query: wdoQuoteKey })}
+                    {wdoQuoteFailed && (
+                      <button
+                        type="button"
+                        data-testid="wdo-table-price-retry"
+                        onClick={() => { setWdoQuote(null); setWdoQuoteAttempt((n) => n + 1); }}
+                        style={{ marginLeft: 8, background: 'none', border: `1px solid ${D.border}`, color: D.text, borderRadius: 6, padding: '4px 10px', fontSize: 14, fontWeight: 500, cursor: 'pointer' }}
+                      >Retry</button>
+                    )}
                   </div>
                 )}
 

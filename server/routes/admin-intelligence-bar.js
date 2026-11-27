@@ -1280,7 +1280,11 @@ function confirmationDisplayParams(toolName, params, preview) {
       priceLine = 'none on the visit — billed by the customer\'s plan or per-application fee, or a free visit type';
     } else if (pinnedPrice) {
       // A WDO inspection with no stated price books at the table price for the
-      // home (owner 2026-11-27), named with what the table was read at.
+      // home (owner 2026-11-27), named with what the table was read at. The
+      // invoice carries it: this tool books the inspection as its own visit
+      // (no add-on lines), and the WDO filing form fills its fee from that
+      // visit's price (wdoFeeSeedFromVisit). A WDO main line with add-on lines
+      // keeps the catalog price (blankLineServerPrice, WDO_WITH_OTHER_LINES_NOTE).
       const tableBasis = pinnedPrice.source === 'wdo_table'
         ? `table price by home size and construction: ${pinnedPrice.price_basis}` : null;
       const basis = pinnedPrice.source === 'stated' ? 'price you gave' : (discounted || tableBasis || `catalog price, ${pinnedPrice.service_name}`);

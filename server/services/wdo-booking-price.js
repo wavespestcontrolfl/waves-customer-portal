@@ -191,9 +191,45 @@ function wdoTableNote(table) {
     .filter(Boolean).join(' ');
 }
 
+// A WDO inspection that is the main line of a visit with other lines keeps the catalog price (pre-push audit P0). Its WDO
+// filing bills the inspection fee, and the filing form fills that fee from the visit's price only when the inspection is
+// the visit's only paid line (wdoFeeSeedFromVisit, CreateProjectModal.jsx); a blank fee bills the flat default. A WDO
+// add-on line on another service's visit is billed with that visit's total, so it keeps the table price.
+const WDO_WITH_OTHER_LINES_NOTE = 'Other services are booked on this WDO visit, so the WDO line keeps the catalog price. Book the inspection as its own visit for the home size and construction price.';
+
+function operationalError(status, message, code) {
+  return Object.assign(new Error(message), { status, statusCode: status, isOperational: true, ...(code ? { code } : {}) });
+}
+
+// The WDO price the booking screen showed for a blank WDO line, as a request carries it: absent = undefined (no check: an
+// older screen, the Intelligence Bar, a phone booking), else a non-negative amount.
+function wdoExpectedPriceFrom(value) {
+  if (value === undefined || value === null || value === '') return undefined;
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) throw operationalError(400, 'wdoExpectedPrice must be the WDO price the screen showed');
+  return amount;
+}
+
+// A save books the WDO price the screen showed, or refuses before any write (pre-push audit P0): a home read that fails or
+// changes between the screen's check and the save must never book a price nobody saw. `price` is the line's price before
+// discounts as the save resolved it (table, else catalog).
+function assertWdoPriceAsShown(price, expected) {
+  if (expected === undefined) return;
+  const known = price != null && Number.isFinite(Number(price));
+  if (known && Math.round(Number(price) * 100) === Math.round(expected * 100)) return;
+  throw operationalError(
+    409,
+    `The WDO price for this home is now ${known ? `$${Number(price).toFixed(2)}` : 'unknown'}, not the $${expected.toFixed(2)} shown. This visit was not booked. Check the price and save again.`,
+    'WDO_PRICE_CHANGED',
+  );
+}
+
 module.exports = {
   WDO_SERVICE_KEY,
   WDO_TABLE_SOURCE,
+  WDO_WITH_OTHER_LINES_NOTE,
+  assertWdoPriceAsShown,
+  wdoExpectedPriceFrom,
   isWdoInspectionService,
   wdoBookingPrice,
   wdoCallBookingPrice,
