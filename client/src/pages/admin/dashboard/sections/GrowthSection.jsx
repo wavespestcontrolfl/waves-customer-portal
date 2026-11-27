@@ -35,6 +35,8 @@ function sparkSeries(daily) {
   return daily.map((d) => Number(d.total) || 0);
 }
 
+const periodTag = (feed) => feed?.period?.label || "MTD";
+
 // GROWTH — is the business growing? Revenue capture, hero KPIs, lead-to-booked
 // conversion, the estimate funnel, and where the leads/dollars come from.
 export default function GrowthSection({
@@ -140,7 +142,7 @@ export default function GrowthSection({
             title="Sales capture"
             sub={`${fmtMoney(salesCapture.captured)} captured of ${fmtMoney(
               (salesCapture.captured || 0) + (salesCapture.missed || 0),
-            )} estimated · MTD`}
+            )} estimated · ${periodTag(salesCapture)}`}
           >
             <CaptureGauge
               captureRate={salesCapture.captureRate}
@@ -275,7 +277,7 @@ export default function GrowthSection({
         {revenueByCity ? (
           <ChartCard
             title="Revenue by city"
-            sub={`${fmtMoney(revenueByCity.total || 0)} · MTD`}
+            sub={`${fmtMoney(revenueByCity.total || 0)} · ${periodTag(revenueByCity)}`}
           >
             <RevenueByCity
               cities={revenueByCity.cities || []}

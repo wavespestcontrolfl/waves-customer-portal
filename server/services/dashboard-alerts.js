@@ -21,8 +21,8 @@ const { etDateString, addETDays } = require('../utils/datetime-et');
 const { LEAD_RESPONSE_SLA_MINUTES, applyLeadsAwaitingContactFilter, countWaitingPeople } = require('./lead-waiting-queue');
 const { scopeToProspects, OPEN_LEAD_STATUSES } = require('./lead-statuses');
 const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
-const { listAtRiskMrrAccounts } = require('./mrr-breakdown');
-const { whereLiveCustomer } = require('./customer-stages');
+const { listAtRiskMrrAccounts, whereRecurringPlanCustomer } = require('./mrr-breakdown');
+const { CUSTOMER_STAGES } = require('./customer-stages');
 const { autopayActivePredicate } = require('./autopay-eligibility');
 const { loadCloseoutStatuses, closeoutIssuesForVisit, factsFullyKnown } = require('./closeout-alerts');
 
@@ -67,9 +67,29 @@ function heldCloseoutAlert({ count, label }) {
 }
 
 
-// Below this share of live customers on chargeable autopay, the coverage gap
-// itself is an action item (manual collection labor + churn risk).
+// Below this share of live recurring plan members on chargeable autopay, the
+// coverage gap itself is a standing health item. Scoped to recurring plans so
+// one-time customers do not depress autopay coverage.
 const AUTOPAY_COVERAGE_TARGET_PCT = 50;
+
+// Standing health / hygiene alerts separated from urgent today's-fires items
+// in ActionInbox so permanent background counts (e.g. churn risk, autopay
+// coverage, unit review, duplicate review) never bury overdue AR or waiting
+// leads.
+const STANDING_ALERT_IDS = new Set([
+  'churn_at_risk',
+  'autopay_coverage_low',
+  'inventory_unit_review',
+  'customer_duplicates_review',
+]);
+
+function applyAlertDefaults(alert) {
+  return {
+    kind: 'alert',
+    tier: STANDING_ALERT_IDS.has(alert.id) ? 'standing' : 'urgent',
+    ...alert,
+  };
+}
 
 // Builder termite warranties: the pitch window for winning a new-construction
 // home onto a Waves program opens ahead of the builder coverage lapsing and
@@ -756,16 +776,18 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
     }
   } catch (err) { failures.push({ id: 'at_risk_mrr' }); logger.error(`[dashboard-alerts] at_risk_mrr: ${err.message}`); }
 
-  // 11. Autopay coverage below target — every manual-pay account is monthly
-  //     collection labor + churn risk. Shares autopayActivePredicate
-  //     (billing recovery / core-kpis) and whereLiveCustomer so the coverage
-  //     math matches the Autopay Coverage tile exactly.
+  // 11. Autopay coverage below target — measured on live recurring-plan
+  //     members (excluding one-time customers) using the shared
+  //     whereRecurringPlanCustomer + autopayActivePredicate definitions so
+  //     this alert matches the Cash Autopay Coverage tile exactly.
   try {
-    const baseRow = await whereLiveCustomer(db('customers')).count({ c: '*' }).first();
+    const recurringBase = (qb) => whereRecurringPlanCustomer(qb, db, 'c')
+      .whereIn('c.pipeline_stage', CUSTOMER_STAGES);
+    const baseRow = await recurringBase(db('customers as c')).count({ c: '*' }).first();
     const base = parseInt(baseRow?.c || 0);
     if (base > 0) {
       const { sql: autopaySql, binding: autopayBinding } = autopayActivePredicate();
-      const coveredRow = await whereLiveCustomer(db('customers as c'))
+      const coveredRow = await recurringBase(db('customers as c'))
         .whereRaw(autopaySql, [autopayBinding])
         .count({ c: '*' })
         .first();
@@ -782,7 +804,7 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
           kind: 'action',
           severity: 'warn',
           count: manual,
-          label: `Autopay covers ${Math.round(pct * 10) / 10}% of customers — ${manual} billed manually`,
+          label: `Autopay covers ${Math.round(pct * 10) / 10}% of recurring plans — ${manual} billed manually`,
           href: '/admin/customers',
         });
       }
@@ -884,12 +906,9 @@ async function computeDashboardAlertsUncached({ fresh = false } = {}) {
   } catch (err) { failures.push({ id: 'customer_duplicates_review' }); logger.error(`[dashboard-alerts] customer_duplicates_review: ${err.message}`); }
 
   // Everything not explicitly tagged above is a passive watch-state alarm; the
-  // client separates do-this-now actions from alerts on this field.
-  for (const a of alerts) {
-    if (!a.kind) a.kind = 'alert';
-  }
-
-  return { asOf: today, alerts, failures };
+  // client separates do-this-now actions from alerts on `kind`, and urgent
+  // fires from standing background health items on `tier`.
+  return { asOf: today, alerts: alerts.map(applyAlertDefaults), failures };
 }
 
 // computeDashboardAlerts sits on two hot paths — the dashboard banner (60s

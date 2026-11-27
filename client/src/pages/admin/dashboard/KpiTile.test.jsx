@@ -36,11 +36,11 @@ describe("KpiTile target-store integration", () => {
         label="Gross Margin"
         metricKey="gross_margin"
         targets={null}
-        value="45%"
-        chart={{ kind: "gauge", value: 45, max: 100 }}
+        value="56%"
+        chart={{ kind: "gauge", value: 56, max: 100 }}
       />,
     );
-    // 45 ≥ default target 40 → good → emerald ring, no alert red.
+    // 56 ≥ default target 55 → good → emerald ring, no alert red.
     expect(container.innerHTML).toContain("#10B981");
     expect(container.innerHTML).not.toContain("#C8312F");
   });

@@ -60,6 +60,10 @@ test.each([
   ['/core-kpis', '2026-09-31'],
   ['/core-kpis', '2026-02-30'],
   ['/lead-funnel', '2026-09-31'],
+  ['/funnel', '2026-09-31'],
+  ['/service-mix', '2026-09-31'],
+  ['/sales-capture', '2026-09-31'],
+  ['/revenue-by-city', '2026-09-31'],
 ])('%s refuses from=%s with a 400 before any query', async (route, from) => {
   const res = await get(`${route}?period=custom&from=${from}`);
   expect(res).toEqual({ status: 400, body: { error: 'from must be a valid YYYY-MM-DD calendar date' } });
