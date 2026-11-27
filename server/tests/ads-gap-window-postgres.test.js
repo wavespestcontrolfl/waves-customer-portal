@@ -23,6 +23,8 @@ postgres('gap window stop count against migrated PostgreSQL', () => {
   let trx;
   let customerId;
   let otherCustomerId;
+  // Stops already in the shared CI database on the window day (rows another suite committed). Each test counts on top of it.
+  let baseline;
   const now = new Date();
   const day = etDateString(addETDays(now, 1)); // the window starts tomorrow
   const settings = { ...BudgetManager.GAP_RULE_DEFAULTS, window_days: 1 };
@@ -44,6 +46,7 @@ postgres('gap window stop count against migrated PostgreSQL', () => {
     jest.spyOn(BudgetManager, 'getTechCountForArea').mockResolvedValue(1);
     customerId = await customer();
     otherCustomerId = await customer();
+    baseline = (await BudgetManager.getGapWindow(now, settings)).days[0].stops;
   });
 
   afterEach(async () => {
@@ -74,7 +77,7 @@ postgres('gap window stop count against migrated PostgreSQL', () => {
     const win = await BudgetManager.getGapWindow(now, settings);
     expect(win.days).toHaveLength(1);
     expect(win.days[0].date).toBe(day);
-    return win.days[0].stops;
+    return win.days[0].stops - baseline;
   }
 
   test('two rows of one visit_id group are one stop', async () => {
