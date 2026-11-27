@@ -311,6 +311,23 @@ function allowsMidRouteInsertion(opts) {
   return opts.capacityPlacement === true || (opts.arrivalSearch === true && opts.arrivalInsert === true);
 }
 
+// When providerTravel is explicitly false (auto-dispatch arrivalSearch uses
+// maxRequests: 0 and runs road-check.js on winners only), travel.preload is a
+// no-op — skip the 3 extra simulation passes over every candidate.
+async function preloadCandidateTravel(candidates, travel, opts) {
+  if (opts.providerTravel === false) return;
+  for (let pass = 0; pass < 3; pass++) {
+    const legs = [];
+    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
+    await travel.preload(legs);
+  }
+}
+
+function candidateRouteOrderIds(opts, fit, targetId) {
+  if (!(opts.arrivalSearch === true && opts.arrivalInsert === true) || !Array.isArray(fit.routeOrder)) return {};
+  return { route_order_ids: fit.routeOrder.map((id) => (id === targetId ? '__candidate__' : String(id))) };
+}
+
 async function findCapacitySlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -438,11 +455,7 @@ async function findCapacitySlots(opts) {
   // Pairwise matrix estimates generate candidates; repeated simulation asks
   // for affected legs at their predicted departures. All Google work shares
   // one bounded, request-local budget across the complete calendar horizon.
-  for (let pass = 0; pass < 3; pass++) {
-    const legs = [];
-    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
-    await travel.preload(legs);
-  }
+  await preloadCandidateTravel(candidates, travel, opts);
   const slots = [];
   // Why each refused candidate was refused (arrival_window, day_overcommitted,
   // return_time, detour_cap, ...), so a thin week explains itself.
@@ -491,6 +504,7 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      ...candidateRouteOrderIds(opts, fit, context.target.id),
       // The simulation's own arrival delay past THIS slot's start (same field
       // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
       // arrival grace (owner ruling 2026-09-28) reads it to decide whether a

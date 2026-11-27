@@ -4,7 +4,7 @@
  * - minutesRuleOk non-regression (workload guard without synthetic gain > 0 veto)
  * - drive-saving-first candidate ranking & pass-2 budget ordering
  */
-const { routeCost, chainDriveMinutes, _internals: { insertByWindow } } = require('../services/auto-dispatch/route-model');
+const { routeCost, chainDriveMinutes, _internals: { insertByWindow, insertByRouteOrder } } = require('../services/auto-dispatch/route-model');
 const { rankCandidates } = require('../services/auto-dispatch/move-rules');
 const { scoreAppointmentPlacement } = require('../services/auto-dispatch/scoring');
 
@@ -33,6 +33,23 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
     expect(inserted.driveWithMinutes).toBeCloseTo(chainDriveMinutes([NORTH, NEAR_NORTH, SOUTH]), 5);
     expect(inserted.detourMinutes).toBeLessThan(appended.detourMinutes - 15);
     expect(inserted.neighbours).toEqual({ prev: NORTH, stop: NEAR_NORTH, next: SOUTH });
+  });
+
+  test('insertByRouteOrder prices the exact solver order when arrival windows overlap (fallback to insertByWindow otherwise)', () => {
+    const dayStops = [
+      { id: 's1', geo: NORTH, startMin: 600, window_start: '10:00', route_order: 1 },
+      { id: 's2', geo: SOUTH, startMin: 630, window_start: '10:30', route_order: 2 },
+    ];
+    // Candidate at 11:00 sits near s1; arrival-route inserted it BEFORE s2 (inside s2's 10:30-12:30 window).
+    const placed = insertByRouteOrder(dayStops, { id: 'v', geo: NEAR_NORTH, startMin: 660 }, ['s1', '__candidate__', 's2']);
+    expect(placed.map((s) => s.id)).toEqual(['s1', 'v', 's2']);
+    const cost = routeCost(dayStops, {
+      id: 'v', geo: NEAR_NORTH, startMin: 660, route_order: null, insertByTime: true, routeOrderIds: ['s1', '__candidate__', 's2'],
+    });
+    expect(cost.neighbours).toEqual({ prev: NORTH, stop: NEAR_NORTH, next: SOUTH });
+    // Mismatched routeOrderIds falls back cleanly to chronological insertByWindow.
+    const fallback = insertByRouteOrder(dayStops, { id: 'v', geo: NEAR_NORTH, startMin: 615 }, ['s1', '__candidate__', 'unknown']);
+    expect(fallback.map((s) => s.id)).toEqual(['s1', 'v', 's2']);
   });
 });
 
@@ -92,5 +109,22 @@ describe('Phase 2: calibrated minutes-first qualification and ranking', () => {
     expect(candScore.workload_score).toBeLessThan(currentScore.workload_score);
     const ranked = rankCandidates({ service, current, currentScore, scored: [{ cand: overloaded, sc: candScore }], threshold: 15, config });
     expect(ranked.qualifies).toBe(false);
+  });
+
+  test('qualifying candidate ordering is transitive across all 6 permutations of bar and minutes-rule slots', () => {
+    const service = { id: 's1', scheduled_date: '2026-12-10', window_start: '09:00', technician_id: 't1', auto_dispatch_change_count: 0 };
+    const current = { is_current: true, date: '2026-12-10', start_time: '09:00', technician_id: 't1', detour_minutes: 30, stops_that_day: 2, same_area_share: 0, route_minutes: 200, capability_level: 'qualified' };
+    const currentScore = { total_score: 50, default_time_score: 0, customer_preference_score: 12.5, technician_score: 15, workload_score: 5 };
+    const barHighGainLowSave = { cand: { date: '2026-12-11', start_time: '09:00', detour_minutes: 22 }, sc: { ...currentScore, total_score: 80 } }; // gain +30, saving 8
+    const barLowGainHighSave = { cand: { date: '2026-12-12', start_time: '09:00', detour_minutes: 10 }, sc: { ...currentScore, total_score: 70 } }; // gain +20, saving 20
+    const minMidSave = { cand: { date: '2026-12-14', start_time: '09:00', detour_minutes: 15 }, sc: { ...currentScore, total_score: 55 } }; // gain +5, saving 15
+    const items = [barHighGainLowSave, barLowGainHighSave, minMidSave];
+    const perms = [
+      [0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0],
+    ];
+    for (const p of perms) {
+      const ranked = rankCandidates({ service, current, currentScore, scored: p.map((i) => items[i]), threshold: 15, config });
+      expect(ranked.ranked.map((c) => c.date)).toEqual(['2026-12-12', '2026-12-14', '2026-12-11']);
+    }
   });
 });

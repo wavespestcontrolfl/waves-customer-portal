@@ -142,9 +142,10 @@ describe('findAvailableSlots — the night arrival search', () => {
   });
 
   test('arrivalInsert enables mid-route insertion for standalone night searches only (never booking callers)', async () => {
-    await findAvailableSlots({ ...NIGHT, arrivalInsert: true });
+    const { slots } = await findAvailableSlots({ ...NIGHT, arrivalInsert: true });
     expect(evaluateArrivalPlacement).toHaveBeenCalled();
     for (const [, opts] of evaluateArrivalPlacement.mock.calls) expect(opts.allowInsertion).toBe(true);
+    expect(slots[0].route_order_ids).toEqual(['s09', '__candidate__']);
 
     evaluateArrivalPlacement.mockClear();
     await findAvailableSlots(NIGHT);

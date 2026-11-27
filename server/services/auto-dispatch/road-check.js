@@ -117,18 +117,29 @@ function measurable({ current, config, travel }) {
 // the dry run's "after the overlapping visit moves" row) is held to the
 // floor on real roads like any other ordinary move: failing it, the visit
 // has no such move (Codex #6264 r2).
+// A nonpositive-gain minutes-rule move (admitted when synthetic score drops due
+// to continuity/stability/cluster dilution) MUST have real Google road
+// confirmation; never commit it on an unconfirmed straight-line estimate alone.
+function needsConfirmedRoad(row) {
+  return Boolean(row && row.byMinutes && !(row.gain > 0));
+}
+
 async function withProjectionChecked(ranked, ctx) {
   if (!ranked.normalBest) return ranked;
   try {
     const road = await roadSaving(ctx.current, ranked.normalBest, ctx.travel);
     const floor = Math.max(ctx.config.minDayMoveDriveSavingMinutes || 0, ranked.normalBestMinutesFloor || 0);
-    if (road && road.saving_minutes < floor) {
+    if ((ranked.normalBestNeedsRoad && !road) || (road && road.saving_minutes < floor)) {
       const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
       return rest;
     }
     return { ...ranked, normalBest: { ...ranked.normalBest, [ROAD_RESULT]: road || { source: 'estimate' } } };
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
+    if (ranked.normalBestNeedsRoad) {
+      const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
+      return rest;
+    }
     return ranked;
   }
 }
@@ -158,22 +169,31 @@ async function confirmOnRoads(ranked, ctx) {
   try {
     for (const row of ranked.rankedRows.slice(0, ROAD_CHECK_SLOTS)) {
       const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
-      // No road answer for the best slot: the model's result stands, and the
-      // audit row says the number is the estimate (r2). The fallback list keeps
-      // no unchecked minutes-rule slot below it (apply.js retries take that list).
-      if (!road && !failed.length) return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+      const requireRoad = needsConfirmedRoad(row);
+      // No road answer for the best slot: for a score-bar or positive-gain slot
+      // the model's result stands (marked as estimate) and unchecked
+      // minutes-rule slots leave the fallback list. A nonpositive-gain
+      // minutes-rule slot requires real road confirmation and continues searching.
+      if (!road && !failed.length && !requireRoad) {
+        return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+      }
       const checked = { ...withRoad(row, road), floor: floorOfRow(row, floor, ctx) };
-      if (!road || road.saving_minutes >= checked.floor) return settled(ranked, checked, true);
+      if ((!road && !requireRoad) || (road && road.saving_minutes >= checked.floor)) return settled(ranked, checked, true);
       failed.push(checked);
     }
     return settled(ranked, failed[0], false);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
     // A slot roads already refused stays refused: the error only stops the search.
-    // With nothing measured yet, it is the unanswered best slot: the model stands
-    // for it, and no unchecked minutes-rule slot stays in the fallback list.
-    return failed.length ? settled(ranked, failed[0], false)
-      : withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
+    // With nothing measured yet, a nonpositive-gain minutes-rule best slot fails
+    // closed; any other best slot stands on the estimate with unchecked
+    // minutes-rule slots removed from the fallback list.
+    if (failed.length) return settled(ranked, failed[0], false);
+    const first = ranked.rankedRows && ranked.rankedRows[0];
+    if (needsConfirmedRoad(first)) {
+      return settled(ranked, { ...withRoad(first, null), floor: floorOfRow(first, floor, ctx) }, false);
+    }
+    return withoutUncheckedMinutes({ ...ranked, best: { ...ranked.best, [ROAD_RESULT]: { source: 'estimate' } } });
   }
 }
 

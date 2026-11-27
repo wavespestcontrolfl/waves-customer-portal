@@ -106,6 +106,28 @@ describe('confirmOnRoads', () => {
     expect(refused).toMatchObject({ qualifies: false, roadFailed: true, roadFloor: 15 });
   });
 
+  test('nonpositive-gain minutes-rule slot requires real road confirmation: unanswered skips to next candidate or fails closed', async () => {
+    const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
+    const ranked = rankedOf('first', 'second');
+    ranked.rankedRows = [
+      { ...ranked.rankedRows[0], gain: -2, byMinutes: true },
+      { ...ranked.rankedRows[1], gain: 20, byMinutes: false },
+    ];
+    // Google has no answer for 'first': must NOT pass on estimate, moves on to 'second'.
+    const fallback = await run(ranked, { now: [20, 20, 10], second: [10, 10, 10] }, { config: minutesConfig });
+    expect(fallback.qualifies).toBe(true);
+    expect(fallback.best.name).toBe('second');
+    // Only a nonpositive-gain minutes-rule slot, and Google returns nothing: fails closed.
+    const onlyNeg = rankedOf('first');
+    onlyNeg.rankedRows = [{ ...onlyNeg.rankedRows[0], gain: 0, byMinutes: true }];
+    const blocked = await run(onlyNeg, {}, { config: minutesConfig });
+    expect(blocked).toMatchObject({ qualifies: false, roadFailed: true, ranked: [] });
+    // Same slot WITH real Google confirmation clearing the 10-min floor: passes.
+    const confirmed = await run(onlyNeg, { now: [20, 20, 10], first: [10, 10, 10] }, { config: minutesConfig });
+    expect(confirmed).toMatchObject({ qualifies: true, byMinutes: true });
+    expect(roadResultOf(confirmed.best)).toMatchObject({ saving_minutes: 20, source: 'google' });
+  });
+
   test('no road answer for the best slot: the fallback list drops the unchecked minutes-rule slots below it', async () => {
     const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
     const ranked = rankedOf('first', 'second', 'third');

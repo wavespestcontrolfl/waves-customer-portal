@@ -72,6 +72,34 @@ function hhmmToMin(t) {
   return Number.isNaN(h) ? null : h * 60 + (m || 0);
 }
 
+// Insert a moved standalone candidate at the exact route position chosen by
+// arrival-route.js (slot.route_order_ids from findCapacitySlots) so overlapping
+// 2-hour arrival windows price the exact same neighbours that placeMovedVisit
+// will write. Falls back to chronological arrival-window insertion when the
+// stop set doesn't match every stop in `sequence`.
+function stopRankIn(stop, rank) {
+  if (stop.id != null && rank.has(String(stop.id))) return rank.get(String(stop.id));
+  for (const id of stop.memberIds || []) if (rank.has(String(id))) return rank.get(String(id));
+  for (const id of stop.coIds || []) if (rank.has(String(id))) return rank.get(String(id));
+  return null;
+}
+
+function insertByRouteOrder(sequence, unit, routeOrderIds) {
+  if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return insertByWindow(sequence, unit);
+  const rank = new Map(routeOrderIds.map((id, i) => [String(id), i]));
+  const candRank = rank.get('__candidate__');
+  if (candRank == null) return insertByWindow(sequence, unit);
+  const tagged = [];
+  for (let i = 0; i < sequence.length; i += 1) {
+    const r = stopRankIn(sequence[i], rank);
+    if (r == null) return insertByWindow(sequence, unit);
+    tagged.push({ stop: sequence[i], r, idx: i });
+  }
+  tagged.push({ stop: unit, r: candRank, idx: sequence.length });
+  tagged.sort((a, b) => a.r - b.r || a.idx - b.idx);
+  return tagged.map((t) => t.stop);
+}
+
 // Insert a moved standalone candidate at its arrival-window position in
 // `sequence` (before the first stop whose window starts strictly later,
 // matching arrival-route.js placeMovedVisit / timeFallbackOrder), instead of
@@ -167,7 +195,9 @@ function physicalStops(stops) {
 function chainWithVisit(sequence, visit) {
   const own = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
   const unit = visit.unitMembers && visit.unitMembers.length ? groupUnit([own, ...visit.unitMembers]) : own;
-  if (visit.insertByTime === true) return insertByWindow(sequence, unit);
+  if (visit.insertByTime === true) {
+    return Array.isArray(visit.routeOrderIds) ? insertByRouteOrder(sequence, unit, visit.routeOrderIds) : insertByWindow(sequence, unit);
+  }
   return currentOrder([...sequence, unit]);
 }
 
@@ -265,5 +295,5 @@ module.exports = {
   routeCost,
   clusterShare,
   physicalStops,
-  _internals: { physicalStops, chainWithVisit, insertByWindow, groupUnit, sumPlanningMinutes },
+  _internals: { physicalStops, chainWithVisit, insertByWindow, insertByRouteOrder, groupUnit, sumPlanningMinutes },
 };

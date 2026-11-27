@@ -52,6 +52,7 @@ const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
 const { applyAssignable, absentTechDays } = require('../technician-eligibility');
 const { currentConflict } = require('./current-conflict');
 const { capacityEnabled } = require('../scheduling/policy');
+const { arrivalWindowRoutingEnabled } = require('../scheduling/arrival-route');
 const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
 const southDayKept = require('./south-day-kept');
@@ -172,7 +173,7 @@ function rowToDayStop(r) {
 // so routeCost must charge their planning minutes with the visit's — on the
 // current placement and every candidate alike — or a grouped visit's route
 // minutes would omit their work (Codex pre-push P1).
-function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order, insertByTime = false) {
+function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order, insertByTime = false, routeOrderIds = null) {
   return {
     geo,
     startMin,
@@ -190,7 +191,16 @@ function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = 
     preserveCapacity: preservesCapacity(service),
     unitMembers: siblings,
     ...(insertByTime ? { insertByTime: true } : {}),
+    ...(insertByTime && Array.isArray(routeOrderIds) ? { routeOrderIds } : {}),
   };
+}
+
+// Standalone moves can persist mid-route route_order on commit via apply.js
+// placeInRoute -> arrival-route.js placeMovedVisit iff capacity mode is off
+// and arrival-window routing is enabled (arrival-route.js:1373). Keep search,
+// scoring, and commit gated on the exact same predicate.
+function canPlaceInRoute(siblings) {
+  return !capacityEnabled() && arrivalWindowRoutingEnabled() && siblings.length === 0;
 }
 
 // Which tech-day a batched day-stop row belongs to (loadDayStopRows serves
@@ -543,10 +553,10 @@ function candidateRouteOrder(service, cand) {
 // are skipped by placeMovedVisit and keep currentOrder.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const insertByTime = siblings.length === 0;
+  const insertByTime = canPlaceInRoute(siblings);
   const cost = routeCost(
     stops,
-    serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), insertByTime),
+    serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), insertByTime, cand.route_order_ids),
     home,
   );
   return {
@@ -930,6 +940,7 @@ function candidateFromSlot(slot, hard) {
     technician_name: (slot.technician && slot.technician.name) || null,
     capability_level: cap,
     find_time_score: slot.score,
+    ...(Array.isArray(slot.route_order_ids) ? { route_order_ids: slot.route_order_ids } : {}),
   };
 }
 
@@ -1297,7 +1308,7 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // matching apply.js placeInRoute -> arrival-route.js placeMovedVisit.
     arrivalSearch: ctx.arrivalSearch === true,
     ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
-    ...(ctx.arrivalSearch === true && ctx.groupContext && ctx.groupContext.siblings.length === 0 ? { arrivalInsert: true } : {}),
+    ...(ctx.arrivalSearch === true && ctx.groupContext && canPlaceInRoute(ctx.groupContext.siblings) ? { arrivalInsert: true } : {}),
     // GATE_AUTO_DISPATCH_DAY_RULES (config.dayRules, carried on ctx by
     // index.js): Sundays are searched too (move-rules.js takes one only when
     // no other day qualifies), and the arrival search's van leaves at the

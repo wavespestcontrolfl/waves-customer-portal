@@ -241,25 +241,29 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   };
 }
 
-// Order of qualifying slots: Sunday last (owner 2026-10-24); then bigger
-// modeled drive saving first (when either slot qualified on the minutes rule,
-// so a 20-min road saving beats an 11-min slot that only got extra synthetic
-// density points); then `rest` (gain, encounter order).
-function byBarThenSaving(a, b, flag, rest) {
+// Order of qualifying slots (strict weak ordering — transitive across every
+// permutation): Sunday last (owner 2026-10-24); then bigger modeled drive
+// saving first; then `rest` (gain, encounter order).
+function byBarThenSaving(a, b, _flag, rest) {
   return Number(a.sunday) - Number(b.sunday)
-    || ((a[flag] || b[flag]) ? b.saving - a.saving : 0)
+    || b.saving - a.saving
     || rest(a, b);
 }
 
 function normalBestOf(conflict, rows, service, config) {
   if (!conflict) return {};
   // A past_cap slot is in the list only for the conflict repair (legacyCap).
-  // Ranked like an ordinary move: Sunday last, bar before minutes rule.
+  // Ranked like an ordinary move: Sunday last, bigger drive saving first.
   const top = rows.filter((r) => r.normalOk && !r.cand.past_cap)
     .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index))[0];
   if (!top) return {};
   // The road floor the projected move must keep (road-check.js withProjectionChecked).
-  return { normalBest: top.cand, normalBestScore: top.sc, ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}) };
+  return {
+    normalBest: top.cand,
+    normalBestScore: top.sc,
+    ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}),
+    ...(top.minutesOk && !(top.gain > 0) ? { normalBestNeedsRoad: true } : {}),
+  };
 }
 
 module.exports = {
