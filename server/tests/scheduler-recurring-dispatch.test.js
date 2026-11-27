@@ -78,7 +78,7 @@ test.each([false, true])('handoff alerts stay registered with cronJobs off and a
   // '* * * * *' three times: the bundled tech push sweep, which must send pushes held whether or not cron jobs run (Codex #6459 r2),
   // the card-pause recovery sweep, which must end a pause that began before a restart,
   // and the star-key hold recovery sweep, which must finish a recording resume or a callback bell already started.
-  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['* * * * *', '* * * * *', '* * * * *', '10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
+  expect(cron.schedule.mock.calls.map(([expression]) => expression).sort()).toEqual(['* * * * *', '* * * * *', '* * * * *', '* * * * *', '10 4 * * *', '27 * * * *', '3,18,33,48 * * * *']);
   expect(flagUnplacedVisits).toHaveBeenCalledTimes(1);
   expect(runAutoDispatch).not.toHaveBeenCalled();
 });

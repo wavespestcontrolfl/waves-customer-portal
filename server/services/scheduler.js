@@ -1037,6 +1037,19 @@ function initScheduledJobs() {
   // token, so overlapping deploy instances never push the same cards, and no
   // lock is held across a push (owner ruling 2026-09-30, #5421).
   // =========================================================================
+  // =========================================================================
+  // EVERY MIN — Stripe email sync (stripe-email-sync.js, owner 2026-11-27 "build"). Drains the durable jobs a customer
+  // email change wrote, so Stripe's copy of the email follows. Before the GATE_CRON_JOBS return: it finishes work a
+  // confirmed change already started. No runExclusive: each job is claimed FOR UPDATE SKIP LOCKED.
+  // =========================================================================
+  cron.schedule('* * * * *', async () => {
+    try {
+      await require('./stripe-email-sync').drainDue();
+    } catch (err) {
+      logger.error(`[stripe-email-sync] drain failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
   cron.schedule('* * * * *', async () => {
     try {
       await require('./tech-visit-notifications').flushBundledPushes();
