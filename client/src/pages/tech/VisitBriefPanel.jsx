@@ -52,6 +52,7 @@ import {
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
 import { detectServiceCategory } from '../../lib/service-colors';
+import PastVisitsSection from './PastVisitsSection';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
 // Waves Admin look; the fallbacks are the same light values, for a render
@@ -1451,6 +1452,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         grouped={grouped}
       />
 
+      {/* facts.past_visits (last five visits, every line) replaces the single Last visit block; absent = the children. */}
+      <PastVisitsSection memberBits={memberBits}>
       {memberBits.some((m) => {
         const bl = m.visitBrief?.last_visit || m.facts?.last_visit;
         return bl || m.service.lastLineServiceDate || m.service.lastLineServiceNotes;
@@ -1468,6 +1471,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           ))}
         </>
       )}
+      </PastVisitsSection>
 
       {memberBits.map((m) => (
         <BriefGuidanceSection
