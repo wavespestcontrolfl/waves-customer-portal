@@ -40,11 +40,15 @@ const row = (id, at, over = {}) => ({ id, customer_id: 'cust-1', direction: 'inb
 
 let smsRows;
 let smsWhere;
-function stubDb({ ownsVisit = true, recheckOwns = null } = {}) {
+function stubDb({ ownsVisit = true, recheckOwns = null, customerAfter = 'cust-1' } = {}) {
   db.mockImplementation((table) => {
     const q = {};
     let list = smsRows.slice();
+    let skip = 0;
+    let max = Infinity;
+    let scopeWhere = null;
     q.where = jest.fn((a, op, val) => {
+      if (table === 'scheduled_services' && typeof a === 'object') scopeWhere = a;
       if (table === 'sms_log') {
         smsWhere.push([a, op, val]);
         if (typeof a === 'object') list = list.filter((r) => Object.entries(a).every(([k, v]) => r[k] === v));
@@ -56,11 +60,16 @@ function stubDb({ ownsVisit = true, recheckOwns = null } = {}) {
     q.whereNotIn = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
     q.orderBy = jest.fn((col, dir) => { list.sort((x, y) => (dir === 'desc' ? -1 : 1) * (x[col] < y[col] ? -1 : x[col] > y[col] ? 1 : 0)); return q; });
-    q.limit = jest.fn((n) => { list = list.slice(0, n); return q; });
-    q.select = jest.fn(async () => list);
+    q.limit = jest.fn((n) => { max = n; return q; });
+    q.offset = jest.fn((n) => { skip = n; return q; });
+    q.select = jest.fn(async () => list.slice(skip, skip + max));
     q.first = jest.fn(async (...cols) => {
       if (table !== 'scheduled_services') return undefined;
-      if (cols[0] === 'scheduled_services.id') return (recheckOwns ?? ownsVisit) ? { id: 'svc-1' } : undefined;
+      if (cols[0] === 'scheduled_services.id') {
+        const bound = scopeWhere && scopeWhere['scheduled_services.customer_id'];
+        if (bound && bound !== customerAfter) return undefined; // the visit now belongs to another customer
+        return (recheckOwns ?? ownsVisit) ? { id: 'svc-1' } : undefined;
+      }
       return ownsVisit ? SVC_ROW : undefined;
     });
     return q;
@@ -129,6 +138,13 @@ describe('GET /:id/visit-texts', () => {
     const res = await get('technician');
     expect(res.status).toBe(404);
     expect(JSON.stringify(res.body)).not.toContain('back yard');
+  });
+
+  test('a customer merge or undo during the read withholds the whole answer: 404, no texts, no signed links', async () => {
+    stubDb({ customerAfter: 'cust-2' });
+    const { status, body } = await get('technician');
+    expect(status).toBe(404);
+    expect(JSON.stringify(body)).not.toMatch(/back yard|signed\.example/);
   });
 
   test('an admin reaches any visit', async () => {

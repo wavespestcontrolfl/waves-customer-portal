@@ -6,14 +6,19 @@
  *   show    a plain customer reply, or an office text of a visit-related type with no money word in it;
  *   hidden  money or unknown: counted, the body never leaves this module;
  *   skip    noise the technician does not need (reminders, tapbacks, opt-in words, failed sends): not counted.
- * An outbound type that is in neither list is hidden, so a type added later stays out until someone lists it here.
+ * A card number or labeled card / bank detail hides the whole text. An outbound type that is in neither list is hidden, so a type added later stays out until someone lists it here.
  */
 const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
+const { scrubPansDetailed } = require('../utils/pan-scrub');
+const { isSmsReaction } = require('./sms-intent');
 
 const WINDOW_DAYS = 7;
 const MAX_TEXTS = 40;
-const FETCH_LIMIT = 200;
+const PAGE_SIZE = 200;
+const MAX_PAGES = 5;
+// Only these image types are ever signed: a PDF or any other document is never linked.
+const IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif']);
 
 const SHOW_INBOUND_TYPES = new Set(['inbound', 'domain_lead', 'van_lead']);
 const SHOW_OUTBOUND_TYPES = new Set([
@@ -36,9 +41,18 @@ const UNSENT_STATUSES = new Set(['failed', 'undelivered', 'blocked', 'held', 'sc
 const MONEY_WORDS = /\b(bills?|billed|billing|invoices?|invoiced|charges?|charged|charging|cards?|payments?|pay|pays|paying|paid|payable|refunds?|refunded|prices?|priced|pricing|costs?|balance|balances|owe|owes|owed|owing|autopay|receipts?|deposits?|cash|venmo|zelle|fees?)\b/i;
 const DOLLAR_AMOUNT = /\$\s?\d|\b\d[\d,]*(\.\d{1,2})?\s*(dollars?|bucks)\b/i;
 
+// Card or bank details a customer may text: a labeled CVV / security code / expiry, a routing or account number.
+const CREDENTIAL_WORDS = /\b(?:cvv2?|cvc2?|cid|security code|card code|expir(?:y|es|ation|ing)|exp\.? date|routing)\b|\b(?:account|acct\.?)\s*(?:number|no\.?|#)/i;
+
 function hasMoneyWords(body) {
   const text = String(body || '');
   return MONEY_WORDS.test(text) || DOLLAR_AMOUNT.test(text);
+}
+
+// A card number (the repo's PAN detector, spoken and spaced forms included) or a labeled card / bank detail.
+function hasCardCredentials(body) {
+  const text = String(body || '');
+  return CREDENTIAL_WORDS.test(text) || scrubPansDetailed(text).count > 0;
 }
 
 function parseMetadata(value) {
@@ -52,15 +66,23 @@ function mediaOf(row) {
   return Array.isArray(media) ? media : [];
 }
 
+const isImageType = (type) => IMAGE_TYPES.has(String(type || '').split(';')[0].trim().toLowerCase());
+
+// The customer's stored image attachments: a stored object with an allow-listed image type.
+function photosOf(row) {
+  if (row.direction !== 'inbound') return [];
+  return mediaOf(row).filter((item) => item && item.key && isImageType(item.contentType));
+}
+
 // 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
 function textVerdict(row) {
   const type = row.message_type || '';
   const inbound = row.direction === 'inbound';
-  if (QUIET_TYPES.has(type)) return 'skip';
+  if (QUIET_TYPES.has(type) || (inbound && isSmsReaction(row.message_body))) return 'skip';
   if (!inbound && UNSENT_STATUSES.has(row.status)) return 'skip';
   if (!(inbound ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(type)) return 'hidden';
-  if (hasMoneyWords(row.message_body)) return 'hidden';
-  if (!String(row.message_body || '').trim() && !(inbound && mediaOf(row).length)) return 'skip';
+  if (hasMoneyWords(row.message_body) || hasCardCredentials(row.message_body)) return 'hidden';
+  if (!String(row.message_body || '').trim() && !photosOf(row).length) return 'skip';
   return 'show';
 }
 
@@ -75,8 +97,7 @@ function windowStart(scheduledDate) {
 // The photos the customer sent, as short-lived signed links. Only a stored object (S3 key) is ever linked: a provider
 // URL is never returned, and a photo that cannot be signed is left out.
 async function signedPhotos(row, sign) {
-  if (row.direction !== 'inbound') return [];
-  const media = mediaOf(row).filter((item) => item && item.key);
+  const media = photosOf(row);
   if (!media.length) return [];
   const signed = await sign(media);
   return signed
@@ -84,26 +105,40 @@ async function signedPhotos(row, sign) {
     .map((item) => ({ url: item.url, contentType: item.contentType || null }));
 }
 
+// The window's rows, newest first, read in pages (at most MAX_PAGES x PAGE_SIZE) so a run of reminders newer than a
+// customer's instruction cannot push it out of view. Classification happens after, over every row read.
+async function windowRows(db, customerId, start, now) {
+  const rows = [];
+  const seen = new Set();
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const batch = await db('sms_log')
+      .where({ customer_id: customerId })
+      .where('created_at', '>=', start)
+      .where('created_at', '<=', now)
+      .orderBy('created_at', 'desc')
+      .orderBy('id', 'desc')
+      .limit(PAGE_SIZE)
+      .offset(page * PAGE_SIZE)
+      .select('id', 'direction', 'message_body', 'message_type', 'status', 'metadata', 'created_at');
+    for (const row of batch) if (!seen.has(row.id)) { seen.add(row.id); rows.push(row); }
+    if (batch.length < PAGE_SIZE) break;
+  }
+  return rows;
+}
+
 async function visitTexts(db, svc, { now = new Date(), sign = null } = {}) {
   const start = windowStart(svc.scheduled_date);
   if (!svc.customer_id || !start) return { texts: [], hidden: 0 };
   const signer = sign || ((media) => require('./sms-media').signMediaForClient(media));
-  const rows = await db('sms_log')
-    .where({ customer_id: svc.customer_id })
-    .where('created_at', '>=', start)
-    .where('created_at', '<=', now)
-    .orderBy('created_at', 'desc')
-    .orderBy('id', 'desc')
-    .limit(FETCH_LIMIT)
-    .select('id', 'direction', 'message_body', 'message_type', 'status', 'metadata', 'created_at');
+  const rows = await windowRows(db, svc.customer_id, start, now);
   let hidden = 0;
   const shown = [];
   for (const row of rows) {
     const verdict = textVerdict(row);
     if (verdict === 'hidden') hidden += 1;
-    else if (verdict === 'show' && shown.length < MAX_TEXTS) shown.push(row);
+    else if (verdict === 'show') shown.push(row);
   }
-  const texts = await Promise.all(shown.reverse().map(async (row) => ({
+  const texts = await Promise.all(shown.slice(0, MAX_TEXTS).reverse().map(async (row) => ({
     id: row.id,
     direction: row.direction,
     at: row.created_at,
@@ -113,4 +148,4 @@ async function visitTexts(db, svc, { now = new Date(), sign = null } = {}) {
   return { texts, hidden };
 }
 
-module.exports = { textVerdict, hasMoneyWords, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS };
+module.exports = { textVerdict, hasMoneyWords, hasCardCredentials, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };

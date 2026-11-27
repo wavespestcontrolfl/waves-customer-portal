@@ -25026,8 +25026,10 @@ router.get('/:id/visit-texts', async (req, res, next) => {
       .first('scheduled_services.*');
     if (!svc) return res.status(404).json({ error: 'Scheduled service not found' });
     const { texts, hidden } = await require('../services/tech-visit-texts').visitTexts(db, svc);
+    // Bound to the customer whose texts were read too: a merge or undo that moved the visit to another customer mid-read
+    // withholds the answer, exactly as visit-brief's finalRecheck does.
     const stillOwned = await db('scheduled_services')
-      .where({ 'scheduled_services.id': svc.id })
+      .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.id');
     if (!stillOwned) return res.status(404).json({ error: 'Scheduled service not found' });

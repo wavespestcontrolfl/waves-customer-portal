@@ -9,7 +9,8 @@ import VisitBriefPanel from './VisitBriefPanel';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
-const renderWith = (request) => render(<VisitTextsSection serviceId="svc-1" request={request} />);
+const ON = { 'svc-1': { brief: { brief: null, visitTexts: true } }, 'svc-2': { brief: { brief: null, visitTexts: true } } };
+const renderWith = (request, byService = ON) => render(<VisitTextsSection serviceId="svc-1" byService={byService} request={request} />);
 const wait = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 describe('VisitTextsSection', () => {
@@ -34,9 +35,12 @@ describe('VisitTextsSection', () => {
     expect(open).toHaveBeenCalledWith('https://signed.example/a', '_blank', 'noopener,noreferrer');
   });
 
-  it('says how many billing texts are hidden, once, in muted text', async () => {
+  it('says how many texts are hidden, once, in neutral muted words', async () => {
+    const one = renderWith(vi.fn(async () => ({ enabled: true, hidden: 1, texts: [{ id: 't1', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Hi', photos: [] }] })));
+    expect(await screen.findByText('1 text is hidden. Ask the office.')).toBeInTheDocument();
+    one.unmount();
     renderWith(vi.fn(async () => ({ enabled: true, hidden: 3, texts: [{ id: 't1', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Hi', photos: [] }] })));
-    expect(await screen.findByText('3 texts about billing are hidden. Ask the office.')).toBeInTheDocument();
+    expect(await screen.findByText('3 texts are hidden. Ask the office.')).toBeInTheDocument();
   });
 
   it('renders nothing when the gate is off (404), the list is empty, or the answer is not the texts shape', async () => {
@@ -56,6 +60,21 @@ describe('VisitTextsSection', () => {
   it('shows one muted line when the read fails', async () => {
     renderWith(vi.fn(async () => { throw Object.assign(new Error('boom'), { status: 500 }); }));
     expect(await screen.findByText("Couldn't load texts")).toBeInTheDocument();
+  });
+});
+
+describe('one visit at a time', () => {
+  it('never shows the previous visit\'s texts under a new visit', async () => {
+    const answers = {
+      '/admin/schedule/svc-1/visit-texts': { enabled: true, hidden: 0, texts: [{ id: 'a', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Visit one text', photos: [] }] },
+      '/admin/schedule/svc-2/visit-texts': new Promise(() => {}),
+    };
+    const request = vi.fn((path) => (answers[path] instanceof Promise ? answers[path] : Promise.resolve(answers[path])));
+    const { rerender } = render(<VisitTextsSection serviceId="svc-1" byService={ON} request={request} />);
+    expect(await screen.findByText('Visit one text')).toBeInTheDocument();
+    rerender(<VisitTextsSection serviceId="svc-2" byService={ON} request={request} />);
+    expect(screen.queryByText('Visit one text')).toBeNull();
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/visit-texts');
   });
 });
 

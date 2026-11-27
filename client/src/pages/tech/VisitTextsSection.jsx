@@ -40,18 +40,22 @@ function PhotoThumbs({ photos }) {
   );
 }
 
-export default function VisitTextsSection({ serviceId, request }) {
-  const [state, setState] = useState({ data: null, failed: false });
+// `byService` is the panel's per-visit brief map: the brief answer carries `visitTexts: true` while the gate is on, and
+// only then is the read made. The loaded answer is stored with the visit it was read for and shown only for that visit.
+export default function VisitTextsSection({ serviceId, byService, request }) {
+  const [state, setState] = useState({ id: null, data: null, failed: false });
+  const enabled = byService?.[serviceId]?.brief?.visitTexts === true;
   useEffect(() => {
-    if (!serviceId || typeof request !== 'function') return undefined;
+    if (!enabled || !serviceId || typeof request !== 'function') return undefined;
     let live = true;
     Promise.resolve(request(`/admin/schedule/${serviceId}/visit-texts`))
-      .then((data) => { if (live) setState({ data, failed: false }); })
+      .then((data) => { if (live) setState({ id: serviceId, data, failed: false }); })
       // 404 is the gate off or a visit that is not his: show nothing. Any other failure gets one muted line.
-      .catch((err) => { if (live) setState({ data: null, failed: err?.status !== 404 }); });
+      .catch((err) => { if (live) setState({ id: serviceId, data: null, failed: err?.status !== 404 }); });
     return () => { live = false; };
-  }, [serviceId, request]);
+  }, [enabled, serviceId, request]);
 
+  if (!enabled || state.id !== serviceId) return null;
   if (state.failed) return <p style={{ ...mutedStyle, marginTop: 10 }}>Couldn't load texts</p>;
   const data = state.data;
   if (!data?.enabled) return null;
@@ -68,7 +72,7 @@ export default function VisitTextsSection({ serviceId, request }) {
           <PhotoThumbs photos={t.photos} />
         </div>
       ))}
-      {hidden > 0 && <p style={mutedStyle}>{hidden} {hidden === 1 ? 'text' : 'texts'} about billing {hidden === 1 ? 'is' : 'are'} hidden. Ask the office.</p>}
+      {hidden > 0 && <p style={mutedStyle}>{hidden} {hidden === 1 ? 'text is' : 'texts are'} hidden. Ask the office.</p>}
     </div>
   );
 }

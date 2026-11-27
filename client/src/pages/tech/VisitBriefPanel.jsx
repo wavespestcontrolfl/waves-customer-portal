@@ -1431,7 +1431,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         onRefresh={onRetry}
       />
 
-      {byService[service.id]?.brief?.visitTexts === true && <VisitTextsSection serviceId={service.id} request={request} />}
+      <VisitTextsSection serviceId={service.id} byService={byService} request={request} />
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>
