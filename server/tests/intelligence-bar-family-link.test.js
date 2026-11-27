@@ -31,6 +31,7 @@ const ADMIN = { isAdmin: true, technicianId: '00000000-0000-4000-8000-0000000000
 let customers;
 let families; // customer id -> family id
 let order;
+let extraRows; // family id -> membership rows of soft-deleted profiles (counted by the writer, hidden from the card's members)
 
 const row = (id) => customers.find((c) => c.id === id);
 const membersOf = (familyId) => Object.entries(families).filter(([, f]) => f === familyId).map(([id]) => {
@@ -40,10 +41,19 @@ const membersOf = (familyId) => Object.entries(families).filter(([, f]) => f ===
 
 function stubDb() {
   const make = () => (table) => {
-    const q = { where: null };
+    const q = { where: null, count: false };
     const b = {
       where: (w) => { q.where = w; return b; },
-      first: async () => (table === 'customers' ? row(q.where.id) : undefined),
+      whereIn: () => b,
+      orderBy: () => b,
+      forUpdate: () => { order.push(`rowlock:${table}`); return b; },
+      select: async () => [],
+      count: () => { q.count = true; return b; },
+      first: async () => {
+        if (table === 'customers') return row(q.where.id);
+        if (table === 'multi_home_family_members' && q.count) return { n: String(Object.values(families).filter((f) => f === q.where.family_id).length + (extraRows[q.where.family_id] || 0)) };
+        return undefined;
+      },
     };
     return b;
   };
@@ -59,6 +69,7 @@ function stubDb() {
 beforeEach(() => {
   jest.clearAllMocks();
   order = [];
+  extraRows = {};
   customers = [
     { id: A, first_name: 'Robin', last_name: 'Sample', company_name: null, address_line1: '100 Test Ln', address_line2: null, city: 'Bradenton', state: 'FL', zip: '34201', active: true, deleted_at: null },
     { id: B, first_name: 'Casey', last_name: 'Sample', company_name: null, address_line1: '200 Demo Ave', address_line2: null, city: 'Sarasota', state: 'FL', zip: '34231', active: true, deleted_at: null },
@@ -98,12 +109,15 @@ describe('registration', () => {
       expect(registry.actions.get(name)).toMatchObject({ domain: 'customers', role: 'admin', approval: 'ui_confirm', scope: 'record', module: 'family-link-tools.js' });
       expect(registry.policyErrors).not.toContain(name);
       expect(require('../services/intelligence-bar/owner-direct').OWNER_DIRECT_TOOL_NAMES.has(name)).toBe(false);
+      // Two customers per card, one task target per request: owner login only.
+      expect(gates.FULL_ACCESS_TWO_STEP_TOOL_NAMES.has(name)).toBe(true);
     }
     expect(FAMILY_LINK_TOOLS.map((t) => t.name)).toEqual(['link_customer_family', 'unlink_customer_family']);
-    expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers' })).toBe(true);
+    expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers', fullAccess: true })).toBe(true);
+    expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers' })).toBe(false);
     expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'technician', context: 'tech' })).toBe(false);
     delete process.env.GATE_IB_PLATFORM;
-    expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers' })).toBe(false);
+    expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers', fullAccess: true })).toBe(false);
   });
 });
 
@@ -150,7 +164,7 @@ describe('link_customer_family', () => {
     const card = await link();
     const result = await confirmLink(card);
     expect(result).toMatchObject({ success: true, sent_to_customer: false, customer_id: A, other_customer_id: B });
-    expect(order).toEqual(['tx', 'lock', 'link']);
+    expect(order).toEqual(['tx', 'lock', 'rowlock:customers', 'link']);
     expect(mockFamily.linkFamily).toHaveBeenCalledTimes(1);
     expect(mockFamily.linkFamily.mock.calls[0][1]).toEqual({ customerId: A, otherCustomerId: B, actorId: ADMIN.technicianId });
   });
@@ -206,8 +220,16 @@ describe('unlink_customer_family', () => {
     expect(cardLines('unlink_customer_family', card).map((l) => l.text)).toContain('Casey Sample is then alone, so the family link is removed from both profiles.');
     const result = await executeFamilyLinkTool('unlink_customer_family', { customer_id: A, confirmed: true, _verified_family_link_version: card._version }, ADMIN);
     expect(result).toMatchObject({ success: true, sent_to_customer: false });
-    expect(order).toEqual(['tx', 'lock', 'unlink']);
+    expect(order).toEqual(['tx', 'lock', 'rowlock:customers', 'unlink']);
     expect(families).toEqual({});
+  });
+
+  it('does not call a family dissolved when a soft-deleted profile still holds a membership row', async () => {
+    families = { [A]: 'f', [B]: 'f' };
+    extraRows = { f: 1 };
+    const card = await unlink();
+    expect(card.dissolves).toBe(false);
+    expect(cardLines('unlink_customer_family', card).map((l) => l.text)).toContain('Casey Sample stays in the family.');
   });
 
   it('keeps the others linked in a bigger family', async () => {

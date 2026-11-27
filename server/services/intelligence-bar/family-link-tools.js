@@ -18,8 +18,9 @@
  * discount's own rules (estimate discount picker, and the GATE_MULTI_HOME_ALL_HOMES job when that gate is on); the
  * card says so in plain words. A household member's own contacts, logins and Bill-To are other tools.
  *
- * Always a confirm card (write-gates.js two-step), admin only (the route is requireAdmin), never owner-direct,
- * platform path only (GATE_IB_PLATFORM). No gate of its own: it is the page's own button, sends nothing and moves no
+ * Always a confirm card (write-gates.js two-step), owner login only (FULL_ACCESS_TWO_STEP_TOOL_NAMES: the link names
+ * two customers and a request's task establishes at most one, so only owner-direct can carry both), never owner-direct
+ * without a card, platform path only (GATE_IB_PLATFORM). No gate of its own: it is the page's own button, sends nothing and moves no
  * money (undo = the other tool, or the page's Unlink).
  *
  *   unconfirmed -> a PREVIEW: nothing is written. Its `_version` pins what the card showed (both profiles' names,
@@ -44,7 +45,7 @@ const FAMILY_LINK_TOOLS = [
     name: 'link_customer_family',
     description: `Link TWO customer profiles as the "Same family" (household): the customer page's Same family Link button. Use it when a relative or household member has their own profile (their own home, phone or plan) and the operator wants it tied to another customer's account. The first call returns a PREVIEW and writes nothing: both profiles, the family each is in now, and the family after the link. The operator approves on the confirmation card; the confirmed run re-checks it and refuses if anything changed.
 Effects: the linked profiles count as one multi-home family, so the 10% Multi-Home Discount can apply across their homes. Nothing is sent to anyone, and no price, visit, invoice, Bill-To payer, contact or login changes. If one profile is already in a family, the other joins that family.
-Refused with the reason: a profile not found or not active, the same profile twice, or the two profiles already in two different families (unlink one first with unlink_customer_family). Admin only.
+Refused with the reason: a profile not found or not active, the same profile twice, or the two profiles already in two different families (unlink one first with unlink_customer_family). Owner login only.
 Pass customer_id (the account) and other_customer_id (the family member's profile); find both with query_customers first. A family member with NO profile of their own is not this tool: add them as a contact on the account (the customer page Contacts section), or create their profile first. Billing one profile to another person is set_customer_bill_to.
 Use for: ${USE_FOR_LINK}.`,
     input_schema: {
@@ -61,7 +62,7 @@ Use for: ${USE_FOR_LINK}.`,
     name: 'unlink_customer_family',
     description: `Take ONE customer profile out of its "Same family" link: the customer page's Same family Unlink button. The first call returns a PREVIEW and writes nothing: the profile and who stays in the family. The operator approves on the confirmation card.
 Effects: the profile no longer counts as part of that multi-home family for the 10% Multi-Home Discount. A family left with one profile is dissolved, as on the page. Nothing is sent to anyone, and no price, visit, invoice or contact changes (a discount already on a visit stays).
-Refused when the profile is not in a family. Admin only.
+Refused when the profile is not in a family. Owner login only.
 Use for: "unlink her from that family", "remove this profile from the household link", "these two are not the same family".`,
     input_schema: {
       type: 'object',
@@ -168,7 +169,10 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
   const mine = a.profile;
   if (!mine.family_id) return refusal(`${mine.name} is not linked to another profile as family. Nothing was changed.`, 'not_linked');
   const others = mine.members.filter((m) => m.id !== mine.id);
-  const dissolves = others.length <= 1;
+  // The writer counts every membership row, a soft-deleted profile's included (unlinkFamily): the family dissolves
+  // only when one row is left, so the card reads the same count instead of the visible members.
+  const rowCount = Number((await database('multi_home_family_members').where({ family_id: mine.family_id }).count('* as n').first())?.n || 0);
+  const dissolves = rowCount <= 2;
   return {
     preview: true,
     tool: 'unlink_customer_family',
@@ -181,13 +185,13 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
       { kind: 'operational', text: `${mine.name} is taken out of the Same family link.` },
       dissolves
         ? { kind: 'operational', text: `${others[0] ? others[0].name : 'The other profile'} is then alone, so the family link is removed from both profiles.` }
-        : { kind: 'operational', text: `The other ${others.length} profiles stay linked to each other.` },
+        : { kind: 'operational', text: others.length === 1 ? `${others[0].name} stays in the family.` : `The other ${others.length} profiles stay linked to each other.` },
       { kind: 'operational', text: `${mine.name} no longer counts in that multi-home family for the 10% Multi-Home Discount. A discount already on a visit stays.` },
       NO_MONEY,
       NOTHING_SENT,
     ],
     sends_to_customer: false,
-    _version: { op: 'unlink', account: pinOf(mine) },
+    _version: { op: 'unlink', account: pinOf(mine), rows: rowCount },
     note: 'PREVIEW ONLY — nothing was changed. Confirm unlinks exactly this profile; if anything changed it refuses.',
   };
 }
@@ -211,6 +215,10 @@ async function commit(toolName, input, actionContext) {
       // The page's own family-change lock first (held to the end of this transaction), then the card re-read under it,
       // so no other link or unlink can land between the check and the write.
       await Family.lockFamilyChanges(trx);
+      // Then every profile the card named, in id order (the service's own order), so a name or address edit cannot land
+      // between this re-read and the write.
+      const shown = new Set([plan._version.account, plan._version.other].filter(Boolean).flatMap((p) => [p.id, ...p.members.map((m) => m[0])]));
+      await trx('customers').whereIn('id', [...shown].sort()).orderBy('id').forUpdate().select('id');
       const locked = await buildPlan(toolName, input, { database: trx });
       if (locked.error || JSON.stringify(locked._version) !== JSON.stringify(plan._version)) throw changedError();
       const result = toolName === 'link_customer_family'

@@ -52,6 +52,10 @@ const FULL_ACCESS_TWO_STEP_TOOL_NAMES = new Set([
   // The general admin edit (owner ruling 2026-10-12, GATE_IB_GENERAL_EDIT): a
   // reviewed list of small internal edits, owner login only, always a card.
   'propose_admin_edit',
+  // The Same family link (IB gap #27) names TWO customer profiles, and a request's task establishes at most one
+  // customer target, so only the owner login (owner-direct) can carry both; another admin login is never offered it.
+  'link_customer_family',
+  'unlink_customer_family',
 ]);
 
 // General admin reads (owner ruling 2026-10-12, GATE_IB_GENERAL_READ):

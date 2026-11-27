@@ -8,6 +8,8 @@ const SKIP = !process.env.DATABASE_URL;
 const { randomUUID } = require('crypto');
 jest.setTimeout(60000);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+// Every pair reads as an eligible duplicate: the family link must still not inherit the merge's admission.
+jest.mock('../services/customer-dedupe', () => ({ ...jest.requireActual('../services/customer-dedupe'), duplicatePairEligibility: jest.fn(async () => ({ eligible: true })) }));
 
 const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes(new URL(process.env.DATABASE_URL).hostname); } catch { return false; } })();
 
@@ -62,6 +64,14 @@ const LOCAL = (() => { try { return ['localhost', '127.0.0.1', '[::1]'].includes
     expect(await confirm('unlink_customer_family', { customer_id: a }, unlinkPreview)).toMatchObject({ success: true });
     expect(await familyOf(a)).toBeNull();
     expect(await familyOf(b)).toBeNull();
+  });
+
+  it('a request about one customer cannot pull in a second profile, even an eligible duplicate', async () => {
+    const a = await profile('ScopeA');
+    const b = await profile('ScopeB');
+    const TaskContext = require('../services/intelligence-bar/task-context');
+    const result = await TaskContext.validateRecordTarget({ customer_id: a, other_customer_id: b }, { targets: [{ customer_id: a }] }, { toolName: 'link_customer_family' });
+    expect(result).toMatchObject({ code: 'target_clarification_required' });
   });
 
   it('refuses a card whose family changed after it was shown, and writes nothing', async () => {
