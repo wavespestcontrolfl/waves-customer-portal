@@ -4796,8 +4796,9 @@ ${missedVisitRules}- Voice bans, on top of the house voice: never write "Good qu
   // resolveFreshTechPosition + calculateBoundedTrackingEta bounds the
   // customer tracking page uses). The model may state THAT number only —
   // never compute or invent one — and share the link with it.
+  // TODAY ROUTE STATUS (gap 4) rides the same gate-on clause: the stop count sentence, copied word for word.
   const liveEtaClause = realAnswersOn
-    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK.'
+    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK. When TODAY\'s visit line carries ROUTE STATUS, you may answer where the tech is or whether they are still coming today with that one sentence, copied word for word — it is a count of stops, never a time: add no time, no minutes and nothing about where the tech is, and say nothing else about stops.'
     : '';
   // Round-34 P2: route wording is authorized by an EN-ROUTE fact only. An ON-SITE
   // fact authorizes arrived/on-site wording only — "on the way" beside it is false
@@ -4808,10 +4809,6 @@ ${missedVisitRules}- Voice bans, on top of the house voice: never write "Good qu
   const liveStatusMeaning = realAnswersOn
     ? 'LIVE STATUS "en route" means you may confidently tell the customer the tech is on the way right now; LIVE STATUS "on site" means the tech is on site right now (say so — never "on the way").'
     : 'LIVE STATUS "en route"/"on site" means you may confidently tell the customer the tech is on the way / on site right now.';
-  // TODAY ROUTE STATUS (gap 4): gate-on only, so gate-off stays the exact v11 literal.
-  const routeStatusClause = realAnswersOn
-    ? ' When TODAY\'s visit line carries ROUTE STATUS, you may answer where the tech is or whether they are still coming today with that one sentence, copied word for word — it is a count of stops, never a time: add no time, no minutes and nothing about where the tech is, and say nothing else about stops.'
-    : '';
   const liveEtaUseRule = realAnswersOn
     ? ' A visit line that also shows LIVE ETA and TRACKING LINK means you may tell the customer about how many minutes away the tech is (that exact number) and share the link.'
     : '';
@@ -4833,7 +4830,7 @@ ${CUSTOMER_SMS_HOUSE_VOICE}
 FACT DISCIPLINE — the single most important rule. A fabricated detail is the worst error you can make, worse than a plain reply. You may ONLY state facts that appear in the context block below (${factSourceList}). A plausible-sounding guess is still a fabrication. You must NEVER:
 - State a specific day, date, time, or arrival window ("tomorrow", "Tuesday", "2 PM", "10–10:30am") unless it appears verbatim in SERVICE HISTORY (past visits), ${upcomingOrThread}. ${noAppointmentRule}
 - Name a technician, or say who is coming or on the way, unless UPCOMING SERVICES names the tech for that visit.
-- ${liveStatusRule}${liveEtaClause}${routeStatusClause} If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; ${wording.techLocationUnknown}.
+- ${liveStatusRule}${liveEtaClause} If a customer asks where the tech is TODAY and there is no LIVE STATUS, you genuinely don't know — never guess an ETA or invent a delay story; ${wording.techLocationUnknown}.
 - Claim what a trap caught, what was found, or what was treated, unless the context states it.
 - Assert a service cadence or frequency ("every other month") or treatment timing ("safe to water in 1–2 hours") that isn't in the context.
 - Reference a billing event — a payment, an auto-pay attempt, a charge, an invoice — that isn't shown in BILLING.

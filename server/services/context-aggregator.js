@@ -1134,7 +1134,13 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
 // TODAY ROUTE STATUS (texting AI gap 4, owner 2026-11-26; sms-route-status.js): before the tech is en route, the
 // tracker's stops-before-you count as one finished sentence for each of TODAY's visits that is still scheduled
 // and has a technician. One read per physical stop (technician + arrival slot); grouped siblings share it. A
-// failed read is no sentence. Returns per-row sentences (null = none) and the send-time snapshot groups.
+// failed read is no sentence. Returns per-row sentences (null = none), the send-time snapshot groups, and the
+// keys getContextForCustomer spreads in (none when the caller did not opt in: no read, no key).
+async function routeStatusContextKeys(upcomingServices, enabled) {
+  if (!enabled) return { context: {}, rows: [] };
+  const { perRow, groups } = await loadRouteStatusFacts(upcomingServices);
+  return { context: { routeStatusGroups: groups }, rows: perRow.map((sentence) => (sentence ? { routeStatus: sentence } : {})) };
+}
 async function loadRouteStatusFacts(upcomingServices, todayStr = etDateString()) {
   const { customerTrackState } = require('./track-transitions');
   const { routeStatusFactFor } = require('./sms-route-status');
@@ -1389,7 +1395,7 @@ class ContextAggregator {
   // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
   // `includeRouteStatus` (texting AI gap 4): TODAY's pre-en-route stop count sentence (loadRouteStatusFacts). Only the shadow drafter
   // opts in, with the real-answers gate on; every other caller pays no read and gets no key.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus = false, asOf = null } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, asOf = null } = {}) {
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
@@ -1659,7 +1665,7 @@ class ContextAggregator {
     // ids each distinct minutes figure actually came from. Threaded through
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
-    const routeStatus = includeRouteStatus ? await loadRouteStatusFacts(upcomingServices) : null;
+    const routeStatus = await routeStatusContextKeys(upcomingServices, includeRouteStatus);
 
     // GATE_DAY_ONLY_PROMISE (part D): ONE bulk read for the listed visits. A visit whose customer was told only the day
     // carries the date and DAY_ONLY_ARRIVAL_NOTE in place of the hour. Gate off: no read, the same context as today.
@@ -1671,7 +1677,7 @@ class ContextAggregator {
       // rendered into any prompt.
       liveEtaGroups,
       // TODAY ROUTE STATUS send-time snapshot input ([{ scheduledServiceId, scheduledServiceIds, sentence }]); opt-in only.
-      ...(routeStatus ? { routeStatusGroups: routeStatus.groups } : {}),
+      ...routeStatus.context,
       customer: {
         id: customer.id, name: `${customer.first_name} ${customer.last_name}`,
         firstName: customer.first_name, phone: customer.phone, email: customer.email,
@@ -1716,7 +1722,7 @@ class ContextAggregator {
         tech: s.technician_name || null,
         isToday: this.calendarDay(s.scheduled_date) === etDateString(),
         liveEta: liveEtas[i] || null,
-        ...(routeStatus && routeStatus.perRow[i] ? { routeStatus: routeStatus.perRow[i] } : {}),
+        ...routeStatus.rows[i],
       }, s.id), s)),
       billing: {
         // invoice grounding failed → the whole money picture is unknowable

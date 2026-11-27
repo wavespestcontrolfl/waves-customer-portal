@@ -4,9 +4,9 @@
  * re-derived at every send seam (sms-eta-freshness) so a changed count refuses the send.
  */
 jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error: jest.fn() }));
-jest.mock('../services/stops-ahead', () => ({ computeStopsAhead: jest.fn() }));
+jest.mock('../services/stops-ahead', () => ({ peekStopsAhead: jest.fn() }));
 
-const { computeStopsAhead } = require('../services/stops-ahead');
+const { peekStopsAhead } = require('../services/stops-ahead');
 const routeStatus = require('../services/sms-route-status');
 const { etaClaimBlockReason, isEtaInfrastructureFailure } = require('../services/sms-eta-freshness');
 
@@ -16,7 +16,7 @@ const snap = (sentence = TWO, id = 'svc-1') => [{ scheduledServiceId: id, schedu
 
 afterEach(() => {
   delete process.env[GATE];
-  computeStopsAhead.mockReset();
+  peekStopsAhead.mockReset();
 });
 
 describe('routeStatusSentence', () => {
@@ -33,10 +33,10 @@ describe('routeStatusSentence', () => {
     expect(routeStatus.routeStatusSentence({ stopsAhead: -1 })).toBeNull();
   });
   test('the drafting read uses the no-write peek and fails soft', async () => {
-    computeStopsAhead.mockResolvedValueOnce({ stopsAhead: 2 });
+    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 2 });
     expect(await routeStatus.routeStatusFactFor('db', 'svc-1')).toBe(TWO);
-    expect(computeStopsAhead).toHaveBeenCalledWith('db', 'svc-1', { peek: true });
-    computeStopsAhead.mockRejectedValueOnce(new Error('pool'));
+    expect(peekStopsAhead).toHaveBeenCalledWith('db', 'svc-1');
+    peekStopsAhead.mockRejectedValueOnce(new Error('pool'));
     expect(await routeStatus.routeStatusFactFor('db', 'svc-1')).toBeNull();
   });
 });
@@ -63,38 +63,38 @@ describe('routeStatusDraftViolation', () => {
 
 describe('routeStatusBlockReason (send time)', () => {
   test('no route snapshot: unchanged path, no read', async () => {
-    expect(await routeStatus.routeStatusBlockReason({ routeStatus: undefined, outgoingBody: TWO, dbh: 'db' })).toBeNull();
-    expect(computeStopsAhead).not.toHaveBeenCalled();
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: null, outgoingBody: TWO, dbh: 'db' })).toBeNull();
+    expect(peekStopsAhead).not.toHaveBeenCalled();
   });
   test('the same count now passes; a body without stop wording reads nothing', async () => {
-    computeStopsAhead.mockResolvedValue({ stopsAhead: 2 });
-    expect(await routeStatus.routeStatusBlockReason({ routeStatus: snap(), outgoingBody: `Good morning! ${TWO}`, dbh: 'trx' })).toBeNull();
-    expect(computeStopsAhead).toHaveBeenCalledWith('trx', 'svc-1', { peek: true });
-    computeStopsAhead.mockClear();
-    expect(await routeStatus.routeStatusBlockReason({ routeStatus: snap(), outgoingBody: 'Thanks!', dbh: 'trx' })).toBeNull();
-    expect(computeStopsAhead).not.toHaveBeenCalled();
+    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: `Good morning! ${TWO}`, dbh: 'trx' })).toBeNull();
+    expect(peekStopsAhead).toHaveBeenCalledWith('trx', 'svc-1');
+    peekStopsAhead.mockClear();
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: 'Thanks!', dbh: 'trx' })).toBeNull();
+    expect(peekStopsAhead).not.toHaveBeenCalled();
   });
   test('a changed count, or no count any more, is stale', async () => {
-    computeStopsAhead.mockResolvedValueOnce({ stopsAhead: 1 });
-    expect(await routeStatus.routeStatusBlockReason({ routeStatus: snap(), outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
-    computeStopsAhead.mockResolvedValueOnce(null);
-    expect(await routeStatus.routeStatusBlockReason({ routeStatus: snap(), outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
+    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 1 });
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
+    peekStopsAhead.mockResolvedValueOnce(null);
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' })).toBe('route_status_changed');
   });
   test('an unreadable route refuses as retryable infrastructure', async () => {
-    computeStopsAhead.mockRejectedValueOnce(new Error('timeout'));
-    const reason = await routeStatus.routeStatusBlockReason({ routeStatus: snap(), outgoingBody: TWO, dbh: 'db' });
+    peekStopsAhead.mockRejectedValueOnce(new Error('timeout'));
+    const reason = await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: TWO, dbh: 'db' });
     expect(reason).toBe('route_status_recheck_failed');
     expect(isEtaInfrastructureFailure(reason)).toBe(true);
     expect(isEtaInfrastructureFailure('route_status_changed')).toBe(false);
   });
   test('an edited count the snapshot does not hold is unbound', async () => {
-    expect(await routeStatus.routeStatusBlockReason({ routeStatus: snap(), outgoingBody: 'Your technician has 1 stop before yours today.', dbh: 'db' })).toBe('route_status_unbound');
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { routeStatus: snap() }, outgoingBody: 'Your technician has 1 stop before yours today.', dbh: 'db' })).toBe('route_status_unbound');
   });
   test('etaClaimBlockReason runs it on a snapshot that carries only a route status', async () => {
-    computeStopsAhead.mockResolvedValueOnce({ stopsAhead: 0 });
+    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 0 });
     const reason = await etaClaimBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: snap() }, factsGeneratedAt: new Date().toISOString(), outgoingBody: TWO, dbh: 'db' });
     expect(reason).toBe('route_status_changed');
-    computeStopsAhead.mockResolvedValueOnce({ stopsAhead: 2 });
+    peekStopsAhead.mockResolvedValueOnce({ stopsAhead: 2 });
     expect(await etaClaimBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: snap() }, factsGeneratedAt: new Date().toISOString(), outgoingBody: TWO, dbh: 'db' })).toBeNull();
   });
 });
@@ -130,7 +130,7 @@ describe('context-aggregator loadRouteStatusFacts', () => {
   const { loadRouteStatusFacts } = require('../services/context-aggregator');
   const TODAY = etDateString();
   test('today + technician + not yet en route only; one read per stop; siblings share it', async () => {
-    computeStopsAhead.mockResolvedValue({ stopsAhead: 2 });
+    peekStopsAhead.mockResolvedValue({ stopsAhead: 2 });
     const rows = [
       { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
       { id: 'b', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: null },
@@ -139,12 +139,12 @@ describe('context-aggregator loadRouteStatusFacts', () => {
       { id: 'e', technician_id: 't1', scheduled_date: '2099-01-01', window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
     ];
     const out = await loadRouteStatusFacts(rows, TODAY);
-    expect(computeStopsAhead).toHaveBeenCalledTimes(1);
+    expect(peekStopsAhead).toHaveBeenCalledTimes(1);
     expect(out.perRow).toEqual([TWO, TWO, null, null, null]);
     expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO }]);
   });
   test('a failed read is no sentence and no snapshot group', async () => {
-    computeStopsAhead.mockRejectedValue(new Error('down'));
+    peekStopsAhead.mockRejectedValue(new Error('down'));
     const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], TODAY);
     expect(out).toEqual({ perRow: [null], groups: [] });
   });

@@ -11,8 +11,8 @@
 //   1..3 stops         -> "Your technician has N stop(s) before yours today."
 // Never minutes, a clock time, the tech's location or another customer's address.
 //
-// The order is the tracker's (the dispatch day-plan sort, reused through computeStopsAhead's peek mode: no
-// floor write, no {pending}). No sentence when: GATE_STOPS_AWAY is off, no technician, the visit is not
+// The order is the tracker's (the dispatch day-plan sort, reused through stops-ahead peekStopsAhead: no floor
+// write, no {pending}). No sentence when: GATE_STOPS_AWAY is off, no technician, the visit is not
 // today, it is already en route / on site (LIVE STATUS owns that), a sibling line is underway, the tech is
 // working a LATER stop, more than 3 stops come first, the visit has no arrival window (not placed on the
 // route), a live stop ties its route position (order undecided), or any read fails.
@@ -29,7 +29,7 @@ const STOP_COUNT_WORDING_RE = /\b(?:next\s+stop|stops?\s+(?:before|ahead\s+of|un
 const NEXT_STOP_SENTENCE = "Your visit is your technician's next stop today.";
 const AT_STOP_BEFORE_SENTENCE = 'Your technician is working at the stop before yours.';
 
-// The one sentence for a computeStopsAhead peek result, or null.
+// The one sentence for a peekStopsAhead result, or null.
 function routeStatusSentence(result) {
   const n = result?.stopsAhead;
   if (!Number.isInteger(n) || n < 0) return null;
@@ -41,8 +41,8 @@ function routeStatusSentence(result) {
 // The current sentence for one visit. THROWS when the route cannot be read (send time holds the send as
 // retryable); null when no sentence applies.
 async function currentRouteStatusSentence(dbh, scheduledServiceId) {
-  const { computeStopsAhead } = require('./stops-ahead');
-  const result = await computeStopsAhead(dbh, scheduledServiceId, { peek: true });
+  const { peekStopsAhead } = require('./stops-ahead');
+  const result = await peekStopsAhead(dbh, scheduledServiceId);
   return routeStatusSentence(result);
 }
 
@@ -102,8 +102,8 @@ const ROUTE_STATUS_RECHECK_FAILED = 'route_status_recheck_failed';
 //     sentence = 'route_status_changed'; a read failure = 'route_status_recheck_failed'.
 //   - stop wording that is not a copied snapshot sentence, on a decision whose snapshot carried one:
 //     'route_status_unbound'. A decision with no route snapshot keeps today's behavior.
-async function routeStatusBlockReason({ routeStatus, outgoingBody, dbh }) {
-  const entries = usableRouteStatusEntries(routeStatus);
+async function routeStatusBlockReason({ liveEtaSnapshot, outgoingBody, dbh }) {
+  const entries = usableRouteStatusEntries(liveEtaSnapshot?.routeStatus);
   if (!entries.length) return null;
   const body = fold(outgoingBody);
   const quoted = entries.filter((e) => body.includes(fold(e.sentence)));

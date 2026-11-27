@@ -75,6 +75,9 @@ function placedOrLegacySql(alias = '') {
   return `(${prefix}window_start IS NOT NULL OR (${prefix}customer_pick_by IS NULL AND ${prefix}recurring_dispatch_due_date IS NULL))`;
 }
 
+const liveExcl = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
+const routeExcl = NOT_A_ROUTE_STOP_STATUSES.map(() => '?').join(', ');
+
 function eligibleTargetDate(svc, today) {
   if (!svc) return null;
   if (NOT_A_STOP_STATUSES.includes(svc.status)) return null;
@@ -85,6 +88,268 @@ function eligibleTargetDate(svc, today) {
   return serviceDate === today ? serviceDate : null;
 }
 
+// The count phase shared by the tracker (computeStopsAhead) and the
+// texting AI (peekStopsAhead): eligibility, the one-snapshot count, the
+// clamp and the cap. Reads only; THROWS on a read failure (each caller
+// decides what a failure means). null = no count to show.
+async function countStopsAhead(db, serviceId, today) {
+  // Eligibility reads the WHOLE sibling group, not just the requested
+  // row: tech-track transitions rows by id, so a sibling of a
+  // multi-service appointment can be en_route/on_site/completed while
+  // the requested row still reads 'scheduled' — and the truck is already
+  // heading to (or done with) this physical stop. The self-join also
+  // drops NULL technician/customer/date targets (NULL never equals),
+  // covering the no-technician case.
+  const grpRes = await db.raw(
+    `SELECT s.id, s.customer_id, s.technician_id, s.scheduled_date, s.window_start,
+            s.customer_pick_by, s.recurring_dispatch_due_date, s.status, s.track_state
+       FROM scheduled_services s, scheduled_services t
+      WHERE t.id = ?::uuid
+        AND s.technician_id = t.technician_id
+        AND s.scheduled_date = t.scheduled_date
+        AND s.customer_id = t.customer_id
+        AND s.window_start IS NOT DISTINCT FROM t.window_start`,
+    [serviceId]
+  );
+  const grpRows = grpRes?.rows || [];
+  const svc = grpRows.find((r) => r.id === serviceId);
+  // The target itself must be a real upcoming stop — terminal visits AND
+  // rescheduled placeholders (which can retain track_state='scheduled')
+  // never display a count. Neither marked windowless parking shape is a
+  // stop; a markerless legacy date-only visit remains eligible. The
+  // calendar date must still be today's ET route.
+  const svcDate = eligibleTargetDate(svc, today);
+  if (!svcDate) return null;
+  // Only the pre-dispatch scheduled state shows a count. en_route and
+  // later are null: both clients render stopsAhead exclusively on their
+  // scheduled cards ("on the way" copy owns the en-route state), and
+  // persisting an undisplayed en-route zero would let a same-day rewind
+  // back to scheduled clamp the real count to a floor no one ever saw.
+  // status can LEAD track_state: tech-track commits the operational
+  // transition first and the tracker transition is best-effort — if the
+  // second step fails, a visit already underway keeps
+  // track_state='scheduled'. A live operational status makes the target
+  // ineligible: the planned-route count must not display (or persist a
+  // floor) for a stop the tech is already traveling to or working. The
+  // same applies when ANY SIBLING row has advanced (or finished): the
+  // physical stop is underway/visited, so a planned count on the
+  // untouched sibling's link would be a lie.
+  const siblingAdvanced = grpRows.some((r) => r.id !== svc.id && isPlacedOrLegacyDateOnly(r)
+    && (['en_route', 'on_site', 'completed'].includes(r.status)
+        || ['en_route', 'on_property', 'complete'].includes(r.track_state)));
+  if (siblingAdvanced) return null;
+  // Target sort tuple and preceding count come from ONE statement (one
+  // READ COMMITTED snapshot): a route reorder committing between two
+  // separate queries would compare the new route against the target's
+  // OLD tuple and could persist a false "You're next". Predicates on the
+  // candidate rows:
+  //  - status: not terminal and not a rescheduled phantom
+  //  - live-hold: dead estimate-slot holds linger until the cleanup cron
+  //    deletes them (same predicate as route-reorder LIVE_HOLD_SQL)
+  //  - track_state: can lead or permanently diverge from status (e.g.
+  //    markComplete leaves status='confirmed' + track_state='complete'),
+  //    so tracker-terminal rows drop out by track_state too — NULL-safe,
+  //    since NOT IN alone silently drops NULL-track_state rows.
+  // Ordering matches the dispatch day-plan (route_order, window, created)
+  // with id as deterministic tiebreak. A "stop" is the repo's sibling
+  // identity — (customer_id, appointment slot), the same key
+  // appointment-reminders merges on: sibling rows for one slot read as
+  // ONE stop via COUNT(DISTINCT (customer, slot)), while a customer's
+  // separate same-day appointment (other slot / other property) stays a
+  // real stop. Only the target's OWN sibling group is excluded, so a
+  // sibling of the target never counts as ahead of itself but the
+  // customer's genuinely-earlier other appointment still does.
+  // Do NOT add property_id/service_address_* to this key: the stamp is
+  // not sibling-uniform (admin add-a-line, dispatch follow-ups, and
+  // estimate-converter same-trip rows leave it NULL next to a stamped
+  // sibling), so a property-qualified key would split one real visit
+  // into two stops — and count the target's own line item as ahead of
+  // it. The cost of the current key is only the same-customer,
+  // same-window, different-property collapse, unreachable for a
+  // single-tech route.
+  // The aggregates classify each preceding stop at the GROUP level (one
+  // flag set per sibling group), never by summing per-row buckets: a
+  // multi-line appointment can hold a completed row NEXT TO an
+  // en_route/on_site row mid-visit (tech-track transitions rows by id),
+  // and row-level counting would put that one physical stop in BOTH
+  // done_before and the active bucket — advancing currentStop twice.
+  // A group with any active row IS the active stop (not also a finished
+  // one); has_done only counts once no sibling is still being worked.
+  // Figures produced:
+  //   ahead      — live (not-yet-serviced) stops sorting before the target;
+  //                this is the number the cap and clamp govern.
+  //   before_all — ROUTE stops (completed included) before the target →
+  //                yourStop = before_all + 1.
+  //   others_all — every route stop today besides the target's own group →
+  //                totalStops = others_all + 1.
+  // Each foreign group anchors at ITS earliest route-eligible tuple
+  // (rn = 1), symmetric with the target's own sibling-group anchor.
+  const G_PRECEDES = `(g.a_route_order, g.slot, g.a_created_at, g.a_id::uuid)
+            < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`;
+  // The comparison anchors at the SIBLING GROUP's earliest route tuple,
+  // not the requested row's own: the route optimizer assigns route_order
+  // per ROW, so another customer's stop can sort between two siblings —
+  // anchoring per-row would count that customer as ahead on one
+  // sibling's link but not the other's, and the truck visits the group
+  // once, at its earliest position. Cancelled/rescheduled/dead-hold
+  // siblings can't anchor (their tuple is stale), but the target row
+  // itself always can — it was already validated eligible above.
+  const countRes = await db.raw(
+    `WITH target_row AS (
+       SELECT id, customer_id, technician_id, scheduled_date, window_start
+         FROM scheduled_services
+        WHERE id = ?::uuid
+          AND technician_id = ?::uuid
+          AND scheduled_date = ?::date
+          AND window_start IS NOT DISTINCT FROM ?::time
+          AND status NOT IN (${liveExcl})
+          AND status NOT IN ('en_route', 'on_site')
+          AND COALESCE(track_state, 'scheduled') = 'scheduled'
+          AND ${placedOrLegacySql()}
+     ),
+     target AS (
+       SELECT tr.customer_id, tr.technician_id, tr.scheduled_date, tr.window_start,
+              g.route_order, g.created_at, g.id,
+              (SELECT MIN(ss.stops_ahead_min_shown)
+                 FROM scheduled_services ss
+                WHERE ss.technician_id = tr.technician_id
+                  AND ss.scheduled_date = tr.scheduled_date
+                  AND ss.customer_id = tr.customer_id
+                  AND ss.window_start IS NOT DISTINCT FROM tr.window_start
+                  AND ${placedOrLegacySql('ss')}
+                  AND ss.stops_ahead_shown_date = ?::date) AS group_floor
+         FROM target_row tr
+         JOIN LATERAL (
+           SELECT s.route_order, s.created_at, s.id
+             FROM scheduled_services s
+            WHERE s.technician_id = tr.technician_id
+              AND s.scheduled_date = tr.scheduled_date
+              AND s.customer_id = tr.customer_id
+              AND s.window_start IS NOT DISTINCT FROM tr.window_start
+              AND ${placedOrLegacySql('s')}
+              AND (s.id = tr.id
+                   OR (s.status NOT IN (${routeExcl})
+                       AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+                       AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())))
+            ORDER BY COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id
+            LIMIT 1
+         ) g ON TRUE
+     ),
+     day_rows AS (
+       SELECT s.customer_id,
+              COALESCE(s.window_start, '23:59'::time) AS slot,
+              s.route_order, s.created_at, s.id, s.status, s.track_state
+         FROM scheduled_services s, target t
+        WHERE s.technician_id = t.technician_id
+          AND s.scheduled_date = t.scheduled_date
+          AND NOT (s.customer_id = t.customer_id
+                   AND s.window_start IS NOT DISTINCT FROM t.window_start)
+          AND ${placedOrLegacySql('s')}
+          AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
+          AND s.status NOT IN (${routeExcl})
+          AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+     ),
+     ranked AS (
+       SELECT dr.*,
+              (dr.status NOT IN (${liveExcl})
+               AND (dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))) AS is_live,
+              ROW_NUMBER() OVER (
+                PARTITION BY dr.customer_id, dr.slot
+                ORDER BY COALESCE(dr.route_order, 999), dr.slot, dr.created_at, dr.id
+              ) AS rn
+         FROM day_rows dr
+     ),
+     grp AS (
+       SELECT r.customer_id, r.slot,
+              BOOL_OR(r.is_live) AS has_live,
+              BOOL_OR(r.status = 'completed' OR r.track_state = 'complete') AS has_done,
+              BOOL_OR(r.is_live AND (r.status = 'on_site' OR r.track_state = 'on_property')) AS has_at,
+              BOOL_OR(r.is_live AND (r.status = 'en_route' OR r.track_state = 'en_route')) AS has_enroute,
+              MAX(COALESCE(r.route_order, 999)) FILTER (WHERE r.rn = 1) AS a_route_order,
+              MAX(r.created_at) FILTER (WHERE r.rn = 1) AS a_created_at,
+              MAX(r.id::text) FILTER (WHERE r.rn = 1) AS a_id
+         FROM ranked r
+        GROUP BY r.customer_id, r.slot
+     )
+     SELECT
+       COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_live)::int AS ahead,
+       COUNT(*) FILTER (WHERE ${G_PRECEDES})::int AS before_all,
+       COUNT(*)::int AS others_all,
+       COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_done
+                          AND NOT g.has_live)::int AS done_before,
+       COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_at)::int AS at_before,
+       COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_enroute AND NOT g.has_at)::int AS enroute_before,
+       COUNT(*) FILTER (WHERE (g.has_at OR g.has_enroute OR g.has_done)
+                          AND NOT (${G_PRECEDES}))::int AS progressed_beyond,
+       COUNT(*) FILTER (WHERE g.has_live
+                          AND (g.a_route_order, g.slot)
+                              = (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time)))::int AS tied,
+       MIN(t.group_floor)::int AS group_floor
+       FROM grp g, target t`,
+    // Binding order mirrors the SQL order: the group_floor subquery's
+    // display date, the sibling-anchor lateral (route-excluded), the
+    // day_rows route filter (route-excluded — cancelled/skipped/no_show/
+    // rescheduled rows are not route rows at all), then ranked's is_live
+    // flag (live-excluded, with tracker-terminal precedence NULL-safe: a
+    // completed/cancelled row with a stale active track_state must not
+    // read as live, matching the tracking routes).
+    [
+      svc.id,
+      svc.technician_id,
+      svcDate,
+      svc.window_start,
+      ...NOT_A_STOP_STATUSES,
+      today,
+      ...NOT_A_ROUTE_STOP_STATUSES,
+      ...NOT_A_ROUTE_STOP_STATUSES,
+      ...NOT_A_STOP_STATUSES,
+    ]
+  );
+  const agg = countRes?.rows?.[0];
+  const raw = Number(agg?.ahead);
+  const yourStop = Number(agg?.before_all) + 1;
+  const totalStops = Number(agg?.others_all) + 1;
+  // The truck's REAL position, measured — never derived from the clamped
+  // count (a clamped numeral with a derived position fabricates "Now at
+  // stop X"). currentStop = finished stops before you, +1 while the tech
+  // is actively at/driving to one of them.
+  const doneBefore = Number(agg?.done_before);
+  const atBefore = Number(agg?.at_before);
+  const enrouteBefore = Number(agg?.enroute_before);
+  // Three truthful truck phases (a merely-en-route stop must not read as
+  // "Now at"): atStop = physically AT a stop (on-site/on-property);
+  // headingToStop = driving to one (en-route); neither = between stops.
+  // A stop that is somehow both reads as AT (on-property wins). The SQL
+  // classifies per GROUP, so a mixed stop (one line completed, one line
+  // active) is the active stop exactly once — never done AND active.
+  const atStop = Number.isFinite(atBefore) && atBefore > 0;
+  const headingToStop = !atStop && Number.isFinite(enrouteBefore) && enrouteBefore > 0;
+  const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
+    + (atStop || headingToStop ? 1 : 0);
+  if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
+  // The tech at/driving-to — or already FINISHED with — a stop that
+  // does NOT precede the target (per-id transitions don't enforce route
+  // order) makes the planned count a lie: "You're next" / "Route starts
+  // soon" while the truck is working, or was already past, a LATER
+  // stop. Fail to the generic state, persist nothing.
+  if (Number(agg?.progressed_beyond) > 0) return null;
+
+  // Clamp against the persisted floor — the GROUP's smallest same-day
+  // floor (fetched in the same snapshot as the count), not the requested
+  // row's own: siblings are one stop with separate tokens, and a sibling
+  // row added mid-day starts with a NULL floor — clamping on the row
+  // alone would leave its link above the cap (generic state) while the
+  // older sibling's link keeps showing a number. The SQL already
+  // restricted the MIN to rows whose shown_date is today, so a stale
+  // floor from another day never clamps.
+  const groupFloorRaw = agg?.group_floor;
+  const groupFloor = groupFloorRaw == null ? null : Number(groupFloorRaw);
+  let clamped = raw;
+  if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
+  if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
+  return { svc, svcDate, groupFloor, clamped, yourStop, totalStops, currentStop, atStop, headingToStop, tied: Number(agg?.tied) };
+}
+
 /**
  * @returns {Promise<{stopsAhead: number, yourStop: number, totalStops: number}|{pending: true}|null>}
  *   stopsAhead — clamped stops-ahead (0..CAP) to display;
@@ -93,8 +358,7 @@ function eligibleTargetDate(svc, today) {
  *   "Now at stop X of Y / You're stop Z" strip. Null when the count
  *   shouldn't render (gate off, no tech, not today, terminal visit,
  *   sibling already underway, active stop beyond the target, beyond the
- *   cap, or any error). opts.peek: see the peek block below (no write,
- *   read errors THROW). With opts.readOnly (the public GET), a value that
+ *   cap, or any error). With opts.readOnly (the public GET), a value that
  *   is not yet the durable floor returns {pending: true} instead of
  *   writing — the caller's explicit POST runs the persisting path.
  */
@@ -102,275 +366,9 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
   if (!gateEnvValue('GATE_STOPS_AWAY')) return null;
   try {
     const today = opts.today || etDateString();
-    // Eligibility reads the WHOLE sibling group, not just the requested
-    // row: tech-track transitions rows by id, so a sibling of a
-    // multi-service appointment can be en_route/on_site/completed while
-    // the requested row still reads 'scheduled' — and the truck is already
-    // heading to (or done with) this physical stop. The self-join also
-    // drops NULL technician/customer/date targets (NULL never equals),
-    // covering the no-technician case.
-    const grpRes = await db.raw(
-      `SELECT s.id, s.customer_id, s.technician_id, s.scheduled_date, s.window_start,
-              s.customer_pick_by, s.recurring_dispatch_due_date, s.status, s.track_state
-         FROM scheduled_services s, scheduled_services t
-        WHERE t.id = ?::uuid
-          AND s.technician_id = t.technician_id
-          AND s.scheduled_date = t.scheduled_date
-          AND s.customer_id = t.customer_id
-          AND s.window_start IS NOT DISTINCT FROM t.window_start`,
-      [serviceId]
-    );
-    const grpRows = grpRes?.rows || [];
-    const svc = grpRows.find((r) => r.id === serviceId);
-    // The target itself must be a real upcoming stop — terminal visits AND
-    // rescheduled placeholders (which can retain track_state='scheduled')
-    // never display a count. Neither marked windowless parking shape is a
-    // stop; a markerless legacy date-only visit remains eligible. The
-    // calendar date must still be today's ET route.
-    const svcDate = eligibleTargetDate(svc, today);
-    if (!svcDate) return null;
-    // Only the pre-dispatch scheduled state shows a count. en_route and
-    // later are null: both clients render stopsAhead exclusively on their
-    // scheduled cards ("on the way" copy owns the en-route state), and
-    // persisting an undisplayed en-route zero would let a same-day rewind
-    // back to scheduled clamp the real count to a floor no one ever saw.
-    // status can LEAD track_state: tech-track commits the operational
-    // transition first and the tracker transition is best-effort — if the
-    // second step fails, a visit already underway keeps
-    // track_state='scheduled'. A live operational status makes the target
-    // ineligible: the planned-route count must not display (or persist a
-    // floor) for a stop the tech is already traveling to or working. The
-    // same applies when ANY SIBLING row has advanced (or finished): the
-    // physical stop is underway/visited, so a planned count on the
-    // untouched sibling's link would be a lie.
-    const siblingAdvanced = grpRows.some((r) => r.id !== svc.id && isPlacedOrLegacyDateOnly(r)
-      && (['en_route', 'on_site', 'completed'].includes(r.status)
-          || ['en_route', 'on_property', 'complete'].includes(r.track_state)));
-    if (siblingAdvanced) return null;
-    // Target sort tuple and preceding count come from ONE statement (one
-    // READ COMMITTED snapshot): a route reorder committing between two
-    // separate queries would compare the new route against the target's
-    // OLD tuple and could persist a false "You're next". Predicates on the
-    // candidate rows:
-    //  - status: not terminal and not a rescheduled phantom
-    //  - live-hold: dead estimate-slot holds linger until the cleanup cron
-    //    deletes them (same predicate as route-reorder LIVE_HOLD_SQL)
-    //  - track_state: can lead or permanently diverge from status (e.g.
-    //    markComplete leaves status='confirmed' + track_state='complete'),
-    //    so tracker-terminal rows drop out by track_state too — NULL-safe,
-    //    since NOT IN alone silently drops NULL-track_state rows.
-    // Ordering matches the dispatch day-plan (route_order, window, created)
-    // with id as deterministic tiebreak. A "stop" is the repo's sibling
-    // identity — (customer_id, appointment slot), the same key
-    // appointment-reminders merges on: sibling rows for one slot read as
-    // ONE stop via COUNT(DISTINCT (customer, slot)), while a customer's
-    // separate same-day appointment (other slot / other property) stays a
-    // real stop. Only the target's OWN sibling group is excluded, so a
-    // sibling of the target never counts as ahead of itself but the
-    // customer's genuinely-earlier other appointment still does.
-    // Do NOT add property_id/service_address_* to this key: the stamp is
-    // not sibling-uniform (admin add-a-line, dispatch follow-ups, and
-    // estimate-converter same-trip rows leave it NULL next to a stamped
-    // sibling), so a property-qualified key would split one real visit
-    // into two stops — and count the target's own line item as ahead of
-    // it. The cost of the current key is only the same-customer,
-    // same-window, different-property collapse, unreachable for a
-    // single-tech route.
-    // The aggregates classify each preceding stop at the GROUP level (one
-    // flag set per sibling group), never by summing per-row buckets: a
-    // multi-line appointment can hold a completed row NEXT TO an
-    // en_route/on_site row mid-visit (tech-track transitions rows by id),
-    // and row-level counting would put that one physical stop in BOTH
-    // done_before and the active bucket — advancing currentStop twice.
-    // A group with any active row IS the active stop (not also a finished
-    // one); has_done only counts once no sibling is still being worked.
-    // Figures produced:
-    //   ahead      — live (not-yet-serviced) stops sorting before the target;
-    //                this is the number the cap and clamp govern.
-    //   before_all — ROUTE stops (completed included) before the target →
-    //                yourStop = before_all + 1.
-    //   others_all — every route stop today besides the target's own group →
-    //                totalStops = others_all + 1.
-    const liveExcl = NOT_A_STOP_STATUSES.map(() => '?').join(', ');
-    const routeExcl = NOT_A_ROUTE_STOP_STATUSES.map(() => '?').join(', ');
-    // Each foreign group anchors at ITS earliest route-eligible tuple
-    // (rn = 1), symmetric with the target's own sibling-group anchor.
-    const G_PRECEDES = `(g.a_route_order, g.slot, g.a_created_at, g.a_id::uuid)
-              < (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time), t.created_at, t.id)`;
-    // The comparison anchors at the SIBLING GROUP's earliest route tuple,
-    // not the requested row's own: the route optimizer assigns route_order
-    // per ROW, so another customer's stop can sort between two siblings —
-    // anchoring per-row would count that customer as ahead on one
-    // sibling's link but not the other's, and the truck visits the group
-    // once, at its earliest position. Cancelled/rescheduled/dead-hold
-    // siblings can't anchor (their tuple is stale), but the target row
-    // itself always can — it was already validated eligible above.
-    const countRes = await db.raw(
-      `WITH target_row AS (
-         SELECT id, customer_id, technician_id, scheduled_date, window_start
-           FROM scheduled_services
-          WHERE id = ?::uuid
-            AND technician_id = ?::uuid
-            AND scheduled_date = ?::date
-            AND window_start IS NOT DISTINCT FROM ?::time
-            AND status NOT IN (${liveExcl})
-            AND status NOT IN ('en_route', 'on_site')
-            AND COALESCE(track_state, 'scheduled') = 'scheduled'
-            AND ${placedOrLegacySql()}
-       ),
-       target AS (
-         SELECT tr.customer_id, tr.technician_id, tr.scheduled_date, tr.window_start,
-                g.route_order, g.created_at, g.id,
-                (SELECT MIN(ss.stops_ahead_min_shown)
-                   FROM scheduled_services ss
-                  WHERE ss.technician_id = tr.technician_id
-                    AND ss.scheduled_date = tr.scheduled_date
-                    AND ss.customer_id = tr.customer_id
-                    AND ss.window_start IS NOT DISTINCT FROM tr.window_start
-                    AND ${placedOrLegacySql('ss')}
-                    AND ss.stops_ahead_shown_date = ?::date) AS group_floor
-           FROM target_row tr
-           JOIN LATERAL (
-             SELECT s.route_order, s.created_at, s.id
-               FROM scheduled_services s
-              WHERE s.technician_id = tr.technician_id
-                AND s.scheduled_date = tr.scheduled_date
-                AND s.customer_id = tr.customer_id
-                AND s.window_start IS NOT DISTINCT FROM tr.window_start
-                AND ${placedOrLegacySql('s')}
-                AND (s.id = tr.id
-                     OR (s.status NOT IN (${routeExcl})
-                         AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
-                         AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())))
-              ORDER BY COALESCE(s.route_order, 999), COALESCE(s.window_start, '23:59'::time), s.created_at, s.id
-              LIMIT 1
-           ) g ON TRUE
-       ),
-       day_rows AS (
-         SELECT s.customer_id,
-                COALESCE(s.window_start, '23:59'::time) AS slot,
-                s.route_order, s.created_at, s.id, s.status, s.track_state
-           FROM scheduled_services s, target t
-          WHERE s.technician_id = t.technician_id
-            AND s.scheduled_date = t.scheduled_date
-            AND NOT (s.customer_id = t.customer_id
-                     AND s.window_start IS NOT DISTINCT FROM t.window_start)
-            AND ${placedOrLegacySql('s')}
-            AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
-            AND s.status NOT IN (${routeExcl})
-            AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
-       ),
-       ranked AS (
-         SELECT dr.*,
-                (dr.status NOT IN (${liveExcl})
-                 AND (dr.track_state IS NULL OR dr.track_state NOT IN ('complete', 'cancelled'))) AS is_live,
-                ROW_NUMBER() OVER (
-                  PARTITION BY dr.customer_id, dr.slot
-                  ORDER BY COALESCE(dr.route_order, 999), dr.slot, dr.created_at, dr.id
-                ) AS rn
-           FROM day_rows dr
-       ),
-       grp AS (
-         SELECT r.customer_id, r.slot,
-                BOOL_OR(r.is_live) AS has_live,
-                BOOL_OR(r.status = 'completed' OR r.track_state = 'complete') AS has_done,
-                BOOL_OR(r.is_live AND (r.status = 'on_site' OR r.track_state = 'on_property')) AS has_at,
-                BOOL_OR(r.is_live AND (r.status = 'en_route' OR r.track_state = 'en_route')) AS has_enroute,
-                MAX(COALESCE(r.route_order, 999)) FILTER (WHERE r.rn = 1) AS a_route_order,
-                MAX(r.created_at) FILTER (WHERE r.rn = 1) AS a_created_at,
-                MAX(r.id::text) FILTER (WHERE r.rn = 1) AS a_id
-           FROM ranked r
-          GROUP BY r.customer_id, r.slot
-       )
-       SELECT
-         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_live)::int AS ahead,
-         COUNT(*) FILTER (WHERE ${G_PRECEDES})::int AS before_all,
-         COUNT(*)::int AS others_all,
-         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_done
-                            AND NOT g.has_live)::int AS done_before,
-         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_at)::int AS at_before,
-         COUNT(*) FILTER (WHERE ${G_PRECEDES} AND g.has_enroute AND NOT g.has_at)::int AS enroute_before,
-         COUNT(*) FILTER (WHERE (g.has_at OR g.has_enroute OR g.has_done)
-                            AND NOT (${G_PRECEDES}))::int AS progressed_beyond,
-         COUNT(*) FILTER (WHERE g.has_live
-                            AND (g.a_route_order, g.slot)
-                                = (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time)))::int AS tied,
-         MIN(t.group_floor)::int AS group_floor
-         FROM grp g, target t`,
-      // Binding order mirrors the SQL order: the group_floor subquery's
-      // display date, the sibling-anchor lateral (route-excluded), the
-      // day_rows route filter (route-excluded — cancelled/skipped/no_show/
-      // rescheduled rows are not route rows at all), then ranked's is_live
-      // flag (live-excluded, with tracker-terminal precedence NULL-safe: a
-      // completed/cancelled row with a stale active track_state must not
-      // read as live, matching the tracking routes).
-      [
-        svc.id,
-        svc.technician_id,
-        svcDate,
-        svc.window_start,
-        ...NOT_A_STOP_STATUSES,
-        today,
-        ...NOT_A_ROUTE_STOP_STATUSES,
-        ...NOT_A_ROUTE_STOP_STATUSES,
-        ...NOT_A_STOP_STATUSES,
-      ]
-    );
-    const agg = countRes?.rows?.[0];
-    const raw = Number(agg?.ahead);
-    const yourStop = Number(agg?.before_all) + 1;
-    const totalStops = Number(agg?.others_all) + 1;
-    // The truck's REAL position, measured — never derived from the clamped
-    // count (a clamped numeral with a derived position fabricates "Now at
-    // stop X"). currentStop = finished stops before you, +1 while the tech
-    // is actively at/driving to one of them.
-    const doneBefore = Number(agg?.done_before);
-    const atBefore = Number(agg?.at_before);
-    const enrouteBefore = Number(agg?.enroute_before);
-    // Three truthful truck phases (a merely-en-route stop must not read as
-    // "Now at"): atStop = physically AT a stop (on-site/on-property);
-    // headingToStop = driving to one (en-route); neither = between stops.
-    // A stop that is somehow both reads as AT (on-property wins). The SQL
-    // classifies per GROUP, so a mixed stop (one line completed, one line
-    // active) is the active stop exactly once — never done AND active.
-    const atStop = Number.isFinite(atBefore) && atBefore > 0;
-    const headingToStop = !atStop && Number.isFinite(enrouteBefore) && enrouteBefore > 0;
-    const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
-      + (atStop || headingToStop ? 1 : 0);
-    if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
-    // The tech at/driving-to — or already FINISHED with — a stop that
-    // does NOT precede the target (per-id transitions don't enforce route
-    // order) makes the planned count a lie: "You're next" / "Route starts
-    // soon" while the truck is working, or was already past, a LATER
-    // stop. Fail to the generic state, persist nothing.
-    if (Number(agg?.progressed_beyond) > 0) return null;
-
-    // Clamp against the persisted floor — the GROUP's smallest same-day
-    // floor (fetched in the same snapshot as the count), not the requested
-    // row's own: siblings are one stop with separate tokens, and a sibling
-    // row added mid-day starts with a NULL floor — clamping on the row
-    // alone would leave its link above the cap (generic state) while the
-    // older sibling's link keeps showing a number. The SQL already
-    // restricted the MIN to rows whose shown_date is today, so a stale
-    // floor from another day never clamps.
-    const groupFloorRaw = agg?.group_floor;
-    const groupFloor = groupFloorRaw == null ? null : Number(groupFloorRaw);
-    let clamped = raw;
-    if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
-    if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
-
-    // opts.peek (texting AI route status, owner 2026-11-26 "BUILD 1-6"): the
-    // same clamped figure the tracker would show right now, with NO write
-    // (a shadow draft or a send-time recheck must never move the floor a
-    // customer sees) and no {pending}. Stricter than the tracker: the
-    // target must have a real arrival window (a windowless stop sorts last
-    // by default, not by plan), and no live stop may share the target's
-    // route_order + window (the order between them is only created_at, so
-    // the count is not decided). Either case returns null.
-    if (opts.peek) {
-      if (svc.window_start == null || Number(agg?.tied) > 0) return null;
-      return { stopsAhead: clamped, atStop, headingToStop };
-    }
+    const counted = await countStopsAhead(db, serviceId, today);
+    if (!counted) return null;
+    const { svc, svcDate, groupFloor, clamped, yourStop, totalStops, currentStop, atStop, headingToStop } = counted;
 
     // readOnly: the public track GET is contractually read-only
     // (AGENTS.md) — retries and prefetches must never mutate. It may
@@ -502,11 +500,24 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
     }
     return null;
   } catch (err) {
-    // peek callers must tell "no count" from "could not read": they rethrow.
-    if (opts.peek) throw err;
     logger.warn(`[stops-ahead] compute failed for ${serviceId}: ${err.message}`);
     return null;
   }
+}
+
+// The texting AI's read (route status, owner 2026-11-26 "BUILD 1-6"): the
+// same clamped figure the tracker would show right now, with NO write (a
+// shadow draft or a send-time recheck must never move the floor a customer
+// sees) and no {pending}. A read failure THROWS, so send time can tell "no
+// count" from "could not read". Stricter than the tracker: the target must
+// have a real arrival window (a windowless stop sorts last by default, not
+// by plan), and no live stop may share the target's route_order + window
+// (the order between them is only created_at, so the count is not decided).
+async function peekStopsAhead(db, serviceId, { today = etDateString() } = {}) {
+  if (!gateEnvValue('GATE_STOPS_AWAY')) return null;
+  const counted = await countStopsAhead(db, serviceId, today);
+  if (!counted || counted.svc.window_start == null || counted.tied > 0) return null;
+  return { stopsAhead: counted.clamped, atStop: counted.atStop, headingToStop: counted.headingToStop };
 }
 
 // True when the visit's scheduled_date is today in ET — the only day
@@ -520,6 +531,7 @@ function isServiceDateToday(scheduledDate, today = etDateString()) {
 
 module.exports = {
   computeStopsAhead,
+  peekStopsAhead,
   isServiceDateToday,
   STOPS_AHEAD_DISPLAY_CAP,
   TERMINAL_STATUSES,

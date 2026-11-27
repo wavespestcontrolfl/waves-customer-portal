@@ -3,6 +3,7 @@ jest.mock('../services/logger', () => ({ warn: jest.fn(), info: jest.fn(), error
 const logger = require('../services/logger');
 const {
   computeStopsAhead,
+  peekStopsAhead,
   STOPS_AHEAD_DISPLAY_CAP,
   NOT_A_STOP_STATUSES,
   NOT_A_ROUTE_STOP_STATUSES,
@@ -403,33 +404,39 @@ describe('isServiceDateToday', () => {
   });
 });
 
-// opts.peek (texting AI route status, gap 4): the tracker's clamped figure with NO write, stricter on order.
-describe('computeStopsAhead peek', () => {
+// peekStopsAhead (texting AI route status, gap 4): the tracker's clamped figure with NO write, stricter on order.
+describe('peekStopsAhead', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     process.env.GATE_STOPS_AWAY = 'true';
   });
   afterAll(() => { delete process.env.GATE_STOPS_AWAY; });
 
+  test('gate off: no count and no read', async () => {
+    process.env.GATE_STOPS_AWAY = '';
+    const db = makeDb({ svcRow: baseSvc(), countN: 1 });
+    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
+    expect(db.raw).not.toHaveBeenCalled();
+  });
   test('returns the clamped count and the truck phase without writing the floor', async () => {
     const db = makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 1, atBefore: 1 });
-    expect(await computeStopsAhead(db, 'svc-self', { today: TODAY, peek: true })).toEqual({ stopsAhead: 1, atStop: true, headingToStop: false });
+    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toEqual({ stopsAhead: 1, atStop: true, headingToStop: false });
     expect(db.updateCalls()).toHaveLength(0);
     expect(db.reReadCalls()).toHaveLength(0);
     expect(db.countCall()[0]).toContain('AS tied');
   });
   test('a live stop tied on route position, or a target with no window, gives no count', async () => {
-    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 }), 'svc-self', { today: TODAY, peek: true })).toBeNull();
-    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc({ window_start: null }), countN: 1 }), 'svc-self', { today: TODAY, peek: true })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc({ window_start: null }), countN: 1 }), 'svc-self', { today: TODAY })).toBeNull();
   });
   test('above the cap is null as on the tracker; the persisting path ignores ties', async () => {
-    expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countN: STOPS_AHEAD_DISPLAY_CAP + 1 }), 'svc-self', { today: TODAY, peek: true })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: STOPS_AHEAD_DISPLAY_CAP + 1 }), 'svc-self', { today: TODAY })).toBeNull();
     const db = makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 });
     expect(await computeStopsAhead(db, 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 1 });
   });
   test('a read failure throws under peek (the tracker path still returns null)', async () => {
     const err = new Error('pool exhausted');
-    await expect(computeStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY, peek: true })).rejects.toThrow('pool exhausted');
+    await expect(peekStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY })).rejects.toThrow('pool exhausted');
     expect(await computeStopsAhead(makeDb({ svcRow: baseSvc(), countError: err }), 'svc-self', { today: TODAY })).toBeNull();
   });
 });
