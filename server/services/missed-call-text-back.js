@@ -1033,6 +1033,8 @@ module.exports = {
   textBackIfMissed,
   sweepMissedCallTextBacks,
   whereCompletedCall,
+  // The one "failed press-1 screen" test, shared with the alert clear-up agent (owner ruling 2026-10-24: a robocall).
+  failedPreconnectScreen,
   _private: {
     stampSpamShadow,
     textBackCoreEligible,
