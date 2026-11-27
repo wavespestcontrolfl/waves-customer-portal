@@ -35,6 +35,7 @@ import {
 } from "../../lib/estimateEngine";
 import { useNavigate } from "react-router-dom";
 import { useIntelligenceBarActions, usePublishIntelligenceBarPageData } from "../../hooks/useIntelligenceBarPageData";
+import { useUnsavedLeaveGuard } from "../../hooks/useUnsavedLeaveGuard";
 import { ActionFeedback, Button, Badge, Card, Checkbox, Field, Input, Select, Textarea, UiSurface, cn } from "../../components/ui";
 import { hasIncludedReentryGuarantee } from "@estimate-purchased-warranty";
 import { buildLinePriceOverridesPayload, overridableLines } from "../../lib/linePriceOverrides";
@@ -2554,39 +2555,7 @@ export default function EstimateToolViewV2({
     property_id: viewedEstimateReady ? form.propertyId || null : null,
     estimate_id: viewedEstimateReady ? savedId || editMode?.id || editEstimateId || null : null });
   const openMessages = useCustomerSms();
-  useEffect(() => {
-    if (!dirty) return undefined;
-    const beforeUnload = (event) => { event.preventDefault(); event.returnValue = ""; };
-    const guardLink = (event) => {
-      const link = event.target.closest?.("a[href]");
-      if (!link || link.target === "_blank" || event.metaKey || event.ctrlKey || link.hash) return;
-      if (!window.confirm("Leave this estimate with unsaved changes?")) {
-        event.preventDefault(); event.stopPropagation();
-      }
-    };
-    // Browser Back/Forward does not click an anchor. BrowserRouter tracks
-    // an index on each entry, letting cancellation restore that entry before
-    // its ordinary popstate listener can unmount this unsaved editor.
-    const entryIndex = window.history.state?.idx;
-    let restoring = false;
-    const guardHistory = (event) => {
-      if (restoring) { restoring = false; event.stopImmediatePropagation(); return; }
-      const nextIndex = event.state?.idx;
-      if (!Number.isInteger(entryIndex) || !Number.isInteger(nextIndex) || entryIndex === nextIndex) return;
-      if (window.confirm("Leave this estimate with unsaved changes?")) return;
-      event.stopImmediatePropagation();
-      restoring = true;
-      window.history.go(entryIndex - nextIndex);
-    };
-    window.addEventListener("popstate", guardHistory, true);
-    window.addEventListener("beforeunload", beforeUnload);
-    document.addEventListener("click", guardLink, true);
-    return () => {
-      window.removeEventListener("popstate", guardHistory, true);
-      window.removeEventListener("beforeunload", beforeUnload);
-      document.removeEventListener("click", guardLink, true);
-    };
-  }, [dirty]);
+  useUnsavedLeaveGuard(dirty, "Leave this estimate with unsaved changes?");
 
   // Multi-property group: anchor id set when the operator chains "Add another
   // property" off a saved estimate (the next save joins the anchor's group via

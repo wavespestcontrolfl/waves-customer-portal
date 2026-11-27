@@ -90,4 +90,38 @@ describe('saved estimate send confirmation',()=>{
   expect(screen.getByRole('radio',{name:'Text message and email',exact:true})).toBeDisabled();
   expect(screen.getByRole('radio',{name:'Email',exact:true})).not.toBeDisabled();
  });
+ it('unlocks channel/schedule controls and uses a fresh attempt key after a pre-dispatch 400 rejection',async()=>{
+  let posts=0;
+  const fetcher=vi.fn((url,opts)=>{
+   if(opts?.method!=='POST') return json(preview);
+   posts++;
+   if(posts===1) return json({error:'SMS channel unavailable'},400);
+   return json({sent:true,channels:{email:{ok:true,real:true}}});
+  });vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Text message',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('SMS channel unavailable');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('Retrying checks the same attempt');
+  const emailRadio=screen.getByRole('radio',{name:'Email',exact:true});
+  expect(emailRadio).not.toBeDisabled();
+  fireEvent.click(emailRadio);
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByText(/provider accepted; delivery not confirmed/)).toBeInTheDocument();
+  const bodies=fetcher.mock.calls.filter(([,o])=>o?.method==='POST').map(([,o])=>JSON.parse(o.body));
+  expect(bodies).toHaveLength(2);
+  expect(bodies[0].sendMethod).toBe('sms');
+  expect(bodies[1].sendMethod).toBe('email');
+  expect(bodies[1].idempotencyKey).not.toBe(bodies[0].idempotencyKey);
+ });
+ it('handles non-JSON 502 error bodies without throwing a JSON parse crash',async()=>{
+  const fetcher=vi.fn((url,opts)=>opts?.method==='POST'
+   ? Promise.resolve({ok:false,status:502,json:async()=>{throw new SyntaxError('Unexpected token <');}})
+   : json(preview));
+  vi.stubGlobal('fetch',fetcher);
+  render(<EstimateSendDialog request={{id:preview.id}} onClose={vi.fn()}/>);
+  fireEvent.click(await screen.findByRole('radio',{name:'Email',exact:true}));
+  fireEvent.click(screen.getByRole('button',{name:'Confirm send'}));
+  expect(await screen.findByRole('alert')).toHaveTextContent('The saved estimate is retained. Retrying checks the same attempt.');
+ });
 });

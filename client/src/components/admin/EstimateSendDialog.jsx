@@ -3,11 +3,50 @@ import { createPortal } from "react-dom";
 import { ActionFeedback, Button, Checkbox, Field, Input, Radio, UiSurface } from "../ui";
 import useModalFocus from "../../hooks/useModalFocus";
 import { etDatetimeLocalToISO } from "../../lib/timezone";
+import { adminLoginUrl } from "../../utils/admin-fetch";
 
+const API_BASE = import.meta.env.VITE_API_URL || "/api";
 const SendContext = createContext(null);
 const headers = () => ({ "Content-Type": "application/json", Authorization: `Bearer ${localStorage.getItem("waves_admin_token")}` });
 const CHANNEL_LABELS = { sms: "Text message", email: "Email", both: "Text message and email" };
 const palmsLabel = (count) => `${count} palm${count === 1 ? "" : "s"}`;
+
+async function parseJsonSafe(response) {
+  try { return await response.json(); } catch { return {}; }
+}
+
+function isPreDispatchRejection(status, data) {
+  if (data?.channels) return false;
+  if (status === 400 || status === 422) return true;
+  return status === 409 && data?.code !== "SEND_OUTCOME_UNCERTAIN";
+}
+
+function validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt }) {
+  let scheduled = null;
+  if (scheduledAt) {
+    // The portal is Eastern-only. An offset supplied by the selected date's
+    // ET calendar avoids interpreting a datetime-local value in another zone.
+    const when = new Date(etDatetimeLocalToISO(scheduledAt));
+    if (!Number.isFinite(when.getTime()) || when <= new Date()) {
+      return { error: "Choose a future send time in Eastern time." };
+    }
+    scheduled = when.toISOString();
+  }
+  const palmsToCount = preview.satellitePalmCount;
+  let confirmedPalmCount = null;
+  if (palmsToCount != null && !hasAttempt) {
+    if (!palmCount) {
+      return { error: "Type the number of palms you counted on the aerial photo." };
+    }
+    confirmedPalmCount = Number(palmCount);
+    if (confirmedPalmCount !== palmsToCount) {
+      return {
+        error: `You counted ${palmsLabel(confirmedPalmCount)}, but this quote priced ${palmsToCount}. Rebuild the quote with ${palmsLabel(confirmedPalmCount)} in the estimate builder, then send it.`,
+      };
+    }
+  }
+  return { scheduled, confirmedPalmCount };
+}
 
 export function useEstimateSend() {
   return useContext(SendContext);
@@ -54,9 +93,13 @@ export default function EstimateSendDialog({ request, onClose }) {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`/api/admin/estimates/${request.id}/send-preview`, { headers: headers(), signal: controller.signal })
+    fetch(`${API_BASE}/admin/estimates/${request.id}/send-preview`, { headers: headers(), signal: controller.signal })
       .then(async (response) => {
-        const data = await response.json();
+        if (response.status === 401) {
+          window.location.href = adminLoginUrl(window.location);
+          throw new Error("Session expired");
+        }
+        const data = await parseJsonSafe(response);
         if (!response.ok) throw new Error(data.error || "Could not load the saved estimate.");
         if (!controller.signal.aborted) setPreview(data);
       })
@@ -66,27 +109,8 @@ export default function EstimateSendDialog({ request, onClose }) {
 
   async function send() {
     if (inFlight.current || !preview || !method || outcome) return;
-    let scheduled = null;
-    if (scheduledAt) {
-      // The portal is Eastern-only. An offset supplied by the selected date's
-      // ET calendar avoids interpreting a datetime-local value in another zone.
-      const when = new Date(etDatetimeLocalToISO(scheduledAt));
-      if (!Number.isFinite(when.getTime()) || when <= new Date()) { setError("Choose a future send time in Eastern time."); return; }
-      scheduled = when.toISOString();
-    }
-    // A satellite palm count is a suggestion until the admin types the real
-    // count. A different count means the quote is rebuilt first; it is
-    // refused here, before an attempt is recorded.
-    const palmsToCount = preview.satellitePalmCount;
-    let confirmedPalmCount = null;
-    if (palmsToCount != null && !attempt.current) {
-      if (!palmCount) { setError("Type the number of palms you counted on the aerial photo."); return; }
-      confirmedPalmCount = Number(palmCount);
-      if (confirmedPalmCount !== palmsToCount) {
-        setError(`You counted ${palmsLabel(confirmedPalmCount)}, but this quote priced ${palmsToCount}. Rebuild the quote with ${palmsLabel(confirmedPalmCount)} in the estimate builder, then send it.`);
-        return;
-      }
-    }
+    const validated = validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt: !!attempt.current });
+    if (validated.error) { setError(validated.error); return; }
     inFlight.current = true;
     sendingLabel.current = submitLabel;
     setBusy(true);
@@ -94,18 +118,31 @@ export default function EstimateSendDialog({ request, onClose }) {
     // Keep the exact body/key after a transport failure. Only a new dialog is
     // a deliberate new attempt; the server returns completed attempt receipts.
     attempt.current ||= {
-      sendMethod: method, scheduledAt: scheduled,
+      sendMethod: method, scheduledAt: validated.scheduled,
       expectedEditVersion: preview.editVersion, messageVersion: preview.messageVersion,
       groupVersions: preview.groupVersions,
       idempotencyKey: crypto.randomUUID(), acknowledgeEngineReview: acknowledged,
       acknowledgeUncertainSend: acknowledged,
-      ...(confirmedPalmCount != null ? { confirmedPalmCount } : {}),
+      ...(validated.confirmedPalmCount != null ? { confirmedPalmCount: validated.confirmedPalmCount } : {}),
     };
     try {
-      const response = await fetch(`/api/admin/estimates/${request.id}/send`, {
+      const response = await fetch(`${API_BASE}/admin/estimates/${request.id}/send`, {
         method: "POST", headers: headers(), body: JSON.stringify(attempt.current),
       });
-      const data = await response.json();
+      if (response.status === 401) {
+        attempt.current = null;
+        window.location.href = adminLoginUrl(window.location);
+        setError("Session expired. Sign in again to send.");
+        return;
+      }
+      const data = await parseJsonSafe(response);
+      if (!response.ok && isPreDispatchRejection(response.status, data)) {
+        // Server rejected the request before any provider dispatch — release
+        // the attempt lock so the operator can adjust inputs and retry cleanly.
+        attempt.current = null;
+        setError(data.error || "Send could not be started. Review the details and try again.");
+        return;
+      }
       if (!response.ok && !data.channels) throw new Error(data.error || "Send failed. Your saved estimate is retained.");
       setOutcome({ ...data, status: response.status });
       if (!response.ok) setError(data.error || "No requested channel reached a provider.");

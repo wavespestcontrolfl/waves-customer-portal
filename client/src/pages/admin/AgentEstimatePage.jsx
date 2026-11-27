@@ -7,7 +7,6 @@ import {
   ChevronDown,
   ExternalLink,
   FileText,
-  MessageSquare,
   Phone,
   RefreshCw,
   Search,
@@ -22,6 +21,7 @@ import { adminFetch } from "../../utils/admin-fetch";
 import { cn, Button, Card, CardHeader, Input, Textarea, UiSurface, Dialog, DialogHeader, DialogTitle, DialogBody } from "../../components/ui";
 import PendingActionsCard from "../../components/admin/PendingActionsCard";
 import { AttachIcon } from "../../components/admin/IntelligenceBarShell";
+import { EstimateSendProvider, useEstimateSend } from "../../components/admin/EstimateSendDialog";
 
 const BUILD_PROMPT = "Build the estimate from all available evidence. If this is a recognized customer, preserve current services and price only requested additions using the selected lead account context. Verify property facts, protocols, inventory, presentation sections, and per-line margin, then propose the draft for my confirmation.";
 const NO_FALLBACK_ACTIONS = [];
@@ -354,7 +354,10 @@ export function CustomerAccountPanel({ account, profile }) {
   );
 }
 
-function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sendMessage, failedChannels = [] }) {
+function DraftSummary({ draft, contact, account, onPreview, onSendOutcome, sendMessage, failedChannels = [] }) {
+  const openSend = useEstimateSend();
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   if (!draft) {
     return <div className="p-4 text-ui-body leading-6 text-zinc-500">No Agent Estimate draft yet. Build one, review the AI basis, then confirm the draft card.</div>;
   }
@@ -363,6 +366,19 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
   // channel before delivery finalized) — the backend still permits resending,
   // so the failed-channel retry must survive that transition too.
   const retryChannels = ["sent", "viewed"].includes(draft.status) ? failedChannels : [];
+  const handleSend = async () => {
+    if (!draft?.id || sendingRef.current) return;
+    if (!canSend && retryChannels.length === 0) return;
+    sendingRef.current = true;
+    setSending(true);
+    try {
+      const outcome = await openSend(draft.id);
+      if (outcome) await onSendOutcome?.(outcome);
+    } finally {
+      sendingRef.current = false;
+      setSending(false);
+    }
+  };
   // The send endpoint delivers to the contact snapshot stored ON the
   // estimate, not the lead's current contact — display and gate on the
   // draft recipient so a post-draft lead correction can't silently send
@@ -442,59 +458,19 @@ function DraftSummary({ draft, contact, account, onPreview, onSend, sending, sen
           )}
         </div>
       )}
-      {canSend && (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          <Button variant="primary"
-            type="button"
-            disabled={!recipientPhone || recipientMismatch || sending}
-            onClick={() => onSend("sms")}
-            className="flex items-center justify-center gap-2"
-          >
-            <MessageSquare size={18} aria-hidden="true" /> Send SMS
-          </Button>
-          <Button variant="primary"
-            type="button"
-            disabled={!recipientEmail || recipientMismatch || sending}
-            onClick={() => onSend("email")}
-            className="flex items-center justify-center gap-2"
-          >
-            <Send size={18} aria-hidden="true" /> Send email
-          </Button>
-          <Button variant="secondary"
-            type="button"
-            disabled={!recipientPhone || !recipientEmail || recipientMismatch || sending}
-            onClick={() => onSend("both")}
-            className="flex items-center justify-center gap-2"
-          >
-            Send both
-          </Button>
-        </div>
+      {(canSend || retryChannels.length > 0) && (
+        <Button
+          variant="primary"
+          type="button"
+          disabled={(!recipientPhone && !recipientEmail) || recipientMismatch || sending}
+          onClick={handleSend}
+          className="flex w-full items-center justify-center gap-2"
+        >
+          <Send size={18} aria-hidden="true" />
+          {retryChannels.length > 0 ? "Review & retry send" : "Review & send"}
+        </Button>
       )}
-      {retryChannels.length > 0 && (
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {retryChannels.includes("sms") && (
-            <Button variant="primary"
-              type="button"
-              disabled={!recipientPhone || recipientMismatch || sending}
-              onClick={() => onSend("sms")}
-              className="flex items-center justify-center gap-2"
-            >
-              <MessageSquare size={18} aria-hidden="true" /> Retry SMS
-            </Button>
-          )}
-          {retryChannels.includes("email") && (
-            <Button variant="primary"
-              type="button"
-              disabled={!recipientEmail || recipientMismatch || sending}
-              onClick={() => onSend("email")}
-              className="flex items-center justify-center gap-2"
-            >
-              <Send size={18} aria-hidden="true" /> Retry email
-            </Button>
-          )}
-        </div>
-      )}
-      {sending && <div className="text-ui-body text-zinc-600">Sending estimate…</div>}
+      {sending && <div className="text-ui-body text-zinc-600">Reviewing send…</div>}
       {sendMessage && <div role="status" className="rounded-sm bg-zinc-100 p-3 text-ui-body text-zinc-800">{sendMessage}</div>}
     </div>
   );
@@ -605,26 +581,6 @@ export function LearningPanel({ leadId, user, memories, onReload }) {
   );
 }
 
-// Yellow-lane drafts 409 their FIRST send until the operator acknowledges the
-// engine's review reasons, and a satellite palm count 409s until the operator
-// types the count from the aerial photo — the
-// same confirm-and-retry contract as the estimates pipeline page. Returns the
-// answers with the new one added; throws on a cancel or any other error.
-export function answerSendGate(error, answers) {
-  if (error?.code === "ENGINE_REVIEW_REQUIRED" && !answers.acknowledgeEngineReview) {
-    if (!window.confirm(`${error.message}\n\nReviewed — send now?`)) {
-      throw new Error("Send cancelled — review the flagged reasons first.");
-    }
-    return { ...answers, acknowledgeEngineReview: true };
-  }
-  if (error?.code === "PALM_COUNT_REQUIRED" && answers.confirmedPalmCount == null) {
-    const typed = String(window.prompt(`${error.message}\n\nPalms you counted (a clump or a multi-trunk palm is one palm):`, "") ?? "").trim();
-    if (!/^\d{1,4}$/.test(typed)) throw new Error("Send cancelled — type the palm count from the aerial photo first.");
-    return { ...answers, confirmedPalmCount: Number(typed) };
-  }
-  throw error;
-}
-
 export default function AgentEstimatePage() {
   const { enabled, ready } = useFeatureFlagReady("agent_estimate", false);
   const outlet = useOutletContext() || {};
@@ -639,7 +595,6 @@ export default function AgentEstimatePage() {
   const [contextError, setContextError] = useState("");
   const [draft, setDraft] = useState(null);
   const [previewOpen, setPreviewOpen] = useState(false);
-  const [sending, setSending] = useState(false);
   const [sendMessage, setSendMessage] = useState("");
   // Channels that failed on the last (possibly partial) send. The server
   // marks the estimate sent when ANY requested channel succeeds, so these
@@ -803,64 +758,28 @@ export default function AgentEstimatePage() {
     setSearchParams(leadId ? { leadId } : {});
   };
 
-  const sendDraft = async (sendMethod) => {
-    if (!draft?.id || sending) return;
-    // A partial "both" send marks the estimate sent server-side while one
-    // channel failed — and can settle as "viewed" if the customer opens the
-    // successful channel first. The backend permits resending both, so keep
-    // a retry path for exactly the channels that failed.
-    const isRetry = ["sent", "viewed"].includes(draft.status) && failedChannels.includes(sendMethod);
-    if (!(draft.status === "draft" && draft.editable_here === true) && !isRetry) return;
-    // Capture the lead this send belongs to — if the operator switches leads
-    // before the request resolves, the completion must not mark the newly
-    // selected draft as sent or reload the old lead under the new URL.
+  const handleSendOutcome = async (outcome) => {
+    if (!draft?.id || !outcome) return;
     const sendLeadId = selectedLeadId;
-    setSending(true);
-    setSendMessage("");
-    try {
-      const postSend = ({ acknowledgeEngineReview = false, confirmedPalmCount = null } = {}) => adminFetch(`/admin/estimates/${draft.id}/send`, {
-        method: "POST",
-        body: JSON.stringify({
-          sendMethod,
-          idempotencyKey: globalThis.crypto?.randomUUID?.() || `agent-estimate-send-${Date.now()}`,
-          ...(acknowledgeEngineReview ? { acknowledgeEngineReview: true } : {}),
-          ...(confirmedPalmCount != null ? { confirmedPalmCount } : {}),
-        }),
-      });
-      // Each send gate is answered once, so at most three tries
-      // (answerSendGate throws on anything it does not ask).
-      let answers = {};
-      let data;
-      let sent = false;
-      for (let tries = 0; !sent && tries < 3; tries += 1) {
-        try {
-          data = await postSend(answers);
-          sent = true;
-        } catch (error) {
-          answers = answerSendGate(error, answers);
-        }
-      }
-      if (activeLeadRef.current !== sendLeadId) return;
-      const label = sendMethod === "sms" ? "SMS" : sendMethod === "email" ? "email" : "SMS and email";
-      const channelIssues = Object.entries(data.channels || {})
-        .filter(([, value]) => value && !value.ok)
-        .map(([channel, value]) => `${channel}: ${value.error || "failed"}`);
-      const failed = channelIssues.length
-        ? Object.entries(data.channels || {}).filter(([, value]) => value && !value.ok).map(([channel]) => channel)
-        : [];
-      setFailedChannels(failed);
-      storeFailedChannels(draft.id, failed);
-      setSendMessage(channelIssues.length
-        ? `Estimate sent with an issue — ${channelIssues.join("; ")}. Retry the failed channel below.`
-        : `Estimate sent by ${label}.`);
-      setDraft((current) => ({ ...current, status: "sent" }));
-      await loadContext();
-    } catch (error) {
-      if (activeLeadRef.current !== sendLeadId) return;
-      setSendMessage(`Send failed: ${error.message}`);
-    } finally {
-      setSending(false);
+    if (activeLeadRef.current !== sendLeadId) return;
+    const entries = Object.entries(outcome.channels || {});
+    const failed = entries.filter(([, value]) => value && !value.ok).map(([channel]) => channel);
+    const channelIssues = entries
+      .filter(([, value]) => value && !value.ok)
+      .map(([channel, value]) => `${channel}: ${value.error || "failed"}`);
+    setFailedChannels(failed);
+    storeFailedChannels(draft.id, failed);
+    setSendMessage(
+      outcome.scheduled
+        ? "Estimate scheduled for delivery."
+        : channelIssues.length
+          ? `Estimate sent with an issue — ${channelIssues.join("; ")}. Open Review & retry send to try again.`
+          : "Estimate sent.",
+    );
+    if (!outcome.scheduled && entries.some(([, value]) => value && value.ok)) {
+      setDraft((current) => (current ? { ...current, status: "sent" } : current));
     }
+    await loadContext();
   };
 
   const evidenceCount = useMemo(() => (
@@ -1065,7 +984,7 @@ export default function AgentEstimatePage() {
                     <Button variant="secondary"
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={intelligence.loading || intelligence.attachmentsLoading}
+                      disabled={askDisabled || intelligence.attachmentsLoading}
                       className="flex items-center justify-center gap-2"
                     >
                       <AttachIcon /> Add photo
@@ -1140,16 +1059,17 @@ export default function AgentEstimatePage() {
 
         <aside className="min-w-0 space-y-4 xl:sticky xl:top-0">
           <SectionCard title="Draft + send" subtitle="The customer receives nothing until you tap a send button.">
-            <DraftSummary
-              draft={draft}
-              contact={contact}
-              account={context?.customer_account}
-              onPreview={(event) => { event.currentTarget.focus({ preventScroll: true }); setPreviewOpen(true); }}
-              onSend={sendDraft}
-              sending={sending}
-              sendMessage={sendMessage}
-              failedChannels={failedChannels}
-            />
+            <EstimateSendProvider>
+              <DraftSummary
+                draft={draft}
+                contact={contact}
+                account={context?.customer_account}
+                onPreview={(event) => { event.currentTarget.focus({ preventScroll: true }); setPreviewOpen(true); }}
+                onSendOutcome={handleSendOutcome}
+                sendMessage={sendMessage}
+                failedChannels={failedChannels}
+              />
+            </EstimateSendProvider>
             {previewUrl && (
               <div className="hidden border-t border-zinc-200 p-3 lg:block">
                 <iframe title="Customer estimate preview" src={previewUrl} className="h-[720px] w-full rounded-sm border border-zinc-200 bg-white" />

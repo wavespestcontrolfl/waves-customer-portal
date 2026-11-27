@@ -7,6 +7,7 @@ import {
 } from "../../components/ui";
 import { useAdminTableScroll } from "../../hooks/useAdminTableScroll";
 import { useAdminTableViews } from "../../hooks/useAdminTableViews";
+import { useUnsavedLeaveGuard } from "../../hooks/useUnsavedLeaveGuard";
 import { normalizeTableColumns } from "../../lib/adminTableViewStorage";
 import { adminFetch } from "../../lib/adminFetch";
 import { etDatetimeLocalValue, formatETDate, formatETTime } from "../../lib/timezone";
@@ -238,6 +239,9 @@ function BidTable({ bids, selectedId, onSelect, visibleColumns = ALL_BID_COLUMNS
 // A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
 const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
 const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE || message === RELOAD_FAILED_MESSAGE;
+const isBidDetailDirty = (bid, dueEditedAt, status, note) => Boolean(
+  bid && (dueEditedAt !== null || status !== bid.status || note !== (bid.decision_note || "")),
+);
 
 function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
@@ -332,6 +336,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   };
 
   const { bid, emails, extras } = state;
+  const dirty = isBidDetailDirty(bid, dueEditedAt, status, note);
+  useUnsavedLeaveGuard(dirty, "Leave this bid with unsaved changes?");
+  const handleClose = () => {
+    if (!dirty || window.confirm("Leave this bid with unsaved changes?")) onClose();
+  };
   if (state.loading && !bid) return <Card><CardBody>Loading…</CardBody></Card>;
   if (state.error) return <ActionFeedback error onRetry={load}>{state.error}</ActionFeedback>;
   if (!bid) return null;
@@ -349,7 +358,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
               <div className="text-ui-body text-ink-secondary">Lead on the invite: {[bid.buyer_name, bid.buyer_email].filter(Boolean).join(" · ")}</div>
             )}
           </div>
-          <Button size="sm" variant="ghost" onClick={onClose}>Close</Button>
+          <Button size="sm" variant="ghost" onClick={handleClose}>Close</Button>
         </div>
 
         <div className="mb-4 grid gap-1 rounded-sm border-hairline border-zinc-200 bg-zinc-50 px-3 py-2 text-ui-body">
