@@ -7,15 +7,28 @@ runner installs no packages and performs no migrations at startup.
 
 The root `.nvmrc` selects Node 20 for development and all jobs in the main CI
 workflow. Use your version manager to select it before installing dependencies.
-With nvm already installed, select the Node version and install dependencies (`~/.claude/bin/npm-ci-serial` on the owner's multi-session Mac — never bare `npm ci`, failing closed if the wrapper is unavailable; `npm ci` in isolated CI, cloud sandboxes, or other single-user machines):
+With nvm already installed, select the Node version, install dependencies, and start the frontend using the block for your environment (on the owner's multi-session Mac, never run bare `npm ci` — the wrapper fails closed if unavailable):
+
+On the owner's multi-session Mac:
 
 ```sh
-nvm install
-nvm use
-~/.claude/bin/npm-ci-serial
-npm run worktree:setup
-npm run dev:doctor -- --frontend
-npm run dev:managed-client
+nvm install \
+  && nvm use \
+  && ~/.claude/bin/npm-ci-serial \
+  && npm run worktree:setup \
+  && npm run dev:doctor -- --frontend \
+  && npm run dev:managed-client
+```
+
+In isolated CI, cloud sandboxes, or other single-user machines:
+
+```sh
+nvm install \
+  && nvm use \
+  && npm ci \
+  && npm run worktree:setup \
+  && npm run dev:doctor -- --frontend \
+  && npm run dev:managed-client
 ```
 
 The file selects a major line, not an exact patch; Node 24.22.1 is the minimum
