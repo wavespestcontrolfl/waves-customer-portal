@@ -3733,6 +3733,15 @@ async function handleChargeRefunded(charge) {
             return combinedRows.find((r) => r.customer_id && !(r.status === 'canceled' && rowMeta(r).superseded_reason)) || combinedRows[0] || null;
           }
         }
+        if (isFullRefund && combinedRows.every((r) => rowMeta(r).pre_settlement && r.status === 'refunded')) {
+          combinedRefundAlerts.push(buildPreSettlementFullRefundAlert({
+            chargeId,
+            paymentIntentId: charge.payment_intent || combinedRows[0]?.stripe_payment_intent_id || null,
+            refundId,
+            refundAmountDollars,
+          }));
+          return combinedRows[0] || null;
+        }
         if (!isFullRefund) {
           logger.error(`[stripe-webhook] PARTIAL refund on combined charge ${chargeId} — cannot attribute to a share; parked for operator`);
           await trx('stripe_orphan_charges')
@@ -4043,15 +4052,16 @@ async function handleChargeRefunded(charge) {
               ...(refundId ? { stamped_refund_ids: [refundId] } : {}),
             }),
           }).returning('*');
-          // Commit the alert inside the same transaction as refundFence so a
-          // crash after commit cannot strand the alert (on retry, refundFence
-          // already exists and bypasses this pre-settlement branch).
-          await emitPreSettlementFullRefundAlert(trx, {
+          // Queue alert for post-commit dispatch so a bell write failure can
+          // NEVER roll back refundFence (and release the settlement lock).
+          // On retry after a crash or failed alert, the committed pre_settlement
+          // marker re-queues this exact deduped alert.
+          combinedRefundAlerts.push(buildPreSettlementFullRefundAlert({
             chargeId,
             paymentIntentId: charge.payment_intent || null,
             refundId,
             refundAmountDollars,
-          });
+          }));
           return refundFence;
         }
       }
@@ -7422,39 +7432,46 @@ async function alertMixedRefund({ invoiceId, handCents }, { chargeId, refundId }
   }
 }
 
+// Post-commit dispatch for combined-charge refund alerts. Runs AFTER the
+// payment/orphan-charge transaction commits so a bell failure never rolls back
+// money locks or refund fences. Does NOT swallow failures: returning null or
+// throwing bubbles HTTP 500 to Stripe so the idempotent webhook retries the
+// deduped alert from the durable record.
 async function emitCombinedRefundAlerts(alerts) {
   if (!alerts.length) return;
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
   for (const { spec, opts } of alerts) {
-    try {
-      await raiseAdminAlert('billing', spec, opts);
-    } catch { /* non-critical */ }
+    const res = await raiseAdminAlert('billing', spec, opts);
+    if (!res) {
+      throw new Error(`[stripe-webhook] combined refund alert failed to persist (${opts.dedupeKey})`);
+    }
   }
 }
 
-async function emitPreSettlementFullRefundAlert(trx, { chargeId, paymentIntentId, refundId, refundAmountDollars }) {
-  const { raiseAdminAlert } = require('../services/admin-alert-compose');
-  await raiseAdminAlert('billing', {
-    area: 'Billing',
-    action: 'review a pre-settlement combined refund',
-    why: `A $${Number(refundAmountDollars).toFixed(2)} combined payment was refunded before settlement, so settlement was fenced.`,
-    severity: 'needs-you',
-    link: '/admin/revenue',
-    subject: { type: 'check', id: `combined-refund:${chargeId}` },
-    doneWhen: 'refund_reviewed',
-    who: 'person',
-  }, {
-    bell: true,
-    trx,
-    dedupeKey: `combined-presettlement-full:${chargeId}:${refundId || 'unknown'}`,
-    detail: `Charge ${chargeId} (combined PI ${paymentIntentId}) was fully refunded for $${refundAmountDollars} before settlement — settlement is fenced; no invoice was marked paid.`,
-    metadata: {
-      stripe_charge_id: chargeId,
-      stripe_payment_intent_id: paymentIntentId,
-      stripe_refund_id: refundId || null,
-      amount: refundAmountDollars,
+function buildPreSettlementFullRefundAlert({ chargeId, paymentIntentId, refundId, refundAmountDollars }) {
+  return {
+    spec: {
+      area: 'Billing',
+      action: 'review a pre-settlement combined refund',
+      why: `A $${Number(refundAmountDollars).toFixed(2)} combined payment was refunded before settlement, so settlement was fenced.`,
+      severity: 'needs-you',
+      link: '/admin/revenue',
+      subject: { type: 'check', id: `combined-refund:${chargeId}` },
+      doneWhen: 'refund_reviewed',
+      who: 'person',
     },
-  });
+    opts: {
+      bell: true,
+      dedupeKey: `combined-presettlement-full:${chargeId}:${refundId || 'unknown'}`,
+      detail: `Charge ${chargeId} (combined PI ${paymentIntentId}) was fully refunded for $${refundAmountDollars} before settlement — settlement is fenced; no invoice was marked paid.`,
+      metadata: {
+        stripe_charge_id: chargeId,
+        stripe_payment_intent_id: paymentIntentId,
+        stripe_refund_id: refundId || null,
+        amount: refundAmountDollars,
+      },
+    },
+  };
 }
 
 // The facts the remove compares the locked invoice against, or null when this

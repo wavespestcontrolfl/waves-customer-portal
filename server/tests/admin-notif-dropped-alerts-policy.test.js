@@ -285,10 +285,10 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     }
   });
 
-  test('source pin: combined-refund sites use raiseAdminAlert with bell:true (pre-settlement full commits in trx) and no-show hold sites use raiseAdminAlert with bell:true', () => {
+  test('source pin: all 4 combined-refund sites queue post-commit raiseAdminAlert with bell:true (propagating failures for Stripe retry) and no-show hold sites use raiseAdminAlert with bell:true', () => {
     const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     expect(stripeSrc).toMatch(/await emitCombinedRefundAlerts\(combinedRefundAlerts\);/);
-    expect(stripeSrc).toMatch(/async function emitCombinedRefundAlerts\(alerts\)[\s\S]*?raiseAdminAlert\('billing', spec, opts\)/);
+    expect(stripeSrc).toMatch(/async function emitCombinedRefundAlerts\(alerts\)[\s\S]*?const res = await raiseAdminAlert\('billing', spec, opts\);\s*if \(!res\) \{\s*throw new Error/);
     for (const key of [
       'combined-partial-refund:',
       'combined-cumulative-refund:',
@@ -303,11 +303,12 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     }
     const preFullIdx = stripeSrc.indexOf('combined-presettlement-full:');
     expect(preFullIdx).toBeGreaterThan(-1);
-    const preFullSnippet = stripeSrc.slice(Math.max(0, preFullIdx - 950), preFullIdx + 120);
-    expect(preFullSnippet).toMatch(/raiseAdminAlert\('billing'/);
+    const preFullSnippet = stripeSrc.slice(Math.max(0, preFullIdx - 700), preFullIdx + 120);
+    expect(preFullSnippet).toMatch(/function buildPreSettlementFullRefundAlert/);
     expect(preFullSnippet).toMatch(/bell:\s*true/);
-    expect(preFullSnippet).toMatch(/\btrx,/);
-    expect(stripeSrc).toMatch(/await emitPreSettlementFullRefundAlert\(trx,/);
+    expect(stripeSrc).toMatch(/combinedRefundAlerts\.push\(buildPreSettlementFullRefundAlert\(/);
+    // Re-queued on retry when refundFence already committed.
+    expect(stripeSrc).toMatch(/combinedRows\.every\(\(r\) => rowMeta\(r\)\.pre_settlement && r\.status === 'refunded'\)/);
 
     const apptSrc = fs.readFileSync(path.join(__dirname, '../services/appointment-reminders.js'), 'utf8');
     for (const key of ['held_notice_contact_enqueue_failed', 'no-show-notice-held:', 'no-show-email-held:']) {
