@@ -195,13 +195,17 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       // A call that records the person as a TENANT also marks a contact spot of this customer that already holds the number
       // (deny only: a tenant never reaches the service reports). It takes the customers row, the same lock the holder's
       // contacts save holds while it reads tenant records, so neither order leaves a roleless tenant (owner 2026-11-27).
-      if (String(entry.role || '').trim().toLowerCase() === 'tenant') await markTenantSlots(trx, visit.customer_id, entry.phoneKey);
+      if (isTenantRole(entry.role)) await markTenantSlots(trx, visit.customer_id, entry.phoneKey);
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source');
       // A row bound to this customer stands as it is, unless it is a copy this customer does not list (a merge moved it here):
       // that grants nothing, so like any ineligible row it is replaced by a fresh row with a NEW id (main's rule above).
       const stands = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)
         && (existing.source !== REMINDER_SOURCE || await listedBy(visit.customer_id, entry.phoneKey, trx));
-      if (stands) return 'kept';
+      if (stands) {
+        // The row stands (same id, scope, claims), but a tenant answer is kept on it: tenant records are read from these rows.
+        if (isTenantRole(entry.role)) await trx(TABLE).where({ id: existing.id }).update({ role: 'tenant' });
+        return 'kept';
+      }
       if (existing) await trx(TABLE).where({ id: existing.id }).del();
       await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
@@ -229,6 +233,10 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
     result.recorded.push({ phoneKey: entry.phoneKey, created: outcome === 'created' });
   }
   return result;
+}
+
+function isTenantRole(role) {
+  return String(role || '').trim().toLowerCase() === 'tenant';
 }
 
 // Set the tenant role on every contact spot of the customer that holds this number. Never clears or widens a role.
@@ -970,12 +978,7 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
   // Numbers waiting on their own YES reply: the holder's save keeps that hold, so it cannot give sign-in.
   const held = unconsentedSlotPhoneKeys(customer || {});
   const tenantKeys = await tenantPhoneKeys(customerId, { conn });
-  // A number that is someone's own Waves account signs in as that account (the login's holder-first rule), never as a contact.
-  const ownAccount = new Set();
-  if (loginLive) {
-    const { holderLoginIdentity } = require('../routes/auth');
-    for (const row of rows) if (await holderLoginIdentity(row.phone_e164)) ownAccount.add(row.phone_key);
-  }
+  const ownAccount = loginLive ? await ownAccountKeys(rows, conn) : new Set();
   const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
   return rows.map((row) => ({
     id: row.id,
@@ -996,6 +999,28 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     canGiveAppAccess: loginLive && !tenantKeys.has(row.phone_key) && !held.has(row.phone_key) && !ownAccount.has(row.phone_key)
       && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
   }));
+}
+
+/**
+ * Listed numbers that are someone's own Waves account: such a number signs in as that account (the login's holder-first
+ * rule), never as a contact. One query finds the candidate numbers; only those go through the login's own admission
+ * check. Errors carry a code only (no phone number reaches a log).
+ */
+async function ownAccountKeys(rows, conn) {
+  const keys = [...new Set(rows.map((r) => r.phone_key).filter(Boolean))];
+  if (!keys.length) return new Set();
+  try {
+    const hits = await conn('customers').whereNull('deleted_at')
+      .whereRaw("right(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), 10) = ANY(?)", [keys])
+      .select(conn.raw("right(regexp_replace(coalesce(phone, ''), '[^0-9]', '', 'g'), 10) AS phone_key"));
+    const candidates = new Set(hits.map((h) => h.phone_key));
+    const { holderLoginIdentity } = require('../routes/auth');
+    const own = new Set();
+    for (const row of rows) if (candidates.has(row.phone_key) && await holderLoginIdentity(row.phone_e164)) own.add(row.phone_key);
+    return own;
+  } catch {
+    throw Object.assign(new Error('own-account check failed'), { code: 'REMINDER_OWN_ACCOUNT_UNREADABLE' });
+  }
 }
 
 /**

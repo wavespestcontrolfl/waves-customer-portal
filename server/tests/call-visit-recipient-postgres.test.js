@@ -553,6 +553,23 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           expect(row.service_contact_role).toBeNull();
         });
 
+        test('a later call naming an existing visit recipient a tenant keeps the row and records the tenant: no app access', async () => {
+          await record();
+          const [before] = await rows();
+          await db('visit_text_recipients').where({ id: before.id }).update({ deliveries: JSON.stringify({ 'confirmation:x': { token: 't' } }) });
+          await record({}, entry({ role: 'tenant' }));
+          const [after] = await rows();
+          expect(after).toMatchObject({ id: before.id, role: 'tenant' });
+          expect(after.deliveries).toEqual({ 'confirmation:x': { token: 't' } });
+          expect([...(await VisitRecipient.tenantPhoneKeys(customerId))]).toEqual([BOB.slice(-10)]);
+          process.env.GATE_CONTACT_LOGIN = 'true';
+          try {
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
+          } finally {
+            delete process.env.GATE_CONTACT_LOGIN;
+          }
+        });
+
         test('a repeat stop keeps the first stop; another customer\'s id changes nothing', async () => {
           await record();
           const first = await stopBob('customer');
