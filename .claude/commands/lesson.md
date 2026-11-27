@@ -28,9 +28,10 @@ conversation: what was done wrong, what the correction was.)
    file that must not change a certain way, a security invariant). Add it
    under the correct severity (P0 / P1 / out-of-scope) and cite the
    `file:line` it protects, matching the existing entries. Rules here are
-   enforced by both Codex (pre-push hook + @codex bot) and Claude reviews.
-   The file has a 30 KB budget (`npm run check:domain-rules` fails past
-   it; Codex truncates at 32 KiB) — run the check after editing, and if
+   enforced by Codex (pre-push hook + `@codex` GitHub bot).
+   The file has a 26 KB budget (`npm run check:domain-rules` fails past
+   it so `~/.codex/AGENTS.md` + repo `AGENTS.md` stay inside Codex's 32 KiB
+   cumulative cap) — run the check after editing, and if
    you are over, cut narration from the class you are extending rather
    than dropping a rule.
 3. **`docs/public-route-contracts.md`** — if the lesson is the security
