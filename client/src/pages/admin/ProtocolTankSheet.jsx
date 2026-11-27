@@ -10,14 +10,135 @@ const TANK_MIX_CATEGORIES = new Set([
   "solution_sl", "liquid_fertilizer", "adjuvant_last",
 ]);
 
-// Amounts come from the existing server calculation. Never scale a different
-// rig's output or turn an optional product into a selected tank ingredient.
-export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] }) {
+const unitText = (unit) => String(unit || "").replaceAll("_", " ");
+const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 3 });
+const fillText = (fill) => `${num(fill.amount)} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
+const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
+const isSpreader = (item) => item.tankAmounts?.application === "spreader";
+const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+// How a product goes on, from the program's own mix marks: a spreader; added to another product's mix (the surfactant and
+// Certainty in the Celsius weed mix); the base of a mix others are added to; the Bermuda removal step's one shared tank; applied
+// alone. With no mark, neutral wording.
+// The one test every mix instruction uses: a product is in today's mix only when it is selected for this sheet and not blocked
+// (a Bermuda step the server marks unavailable, a field hold), at a limit, held, skipped, or a spreader product.
+const BLOCKED_PLAN_STATES = new Set(["capped", "held", "unavailable"]);
+const mixReady = (item) => Boolean(item.selected && !item.unavailable && !item.fieldHold && !item.tankAmounts?.skipped
+  && !BLOCKED_PLAN_STATES.has(item.tankAmounts?.planState) && !isSpreader(item));
+const mixesInto = (additive, base) => Boolean(additive.tankAmounts?.mixWith) && nameKey(base.product.name).startsWith(nameKey(additive.tankAmounts.mixWith));
+const GRANULAR_METHOD = { hand_shaker: "Hand shaker", spreader: "Spreader" };
+
+// The Bermuda removal step's shared tank, by product id from the server's step order (lawn-bermuda-removal.js mixOrderField:
+// water, Recognition, Fusilade II, the surfactant last). The server sends no order for a blocked step, and the line shows only
+// when every step product on the sheet is ready.
+function sharedTank(item, products, order) {
+  const steps = (order || []).filter((step) => step.productId);
+  const ids = steps.map((step) => String(step.productId));
+  const stepItems = products.filter((other) => other.bermudaStep);
+  if (!ids.includes(String(item.product.id)) || !stepItems.every((other) => mixReady(other) && ids.includes(String(other.product.id)))) return null;
+  return `Same tank: ${steps.map((step) => step.productName).join(" + ")}`;
+}
+
+function applicationMethod(item, products, order) {
+  const amounts = item.tankAmounts || {};
+  if (isSpreader(item)) return GRANULAR_METHOD[amounts.applicator] || "Spreader";
+  const neutral = amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
+  if (!mixReady(item)) return neutral;
+  // A Bermuda step line never takes the name marks below (they point at each other): the shared tank, or neutral wording.
+  if (item.bermudaStep) return sharedTank(item, products, order) || neutral;
+  if (products.some((base) => mixReady(base) && mixesInto(item, base))) return `Add to the ${amounts.mixWith} mix`;
+  const partners = products.filter((other) => mixReady(other) && mixesInto(other, item));
+  return partners.length ? `Tank with: ${partners.map((other) => other.product.name).join(", ")}` : neutral;
+}
+
+// The Celsius label's heat rule (server: lawn-weed-mix.js), on the surfactant card and the Celsius card whenever the sheet tells
+// them to mix.
+function surfactantNote(item, products) {
+  // The surfactant's own card always carries it, selected or not; the Celsius card when the sheet tells them to mix.
+  const own = item.tankAmounts?.surfactantNote;
+  if (own) return own;
+  if (!mixReady(item)) return null;
+  return products.find((other) => mixReady(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
+}
+
+// A program volume the sprayer's test does not put out (server: the pass count), named for the use it applies to.
+const sentenceCase = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+// "Use the other sprayer" only when the server found another sprayer on this sheet tested at the label volume.
+function volumeAdvice({ labelGalPer1000: label, testedGalPer1000: tested, passes, otherSprayerName }) {
+  const other = otherSprayerName ? `, or use ${otherSprayerName} (tested at ${num(label)})` : "";
+  if (passes) return `Make ${passes} passes, or slow down to reach the label volume.`;
+  return `${tested > label ? "Speed up" : "Slow down"} to reach ${num(label)}${other}.`;
+}
+const volumeText = (check) => [
+  check.use ? `${sentenceCase(check.use)}:` : null,
+  `Label volume is ${num(check.labelGalPer1000)} gal per 1,000. ${check.sprayerName || "This sprayer"} was tested at ${num(check.testedGalPer1000)}.`,
+  volumeAdvice(check),
+].filter(Boolean).join(" ");
+const PLAN_STATE_NOTES = {
+  capped: "Limit reached: do not apply at this visit.",
+  held: "City hold: do not apply at this visit.",
+  unavailable: "No program rate: catalog rate shown.",
+};
+
+// A volume stated for one use of the line (October Velista, large patch at 2 gal per 1,000 sq ft): that use's own fills.
+const useRows = (useFills = []) => useFills.flatMap((use) => [["100 gal", use.per100Gal], ["FlowZone 4 gal", use.backpack4Gal]]
+  .filter(([, fill]) => fill)
+  .map(([label, fill]) => [`${label}, ${use.use}`, `${fillText(fill)} at ${num(use.carrierGalPer1000)} gal per 1,000 sq ft`]));
+
+// One product's fill amounts (server: lawn-tank-reference.js) as [label, text] rows, and the one amount the heading shows.
+const headingFill = (fill, backpack) => `${fillText(fill)} / ${num(fill.gallons)} gal${fill === backpack ? " FlowZone" : ""}`;
+
+// The card heading: the full tank, else 100 gal, else FlowZone. A card with only per-use fills (October Velista with no FlowZone
+// test) shows the first of them, never "No amount".
+function amountHeading(amounts) {
+  const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
+  if (main) return headingFill(main, amounts.backpack4Gal);
+  const use = (amounts.useFills || []).find((entry) => entry.per100Gal || entry.backpack4Gal);
+  return use ? `${headingFill(use.per100Gal || use.backpack4Gal, use.backpack4Gal)}, ${use.use}` : "No amount";
+}
+
+function amountRows(amounts) {
+  if (!amounts) return { rows: [], heading: "No amount" };
+  if (amounts.skipped) return { rows: [], heading: "Skipped this round" };
+  const rate = amounts.ratePer1000 ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} per 1,000 sq ft` : null;
+  if (amounts.application === "spreader") {
+    return { rows: [["Rate", rate || "Rate not on file. Use the label rate."]], heading: rate ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} / 1,000 sq ft` : "No amount" };
+  }
+  const rows = [["Rate", amounts.concentrationPercent ? `${num(amounts.concentrationPercent)}% of the spray volume` : rate || "Not on file. Use the label rate."]];
+  if (amounts.per100Gal) rows.push(["100 gal tank", fillText(amounts.per100Gal)]);
+  if (amounts.fullTank) rows.push([`Full ${num(amounts.fullTank.gallons)} gal tank`, fillText(amounts.fullTank)]);
+  // A backpack amount names the FlowZone unit whose test it used.
+  if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", `${fillText(amounts.backpack4Gal)}${amounts.backpack4Gal.sprayerName ? ` · ${amounts.backpack4Gal.sprayerName} test` : ""}`]);
+  else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
+  if (amounts.fixedCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.fixedCarrierGalPer1000)} gal per 1,000 sq ft (${CARRIER_SOURCE[amounts.fixedCarrierSource]})`]);
+  rows.push(...useRows(amounts.useFills));
+  return { rows, heading: amountHeading(amounts) };
+}
+
+// The checks that once withheld a product's amount, now short warnings beside it (owner 2026-11-26: warn, never hide).
+function productCautions(item, exclusions, products) {
+  const { product, tankAmounts: amounts = {} } = item;
+  // The whole species only: a named cultivar exclusion (Floratam, an unknown cultivar) stays on the excluded-turf line.
+  const excludesDefaultTurf = exclusions.some((species) => ["staugustine", "staugustinegrass"].includes(nameKey(species)));
+  return [
+    !product.labelVerifiedAt && "Label not verified in the app.",
+    excludesDefaultTurf && "Not labeled for St. Augustine.",
+    item.conditional && "Conditional: confirm the trigger first.",
+    !item.selected && "Not selected: yearly and visit limits are not checked here.",
+    amounts?.application === "spray" && !TANK_MIX_CATEGORIES.has(product.mixingOrderCategory) && "Tank mixing not set in the app. Check the label.",
+    PLAN_STATE_NOTES[amounts?.planState],
+    item.fieldHold && "On hold: see the warning above.",
+    // The program's required notes for this product, selected or not (the sheet-wide warnings list only the selected ones).
+    ...(item.gateNotes || []).filter((note) => note.severity === "required").map((note) => note.text),
+    surfactantNote(item, products),
+    ...(amounts?.volumeChecks || []).map(volumeText),
+  ].filter(Boolean);
+}
+
+// Amounts come from the server calculation, from the selected rig's last
+// sprayer test. Every check is a warning beside the amount, never in place of
+// it (owner 2026-11-26); only a missing sprayer test leaves an amount out.
+export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
-  const currentCalibration = calibration?.id === equipment?.calibrationId
-    && calibration?.calibration_status === "field_verified"
-    && (!equipment?.expiresAt || new Date(equipment.expiresAt) > new Date());
-  const tankReady = Number(equipment?.tankCapacityGal) === 110 && currentCalibration;
   const products = (plan.items || []).filter((item) => item.product);
   const sheet = (
     <>
@@ -34,34 +155,27 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
             Reference sheet, not a pesticide container label or approval to combine every product.
             Follow each product label for mixing, PPE, application restrictions and re-entry.
           </p>
-          <p className="mt-2">Each product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>
+          <p className="mt-2">Products are not approved to be combined in one tank unless their card says so.</p>
+          <p className="mt-2 font-medium">Reference amounts. Yearly and visit limits are checked on the job card, not here.</p>
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
-        {!tankReady && (
-          <p role="alert" className="rounded-md border border-alert-fg/30 bg-alert-bg p-3 text-alert-fg">
-            Tank quantities are unavailable. Select a 110-gallon tank with a current, field-verified calibration.
-          </p>
-        )}
-        {tankReady && (
+        {equipment?.carrierGalPer1000 > 0 && (
           <p className="protocol-tank-meta">
             Carrier: {equipment.carrierGalPer1000} gal per 1,000 sq ft · Full-tank coverage: {Number(equipment.tankCoverageSqft).toLocaleString("en-US")} sq ft
           </p>
         )}
-        {(plan.warnings || []).map((warning, index) => (
+        {[...(plan.warnings || []), ...(plan.blocks || [])].map((warning, index) => (
           <p key={`${warning.code}-${index}`} className="text-alert-fg">{warning.message}</p>
         ))}
         {safetyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
         {!products.length && <p>No mapped products are available for this month.</p>}
         {products.map((item, index) => {
         const product = item.product;
-        const mix = item.fullTankMix;
+        const amounts = item.tankAmounts;
+        const { rows: fills, heading } = amountRows(amounts);
         const labelLink = productLabelLink(product);
-        const tankProduct = TANK_MIX_CATEGORIES.has(product.mixingOrderCategory);
         const exclusions = product.excludedTurfSpecies || [];
-        const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "").startsWith("staugustine"));
-        const quantityChecks = [item.selected, tankReady, tankProduct, product.labelVerifiedAt, !excludesDefaultTurf,
-          Number.isFinite(mix?.amount), mix?.amount > 0, mix?.amountUnit];
-        const hasAmount = quantityChecks.every(Boolean);
+        const cautions = productCautions(item, exclusions, products);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
           ["Active ingredient", product.activeIngredient],
@@ -80,12 +194,12 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
           <section key={`${product.id}-${index}`} className="protocol-tank-product">
             <div className="field-section-heading protocol-tank-product-heading doc-keep-with-next flex flex-wrap justify-between gap-2">
               <h3>{product.name}</h3>
-              <span className="protocol-tank-meta font-mono">{hasAmount ? `${mix.amount} ${mix.amountUnit.replaceAll("_", " ")} / 110 gal` : "Quantity withheld"}</span>
+              <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            <p className="mt-2 font-medium">Separate single-product tank</p>
-            <p className="mt-2 text-zinc-600">{item.conditional ? "Conditional product — confirm its trigger before use." : "Protocol product"} {item.selected ? "Selected." : "Not selected for this tank."}</p>
-            {!tankProduct && <p className="mt-2">Tank mixing is not established for this product. Check its application method and label.</p>}
-            {!product.labelVerifiedAt && <p className="mt-2 text-alert-fg">Label verification missing.</p>}
+            <p className="mt-2 font-medium">{applicationMethod(item, products, plan.bermudaMixingOrder)}</p>
+            <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
+            {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
+            {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
             <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
             <dl className="protocol-tank-meta mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{String(value)}</dd></div>)}</dl>

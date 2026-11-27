@@ -241,7 +241,8 @@ function unreadTimedClaim(drafter, outgoingBody, { claims, liveContext }) {
 // consults (provider-boundary predicates, scheduler, Agent Review, auto-send): such a
 // failure is retryable / non-terminal, never a permanent "stale". 'eta_recheck_failed' is
 // the decision-row read / parse failure agent-decision-send-checks reports.
-const ETA_INFRASTRUCTURE_FAILURE_REASONS = Object.freeze(['eta_claim_recheck_failed', 'eta_recheck_failed', 'eta_claim_recompute_unavailable']);
+// 'route_status_recheck_failed' (texting AI gap 4): the TODAY ROUTE STATUS stop count could not be re-read.
+const ETA_INFRASTRUCTURE_FAILURE_REASONS = Object.freeze(['eta_claim_recheck_failed', 'eta_recheck_failed', 'eta_claim_recompute_unavailable', 'route_status_recheck_failed']);
 function isEtaInfrastructureFailure(reason) {
   return ETA_INFRASTRUCTURE_FAILURE_REASONS.includes(reason);
 }
@@ -495,7 +496,15 @@ async function recheckBoundClaim(claim, entries, { factsGeneratedAt, now, dbh })
  * through; the auto-send executor passes its in-memory claim copies
  * instead of round-tripping through JSON.
  */
-async function etaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, techNames: persistedTechNames = [], promptVersion = null, now = new Date(), dbh = db }) {
+// TODAY ROUTE STATUS (texting AI gap 4) runs first: a copied stop count sentence is re-derived from the route right now; a
+// changed count ('route_status_changed') or stop wording the snapshot does not hold ('route_status_unbound') refuses, an
+// unreadable route refuses as retryable ('route_status_recheck_failed'). A snapshot with no routeStatus key passes through.
+async function etaClaimBlockReason(args) {
+  const { routeStatusBlockReason } = require('./sms-route-status');
+  return (await routeStatusBlockReason({ liveEtaSnapshot: args.liveEtaSnapshot, outgoingBody: args.outgoingBody, dbh: args.dbh || db }))
+    || liveEtaClaimBlockReason(args);
+}
+async function liveEtaClaimBlockReason({ liveEtaSnapshot = null, factsGeneratedAt = null, outgoingBody, techNames: persistedTechNames = [], promptVersion = null, now = new Date(), dbh = db }) {
   // Codex round-13 P2: any /track/ link that is not the canonical origin's exact token path is refused
   // outright, claim or not.
   if (scanTrackLinks(outgoingBody).violation) return 'eta_claim_link_untrusted';

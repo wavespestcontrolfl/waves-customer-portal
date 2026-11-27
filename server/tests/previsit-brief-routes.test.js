@@ -69,6 +69,13 @@ jest.mock('../services/previsit-brief', () => ({
   VISIT_BRIEF_TYPE: 'visit_brief_v1',
 }));
 
+// "About this home" rides every answer once the visit has a customer; its own routes test (home-note-routes.test.js) pins that.
+// Here the answers stay exactly the brief's own.
+jest.mock('../services/home-note', () => ({
+  ...jest.requireActual('../services/home-note'),
+  readHomeNote: async () => ({ status: 200, note: null, editable: false }),
+}));
+
 // GATE_AWAY_WATCH: the window reader is unit-tested in away-watch.test.js; here only its answer for this visit.
 const mockAwayWatchCardLines = jest.fn(async () => null);
 jest.mock('../services/away-watch', () => ({
