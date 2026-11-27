@@ -589,3 +589,15 @@ describe('pestsIn', () => {
     for (const word of ['roach', 'roaches']) expect(roach.test(word)).toBe(true);
   });
 });
+
+describe('selfBookedNoteText', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('returns the typed note without the booking flow appendix', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Please text first — Unit: 5')).toBe('Please text first');
+    expect(selfBookedNoteText('Self-booked via portal — Unit: 5')).toBeNull();
+    expect(selfBookedNoteText(null)).toBeNull();
+  });
+  test('a re-service request line is not a booking note', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service request: ants are back')).toBeNull();
+  });
+});

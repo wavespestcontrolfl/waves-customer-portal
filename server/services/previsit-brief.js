@@ -175,6 +175,9 @@ async function deterministicVisitFacts(svc, dbh = db) {
       logger.warn(`[previsit-brief] visit-facts customerFlagged unreadable for service ${svc.id}: ${err.message}`);
     }
   }
+  // customer_asked: what the customer asked for about this visit (re-service reason and words, the self-booking
+  // note, open portal requests). Fail-soft; the service never throws and logs error codes only.
+  const customerAsked = await require('./visit-customer-asked').customerAskedFacts(svc, dbh).catch(() => null);
   // history_unavailable: the service-history read failed, so a null last_visit
   // means "unknown", never "no earlier visit" (readers must not claim one).
   return {
@@ -182,6 +185,7 @@ async function deterministicVisitFacts(svc, dbh = db) {
     last_visit: lastVisit,
     ...(history.available ? {} : { history_unavailable: true }),
     ...(customerFlagged ? { customerFlagged } : {}),
+    ...(customerAsked ? { customer_asked: customerAsked } : {}),
     ...(animalWarnings.length ? { labelAnimalWarnings: animalWarnings } : {}),
   };
 }

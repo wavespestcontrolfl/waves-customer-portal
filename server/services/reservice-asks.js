@@ -189,6 +189,18 @@ function legacyRequestText(notes) {
   return null;
 }
 
+// The note a customer typed when self-booking ("Self-booked. Notes: Please text first — Unit: 5"), without the
+// appendix the booking flow adds. A re-service request line is bookingWords' and is not returned here.
+function selfBookedNoteText(notes) {
+  for (const segment of String(notes || '').split('\n')) {
+    const match = /^Self-booked\.\s*Notes:\s*(.+)$/.exec(segment.trim());
+    if (!match) continue;
+    const text = compact(match[1].split(NOTE_APPENDIX_RE)[0]);
+    return text && !LEGACY_NOTE_RE.test(text) ? text : null;
+  }
+  return null;
+}
+
 // The booking's own words as { source, text, quoted, lead } before the scrub,
 // or null. Quote rule (owner 2026-09-26): the picker and a text are the
 // customer's exact words; a call is a paraphrase and office words are staff's.
@@ -398,6 +410,7 @@ async function gatherReserviceAsks(scheduledServiceId, { knex = db, now = new Da
 module.exports = {
   gatherReserviceAsks,
   isReserviceVisit,
+  selfBookedNoteText,
   ASKS_LOOKBACK_DAYS,
   MAX_ITEMS,
   _test: {
