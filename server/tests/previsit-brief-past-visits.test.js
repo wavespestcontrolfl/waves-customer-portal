@@ -1,7 +1,9 @@
 /**
  * deterministicVisitFacts().past_visits (services/previsit-brief.js): the customer's
  * newest five completed visits of EVERY service line for the tech Visit Brief
- * (owner 2026-11-26). Synthetic customer and visits only.
+ * (owner 2026-11-26). The list is the portal's own completed-visit history
+ * (listPortalServiceHistory, which has its own suites); these tests cover what
+ * past_visits adds on top. Synthetic customer and visits only.
  */
 
 jest.mock('../models/db', () => {
@@ -11,286 +13,213 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-// The reviewed customer-safe parse is its own module with its own suites. Here it stands in as "the report
-// copy of this record" (the stub's technician_notes), so these tests cover what past_visits adds on top:
-// the one-line fold, the second access-code mask and the money scrub. A record marked `unsafe` has no copy.
-const mockSafeNotes = jest.fn((record) => (record.unsafe ? null : record.technician_notes || null));
-jest.mock('../services/context-aggregator', () => ({
-  ...jest.requireActual('../services/context-aggregator'),
-  customerSafeVisitNotes: (...args) => mockSafeNotes(...args),
+const mockHistory = jest.fn();
+jest.mock('../services/portal-service-history', () => ({
+  ...jest.requireActual('../services/portal-service-history'),
+  listPortalServiceHistory: (...args) => mockHistory(...args),
 }));
 
 const { deterministicVisitFacts } = require('../services/previsit-brief');
 
 const SVC = { id: 'svc-now', customer_id: 'cust-1', service_type: 'Pest Control Service', scheduled_date: '2026-11-26', notes: null };
 
-const rec = (id, date, type, extra = {}) => ({
-  id, customer_id: 'cust-1', service_type: type, service_line: null, service_date: date,
-  status: 'completed', technician_notes: null, is_callback: false, service_key: null, service_key_snapshot: null, service_data: null, scheduled_service_id: `sched-${id}`, ...extra,
+// One portal history row (the reader's own shape) plus what the marks read returns for it.
+const visit = (id, date, type, extra = {}) => ({
+  id, date, type, notes: null, products: [],
+  mark: { is_callback: false, service_data: null, visit_date: date, service_key: null, service_key_snapshot: null },
+  ...extra,
 });
+const withMark = (v, mark) => ({ ...v, mark: { ...v.mark, ...mark } });
 
-// Newest first, mixed lines, so the cap and the strictly-before rule matter.
-const ROWS = [
+// Newest first, as the portal reader returns them.
+const VISITS = [
   // A visit dated AFTER the viewed stop (viewing an older stop): never "past".
-  rec('r0', '2026-12-01', 'Pest Control Service'),
-  // Just-completed record of a sibling member on the same grouped stop.
-  rec('r8', '2026-11-26', 'Lawn Care Treatment', { scheduled_service_id: 'svc-sib' }),
-  rec('r1', '2026-11-10', 'Lawn Care Treatment', { technician_notes: 'Edged the bed near the gate.' }),
-  rec('r2', '2026-10-20', 'Pest Control Re-Service', { is_callback: true, technician_notes: 'Ants back at the lanai door.' }),
-  // The viewed visit's own record, dated the viewed day: never past.
-  rec('r3', '2026-11-26', 'Pest Control Service', { scheduled_service_id: 'svc-now' }),
-  rec('r4', '2026-09-01', 'Mosquito Control'),
-  rec('r5', '2026-08-01', 'Pest Control Service'),
-  rec('r6', '2026-07-01', 'Lawn Care Treatment'),
-  rec('r7', '2026-06-01', 'Pest Control Service'),
+  visit('r0', '2026-12-01', 'Pest Control Service'),
+  // A record of the viewed day (this stop's own, or a sibling's): never past.
+  visit('r8', '2026-11-26', 'Lawn Care Treatment'),
+  visit('r1', '2026-11-10', 'Lawn Care Treatment', { notes: 'Edged the bed near the gate.', products: [{ product_name: 'Example Herbicide' }] }),
+  withMark(visit('r2', '2026-10-20', 'Pest Control Re-Service', {
+    notes: 'Ants back at the lanai door.', products: [{ product_name: 'Example Gel Bait' }, { product_name: 'Example Gel Bait' }],
+  }), { is_callback: true }),
+  visit('r4', '2026-09-01', 'Mosquito Control', { products: [{ product_name: 'Example Barrier' }] }),
+  visit('r5', '2026-08-01', 'Pest Control Service'),
+  visit('r6', '2026-07-01', 'Lawn Care Treatment'),
+  visit('r7', '2026-06-01', 'Pest Control Service'),
 ];
 
-const PRODUCTS = [
-  { service_record_id: 'r1', product_name: 'Example Herbicide', active_ingredient: 'x', targets: [], application_rate: 4, rate_unit: 'oz' },
-  { service_record_id: 'r2', product_name: 'Example Gel Bait', targets: [] },
-  { service_record_id: 'r2', product_name: 'Example Gel Bait', targets: [] },
-  { service_record_id: 'r4', product_name: 'Example Barrier', targets: [] },
-];
-
-// Chainable knex stub. The past-visits read is the 'service_records as sr' select: it applies the
-// strictly-before date bound and the limit to ROWS.
-function fakeDbh({ throws = {}, rows = ROWS } = {}) {
+// Chainable knex stub. Only the marks read ('service_records as sr') returns rows: one per requested id
+// that belongs to the requested customer.
+function fakeDbh({ visits = VISITS, marksThrow = false, otherCustomerIds = [] } = {}) {
   return (table) => {
-    const state = { beforeDay: null, limit: null, notVisit: undefined, customerId: undefined, status: undefined };
+    const state = { ids: null, customerId: undefined };
     const q = {};
-    for (const m of ['whereIn', 'whereNotIn', 'orderBy', 'offset', 'leftJoin', 'modify']) q[m] = () => q;
-    q.where = (arg, op, val) => {
-      if (arg === 'sr.service_date' && op === '<') state.beforeDay = val;
-      if (arg && typeof arg === 'object') {
-        if ('sr.customer_id' in arg) state.customerId = arg['sr.customer_id'];
-        if ('sr.status' in arg) state.status = arg['sr.status'];
-      }
-      return q;
-    };
-    q.whereRaw = (sql, bindings) => {
-      // The viewed day's visits of this customer (the stub's scheduled_services): the viewed one and a sibling.
-      if (/NOT IN \(\s*SELECT vd\.id FROM scheduled_services vd/.test(sql) && bindings[0] === 'cust-1') state.notVisit = ['svc-now', 'svc-sib'];
-      return q;
-    };
-    q.limit = (n) => { state.limit = n; return q; };
+    for (const m of ['whereNotIn', 'whereRaw', 'orderBy', 'offset', 'limit', 'leftJoin', 'modify']) q[m] = () => q;
+    q.where = (arg, val) => { if (arg === 'sr.customer_id') state.customerId = val; return q; };
+    q.whereIn = (col, ids) => { if (col === 'sr.id') state.ids = ids; return q; };
     q.select = async () => {
-      if (throws[table]) throw new Error(`${table} outage`);
-      if (table === 'service_products as sp') return PRODUCTS;
       if (table !== 'service_records as sr') return [];
-      // No bound given = every row: a test fails if the code ever drops the bound.
-      // A predicate the code never sent filters nothing: a dropped customer or status filter fails a test.
-      return rows
-        .filter((r) => state.customerId === undefined || r.customer_id === state.customerId)
-        .filter((r) => state.status === undefined || r.status === state.status)
-        .filter((r) => !state.beforeDay || r.service_date < state.beforeDay)
-        .filter((r) => state.notVisit === undefined || !state.notVisit.includes(r.scheduled_service_id))
-        .slice(0, state.limit ?? rows.length);
+      if (marksThrow) throw new Error('service_records outage');
+      // A predicate the code never sent filters nothing: a dropped customer filter fails a test.
+      return visits
+        .filter((v) => (state.ids || []).includes(v.id))
+        .filter((v) => state.customerId === undefined || !otherCustomerIds.includes(v.id))
+        .map((v) => ({ id: v.id, ...v.mark }));
     };
     q.first = async () => undefined;
     return q;
   };
 }
 
+const facts = (svc = SVC, opts = {}) => {
+  const visits = opts.visits || VISITS;
+  mockHistory.mockImplementation(async () => ({ services: visits.map(({ mark, ...row }) => row), total: visits.length }));
+  return deterministicVisitFacts(svc, fakeDbh({ ...opts, visits }));
+};
+
+beforeEach(() => mockHistory.mockReset());
+
 describe('deterministicVisitFacts past_visits', () => {
-  test('five newest completed visits across every line, current visit left out', async () => {
-    const facts = await deterministicVisitFacts(SVC, fakeDbh());
-    expect(facts.past_visits).toHaveLength(5);
-    expect(facts.past_visits.map((v) => v.date)).toEqual(['2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01']);
-    expect(facts.past_visits.map((v) => v.date)).not.toContain('2026-09-30');
+  test('reads the portal\'s completed history for this customer on the passed connection', async () => {
+    await facts();
+    expect(mockHistory).toHaveBeenCalledTimes(1);
+    const [customerId, opts] = mockHistory.mock.calls[0];
+    expect(customerId).toBe('cust-1');
+    expect(opts).toEqual(expect.objectContaining({ completedOnly: true }));
+    expect(typeof opts.database).toBe('function');
+    expect(opts.limit).toBeGreaterThan(5);
   });
 
-  test('nothing from the viewed day is listed: the stop\'s own records and a sibling\'s just-completed one stay out', async () => {
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
-    expect(visits.map((v) => v.date)).not.toContain('2026-11-26');
-  });
-
-  test('records of the viewed day\'s visits are left out even when dated earlier (own and a sibling); a record with no schedule link stays', async () => {
-    const rows = [
-      rec('own', '2026-11-20', 'Pest Control Service', { scheduled_service_id: 'svc-now' }),
-      rec('sib', '2026-11-19', 'Lawn Care Treatment', { scheduled_service_id: 'svc-sib' }),
-      rec('legacy', '2026-11-15', 'Pest Control Service', { scheduled_service_id: null }),
-      ...ROWS,
-    ];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
-    expect(visits.map((v) => v.date)).toEqual(['2026-11-15', '2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01']);
-  });
-
-  test('another customer\'s record and an unfinished record are never listed', async () => {
-    const rows = [
-      rec('other', '2026-11-24', 'Pest Control Service', { customer_id: 'cust-2', technician_notes: 'Another home.' }),
-      rec('draft', '2026-11-23', 'Pest Control Service', { status: 'in_progress' }),
-      ...ROWS,
-    ];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+  test('five newest visits across every line; nothing from the viewed day or later', async () => {
+    const { past_visits: visits } = await facts();
     expect(visits.map((v) => v.date)).toEqual(['2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01']);
-    expect(JSON.stringify(visits)).not.toContain('Another home');
-  });
-
-  test('an access code in an old note is masked; the treatment words stay', async () => {
-    const rows = [rec('code', '2026-11-12', 'Pest Control Service', { technician_notes: 'Treated the lanai for ants. Gate code 4471, lockbox 9902.' }), ...ROWS];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
-    expect(visits[0].notes).toContain('Treated the lanai for ants.');
-    expect(visits[0].notes).not.toMatch(/4471|9902/);
-  });
-
-  test('a price in an old note is removed; the recorded service label is kept as written', async () => {
-    const rows = [rec('price', '2026-11-12', 'Palm Fertilization (45 min)', { technician_notes: 'Repair estimate $1,250 for the screen. Fed both palms.' }), ...ROWS];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
-    expect(visits[0].notes).toContain('Fed both palms.');
-    expect(visits[0].notes).not.toMatch(/1,250|\$/);
-    expect(visits[0].type).toMatch(/^Palm Fertilization/);
-  });
-
-  test('notes come from the customer-safe report copy, never the raw note; a code split across lines is masked', async () => {
-    const rows = [
-      rec('nl', '2026-11-13', 'Pest Control Service', { technician_notes: 'Treated the garage.\nGate:\n4521' }),
-      rec('raw', '2026-11-12', 'Pest Control Service', { technician_notes: 'Office only: customer disputes the bill.', unsafe: true }),
-      ...ROWS,
-    ];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
-    expect(mockSafeNotes).toHaveBeenCalledWith(expect.objectContaining({ id: 'nl' }), { projectLine: true });
-    expect(visits[0].notes).toContain('Treated the garage.');
-    expect(visits[0].notes).not.toContain('4521');
-    expect(visits[1].notes).toBeNull();
-  });
-
-  test('a fee-labelled amount with a currency prefix is removed', async () => {
-    const rows = [rec('fee', '2026-11-13', 'Pest Control Service', { technician_notes: 'Inspection fee: USD 250. Checked the attic.' }), ...ROWS];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
-    expect(visits[0].notes).toContain('Checked the attic.');
-    expect(visits[0].notes).not.toContain('250');
-  });
-
-  test('the product name recorded that day wins over the catalog name', async () => {
-    const rows = [rec('r1', '2026-11-10', 'Lawn Care Treatment')];
-    const dbh = fakeDbh({ rows });
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, (table) => {
-      const q = dbh(table);
-      if (table === 'service_products as sp') q.select = async () => [{ service_record_id: 'r1', product_name: 'Example Herbicide', catalog_name: 'Renamed Herbicide' }];
-      return q;
-    });
-    expect(visits[0].products).toEqual([{ name: 'Example Herbicide' }]);
-  });
-
-  test('a price in a service label or a product name is removed; two long names that differ at the end both show', async () => {
-    const long = 'Example Granular Fertilizer With A Very Long Recorded Name For The Front And Side Lawn Areas Applied At The Label Rate Formula';
-    const rows = [rec('r1', '2026-11-10', 'Palm Treatment ($125)')];
-    const dbh = fakeDbh({ rows });
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, (table) => {
-      const q = dbh(table);
-      if (table === 'service_products as sp') {
-        q.select = async () => [
-          { service_record_id: 'r1', product_name: 'Example Potash 0-0-25 ($2.18)' },
-          { service_record_id: 'r1', product_name: 'Example Bait (USD 40)' },
-          { service_record_id: 'r1', product_name: `${long} A` },
-          { service_record_id: 'r1', product_name: `${long} B` },
-        ];
-      }
-      return q;
-    });
-    expect(JSON.stringify(visits)).not.toMatch(/\$|125|2\.18/);
-    expect(visits[0].type).toBe('Palm Treatment');
-    expect(visits[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', 'Example Bait', `${long} A`, `${long} B`]);
-    const usd = await deterministicVisitFacts(SVC, fakeDbh({ rows: [rec('u1', '2026-11-10', 'Palm Treatment (125 dollars)')] }));
-    expect(usd.past_visits[0].type).toBe('Palm Treatment');
   });
 
   test('an older stop never lists a later visit', async () => {
-    const { past_visits: visits } = await deterministicVisitFacts({ ...SVC, scheduled_date: '2026-10-25' }, fakeDbh());
+    const { past_visits: visits } = await facts({ ...SVC, scheduled_date: '2026-10-25' });
     expect(visits.map((v) => v.date)).toEqual(['2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01', '2026-06-01']);
   });
 
-  test('an unreadable scheduled_date omits the key instead of listing everything', async () => {
-    const facts = await deterministicVisitFacts({ ...SVC, scheduled_date: null }, fakeDbh());
-    expect(facts).not.toHaveProperty('past_visits');
+  test('a record of a visit on the viewed day is left out even when it is dated earlier; a record with no visit stays', async () => {
+    const visits = [
+      // A project completion dated before the scheduled day, linked to a visit of the viewed day.
+      withMark(visit('own', '2026-11-20', 'Pest Control Service'), { visit_date: '2026-11-26' }),
+      withMark(visit('legacy', '2026-11-15', 'Pest Control Service'), { visit_date: null }),
+      ...VISITS,
+    ];
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(list.map((v) => v.date)).toEqual(['2026-11-15', '2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01']);
   });
 
-  test('free return mark: catalog or saved key re-service counts with the record flag off; a rodent follow-up never does', async () => {
-    const extra = [
-      rec('c1', '2026-11-20', 'Pest Control Re-Service', { service_key: 'pest_re_service', is_callback: false }),
-      rec('c2', '2026-11-19', 'Lawn Care Re-Service', { service_key: 'lawn_re_service', is_callback: false }),
-      rec('c3', '2026-11-18', 'Rodent Trapping Follow-up', { service_key: 'rodent_trapping_followup', is_callback: true }),
-      rec('c4', '2026-11-17', 'Pest Control Service', { service_key: 'pest_control', is_callback: false }),
-      // No catalog link (null service_id): the visit's saved key decides.
-      rec('c5', '2026-11-16', 'Pest Control Re-Service', { service_key: null, service_key_snapshot: 'pest_re_service', is_callback: false }),
-      rec('c6', '2026-11-15', 'Rodent Trapping Follow-up', { service_key: null, service_key_snapshot: 'rodent_trapping_followup', is_callback: true }),
-    ];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows: extra.slice(0, 5) }));
-    const more = await deterministicVisitFacts(SVC, fakeDbh({ rows: extra.slice(5) }));
-    const byDate = Object.fromEntries([...visits, ...more.past_visits].map((v) => [v.date, v.callback]));
-    expect(byDate).toEqual({
-      '2026-11-20': true, '2026-11-19': true, '2026-11-18': false, '2026-11-17': false, '2026-11-16': true, '2026-11-15': false,
+  test('a record the customer-scoped marks read does not return is left out', async () => {
+    const visits = [visit('other', '2026-11-24', 'Pest Control Service', { notes: 'Another home.' }), ...VISITS];
+    const { past_visits: list } = await facts(SVC, { visits, otherCustomerIds: ['other'] });
+    expect(JSON.stringify(list)).not.toContain('Another home');
+    expect(list).toHaveLength(5);
+  });
+
+  test('an unreadable scheduled_date omits the key instead of listing everything', async () => {
+    const out = await facts({ ...SVC, scheduled_date: null });
+    expect(out).not.toHaveProperty('past_visits');
+    expect(mockHistory).not.toHaveBeenCalled();
+  });
+
+  test('no earlier visit is an empty list, not a missing key', async () => {
+    const out = await facts(SVC, { visits: [visit('r8', '2026-11-26', 'Lawn Care Treatment')] });
+    expect(out.past_visits).toEqual([]);
+  });
+
+  test('entry shape: date, service name, note, product names once each, free return mark; no money keys', async () => {
+    const { past_visits: visits } = await facts();
+    expect(visits[0]).toEqual({
+      date: '2026-11-10', type: 'Lawn Care Treatment', notes: 'Edged the bed near the gate.', products: [{ name: 'Example Herbicide' }], callback: false,
     });
+    expect(visits[1]).toEqual({
+      date: '2026-10-20', type: 'Pest Control Re-Service', notes: 'Ants back at the lanai door.', products: [{ name: 'Example Gel Bait' }], callback: true,
+    });
+    expect(JSON.stringify(visits)).not.toMatch(/price|total|amount|invoice|rate/i);
+  });
+
+  test('notes: one line, an access code masked (also split across lines), money removed (also a range)', async () => {
+    const visits = [
+      visit('a', '2026-11-14', 'Pest Control Service', { notes: 'Treated the garage.\nGate:\n4521' }),
+      visit('b', '2026-11-13', 'Pest Control Service', { notes: 'Treated the lanai for ants. Gate code 4471, lockbox 9902.' }),
+      visit('c', '2026-11-12', 'Pest Control Service', { notes: 'Quoted $125–150 for repair. Inspection fee: USD 250. Fed both palms.' }),
+      visit('d', '2026-11-11', 'Pest Control Service', { notes: null }),
+    ];
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(list[0].notes).toContain('Treated the garage.');
+    expect(list[0].notes).not.toContain('4521');
+    expect(list[1].notes).toContain('Treated the lanai for ants.');
+    expect(list[1].notes).not.toMatch(/4471|9902/);
+    expect(list[2].notes).toContain('Fed both palms.');
+    expect(list[2].notes).not.toMatch(/125|150|250|\$/);
+    expect(list[3].notes).toBeNull();
+  });
+
+  test('a long note gets the day payload\'s word-boundary preview', async () => {
+    const visits = [visit('long', '2026-11-14', 'Pest Control Service', { notes: 'word '.repeat(120).trim() })];
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(list[0].notes.length).toBeLessThanOrEqual(201);
+    expect(list[0].notes.endsWith('…')).toBe(true);
+  });
+
+  test('names: prices removed from service and product names; the recorded label is kept; long names that differ at the end both show', async () => {
+    const long = 'Example Granular Fertilizer With A Very Long Recorded Name For The Front And Side Lawn Areas Applied At The Label Rate Formula';
+    const visits = [
+      visit('n1', '2026-11-14', 'Palm Treatment ($125)', {
+        products: [
+          { product_name: 'Example Potash 0-0-25 ($2.18)' }, { product_name: 'Example Bait (USD 40)' },
+          { product_name: `${long} A` }, { product_name: `${long} B` },
+        ],
+      }),
+      visit('n2', '2026-11-13', 'Palm Fertilization (125 dollars)'),
+    ];
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(JSON.stringify(list)).not.toMatch(/\$|125|2\.18|USD/);
+    expect(list[0].type).toBe('Palm Treatment');
+    expect(list[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', 'Example Bait', `${long} A`, `${long} B`]);
+    expect(list[1].type).toBe('Palm Fertilization');
+  });
+
+  test('a visit lists every distinct product name: no cap of eight', async () => {
+    const products = Array.from({ length: 9 }, (_, i) => ({ product_name: `Example Product ${i + 1}` }));
+    const visits = [visit('p', '2026-11-14', 'Lawn Care Treatment', { products: [...products, products[0]] })];
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(list[0].products).toHaveLength(9);
+  });
+
+  test('free return mark: a re-service key counts with the record flag off; a rodent follow-up never does', async () => {
+    const visits = [
+      withMark(visit('c1', '2026-11-20', 'Pest Control Re-Service'), { service_key: 'pest_re_service' }),
+      withMark(visit('c2', '2026-11-19', 'Lawn Care Re-Service'), { service_key_snapshot: 'lawn_re_service' }),
+      withMark(visit('c3', '2026-11-18', 'Rodent Trapping Follow-up'), { service_key: 'rodent_trapping_followup', is_callback: true }),
+      withMark(visit('c4', '2026-11-17', 'Rodent Trapping Follow-up'), { service_key_snapshot: 'rodent_trapping_followup', is_callback: true }),
+      visit('c5', '2026-11-16', 'Pest Control Service'),
+    ];
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(list.map((v) => v.callback)).toEqual([true, true, false, false, false]);
   });
 
   test('free return mark: the record\'s own frozen key beats the scheduled row\'s current key (object or JSON string)', async () => {
-    const rows = [
-      rec('f1', '2026-11-20', 'Pest Control Re-Service', { service_data: { completedServiceKey: 'pest_re_service' }, service_key: 'pest_control' }),
-      rec('f2', '2026-11-19', 'Pest Control Service', { service_data: JSON.stringify({ completedServiceKey: 'pest_control' }), service_key: 'pest_re_service', is_callback: false }),
-      rec('f3', '2026-11-18', 'Lawn Care Re-Service', { service_data: '{not json', service_key: 'lawn_re_service' }),
-      rec('f4', '2026-11-17', 'Pest Control Service', { service_data: { other: 1 }, service_key_snapshot: 'pest_re_service' }),
+    const visits = [
+      withMark(visit('f1', '2026-11-20', 'Pest Control Re-Service'), { service_data: { completedServiceKey: 'pest_re_service' }, service_key: 'pest_quarterly' }),
+      withMark(visit('f2', '2026-11-19', 'Pest Control Service'), { service_data: JSON.stringify({ completedServiceKey: 'pest_quarterly' }), service_key: 'pest_re_service' }),
+      withMark(visit('f3', '2026-11-18', 'Pest Control Service'), { service_data: '{not json', service_key: 'pest_re_service' }),
+      withMark(visit('f4', '2026-11-17', 'Pest Control Service'), { service_data: { other: 1 }, service_key_snapshot: 'lawn_re_service' }),
     ];
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
-    expect(Object.fromEntries(visits.map((v) => [v.date, v.callback]))).toEqual({
-      '2026-11-20': true, '2026-11-19': false, '2026-11-18': true, '2026-11-17': true,
-    });
+    const { past_visits: list } = await facts(SVC, { visits });
+    expect(list.map((v) => v.callback)).toEqual([true, false, true, true]);
   });
 
-  test('a past visit lists every distinct product name: no cap of eight', async () => {
-    const names = Array.from({ length: 9 }, (_, i) => `Example Product ${i + 1}`);
-    const products = [...names, names[0]].map((product_name) => ({ service_record_id: 'p1', product_name, targets: [] }));
-    const dbh = (table) => {
-      const q = fakeDbh({ rows: [rec('p1', '2026-11-10', 'Pest Control Service')] })(table);
-      if (table === 'service_products as sp') q.select = async () => products;
-      return q;
-    };
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, dbh);
-    expect(visits[0].products.map((p) => p.name)).toEqual(names);
+  test('history read outage: no throw, key omitted, the other facts still answer', async () => {
+    mockHistory.mockRejectedValue(new Error('history outage'));
+    const out = await deterministicVisitFacts(SVC, fakeDbh());
+    expect(out).not.toHaveProperty('past_visits');
+    expect(out).toHaveProperty('access');
   });
 
-  test('entry shape: service name, the day note, product names, free return visit mark', async () => {
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
-    expect(visits[0]).toEqual({ date: '2026-11-10', type: expect.any(String), notes: 'Edged the bed near the gate.', products: [{ name: 'Example Herbicide' }], callback: false });
-    expect(visits[1].callback).toBe(true);
-    expect(visits[1].notes).toBe('Ants back at the lanai door.');
-    // Duplicate product name collapses.
-    expect(visits[1].products).toEqual([{ name: 'Example Gel Bait' }]);
-    expect(visits[2].products).toEqual([{ name: 'Example Barrier' }]);
-    expect(visits[3].notes).toBeNull();
-    expect(visits[3].callback).toBe(false);
-  });
-
-  test('a long note gets the same word-boundary preview as the day payload', async () => {
-    const dbh = fakeDbh();
-    const r1 = ROWS.find((r) => r.id === 'r1');
-    r1.technician_notes = `${'word '.repeat(80)}end`;
-    try {
-      const { past_visits: visits } = await deterministicVisitFacts(SVC, dbh);
-      expect(visits[0].notes.length).toBeLessThanOrEqual(201);
-      expect(visits[0].notes.endsWith('…')).toBe(true);
-    } finally {
-      r1.technician_notes = 'Edged the bed near the gate.';
-    }
-  });
-
-  test('no money keys on any entry', async () => {
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
-    for (const v of visits) {
-      expect(Object.keys(v).sort()).toEqual(['callback', 'date', 'notes', 'products', 'type']);
-      for (const p of v.products) expect(Object.keys(p)).toEqual(['name']);
-    }
-    expect(JSON.stringify(visits)).not.toMatch(/price|amount|total|rate|invoice|\$/i);
-  });
-
-  test('history read outage: no throw, key omitted, history_unavailable still set', async () => {
-    const facts = await deterministicVisitFacts(SVC, fakeDbh({ throws: { service_records: true, 'service_records as sr': true } }));
-    expect(facts).not.toHaveProperty('past_visits');
-    expect(facts.history_unavailable).toBe(true);
-  });
-
-  test('product read outage: visits stay, names empty', async () => {
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ throws: { 'service_products as sp': true } }));
-    expect(visits).toHaveLength(5);
-    expect(visits.every((v) => v.products.length === 0)).toBe(true);
+  test('marks read outage: key omitted rather than an unchecked list', async () => {
+    const out = await facts(SVC, { marksThrow: true });
+    expect(out).not.toHaveProperty('past_visits');
   });
 });

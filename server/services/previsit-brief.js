@@ -118,24 +118,28 @@ function visitFactsGateEnabled() {
 }
 
 // The customer's newest completed visits of EVERY service line (owner 2026-11-26,
-// "ALL REC"): a past visit is a completed service_record dated STRICTLY BEFORE the
-// viewed visit's scheduled_date (ET calendar day), so nothing from the viewed day,
-// this stop's own members included, is ever listed. Each entry: date, service name,
-// the visit's note as the customer's own report shows it (customerSafeVisitNotes,
-// the reviewed parse this file already uses for history; never the raw technician
-// note), the product NAMES recorded that day (no rates, no money) and a free
-// re-service mark. Fail-soft: an unreadable scheduled_date or a read failure returns
-// null so the key is omitted and the client keeps its single-visit section; a
-// product read failure only empties the names.
+// "ALL REC"), for the technician's Visit Brief. The list is the portal's own
+// completed-visit history (listPortalServiceHistory, completedOnly): the same
+// records, the same one-record-per-appointment rule, the same suppression rules
+// and the same reviewed report text the customer sees. Never the raw technician
+// note. On top of it:
+//   - a past visit is dated STRICTLY BEFORE the viewed visit's scheduled_date (ET
+//     calendar day), and is not a record of any visit this customer has on the
+//     viewed day (a project completion can carry an earlier date);
+//   - notes are folded to one line, access codes masked again and money amounts
+//     removed; service and product names lose their price tokens;
+//   - a free re-service mark from the record's own frozen key.
+// Fail-soft: an unreadable scheduled_date or a read failure returns null so the
+// key is omitted and the client keeps its single-visit section.
 const PAST_VISITS_LIMIT = 5;
-// An old visit's note for the technician: the customer-safe report copy (it fails closed, scrubs the
-// inspection-fee cues and masks access codes), put on one line and masked again (a code split across
-// lines), with money amounts removed. History spans the whole account, so the raw note is never shown.
-const NOTE_MONEY_RE = /(?:\$|\busd\s?)\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|bucks|usd)\b/gi;
-function pastVisitNoteText(record) {
-  const safe = customerSafeVisitNotes(record, { projectLine: true });
-  if (!safe) return null;
-  return redactAccessCodes(String(safe).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]');
+// The portal read is newest first; the viewed day's own records and (for an older stop) later visits are dropped
+// after it, so it reads more than five.
+const PAST_VISITS_READ = 40;
+// One currency marker may cover a range ("$125-150", "USD 125 to 150"): both ends go.
+const NOTE_MONEY_RE = /(?:\$|\busd\s?)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\$?\d[\d,]*(?:\.\d+)?)?|\b\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\d[\d,]*(?:\.\d+)?)?\s?(?:dollars|bucks|usd)\b/gi;
+function pastVisitNoteText(safeNotes) {
+  if (!safeNotes) return null;
+  return redactAccessCodes(String(safeNotes).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]');
 }
 // A recorded label (service or product name) with price tokens removed and whitespace folded.
 function pastVisitLabel(value, max) {
@@ -144,14 +148,13 @@ function pastVisitLabel(value, max) {
     .replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
   return cleanText(text, max);
 }
-// The product names recorded on that visit, as written that day (the catalog name only when none was
-// recorded), each once.
-function pastVisitProductNames(productRows) {
+// The product names recorded on that visit, as written that day, each once.
+function pastVisitProductNames(products) {
   const seen = new Set();
   const names = [];
-  for (const row of productRows) {
+  for (const row of products || []) {
     // The full recorded name (the recap writer allows 150 characters), price tokens removed.
-    const name = pastVisitLabel(row.product_name || row.catalog_name, 150);
+    const name = pastVisitLabel(row.product_name, 150);
     const key = (name || '').toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -159,60 +162,54 @@ function pastVisitProductNames(productRows) {
   }
   return names;
 }
-
 // The record's own frozen key (service_data.completedServiceKey, stamped when the visit closed; present
 // even as null) wins over what the scheduled row says today; legacy records without it use the join.
 function pastVisitServiceKey(row) {
   const data = parseStoredBrief(row.service_data);
-  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) return data.completedServiceKey || null;
+  if (data && Object.prototype.hasOwnProperty.call(data, 'completedServiceKey')) return data.completedServiceKey;
   return row.service_key || row.service_key_snapshot || null;
 }
-
+// What the portal history does not carry, for the records it listed: whether the record belongs to a visit
+// of the viewed day, and the keys for the free re-service mark.
+async function pastVisitMarks(dbh, svc, viewedDay, recordIds) {
+  if (!recordIds.length) return new Map();
+  const rows = await dbh('service_records as sr')
+    .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+    .leftJoin('services as catalog', 'catalog.id', 'ss.service_id')
+    .where('sr.customer_id', svc.customer_id)
+    .whereIn('sr.id', recordIds)
+    .select('sr.id', 'sr.is_callback', 'sr.service_data', 'ss.scheduled_date as visit_date',
+      'catalog.service_key', 'ss.service_key_snapshot');
+  return new Map(rows.map((r) => [String(r.id), { ...r, viewedDay: calendarDay(r.visit_date) === viewedDay }]));
+}
 async function loadPastVisits(dbh, svc) {
   try {
     const viewedDay = calendarDay(svc.scheduled_date);
     if (!viewedDay) return null;
+    const { listPortalServiceHistory } = require('./portal-service-history');
     const { isReserviceVisit } = require('./reservice-asks');
-    const rows = await dbh('service_records as sr')
-      // Legacy records only (no frozen key in service_data): the linked visit's catalog key, else its
-      // saved key snapshot. A re-service key counts as a free return even with the record flag off,
-      // and a rodent trapping follow-up never does (isReserviceVisit decides).
-      .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
-      .leftJoin('services as catalog', 'catalog.id', 'ss.service_id')
-      .where({ 'sr.customer_id': svc.customer_id, 'sr.status': 'completed' })
-      .where('sr.service_date', '<', viewedDay)
-      // A record of the viewed day's own visits can carry an earlier date (a project completion uses its
-      // project date): leave out, by identity, every record linked to this customer's visits scheduled on
-      // the viewed day (the viewed visit and its grouped-stop siblings). A legacy record with no schedule
-      // link stays.
-      .whereRaw(
-        `(sr.scheduled_service_id IS NULL OR sr.scheduled_service_id NOT IN (
-           SELECT vd.id FROM scheduled_services vd WHERE vd.customer_id = ? AND vd.scheduled_date = ?))`,
-        [svc.customer_id, viewedDay],
-      )
-      .orderBy('sr.service_date', 'desc')
-      .orderBy('sr.created_at', 'desc')
-      .orderBy('sr.id', 'desc')
-      .limit(PAST_VISITS_LIMIT)
-      // sr.*: customerSafeVisitNotes reads the record's own report columns.
-      .select('sr.*', 'catalog.service_key', 'ss.service_key_snapshot');
-    let productRows = [];
-    try {
-      productRows = await loadProductHistory(dbh, rows.map((r) => r.id));
-    } catch (err) {
-      logger.warn(`[previsit-brief] visit-facts past-visit products unreadable for customer ${svc.customer_id}: ${err.message}`);
-    }
-    return rows.map((r) => ({
-      date: calendarDay(r.service_date),
-      // The label recorded for that visit, only its duration/price suffixes stripped: never re-labelled.
-      type: pastVisitLabel(briefServiceIdentity(r.service_type), 120),
-      // History spans the whole account: a code written in a note for another home is masked.
-      notes: previewText(pastVisitNoteText(r)),
-      products: pastVisitProductNames(productRows.filter((p) => String(p.service_record_id) === String(r.id))),
-      callback: isReserviceVisit({ is_callback: r.is_callback === true, service_key: pastVisitServiceKey(r) }),
-    }));
+    const { services } = await listPortalServiceHistory(svc.customer_id, {
+      limit: PAST_VISITS_READ, completedOnly: true, database: dbh,
+    });
+    const earlier = (services || []).filter((v) => { const day = calendarDay(v.date); return day && day < viewedDay; });
+    const marks = await pastVisitMarks(dbh, svc, viewedDay, earlier.map((v) => v.id));
+    return earlier
+      // A record the marks read did not return is not provably this customer's past visit: left out.
+      .filter((v) => marks.has(String(v.id)) && !marks.get(String(v.id)).viewedDay)
+      .slice(0, PAST_VISITS_LIMIT)
+      .map((v) => {
+        const mark = marks.get(String(v.id));
+        return {
+          date: calendarDay(v.date),
+          // The label recorded for that visit, only its duration/price suffixes stripped: never re-labelled.
+          type: pastVisitLabel(briefServiceIdentity(v.type), 120),
+          notes: previewText(pastVisitNoteText(v.notes)),
+          products: pastVisitProductNames(v.products),
+          callback: isReserviceVisit({ is_callback: mark.is_callback === true, service_key: pastVisitServiceKey(mark) }),
+        };
+      });
   } catch (err) {
-    logger.warn(`[previsit-brief] visit-facts past visits unreadable for customer ${svc.customer_id}: ${err.message}`);
+    logger.warn(`[previsit-brief] visit-facts past visits unreadable for customer ${svc.customer_id}: ${err.code || err.name || 'error'}`);
     return null;
   }
 }
