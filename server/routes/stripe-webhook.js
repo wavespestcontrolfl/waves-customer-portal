@@ -3738,6 +3738,7 @@ async function handleChargeRefunded(charge) {
             chargeId,
             paymentIntentId: charge.payment_intent || combinedRows[0]?.stripe_payment_intent_id || null,
             anchorInvoiceId: rowMeta(combinedRows[0] || {}).combined_anchor_invoice_id || null,
+            customerId: preSettlementRowCustomerId(combinedRows[0]),
             refundId,
             refundAmountDollars,
           }));
@@ -4009,35 +4010,15 @@ async function handleChargeRefunded(charge) {
               .onConflict('stripe_payment_intent_id')
               .ignore();
             const anchorInvoiceId = combinedPiMeta.waves_invoice_id || null;
-            combinedRefundAlerts.push({
-              spec: {
-                area: 'Billing',
-                action: cumulativeFullPreSettle
-                  ? 'reconcile an unsettled combined charge refund'
-                  : 'reconcile a pre-settlement partial refund',
-                why: cumulativeFullPreSettle
-                  ? `$${Number(refundAmountDollars).toFixed(2)} completed a multi-partial refund on an unsettled combined charge and was parked.`
-                  : `A $${Number(refundAmountDollars).toFixed(2)} partial refund hit an unsettled multi-invoice charge and was parked for review.`,
-                severity: 'needs-you',
-                link: combinedRefundAlertLink({ anchorInvoiceId }),
-                subject: anchorInvoiceId ? { type: 'invoice', id: String(anchorInvoiceId) } : { type: 'check', id: `combined-refund:${chargeId}` },
-                doneWhen: 'refund_reconciled',
-                who: 'person',
-              },
-              opts: {
-                bell: true,
-                refreshOnDedupe: true,
-                dedupeKey: `combined-refund:${chargeId}:${refundId || 'unknown'}`,
-                detail: `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? `it is now fully refunded across multiple partial refunds (final partial ${refundId || 'unknown'} of $${refundAmountDollars}) — every constituent is parked` : `partial refund ${refundId || 'unknown'} of $${refundAmountDollars} cannot be auto-attributed`}. Open Invoices to reconcile.`,
-                metadata: {
-                  stripe_charge_id: chargeId,
-                  stripe_payment_intent_id: charge.payment_intent || null,
-                  stripe_refund_id: refundId || null,
-                  amount: refundAmountDollars,
-                  ...(anchorInvoiceId ? { invoice_id: anchorInvoiceId } : {}),
-                },
-              },
-            });
+            combinedRefundAlerts.push(buildPreSettlementPartialRefundAlert({
+              chargeId,
+              paymentIntentId: charge.payment_intent || null,
+              anchorInvoiceId,
+              customerId: piMetaCustomerId(combinedPiMeta),
+              refundId,
+              refundAmountDollars,
+              cumulativeFullPreSettle,
+            }));
             return null;
           }
           const [refundFence] = await trx('payments').insert({
@@ -4057,6 +4038,7 @@ async function handleChargeRefunded(charge) {
               pre_settlement: true,
               source: 'combined_pay_webhook',
               combined_anchor_invoice_id: combinedPiMeta.waves_invoice_id || null,
+              combined_customer_id: piMetaCustomerId(combinedPiMeta),
               ...(refundId ? { stamped_refund_ids: [refundId] } : {}),
             }),
           }).returning('*');
@@ -4068,6 +4050,7 @@ async function handleChargeRefunded(charge) {
             chargeId,
             paymentIntentId: charge.payment_intent || null,
             anchorInvoiceId: combinedPiMeta.waves_invoice_id || null,
+            customerId: piMetaCustomerId(combinedPiMeta),
             refundId,
             refundAmountDollars,
           }));
@@ -7473,14 +7456,64 @@ function combinedRefundAlertLink({ customerId = null, anchorInvoiceId = null } =
   return '/admin/invoices';
 }
 
-function buildPreSettlementFullRefundAlert({ chargeId, paymentIntentId, anchorInvoiceId = null, refundId, refundAmountDollars }) {
+function piMetaCustomerId(meta) {
+  return meta?.waves_customer_id || null;
+}
+
+function preSettlementRowCustomerId(row) {
+  if (!row) return null;
+  if (row.customer_id) return row.customer_id;
+  const meta = typeof row.metadata === 'string'
+    ? (() => { try { return JSON.parse(row.metadata); } catch { return {}; } })()
+    : (row.metadata || {});
+  return meta.combined_customer_id || null;
+}
+
+function buildPreSettlementPartialRefundAlert({
+  chargeId, paymentIntentId, anchorInvoiceId = null, customerId = null, refundId, refundAmountDollars, cumulativeFullPreSettle,
+}) {
+  return {
+    spec: {
+      area: 'Billing',
+      action: cumulativeFullPreSettle
+        ? 'reconcile an unsettled combined charge refund'
+        : 'reconcile a pre-settlement partial refund',
+      why: cumulativeFullPreSettle
+        ? `$${Number(refundAmountDollars).toFixed(2)} completed a multi-partial refund on an unsettled combined charge and was parked.`
+        : `A $${Number(refundAmountDollars).toFixed(2)} partial refund hit an unsettled multi-invoice charge and was parked for review.`,
+      severity: 'needs-you',
+      link: combinedRefundAlertLink({ anchorInvoiceId, customerId }),
+      subject: anchorInvoiceId ? { type: 'invoice', id: String(anchorInvoiceId) } : { type: 'check', id: `combined-refund:${chargeId}` },
+      doneWhen: 'refund_reconciled',
+      who: 'person',
+    },
+    opts: {
+      bell: true,
+      refreshOnDedupe: true,
+      dedupeKey: `combined-refund:${chargeId}:${refundId || 'unknown'}`,
+      detail: `Charge ${chargeId} backs multiple invoices (not yet settled); ${cumulativeFullPreSettle ? `it is now fully refunded across multiple partial refunds (final partial ${refundId || 'unknown'} of $${refundAmountDollars}) — every constituent is parked` : `partial refund ${refundId || 'unknown'} of $${refundAmountDollars} cannot be auto-attributed`}. Open Invoices to reconcile.`,
+      metadata: {
+        stripe_charge_id: chargeId,
+        stripe_payment_intent_id: paymentIntentId,
+        stripe_refund_id: refundId || null,
+        amount: refundAmountDollars,
+        ...(anchorInvoiceId ? { invoice_id: anchorInvoiceId } : {}),
+        ...(customerId ? { customer_id: customerId } : {}),
+      },
+    },
+  };
+}
+
+function buildPreSettlementFullRefundAlert({
+  chargeId, paymentIntentId, anchorInvoiceId = null, customerId = null, refundId, refundAmountDollars,
+}) {
   return {
     spec: {
       area: 'Billing',
       action: 'review a pre-settlement combined refund',
       why: `A $${Number(refundAmountDollars).toFixed(2)} combined payment was refunded before settlement, so settlement was fenced.`,
       severity: 'needs-you',
-      link: combinedRefundAlertLink({ anchorInvoiceId }),
+      link: combinedRefundAlertLink({ anchorInvoiceId, customerId }),
       subject: anchorInvoiceId ? { type: 'invoice', id: String(anchorInvoiceId) } : { type: 'check', id: `combined-refund:${chargeId}` },
       doneWhen: 'refund_reviewed',
       who: 'person',
@@ -7496,6 +7529,7 @@ function buildPreSettlementFullRefundAlert({ chargeId, paymentIntentId, anchorIn
         stripe_refund_id: refundId || null,
         amount: refundAmountDollars,
         ...(anchorInvoiceId ? { invoice_id: anchorInvoiceId } : {}),
+        ...(customerId ? { customer_id: customerId } : {}),
       },
     },
   };
