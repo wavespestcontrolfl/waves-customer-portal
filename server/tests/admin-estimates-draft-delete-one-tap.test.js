@@ -66,26 +66,32 @@ const router = require('../routes/admin-estimates');
 // Table-aware recording builders: db('estimates') answers the draft row,
 // db('one_tap_purchases') answers the configured ledger rows; the
 // transaction replays the same table map and records deletes.
-function makeTableDb({ estimate, oneTapRows = [], holdRows = [] }) {
+function makeTableDb({ estimate, lockedEstimate = undefined, oneTapRows = [], lockedOneTapRows = undefined, holdRows = [], deleteCount = 1 }) {
   const calls = { deleted: [], updated: [] };
-  const builderFor = (table) => {
+  const builderFor = (table, inTrx = false) => {
     const b = {};
-    for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'select', 'orderBy', 'limit']) {
+    for (const m of ['where', 'whereIn', 'whereNot', 'whereNull', 'whereNotNull', 'whereNotIn', 'whereRaw', 'forUpdate', 'select', 'orderBy', 'limit']) {
       b[m] = jest.fn((...args) => {
         if (typeof args[0] === 'function') args[0].call(b, b);
         return b;
       });
     }
-    b.first = jest.fn(async () => (table === 'estimates' ? estimate : undefined));
-    const listFor = { one_tap_purchases: oneTapRows, scheduled_services: holdRows };
+    const estRow = inTrx && lockedEstimate !== undefined ? lockedEstimate : estimate;
+    b.first = jest.fn(async () => (table === 'estimates' ? estRow : undefined));
+    const otpRows = inTrx && lockedOneTapRows !== undefined ? lockedOneTapRows : oneTapRows;
+    const listFor = { one_tap_purchases: otpRows, scheduled_services: holdRows };
     b.then = (resolve, reject) => Promise.resolve(listFor[table] || []).then(resolve, reject);
     b.update = jest.fn(async (patch) => { calls.updated.push({ table, patch }); return 1; });
-    b.del = jest.fn(async () => { calls.deleted.push(table); return 1; });
+    b.del = jest.fn(async () => {
+      if (table === 'estimates' && deleteCount === 0) return 0;
+      calls.deleted.push(table);
+      return table === 'estimates' ? deleteCount : 1;
+    });
     return b;
   };
-  db.mockImplementation((table) => builderFor(table));
+  db.mockImplementation((table) => builderFor(table, false));
   db.transaction = jest.fn(async (fn) => {
-    const trx = (table) => builderFor(table);
+    const trx = (table) => builderFor(table, true);
     trx.fn = db.fn;
     trx.raw = db.raw;
     return fn(trx);
@@ -192,6 +198,59 @@ describe('draft delete with one-tap ledger rows', () => {
       expect(res.status).toBe(200);
       expect(calls.deleted).toEqual(expect.arrayContaining(['estimates']));
       expect(calls.deleted).not.toContain('one_tap_purchases');
+    });
+  });
+
+  test('refuses with 409 when the draft transitions to sent between pre-read and FOR UPDATE lock', async () => {
+    const calls = makeTableDb({
+      estimate: { id: 'est-1', status: 'draft' },
+      lockedEstimate: { id: 'est-1', status: 'sent' },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
+      expect(res.status).toBe(409);
+      expect(calls.deleted).toEqual([]);
+      expect(calls.updated).toEqual([]);
+    });
+  });
+
+  test('refuses with 409 when a live delivery claim is active on the draft', async () => {
+    const calls = makeTableDb({
+      estimate: {
+        id: 'est-1',
+        status: 'draft',
+        estimate_data: { estimatorEngine: { delivering_at: new Date().toISOString(), delivering_token: 'tok-live' } },
+      },
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
+      expect(res.status).toBe(409);
+      expect(calls.deleted).toEqual([]);
+    });
+  });
+
+  test('refuses with 400 if a one-tap ledger row completes before the transaction lock', async () => {
+    const calls = makeTableDb({
+      estimate: { id: 'est-1', status: 'draft' },
+      oneTapRows: [{ id: 'otp-1', status: 'initiated' }],
+      lockedOneTapRows: [{ id: 'otp-1', status: 'completed' }],
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
+      expect(res.status).toBe(400);
+      expect(calls.deleted).toEqual([]);
+    });
+  });
+
+  test('rolls back with 409 if the guarded estimates DELETE matches 0 rows', async () => {
+    const calls = makeTableDb({
+      estimate: { id: 'est-1', status: 'draft' },
+      deleteCount: 0,
+    });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
+      expect(res.status).toBe(409);
+      expect(calls.deleted).not.toContain('estimates');
     });
   });
 });

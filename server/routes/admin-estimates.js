@@ -8,9 +8,9 @@ const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('.
 const { satellitePalmCountToConfirm } = require('../services/estimator-engine/lookup-palm-review');
 const router = express.Router();
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, ESTIMATE_DELIVERY_CLAIM_TTL_MS, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
-const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
+const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
 // Real handoffs kept in deliveryState.deliveredAt (oldest dropped first).
 const DELIVERY_HISTORY_MAX = 25;
@@ -1379,25 +1379,12 @@ async function sendEstimateEmail({ estimate, firstName, viewUrl, priceLine, idem
   return { ok: true, providerAttempted: true, providerAccepted: true, provider: 'smtp_fallback' };
 }
 
-router.use(adminAuthenticate, requireTechOrAdmin);
-// 2026-08-25 role lockdown (first-hire prep): estimates are a sales/pricing
-// surface — owner-only, with a NARROW staff read allowlist for the flows
-// tech-visible surfaces actually use: the single-estimate read (/:id) and
-// the schedule-source read the Create Appointment modal fires. The
-// collection list, analytics (actuals-variance, win-loss, source
-// performance), proposals, pricing audits, and every mutation require the
-// admin role.
-const STAFF_ESTIMATE_GET_RE = /^\/[A-Za-z0-9-]+(\/schedule-source)?$/;
-const OWNER_ONLY_NAMED_GETS = new Set([
-  '/actuals-variance', '/win-loss-slices', '/source-performance',
-]);
-router.use((req, res, next) => (
-  req.method === 'GET'
-    && STAFF_ESTIMATE_GET_RE.test(req.path)
-    && !OWNER_ONLY_NAMED_GETS.has(req.path)
-    ? next()
-    : requireAdmin(req, res, next)
-));
+// Estimates are an owner/admin-only sales & pricing surface. Technicians use
+// /api/tech/estimates (which pins reads/writes to their own drafts & route).
+// The former GET /:id/schedule-source staff carve-out had no UI caller outside
+// the admin-only Pipeline page and returned unscoped customer PII, pricing, and
+// the live estimate token.
+router.use(adminAuthenticate, requireAdmin);
 
 // Post-commit bell for a save whose engine recompute FAILED (validation audit
 // SEC-002; pre-push codex P1): the resolver fails open and reports the
@@ -6316,6 +6303,12 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
         error: `Booking link can only be sent for sent/viewed/accepted estimates. Current status: ${estimate.status}.`,
       });
     }
+    if (estimate.status !== 'accepted' && estimate.expires_at
+      && new Date(estimate.expires_at).getTime() <= Date.now()) {
+      return res.status(400).json({
+        error: 'This estimate has expired. Extend or resend it before sending a booking link.',
+      });
+    }
     if (estimate.archived_at) {
       return res.status(400).json({ error: 'Estimate is archived. Unarchive first.' });
     }
@@ -6367,30 +6360,34 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     // carry a stray expired timestamp the rescue hasn't cleared yet — the
     // expiry test must never apply to it, or a live appointment reads as
     // gone and a duplicate link goes out.
+    let linkedSvcId = null;
     try {
       const estData = typeof estimate.estimate_data === 'string'
         ? JSON.parse(estimate.estimate_data)
         : estimate.estimate_data;
-      const linkedSvcId = estData?.scheduled_service_id || null;
-      const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
-      const linked = await db('scheduled_services')
-        .where((q) => {
-          q.where({ source_estimate_id: estimate.id });
-          if (linkedSvcId) q.orWhere({ id: linkedSvcId });
-        })
-        .whereNotIn('status', TERMINAL_STATUSES)
-        .andWhere((q) => {
-          q.whereNotNull('customer_id')
-            .orWhereNull('reservation_expires_at')
-            .orWhereRaw('reservation_expires_at > NOW()');
-        })
-        .first();
-      if (linked) {
-        return res.status(409).json({
-          error: `Customer already has an appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
-        });
-      }
-    } catch (_) { /* on parse failure fall through — no false positive */ }
+      linkedSvcId = estData?.scheduled_service_id;
+    } catch { linkedSvcId = null; }
+    // Keep the DB collision check OUTSIDE the JSON parse catch: a transient
+    // DB failure must fail closed (500, no SMS) rather than sending a
+    // duplicate /book link to a customer who already has a live visit.
+    const { TERMINAL_STATUSES } = require('../services/waveguard-existing-services');
+    const linked = await db('scheduled_services')
+      .where((q) => {
+        q.where({ source_estimate_id: estimate.id });
+        if (linkedSvcId) q.orWhere({ id: linkedSvcId });
+      })
+      .whereNotIn('status', TERMINAL_STATUSES)
+      .andWhere((q) => {
+        q.whereNotNull('customer_id')
+          .orWhereNull('reservation_expires_at')
+          .orWhereRaw('reservation_expires_at > NOW()');
+      })
+      .first();
+    if (linked) {
+      return res.status(409).json({
+        error: `Customer already has an appointment on ${linked.scheduled_date} for this estimate. Use the Schedule view to manage the booking.`,
+      });
+    }
 
     // estimate_id stamps scheduled_services.source_estimate_id (same
     // correlation the accept-flow links carry) and the namespaced accept
@@ -6418,20 +6415,28 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
     ));
     if (!msg) return res.status(422).json({ error: 'SMS template estimate_accepted_onetime is missing or inactive' });
 
+    const identity = estimate.customer_id
+      ? {
+        audience: 'customer',
+        customerId: estimate.customer_id,
+        identityTrustLevel: 'phone_matches_customer',
+      }
+      : {
+        audience: 'lead',
+        identityTrustLevel: 'phone_provided_unverified',
+        consentBasis: {
+          status: 'transactional_allowed',
+          source: 'admin_estimate_send_booking_link',
+          capturedAt: estimate.created_at || new Date().toISOString(),
+        },
+      };
     const smsResult = await sendCustomerMessage({
       to: estimate.customer_phone,
       body: msg,
       channel: 'sms',
-      audience: estimate.customer_id ? 'customer' : 'lead',
       purpose: 'estimate_followup',
-      customerId: estimate.customer_id || undefined,
       estimateId: estimate.id,
-      identityTrustLevel: estimate.customer_id ? 'phone_matches_customer' : 'phone_provided_unverified',
-      consentBasis: estimate.customer_id ? undefined : {
-        status: 'transactional_allowed',
-        source: 'admin_estimate_send_booking_link',
-        capturedAt: estimate.created_at || new Date().toISOString(),
-      },
+      ...identity,
       entryPoint: 'admin_estimate_send_booking_link',
       metadata: {
         original_message_type: 'estimate_accepted_onetime_manual_resend',
@@ -6807,6 +6812,52 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
+function hasLiveDeliveryClaim(row, nowMs = Date.now()) {
+  const data = parseEstimateData(row?.estimate_data);
+  const deliveringAt = data?.estimatorEngine?.delivering_at;
+  if (!deliveringAt) return false;
+  const ts = Date.parse(deliveringAt);
+  return Number.isFinite(ts) && (nowMs - ts) < ESTIMATE_DELIVERY_CLAIM_TTL_MS;
+}
+
+function draftDeleteError(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
+}
+
+async function deleteDraftEstimateInTransaction(trx, estimateId) {
+  const locked = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+  if (!locked) throw draftDeleteError(404, 'Estimate not found');
+  if (locked.status !== 'draft' || locked.price_locked_at || hasLiveDeliveryClaim(locked)) {
+    throw draftDeleteError(409, 'This estimate changed while you were deleting it. Refresh and retry.');
+  }
+  const lockedOneTapRows = await trx('one_tap_purchases')
+    .where({ estimate_id: estimateId })
+    .forUpdate()
+    .select('id', 'status');
+  if (lockedOneTapRows.some((r) => r.status === 'completed')) {
+    throw draftDeleteError(400, 'This estimate carries a completed one-tap purchase and cannot be deleted.');
+  }
+  if (lockedOneTapRows.length) {
+    await trx('one_tap_purchases')
+      .whereIn('id', lockedOneTapRows.map((r) => r.id))
+      .whereNot({ status: 'completed' })
+      .del();
+  }
+  await trx('leads')
+    .where({ estimate_id: estimateId })
+    .update({ estimate_id: null, updated_at: new Date() });
+  const deletedCount = await trx('estimates')
+    .where({ id: estimateId, status: 'draft' })
+    .whereNull('price_locked_at')
+    .whereRaw(DELIVERY_CLAIM_NOT_LIVE_SQL)
+    .del();
+  if (!deletedCount) {
+    throw draftDeleteError(409, 'This estimate changed while you were deleting it. Refresh and retry.');
+  }
+}
+
 // DELETE /api/admin/estimates/:id — delete a draft estimate only.
 // Sent/customer-facing estimates must stay auditably available; use archive
 // for closed rows instead of breaking public links.
@@ -6817,12 +6868,13 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
+    if (estimate.price_locked_at || hasLiveDeliveryClaim(estimate)) {
+      return res.status(409).json({ error: 'This estimate is locked or being sent and cannot be deleted.' });
+    }
     // One-tap ledger rows FK this estimate (NO ACTION): without removing
     // them first the delete below dies on 23503. A completed ledger row is
-    // a consent artifact and must never be deleted — it also implies the
-    // estimate is accepted, so the draft-only guard above already blocks it;
-    // belt-and-braces refuse anyway. Live holds are the 15-min sweeper's
-    // problem once the ledger row is gone.
+    // a consent artifact and must never be deleted — re-asserted under lock
+    // inside the transaction too so a racing completion cannot be deleted.
     const oneTapRows = await db('one_tap_purchases')
       .where({ estimate_id: req.params.id })
       .select('id', 'status');
@@ -6844,22 +6896,20 @@ router.delete('/:id', async (req, res, next) => {
         estimateId: req.params.id,
       });
     }
-    await db.transaction(async (trx) => {
-      if (oneTapRows.length) {
-        await trx('one_tap_purchases')
-          .whereIn('id', oneTapRows.map((r) => r.id))
-          .whereNot({ status: 'completed' })
-          .del();
-      }
-      await trx('leads')
-        .where({ estimate_id: req.params.id })
-        .update({ estimate_id: null, updated_at: new Date() });
-      await trx('estimates').where({ id: req.params.id }).del();
-    });
+    await db.transaction((trx) => deleteDraftEstimateInTransaction(trx, req.params.id));
     logger.info(`[estimates] Deleted estimate ${req.params.id}`);
     res.json({ success: true });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    next(err);
+  }
 });
+
+// Malformed UUID path parameters throw Postgres 22P02; answer 404 instead of 500
+// while keeping synthetic-id unit mocks unaffected.
+router.use((err, _req, res, next) => (
+  err?.code === '22P02' ? res.status(404).json({ error: 'Estimate not found' }) : next(err)
+));
 
 // The old POST /cleanup-demo endpoint (bulk-delete estimates matching a
 // hardcoded list of seed customer names) is intentionally GONE: it was live
