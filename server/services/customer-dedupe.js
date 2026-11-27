@@ -2292,13 +2292,15 @@ async function mergeHomeNotes(trx, table, column, winnerId, loserId, { performed
   const loserRow = rows.get(loserId);
   const winnerRow = rows.get(winnerId);
   if (!loserRow) return 'no loser note';
-  if (!winnerRow) return trx(table).where(column, loserId).update({ [column]: winnerId });
+  // The writes name home_notes and customer_id literally (not the handler's table/column arguments): the annual-prepay
+  // dynamic-writer ratchet counts only writes through a dynamic table, and this one never touches another table.
+  if (!winnerRow) return trx('home_notes').where('customer_id', loserId).update({ customer_id: winnerId });
   const joined = `${winnerRow.body}${HOME_NOTE_JOINT}${loserRow.body}`;
   if (joined.length > HOME_NOTE_TABLE_MAX) {
     throw new Error(`home notes are too long to join (${joined.length} characters, limit ${HOME_NOTE_TABLE_MAX}): shorten one note, then merge again`);
   }
   try {
-    await trx(table).where(column, winnerId).update({
+    await trx('home_notes').where('customer_id', winnerId).update({
       body: joined,
       revision: Number(winnerRow.revision) + 1,
       // The joined text is nobody's single edit: the author is the admin who ran the merge, or none (the byline then shows
@@ -2312,7 +2314,7 @@ async function mergeHomeNotes(trx, table, column, winnerId, loserId, { performed
     // the database error code go on.
     throw Object.assign(new Error(`home note join failed (update, ${(err && err.code) || 'unknown'})`), { code: 'home_note_join_failed' });
   }
-  await trx(table).where(column, loserId).del();
+  await trx('home_notes').where('customer_id', loserId).del();
   return 'joined the two notes on the kept customer';
 }
 

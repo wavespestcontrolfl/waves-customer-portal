@@ -7,6 +7,7 @@
 // under an open editor can never make a save overwrite a newer note. Tech portal style rule: inline styles, no Tailwind.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatETDate } from '../../lib/timezone';
+import { DEAD_ASSIGNMENT_STATUSES } from './routeStops';
 
 const MAX = 1000;
 const C = {
@@ -34,7 +35,9 @@ export function homeNoteFor(services, byService) {
   const member = services.find((s) => byService?.[s.id]?.brief?.homeNote !== undefined);
   if (!member) return null;
   const carried = byService[member.id].brief.homeNote;
-  return { id: member.id, note: carried?.note || null, customerId: carried?.customerId || null };
+  return {
+    id: member.id, note: carried?.note || null, customerId: carried?.customerId || null, answer: carried,
+  };
 }
 // The customer a stop member is for NOW (the schedule's own row). A brief kept from before a merge or undo can still carry the
 // old customer's note under the same visit id; when the two differ the note is not shown and any draft is dropped.
@@ -57,6 +60,16 @@ const briefView = (services, byService) => {
 // The member row the edit started on now belongs to another customer (a merge or undo moved the visit): this holds even when
 // the refreshed brief carries no note at all, so the check reads the schedule row, not the brief.
 const pinnedMemberMoved = (services, pin) => Boolean(services && pin && pin.memberId) && customerDiffers(memberCustomerId(services, pin.memberId), pin.customerId);
+// Where a save goes: the member the edit started on while it is still the technician's; once it is not (gone from the stop or in a
+// dead status), a current sibling member that confirms the SAME customer, keeping the pinned note id and revision. None: the pinned
+// route stands and the server refuses it.
+const saveRouteFor = (services, pin) => {
+  const alive = (member) => !DEAD_ASSIGNMENT_STATUSES.has(member.status);
+  const original = services && services.find((m) => m.id === pin.memberId);
+  if (!services || !pin.memberId || (original && alive(original))) return pin.route;
+  const sibling = services.find((m) => alive(m) && pin.customerId && memberCustomerId(services, m.id) === pin.customerId);
+  return sibling ? visitNotePath(sibling.id) : pin.route;
+};
 const livePinOf = (pin, stopKey, blocked) => (pin && pin.stopKey === stopKey && !blocked ? pin : null);
 const visitNotePath = (id) => `/admin/schedule/${id}/home-note`;
 
@@ -174,8 +187,10 @@ export default function HomeNoteSection({ request, path, stopKey, services, bySe
   }, [request, route]);
   useEffect(() => { if (!fed && request && route) read(); }, [fed, request, route, read]);
   // The brief read again (after a save, or a refresh) brings the newest note down; an open editor keeps its pin.
-  const { note: pickedNote, customerId: pickedCustomer = null } = picked || {};
-  useEffect(() => { if (pickedNote !== undefined) setLoad({ status: 'ready', note: pickedNote, customerId: pickedCustomer }); }, [pickedNote, pickedCustomer]);
+  const { note: pickedNote, customerId: pickedCustomer = null, answer } = picked || {};
+  // Every fresh brief answer is reconciled (a new answer object per read, even one that repeats a null), so a note someone else
+  // deleted disappears; an answer that omits the note changes nothing.
+  useEffect(() => { if (answer !== undefined) setLoad({ status: 'ready', note: pickedNote, customerId: pickedCustomer }); }, [answer]);
   // The draft belongs to the customer it was typed for: it ends only on Cancel, a successful Save, or the panel moving to
   // a different customer (the office page: another path). A brief that omits the note, or a grouped stop that switches
   // which member supplies it, leaves the draft exactly as typed.
@@ -189,7 +204,7 @@ export default function HomeNoteSection({ request, path, stopKey, services, bySe
     const pin = livePin;
     setState({ ...IDLE, busy: true });
     try {
-      const out = await request(pin.route, { method: 'PUT', body: JSON.stringify({ body: draft, expectedNoteId: pin.noteId, expectedRevision: pin.revision, expectedCustomerId: pin.customerId }) });
+      const out = await request(saveRouteFor(services, pin), { method: 'PUT', body: JSON.stringify({ body: draft, expectedNoteId: pin.noteId, expectedRevision: pin.revision, expectedCustomerId: pin.customerId }) });
       if (pinRef.current !== pin) return;
       setLoad({ status: 'ready', note: confirmedNote(out), customerId: pin.customerId });
       setDraft(null);

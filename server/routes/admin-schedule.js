@@ -442,7 +442,7 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -24996,6 +24996,8 @@ router.get('/:id/home-note', async (req, res, next) => {
 router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, async (req, res, next) => {
   try {
     const HomeNote = require('../services/home-note');
+    // Required here, not in the file's shared import: that line is part of the handler chain the Intelligence Bar read catalog fingerprints.
+    const { lockOwnedLiveVisit } = require('../services/technician-visit-scope');
     if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
     const out = await db.transaction(async (trx) => {
       // Same lock order as a customer merge: the customer first, then the visit (the merge locks customers, then repoints visits).

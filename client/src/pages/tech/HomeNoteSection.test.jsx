@@ -169,7 +169,7 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     expect(screen.getByText('No note yet.')).toBeInTheDocument();
     rerender(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={services} byService={{ a: { brief: { brief: null } } }} />);
     expect(container).toBeEmptyDOMElement();
-    expect(homeNoteFor(services, { a: { brief: { homeNote: { note: null, customerId: CUSTOMER } } }, b: { brief: { homeNote: { note: NOTE, customerId: CUSTOMER } } } })).toEqual({ id: 'a', note: null, customerId: CUSTOMER });
+    expect(homeNoteFor(services, { a: { brief: { homeNote: { note: null, customerId: CUSTOMER } } }, b: { brief: { homeNote: { note: NOTE, customerId: CUSTOMER } } } })).toMatchObject({ id: 'a', note: null, customerId: CUSTOMER });
   });
 
   it('a different stopKey drops the draft and its pinned route at once; a late answer from the old stop is ignored', async () => {
@@ -296,5 +296,42 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b' }]} byService={answered(NOTE)} />);
     expect(screen.getByText(NOTE.body)).toBeInTheDocument();
     expect(screen.queryByLabelText('About this home')).toBeNull();
+  });
+
+  it('when the member editing began is no longer the technician\'s, a current sibling confirming the SAME customer takes the save, with the pinned note id and revision', async () => {
+    const request = vi.fn(async () => ({ note: { ...NOTE, body: 'Mine' } }));
+    const first = [{ id: 'b', customer_id: CUSTOMER, status: 'confirmed' }, { id: 'd', customer_id: CUSTOMER, status: 'confirmed' }];
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={first} byService={answered(NOTE)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Mine' } });
+    // Member b completes off the technician's list; sibling d (same customer) is still his.
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: CUSTOMER, status: 'cancelled' }, first[1]]} byService={{ d: { brief: { brief: null } } }} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(puts(request)).toHaveLength(1));
+    expect(puts(request)[0][0]).toBe('/admin/schedule/d/home-note');
+    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Mine', expectedNoteId: NOTE.id, expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER });
+  });
+
+  it('a sibling for a DIFFERENT customer is never used, and a still-current original member keeps its own route', async () => {
+    const request = vi.fn(async () => ({ note: { ...NOTE, body: 'Mine' } }));
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: CUSTOMER, status: 'confirmed' }, { id: 'd', customer_id: 'c2', status: 'confirmed' }]} byService={answered(NOTE)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: CUSTOMER, status: 'cancelled' }, { id: 'd', customer_id: 'c2', status: 'confirmed' }]} byService={{}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(puts(request)).toHaveLength(1));
+    expect(puts(request)[0][0]).toBe('/admin/schedule/b/home-note');
+  });
+
+  it('every fresh brief answer is reconciled, even a repeated null: a note someone else deleted disappears', async () => {
+    const request = vi.fn(async () => ({ note: { ...NOTE, id: 'note-new', revision: 1 } }));
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(null)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add note' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: NOTE.body } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText('Saved.')).toBeInTheDocument();
+    expect(screen.getByText(NOTE.body)).toBeInTheDocument();
+    // Someone else deletes it; the next brief read says null again (a new answer object, the same null as before).
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={services} byService={answered(null)} />);
+    await waitFor(() => expect(screen.getByText('No note yet.')).toBeInTheDocument());
   });
 });
