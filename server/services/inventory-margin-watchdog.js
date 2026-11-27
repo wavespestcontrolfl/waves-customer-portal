@@ -193,31 +193,45 @@ function chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows, wi
   return events;
 }
 
-function priorNormalizedCostForProduct(prod, winner, mode, historyRows, scoreVendorRows) {
-  const currentCost = normalizedCostBasis(winner, mode);
-  if (!(currentCost > 0)) return null;
-  // Reconstruct consecutive eligible winning costs chronologically across all
-  // vendors (from price_history + approved price_snapshots). Comparing against
-  // the immediately preceding winning cost catches both increases and expired
-  // cheaper vendors without mistaking a price cut ($100 -> $150 -> $130) for a spike.
-  const events = chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows, winner?.row || null);
-  if (!events.length) return null;
+function winningSequenceFromEvents(events) {
   const latestByVendor = new Map();
-  const winningSequence = [];
+  const seq = [];
   for (const ev of events) {
     latestByVendor.set(ev.vendorKey, ev.cost);
     let win = Infinity;
     for (const c of latestByVendor.values()) if (c < win) win = c;
-    const prevWin = winningSequence[winningSequence.length - 1];
+    const prevWin = seq[seq.length - 1];
     if (prevWin == null || Math.abs(win - prevWin) / prevWin >= 1e-6) {
-      winningSequence.push(win);
+      seq.push(win);
     }
   }
-  const lastWin = winningSequence[winningSequence.length - 1];
+  return seq;
+}
+
+function priorCostFromSequence(seq, currentCost) {
+  if (!seq.length) return null;
+  const lastWin = seq[seq.length - 1];
   if (Math.abs(lastWin - currentCost) / currentCost < 1e-6) {
-    return winningSequence.length >= 2 ? winningSequence[winningSequence.length - 2] : null;
+    return seq.length >= 2 ? seq[seq.length - 2] : null;
   }
   return lastWin;
+}
+
+function priorNormalizedCostForProduct(prod, winner, mode, historyRows, scoreVendorRows, eligibleVendorIds = null) {
+  const currentCost = normalizedCostBasis(winner, mode);
+  if (!(currentCost > 0)) return null;
+  const events = chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows, winner?.row || null);
+  if (!events.length) return null;
+  // Prefer consecutive winning costs among currently eligible vendors so an
+  // expired vendor's old quote never turns a current vendor's price cut into a
+  // false spike; fall back to all-vendor history only when eligible vendors have
+  // no prior price transition (which catches a cheaper vendor expiring).
+  if (eligibleVendorIds && eligibleVendorIds.size > 0) {
+    const eligibleEvents = events.filter((ev) => eligibleVendorIds.has(ev.vendorKey));
+    const eligiblePrior = priorCostFromSequence(winningSequenceFromEvents(eligibleEvents), currentCost);
+    if (eligiblePrior != null) return eligiblePrior;
+  }
+  return priorCostFromSequence(winningSequenceFromEvents(events), currentCost);
 }
 
 function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRows = [], { scoreVendorRows } = {}) {
@@ -243,7 +257,15 @@ function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRow
     const winner = pool[0];
     const currentNorm = normalizedCostBasis(winner, mode);
     if (!(currentNorm > 0)) continue;
-    const priorNorm = priorNormalizedCostForProduct(prod, winner, mode, histByProduct.get(String(prod.id)), scorer);
+    const eligibleVendorIds = new Set(candidates.map((c) => String(c.vendor_id || '')));
+    const priorNorm = priorNormalizedCostForProduct(
+      prod,
+      winner,
+      mode,
+      histByProduct.get(String(prod.id)),
+      scorer,
+      eligibleVendorIds,
+    );
     // One-way ONLY: ignore missing history and ignore cheaper generic substitutes (current <= prior).
     if (!(priorNorm > 0) || currentNorm <= priorNorm) continue;
     const pctIncrease = (currentNorm - priorNorm) / priorNorm;
@@ -292,10 +314,17 @@ function zeroCostLineFound(cogs) {
 }
 
 function resolveModeledLaborPerVisit(line, spec, laborRate) {
-  const annualLabor = numberOrNull(line?.costs?.labor ?? line?.costs?.annualLabor);
-  if (annualLabor > 0) return annualLabor / Math.max(1, spec.visitsPerYear);
-  const directLabor = numberOrNull(line?.costs?.laborPerVisit ?? line?.laborCost);
-  if (directLabor > 0) return directLabor;
+  const c = line?.costs || {};
+  const perVisit = numberOrNull(c.laborPerVisit);
+  if (perVisit > 0) return perVisit;
+  const onSite = numberOrNull(c.onSiteLaborCost);
+  const drive = numberOrNull(c.driveLaborCost);
+  if (onSite > 0 || drive > 0) return (onSite > 0 ? onSite : 0) + (drive > 0 ? drive : 0);
+  const annualLabor = numberOrNull(c.laborCost ?? c.labor ?? c.annualLabor);
+  if (annualLabor > 0) {
+    const visits = numberOrNull(line?.visitsPerYear ?? line?.visits) || spec.visitsPerYear;
+    return annualLabor / Math.max(1, visits);
+  }
   return spec.laborHoursPerVisit * laborRate;
 }
 

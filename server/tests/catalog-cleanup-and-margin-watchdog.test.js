@@ -244,6 +244,7 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { id: 'p-pack', name: 'Bifen I/T', active: true, best_price: 120.00, unit_size_oz: 64, container_size: '64 fl oz' },
       { id: 'p-switched', name: 'Demand CS', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-cut-after-spike', name: 'Suspend PolyZone', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
+      { id: 'p-expired-ignored', name: 'Temprid FX', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-small-bump', name: 'Alpine WSG', active: true, best_price: 84.00, unit_size_oz: 17.6, container_size: '500 g' },
     ];
     const vendorRows = [
@@ -253,6 +254,8 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { id: 'vp-5', product_id: 'p-switched', vendor_id: 'v-2', price_amount: 130.00, quantity: '32 fl oz' },
       // $100 -> $150 -> $130: final step is a price CUT, MUST NOT report a 30% spike!
       { id: 'vp-6', product_id: 'p-cut-after-spike', vendor_id: 'v-1', price_amount: 130.00, quantity: '32 fl oz' },
+      // Expired v-old quoted $100 earlier, while eligible v-2 dropped $150 -> $130: MUST NOT fake a spike!
+      { id: 'vp-7', product_id: 'p-expired-ignored', vendor_id: 'v-2', price_amount: 130.00, quantity: '32 fl oz' },
       { id: 'vp-4', product_id: 'p-small-bump', vendor_id: 'v-1', price_amount: 84.00, quantity: '500 g' },
     ];
     const priceHistory = [
@@ -267,6 +270,9 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       { product_id: 'p-cut-after-spike', vendor_id: 'v-1', price: 130.00, quantity: '32 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
       { product_id: 'p-cut-after-spike', vendor_id: 'v-1', price: 150.00, quantity: '32 fl oz', recorded_at: '2026-11-01T00:00:00Z' },
       { product_id: 'p-cut-after-spike', vendor_id: 'v-1', price: 100.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-expired-ignored', vendor_id: 'v-2', price: 130.00, quantity: '32 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-expired-ignored', vendor_id: 'v-2', price: 150.00, quantity: '32 fl oz', recorded_at: '2026-11-01T00:00:00Z' },
+      { product_id: 'p-expired-ignored', vendor_id: 'v-old', price: 100.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
       { product_id: 'p-small-bump', vendor_id: 'v-1', price: 84.00, quantity: '500 g', recorded_at: '2026-11-20T00:00:00Z' },
       { product_id: 'p-small-bump', vendor_id: 'v-1', price: 80.00, quantity: '500 g', recorded_at: '2026-10-01T00:00:00Z' },
     ];
@@ -344,6 +350,42 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
     expect(missingCogs.map((m) => m.serviceKey)).toEqual(['mosquito', 'rodent_trapping', 'stinging']);
     expect(missingCogs[0].missingServiceTypes).toEqual(['Mosquito Treatment - Essential Barrier']);
     expect(incompleteChecks.map((c) => c.serviceKey)).toEqual(['bora_care']);
+  });
+
+  test('evaluateServiceMargins reads real engine labor costs (onSite+drive, laborPerVisit, annual laborCost/visits) before falling back', () => {
+    const generateEstimate = ({ services }) => {
+      if (services.pest) return { lineItems: [{ service: 'pest_control', perVisit: 45, costs: { onSiteLaborCost: 14.58, driveLaborCost: 11.67 } }] };
+      if (services.mosquito) return { lineItems: [{ service: 'mosquito', perVisit: 50, costs: { laborPerVisit: 29.17 } }] };
+      if (services.treeShrub) return { lineItems: [{ service: 'tree_shrub', perVisit: 45, visitsPerYear: 6, costs: { laborCost: 122.50 } }] };
+      if (services.oneTimePest) return { lineItems: [{ service: 'one_time_pest', price: 250 }] };
+      if (services.rodentTrapping) return { lineItems: [{ service: 'rodent_trapping', price: 350 }] };
+      if (services.stinging) return { lineItems: [{ service: 'stinging_insect', price: 175 }] };
+      if (services.trenching) return { lineItems: [{ service: 'trenching', price: 1800 }] };
+      if (services.boraCare) return { lineItems: [{ service: 'bora_care', price: 1200 }] };
+      return { lineItems: [] };
+    };
+    const healthyCogs = (serviceKey) => ({
+      status: 'ok',
+      totalPerVisit: 10,
+      fixedCost: 0,
+      lines: serviceKey === 'mosquito'
+        ? [
+          { serviceType: 'Mosquito Treatment - Essential Barrier', cost: 6, warning: null },
+          { serviceType: 'Mosquito Treatment - IGR', cost: 4, warning: null },
+        ]
+        : [{ serviceType: serviceKey, cost: 10, warning: null }],
+      warnings: [],
+    });
+    const { lowMargins } = evaluateServiceMargins({
+      inventory: { available: true, rows: [] },
+      generateEstimate,
+      inventoryCostFromRows: healthyCogs,
+      laborRate: 35,
+    });
+    const byKey = Object.fromEntries(lowMargins.map((m) => [m.serviceKey, m]));
+    expect(byKey.pest_control.laborCost).toBeCloseTo(26.25, 2);
+    expect(byKey.mosquito.laborCost).toBeCloseTo(29.17, 2);
+    expect(byKey.tree_shrub.laborCost).toBeCloseTo(20.42, 2);
   });
 
   test('runInventoryMarginWatchdog respects gate, loads approved price_snapshots, keeps alert open on outage, closes when clean, and fails on null alert receipt', async () => {
