@@ -3183,9 +3183,10 @@ async function wdoTableForBooking({ customer, propertyId = null, estimateId = nu
 // No table price: nothing to check.
 async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = null, chosenPropertyId = null, estimateId = null, trx }) {
   if (!table) return;
-  // The home the price was read at, by the pricing's own rule: the property the office chose, else the linked estimate's,
-  // else the property the visit is stamped with.
-  const home = estimateId ? await bookedHomeProperty({ customerId, propertyId: chosenPropertyId, estimateId, conn: trx }) : { propertyId };
+  // The home the price was read at, by the pricing's own rule and from its own input: the property the office chose, else
+  // the linked estimate's, else (none chosen) the customer's own address, where dispatch shows the visit. A sole property
+  // the save just stamped is no choice: bookedHome reads it again at the address dispatch shows (pre-push audit P0).
+  const home = estimateId ? await bookedHomeProperty({ customerId, propertyId: chosenPropertyId, estimateId, conn: trx }) : { propertyId: chosenPropertyId };
   const customer = home.unsure ? null : await trx('customers').where({ id: customerId }).first();
   const stillApplies = (at) => wdoTableStillApplies(table, { customer, conn: trx, ...at });
   // A linked estimate's home must also be the property the visit is stamped with, when one is (pre-push audit P0).

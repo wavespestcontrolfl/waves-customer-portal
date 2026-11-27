@@ -106,6 +106,14 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
   });
 
+  test('a customer with no street on file and no saved property gets no table price: the home cannot be told', async () => {
+    lookup.mockResolvedValue(null);
+    for (const street of [null, '', '  ']) {
+      expect((await bookBlankWdo({ customer: { ...HOME, address_line1: street } })).finalPrice).toBe(250);
+    }
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
   test('no property record: the first size step as concrete block on a slab, with an office note that says so', async () => {
     for (const none of [null, { enriched: {} }]) {
       lookup.mockResolvedValue(none);
@@ -209,6 +217,9 @@ describe('a blank WDO line books at the table price of the home', () => {
     const check = (table, propertyId) => assertWdoTableHomeUnchanged(table, { customerId: CUSTOMER_ID, propertyId, trx: dbMock });
     // The save stamps the same sole property: it goes on.
     await expect(check(pricing.wdoTable, PROPERTY_ID)).resolves.toBeUndefined();
+    // The customer's own street changed after pricing: dispatch now shows another address than the home priced.
+    wireDb({ customers: { ...HOME, address_line1: '400 New St' }, customer_properties: rows([AT_HOME]) });
+    await expect(check(pricing.wdoTable, PROPERTY_ID)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
     // The property was replaced by one at another address, or its address was edited, before the save stamped it.
     const OTHER = { ...RENTAL, id: 'c0d1e2f3-2222-4b3c-8d4e-6f7a8b9c0d1e', address_line1: '300 Sample Ct' };
     wireDb({ customers: HOME, customer_properties: rows([OTHER]) });
@@ -590,6 +601,10 @@ describe('phone bookings (the call pipeline, the voice agent, the new caller boo
     wireDb({ customers: HOME, customer_properties: undefined });
     expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: homeAlias })).toMatchObject({ price: 200, source: 'wdo_table' });
     expect(lookup).toHaveBeenLastCalledWith(expect.stringContaining('Bradenton'));
+    // A call at the customer's own address while the primary property is saved elsewhere: the account's own type describes
+    // that address.
+    wireDb({ customers: { ...HOME, property_type: 'commercial' }, customer_properties: { ...RENTAL, is_primary: true } });
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: { propertyId: null, address: ADDRESS } })).toBe(CATALOG);
   });
 
   test('a call linked to a saved property is priced at it only while the property still has the call\'s address (by its address key: one ZIP carries several town names)', async () => {

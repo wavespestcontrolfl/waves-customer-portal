@@ -101,12 +101,17 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   // read on its own record: only the account's own tier calls it commercial, never the home's records. The home under
   // another town name is the home: its own records, read at its own address (pre-push audit P0).
   const writtenElsewhere = !!written && addressKey(serviceRow) !== addressKey(at.customer);
-  // At the customer's own address the account's own type describes the same home, also when the property saved there is
-  // not marked primary (the shared rule reads it only beside a primary property) (pre-push audit P0).
-  const commercial = writtenElsewhere
-    ? normalizePropertyType(row.waveguard_tier) === 'commercial'
-    : at.commercial || (!at.otherProperty && normalizePropertyType(row.property_type) === 'commercial');
+  // At the customer's own address the account's own type describes the same home: also when the property saved there is
+  // not marked primary (the shared rule reads it only beside a primary property), and when a call names that address
+  // while the primary property is saved elsewhere (pre-push audit P0).
+  const atOwnAddress = writtenElsewhere ? addressKey(serviceRow) === addressKey(row) : !at.otherProperty;
+  const commercial = (writtenElsewhere ? normalizePropertyType(row.waveguard_tier) === 'commercial' : at.commercial)
+    || (atOwnAddress && normalizePropertyType(row.property_type) === 'commercial');
   if (commercial) return { refusal: 'the stored records call this a commercial property' };
+  // No street: the lookup would miss and the engine would quote its smallest home. The home cannot be told (pre-push audit
+  // P0).
+  const street = writtenElsewhere ? serviceRow.address_line1 : at.customer.address_line1;
+  if (!String(street || '').trim()) return { refusal: 'the home has no street address on record' };
   return { address: writtenElsewhere ? written : addressForCustomer(at.customer) };
 }
 
