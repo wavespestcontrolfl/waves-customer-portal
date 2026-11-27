@@ -101,7 +101,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const sid = `SM${tag}c`;
     await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'yes', created_at: T0, status: 'received' });
     const visit = async (status) => {
-      const [r] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-10', service_type: 'Pest Control', status, created_at: at(20) }).returning('id');
+      const [r] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-10', window_start: '09:00', window_end: '10:00', service_type: 'Pest Control', status, created_at: at(20) }).returning('id');
       made.visits.push(r.id);
       return r.id;
     };
@@ -119,6 +119,10 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(timeline.complete).toBe(true);
     const found = timeline.events.filter((e) => e.proof).map((e) => `${e.proof}:${e.id}`).sort();
     expect(found).toEqual([`booking:${live}`, `estimate_sent:${handed}`].sort());
+    // The booking carries the day and time the visit holds, for the yes-to-an-offered-time check.
+    expect(timeline.events.find((e) => e.id === String(live))).toMatchObject({
+      slot: { day: '2027-01-10', start: '09:00', end: '10:00' }, line: 'VISIT created after the alert, for 2027-01-10 09:00-10:00 (pending)',
+    });
   });
 
   test('a sent staff email counts only when it provably reached this customer; a draft never does; SMS alerts see it too', async () => {
@@ -286,10 +290,14 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     await move({ original_date: '2027-01-12', original_window: '15:00-16:00', new_date: '2027-01-12', new_window: '15:00-17:00', initiated_by: 'admin_bulk' });
     // A staff hand-off for the customer to pick a time (the row rain-out.js writes: due day, no time, its marker in notes).
     const handoff = await move({ new_date: '2027-01-12', new_window: null, initiated_by: 'admin', notes: require('../services/rain-out').PICK_LOG_MARKER });
+    // A staff date edit with no time (the package follow-up edit writes one): a day-only proof, with no start in its slot.
+    const dayOnly = await move({ new_date: '2027-01-12', initiated_by: 'admin', reason_code: 'admin_edit' });
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const moves = (await agent.buildTimeline(row)).events.filter((e) => e.type === 'reschedule');
-    expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since, handoff].sort());
-    expect(moves.filter((e) => e.proof === 'date_change').map((e) => e.id).sort()).toEqual([held, sameDay].sort());
+    expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since, handoff, dayOnly].sort());
+    expect(moves.filter((e) => e.proof === 'date_change').map((e) => e.id).sort()).toEqual([held, sameDay, dayOnly].sort());
+    expect(moves.find((e) => e.id === held).slot).toEqual({ day: '2027-01-12', start: '15:00', end: '16:00' });
+    expect(moves.find((e) => e.id === dayOnly).slot).toEqual({ day: '2027-01-12', start: null, end: null });
     expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now: the visit has moved since, to 2027-01-12 15:00-16:00$/);
     expect(moves.find((e) => e.id === handoff).line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by Waves staff .*no time is booked, so this is no answer$/);
   });
