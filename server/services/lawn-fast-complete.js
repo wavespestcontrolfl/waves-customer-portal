@@ -1382,6 +1382,19 @@ function visitTypeRefusal(verdict, lawnFast) {
  * An incomplete visit OUTCOME is not judged (nothing to confirm; the quick sheet
  * only submits completed), like the lawn assessment preflight.
  */
+// The Tetrino row's rate per 1,000 sq ft in fl oz: its stated rate, else its typed amount (fl oz or gal) over its area. NaN when
+// neither can be read. Only the warning above reads it.
+function tetrinoRatePer1000(row) {
+  const rate = Number(row?.rate);
+  if (Number.isFinite(rate) && rate > 0) return rate;
+  const amount = Number(row?.totalAmount);
+  const area = Number(row?.areaValue);
+  if (!(amount > 0) || !(area > 0) || (row?.areaUnit && row.areaUnit !== 'sqft')) return NaN;
+  const unit = String(row?.amountUnit || '').toLowerCase().replace(/\s+/g, '');
+  const flOz = unit === 'gal' ? amount * 128 : unit === 'floz' || unit === 'fl_oz' ? amount : NaN;
+  return (flOz / area) * 1000;
+}
+
 async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = null, isIncompleteVisit = false, expectedVisit = null, lawnFast = null, products = null, technicianNotes } = {}) {
   // The dark gate comes FIRST: any /complete carrying a lawnFast block is refused while
   // the gate is off, whatever its outcome.
@@ -1491,8 +1504,9 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
     const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
     const decision = require('./waveguard-plan-engine').tetrinoScoutDecision(scout);
     const applied = (products || []).find((row) => String(row?.productId).toLowerCase() === String(tetrino.id).toLowerCase());
-    if (!decision.eligible || !scout.tetrinoApplied) logger.warn(`[lawn-fast] Tetrino on ${svc.id} without the scout record (warning only)`);
-    else if (Number(applied?.rate) > 0.367 && !decision.highRateEligible) logger.warn(`[lawn-fast] high Tetrino rate on ${svc.id} without high chinch pressure (warning only)`);
+    // Tetrino is on the submitted products, so it was applied, whatever an older sheet sent as tetrinoApplied.
+    if (!decision.eligible) logger.warn(`[lawn-fast] Tetrino on ${svc.id} without the scout record (warning only)`);
+    else if (tetrinoRatePer1000(applied) > 0.367 && !decision.highRateEligible) logger.warn(`[lawn-fast] high Tetrino rate on ${svc.id} without high chinch pressure (warning only)`);
   }
   // An empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
