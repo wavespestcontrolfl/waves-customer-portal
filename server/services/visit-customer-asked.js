@@ -49,12 +49,26 @@ const RESCHEDULE_UPDATE_DATE_RE = /^Customer updated (\d{4}-\d{2}-\d{2}):/;
 const RESCHEDULE_NOTE_RE = /Customer notes: ([\s\S]*)$/;
 
 // No prices on a technician screen (owner rule). An amount is a money sign, a dollar word, or a price-shaped number
-// (a comma thousand like 1,200, or two decimals like 49.95). The word screen adds what a message or an older
+// (a comma thousand like 1,200, or two decimals like 49.95), or a whole number paired with a billing unit or a pricing
+// word ("149/month", "quoted 149", "for 149"); room numbers and counts ("room 149", "3 dogs") stay. The word screen adds what a message or an older
 // description must also pass: price, cost, charge, refund, invoice, quote and the like.
-const MONEY_AMOUNT_RE = /[$€£]|\b(?:usd|dollars?|bucks?)\b|\b\d{1,3}(?:,\d{3})+\b|\b\d+\.\d{2}\b/i;
+const BILLING_UNITS = 'month|mo|year|yr|visit|application|treatment|service|quarter|week|time|spray|trip|stop';
+const PRICING_WORDS = 'quoted?|priced?|prices?|cost|costs|costing|charged?|charges|fees?|rates?|paid|pay|owe|owed|deposit|balance|quote|estimate|dollars?|bucks?';
+const MONEY_AMOUNT_RES = [
+  /[$€£]|\b(?:usd|dollars?|bucks?)\b|\b\d{1,3}(?:,\d{3})+\b|\b\d+\.\d{2}\b/i,
+  // A whole-number amount with a billing unit: "149/month", "149 per application", "149 a visit".
+  new RegExp(`\\b\\d+\\s*(?:/|per\\b|a\\b|an\\b|each\\b|every\\b)\\s*(?:${BILLING_UNITS})s?\\b`, 'i'),
+  // A whole-number amount beside a pricing word, either order: "quoted 149", "149 total price", "for 149".
+  new RegExp(`\\b(?:${PRICING_WORDS})\\b[^.\\n\\d]{0,20}\\b\\d{2,}\\b|\\b\\d{2,}\\b[^.\\n\\d]{0,12}\\b(?:${PRICING_WORDS})\\b|\\bfor\\s+\\d{3,}\\b`, 'i'),
+];
 const MONEY_WORD_RE = /\b(?:price|prices|pricing|priced|cost|costs|costing|charge|charged|charges|refund\w*|invoice\w*|bill|billed|billing|pay|paid|payment\w*|fees?|quote\w*|estimate\w*|discount\w*|total|balance|deposit|owe|owed|credit|card)\b/i;
-const moneyFree = (text) => !MONEY_AMOUNT_RE.test(text);
+const moneyFree = (text) => !MONEY_AMOUNT_RES.some((re) => re.test(text));
 const moneyWordFree = (text) => moneyFree(text) && !MONEY_WORD_RE.test(text);
+
+// A query builder never runs with a missing customer: knex turns { customer_id: null } into IS NULL.
+function requireCustomer(svc) {
+  if (!svc?.customer_id) throw new Error('customer_id required');
+}
 
 const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
 const compact = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -129,6 +143,7 @@ async function bookingNoteItems(svc, dbh) {
 
 // Does this account provably have ONE premises? The re-service asks' own fail-closed proof; a failed read is "no".
 async function singlePremises(svc, dbh) {
+  if (!svc?.customer_id) return false;
   try {
     return await require('./reservice-property-scope').accountProvesSinglePremises(dbh, svc.customer_id);
   } catch (err) {
@@ -142,6 +157,7 @@ async function singlePremises(svc, dbh) {
 // a visit with none of the three is an unstamped visit and belongs to the primary property (the visit rule of
 // account-properties.js). A stamp or link that cannot be resolved matches nothing: the request is withheld.
 async function visitPropertyIds(svc, dbh, scope) {
+  if (!svc?.customer_id) return [];
   try {
     const { sameResolvedProperty } = require('./service-report/visit-property-scope');
     const linkage = require('./estimate-property-linkage');
@@ -186,6 +202,7 @@ const storedAddress = (row) => metaOf(row)?.property?.address || null;
 // (the customer row's own address when no property row exists). Nothing resolvable is "stamp present, not resolved":
 // it matches nothing.
 async function primaryScope(svc, dbh) {
+  if (!svc?.customer_id) return { hasEvidence: true, key: null };
   try {
     const linkage = require('./estimate-property-linkage');
     const columns = ['address_line1', 'address_line2', 'city', 'zip'];
@@ -223,6 +240,7 @@ const appointmentHeader = (svc) => `Appointment ${svc.id}: `;
 
 // The query is built before the row limit applies: the property, writer and appointment filters all run in SQL.
 function portalRowsQuery(dbh, svc, propertyIds) {
+  requireCustomer(svc);
   const { CTA_REQUEST_SOURCES } = require('./cta-service-request');
   const { OPEN_REQUEST_TERMINAL_STATUSES } = require('./estimate-add-service-request');
   return dbh('service_requests')
@@ -238,31 +256,44 @@ function portalRowsQuery(dbh, svc, propertyIds) {
               .orWhere(function portalForm() { this.whereNull('source').whereRaw(PORTAL_FORM_SQL); });
           });
         propertyFilter(this, propertyIds);
-      }).orWhere(function thisAppointment() {
-        this.where({ category: 'schedule_change', source: RESCHEDULE_SOURCE })
-          .whereRaw('left(COALESCE(description, \'\'), ?) = ?', [appointmentHeader(svc).length, appointmentHeader(svc)]);
       });
     })
     // Newest by creation, never by last change: an office edit bumps updated_at and must not displace a newer ask.
-    // A revised reschedule note is dated in JS (rescheduleNote), after a read deep enough to cover it.
     .orderBy('created_at', 'desc')
     .limit(PORTAL_READ_LIMIT)
     .select('subject', 'description', 'source', 'created_at', 'metadata');
 }
 
+// This appointment's own reschedule requests, in a query of their own (anchored header match), so the portal read's
+// depth never decides whether one shows. They name no property: the appointment is the scope.
+function rescheduleRowsQuery(dbh, svc) {
+  requireCustomer(svc);
+  const { OPEN_REQUEST_TERMINAL_STATUSES } = require('./estimate-add-service-request');
+  return dbh('service_requests')
+    .where({ customer_id: svc.customer_id, category: 'schedule_change', source: RESCHEDULE_SOURCE })
+    .where(function openRows() {
+      this.whereNull('status').orWhereNotIn('status', OPEN_REQUEST_TERMINAL_STATUSES);
+    })
+    .whereRaw('left(COALESCE(description, \'\'), ?) = ?', [appointmentHeader(svc).length, appointmentHeader(svc)])
+    .orderBy('created_at', 'desc')
+    .limit(PORTAL_ROW_LIMIT)
+    .select('subject', 'description', 'source', 'created_at', 'metadata');
+}
+
 // The customer's own note from a reschedule request, dated by the update that supplied it: the newest block with a
 // "Customer notes:" line. The first block is the request itself (the row's date). A later block carries an ET date
-// the customer's own text could also spell: it counts only as a real calendar date between the request and now, at
-// noon Eastern (the one timestamp used to rank and to show); anything else falls back to the row's date.
+// the customer's own text could also spell: it counts only as a real calendar day from the request's day to today
+// (ET). Its time is noon Eastern, never later than now and never earlier than the request (the one timestamp used to
+// rank and to show); any other date falls back to the row's date.
 function rescheduleNote(description, createdAt, now = new Date()) {
   const blocks = String(description || '').split(RESCHEDULE_UPDATE_SPLIT_RE);
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const note = compact(RESCHEDULE_NOTE_RE.exec(blocks[i])?.[1]);
     if (!note) continue;
     const day = i === 0 ? null : validCalendarDate(RESCHEDULE_UPDATE_DATE_RE.exec(blocks[i])?.[1]);
-    const stamped = day ? parseETDateTime(`${day}T12:00`) : null;
-    const usable = stamped && stamped >= new Date(createdAt) && stamped <= now;
-    return { note, at: usable ? stamped : createdAt };
+    const inRange = day && day >= etCalendarDayOf(createdAt) && day <= etDateString(now);
+    const stamped = inRange ? new Date(Math.max(new Date(createdAt), Math.min(parseETDateTime(`${day}T12:00`), now))) : null;
+    return { note, at: stamped || createdAt };
   }
   return null;
 }
@@ -288,7 +319,11 @@ function requestRowText(row) {
 async function portalItems(svc, dbh, singleSoon) {
   const single = await singleSoon;
   const scope = await visitScope(svc, dbh);
-  const rows = await portalRowsQuery(dbh, svc, single ? null : await visitPropertyIds(svc, dbh, scope));
+  const [portalRows, rescheduleRows] = await Promise.all([
+    portalRowsQuery(dbh, svc, single ? null : await visitPropertyIds(svc, dbh, scope)),
+    rescheduleRowsQuery(dbh, svc),
+  ]);
+  const rows = [...(portalRows || []), ...(rescheduleRows || [])];
   // An unstamped visit resolves its premises only when a row has an address to check against.
   const checkScope = scope.hasEvidence || !(rows || []).some(storedAddress) ? scope : await primaryScope(svc, dbh);
   // Entries first, empties dropped (a preferred-date-only reschedule), THEN the limit.
@@ -335,6 +370,7 @@ const safeMessage = (text) => moneyWordFree(text) && !LINK_RE.test(text) && !NUM
   && !require('./reservice-office-only').officeOnlyReason(text);
 
 async function portalMessageItems(svc, dbh, singleSoon) {
+  if (!svc?.customer_id) return [];
   if (!require('../config/feature-gates').portalMessagesLive()) return [];
   const { since, until } = messageWindow(svc);
   const rows = await dbh('messages as m')
@@ -357,6 +393,8 @@ async function portalMessageItems(svc, dbh, singleSoon) {
  * @returns {Promise<{ items: object[] } | null>} Newest first, one entry per wording, at most 8; null when nothing.
  */
 async function customerAskedFacts(svc, dbh) {
+  // A hold or any visit with no customer reads nothing: no query may run on a missing customer id.
+  if (!svc?.customer_id) return null;
   // The premises proof is read once for both portal sources; it never rejects (a failed read is "not single").
   const single = singlePremises(svc, dbh);
   const lists = await Promise.all([
@@ -376,4 +414,4 @@ async function customerAskedFacts(svc, dbh) {
   return picked.length ? { items: picked } : null;
 }
 
-module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { requestRowText, portalMessageItems, safeMessage, messageWindow, portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };
+module.exports = { customerAskedFacts, MAX_ITEMS, MAX_TEXT_CHARS, _test: { rescheduleRowsQuery, moneyFree, requestRowText, portalMessageItems, safeMessage, messageWindow, portalRowsQuery, rescheduleNote, visitPropertyIds, storedAddressMatches, pickItems } };

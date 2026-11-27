@@ -41,11 +41,12 @@ function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct'
     calls.push(['table', table]);
     const q = {};
     for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'join']) {
-      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; return q; };
+      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; if (m === 'where' && args[0]?.source === 'customer_portal_reschedule') q.resched = true; return q; };
     }
     q.select = async () => {
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
       if (table === 'messages as m') return messages;
+      if (table === 'service_requests') return rows.filter((r) => (r.source === 'customer_portal_reschedule') === Boolean(q.resched));
       return table === 'customer_properties' ? props : rows;
     };
     q.first = async () => {
@@ -187,11 +188,16 @@ describe('customerAskedFacts: portal requests', () => {
     expect(sql).toContain("metadata->>'writer' IN ('portal_form', 'portal_flow') OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL");
   });
 
-  test('a reschedule request is matched on the anchored appointment header, not anywhere in the description', () => {
-    const { sql, bindings } = sqlOf(SVC, null);
+  test('this appointment\'s reschedule requests have their own query: anchored header, no 40-row dependence', () => {
+    const portal = sqlOf(SVC, null);
+    expect(portal.sql).not.toContain('left(COALESCE(description');
+    expect(portal.bindings).not.toContain('customer_portal_reschedule');
+    const { sql, bindings } = _test.rescheduleRowsQuery(pg(), SVC).toSQL();
     expect(sql).toContain("left(COALESCE(description, ''), ?) = ?");
     expect(sql).not.toContain('strpos');
-    expect(bindings).toEqual(expect.arrayContaining(['Appointment svc-1: '.length, 'Appointment svc-1: ', 'customer_portal_reschedule']));
+    expect(sql).toMatch(/"customer_id" = \? and "category" = \? and "source" = \?/);
+    expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'schedule_change', 'customer_portal_reschedule', 'Appointment svc-1: '.length, 'Appointment svc-1: ']));
+    expect(bindings[bindings.length - 1]).toBe(5);
   });
 
   describe('which properties the visit is on (not single premises)', () => {
@@ -429,7 +435,6 @@ describe('customerAskedFacts: portal entries rank by their own date', () => {
 });
 
 describe('customerAskedFacts: no prices on a technician screen', () => {
-  const typed = (description, over) => formRow({ subject: description.slice(0, 80), description, metadata: { writer: 'portal_form' }, ...over });
   const flow = (over) => formRow({ subject: 'Service pricing review requested', description: 'Customer asked WAVES AI: "lawn price". Lawn care is $149.00 per visit.', metadata: { writer: 'portal_flow', propertyId: 'prop-1' }, ...over });
   const stamped = (description) => formRow({ subject: 'Lawn plan', description, metadata: { propertyId: 'prop-1' } });
 
@@ -506,6 +511,94 @@ describe('customerAskedFacts: reschedule note dates are derived in JS, with vali
     const row = formRow({ source: 'customer_portal_reschedule', created_at: created, description: update('2026-11-25') });
     const facts = await customerAskedFacts(SVC, fakeDbh({ rows: [row] }));
     expect(facts.items[0].at).toBe('2026-11-25T17:00:00.000Z');
+  });
+});
+
+describe('customerAskedFacts: a visit with no customer reads nothing', () => {
+  const HOLD = { ...SVC, customer_id: null };
+  test('a reservation hold performs no reads at all, and every builder refuses a missing customer', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const dbh = fakeDbh({ rows: [formRow()], messages: [{ body: 'hello', created_at: '2026-11-24T15:00:00.000Z' }] });
+    expect(await customerAskedFacts(HOLD, dbh)).toBeNull();
+    expect(await customerAskedFacts({ ...SVC, customer_id: undefined }, dbh)).toBeNull();
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(dbh.calls).toEqual([]);
+    expect(mockGather).not.toHaveBeenCalled();
+    expect(mockSingle).not.toHaveBeenCalled();
+    expect(() => _test.portalRowsQuery(dbh, HOLD, null)).toThrow('customer_id required');
+    expect(() => _test.rescheduleRowsQuery(dbh, HOLD)).toThrow('customer_id required');
+    expect(dbh.calls).toEqual([]);
+  });
+
+  test('the helpers guard themselves too: no premises proof, property read, primary read or message read', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const dbh = fakeDbh({ props: [HOME] });
+    expect(await _test.visitPropertyIds(HOLD, dbh, { hasEvidence: false, key: null })).toEqual([]);
+    expect(await _test.portalMessageItems(HOLD, dbh, Promise.resolve(true))).toEqual([]);
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(dbh.calls).toEqual([]);
+  });
+});
+
+describe('customerAskedFacts: whole-number amounts with a pricing word or billing unit', () => {
+  test.each([
+    'quoted 149 per application', 'I was quoted 149', 'it is 149/month', '149 a visit', 'for 149', '$149', 'about 149 dollars',
+    'the 149 price', '149 total cost', 'charged 85 last time', 'it was 85 each visit', '85 per month',
+  ])('"%s" is a price', (text) => expect(_test.moneyFree(text)).toBe(false));
+
+  test.each([
+    'room 149', '3 dogs in the yard', 'gate code is the one on the lockbox', 'Please come at 9 or 10', 'Unit 12, back door', 'apartment 305 building B',
+    'two cats and 4 kids', 'ants since 2025',
+  ])('"%s" stays', (text) => expect(_test.moneyFree(text)).toBe(true));
+
+  test('an item with such a phrase is dropped by the shared screen', async () => {
+    mockGather.mockResolvedValue(asks([askItem({ id: 'text:1', text: 'They quoted 149 per application for ants.' }), askItem({ id: 'text:2', text: 'Ants in room 149.' })]));
+    expect((await customerAskedFacts(SVC, fakeDbh())).items.map((i) => i.text)).toEqual(['Ants in room 149.']);
+  });
+});
+
+describe('customerAskedFacts: the reschedule ranking time is bounded to now', () => {
+  const created = '2026-11-27T13:00:00.000Z'; // 8 AM ET
+  const text = (day) => `Appointment svc-1: Pest on 2026-12-01\nCustomer notes: first\nCustomer updated ${day}:\nCustomer notes: second`;
+
+  test('a same-morning update ranks at now, not at the noon still ahead', () => {
+    const now = new Date('2026-11-27T14:00:00.000Z'); // 9 AM ET
+    expect(_test.rescheduleNote(text('2026-11-27'), created, now)).toEqual({ note: 'second', at: now });
+  });
+
+  test('a same-day update after noon ranks at noon; one filed after noon keeps the request time', () => {
+    expect(_test.rescheduleNote(text('2026-11-27'), created, new Date('2026-11-27T20:00:00.000Z')).at).toEqual(new Date('2026-11-27T17:00:00.000Z'));
+    expect(_test.rescheduleNote(text('2026-11-27'), '2026-11-27T19:00:00.000Z', new Date('2026-11-27T20:00:00.000Z')).at).toEqual(new Date('2026-11-27T19:00:00.000Z'));
+  });
+
+  test('a day still ahead of today falls back to the row date', () => {
+    expect(_test.rescheduleNote(text('2026-11-28'), created, new Date('2026-11-27T14:00:00.000Z')).at).toBe(created);
+  });
+
+  test('end to end: the same-morning update is not outranked by an older ask', async () => {
+    const realNow = Date.now;
+    jest.useFakeTimers({ now: new Date('2026-11-27T14:00:00.000Z'), doNotFake: ['nextTick', 'setImmediate', 'setTimeout'] });
+    try {
+      const rows = [
+        formRow({ subject: 'Older ask', description: 'Brown patch', metadata: { writer: 'portal_form' }, created_at: '2026-11-27T12:00:00.000Z' }),
+        formRow({ subject: 'Reschedule', source: 'customer_portal_reschedule', created_at: created, description: text('2026-11-27') }),
+      ];
+      const facts = await customerAskedFacts(SVC, fakeDbh({ rows }));
+      expect(facts.items[0]).toMatchObject({ text: 'second', at: '2026-11-27T14:00:00.000Z' });
+    } finally {
+      jest.useRealTimers();
+      Date.now = realNow;
+    }
+  });
+});
+
+describe('customerAskedFacts: this appointment\'s reschedule requests do not depend on the portal read depth', () => {
+  test('a reschedule row is returned by its own query even when the portal read returns nothing', async () => {
+    const rows = [formRow({ subject: 'Reschedule', source: 'customer_portal_reschedule', description: 'Appointment svc-1: Pest on 2026-12-01\nCustomer notes: Friday please' })];
+    const dbh = fakeDbh({ rows });
+    const facts = await customerAskedFacts(SVC, dbh);
+    expect(facts.items[0]).toMatchObject({ text: 'Friday please', appointment: true });
+    expect(dbh.calls.filter((c) => c[0] === 'service_requests' && c[1] === 'where' && c[2]?.source === 'customer_portal_reschedule')).toHaveLength(1);
   });
 });
 
