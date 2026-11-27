@@ -631,9 +631,14 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).update({ customer_id: winnerId });
           expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
           expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
-          // once the winner itself lists the number, the copy is a grant again
-          await db('customer_reminder_contacts').insert({ customer_id: winnerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x' });
+          // a call from the winner naming the person for this visit takes the stale copy over (same id, claims kept, no link)
+          const [stale] = await otherRows();
+          const taken = await record({ scheduledServiceId: otherVisitId, customerId: winnerId }, entry({ appointment_texts_scope: 'this_visit' }));
+          expect(taken.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+          const [row] = await otherRows();
+          expect(row).toMatchObject({ id: stale.id, source: 'call_caller_provided', customer_id: winnerId, track_token: null });
           expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+          expect(await db('customer_reminder_contacts').where({ customer_id: winnerId })).toHaveLength(0);
         } finally {
           await db('scheduled_services').where({ id: otherVisitId }).update({ customer_id: customerId });
           await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).del();
