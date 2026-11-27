@@ -180,32 +180,36 @@ describe('once per ET day', () => {
     expect(mockTrigger.mock.calls.map(([, payload]) => payload.day)).toEqual(['2026-10-31', '2026-11-01', '2026-11-02']);
   });
 
-  test('a send that definitely did not happen releases the claim so a rerun can send, while post-handoff failure keeps it', async () => {
+  test('a send that definitely did not happen releases the audience claim so a rerun can send, while retaining the legacy rollout fence', async () => {
     mockOpenRows.mockResolvedValue(many(2));
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:scoped')).toBe(true);
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'recipient_lookup' });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'before_handoff' });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
     mockTrigger.mockRejectedValueOnce(new Error('boom'));
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
     // Missing push credentials (skipped with apns_not_configured / push_not_configured)
-    // is a delivery failure, NOT a routine skip — releases the claim so retry works once configured.
+    // is a delivery failure, NOT a routine skip — releases the audience claim so retry works once configured.
     mockTrigger.mockResolvedValueOnce({
       bellWritten: false,
       push: { sent: 0, failed: 0, skipped: 1, subscriptions: 1, results: [{ sent: false, skipped: true, reason: 'apns_not_configured' }] },
     });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, error: 'push_not_configured' });
-    expect(claimed.size).toBe(0);
-    // Opt-outs / empty subscriptions (sent=0, failed=0, no config error) report skipped and release claim.
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    // Opt-outs / empty subscriptions (sent=0, failed=0, no config error) release audience claim
+    // while retaining the legacy rollout fence so an older instance cannot broadcast private counts.
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 0, subscriptions: 0 } });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'no_delivery' });
-    expect(claimed.size).toBe(0);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(false);
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
     // Per-device failure after handoff (push.failed > 0) may have had its ack lost ->
     // treat as uncertain and KEEP the claim so a rerun never sends a duplicate banner.
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: { sent: 0, failed: 2, subscriptions: 2 } });
@@ -223,6 +227,15 @@ describe('once per ET day', () => {
     mockTrigger.mockClear();
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'already_claimed' });
     expect(mockTrigger).not.toHaveBeenCalled();
+
+    // When only ownerOnly alerts are open and no owner admin exists, reserve the legacy key
+    // so an older instance cannot broadcast the private count to non-owner admins.
+    claimed.clear();
+    activeAdmins = [{ id: 2, email: 'office@wavespestcontrol.com' }];
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 1, sent: false, skipped: 'no_recipients' });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    expect(claimed.has('morning_banner:2026-11-03:scoped')).toBe(true);
   });
 
   test('a failed recipient lookup leaves no stranded daily claim so a rerun succeeds', async () => {

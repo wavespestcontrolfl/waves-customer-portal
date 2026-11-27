@@ -29,7 +29,7 @@
 
 const logger = require('./logger');
 const db = require('../models/db');
-const { takeSendClaim, releaseSendClaim, claimScopedDay, releaseScopedDay } = require('./sms-send-claims');
+const { takeSendClaim, releaseSendClaim, claimScopedDay } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { AREAS } = require('./admin-alert-compose');
 const { isFullAccessEmail } = require('./intelligence-bar/ib-access');
@@ -218,12 +218,13 @@ function summarizeOutcomes(day, ownerSummary, outcomes) {
 // alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
 // re-notify an audience that already received today's banner. Look up
 // recipients BEFORE reserving any claim so a DB lookup failure leaves no
-// stranded daily claim; reserve the legacy bare-date key alongside a `:scoped`
-// marker in one transaction so both rollout orders never duplicate a banner AND
-// an interrupted new run can safely resume unclaimed audiences.
+// stranded daily claim; once recipients are loaded, reserve AND retain the
+// legacy bare-date key alongside `:scoped` in one transaction (even when no
+// recipients qualify or every audience skips/fails) so an older instance can
+// never grab the legacy key and broadcast ownerOnly alert counts to office
+// admins, while new-release retries always resume unclaimed audiences via `:scoped`.
 async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
   const audiences = buildAudiences(day, ownerSummary, sharedSummary, await splitAdminIdsByOwnerAccess());
-  if (audiences.length === 0) return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
 
   const legacyKey = `${CLAIM_PREFIX}${day}`;
   const markerKey = `${CLAIM_PREFIX}${day}:scoped`;
@@ -238,16 +239,9 @@ async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
     logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
     return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
   }
+  if (audiences.length === 0) return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
 
   const outcomes = await Promise.all(audiences.map(sendClaimedAudience));
-  const keptStatuses = new Set(['sent', 'uncertain', 'already_claimed']);
-  if (gate.reservedHere && !outcomes.some((o) => keptStatuses.has(o.status))) {
-    try {
-      await releaseScopedDay(legacyKey, markerKey);
-    } catch (err) {
-      logger.error(`[morning-banner] scoped day claim release failed for ${day}: ${err?.code || err?.message || 'error'}`);
-    }
-  }
   return summarizeOutcomes(day, ownerSummary, outcomes);
 }
 

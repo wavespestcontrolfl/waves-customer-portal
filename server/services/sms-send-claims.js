@@ -77,14 +77,7 @@ async function claimScopedDay(legacyKey, markerKey, conn = db) {
   return typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn);
 }
 
-async function releaseScopedDay(legacyKey, markerKey, conn = db) {
-  const run = async (trx) => {
-    await trx('sms_send_claims').whereIn('claim_key', [legacyKey, markerKey]).del();
-  };
-  return typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn);
-}
-
 module.exports = {
   pruneSmsSendClaims, takeSendClaim, releaseSendClaim, hasAnySendClaim,
-  claimScopedDay, releaseScopedDay, WEEKLY_CLAIM_PREFIXES,
+  claimScopedDay, WEEKLY_CLAIM_PREFIXES,
 };
