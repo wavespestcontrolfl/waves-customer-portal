@@ -118,6 +118,13 @@ const PEST = {
     { sqft: 4000, adj: r(10) },
     { sqft: 5500, adj: r(16) },
   ],
+  // Above 5,500 sq ft a NEW quote adds a premium on top of the table price: +$8 per visit (quarterly list price) for each 1,000 sq ft over
+  // aboveTableStartSqFt (5,500), pro-rated to the square foot, no cap (owner 2026-11-26: 8,000 sq ft = $148, 10,000 = $164). A CODE constant, not a
+  // pricing_config row: nothing a Settings edit does can move a sent quote. A quote saved before the rule stays flat at the last
+  // bracket (legacyPestAboveTable stamp). Bimonthly, monthly and one-time pest follow through the quarterly price.
+  aboveTablePer1000: 8,
+  // Where that premium starts: a code constant too, never read from the table, so a Settings edit of the last bracket cannot move it.
+  aboveTableStartSqFt: 5500,
   additionalAdjustments: {
     indoor: r(15),              // NEW. Interior treatment adds 10-15 min + $3-5 in product.
     shrubs_light: -r(5),        // Light shrubs = sparser perimeter, less spray time. Already on the admin Pricing Logic panel; pricer was missing the branch (drift bug).
@@ -152,6 +159,8 @@ const PEST = {
   // exactly-2,500 sf footprint lands in the mid tier — the docstring above
   // says "1,500 – 2,500" is inclusive on both ends. Keep this in mind if
   // you re-tune via the admin Pricing Logic panel.
+  // Since 2026-11-26 (owner "whole home", new quotes only) the size read against these brackets is the home's TOTAL living area,
+  // not the ground-floor footprint; a quote priced before that keeps the footprint (estimate stamp legacyWholeHomeSizing).
   pestInitialRoach: {
     regular: [
       { sqft: 1500, price: r(119) },
@@ -2382,7 +2391,11 @@ const SPECIALTY = {
     },
   },
   wasp: {
-    tiers: [r(150), r(250), r(435), r(775)],
+    // Second level $250 -> $275 (owner 2026-11-26): a tier-2 nest with the $75 small removal is $350. Yellow jackets, hornets and
+    // paper wasps price through this one table (the species only names the line). CODE constants, not Settings: a quote sent before
+    // the change keeps the table it was priced with (estimate stamp legacySpecialty1126 -> legacyTiers), so nothing can move it.
+    tiers: [r(150), r(275), r(435), r(775)],
+    legacyTiers: [r(150), r(250), r(435), r(775)],
     addons: {
       aggressiveness: [r(75), r(150), r(200)],
       height: [r(75), r(150)],
@@ -2430,6 +2443,22 @@ const SPECIALTY = {
     brackets: [
       { maxSqFt: Infinity, price: r(250) },
     ],
+    // Owner ruling 2026-11-26: the inspection price varies by home size and construction, $150 floor up to $275, for NEW
+    // quotes only (a quote saved before the rule keeps the flat `brackets` price above: the legacyWdoFlat stamp). A code
+    // constant, not a Settings row, so a Settings edit never moves it. Size is the home's living area (sq ft) the quote priced
+    // (<= maxSqFt; the footprint stands in when no living area is known). Columns: `block` = concrete block / masonry on a slab;
+    // `frame` = wood frame or mixed construction on a slab; `crawl` = any crawl space or raised foundation (wins over the walls).
+    // Unknown or untrusted construction / foundation prices as `block` and carries an internal staff note.
+    sizeTable: {
+      tiers: [
+        { maxSqFt: 2000, block: r(150), frame: r(175), crawl: r(200) },
+        { maxSqFt: 3000, block: r(175), frame: r(200), crawl: r(225) },
+        { maxSqFt: 4000, block: r(200), frame: r(225), crawl: r(250) },
+        { maxSqFt: Infinity, block: r(225), frame: r(250), crawl: r(275) },
+      ],
+      // Internal only: every staff note priceWDO adds to the line's warnings starts with this marker (the customer payload strips by it).
+      staffNoteMarker: 'WDO staff note:',
+    },
   },
 };
 
@@ -2496,6 +2525,9 @@ const BED_BUG = {
     label: 'Bed Bug Chemical/IPM Program',
     includedVisits: 2,
     followUpDays: 14,
+    // Each room after the first adds this flat amount to the FINAL first-room price (owner 2026-11-26: room 1 as today, every added room $349;
+    // CODE constant: a quote sent before it keeps the old per-room cost curve, estimate stamp legacySpecialty1126).
+    addedRoomPrice: 349,
     materialPerRoomVisit1: 50.42,
     materialPerRoomVisit2Factor: 0.50,
     extraFollowUpMaterialFactor: 0.25,

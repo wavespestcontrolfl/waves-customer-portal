@@ -5101,7 +5101,7 @@ and both accept an OPTIONAL `heard_about` —
 the quote form's self-reported "How did you hear about us?" answer,
 validated against a FIXED allowlist (`server/services/heard-about.js`
 `sanitizeHeardAbout`, shared with the online quote wizard): `google_search`, `google_maps`, `chatgpt`,
-`other_ai`, `facebook_instagram`, `nextdoor`, `yelp`, `friend_neighbor`,
+`other_ai`, `facebook_instagram`, `facebook_group`, `nextdoor`, `yelp`, `friend_neighbor`,
 `truck_yard_sign`, `other`. Any other value — including free text — is
 SILENTLY DROPPED (never stored; the request still succeeds as if the field
 were absent). A valid value is stored verbatim in `leads.heard_about`
@@ -6052,13 +6052,17 @@ the quote invitation and booking confirmations retain their existing paths.
 A refused website publication
 withholds the booking handoff. Legacy callers keep their current `/book`
 handoff. Ordinary website lead forms do not opt into this route.
-Recurring mosquito above 2 acres (owner 2026-11-26): a `mosquito` service on a
-measured lot above 87,120 sq ft (gross lot or treatable area) answers `202` with
-`quote_required: true`, `reason: "mosquito_lot_above_2_acres"`, no price fields,
-and the message "Mosquito control for a property this size is priced by our
-team — we'll review your lot and send your exact price shortly." The office bell
-reads "Lot above 2 acres: set the mosquito price by hand". Lots at or below
-2 acres price as before; an unmeasured lot keeps `mosquito_treatable_area_unverified`.
+Recurring mosquito above 2 acres (owner 2026-11-26, changed the same evening): a `mosquito` service on a
+measured lot above 87,120 sq ft (gross lot or treatable area) is PRICED for a new quote: the 2-acre per-visit
+price plus $85 per added acre (pro-rated), so it no longer answers `reason: "mosquito_lot_above_2_acres"` and the
+office bell no longer reads "Lot above 2 acres: set the mosquito price by hand". The existing review a lot of about an
+acre or more already had (`reason: "acre_or_larger_property"`, `202`, `quote_required: true`) still holds it on this route,
+exactly like a 1.5-acre lot. An estimate priced before the change (estimate stamp `legacySpecialty1126`) keeps the
+hand-price hold. An unmeasured lot keeps `mosquito_treatable_area_unverified`.
+This route stores a home lot above 200,000 sq ft as exactly 200,000 (the residential lot cap), so a lot AT that number
+means "4.59 acres or more": it is never priced as 4.59 acres. It still answers `202`, `quote_required: true`,
+`reason: "mosquito_lot_above_2_acres"` with no price fields, and the office bell reads "Lot is 4.59 acres or more
+(property records stop there): enter the real lot size to price mosquito, or set the price by hand".
 A `leadId` that names a web-form lead (`lead_type` `form_submission`; its
 id reaches a visitor only through the quiz hand-off) is written only while
 that lead passes the hand-off's rule: open, not deleted, not commercial
@@ -6256,7 +6260,19 @@ site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
 review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
 (owner ruling 2026-09-03: the two-treatment package priced as one
-regular_standalone knockdown on the home footprint; species / severity /
+regular_standalone knockdown on the home footprint (since 2026-11-26, new quotes
+only: on the home's total living area, so a two-story home prices as a one-story
+home of the same size; a draft stored before that keeps its footprint price,
+estimate stamp `legacyWholeHomeSizing`; when the wizard keeps its 2,000 sq ft
+placeholder and the server's own lookup measured the home, the cockroach and bed
+bug treatments price on the measured living area, as flea does, and a
+customer-confirmed size still wins; a bed bug row held for inspection stores
+the same size fields, so a staff revision keeps the measured home; a
+commercial building is not a home and keeps its measured footprint; the
+measured home also satisfies the stand-alone package's "building size not
+measured" check, and a measured home above the 20,000 sq ft public ceiling
+that a line priced on parks the quote, `home_size_above_public_limit`, as a
+posted size above it does); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed
@@ -6407,6 +6423,10 @@ website-quote withdrawal, and the web-form shell test above. Off, every
 comparison is as before. No request or response shape changes.
 
 Priced lawn area (always on; the former `GATE_PUBLIC_QUOTE_LAWN_AREA` was removed after astro #464 went live): the `/calculate` response carries `lawn_area` when the quote has a residential `lawn_care` or `commercial_lawn` line with a positive priced area: `lawn_area.turf_sqft` (the priced turf area, rounded to whole square feet) and `lawn_area.source`, one of `measured`, `confirmed`, `ai_satellite`, `county`, `lot_estimate`, `footprint_estimate` (an unknown basis, or a satellite figure capped to the parcel, reads `lot_estimate`). The block is omitted when the quote has no priced lawn line or the area is missing or not positive; the widget then shows its own estimate copy and makes no priced-basis claim.
+
+Home size above the public ceiling (owner 2026-11-26, pest above 5,500 sq ft; always on, no gate): a residential `/calculate` whose posted `homeSqFt` is above 20,000 is never priced as the clamped size, whatever `services` it asks for (pest keeps rising with the footprint, so a 24,000 sq ft two-story home would read as a 10,000 sq ft footprint; a quote with no pest service is held too, because a stored clamped size would price pest the day pest is added to that estimate). It answers `202 { lead_id, quote_required: true, service: null, reason: 'home_size_above_public_limit', service_interest, message }` with `message` "A home this size is priced by our team — we'll review it and send your exact price shortly." and NO price fields (`monthly_total`, `annual_total`, `variance_*`, `per_application`, `setup_fee_amount`, `recurring_lines` are absent). The lead and draft keep the real posted size (`engineInput.homeSqFt`, `services.exclusion.homeSqFt`, `extracted_data.homeSqFt`), bounded at 200,000 sq ft (ten times the ceiling) so a junk finite value such as `1e300` never reaches the price arithmetic or a size column; the reason is in `RESIDENTIAL_VERIFICATION_REASONS`, so the lead is a residential verification. Precedence: this reason is the last of the quote-required reasons. When an engine manual-review line is also present (for example `topDressing` beside `pest`), that line's `service`, `reason` and `message` are the answer and `home_size_above_public_limit` is not reported; the lead still keeps the real posted size. The one exception is a held `pest_control` or `one_time_pest` line: it answers with `home_size_above_public_limit` and its own `service`, whatever the engine lists first on it. With no lot posted the route prices on a stand-in lot of 4 x the home size, and the engine lists that lot review (`very_large_lot`) first, which would read as a commercial quote. A posted `homeSqFt` is a finite number or a numeric string. Anything else is no size and takes the 2,000 sq ft default: text that is not a number (`"abc"`, `"1,800"`, `"NaN"`), an infinite value (`Infinity`, `-Infinity`), and a JSON boolean, array, object or `null` (`true` is not 1 sq ft, `[24000]` is not 24,000). Such a value is never clamped to the ceiling, parked or stored. With no lot posted (or on a wizard request), the synthetic lot is the real home size × 4, under the existing lot cap (200,000 for residential). A commercial quote and a size at or below 20,000 are unchanged.
+
+Story count above the pest table (owner 2026-11-26, pest above 5,500 sq ft; always on, no gate): above 5,500 sq ft the pest price rises with the footprint, the living area over the stories (12,000 sq ft: $180 a visit on one floor, $132 on two), and the website form asks no story count: the posted `stories` is the lookup's echo, or anything a direct caller typed. So for a residential `/calculate` whose home size is above 5,500 and at or below 20,000, the posted count (bounded 1 to 3, default 1, as before) is a known count only when the server's own cached lookup for the address vouches for the same number: `storiesSource` is one of `ai`, `permit`, `verified`, `manual`, the lookup carries no verify flag on `stories` and no whole-lookup flag (`address`, `all`), and an `ai` count names its evidence on the lookup record (`storyCountHasEvidence` in `estimator-engine/draft-builder.js`): either the AI stories fallback's own evidence (`_storiesEvidence`), which must grade as a direct answer (`storiesSourceForPricing`), or the record search's field evidence for the count (`_fieldEvidence.stories`) from a known source family (`verified`, `county`, `cadastral`, `permit`, `builder`, `listing`, `aggregator`) with no `fieldVerify` mark. An `ai` count with neither (no record, or a record that names no evidence for the count) is not a known count. Otherwise the engine input carries `storiesSource: 'default'` and the engine marks the pest line `stories_estimated`. A request with `pest` or `oneTimePest` then answers `202 { lead_id, quote_required: true, service: 'pest_control' | 'one_time_pest', reason: 'stories_estimated', service_interest, message }` with `message` "A home this size is priced by our team — we'll review it and send your exact price shortly." and NO price fields. The reason is in `RESIDENTIAL_VERIFICATION_REASONS`, so the lead is a residential verification and the office notice reads "needs property confirmation (stories_estimated)". `stories_estimated` is the reason of a held `pest_control` or `one_time_pest` line that carries it, whatever else the engine lists first on that line: with no measured lot the route prices on a stand-in lot of 4 x the home size, and for a home above 10,000 sq ft the engine lists that lot review (`very_large_lot`) before the story count. As on every website quote, the first held line names a multi-service quote: recurring pest is the first line, and one-time pest is listed after the recurring lines, so a held lawn or mosquito line beside one-time pest returns its own `service`, `reason` and `message`. A request with no pest service prices as before and stores the same mark, so pest added to that draft later is held too. The count that prices is never replaced: a record that says two floors beside a posted one floor holds the quote, it does not re-price it. Unchanged: a home at or below 5,500 sq ft (the posted count prices with or without a record), a commercial quote, and a home above 20,000 sq ft (held under `home_size_above_public_limit`, with no story-count mark). A direct caller with no cached lookup for the address always gets the hold above 5,500 sq ft.
 
 Repeat-run dedupe (#3834 split, PR A′; always on): a tokenless `/calculate` whose typed
 email AND phone AND quoted address AND service (catalog `serviceKey`, or
@@ -6674,6 +6694,11 @@ agent-readable /pricing.md surface and directly by AI agents (both
 surfaces read this same computed payload — neither carries its own copy
 of the sweep). Exact per-property pricing stays on POST
 /api/public/quote/calculate.
+The `wdo_inspection` row (owner ruling 2026-11-26, $150-$275 by home size and construction): its range comes from the code
+table `SPECIALTY.wdo.sizeTable` (`server/services/pricing-engine/constants.js`), not from a `pricing_config` row. `low`/`high` are the
+table's floor and ceiling ($150-$275, the sweep widens them if a value ever falls outside) and `notes` ends "Price by home size and
+construction." The row's shape and key are unchanged; only its numbers moved (it read $150-$350). The staff-only notes on a
+WDO estimate line (construction, foundation, an unconfirmed home size) are never part of this payload. The lawn row publishes no 6x column (that tier is retired for new sales).
 The `tree_shrub_care` row contracted with the Light tier's retirement
 (2026-09-24): the sweep is now `standard`/`enhanced` only (`light` dropped
 from the tier sweep the same way the lawn row above dropped its retired
@@ -7928,7 +7953,7 @@ route or on site, else 0). It never returns `summary`, the report, invoice, prep
 or review tokens, photos, the offer and referral cards, `customer`,
 `cancellation`, `visitChange`, stops count or route progress, and the cards and
 summary reads do not run. The recipient path is strictly read-only (no
-geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token) and
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token), the row may also be a copy of the customer's every-visit list (`customer_reminder_contacts`, owner 2026-11-24 PM + 2026-11-26 "simpler": a person a call named, without a "just this visit" limit, is copied onto each live visit of that customer as an ordinary recipient row by `materializeForVisit` right before a send, so a later visit's en-route text can mint that person's own map-only token for THAT visit; a copy also needs the visit's CURRENT customer to list the number, checked in the resolver's permission read and again in the same final joined query on all three routes, so a copy a merge moved to an account that does not list the person answers 404 like an unknown token) and
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
 no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` exactly this visit's own id, decided in the same SELECT that returns the fix (no visit-group lookup: a grouped visit whose focus moved to a sibling shows no truck) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. The technician photo is presigned STRICT for this scope (`resolveTechPhotoUrl(..., { strict: true })`): a signing failure throws a code-only error and answers 404 like an unknown token, never a fallback photo (every other caller keeps its fallback; the helper logs the error code only, never the S3 key or the raw message). The GET makes no visit-change read: an eligible row is en route, on site or just completed, which carries no visit change. Its stops-ahead POST answers nulls and its view POST
@@ -9908,7 +9933,12 @@ again just because its customer_visible flag serves an unrelated
 customer-facing surface,
 the /api/public/pricing-ranges payload via its shared fail-closed producer,
 the service-areas table, and a static description of the
-/api/public/quote/calculate HTTP contract (how_to_request_quote). No
+/api/public/quote/calculate HTTP contract (how_to_request_quote). Each tool
+advertises a human-readable top-level title (mirrored in annotations for
+2025-03-26 clients) and truthful closed-world annotations (`readOnlyHint:
+true`, `destructiveHint: false`, `openWorldHint: false`);
+the shared serializer includes those fields only for this public registry,
+leaving the internal /api/mcp and /api/mcp-admin payloads unchanged. No
 customer-PII tools and no write tools may be added here — exact quotes and
 lead capture stay on /api/public/quote/calculate behind its four-field
 contact gate; this surface documents that endpoint, never wraps it. Treat

@@ -1839,7 +1839,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Treated exterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice\nTreated interior cracks & crevices (activity present)\nSwept eaves, window frames, door frames, and lanai",
+        "primary": "Treated exterior perimeter band\nApplied repellent solution with surfactant to perimeter\nApplied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice\nTreated interior cracks & crevices (activity present)\nSwept eaves, window frames, door frames, and lanai",
         "secondary": "Applied WDG or granular bait in landscape beds\nPlaced glue boards in garage or utility areas\nDocumented moisture, exclusion, or sanitation conditions",
         "lineMeta": {
           "Treated exterior perimeter band": {
@@ -1856,7 +1856,7 @@
               "LESCO Crosscheck Plus"
             ]
           },
-          "Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 18-in band at openings) + crack & crevice": {
+          "Applied non-repellent solution to foundation perimeter (1 ft up + 1 ft out; 1-in pin stream at openings) + crack & crevice": {
             "scope": "exterior",
             "treatmentApplied": true
           },
@@ -1894,7 +1894,67 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted."
+        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted.",
+        "mixRates": [
+          {
+            "product": "LESCO Crosscheck Plus",
+            "where": "Outside: perimeter band",
+            "perGallon": {
+              "amount": 0.625,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "about 1.5 gal per 1,000 sq ft",
+            "limit": "1 fl oz per 1,000 sq ft at most; 7 days between applications",
+            "epa": "10404-120"
+          },
+          {
+            "product": "Taurus SC",
+            "where": "Outside: foundation band, 1 ft up and 1 ft out; 1-in pin stream at openings",
+            "perGallon": {
+              "amount": 0.4,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "2 qt per 160 linear ft",
+            "limit": "A calendar year allows four applications at this strength, or two at this strength and one at 0.8 fl oz per gal, or two at 0.8",
+            "epa": "53883-279"
+          },
+          {
+            "product": "LESCO 90/10 Nonionic Surfactant",
+            "where": "Same tank as the outside mix",
+            "perGallon": {
+              "amount": 0.0625,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "0.25 fl oz in the 4 gal FlowZone"
+          },
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Inside: cracks and crevices where ants are active",
+            "perGallon": {
+              "amount": 10,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Roaches: use the roach card rate. Not for Pharaoh ants. 3 days between applications",
+            "epa": "91234-401"
+          }
+        ]
       },
       {
         "visit": 3,
@@ -1929,7 +1989,30 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Species ID drives product choice. Ghost ants require patience and non-repellent transfer."
+        "notes": "Species ID drives product choice. Ghost ants require patience and non-repellent transfer.",
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Ant trails and entry points, inside or outside",
+            "perGallon": {
+              "amount": 10,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Not for Pharaoh ants, inside or outside",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Advion Ant Bait Gel",
+            "where": "Along active trails",
+            "dose": "0.1 to 1 g per spot",
+            "epa": "100-1498"
+          }
+        ]
       },
       {
         "visit": 4,
@@ -1945,76 +2028,82 @@
           "premium": true
         },
         "notes": "Flea jobs use the Flea Control card. Do not guarantee resolution unless pet treatment and vacuum protocol are followed."
-      },
+      }
+    ]
+  },
+  "assessment": {
+    "name": "Waves Assessment Protocol",
+    "notes": [
+      "A Waves Assessment is a free walk of the property to find the problem and recommend a plan. It is booked when the service could not be named on the call.",
+      "No product is applied or logged on an assessment. A treatment the customer buys on the spot is done and logged on the sold service's own visit (owner pick D13, 2026-11-25).",
+      "Log on the sheet: the outcome, what the customer is interested in, the call-back date when not sold, the pest or problem found, the site limits and the photos.",
+      "Bring a flashlight, a phone, a hand lens and a clean jar for a specimen. Wear closed shoes, and gloves for an attic hatch or a meter box."
+    ],
+    "visits": [
       {
-        "visit": 5,
+        "visit": 1,
         "month": "Any",
-        "primary": "Rodent monitoring / bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nOutdoor stations where activity shows: the bait this site uses (below)\nSnap traps in the attic only, spread apart, screwed or tied down, when activity is active",
-        "secondary": "Outdoors at a home: bromethalin bait in a locked, anchored station\nCommercial sites only: a second-generation bait in locked, anchored stations\nDocument exclusion findings with photos\nEscalate seal-up proposal when entry points are active\nRemove carcasses and reset traps on follow-up",
-        "lineMeta": {
-          "Outdoor stations where activity shows: the bait this site uses (below)": {
-            "scope": "exterior",
-            "treatmentApplied": false
-          },
-          "Outdoors at a home: bromethalin bait in a locked, anchored station": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Tomcat Bait Chunx with Bromethalin"
-            ],
-            "completionApplicationMethod": "bait_placement"
-          },
-          "Commercial sites only: a second-generation bait in locked, anchored stations": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Contrac Blox"
-            ],
-            "completionApplicationMethod": "bait_placement"
-          },
-          "Rodent monitoring / bait": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Inspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries": {
-            "scope": "exterior",
-            "treatmentApplied": false
-          },
-          "Snap traps in the attic only, spread apart, screwed or tied down, when activity is active": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Document exclusion findings with photos": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Escalate seal-up proposal when entry points are active": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Remove carcasses and reset traps on follow-up": {
-            "scope": "interior",
-            "treatmentApplied": false
-          }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "elevated",
+        "primary": "Waves Assessment (about 30 minutes, no product)\nBefore the door: read the call note and the problem the customer named; open the draft estimate\nAsk three questions: what did you see and where; since when; pets, children, a well, a pond or a canal on the lot\nOutside walk, clockwise from the front door. Pest: trails, droppings, webs, nests, entry gaps, mulch against the wall, branches on the roof, standing water\nOutside walk, lawn and plants: grass type, weeds, thin or brown areas, irrigation; shrubs and palms: scale, whitefly, frond color\nRecord the site limits that change a quote: water within 15 ft (fresh) or 60 ft (canal or bay), pool cage and lanai, eave height, locked gate, dog, edible garden\nTake 4 to 8 photos: the front of the home, each problem, each site limit\nFinish the estimate on the phone and show the customer its price: the recommended plan first, then one alternative. Never write or say a price that is not on the estimate\nAsk for the booking now. Yes: book the first visit before leaving. No: set the call-back date on the sheet",
+        "secondary": "Inside only where the customer reports a problem: kitchen, baths, garage, and the attic hatch when rodents are named. Flashlight only\nCustomer says yes and wants treatment today: call the office to book the sold service on this visit, then treat from that service's card and log the products there\nNobody home: use the no-show choice on the sheet",
+        "material_cost": "inspection",
+        "labor_cost": "inspection",
         "tiers": {
-          "bronze": false,
-          "silver": false,
+          "bronze": true,
+          "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "Baiting without exclusion is monitoring, not remediation. Separate exclusion scope when needed."
-      },
-      {
-        "visit": 6,
-        "month": "Any",
-        "primary": "Mosquito Barrier\nEssential Barrier: bifenthrin adulticide directed to foliage, fence lines, shaded resting zones, lanai perimeter, and pool cage edges\nPrecision Barrier: gamma-cyhalothrin adulticide for heavy vegetation, water adjacency, pool cages, and higher residual expectations\nPyriproxyfen + novaluron IGR support where breeding pressure exists",
-        "secondary": "Inspect drains, planters, saucers, bromeliads, gutters, tarps, toys, and other water-holding sites\nDump standing water where practical and document sources that cannot be removed\nUse mosquito stations or Bti dunk tablets when breeding sources cannot be fully eliminated\nAvoid blooming plants and pollinator activity windows",
-        "material_cost": "inventory",
-        "labor_cost": "standard",
-        "notes": "Use gas-powered backpack sprayer for directed barrier application. Peak pressure May-Oct. Wind, rain, inaccessible water, and source-reduction notes must be documented."
+        "notes": "No product on this visit. The price the customer sees is the estimate's price.",
+        "lineMeta": {
+          "Waves Assessment (about 30 minutes, no product)": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Before the door: read the call note and the problem the customer named; open the draft estimate": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Ask three questions: what did you see and where; since when; pets, children, a well, a pond or a canal on the lot": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Outside walk, clockwise from the front door. Pest: trails, droppings, webs, nests, entry gaps, mulch against the wall, branches on the roof, standing water": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Outside walk, lawn and plants: grass type, weeds, thin or brown areas, irrigation; shrubs and palms: scale, whitefly, frond color": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Record the site limits that change a quote: water within 15 ft (fresh) or 60 ft (canal or bay), pool cage and lanai, eave height, locked gate, dog, edible garden": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Take 4 to 8 photos: the front of the home, each problem, each site limit": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Finish the estimate on the phone and show the customer its price: the recommended plan first, then one alternative. Never write or say a price that is not on the estimate": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Ask for the booking now. Yes: book the first visit before leaving. No: set the call-back date on the sheet": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Inside only where the customer reports a problem: kitchen, baths, garage, and the attic hatch when rodents are named. Flashlight only": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Customer says yes and wants treatment today: call the office to book the sold service on this visit, then treat from that service's card and log the products there": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Nobody home: use the no-show choice on the sheet": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          }
+        }
       }
     ]
   },
@@ -2471,6 +2560,41 @@
         "completionDefaultProducts": [
           "Suspend Polyzone",
           "Tekko Pro IGR"
+        ],
+        "mixRates": [
+          {
+            "product": "Suspend Polyzone",
+            "where": "Barrier: shaded foliage and resting sites",
+            "perGallon": {
+              "amount": 1.1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "limit": "21 days between applications; no spray above 15 mph wind",
+            "epa": "101563-143"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Same tank as the PolyZone",
+            "perGallon": {
+              "amount": 1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Summit Bti Dunks",
+            "where": "Standing water that cannot be dumped",
+            "dose": "1 dunk per 100 sq ft of water, every 30 days. Never an HOA or CDD pond",
+            "epa": "6218-87"
+          }
         ]
       },
       {
@@ -2567,6 +2691,41 @@
         "completionDefaultProducts": [
           "Suspend Polyzone",
           "Tekko Pro IGR"
+        ],
+        "mixRates": [
+          {
+            "product": "Suspend Polyzone",
+            "where": "Barrier: shaded foliage and resting sites",
+            "perGallon": {
+              "amount": 1.1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "limit": "21 days between applications; no spray above 15 mph wind",
+            "epa": "101563-143"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Same tank as the PolyZone",
+            "perGallon": {
+              "amount": 1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Summit Bti Dunks",
+            "where": "Standing water that cannot be dumped",
+            "dose": "1 dunk per 100 sq ft of water, every 30 days. Never an HOA or CDD pond",
+            "epa": "6218-87"
+          }
         ]
       },
       {
@@ -2608,7 +2767,23 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "A re-service visit. It prefills no spray: PolyZone repeats only at 21 days, and Tekko Pro outdoors not inside 14 days."
+        "notes": "A re-service visit. It prefills no spray: PolyZone repeats only at 21 days, and Tekko Pro outdoors not inside 14 days.",
+        "mixRates": [
+          {
+            "product": "LESCO Crosscheck Plus",
+            "where": "Callback before day 21: resting sites only",
+            "perGallon": {
+              "amount": 0.33,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "7 days between applications at this rate",
+            "epa": "10404-120"
+          }
+        ]
       },
       {
         "visit": 5,
@@ -2643,22 +2818,27 @@
   "palm_injection": {
     "name": "Palm Injection Protocol",
     "notes": [
-      "Palm injections are add-ons, not default Tree & Shrub inclusions.",
-      "Diagnose the target issue before injecting. Do not use injections as a substitute for full palm fertility, irrigation correction, or disease diagnosis.",
-      "Record species or palm type, size class, product, dose, port count, target issue, photos, and follow-up timing."
+      "Every hole in a palm is permanent: palms cannot seal a wound. Every injection needs a reason (owner 2026-11-25, D8).",
+      "Lethal bronzing prevention with Arbor-OTC is the main service: lethal bronzing on the property or nearby, on a susceptible palm (Sylvester, Canary Island date, pygmy date, queen, Sabal, Bismarck, Christmas, coconut). Every 3 months for at least 2 years.",
+      "Sell it as protection, never a cure and never a guarantee: no trial has tested Arbor-OTC on lethal bronzing yet (UF/IFAS PP163). A palm is removed only on its own positive test; a palm with symptoms is held and tested on its own first, since other problems look alike.",
+      "Insects, palmetto weevil, coconut bud rot and nutrients: inject only after a diagnosis. Try a soil drench first for insects (no hole). Nutrients only after soil fertilizer fails.",
+      "First lethal bronzing visit: test before the first dose. UF Plant Diagnostic Center: $60 a palm, or $100 for a pool of up to 10 palms; the lab fee goes on the invoice. Results in about a week. A pooled sample that tests positive names no palm: test each palm in that pool on its own before any removal.",
+      "Confirm the Florida license category with FDACS before the first job (tree injection is reported to need Lawn & Ornamental).",
+      "Store Arbor-OTC in the office below 77°F, never in the truck.",
+      "Log each palm: palm ID, product, EPA number, mix, the amount the palm took (not the planned dose), hole position, plug, uptake time, next due date."
     ],
     "safety_rules": [
-      "Confirm product label and palm suitability before drilling or injecting.",
-      "Do not inject a palm with unclear diagnosis or severe irreversible decline without office review.",
-      "Disinfect equipment between palms when disease is suspected.",
-      "Document ports, dose, and follow-up date."
+      "Long sleeves, long pants, shoes and socks, chemical-resistant gloves and eyewear for every injection (IMA-jet label).",
+      "Never inject a palm whose fruit or nuts anyone eats, sells or gives away: Arbor-OTC is for non-food palms, and IMA-jet, TREE-äge and PHOSPHO-jet all bar food use.",
+      "Disinfect the bit and the needle between palms; flame the bit between palms when taking test samples.",
+      "Stay with the palm while it takes up the dose; keep people back from the palm only while you inject."
     ],
     "visits": [
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Palm Injection Assessment\nIdentify palm species/type, size class, symptoms, canopy pattern, spear condition, trunk wounds, irrigation/salt stress, and fertility history\nPhotograph canopy, spear, trunk, root zone, and affected fronds\nDetermine whether Mg, Mn/Fe, systemic pest, or diagnosed disease support injection",
-        "secondary": "Recommend soil/root-zone correction when injection is not the right tool\nEscalate severe decline, bud rot suspicion, or unclear diagnosis before treatment\nQuote injection separately from Tree & Shrub service",
+        "primary": "Palm Injection Assessment\nTag each palm: an ID, a photo, its species, clear-trunk height, trunk width and canopy width\nScreen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, a palm whose fruit or nuts anyone eats, sells or gives away, or open flowers (for an insect injection)\nFirst lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center\nNo lethal bronzing dose until the palm tests negative",
+        "secondary": "Insects: recommend a soil drench first; inject only when a drench is impractical\nNutrient pattern: correct the soil fertilizer first; inject only after it fails\nEscalate severe decline, bud rot or an unclear diagnosis before any treatment\nQuote injection separately from Tree & Shrub service",
         "material_cost": "inspection",
         "labor_cost": "inspection",
         "tiers": {
@@ -2667,35 +2847,129 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Assessment comes first. Never sell injection from a single yellow-frond observation."
+        "notes": "Assessment and testing come first. Never sell an injection from a single yellow frond. About 15 minutes a palm.",
+        "lineMeta": {
+          "Palm Injection Assessment": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tag each palm: an ID, a photo, its species, clear-trunk height, trunk width and canopy width": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "First lethal bronzing visit: drill a sawdust sample from each palm, flame the bit between palms, bag and label each palm separately for the UF Plant Diagnostic Center": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Insects: recommend a soil drench first; inject only when a drench is impractical": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Nutrient pattern: correct the soil fertilizer first; inject only after it fails": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Escalate severe decline, bud rot or an unclear diagnosis before any treatment": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Quote injection separately from Tree & Shrub service": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "No lethal bronzing dose until the palm tests negative": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Screen out: no injection for lethal bronzing symptoms, a dead spear leaf, Ganoderma, Thielaviopsis, Fusarium wilt, a palm whose fruit or nuts anyone eats, sells or gives away, or open flowers (for an insect injection)": {
+            "scope": "plant",
+            "treatmentApplied": false
+          }
+        }
       },
       {
         "visit": 2,
         "month": "Any",
-        "primary": "Palm Injection Application\nApply selected injection product per label and diagnosis\nUse Palm-Jet Mg for diagnosed magnesium deficiency pattern where appropriate\nUse Mn-Jet Fe for diagnosed manganese/iron deficiency pattern where appropriate\nUse IMA-jet or Propizol only when pest/disease diagnosis and label fit support it",
-        "secondary": "Record product, dose, port count, palm count, and application date\nKeep injection work separate from routine foliar or granular Tree & Shrub work\nClean and disinfect injection equipment as needed",
+        "primary": "Palm Injection Application\nConfirm the palm's tag, its test or diagnosis, and the screen-out list before drilling\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
+        "secondary": "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp. An unusually thin or thick trunk moves the dose one size down or up (label)\nInsects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted. Dose from the label's table for that pest, its pressure (light or severe) and the trunk width. Not in flower; no palm that will bear food within 365 days; no repeat inside a year\nPalmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4. Dose from the LOW column of the label's table for the trunk width; may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin. No food palms\nCoconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz; any other palm: the dose from the label's canopy-spread table. Never for Fusarium wilt\nNutrients, last resort after soil fertilizer fails: PALM-jet Mg. Dose from the label's table for the palm's size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F\nDiagnosed manganese or iron pattern: Mn-Jet Fe. Dose from the label's palm table by canopy width; one hole; late summer or fall",
         "lineMeta": {
-          "Use Palm-Jet Mg for diagnosed magnesium deficiency pattern where appropriate": {
+          "Palm Injection Application": {
             "scope": "plant",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Palm-Jet Mg"
-            ]
+            "treatmentApplied": false
           },
-          "Use Mn-Jet Fe for diagnosed manganese/iron deficiency pattern where appropriate": {
+          "Confirm the palm's tag, its test or diagnosis, and the screen-out list before drilling": {
             "scope": "plant",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Mn-Jet Fe"
-            ]
+            "treatmentApplied": false
           },
-          "Use IMA-jet or Propizol only when pest/disease diagnosis and label fit support it": {
+          "Repeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Stay with the palm and log the uptake time; disinfect the bit and the needle before the next palm": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Coconut bud rot, lab-confirmed Phytophthora only: PHOSPHO-jet, 2 tsp to 1 fl oz diluted to 1 to 2 fl oz; any other palm: the dose from the label's canopy-spread table. Never for Fusarium wilt": {
             "scope": "plant",
             "treatmentApplied": true,
             "catalogProductHints": [
-              "IMA-jet",
-              "Propizol"
-            ]
+              "Arborjet PHOSPHO-Jet Systemic Fungicide"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
+          },
+          "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp. An unusually thin or thick trunk moves the dose one size down or up (label)": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Arbor OTC Fungicide 5 oz"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
+          },
+          "Insects after a diagnosis (royal palm bug, whitefly, mealybug, soft scale): IMA-jet 10, undiluted. Dose from the label's table for that pest, its pressure (light or severe) and the trunk width. Not in flower; no palm that will bear food within 365 days; no repeat inside a year": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Ima-Jet 10"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
+          },
+          "Palmetto weevil or leaf skeletonizer on a valuable palm, before crown damage: TREE-äge G4. Dose from the LOW column of the label's table for the trunk width; may be diluted 1 to 9 with water. Carry the Florida 2(ee) bulletin. No food palms": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Tree-Age G-4 Injectable Insecticide"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
+          },
+          "Nutrients, last resort after soil fertilizer fails: PALM-jet Mg. Dose from the label's table for the palm's size. Alone, max 3 a year, not within 2 weeks of any other injection, not above 90°F": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Palm-Jet Palm Nutrition"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
+          },
+          "Diagnosed manganese or iron pattern: Mn-Jet Fe. Dose from the label's palm table by canopy width; one hole; late summer or fall": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "ArborJet Mn-Jet Fe Micros"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
           }
         },
         "material_cost": "inventory",
@@ -2706,13 +2980,13 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "Injection pricing is per palm and should remain separate from recurring Tree & Shrub tier inclusions."
+        "notes": "Pick the one injection the test or diagnosis supports. Injection pricing is per palm and stays separate from recurring Tree & Shrub tier inclusions."
       },
       {
         "visit": 3,
         "month": "Any",
-        "primary": "Palm Injection Follow-Up\nReinspect treated palms for symptom progression, spear condition, canopy response, and new stress signs\nPhotograph the same angles as the assessment\nUpdate next injection or fertility recommendation",
-        "secondary": "Do not repeat injection automatically without diagnosis and timing review\nEscalate non-response, worsening crown decline, or suspected pathogen issue\nDocument customer-facing expectations for slow visible response",
+        "primary": "Palm Injection Follow-Up\nReinspect each tagged palm: spear, canopy, the hole and plug, new stress signs\nPhotograph the same angles as the assessment\nUpdate the next due date: every 3 months on the lethal bronzing plan",
+        "secondary": "Do not repeat an injection without its diagnosis and timing review\nNew lethal bronzing symptoms: stop injecting that palm, test it on its own, and recommend removal only on its own positive result\nTell the customer: the palm changes slowly, over months; the small plugs stay in the trunk",
         "material_cost": "0.00",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2721,7 +2995,99 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Palm recovery is slow. Follow-up should focus on trend, not instant color change."
+        "notes": "Palm recovery is slow. Follow-up should focus on trend, not instant color change.",
+        "lineMeta": {
+          "Palm Injection Follow-Up": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Reinspect each tagged palm: spear, canopy, the hole and plug, new stress signs": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Photograph the same angles as the assessment": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Update the next due date: every 3 months on the lethal bronzing plan": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Do not repeat an injection without its diagnosis and timing review": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tell the customer: the palm changes slowly, over months; the small plugs stay in the trunk": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "New lethal bronzing symptoms: stop injecting that palm, test it on its own, and recommend removal only on its own positive result": {
+            "scope": "plant",
+            "treatmentApplied": false
+          }
+        }
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Lethal Bronzing Prevention\nConfirm the palm tested negative (first visit) or is on the 3-month plan\nScreen out: symptoms, a dead spear leaf, or a palm whose fruit or nuts anyone eats, sells or gives away\nLethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp. An unusually thin or thick trunk moves the dose one size down or up (label)\nDrill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector\nRepeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments\nStay with the palm and log the uptake time; disinfect the bit and the needle before the next palm\nA leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why",
+        "secondary": "A palm with symptoms: no dose; test that palm on its own, and recommend removal only on its own positive result\nTell the customer: keep the base of the palm clear; the plugs stay in the trunk; we come back every 3 months. Keep people and pets off a leak until you have cleaned it up",
+        "lineMeta": {
+          "Lethal Bronzing Prevention": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Confirm the palm tested negative (first visit) or is on the 3-month plan": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Repeat visit: the same hole. Pull the plug, drill 1/2 in deeper, fit a new plug; a new hole only every 3 to 4 treatments": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Stay with the palm and log the uptake time; disinfect the bit and the needle before the next palm": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A leak or no uptake: stop, re-seat the plug or the needle, and log the amount the palm took and why": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Drill one hole with a 3/8 in bit, 4 in deep, 2 to 3 ft up the trunk; fit a #4 plug; inject with the air injector": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "A palm with symptoms: no dose; test that palm on its own, and recommend removal only on its own positive result": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Lethal bronzing prevention: Arbor-OTC, 2.8 g in 5 tsp purified water. Clear trunk under 6 ft: 3¼ tsp; 6 to 15 ft: about 5¼ tsp; over 15 ft: 7 tsp. An unusually thin or thick trunk moves the dose one size down or up (label)": {
+            "scope": "plant",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Arborjet Arbor OTC Fungicide 5 oz"
+            ],
+            "completionApplicationMethod": "trunk_injection",
+            "exactCatalogName": true
+          },
+          "Screen out: symptoms, a dead spear leaf, or a palm whose fruit or nuts anyone eats, sells or gives away": {
+            "scope": "plant",
+            "treatmentApplied": false
+          },
+          "Tell the customer: keep the base of the palm clear; the plugs stay in the trunk; we come back every 3 months. Keep people and pets off a leak until you have cleaned it up": {
+            "scope": "plant",
+            "treatmentApplied": false
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "per_palm",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": false,
+          "premium": true
+        },
+        "notes": "Every 3 months for at least 2 years (owner 2026-11-25, D8). Protection, not a cure, and no guarantee."
       }
     ]
   },
@@ -2772,7 +3138,8 @@
               "amount": 2,
               "unit": "fl_oz",
               "use": "cockroaches",
-              "epa": "53883-335"
+              "epa": "53883-335",
+              "carrierGalPer1000": 1
             }
           }
         },
@@ -2789,6 +3156,44 @@
           "Atticus Antapex WSG",
           "Tekko Pro IGR",
           "Advion Evolution Cockroach Gel Bait"
+        ],
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Inside: cracks and crevices",
+            "perGallon": {
+              "amount": 10,
+              "amountMax": 30,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "3 days between applications",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Inside: cracks, crevices and spots",
+            "perGallon": {
+              "amount": 2,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Advion Evolution Cockroach Gel Bait",
+            "where": "Hinges, appliance motors, cabinet corners",
+            "dose": "0.5 g per spot; 1 to 3 spots per 10 linear ft, 3 to 5 when heavy",
+            "epa": "100-1484"
+          }
         ]
       },
       {
@@ -2827,7 +3232,7 @@
         "visit": 3,
         "month": "Any",
         "primary": "Cockroach Follow-Up\nInspect monitors, bait consumption, live activity, egg cases, droppings, and customer prep progress\nRefresh bait only where consumed or contaminated\nSpot treat cracks, crevices, or harborages as needed",
-        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review",
+        "secondary": "Adjust plan if monitor counts are not dropping\nReinforce sanitation, moisture, and food-source corrections\nEscalate severe or multi-unit activity for office review\nOn a vehicle: the first visit's limits still apply (no bait on the dash, in a vent or in direct sun; no spray on electrical parts; do not wet carpet or seats)",
         "material_cost": "inventory",
         "labor_cost": "follow_up",
         "tiers": {
@@ -2836,7 +3241,226 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied. No growth regulator at the follow-up: the first visit's gives up to 6 months of activity on roach nymphs."
+        "notes": "Progress should be measured by monitor counts and live sightings, not just product applied. No growth regulator at the follow-up: the first visit's gives up to 6 months of activity on roach nymphs.",
+        "lineMeta": {
+          "On a vehicle: the first visit's limits still apply (no bait on the dash, in a vent or in direct sun; no spray on electrical parts; do not wet carpet or seats)": {
+            "scope": "interior",
+            "treatmentApplied": false
+          }
+        }
+      },
+      {
+        "visit": 4,
+        "month": "Any",
+        "primary": "Vehicle German Roach Treatment\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nUse non-repellent crack-and-crevice treatment in seat tracks, under-seat frames and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft\nPlace 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "secondary": "",
+        "lineMeta": {
+          "Vehicle German Roach Treatment": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Ask where the vehicle parks and whether the home or workplace has roaches; record the answer": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Confirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Vacuum seats, seat tracks, under seats, console, door pockets and trunk before any product": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Place 2 monitors (under a front seat, in the trunk) and record the count": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Tell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Apply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Advion Evolution Cockroach Gel Bait"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          },
+          "Use non-repellent crack-and-crevice treatment in seat tracks, under-seat frames and trunk seams": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Atticus Antapex WSG"
+            ],
+            "completionApplicationMethod": "spot_treatment"
+          },
+          "Apply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "labelRatePerGallon": {
+              "amount": 2,
+              "unit": "fl_oz",
+              "use": "cockroaches",
+              "epa": "53883-335",
+              "carrierGalPer1000": 1
+            }
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "Label limits inside a vehicle. Gel bait (Advion, EPA 100-1484): never where a child or pet can reach it, never on a surface food touches, never on the dash, in a vent or in direct sun (above 120 F the bait turns liquid and stops working). Growth regulator (Tekko Pro, EPA 53883-335, lists automobiles): never on wiring, switches, screens or other electrical parts; do not wet carpet or seats; test a hidden spot of fabric first. Non-repellent (Antapex WSG, EPA 91234-401, lists autos): never on electrical parts, never to the point of drip or run. Never spray a surface that carries bait and never bait a sprayed surface. The growth regulator goes down once: its label gives up to 6 months of activity on roach nymphs, so the follow-up visit has none. Book the follow-up for day 14: the price covers both visits.",
+        "completionDefaultProducts": [
+          "Atticus Antapex WSG",
+          "Tekko Pro IGR",
+          "Advion Evolution Cockroach Gel Bait"
+        ],
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Vehicle: cracks and seams, light application",
+            "perGallon": {
+              "amount": 10,
+              "amountMax": 30,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "keep off electrical parts",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Vehicle: cracks and spots, light application",
+            "perGallon": {
+              "amount": 2,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Do not wet carpet; keep off electrical parts",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Advion Evolution Cockroach Gel Bait",
+            "where": "Vehicle: out of reach of children and pets",
+            "dose": "0.5 g per spot",
+            "epa": "100-1484"
+          }
+        ]
+      },
+      {
+        "visit": 5,
+        "month": "Any",
+        "primary": "Vehicle Roach Add-On\nAsk where the vehicle parks and whether the home or workplace has roaches; record the answer\nConfirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in\nVacuum seats, seat tracks, under seats, console, door pockets and trunk before any product\nApply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams\nApply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft\nPlace 2 monitors (under a front seat, in the trunk) and record the count\nLeave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then\nTell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up",
+        "secondary": "",
+        "lineMeta": {
+          "Vehicle Roach Add-On": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Ask where the vehicle parks and whether the home or workplace has roaches; record the answer": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Confirm food, trash, child seats, pet items and floor mats are out of the vehicle before any product goes in": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Vacuum seats, seat tracks, under seats, console, door pockets and trunk before any product": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Place 2 monitors (under a front seat, in the trunk) and record the count": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Tell the customer to park in shade where they can and to keep food out of the vehicle until the follow-up": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Apply cockroach gel bait as small spots in cracks out of reach of children and pets: seat tracks, under-seat frames, console seams, glove box hinge and trunk seams": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Advion Evolution Cockroach Gel Bait"
+            ],
+            "completionApplicationMethod": "bait_placement"
+          },
+          "Apply growth regulator as a light crack-and-crevice spray to carpet edges, under seats and the trunk, 1 gallon per 1,000 sq ft": {
+            "scope": "interior",
+            "treatmentApplied": true,
+            "catalogProductHints": [
+              "Tekko Pro IGR"
+            ],
+            "completionApplicationMethod": "spot_treatment",
+            "labelRatePerGallon": {
+              "amount": 2,
+              "unit": "fl_oz",
+              "use": "cockroaches",
+              "epa": "53883-335",
+              "carrierGalPer1000": 1
+            }
+          }
+        },
+        "material_cost": "inventory",
+        "labor_cost": "elevated",
+        "tiers": {
+          "bronze": false,
+          "silver": false,
+          "enhanced": true,
+          "premium": true
+        },
+        "notes": "The rider on a home German roach job: gel bait and growth regulator only, no non-repellent spray in the vehicle. Label limits inside a vehicle. Gel bait (Advion, EPA 100-1484): never where a child or pet can reach it, never on a surface food touches, never on the dash, in a vent or in direct sun (above 120 F the bait turns liquid and stops working). Growth regulator (Tekko Pro, EPA 53883-335, lists automobiles): never on wiring, switches, screens or other electrical parts; do not wet carpet or seats; test a hidden spot of fabric first. Never spray a surface that carries bait and never bait a sprayed surface. The growth regulator goes down once: its label gives up to 6 months of activity on roach nymphs, so the follow-up visit has none.",
+        "completionDefaultProducts": [
+          "Tekko Pro IGR",
+          "Advion Evolution Cockroach Gel Bait"
+        ],
+        "mixRates": [
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Vehicle: cracks and spots, light application",
+            "perGallon": {
+              "amount": 2,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Do not wet carpet; keep off electrical parts",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Advion Evolution Cockroach Gel Bait",
+            "where": "Vehicle: out of reach of children and pets",
+            "dose": "0.5 g per spot",
+            "epa": "100-1484"
+          }
+        ]
       }
     ]
   },
@@ -2881,9 +3505,13 @@
               "Tekko Pro IGR"
             ],
             "completionApplicationMethod": "spot_treatment",
-            "tankRatePerGallon": {
+            "labelRatePerGallon": {
               "amount": 0.66,
-              "unit": "fl_oz"
+              "unit": "fl_oz",
+              "use": "fleas, in the shared tank at 1 gallon per 1,000 sq ft",
+              "epa": "53883-335",
+              "weakerMix": true,
+              "carrierGalPer1000": 1
             }
           },
           "Exterior, shaded pet zones only when pets rest outside: the same tank mix, 1 gallon per 1,000 sq ft": {
@@ -2907,6 +3535,37 @@
         "completionDefaultProducts": [
           "Atticus Antapex WSG",
           "Tekko Pro IGR"
+        ],
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Inside floors, rugs and pet areas; shaded pet zones outside",
+            "perGallon": {
+              "amount": 10,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Same tank as the Antapex",
+            "perGallon": {
+              "amount": 0.66,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "21 days between inside applications",
+            "epa": "53883-335"
+          }
         ]
       },
       {
@@ -2932,7 +3591,23 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Treatment 2 is a check first. Spray only where live fleas are found."
+        "notes": "Treatment 2 is a check first. Spray only where live fleas are found.",
+        "mixRates": [
+          {
+            "product": "Onslaught FastCap",
+            "where": "Only where live fleas are found",
+            "perGallon": {
+              "amount": 0.5,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "epa": "1021-2574"
+          }
+        ]
       }
     ]
   },
@@ -3008,6 +3683,43 @@
         "completionDefaultProducts": [
           "MGK Crossfire Bed Bug Concentrate",
           "Atticus Antapex WSG"
+        ],
+        "mixRates": [
+          {
+            "product": "MGK Crossfire Bed Bug Concentrate",
+            "where": "Mattress seams, bed frame, furniture",
+            "perGallon": {
+              "amount": 13,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "13 fl oz plus 115 fl oz of water makes 1 gal",
+            "limit": "Mix only what the job needs",
+            "epa": "1021-2776"
+          },
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Baseboards and off-bed cracks, never on a mattress",
+            "perGallon": {
+              "amount": 20,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "3 days between applications",
+            "epa": "91234-401"
+          },
+          {
+            "product": "CimeXa Insecticide Dust",
+            "where": "Wall voids, bed frame joints, under the box spring cover; none inside electrical boxes",
+            "dose": "2 oz per 100 sq ft, a light film",
+            "epa": "73079-12"
+          }
         ]
       },
       {
@@ -3045,7 +3757,44 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Every bed bug visit after treatment 1 uses this card: treatment 2 at day 14, each clearance check, and the third treatment on a heavy job. It is a check first. Spray only where live bugs or fresh eggs are found."
+        "notes": "Every bed bug visit after treatment 1 uses this card: treatment 2 at day 14, each clearance check, and the third treatment on a heavy job. It is a check first. Spray only where live bugs or fresh eggs are found.",
+        "mixRates": [
+          {
+            "product": "MGK Crossfire Bed Bug Concentrate",
+            "where": "Only where live bugs or fresh eggs are found",
+            "perGallon": {
+              "amount": 13,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "13 fl oz plus 115 fl oz of water makes 1 gal",
+            "limit": "Mix only what the job needs",
+            "epa": "1021-2776"
+          },
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Bugs found off the bed, never on a mattress",
+            "perGallon": {
+              "amount": 20,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "3 days between applications",
+            "epa": "91234-401"
+          },
+          {
+            "product": "CimeXa Insecticide Dust",
+            "where": "Top up where dust was removed",
+            "dose": "2 oz per 100 sq ft, a light film",
+            "epa": "73079-12"
+          }
+        ]
       }
     ]
   },
@@ -3100,7 +3849,39 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "High-liability workflow. Requires exact label rate, volume, diagram, and access notes."
+        "notes": "High-liability workflow. Requires exact label rate, volume, diagram, and access notes.",
+        "mixRates": [
+          {
+            "product": "Termidor SC",
+            "where": "Trench and rod along the foundation",
+            "perGallon": {
+              "amount": 0.8,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "4 gal per 10 linear ft for each foot of depth. 100 gal tank: 78 fl oz (label table)",
+            "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
+            "epa": "7969-210"
+          },
+          {
+            "product": "Taurus SC",
+            "where": "Same use, only when the work order names Taurus",
+            "perGallon": {
+              "amount": 0.8,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "4 gal per 10 linear ft for each foot of depth. 100 gal tank: 78 fl oz (label table)",
+            "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
+            "epa": "53883-279"
+          }
+        ]
       },
       {
         "visit": 4,
@@ -3130,7 +3911,23 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "Best for accessible wood. Cost scales by treatable sqft and dilution/application method."
+        "notes": "Best for accessible wood. Cost scales by treatable sqft and dilution/application method.",
+        "mixRates": [
+          {
+            "product": "Bora-Care",
+            "where": "Raw wood, sprayed",
+            "perGallon": {
+              "amount": 64,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 part Bora-Care to 1 part water; up to 400 sq ft per gal",
+            "epa": "64405-1"
+          }
+        ]
       },
       {
         "visit": 6,

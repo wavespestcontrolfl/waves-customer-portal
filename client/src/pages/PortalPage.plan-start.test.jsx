@@ -114,7 +114,7 @@ it.each([
   fireEvent.click(await screen.findByRole('button', { name: 'See my price and book' }));
   await waitFor(() => expect(api.createRequest).toHaveBeenCalledOnce());
   expect(api.createRequest).toHaveBeenCalledWith({
-    category: 'add_service', subject: 'Add Pest Control to my plan', description: 'Customer priced Quarterly pest control in the portal.',
+    category: 'add_service', subject: 'Add Pest Control to my plan', description: 'Customer priced Quarterly pest control in the portal.', flow: 'pricing_assistant',
   });
   expect(await screen.findByText('Request sent')).toBeInTheDocument();
   expect(api.startPlan).toHaveBeenCalledOnce();

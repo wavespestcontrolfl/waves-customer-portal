@@ -80,7 +80,19 @@ async function lawnMix(query = {}) {
 }
 
 let calibration;
+let backpackCalibration;
 let visit;
+
+// The calibration reads: the selected rig (getActiveCalibration, .first()) and the FlowZone backpack (system_type 'backpack', a list).
+function calibrationQuery() {
+  const query = readQuery([]);
+  let backpackOnly = false;
+  query.where = jest.fn((key, value) => { if (key === 'es.system_type' && value === 'backpack') backpackOnly = true; return query; });
+  const rows = () => [].concat(backpackOnly ? backpackCalibration : calibration).filter(Boolean);
+  query.first = jest.fn(async () => rows()[0] || null);
+  query.catch = (onRejected) => Promise.resolve(rows()).catch(onRejected);
+  return query;
+}
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -89,8 +101,9 @@ beforeEach(() => {
     id: 'calibration-fixture', equipment_system_id: 'tank-fixture',
     system_name: 'Fixture tank', system_type: 'tank',
     carrier_gal_per_1000: 2, tank_capacity_gal: 40,
-    expires_at: '2030-07-16T16:00:00Z',
+    expires_at: '2030-07-16T16:00:00Z', calibration_status: 'field_verified',
   };
+  backpackCalibration = null;
   visit = {
     month: 'Jul', visit: 7, notes: '',
     primary: 'BLACKOUT — K-Flow 0-0-25 ($2.18)',
@@ -98,7 +111,7 @@ beforeEach(() => {
   };
   protocols.lawn.st_augustine.visits = [visit];
   db.mockImplementation((table) => {
-    if (table === 'equipment_calibrations as ec') return readQuery(calibration ? [calibration] : []);
+    if (table === 'equipment_calibrations as ec') return calibrationQuery();
     if (table === 'products_catalog') return readQuery(CATALOG);
     if (table === 'product_aliases') return readQuery(CATALOG.flatMap((product) => (
       product.aliases.map((alias_name) => ({ product_id: product.id, alias_name }))
@@ -155,16 +168,108 @@ describe('lawn-mix response for optional products', () => {
     expect(body.items[0]).toMatchObject({
       scope: 'INSPECTION_ONLY', matched: true, product: { id: 'kflow' }, selected: false,
       jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null,
+      // The tank sheet gives the SKIP line no fill either.
+      tankAmounts: { skipped: true, per100Gal: null, fullTank: null, backpack4Gal: null, useFills: [] },
     });
     expect(body.selectedItems).toEqual([]);
     expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });
   });
 
-  test('calibration expiry does not withhold mix amounts when inputs exist', async () => {
+  // Owner 2026-11-26: a safety or limit alert is a warning, never a hidden amount. The sheet keeps the last test's carrier and says so.
+  test('an overdue sprayer test keeps every amount and warns with the last test date and carrier', async () => {
     calibration.expires_at = '2000-01-01T00:00:00Z';
+    calibration.calibrated_at = '2030-06-07T14:00:00Z';
     const body = await lawnMix();
-    expect(body.items.find(item => item.product?.id === 'kflow').jobMix.amount).toBeGreaterThan(0);
-    expect(body.warnings).toEqual([]);
+    const kflow = body.items.find(item => item.product?.id === 'kflow');
+    expect(kflow.jobMix.amount).toBeGreaterThan(0);
+    expect(kflow.tankAmounts.per100Gal).toMatchObject({ gallons: 100, amount: 150, amountUnit: 'fl_oz', carrierGalPer1000: 2, carrierSource: 'calibration' });
+    expect(body.warnings).toEqual([expect.objectContaining({
+      code: 'calibration_overdue_or_estimated',
+      message: 'Sprayer test overdue: Fixture tank last tested 2030-06-07 at 2 gal per 1,000 sq ft. Amounts below assume that. Test the sprayer again.',
+    })]);
+  });
+
+  test('an estimated (never field tested) sprayer keeps its amounts and says so', async () => {
+    calibration.calibration_status = 'estimated';
+    const body = await lawnMix();
+    expect(body.items.find(item => item.product?.id === 'kflow').tankAmounts.per100Gal).toMatchObject({ amount: 150 });
+    expect(body.equipment).toMatchObject({ calibrationStatus: 'estimated' });
+    expect(body.warnings).toEqual([expect.objectContaining({
+      code: 'calibration_overdue_or_estimated',
+      message: 'Sprayer not field tested: Fixture tank at 2 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
+    })]);
+  });
+
+  test('tank amounts: the base liquid per 100 gal and per full tank; every sprayed product, unselected or not, per 4 gal FlowZone', async () => {
+    backpackCalibration = {
+      id: 'calibration-backpack', equipment_system_id: 'backpack-fixture', system_name: 'FlowZone fixture backpack', system_type: 'backpack',
+      carrier_gal_per_1000: 1.33, tank_capacity_gal: 4, calibration_status: 'estimated', expires_at: '2030-08-01T00:00:00Z',
+    };
+    const body = await lawnMix();
+    const [base, rescue, premium] = body.items;
+    // amount = rate per 1,000 sq ft x (tank gallons / carrier gal per 1,000 sq ft)
+    expect(base.tankAmounts).toMatchObject({
+      application: 'spray', bigTank: true, ratePer1000: 3, rateUnit: 'fl_oz', fixedCarrierGalPer1000: null,
+      per100Gal: { gallons: 100, amount: 150, carrierGalPer1000: 2, carrierSource: 'calibration' },
+      fullTank: { gallons: 40, amount: 60 },
+      backpack4Gal: { gallons: 4, amount: 9.023, amountUnit: 'fl_oz', carrierGalPer1000: 1.33, carrierSource: 'calibration', sprayerName: 'FlowZone fixture backpack' },
+    });
+    expect(rescue).toMatchObject({ selected: false, jobMix: null, fullTankMix: null });
+    expect(rescue.tankAmounts).toMatchObject({ bigTank: false, per100Gal: null, fullTank: null, backpack4Gal: { amount: 0.872, amountUnit: 'oz' } });
+    expect(premium.tankAmounts).toMatchObject({ bigTank: false, backpack4Gal: { amount: 27.068 } });
+    expect(body.warnings).toEqual([expect.objectContaining({
+      code: 'backpack_calibration_overdue_or_estimated',
+      message: 'Sprayer not field tested: FlowZone fixture backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
+    })]);
+  });
+
+  test('the FlowZone is found by what it is (4 gal backpack named FlowZone): a field-verified test first, then the newest test', async () => {
+    const flowZone = (id, name, status, calibratedAt, carrier) => ({
+      id, equipment_system_id: `${id}-system`, system_name: name, system_type: 'backpack', tank_capacity_gal: 4,
+      carrier_gal_per_1000: carrier, calibration_status: status, calibrated_at: calibratedAt, expires_at: '2030-08-01T00:00:00Z',
+    });
+    const other = { ...flowZone('alpha', 'Alpha 3 gal backpack', 'field_verified', '2030-07-10T12:00:00Z', 1), tank_capacity_gal: 3 };
+    const estimated = flowZone('fz-new', 'FlowZone Typhoon Backpack #2', 'estimated', '2030-07-01T12:00:00Z', 1.33);
+    const verified = flowZone('fz-old', 'FlowZone Typhoon Backpack #1', 'field_verified', '2030-06-20T12:00:00Z', 1.6);
+    backpackCalibration = [other, estimated, verified];
+    const kflowFill = async () => (await lawnMix()).items.find((item) => item.product?.id === 'kflow').tankAmounts.backpack4Gal;
+    expect(await kflowFill()).toMatchObject({ carrierGalPer1000: 1.6 });
+    backpackCalibration = [other, { ...verified, calibration_status: 'estimated' }, estimated];
+    expect(await kflowFill()).toMatchObject({ carrierGalPer1000: 1.33 });
+    const body = await lawnMix();
+    expect(body.warnings).toContainEqual(expect.objectContaining({ code: 'backpack_calibration_overdue_or_estimated', message: expect.stringContaining('FlowZone Typhoon Backpack #2') }));
+  });
+
+  test('a FlowZone picked as the rig sizes its own 4 gal fill, not the FlowZone ranked first', async () => {
+    const flowZone = (id, carrier, status) => ({
+      id, equipment_system_id: `${id}-system`, system_name: `FlowZone Typhoon Backpack ${id}`, system_type: 'backpack', tank_capacity_gal: 4,
+      carrier_gal_per_1000: carrier, calibration_status: status, calibrated_at: '2030-07-01T12:00:00Z', expires_at: '2030-08-01T00:00:00Z',
+    });
+    calibration = flowZone('picked', 1.1, 'estimated');
+    backpackCalibration = [flowZone('ranked-first', 1.6, 'field_verified')];
+    const body = await lawnMix({ equipmentSystemId: 'picked-system' });
+    const kflow = body.items.find((item) => item.product?.id === 'kflow').tankAmounts;
+    expect(kflow).toMatchObject({ per100Gal: null, fullTank: null, backpack4Gal: { carrierGalPer1000: 1.1 } });
+    // One warning for the one sprayer in use, naming it.
+    expect(body.warnings.filter((w) => /Sprayer/.test(w.message))).toEqual([expect.objectContaining({ message: expect.stringContaining('FlowZone Typhoon Backpack picked') })]);
+  });
+
+  test('a sprayer with no test status on file warns that its field test is not on file, and keeps its amounts', async () => {
+    calibration.calibration_status = null;
+    const body = await lawnMix();
+    expect(body.items.find(item => item.product?.id === 'kflow').tankAmounts.per100Gal).toMatchObject({ amount: 150 });
+    expect(body.warnings).toEqual([expect.objectContaining({
+      code: 'calibration_overdue_or_estimated',
+      message: 'Sprayer not field tested: Fixture tank at 2 gal per 1,000 sq ft (field test not on file). Amounts below assume that. Test the sprayer.',
+    })]);
+  });
+
+  test('a line that fixes its spray volume sizes every fill on it, with or without a sprayer test', async () => {
+    visit.secondary = '★ If Talstar failed Jun: Arena 50 WDG (Group 4A) in 4 gal per 1,000 sq ft ($5.20)';
+    calibration = null;
+    const body = await lawnMix();
+    const arena = body.items.find((item) => item.product?.id === 'arena');
+    expect(arena.tankAmounts).toMatchObject({ fixedCarrierGalPer1000: 4, fixedCarrierSource: 'line', backpack4Gal: { amount: 0.29, carrierGalPer1000: 4, carrierSource: 'line' } });
   });
 
   test.each([
@@ -177,9 +282,11 @@ describe('lawn-mix response for optional products', () => {
     expect(body.items).toHaveLength(3);
     for (const item of body.items) {
       expect(item).toMatchObject({ jobMix: null, fullTankMix: null, plannedMix: null, plannedFullTankMix: null });
+      // No sprayer test at all (no FlowZone test either): no tank amount, and the sheet says which sprayer needs one.
+      expect(item.tankAmounts).toMatchObject({ per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: true });
     }
     expect(body.materialCostSummary).toMatchObject({ total: 0, pricedLineCount: 0 });
-    if (warning) expect(body.warnings).toEqual([expect.objectContaining({ code: warning })]);
+    if (warning) expect(body.warnings).toEqual([expect.objectContaining({ code: warning, message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.' })]);
   });
 });
 
@@ -270,3 +377,73 @@ describe('the gate-off June LESCO Crosscheck Plus lines', () => {
     }
   });
 });
+
+// The mix safety table on the sheet (services/product-mix-rules.js checkMix): every pair of sprayed products, for the
+// sheet's mix-line helper to show under each shared tank. A warning only; a failed check is left out and logged.
+describe('lawn-mix mixCheck', () => {
+  const mixRules = require('../services/product-mix-rules');
+  const logger = require('../services/logger');
+
+  test('checks every sprayed product on the sheet and sends each pair\'s verdict and reason', async () => {
+    const check = jest.spyOn(mixRules, 'checkMix').mockResolvedValue({
+      products: [],
+      pairs: [{ productAId: 'kflow', productAName: 'LESCO K-Flow 0-0-25', productBId: 'arena', productBName: 'Arena 50 WDG', verdict: 'caution', reason: 'Jar test first.', source: 'owner', jarTestRequired: true, entries: [{ kind: 'pair' }] }],
+      catalogNotes: [],
+    });
+    const body = await lawnMix();
+    expect(check).toHaveBeenCalledWith(['kflow', 'arena', 'hydretain'], { max: 3 });
+    expect(body.mixCheck).toEqual({ pairs: [{ productAId: 'kflow', productAName: 'LESCO K-Flow 0-0-25', productBId: 'arena', productBName: 'Arena 50 WDG', verdict: 'caution', reason: 'Jar test first.', jarTestRequired: true }] });
+    // A warning only: every product keeps its amounts.
+    expect(body.items.map((item) => item.plannedMix?.amount)).toEqual([30, 2.9, 90]);
+    check.mockRestore();
+  });
+
+  test('a failed check returns the unavailable status, logs, and the sheet still renders', async () => {
+    const check = jest.spyOn(mixRules, 'checkMix').mockRejectedValue(new Error('product_mix_rules is missing'));
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const body = await lawnMix();
+    expect(body.mixCheck).toEqual({ status: 'unavailable', pairs: [] });
+    expect(body.items).toHaveLength(3);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('product_mix_rules is missing'));
+    check.mockRestore();
+    warn.mockRestore();
+  });
+
+  test('a sheet with fewer than two sprayed products makes no check', async () => {
+    visit.primary = 'BLACKOUT — K-Flow 0-0-25 ($2.18)';
+    visit.secondary = '';
+    const check = jest.spyOn(mixRules, 'checkMix');
+    const body = await lawnMix();
+    expect(check).not.toHaveBeenCalled();
+    expect(body.mixCheck).toBeNull();
+    check.mockRestore();
+  });
+});
+
+describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan line resolver', () => {
+  const { resolveMixWith } = adminProtocolsRouter._internals;
+  const catalog = [
+    { id: 'cel', name: 'Celsius WG Herbicide', aliases: ['Celsius WG'] },
+    // No NIS alias on the row: the protocol's short name resolves by the explicit map.
+    { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [] },
+    { id: 'kflow', name: 'LESCO K-Flow 0-0-25', aliases: ['K-Flow'] },
+    { id: 'rec', name: 'Recognition Post Emergent Herbicide', aliases: ['Recognition'] },
+    { id: 'fus', name: 'Fusilade II Turf and Ornamental', aliases: ['Fusilade II'] },
+  ];
+  const line = (id, mixWith) => ({ product: { id }, tankAmounts: { mixWith } });
+
+  test('names and aliases resolve to ids; a seller word alone and an unknown name resolve to nothing', () => {
+    const [nis, cel, both, seller, unknown, none] = resolveMixWith([
+      line('nis', 'Celsius WG'), line('cel', 'NIS'), line('nis', 'Recognition Post Emergent Herbicide and Fusilade II'),
+      line('cel', 'LESCO'), line('cel', 'Unknown blend'), line('kflow', null),
+    ], catalog);
+    expect(nis.tankAmounts.mixWithProductIds).toEqual(['cel']);
+    expect(cel.tankAmounts.mixWithProductIds).toEqual(['nis']);
+    expect(both.tankAmounts.mixWithProductIds).toEqual(['rec', 'fus']);
+    // "LESCO" is the seller, not a product: no LESCO product attaches, and the sheet says "No rule on file".
+    expect(seller.tankAmounts.mixWithProductIds).toEqual([]);
+    expect(unknown.tankAmounts.mixWithProductIds).toEqual([]);
+    expect(none.tankAmounts).toEqual({ mixWith: null });
+  });
+});
+

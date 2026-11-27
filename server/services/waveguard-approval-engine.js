@@ -1,5 +1,6 @@
 const { savepointRead } = require('../utils/savepoint-read');
 const { isPreEmergent } = require('./service-report/lawn-watering-rule');
+const { dateOnlyString } = require('../utils/date-only');
 
 function normalizeText(value) {
   return String(value || '')
@@ -344,6 +345,176 @@ function repeatGroupFinding({ product, input, groupType, groupValue, last }) {
   };
 }
 
+// ── A label's limit on applications in a row ────────────────────────────────
+// The repeat-group finding above says a group was used before. It does not say when a label's own limit on applications
+// in a row is reached. Protocols audit 2026-11-26, item 5: the fall large patch calendar could direct Velista in
+// October, November and December on one lawn, and the third one read like any other repeat.
+//
+// Velista (EPA 100-1534), Resistance Management: "Do not make more than two successive applications of Velista; these
+// two applications should be followed by applications of fungicides from a different FRAC mode of action group."
+//
+// How the lawn's history is read, one way for every product on this list (successiveRun):
+//   - the lawn's completed fungicide applications up to the visit's date, newest first, with no lower date bound (the
+//     label names no time after which a run ends). One service record is one application: its tank-mix rows are one,
+//     two visits on one date are two. The visit judged is left out by its own id;
+//   - property-scoped as the take-all pair is. An application that names no property may have been made here, so it
+//     is read;
+//   - an application that carries the product counts, alone or in a tank mix (the label limits the product's
+//     applications; a mix partner does not un-count one), wherever it is placed;
+//   - an application without the product ends the run only when it carries a fungicide of another group AND is placed
+//     at this property (a rotation that names no property may have been made elsewhere). One whose fungicides are all
+//     of the product's own group, or of no group on file, neither counts nor ends the run;
+//   - `max` such applications in a row before this visit = this application would be one too many.
+// Who reads it:
+//   - the approval engine raises successive_application_limit with the dates. On the job card's tank search it is a
+//     warning beside the amount, like a group repeat (job-card.js ROTATION_CODES; owner 2026-10-09, "show the mix
+//     amount"). `approvable: false` rides to the close-out's record: an approval there does not permit it;
+//   - the treatment guide does not suggest the product and suggests the next fungicide (lawn-fast-complete.js
+//     fungicideHolds). The row stays on the list and in the search, and the close-out never stops on it (owner
+//     2026-11-26: "alerts like this should just be alerts, they should not stop the job from being completed").
+const SUCCESSIVE_USE_LIMITS = Object.freeze([
+  Object.freeze({ epa: '100-1534', name: /^velista\b/, category: 'fungicide', group: '7', max: 2, source: 'Velista label, EPA 100-1534, Resistance Management' }),
+]);
+const SUCCESSIVE_USE_CODE = 'successive_application_limit';
+
+const epaOf = (value) => String(value ?? '').toLowerCase().replace(/\s+/g, '');
+// Is this catalog or history row the limited product? By registration number when the row has one, else by name.
+function isLimitedProduct(limit, { epa, name }) {
+  const registration = epaOf(epa);
+  return registration ? registration === limit.epa : limit.name.test(normalizeText(name));
+}
+const successiveLimitFor = (product) => SUCCESSIVE_USE_LIMITS.find((limit) => isLimitedProduct(limit, { epa: product?.epa_reg_number ?? product?.epaRegNumber, name: product?.name })) || null;
+// Every group a history row carries, bare ("Group 11 + 3" and "3 + 11" both read 11 and 3). Not behind the v13 gate.
+const rowGroups = (row) => [row.catalog_group, row.catalog_moa_group, row.moa_group]
+  .flatMap((value) => String(value ?? '').split(GROUP_SPLIT)).map(bareGroup).filter(Boolean);
+
+const APPLIED_RECORD_STATUSES = Object.freeze(['completed', 'incomplete']);
+
+// The lawn's recorded applications of one product category up to the visit's date, as product rows (newest first).
+// A failed read throws when strict, else reads as no history.
+async function categoryHistory(knex, { customerId, propertyId, category, serviceDate, serviceId = null, strict = false }) {
+  return savepointRead(knex, (k) => k('service_products as sp')
+    .join('service_records as sr', 'sp.service_record_id', 'sr.id')
+    .leftJoin('products_catalog as pc', function () {
+      this.on('sp.product_name', '=', 'pc.name');
+    })
+    // A visit whose property cannot be established is judged on the customer's whole history (the repeat-group finding's
+    // own scope): reading only the unplaced records would drop every application recorded at the property itself.
+    .modify((query) => {
+      if (propertyId) return scopeToTreatedProperty(query, propertyId, { joinVisit: true, includeUnplaced: true });
+      return query.leftJoin('scheduled_services as ss', 'sr.scheduled_service_id', 'ss.id')
+        .leftJoin('property_application_history as pah_scope', 'pah_scope.service_product_id', 'sp.id');
+    })
+    .where('sr.customer_id', customerId)
+    // A visit closed as incomplete keeps the products that did go down: they are applications too.
+    .whereIn('sr.status', APPLIED_RECORD_STATUSES)
+    .where('sr.service_date', '<=', serviceDate)
+    // The visit being judged is not its own history (a close-out can be read again after its record exists).
+    .modify((query) => { if (serviceId) query.whereRaw('(sr.scheduled_service_id IS NULL OR sr.scheduled_service_id <> ?)', [serviceId]); })
+    .where(function () { this.where('sp.product_category', category).orWhere('pc.category', category); })
+    .orderBy([{ column: 'sr.service_date', order: 'desc' }, { column: 'sr.created_at', order: 'desc' }])
+    .select(
+      'sr.id as service_record_id', 'sr.service_date', 'sr.created_at as recorded_at', 'sr.service_line', 'sr.service_type', 'sp.product_name', 'sp.moa_group',
+      // The registration the close-out stored with the application: the catalog row of that name may since be renamed or replaced.
+      'sp.epa_reg_number as recorded_epa', 'pc.epa_reg_number as catalog_epa', 'pc.frac_group as catalog_group', 'pc.moa_group as catalog_moa_group',
+      k.raw('COALESCE(pah_scope.property_id, ss.property_id) as treated_property_id'),
+    ))
+    .catch((err) => { if (strict) throw err; return []; });
+}
+
+// The product rows as applications, newest first: one per service record (rows with no record id: one per date).
+function applicationsOf(rows) {
+  const byRecord = new Map();
+  for (const row of rows || []) {
+    const day = dateOnlyString(row.service_date);
+    if (!day) continue;
+    const key = row.service_record_id != null ? `record:${row.service_record_id}` : `day:${day}`;
+    if (!byRecord.has(key)) byRecord.set(key, { day, recordedAt: row.recorded_at instanceof Date ? row.recorded_at.toISOString() : String(row.recorded_at || ''), rows: [] });
+    byRecord.get(key).rows.push(row);
+  }
+  return [...byRecord.values()].sort((a, b) => b.day.localeCompare(a.day) || b.recordedAt.localeCompare(a.recordedAt));
+}
+
+// The dates, newest first, of the product's unbroken run of applications that ends at the lawn's latest fungicide
+// application. `propertyId`: the visit's property. Null = none could be established: the rows are the customer's
+// whole history (categoryHistory), every listed application in it counts, and no rotation ends the run, because none
+// can be tied to the lawn this visit treats.
+// A rotation ends the run only when it is a lawn treatment at this property: a fungicide of another group on the
+// shrubs, or at another home, is not this lawn's rotation.
+function successiveRun(limit, rows, { propertyId = null } = {}) {
+  const here = (row) => Boolean(propertyId) && String(row.treated_property_id ?? '') === String(propertyId) && isLawnRecord(row);
+  const run = [];
+  for (const application of applicationsOf(rows)) {
+    if (application.rows.some((row) => isLimitedProduct(limit, { epa: row.recorded_epa || row.catalog_epa, name: row.product_name }))) run.push(application.day);
+    else if (application.rows.some((row) => here(row) && rowGroups(row).some((group) => group !== limit.group))) break;
+  }
+  return run;
+}
+
+// A history row of a lawn service record: by the record's own service line, else by its name.
+function isLawnRecord(row) {
+  const line = String(row?.service_line || '').trim().toLowerCase();
+  if (line) return line === 'lawn' || line === 'lawn_care';
+  return require('./service-report/service-line-configs').detectServiceLine(row?.service_type) === 'lawn';
+}
+
+// Did a record at this property end the group's run? (Fast Complete: whether the Group 11 run is closed after a
+// Velista run, so the Group 11 row may be offered.) True only when the lawn's latest application of the category is
+// placed at `propertyId`, every product of it has a group on file, and none carries `group`. An application that names
+// no property, a product with no group on file, no history and a visit with no property all read as not ended.
+function latestApplicationEndsGroup(rows, group, { propertyId = null } = {}) {
+  const [latest] = applicationsOf(rows);
+  if (!latest || !propertyId) return false;
+  return latest.rows.every((row) => String(row.treated_property_id ?? '') === String(propertyId) && isLawnRecord(row)
+    && rowGroups(row).length > 0 && !rowGroups(row).includes(String(group)));
+}
+
+// The property a visit's history is judged at: the visit's own, else the one its address resolves to (the resolver
+// the lawn areas use: 17 of 423 upcoming lawn visits carried no property on 2026-11-26). Null when none resolves.
+// A failed read throws when strict, else reads as none.
+async function visitPropertyFor(knex, visit, { strict = false } = {}) {
+  if (visit?.property_id) return visit.property_id;
+  if (!visit?.customer_id) return null;
+  try {
+    return await savepointRead(knex, (k) => require('./property-service-areas').resolveVisitPropertyId(visit, k)) || null;
+  } catch (err) {
+    if (strict) throw err;
+    return null;
+  }
+}
+
+// Every listed product whose run is full before this visit, as `[{ limit, dates }]`, with the history rows read
+// (`rowsByCategory`, for a caller that asks more of them) and the property they were judged at. `visit`: the booked
+// visit, to resolve a property it does not carry. A visit with no readable date reads as none.
+async function successiveLimitsReached(knex, { customerId, propertyId: given = null, visit = null, serviceDate, serviceId = null, strict = false, limits = SUCCESSIVE_USE_LIMITS }) {
+  const day = dateOnlyString(serviceDate);
+  const reached = [];
+  const rowsByCategory = new Map();
+  if (!day) return { reached, rowsByCategory, propertyId: given };
+  const propertyId = given || await visitPropertyFor(knex, visit ? { ...visit, customer_id: visit.customer_id || customerId } : null, { strict });
+  for (const limit of limits) {
+    if (!rowsByCategory.has(limit.category)) rowsByCategory.set(limit.category, await categoryHistory(knex, { customerId, propertyId, category: limit.category, serviceDate: day, serviceId, strict }));
+    const run = successiveRun(limit, rowsByCategory.get(limit.category), { propertyId });
+    if (run.length >= limit.max) reached.push({ limit, dates: run.slice(0, limit.max) });
+  }
+  return { reached, rowsByCategory, propertyId };
+}
+
+async function successiveUseFindings(knex, { customerId, propertyId, visit, product, serviceDate, serviceId, strict }) {
+  const limit = successiveLimitFor(product);
+  if (!limit) return [];
+  const { reached } = await successiveLimitsReached(knex, { customerId, propertyId, visit, serviceDate, serviceId, strict, limits: [limit] });
+  return reached.map(({ dates }) => ({
+    code: SUCCESSIVE_USE_CODE,
+    severity: 'block',
+    approvable: false,
+    productId: product.id,
+    productName: product.name,
+    message: `${product.name} was the lawn's last ${limit.max} fungicide applications (${[...dates].reverse().join(', ')}). Its label allows no more than ${limit.max} in a row: use a fungicide of another group.`,
+    evidence: { limit: limit.max, dates, source: limit.source },
+  }));
+}
+
 // The repeat-group (rotation) review of one applied product: for each of its groups, the latest
 // comparable application, the named exemptions, and the finding.
 async function repeatGroupFindings(knex, { customerId, propertyId, product, input, plan, serviceDate, strict }) {
@@ -463,6 +634,7 @@ async function evaluateWaveGuardManagerApprovals(knex, {
     }
 
     blocks.push(...await repeatGroupFindings(knex, { customerId, propertyId: service?.property_id || null, product, input, plan, serviceDate, strict }));
+    blocks.push(...await successiveUseFindings(knex, { customerId, propertyId: service?.property_id || null, visit: service || null, product, serviceDate, serviceId: service?.id || null, strict }));
   }
 
   const turfProfile = await savepointRead(knex, (k) => k('customer_turf_profiles')
@@ -508,6 +680,8 @@ function managerApprovalSummary(approval, blocks, actor) {
       productId: block.productId || null,
       productName: block.productName || null,
       ...(block.evidence ? { evidence: block.evidence } : {}),
+      // A label limit no approval lifts (successive_application_limit): the record says so beside the approval.
+      ...(block.approvable === false ? { approvable: false } : {}),
     })),
   };
 }
@@ -520,4 +694,11 @@ module.exports = {
   productGroups,
   priorProtocolRow,
   rowNamesTakeAll,
+  successiveRun,
+  successiveLimitsReached,
+  latestApplicationEndsGroup,
+  visitPropertyFor,
+  isLimitedProduct,
+  SUCCESSIVE_USE_LIMITS,
+  SUCCESSIVE_USE_CODE,
 };

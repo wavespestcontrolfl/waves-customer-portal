@@ -14,7 +14,7 @@ const { sanitizeHeardAbout, sanitizeHeardAboutPrompt, buildLeadWebhookIntake } =
 describe('sanitizeHeardAbout — fixed allowlist', () => {
   const ALLOWED = [
     'google_search', 'google_maps', 'chatgpt', 'other_ai',
-    'facebook_instagram', 'nextdoor', 'yelp', 'friend_neighbor',
+    'facebook_instagram', 'facebook_group', 'nextdoor', 'yelp', 'friend_neighbor',
     'truck_yard_sign', 'other',
   ];
 

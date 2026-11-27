@@ -315,15 +315,33 @@ customer's message by this rule.
    minutes, records in `alert_clear_verdicts` whether each open one is `answered`, `nothing_to_answer` or `still_owed`. SHADOW ONLY: it
    closes, edits and rings no bell and sends no text, email or call; the verdicts are scored against what staff did for a week before
    any live mode is built. It reads what came before the bell and every record created after it (texts, calls, visits, estimates,
-   email-thread messages). Plain rules go first: an unknown missed call with no voicemail, a text-back already sent and 24 hours of
-   silence is `nothing_to_answer`; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
+   email-thread messages). Plain rules go first: an unknown missed call with no voicemail, 24 hours of silence and no call from
+   Waves to the number (a bridged form callback counts by its `metadata.leadPhone`) is `nothing_to_answer` when the text-back for that call reached the caller (its claim says sent, or the
+   provider's receipt says delivered; a bounced or cancelled one did not), or the caller failed the
+   press-1 screen (a robocall; the bell's robodialer pattern markers alone do not count); a repeat call that the one-per-number
+   text-back skipped stays open; a delivered staff text, a sent staff email or a call a person answered, each by the repo's own witness
    definitions above (never `message_type` manual or seconds alone), after the bell is `answered`, proof = that record. A bell that says we owe a quote, a callback or a promise
    (title "we still owe", or `doneWhen: 'promise_fulfilled'`) is closed only by that rule or a sent estimate, never by the model.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
-   a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time needs a
-   booking after it, and a finished visit never answers a question about its result. Any doubt, error or refusal is `still_owed`.
-   A bell is judged again only when a new record appears after it.
+   a real record (never an automated text, an expired link or an unsent Gmail draft). No plain rule closes a bare "ok" or "yes":
+   the model is shown the message it answers (whole, with when it was sent; for a text, the last one sent from the Waves line
+   the yes came to, to the number it came from (both numbers by the canonical address rule: the text's own text-log row
+   first), never an app push notice; a bell with no message id takes the newest text in from either message store, shows it to the model
+   with the time it came, and looks for the offer by that text's own numbers; for an email, the last Waves email sent to the address the reply came from, read from its HTML when it stored no
+   text, never a forward to staff) and says whether the yes accepts an offered day or time (`yes_to_offer`; a reply without it
+   counts as yes). An email reply is cut at quoted history and signatures first, so "Yes" over "Sent from my iPhone" is a bare yes.
+   A yes whose message was not shown whole (cut short, no words, or none found; a send whose Cc or Bcc was never captured stops
+   the look) stays owed by rule, with no model call: no reading and no booking can be checked against it. When the yes accepts an offer, the bell closes only when the
+   model names the booking or held staff move that puts the visit at the offered day and time (the match is the model's: offers
+   are free text, and each visit line gives the day with its weekday and the arrival window the customer is told; a visit waiting
+   for the customer to pick a time is no booking, and a visit the customer is told only the day of states its day alone, so it
+   proves no offered time; a failed read of what the customer was told skips the alert until the next sweep; a visit that has
+   since run is not read, and keeps the slot it ran in). An owed bell with a bare yes stays owed. A finished visit never answers a question about its result. A visit move (a new day or a new start)
+   answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
+   customer, a hand-off for the customer to pick a time (no time is booked), or a move on a visit that now waits for the
+   customer's pick, is never an answer.
+   Any doubt, error or refusal is `still_owed`. A bell is judged again only when a new record appears after it or the rules change.
    A complaint-call bell (`Comms — call <name> about a complaint`, `doneWhen: 'complaint_answered'`, dedupe key
    `call-complaint:<call id>`) rings once per call, right after the call gets the final label `complaint_escalated`,
    for a known customer (never a test customer or a sandbox call) and only for a call that ended in the last 24 hours.

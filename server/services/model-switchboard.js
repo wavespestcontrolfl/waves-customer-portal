@@ -80,6 +80,8 @@ const SELECTORS = [
   { key: 'LAWN_CHALLENGE', env: 'MODEL_LAWN_CHALLENGE', description: 'Lawn diagnostic adversarial challenge', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'LIVE_CALL', env: 'MODEL_LIVE_CALL', description: 'Live-call upset-caller check (owner 2026-11-16: Haiku 5.5; dark behind GATE_LIVE_CALL_UPSET_ALERT)', accepts: { providers: ['anthropic'], cap: 'text' } },
   { key: 'DEAL_END_DATE', env: 'MODEL_DEAL_END_DATE', description: 'SiteOne deals bell offer end date (owner 2026-11-19: Haiku 5.5; dark behind GATE_SITEONE_DEAL_AI_END_DATE)', accepts: { providers: ['anthropic'], cap: 'text' } },
+  // deep: true — its only call site (email/email-classifier.js, TEXT_POLICIES.emailClassify) goes through llm/call.js.
+  { key: 'EMAIL_CLASSIFY', env: 'MODEL_EMAIL_CLASSIFY', description: 'Inbound email classification (owner 2026-11-27: Opus 5.5 after a replay on 286 real emails)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'ALERT_CLEAR', env: 'MODEL_ALERT_CLEAR', description: 'Alert clear-up agent (owner 2026-11-26: Sonnet 5.5 on the paid API; shadow only behind GATE_ALERT_CLEAR_AGENT)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'VOICE_JUDGE', env: 'MODEL_VOICE_JUDGE', description: 'Voice relay eval judge (pinned: moving it re-baselines the voice agent scorecard)', accepts: { providers: ['anthropic'], cap: 'text' } },
   // deep: true — its only call sites are the newsletterWriter policy through
@@ -181,6 +183,7 @@ const POLICY_SELECTOR = {
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   reportAsk: { primary: 'REPORT_ASK', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
+  emailClassify: { primary: 'EMAIL_CLASSIFY', fallback: 'OPENAI_FAST' },
   fastStructuredInteractive: { primary: 'OPENAI_FAST_INTERACTIVE', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
   askWaves: { primary: 'OPENAI_BALANCED', fallback: 'VOICE' },
@@ -384,7 +387,7 @@ const LANES = [
   // ── Fast text ──
   L('lead_triage', 'Lead triage classification', 'lead-triage.js', 'fastText', R('leadClassify'), T('FAST'), { inbound: true }),
   L('churn_classify', 'Churn-reason classification', 'churn-classifier.js', 'fastText', R('churnClassify'), T('FAST'), { inbound: true }),
-  L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
+  L('email_classify', 'Inbound email classification', 'email/email-classifier.js', 'fastText', P('emailClassify', 'primary'), P('emailClassify', 'fallback'), { inbound: true }),
   L('sms-commitment-fulfillment', 'SMS completion verification', 'sms-commitment-fulfillment.js', 'deep', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms-commitment-thread-close', 'SMS follow-up closed by a later text', 'sms-commitment-thread-close.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call-commitment-contact-check', 'Call promise kept-by-contact check', 'call-commitment-contact-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),

@@ -73,6 +73,24 @@ describe('applyOperatorCustomerEmail', () => {
     );
   });
 
+  test('rowAllowed: a predicate over the LOCKED row; a refusal returns not_allowed before the address key or any write', async () => {
+    const { trx, rows, order } = fakeTrx([{ id: 'c1', email: 'old@example.com', account_id: 'a1', active: false }]);
+    const rowAllowed = jest.fn((row) => row.active === true);
+    const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'new@example.com', rowAllowed });
+    expect(result).toEqual({ outcome: 'not_allowed' });
+    expect(rowAllowed).toHaveBeenCalledWith(expect.objectContaining({ id: 'c1', active: false }));
+    expect(order).toEqual(['row-lock']);
+    expect(rows[0].email).toBe('old@example.com');
+    expect(mockPropagateCustomerEmailChange).not.toHaveBeenCalled();
+  });
+
+  test('rowAllowed true behaves exactly like no predicate', async () => {
+    const { trx, rows } = fakeTrx([{ id: 'c1', email: 'old@example.com', account_id: 'a1', active: true }]);
+    const result = await applyOperatorCustomerEmail(trx, { customerId: 'c1', email: 'new@example.com', rowAllowed: () => true });
+    expect(result.outcome).toBe('changed');
+    expect(rows[0].email).toBe('new@example.com');
+  });
+
   test('refuses an address another account holds — decided under the key, before any write', async () => {
     const { trx, rows, order } = fakeTrx([
       { id: 'c1', email: null, account_id: 'a1' },

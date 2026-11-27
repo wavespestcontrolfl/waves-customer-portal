@@ -17,7 +17,14 @@ const logger = require('./logger');
 const rpcResult = (id, result) => ({ jsonrpc: '2.0', id, result });
 const rpcError = (id, code, message) => ({ jsonrpc: '2.0', id, error: { code, message } });
 
-function createMcpRpc({ tools, serverInfo, protocolVersion, instructions = null, logPrefix = 'mcp' }) {
+function createMcpRpc({
+  tools,
+  serverInfo,
+  protocolVersion,
+  instructions = null,
+  logPrefix = 'mcp',
+  includeToolMetadata = false,
+}) {
   async function executeTool(name, args = {}) {
     const tool = tools.find((t) => t.name === name);
     if (!tool) return { error: `unknown tool: ${name}` };
@@ -51,7 +58,21 @@ function createMcpRpc({ tools, serverInfo, protocolVersion, instructions = null,
       case 'ping':
         return respond({});
       case 'tools/list':
-        return respond({ tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) });
+        return respond({
+          tools: tools.map(({
+            name, title, description, inputSchema, annotations,
+          }) => ({
+            name,
+            ...(includeToolMetadata && title ? { title } : {}),
+            description,
+            inputSchema,
+            ...(includeToolMetadata && (title || annotations) ? {
+              // 2025-03-26 defines the display title in ToolAnnotations;
+              // later revisions also define the top-level title field.
+              annotations: { ...annotations, ...(title ? { title } : {}) },
+            } : {}),
+          })),
+        });
       case 'tools/call': {
         const result = await executeTool(params?.name, params?.arguments);
         return respond({

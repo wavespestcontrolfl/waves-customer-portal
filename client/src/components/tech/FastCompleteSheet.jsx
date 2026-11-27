@@ -313,7 +313,10 @@ const isOutOfStockRow = (row) => stockHolds(row.product, submittedAmount(row.tot
 // (reason '' when none), and the product whose stock holds Complete when
 // that is what is missing. `stockAdvisory` (the
 // context's key): no product at 0 in stock holds, and `stockNotices` names each.
-function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}, stockAdvisory) {
+// A visit with no protocol card (owner pick D18) and no product is inspection only: the sheet records applications, so it
+// sends the tech to the Full form, which records the stop with no product ("Full form" in the hold opens it).
+export const NO_CARD_HOLD = 'This visit has no protocol card: inspection only, no product. Record it on the Full form.';
+export function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}, stockAdvisory, noCard = false) {
   const active = rows.filter((row) => row.active);
   // The server refuses the whole visit when a tracked stock would go below
   // zero (unless the stock is advisory); a stock already at zero is named here instead.
@@ -325,7 +328,7 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending, openChe
   const [, reason = '', stockRow = null] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
-    [!active.length, 'Select at least one product.'],
+    [!active.length, noCard ? NO_CARD_HOLD : 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [!form.pests.size, 'Select at least one pest.'],
@@ -437,11 +440,14 @@ function useShortFormWrapUp({ ctx, service, submission, request, rows, form, onC
 
 // The report flow takes visits the house mix is not for (an initial
 // cleanout), so it seeds only where the recap modal and the full form would;
-// a re-service sheet always starts with it.
-function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
+// a re-service sheet starts with it unless the server says the visit has no card.
+export function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType, cardDefaults }) {
   // A lane visit (bed bug, fire ant, tick, …) is never the pest house mix,
   // a callback included.
   if (laneKey || typedType) return false;
+  // A visit with no protocol card (owner pick D18, the defaults read's no_protocol) is inspection only on either flow: a
+  // callback named "Courtesy Visit" with no key. A failed read (null) keeps the mix as before.
+  if (cardDefaults?.matchedVisit?.reason === 'no_protocol') return false;
   return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
 }
 
@@ -515,7 +521,7 @@ function useFastCompleteContext({
         // A typed visit keeps its own activity (the completion ignores the
         // 1 to 5 rating on a typed form), so it asks for none.
         const rates = ratingContract?.allowed === true && !typedType;
-        const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType });
+        const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType, cardDefaults });
         // Taurus SC's yearly label limit at this home, read by the server with this context; null (unknown) leaves it off the mix.
         const taurusYearly = taurusYearlyOf(data?.taurusYearly);
         setCtx({
@@ -540,6 +546,8 @@ function useFastCompleteContext({
           // re-service, never a lane or typed one: the visits the full form
           // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
           houseMix,
+          // The server's no-card answer (owner pick D18): an empty product list then sends the tech to the Full form.
+          noCard: cardDefaults?.matchedVisit?.reason === 'no_protocol',
           visitIdentity: sheetVisitIdentity(visit, reportFlow, oneTapGateOf(data)),
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
@@ -844,7 +852,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     onPick: (product) => addProduct(product, form.method),
   });
 
-  const { reason: sheetReason, stockRow, stockNotices } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong }, ctx.stockAdvisory);
+  const { reason: sheetReason, stockRow, stockNotices } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong }, ctx.stockAdvisory, ctx.noCard === true);
   const missingReason = withAsksHold(sheetReason, asks);
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
@@ -1150,8 +1158,12 @@ function reportCompletionBody({
     // The untouched first-visit 5: the server re-checks it is still the
     // first visit (owner ruling 2026-09-24).
     ...(ratingSent && form.ratingPrefilled ? { clientPestRatingPrefilled: true } : {}),
-    technicianNotes: draft.text.trim(),
-    reportDraftBase: draft.base,
+    // A note visit (GATE_REPORT_OWN_NOTE): the report shows the tech's own note as the note step tidied it, so the
+    // record keeps the note as said and the server screens the tidied text against it again. No writer draft went
+    // out, so there is no draft base for the edit heads-up.
+    ...(draft.reportNote
+      ? { technicianNotes: form.note.trim(), reportNote: draft.reportNote }
+      : { technicianNotes: draft.text.trim(), reportDraftBase: draft.base }),
     ...(promiseMarks.length ? { promiseMarks } : {}),
     // The photo descriptions the report was written from (a changed one
     // makes the report stale here): the server re-reads them under the visit
@@ -1197,7 +1209,10 @@ const NO_PRODUCT_HOLDS = {
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
 // What an empty product list says for this record mode (null: no hold).
-const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
+export const noProductHold = (mode, noCard = false) => {
+  if (mode in NO_PRODUCT_HOLDS) return NO_PRODUCT_HOLDS[mode];
+  return noCard ? NO_CARD_HOLD : 'Select at least one product.';
+};
 
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
 // reads the products out of the note first, so neither an empty list nor a row
@@ -1207,11 +1222,11 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // lists every such product for the sheet to name.
 // `oneTap` (GATE_ONE_TAP_REPORT, owner 2026-10-17): the photo read holds nothing (photos are optional, shown when
 // saved; the body then omits photoCaptionsSeen until the read answers). A photo change still being saved still holds.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, traceHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, traceHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, noCard = false, ...sendInputs }) {
   const outOfStock = active.find(isOutOfStockRow);
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
-  const noProduct = unread ? null : noProductHold(mode);
+  const noProduct = unread ? null : noProductHold(mode, noCard);
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
@@ -1629,11 +1644,48 @@ const READS = {
 };
 const PEST_READ = { endpoint: 'voice-facts', factsOf: pestFactsOf };
 
+// The note step (GATE_REPORT_OWN_NOTE, report speed plan step 2): on a plain pest visit the customer's report shows the
+// tech's own note, tidied by one model call and screened by the server ({ ok, text, source: 'cleaned' | 'fixed' }), in
+// place of the writer's report (the completion drops the writer's text on such a visit). The gate off (404), a visit
+// the step does not take (409) or a failed call writes the report the old way, so the note step never holds Complete.
+// The gate's own 404 ({ enabled: false }) is kept for the sheet, so a gate that is off costs one call. A visit the
+// route no longer gives this tech (403), no longer finds (404 not_found) or finds with no customer (409
+// visit_has_no_customer: /complete refuses it too) writes nothing: the sheet says so.
+const isNoteAnswer = (answer) => answer?.ok === true && ['cleaned', 'fixed'].includes(answer.source)
+  && typeof answer.text === 'string' && answer.text.trim() !== '';
+const NOTE_VISIT_GONE = {
+  403: 'This visit is no longer yours to complete. Close the sheet and open your schedule again.',
+  404: 'This visit was not found. Close the sheet and open your schedule again.',
+};
+// Only a plain pest visit asks (a lane or typed visit, `mode`, keeps its own record and report).
+const NOTE_VISIT_NO_CUSTOMER = 'This visit has no customer on it now. Close the sheet and ask the office.';
+// { text, reportNote, noteReason } | { stop: message } | null (write the writer's report).
+async function readOwnNote({ request, base, note, mode, offRef }) {
+  if (mode || offRef.current) return null;
+  try {
+    const answer = await request(`${base}/pest-recap/report-note`, { method: 'POST', body: JSON.stringify({ note }) });
+    if (!isNoteAnswer(answer)) return null;
+    return {
+      text: answer.text.trim(),
+      reportNote: { source: answer.source, text: answer.text },
+      noteReason: typeof answer.reason === 'string' ? answer.reason : null,
+    };
+  } catch (err) {
+    if (err?.status === 404 && err.details?.enabled === false) {
+      offRef.current = true;
+      return null;
+    }
+    const gone = err?.code === 'visit_has_no_customer' ? NOTE_VISIT_NO_CUSTOMER : NOTE_VISIT_GONE[err?.status];
+    return gone ? { stop: gone } : null;
+  }
+}
+
 function useReportDraft({ request, base, mode = null, houseMix = false }) {
   const [draft, setDraft] = useState(null);
   const [writing, setWriting] = useState(false);
   const [writeError, setWriteError] = useState('');
   const sequenceRef = useRef(0);
+  const noteOffRef = useRef(false);
   const write = useCallback(async ({ buildPayload, note, current, scoreSet, stationRead = NO_STATION_READ, signature, fresh, extraRead = null }) => {
     const sequence = ++sequenceRef.current;
     setWriting(true);
@@ -1666,6 +1718,17 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     // lane visit's record fills from the read).
     const draftSignature = signature(facts, extra);
     const payload = buildPayload(facts, extra);
+    const noted = await readOwnNote({ request, base, note, mode, offRef: noteOffRef });
+    if (sequence !== sequenceRef.current) return;
+    if (noted) {
+      setWriting(false);
+      // A visit the tech no longer has keeps no earlier draft: Complete & send goes with it.
+      if (noted.stop) {
+        setDraft(null);
+        setWriteError(noted.stop);
+      } else setDraft({ ...noted, base: noted.text, signature: draftSignature, deterministic: false, facts });
+      return;
+    }
     let written = null;
     let failure = null;
     try {
@@ -1683,7 +1746,16 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     setDraft({ text, base: text, signature: draftSignature, deterministic: written.deterministic === true, facts });
   }, [request, base, mode, houseMix]);
   const editText = useCallback((text) => setDraft((prev) => ({ ...prev, text })), []);
-  return { draft, writing, writeError, write, editText };
+  // The server refused a note because the note step went off after the preview (409 REPORT_NOTE_OFF): the note draft
+  // goes, and the next write is the writer's report from the same form.
+  const noteTurnedOff = useCallback(() => {
+    noteOffRef.current = true;
+    sequenceRef.current += 1;
+    setWriting(false);
+    setWriteError('The report note is turned off. Write the report again, then send.');
+    setDraft((prev) => (prev?.reportNote ? null : prev));
+  }, []);
+  return { draft, writing, writeError, write, editText, noteTurnedOff };
 }
 
 // Lane voice fill (GATE_LANE_VOICE_FILL, Fast Complete step 2): a specialty
@@ -1929,6 +2001,7 @@ function ReportFlowForm({
   useEffect(() => { if (submitCode === 'station_roster_changed') recordState.stationsChanged(); }, [submitCode]);
   const report = useReportDraft({ request, base, mode, houseMix: ctx.houseMix === true });
   const { draft, writing } = report;
+  useEffect(() => { if (submitCode === 'REPORT_NOTE_OFF') report.noteTurnedOff(); }, [submitCode]);
   // The Wrap-up: the full form's bottom section, on the visit step and the report step (one state). The report flow posted no
   // `reviewTiming` before, so the key stays absent while the timing is Automatic. A re-service
   // (not in ctx.wrapUp) keeps its fixed text.
@@ -1985,6 +2058,7 @@ function ReportFlowForm({
     stationHold: recordState.stationGate.generate,
     stockAdvisory: ctx.stockAdvisory,
     oneTap,
+    noCard: ctx.noCard === true,
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({

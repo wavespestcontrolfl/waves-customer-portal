@@ -24,6 +24,15 @@ beforeEach(() => { jest.clearAllMocks(); db.mockReset(); priorGate = process.env
 afterEach(() => { if (priorGate === undefined) delete process.env.GATE_SMS_REAL_ANSWERS; else process.env.GATE_SMS_REAL_ANSWERS = priorGate; });
 
 describe('recheckScheduledSmsAmounts', () => {
+  // PHOTO CHECK (texting AI gap 6): a queued AI reply that names what a photo shows in its own words is rechecked at fire time, bound to the
+  // decision's own inbound text
+  test('a queued own-words photo reply runs the full recheck with the decision inbound sms_log id', async () => {
+    dbReturning({ prompt_version: 'house_voice_v12_real_answers69_n', input_snapshot: JSON.stringify({ sms: { body: 'what is this?' } }), customer_id: 'c1', suggested_message: 'From the picture, those look like fire ants.', sms_log_id: 'log-9' });
+    recheck.outgoingAmountsStale.mockResolvedValue({ stale: true, reason: 'photo_check_unverified' });
+    const out = await recheckScheduledSmsAmounts({ msg: { id: 'm', customer_id: 'c1', message_body: 'From the picture, those look like fire ants.' }, claimMeta: { agent_decision_id: 'd1', human_authored: false } });
+    expect(out).toEqual({ stale: true, reason: 'photo_check_unverified' });
+    expect(recheck.outgoingAmountsStale).toHaveBeenCalledWith(expect.objectContaining({ inboundSmsLogId: 'log-9' }));
+  });
   test('(c) a human reply with no figure, Zelle offer or payment claim does no reads at all', async () => {
     await expect(recheckScheduledSmsAmounts({ msg: { id: 'm1', customer_id: 'c1', message_body: 'Sounds good, see you Tuesday!' }, claimMeta }))
       .resolves.toEqual({ stale: false, reason: null });

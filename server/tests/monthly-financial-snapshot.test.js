@@ -22,6 +22,13 @@ jest.mock('../services/monthly-snapshot-buyer-columns', () => ({
   buyerColumns: (...a) => mockBuyerColumns(...a),
 }));
 
+// The cross-sell columns have their own suites (cross-sell-rate.test.js and the Postgres one); here only the hand-off.
+const mockCrossSellColumns = jest.fn();
+jest.mock('../services/cross-sell-rate', () => ({
+  ...jest.requireActual('../services/cross-sell-rate'),
+  crossSellColumns: (...a) => mockCrossSellColumns(...a),
+}));
+
 const svc = require('../services/monthly-financial-snapshot');
 const migration = require('../models/migrations/20261126100000_monthly_financial_snapshots');
 
@@ -60,6 +67,8 @@ beforeEach(() => {
   mockBuildPnl.mockReset();
   mockBuyerColumns.mockReset();
   mockBuyerColumns.mockResolvedValue({ sde: 1800, prepaid_owed: 0 });
+  mockCrossSellColumns.mockReset();
+  mockCrossSellColumns.mockResolvedValue({ recurring_customers: 275, multi_service_customers: 33, multi_service_sources: '{"office":33}' });
 });
 
 describe('monthWindow and monthOffset', () => {
@@ -222,8 +231,13 @@ describe('computeMonthSnapshot', () => {
       pnl_complete: true,
       sde: 1800,
       prepaid_owed: 0,
+      recurring_customers: 275,
+      multi_service_customers: 33,
+      multi_service_sources: '{"office":33}',
     });
     expect(mockBuildPnl).toHaveBeenCalledWith(db, '2026-10-01', '2026-10-31');
+    // The cross-sell count is taken on the month's last day.
+    expect(mockCrossSellColumns).toHaveBeenCalledWith(db, '2026-10-31', expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/));
     // The buyer columns get the month's window, the settings row in effect, the P&L, the office allowance and cash revenue.
     expect(mockBuyerColumns).toHaveBeenCalledWith(db, expect.objectContaining({
       startDate: '2026-10-01', endDate: '2026-10-31', officeAllowance: 500, cashRevenue: 9000,

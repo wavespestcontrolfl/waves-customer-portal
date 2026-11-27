@@ -162,7 +162,7 @@ const {
 } = require('../services/estimate-automation-duplicates');
 const { WAVES_SUPPORT_PHONE_DISPLAY } = require('../constants/business');
 const { isSellableTreeShrubTier } = require('../services/pricing-engine/retired-sale-catalog');
-const { PLUGGING_AREA_REQUIRED_REASON } = require('../services/pricing-engine/service-pricing');
+const { PLUGGING_AREA_REQUIRED_REASON, MOSQUITO_LOT_AT_RECORD_CAP_TEXT } = require('../services/pricing-engine/service-pricing');
 // customQuoteReason the engine stamps on every top dressing line (estimate-engine.js).
 const TOP_DRESSING_QUOTE_ONLY_REASON = 'top_dressing_quote_only';
 // Reasons the office prices by hand: a keyed quote-on-request product and top
@@ -220,16 +220,20 @@ const TRUSTED_STORIES_SOURCES = new Set(['ai', 'permit', 'verified', 'manual']);
 // fieldVerifyFlags entry on squareFootage or stories (conflicting evidence)
 // — or the global address flag — means "verify before pricing", and a
 // footprint derived from either is not trusted (Codex #6398 r24 P1).
+// The three story-count tests above as one answer: does the SERVER-SIDE lookup vouch for its own story count?
+// A record-search 'ai' count with no fallback evidence passes here, as the Tree & Shrub footprint has always read it. The pest
+// check above the 5,500 sq ft table also asks that such a count names its evidence on the record (storyCountHasEvidence).
+function lookupStoriesAreTrusted(trustedTurf = {}, propertyRecord = null) {
+  const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
+  if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource) || !lookupDimensionIsTrustworthy(t, 'stories')) return false;
+  if (t.storiesSource !== 'ai') return true;
+  const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
+  return storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null }) === 'lookup';
+}
 function trustedTreeShrubFootprintSqFt(trustedTurf = {}, propertyRecord = null) {
   const t = trustedTurf && typeof trustedTurf === 'object' ? trustedTurf : {};
   if (t.footprintUnknown === true) return null;
-  if (!TRUSTED_STORIES_SOURCES.has(t.storiesSource)) return null;
-  if (!lookupDimensionIsTrustworthy(t, 'homeSqFt') || !lookupDimensionIsTrustworthy(t, 'stories')) return null;
-  if (t.storiesSource === 'ai') {
-    const { storiesSourceForPricing } = require('../services/estimator-engine/draft-builder');
-    const graded = storiesSourceForPricing({ stories: t.stories, storiesEvidence: propertyRecord?._storiesEvidence || null });
-    if (graded !== 'lookup') return null;
-  }
+  if (!lookupDimensionIsTrustworthy(t, 'homeSqFt') || !lookupStoriesAreTrusted(t, propertyRecord)) return null;
   const stories = Math.max(1, Math.min(3, Number(t.stories) || 1));
   const perStory = (v) => Math.max(1, Math.round(Number(v) / stories));
   if (Number(t.footprint) > 0) return Number(t.footprint);
@@ -1257,6 +1261,9 @@ async function sendQuoteRequestEmail({
 // commercial in the office bell (GH codex P2 on #3839).
 const RESIDENTIAL_VERIFICATION_REASONS = new Set([
   'lot_size_requires_verification',
+  'home_size_above_public_limit',
+  // A home above the pest footprint table whose story count no record confirms (the engine's own review reason).
+  'stories_estimated',
   'mosquito_treatable_area_unverified',
   'unit_in_multi_unit_building',
   'low_confidence_turf_requires_field_verification',
@@ -1372,11 +1379,17 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       return res.status(200).json({ ok: true });
     }
     const {
-      leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt,
+      leadId, firstName, lastName, email, phone, address, city, zip, homeSqFt: postedHomeSqFt,
       buildingSizeConfirmed,
       lotSqFt, lotSizeConfirmed, stories, propertyType, category, isCommercial, commercialSubtype,
       enriched, services: bodyServices, attribution,
     } = req.body || {};
+    // A posted home size is a finite number or a numeric string. Anything else is no size and takes the 2,000 sq ft default: text
+    // that is not a number, an infinite value, and a boolean, array or object (Number() would read true as 1 and [24000] as 24000).
+    // It is never clamped to the ceiling, parked or stored.
+    const homeSqFt = (typeof postedHomeSqFt === 'number' || typeof postedHomeSqFt === 'string') && Number.isFinite(Number(postedHomeSqFt))
+      ? postedHomeSqFt
+      : NaN;
     // Optional self-reported "How did you hear about us?" (+ the AI follow-up
     // prompt): fixed allowlist, unknown values silently dropped, never required.
     const wizardHeardAbout = heardAboutFromBody(req.body);
@@ -1469,6 +1482,15 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     const HOME_CAP = commercialDetected ? 5_000_000 : 20000;
     const LOT_CAP = commercialDetected ? 50_000_000 : 200000;
     const sqft = Math.max(500, Math.min(HOME_CAP, Number(homeSqFt) || 2000));
+    // A residential home bigger than the public calculator's ceiling is never priced as the truncated size: pest keeps rising with
+    // the footprint (owner 2026-11-26), so a 24,000 sq ft two-story clamped to 20,000 would quote a 10,000 sq ft footprint. A posted
+    // size above the ceiling goes to the team for a hand price instead, WHATEVER the quote asks for: a lawn-only quote that stored
+    // the truncated size would hand it to pest the day pest is added to that estimate.
+    const homeSizeAbovePublicLimit = !commercialDetected && Number(homeSqFt) > HOME_CAP;
+    // ONE resolved size for everything this quote stores or prices from: the engine input, the exclusion line and the lead's extracted data.
+    // The size kept for the team is bounded at ten times the public ceiling (200,000 sq ft): a junk value such as 1e300 is finite, so
+    // without the bound it would reach the price arithmetic (prices that overflow and store as null) and the integer size columns.
+    const resolvedHomeSqFt = homeSizeAbovePublicLimit ? Math.min(Number(homeSqFt), HOME_CAP * 10) : sqft;
     // Resolve the TRUSTED lot once (lookup-measured or customer-confirmed) and use
     // it for BOTH the measured flag AND the lot fed to the engine — otherwise we
     // could mark the lot measured off enriched.lotSqFt while still pricing off the
@@ -1779,7 +1801,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // record — codex P0 r3).
     const engineFallbackLot = !wizardShaped && Number(lotSqFt) > 0
       ? Number(lotSqFt)
-      : sqft * 4;
+      : resolvedHomeSqFt * 4;
     const lot = Math.max(500, Math.min(LOT_CAP, realLotSqFt ?? engineFallbackLot));
     // DB-safe measured value for the customers.lot_sqft writes below — a
     // public confirmed value like 1e100 would overflow the integer column
@@ -1833,17 +1855,32 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     })();
     const buildingSizeMeasured = realFootprintSqFt != null;
     const treeShrubFootprintSqFt = trustedTreeShrubFootprintSqFt(trustedTurf, trustedRecord);
-    // Flea only: no home size was posted (the 2,000 default is about to be substituted) and the server's own lookup measured a
-    // residential home. Both fields are set here, never read from the body, and reach only priceFlea (nothing else changes).
+    // No home size was posted (the 2,000 default is about to be substituted) and the server's own lookup measured a residential
+    // home. Both fields are set here, never read from the body, and are read only by the services that size on the home's total
+    // living area (flea, cockroach, bed bug: resolveWholeHomeSize), so they are set whatever the request asks for; nothing else changes.
     // The wizard's untouched confirm-step placeholder (a wizard-shaped request, exactly 2,000, buildingSizeConfirmed not true) is the
     // default too, never a customer-supplied size; a confirmed 2,000 sq ft home is genuine, and a direct API caller's explicit size
     // (no enriched profile) is always genuine.
     const homeSizeIsDefault = !(Number(homeSqFt) > 0) || (wizardShaped && buildingSizeConfirmed !== true && Number(homeSqFt) === 2000);
-    const fleaMeasuredHomeSqFt = !commercialDetected && services?.flea && homeSizeIsDefault
+    const fleaMeasuredHomeSqFt = !commercialDetected && homeSizeIsDefault
       ? trustedFleaHomeSqFt(trustedTurf, trustedRecord)
       : null;
+    // Pest above the 5,500 sq ft table (owner 2026-11-26, new quotes): the price rises with the footprint, the living area over
+    // the stories, so the story count sets it. The count the engine gets (storiesNum) is the body's, as before: the wizard
+    // echoing a lookup, or anything a direct caller typed. Above the table it is a known count only when the server's own
+    // lookup vouches for the same number, and a count the lookup's AI found names its evidence (storyCountHasEvidence).
+    // Otherwise storiesSource 'default' puts the engine's stories_estimated review on the pest line and the quote goes to the
+    // team. The mark is set whatever the services, so pest added to this draft later is held too. A home above the 20,000 sq ft
+    // ceiling is already held for the team under its own reason.
+    const lookupVouchesForStories = lookupStoriesAreTrusted(trustedTurf, trustedRecord)
+      && (trustedTurf.storiesSource !== 'ai' || require('../services/estimator-engine/draft-builder').storyCountHasEvidence(trustedRecord))
+      && Number(trustedTurf.stories) === storiesNum;
+    const storiesUnknownAboveTable = !commercialDetected && !homeSizeAbovePublicLimit
+      && resolvedHomeSqFt > Number(pricingConstants.PEST.aboveTableStartSqFt) && !lookupVouchesForStories;
     let engineInput = {
-      homeSqFt: sqft,
+      // The posted size itself when it is above the ceiling (that quote parks for a hand price): a stored draft re-priced later by
+      // staff reads the real size, never the clamped one.
+      homeSqFt: resolvedHomeSqFt,
       ...(fleaMeasuredHomeSqFt ? { fleaMeasuredHomeSqFt, homeSqFtIsDefault: true } : {}),
       // Tree & Shrub open-parcel basis: the server-measured footprint, never
       // the body's homeSqFt; absent → the pricer parks the lot-based line.
@@ -1859,7 +1896,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // commercial lawn/tree can estimate, but commercial mosquito reads this flag
       // and falls back to manual rather than auto-pricing a fabricated area.
       lotSizeMeasured,
-      stories: Math.max(1, Math.min(3, Number(stories) || Number(ep.stories) || 1)),
+      stories: storiesNum,
+      ...(storiesUnknownAboveTable ? { storiesSource: 'default' } : {}),
       lotSqFt: lot,
       propertyType: commercialDetected ? 'commercial' : (propertyType || ep.propertyType || 'Single Family'),
       category: category || ep.category || null,
@@ -1932,7 +1970,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // contract as the estimator translator (countyCeilingStillValid): the
     // ceiling forwards only while THIS request's dimensions still match the
     // county dimensions it was computed from (pre-push codex P0 r3).
-    if (countyCeilingStillValid(trustedTurf, { homeSqFt: sqft, lotSqFt: lot, stories: engineInput.stories })) {
+    if (countyCeilingStillValid(trustedTurf, { homeSqFt: resolvedHomeSqFt, lotSqFt: lot, stories: engineInput.stories })) {
       engineInput.countyTurfCeilingSf = trustedTurf.countyTurfCeilingSf;
     }
     if (commercialDetected) {
@@ -2084,7 +2122,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     }
     if (services.exclusion) {
       engineInput.services.exclusion = {
-        homeSqFt: sqft,
+        homeSqFt: resolvedHomeSqFt,
         stories: engineInput.stories,
       };
     }
@@ -2253,6 +2291,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isManualQuoteLine(line)
     );
     const manualQuoteLine = manualQuoteLines[0] || null;
+    // The public ceiling is on the size a line PRICES on. When the server lookup's measured home replaced the placeholder on a line
+    // (flea, cockroach, bed bug: footprintSource 'lookup_measured_home') and that home is above the ceiling, the quote goes to the
+    // team, as it does when the same size is posted. A measurement no line priced on changes nothing.
+    const homeAbovePublicLimit = homeSizeAbovePublicLimit || (Number(fleaMeasuredHomeSqFt) > HOME_CAP
+      && (estimate?.lineItems || []).some((line) => line?.footprintSource === 'lookup_measured_home'));
     // A commercial auto-priced line whose driving area is estimated carries a LOW
     // pricing confidence. When the aggregate ±20% band is too wide to show a
     // useful number (> $300/mo swing), the quote is force-converted to a
@@ -2318,7 +2361,12 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel
-      || lotFlagForcesSiteQuote;
+      || lotFlagForcesSiteQuote || homeAbovePublicLimit;
+    // A held pest line on a big home names its size hold, whatever the engine lists first on that line. A home with no measured lot
+    // prices on a stand-in lot of 4 x the home size, and the engine lists that lot review (very_large_lot) first: reading reasons[0]
+    // told the homeowner that commercial properties need a manual quote, and filed the lead as commercial. Above the 20,000 sq ft
+    // ceiling the size hold names the quote; above the 5,500 sq ft table, the story-count hold.
+    const heldPestLine = ['pest_control', 'one_time_pest'].includes(manualQuoteLine?.service);
     const quoteRequiredReason = manualQuoteLine?.reason
       // The turf-review lines expose their reason via customQuoteReason /
       // manualReviewReasons, not `reason` — without these legs a parked
@@ -2326,10 +2374,13 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // below and told the customer commercial properties need a manual
       // quote (GH codex P2 on 2aaf7d9a5).
       || manualQuoteLine?.customQuoteReason
+      || (heldPestLine && homeSizeAbovePublicLimit ? 'home_size_above_public_limit' : null)
+      || (heldPestLine && manualQuoteLine.manualReviewReasons?.includes('stories_estimated') ? 'stories_estimated' : null)
       || manualQuoteLine?.manualReviewReasons?.[0]
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
-      || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null);
+      || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null)
+      || (homeAbovePublicLimit ? 'home_size_above_public_limit' : null);
     const quoteIsPricedByTeam = isPricedByTeamReason(quoteRequiredReason);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
@@ -2389,7 +2440,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       // codex #3861 r1 P2).
       wizard_submitted_at: new Date().toISOString(),
       entry_channel: entryChannel,
-      homeSqFt: sqft,
+      homeSqFt: resolvedHomeSqFt,
       lotSqFt: lot,
       services,
       enriched: ep,
@@ -2947,7 +2998,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           leadSourceDetail: sourceMeta.leadSourceDetail,
           entryChannel,
           quoteCity,
-          sqft,
+          sqft: resolvedHomeSqFt,
           // Persist only a MEASURED/confirmed lot — the sqft×4 engine
           // fallback must never be stored: customer-pricing-ai treats
           // customers.lot_sqft as authoritative before the lookup, so a
@@ -3361,9 +3412,25 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacyTwoStoryRoof === 'boolean'
                 ? { legacyTwoStoryRoof: estimate.pricingMetadata.legacyTwoStoryRoof }
                 : {}),
+              // WDO size + construction stamp (2026-11-26).
+              ...(typeof estimate.pricingMetadata.legacyWdoFlat === 'boolean'
+                ? { legacyWdoFlat: estimate.pricingMetadata.legacyWdoFlat }
+                : {}),
               // One-time pest rule (new quotes only, 2026-11-26): its own stamp.
               ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
                 ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
+                : {}),
+              // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): its own stamp.
+              ...(typeof estimate.pricingMetadata.legacyPestAboveTable === 'boolean'
+                ? { legacyPestAboveTable: estimate.pricingMetadata.legacyPestAboveTable }
+                : {}),
+              // Whole-home sizing (cockroach, bed bug, rodent guarantee on total living area; new quotes only, 2026-11-26): its own stamp.
+              ...(typeof estimate.pricingMetadata.legacyWholeHomeSizing === 'boolean'
+                ? { legacyWholeHomeSizing: estimate.pricingMetadata.legacyWholeHomeSizing }
+                : {}),
+              // Specialty prices (bed bug rooms, mosquito above 2 acres, wasp level; 2026-11-26): ONE stamp.
+              ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
+                ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }
                 : {}),
             } }
             : {}),
@@ -3372,7 +3439,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             name: item.name || item.label || item.displayName,
             ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
             ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
+            ...(typeof item.legacyWdoFlat === 'boolean' ? { legacyWdoFlat: item.legacyWdoFlat } : {}),
             ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
+            ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
+            ...(typeof item.legacyWholeHomeSizing === 'boolean' ? { legacyWholeHomeSizing: item.legacyWholeHomeSizing } : {}),
+            ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),
             annual: item.annualAfterDiscount ?? item.annual ?? null,
             monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
             price: item.priceAfterDiscount ?? item.price ?? null,
@@ -3462,6 +3533,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             exteriorStatus: item.exteriorStatus ?? null,
             // Flea size rule the row was quoted under (estimate-flea-size-replay reads it; an unstamped flea row replays as pre-2026-11-26).
             ...(item.fleaSizeBasis ? { fleaSizeBasis: item.fleaSizeBasis, footprintUsed: item.footprintUsed ?? null, footprintSource: item.footprintSource ?? null, ...(item.fleaPostedHomeSqFt ? { fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}) } : {}),
+            // Cockroach and bed bug rows: the size the row priced on and its source (the replay restores a lookup-measured home from it).
+            ...(item.homeSizeBasis ? { homeSizeBasis: item.homeSizeBasis, footprintUsed: item.footprintUsed, footprintSource: item.footprintSource, fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}),
             // Palm-injection lines carry cadence ONLY as appsPerYear (the
             // palm pricer emits no visits/frequency) — dropping it here
             // left the mirrored draft cadence-less, so a palm-only handoff
@@ -3841,7 +3914,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             : quoteRequiredReason === PLUGGING_AREA_REQUIRED_REASON
               ? `${serviceInterest} · needs the area to plug (sq ft) · ${quoteFullAddress}`
             : quoteRequiredReason === 'mosquito_lot_above_2_acres'
-              ? `${serviceInterest} · Lot above 2 acres: set the mosquito price by hand · ${quoteFullAddress}`
+              ? `${serviceInterest} · ${manualQuoteLine?.mosquitoLotAtRecordCap === true ? MOSQUITO_LOT_AT_RECORD_CAP_TEXT : 'Lot above 2 acres: set the mosquito price by hand'} · ${quoteFullAddress}`
             : isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine)
               ? `${serviceInterest} · needs property confirmation (${quoteRequiredReason}) · ${quoteFullAddress}`
               : `${serviceInterest} · commercial manual quote · ${quoteFullAddress}`)
@@ -4482,6 +4555,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
           ? 'Your grass type needs a quick look from our team before we finalize lawn pricing — we\'ll send your exact price shortly.'
           : (quoteRequiredReason === 'lot_size_requires_verification' || quoteRequiredReason === 'mosquito_treatable_area_unverified')
           ? 'Your property\'s outdoor area needs a quick confirmation before we price this service — the Waves team will follow up with your exact price.'
+          : (quoteRequiredReason === 'home_size_above_public_limit' || quoteRequiredReason === 'stories_estimated')
+          ? 'A home this size is priced by our team — we\'ll review it and send your exact price shortly.'
           : quoteRequiredReason === 'mosquito_lot_above_2_acres'
           ? 'Mosquito control for a property this size is priced by our team — we\'ll review your lot and send your exact price shortly.'
           : (!RESIDENTIAL_VERIFICATION_REASONS.has(quoteRequiredReason) && isResidentialVerificationHold(quoteRequiredReason, manualQuoteLine))

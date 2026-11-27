@@ -1,7 +1,8 @@
 'use strict';
 // Facts staff know and the texting agent may state (owner 2026-11-25, texting AI fix step 2: "feed the facts staff know"; owner ruling
 // 2026-09-30: price and fee questions are explained from the estimate and invoice on file): the open estimate's per-application price and
-// applications a year, a customer's prepaid visits left, and the prep guide of the customer's booked visit. This module only READS the facts.
+// applications a year, a customer's prepaid visits left, the prep guide of the customer's booked visit and whether the latest visits' service
+// reports went out by email (never the address). This module only READS the facts.
 // The numbers never reach the AI raw: each becomes one finished sentence in payment-status-contract.js (the same copy-verbatim contract as the
 // plan price and the balance, PR #5331), so a figure the AI writes in its own words is held. The guide's own published sentences reach it as the
 // PREP GUIDE section (sms-shadow-drafter.js prepGuideSection). Never a technician note or a visit note. A read that fails is null, never a guess.
@@ -172,19 +173,25 @@ function guideGroups(blocks, productNames) {
  * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
  * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
  */
-async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
+// The guide the completed services agree on, else null. A named service (`family`): only a guide of that service, never another
+// service's last guide.
+function lastGuideConfig(completed, family) {
+  const keys = new Set(completed.map((guide) => (family && guide.pestType !== family ? null : guide.config?.emailTemplateKey || null)));
+  return keys.size === 1 && [...keys][0] ? completed[0].config : null;
+}
+async function loadPrepGuideFacts(customerId, lastRecords, { db, family } = {}) {
   const none = { sections: [] };
   if (!customerId || !db) return null;
   const completedRecords = [].concat(lastRecords || []);
   try {
     const sender = require('./prep-guide-sender');
-    const booked = await sender.bookedPrepGuide([customerId]);
+    // `family` (texting AI gap 5): the service the customer named; a later upcoming visit that carries its guide comes back as source 'named'
+    const booked = await sender.bookedPrepGuide([customerId], { family });
     // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
     // Each resolves to the guide it carried; they must all agree, else no guide is named.
     // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
     const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceRecordId: record?.id, serviceType: record?.service_type })));
-    const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
-    const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
+    const config = booked ? booked.config : lastGuideConfig(completed, family);
     if (!config) return none;
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     // the template must be one the customer's own page and the email sender would use: published (an active version) and not switched off
@@ -192,11 +199,98 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
     const raw = loaded.activeVersion.blocks;
     const blocks = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const sections = guideGroups(blocks, await require('./company-facts-bank').readProductNames(db));
-    return sections.length ? { source: booked ? 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
+    return sections.length ? { source: booked ? booked.source || 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}: ${err.message}`);
     return null;
   }
 }
 
-module.exports = { loadEstimateFacts, loadPrepaidPlanFacts, loadPrepGuideFacts };
+// ---- Service report delivery ------------------------------------------------------------------------------------------------------
+
+// The email ledger statuses (email_messages.status) of the account holder's own report email: delivered, or did not go through. Any other
+// status (a complaint, an unsubscribe, a row still queued) says nothing about the inbox, so the sentence names no address then.
+// How many of the latest completed visits the texting AI may report on (the customer asks about "my report", the last visit or the one before).
+const REPORT_DELIVERY_VISITS = 2;
+const cleanAddress = (value) => String(value || '').trim().toLowerCase();
+// The ACCOUNT HOLDER's own report email (email_messages.status of the key service_report_ready:<record>:primary) decides what the customer
+// is told, never the queue row alone: the queue row is the whole send (several recipients), so a holder email that went out beside a
+// service contact's that failed leaves the row queued or failed (Codex #8660 r1). Reached the holder ('delivered'), reached the provider
+// and did not reach the inbox ('undelivered'), went out with a status that says nothing more ('unknown'), was never sent ('not_sent':
+// suppressed or the provider call failed), or not attempted yet ('no_attempt'). Any other status: no sentence.
+const HOLDER_EMAIL = {
+  sent: 'delivered', delivered: 'delivered', opened: 'delivered', clicked: 'delivered',
+  bounced: 'undelivered', bounce: 'undelivered', dropped: 'undelivered',
+  complained: 'unknown', spam_report: 'unknown', unsubscribed: 'unknown',
+  blocked: 'not_sent', failed: 'not_sent', queued: 'no_attempt',
+};
+const HOLDER_RECEIVED = new Set(['delivered', 'undelivered', 'unknown']);
+// A report the holder never received, by the queue row's status and the holder's own email ('none' = no row for it): "not yet" while the
+// queue still holds the send, "not emailed" once the queue gave up and the holder's row proves no send (or a skip, which sends to no one).
+// Every other pair (a queue row marked sent with no holder email, ...) disagrees: no sentence, a person answers.
+const NOT_RECEIVED = {
+  'queued:none': 'pending', 'queued:no_attempt': 'pending', 'queued:not_sent': 'pending',
+  'sending:none': 'pending', 'sending:no_attempt': 'pending', 'sending:not_sent': 'pending',
+  'skipped:none': 'not_sent', 'skipped:not_sent': 'not_sent', 'failed:not_sent': 'not_sent', 'cancelled:not_sent': 'not_sent',
+};
+
+// One visit's delivery fact, or null when a person answers: no delivery row (or, never by the unique key, two), two holder emails, no
+// service name or day, a received email with no send time, or a queue row and a holder email that disagree.
+function visitDelivery(record, { rows, own, accountEmail }) {
+  const { dateOnlyString } = require('../utils/date-only');
+  const queue = rows.length === 1 ? String(rows[0].status || '').toLowerCase() : '';
+  const holder = own.length ? (own.length === 1 && HOLDER_EMAIL[String(own[0].status || '').toLowerCase()]) : 'none';
+  const visit = { recordId: record.id, serviceType: String(record.service_type || ''), serviceDate: dateOnlyString(record.service_date) };
+  if (!queue || !holder || !visit.serviceType || !visit.serviceDate) return null;
+  if (!HOLDER_RECEIVED.has(holder)) return NOT_RECEIVED[`${queue}:${holder}`] ? { ...visit, state: NOT_RECEIVED[`${queue}:${holder}`] } : null;
+  // the day the holder's own email went out (its own sent_at, not the queue row's: the row may still be retrying another recipient)
+  const sentAt = own[0].sent_at ? new Date(own[0].sent_at) : null;
+  if (!(sentAt?.getTime() >= 0)) return null;
+  const address = cleanAddress(own[0].recipient_email_snapshot);
+  const recipient = holder === 'delivered' ? (accountEmail && address === accountEmail ? 'account' : 'other_address') : holder;
+  return { ...visit, state: 'sent', sentOn: require('../utils/datetime-et').etDateString(sentAt), recipient };
+}
+
+/**
+ * Whether the service report of each of the customer's latest completed visits went out by email (service_report_deliveries, the durable
+ * queue the report email is sent from: one email row per visit, service_report_v1), as { visits: [{ recordId, serviceType, serviceDate,
+ * state, sentOn, recipient }] } in visit order (newest first):
+ *   state      'sent' (the holder's own email went out) | 'pending' (the queue still holds it and the holder's email has not gone out) |
+ *              'not_sent' (the queue gave up and the holder's own email provably did not go out, or a skip): see visitDelivery
+ *   sentOn     the ET calendar day of the holder's own email's sent_at (YYYY-MM-DD), for 'sent' only
+ *   recipient  for 'sent': 'account' (the account holder's own report email was delivered, to the email address the account carries NOW),
+ *              'other_address' (delivered, to an address the account no longer carries), 'undelivered' (that email did not go through),
+ *              or 'unknown' (the holder's own email row carries a status that says nothing): the address is never returned.
+ *              A sent report with NO ledger row for the holder's own email is left out (it may have gone only to a service contact).
+ * A visit with no delivery row (a report sent before the queue, or none), a queue row and holder email that disagree (a row marked sent with
+ * no holder email: it may have gone only to a service contact) or an email with no send time is left out: a person answers. Never an email
+ * address, never a technician note. { visits: [] } when nothing qualifies; null when a read failed. Never throws.
+ */
+async function loadReportDeliveryFacts(customerId, records, { db } = {}) {
+  if (!customerId || !db) return null;
+  const visits = [].concat(records || []).filter((record) => record?.id).slice(0, REPORT_DELIVERY_VISITS);
+  if (!visits.length) return { visits: [] };
+  try {
+    const ids = visits.map((record) => record.id);
+    const ownKey = (id) => `service_report_ready:${id}:primary`;
+    const [customer, deliveries, ledger] = await Promise.all([
+      db('customers').where({ id: customerId }).first('email'),
+      db('service_report_deliveries').whereIn('service_record_id', ids).where({ channel: 'email', report_template_version: 'service_report_v1' })
+        .select('service_record_id', 'status', 'sent_at'),
+      // the account holder's own report email (email-delivery.js serviceReportEmailIdempotencyKey: one key per visit and recipient role)
+      db('email_messages').whereIn('idempotency_key', ids.map(ownKey)).select('idempotency_key', 'status', 'recipient_email_snapshot', 'sent_at'),
+    ]);
+    const accountEmail = cleanAddress(customer?.email);
+    const out = visits.map((record) => visitDelivery(record, {
+      rows: deliveries.filter((row) => String(row.service_record_id) === String(record.id)),
+      own: ledger.filter((message) => message.idempotency_key === ownKey(record.id)),
+      accountEmail,
+    })).filter(Boolean);
+    return { visits: out };
+  } catch (err) {
+    logger.warn(`[sms-staff-facts] report delivery unavailable for customer ${customerId}: ${err.code || err.name || 'error'}`);
+    return null;
+  }
+}
+
+module.exports = { loadEstimateFacts, loadPrepaidPlanFacts, loadPrepGuideFacts, loadReportDeliveryFacts, REPORT_DELIVERY_VISITS };

@@ -294,8 +294,10 @@ describe('pricing audit — tree & shrub and palm count', () => {
 });
 
 describe('pricing audit — specialty flat / cost-plus services', () => {
-  test('WDO is a single flat bracket', () => {
-    expect(line(generateEstimate({ ...BASE, services: { wdo: {} } }), 'wdo_inspection').price).toBe(constants.SPECIALTY.wdo.brackets[0].price);
+  test('WDO prices off the size + construction table (new quotes); a legacy-stamped quote keeps the $250 flat bracket', () => {
+    const tiers = constants.SPECIALTY.wdo.sizeTable.tiers;
+    expect(line(generateEstimate({ ...BASE, services: { wdo: {} } }), 'wdo_inspection').price).toBe(tiers[0].block);
+    expect(line(generateEstimate({ ...BASE, legacyWdoFlat: true, services: { wdo: {} } }), 'wdo_inspection').price).toBe(constants.SPECIALTY.wdo.brackets[0].price);
   });
   test.each(['light', 'moderate', 'heavy', 'severe'])('German roach cleanout %s tier', (severity) => {
     const exp = audit.expectGermanRoach(severity);
@@ -416,7 +418,9 @@ describe("pricing audit — FROZEN golden prices (in-code constants, reviewed 20
     ["palm injection Tree-Age, 1 palm at 12 in DBH", { ...BASE, services: { palmInjection: { treatmentType: "treeAge", palmCount: 1, dbhInches: 12 } } }, "palm_injection", { pricePerPalm: 85, perVisit: 85, annual: 42.5, monthly: 3.54 }],
     ["German roach moderate", { ...BASE, services: { germanRoach: { severity: "moderate" } } }, "german_roach", { price: 450, priceAfterDiscount: 450 }],
     ["German roach severe", { ...BASE, services: { germanRoach: { severity: "severe" } } }, "german_roach", { price: 550, priceAfterDiscount: 550 }],
-    ["WDO inspection 2,000 sf", { ...BASE, services: { wdo: {} } }, "wdo_inspection", { price: 250, priceAfterDiscount: 250 }],
+    // New quotes (2026-11-26): the size + construction table; no construction known = the block column. A quote saved before it keeps $250.
+    ["WDO inspection 2,000 sf", { ...BASE, services: { wdo: {} } }, "wdo_inspection", { price: 150, priceAfterDiscount: 150 }],
+    ["WDO inspection 2,000 sf, saved before the size rule", { ...BASE, legacyWdoFlat: true, services: { wdo: {} } }, "wdo_inspection", { price: 250, priceAfterDiscount: 250 }],
   ];
   test.each(FROZEN)("%s prices exactly as frozen", (_name, input, service, expected) => {
     const li = line(generateEstimate(input), service);

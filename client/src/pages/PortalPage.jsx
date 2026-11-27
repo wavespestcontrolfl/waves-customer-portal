@@ -56,6 +56,7 @@ import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcas
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
 import { maybeAskForAppRating } from '../native/appRating';
+import ProfileEditCard from '../components/portal/ProfileEditCard';
 import { useBiometricLock } from '../components/BiometricGate';
 import { useGlassSurface } from '../glass/glass-engine';
 import VisitPrepPhotoSheet from '../components/visit-prep/VisitPrepPhotoSheet';
@@ -11703,7 +11704,7 @@ function WavesAiPricingPanel({ compact, card, sectionTitle, primaryButton, secon
     try {
       const subject = selected?.requestSubject || 'Service pricing review requested';
       const description = selected?.requestDescription || `Customer asked WAVES AI: "${prompt}". ${result?.message || ''}`;
-      await api.createRequest?.({ category: 'add_service', subject, description });
+      await api.createRequest?.({ category: 'add_service', subject, description, flow: 'pricing_assistant' });
       if (seq === planStartSeq.current) setRequested(true);
     } catch (err) {
       showCustomerAlert(whenOffline(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`));
@@ -12101,7 +12102,7 @@ function WaveGuardTierExplorerModal({ currentTierName, compact, primaryButton, s
       const subject = `WaveGuard plan ${canPriceTier ? 'upgrade' : 'review'}: ${currentTier} to ${selectedTier}`;
       const details = selected?.requestDescription || 'Manual account review requested from the portal tier explorer.';
       const description = `Current tier: WaveGuard ${currentTier}. Requested tier: WaveGuard ${selectedTier}. ${details}`.slice(0, 500);
-      await api.createRequest?.({ category, subject, description });
+      await api.createRequest?.({ category, subject, description, flow: 'tier_explorer' });
       setRequested(true);
     } catch (err) {
       showCustomerAlert(whenOffline(`Couldn't send request: ${err.message || 'please try again or call us at (941) 297-5749.'}`));
@@ -19329,6 +19330,8 @@ export default function PortalPage() {
                       )}
                     </div>
                   </div>
+                  {/* Edit own name and email (GATE_CUSTOMER_PROFILE_EDIT): /auth/me profileEdit is true only while the gate is on. */}
+                  <ProfileEditCard customer={customer} refreshCustomer={refreshCustomer} />
                 </div>
                 {propertiesError && (
                   <div role="alert" style={{ padding: 12, borderBottom: `1px solid ${PORTAL_SHELL.border}`, background: '#FFF7ED' }}>

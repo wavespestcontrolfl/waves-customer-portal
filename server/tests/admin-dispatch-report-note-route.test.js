@@ -151,6 +151,10 @@ describe('POST pest-recap/report-note', () => {
     };
     expect(await refused({ ok: false, reason: 'not_found' })).toEqual([404, { error: 'not_found', code: 'not_found' }]);
     expect(await refused({ ...PEST_VISIT, eligible: false })).toEqual([409, { error: 'not_pest_control', code: 'not_pest_control' }]);
+    // A pest profile under a label the report reads as another line: the completion would refuse the note, so the
+    // route refuses too and the sheet writes the writer's report.
+    expect(await refused({ ...PEST_VISIT, svc: { ...PEST_VISIT.svc, service_type: 'Mosquito Control' } }))
+      .toEqual([409, { error: 'not_pest_control', code: 'not_pest_control' }]);
     expect(await refused({ ...PEST_VISIT, profile: null, eligible: false }))
       .toEqual([503, { error: 'profile_unavailable', code: 'profile_unavailable' }]);
     expect(await refused({ ...PEST_VISIT, svc: { ...PEST_VISIT.svc, customer_id: null } }))

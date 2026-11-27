@@ -65,7 +65,7 @@ describe('FastCompleteSheet', () => {
     expect(await screen.findByRole('button', { name: /Taurus SC — 1.6 fl oz/ })).toBeTruthy();
     // A liquid's bare "oz" is a fluid ounce, and a dose under 1 fl oz reads in
     // measuring spoons (0.25 fl oz = 1½ tsp) — never in mL.
-    expect(screen.getByRole('button', { name: /LESCO Crosscheck Plus — 4 fl oz/ })).toBeTruthy();
+    expect(screen.getByRole('button', { name: /LESCO Crosscheck Plus — 2.5 fl oz/ })).toBeTruthy();
     expect(screen.getByRole('button', { name: /LESCO 90\/10 Nonionic Surfactant — 1½ tsp/ })).toBeTruthy();
   });
 

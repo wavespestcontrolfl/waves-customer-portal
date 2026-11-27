@@ -14,6 +14,7 @@ jest.mock('../services/sms-staff-facts', () => ({
   loadEstimateFacts: jest.fn(async () => ({ perApplication: [{ label: 'Pest Control', cents: 12500, applications: 4 }] })),
   loadPrepaidPlanFacts: jest.fn(async () => [{ label: 'Quarterly Pest Control', remaining: 3, paid: 4 }]),
   loadPrepGuideFacts: jest.fn(async () => ({ source: 'booked', key: 'prep.interior_pest', label: 'Interior Pest Treatment', sections: [{ heading: null, sentences: ['Please clear the area under the sinks.'] }] })),
+  loadReportDeliveryFacts: jest.fn(async () => ({ visits: [] })),
 }));
 
 const db = require('../models/db');
@@ -189,5 +190,30 @@ describe('getContextForCustomer texting AI staff facts', () => {
     expect(await handed(['a', 'b', 'c', 'd', 'e'].map((id) => record(id, '2026-11-20')))).toBeNull();
     // five rows over two days: the latest day is complete
     expect((await handed([record('a', '2026-11-20'), record('b', '2026-11-20'), record('c', '2026-11-20'), record('d', '2026-11-20'), record('e', '2026-11-01')])).length).toBe(4);
+  });
+});
+
+// Texting AI gap 2 (owner 2026-11-26): the latest visits' report delivery is OPT IN the same way; the key is absent for every other caller.
+describe('getContextForCustomer report delivery (texting AI gap 2)', () => {
+  const staffFacts = require('../services/sms-staff-facts');
+  const record = (id, day) => ({ id, service_date: day, service_type: 'Pest Control', status: 'completed' });
+
+  test('an opted-in live context carries it, read for the customer\'s completed history', async () => {
+    const rows = [record('a', '2026-11-20'), record('b', '2026-10-20')];
+    db.mockImplementation((table) => recordingQuery(table, table === 'service_records' ? rows : []));
+    staffFacts.loadReportDeliveryFacts.mockResolvedValueOnce({ visits: [{ recordId: 'a', state: 'pending' }] });
+    const context = await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true });
+    expect(context.reportDeliveries).toEqual({ visits: [{ recordId: 'a', state: 'pending' }] });
+    expect(staffFacts.loadReportDeliveryFacts).toHaveBeenCalledWith(customer.id, rows, { db });
+    staffFacts.loadReportDeliveryFacts.mockResolvedValueOnce(null);
+    expect((await ContextAggregator.getContextForCustomer(customer, { includeSmsStaffFacts: true })).reportDeliveries).toBeNull(); // a failed read stays null
+  });
+
+  test('every other caller, the send-time recheck\'s named facts and a frozen replay read none of it and carry no key', async () => {
+    for (const options of [{ includeVisitLoops: true }, { includeSmsStaffFacts: false }, { includeSmsStaffFacts: { prepaid: true } }, { includeSmsStaffFacts: true, asOf: ASOF }]) {
+      const context = await ContextAggregator.getContextForCustomer(customer, options);
+      expect(context).not.toHaveProperty('reportDeliveries');
+    }
+    expect(staffFacts.loadReportDeliveryFacts).not.toHaveBeenCalled();
   });
 });

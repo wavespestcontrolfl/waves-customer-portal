@@ -276,7 +276,7 @@ const {
   pricePlugging, pluggingAreaRequiredLine, priceFoamDrill, priceRecurringFoam, priceStingingInsect, priceExclusion, priceRodentExclusionV2, priceRodentGuarantee, barrelMeasurementHold,
   calculatePluggingPrice, calculateFoamPrice, calculateStingingPrice,
   calculateExclusionPrice, calculateRodentGuaranteeCombo,
-  resolvePalmCount,
+  resolvePalmCount, resolveGuaranteeHomeSize,
   normalizeRoachType, assertFinitePriceFields,
   priceDeadAnimalRemoval, assertDeadAnimalRemovalEnabled, buildPricingError,
 } = require('./service-pricing');
@@ -1054,6 +1054,17 @@ function legacyTwoStoryRoof(input, serviceKey = null) {
     && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
+// WDO inspection by home size and construction (owner 2026-11-26: $150 to $275, new quotes only). It rides the same replay
+// mechanism with its own stamp (pricingMetadata.legacyWdoFlat): input.legacyWdoFlat is derived from the estimate's own stamp
+// (estimate-floor-signal-replay.js savedLegacyWdoFlatSignal), a priced estimate with no stamp (or inputs asking for a WDO
+// inspection) predates the rule and keeps the $250 flat price. A fresh quote never sets it. The size and construction the
+// table reads are the stored inputs' own, so a replay never re-reads a live lookup.
+const WDO_FLAT_SERVICES = new Set(['wdo_inspection']);
+function legacyWdoFlat(input, serviceKey = null) {
+  return input?.legacyWdoFlat === true
+    && !(serviceKey && [input.addedServiceKeys, input.currentRulesServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
 // One-time pest for NEW quotes (owner 2026-11-26, "only new estimtes": 1.8x the quarterly visit, a 10% minimum over the first visit
 // of a plan, no home-age step in any pest price). It rides the same replay mechanism with its own stamp
 // (pricingMetadata.legacyOneTimePestBuffer): input.legacyOneTimePestBuffer is derived from the estimate's own stamp
@@ -1068,10 +1079,63 @@ function legacyOneTimePestBuffer(input, serviceKey = null) {
     && !(serviceKey && [input.addedServiceKeys, input.oneTimePestCurrentServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
+// Pest above the 5,500 sq ft footprint table (owner 2026-11-26: +$8 per visit at quarterly for each 1,000 sq ft above it, no cap),
+// new quotes only. Its own stamp (pricingMetadata.legacyPestAboveTable), same replay mechanism: input.legacyPestAboveTable is derived
+// from the estimate's own stamp (estimate-floor-signal-replay.js savedLegacyPestAboveTableSignal), a priced estimate with no stamp
+// predates the rule, and a legacy quote runs the existing flat code unchanged. A fresh quote never sets it. Plan-wide (no per-service
+// marker): a pest service added to a legacy estimate stays on the old rule, so a replay never raises a sold price.
+const PEST_ABOVE_TABLE_SERVICES = new Set(['pest_control', 'one_time_pest']);
+function legacyPestAboveTable(input) {
+  return input?.legacyPestAboveTable === true;
+}
+
+// Whole-home sizing (owner 2026-11-26 "whole home"): the cockroach treatment, the bed bug treatment and the yearly rodent
+// guarantee price on the home's TOTAL living area, as flea does, new quotes only. Its own stamp
+// (pricingMetadata.legacyWholeHomeSizing), same replay mechanism: input.legacyWholeHomeSizing is derived from the estimate's own
+// stamp (estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), a priced estimate with no stamp, or one that kept only
+// inputs asking for one of the three, predates the rule, and a legacy quote runs the existing ground-floor code unchanged. A fresh
+// quote never sets it. Plan-wide (no per-service marker): a service a revision adds to a legacy estimate stays on the old rule, so
+// a replay never raises a sold price.
+const WHOLE_HOME_SIZING_SERVICES = new Set(['pest_initial_roach', 'bed_bug', 'rodent_guarantee']);
+function legacyWholeHomeSizing(input) {
+  return input?.legacyWholeHomeSizing === true;
+}
+
 // The plan line's quarterly per-app rate without its home-age step (a new one-time visit has none): the one shared helper
 // (one-time-pest-home-age.js quarterlyPerAppWithoutHomeAge), also used by the estimate page, with the quote-time floor.
 function ageFreeQuarterly(planLine, floor) {
   return quarterlyPerAppWithoutHomeAge(planLine?.basePrice, planLine?.pestAgeAdj, floor);
+}
+
+// Specialty prices of 2026-11-26 (owner, evening): bed bug chemical $349 for each added room, a mosquito lot above 2 acres priced
+// ($85 per visit per added acre) instead of held for a hand price, and the wasp / hornet / yellow jacket second level $275.
+// ONE estimate-level stamp (pricingMetadata.legacySpecialty1126) rides the same replay mechanism as the rules above:
+// input.legacySpecialty1126 is derived from the estimate's own stamp (estimate-floor-signal-replay.js
+// savedLegacySpecialty1126Signal), a priced estimate with no stamp, or one that kept only inputs asking for one of the three
+// services, predates the rule, and a legacy quote runs the old code path unchanged. A fresh quote never sets it. A service this
+// revision adds (input.addedServiceKeys), or whose saved line carries legacySpecialty1126=false (input.specialty1126CurrentServices,
+// read from those line stamps), is on the new prices. The flat currentRulesServices history PREDATES this rule and is never read
+// here (an older revision's entry is no evidence), the same as legacyOneTimePestBuffer.
+const SPECIALTY_1126_SERVICES = new Set(['bed_bug', 'mosquito', 'stinging_insect']);
+function legacySpecialty1126(input, serviceKey = null) {
+  return input?.legacySpecialty1126 === true
+    && !(serviceKey && [input.addedServiceKeys, input.specialty1126CurrentServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
+}
+
+// The same home on a lot of exactly 2 acres (87,120 sq ft), for the recurring mosquito price of a bigger lot: the lot is capped, an
+// explicit treatable area is capped with it, and the profile re-derives hardscape, treatable area and category from there.
+// Null when the lot is not above 2 acres. `base` is the input generateEstimate gave calculatePropertyProfile for the real property.
+const MOSQUITO_TWO_ACRES_SQFT = 87120;
+function mosquitoTwoAcreProperty(property, base) {
+  const lot = Number(property?.lotSqFt ?? base?.lotSqFt) || 0;
+  const treatable = Number(property?.mosquitoTreatableSqFt) || 0;
+  if (!(Math.max(lot, treatable) > MOSQUITO_TWO_ACRES_SQFT)) return null;
+  const explicit = Number(base.mosquitoTreatableSqFt);
+  return calculatePropertyProfile({
+    ...base,
+    lotSqFt: Math.min(Number(base.lotSqFt) || 0, MOSQUITO_TWO_ACRES_SQFT),
+    mosquitoTreatableSqFt: explicit > 0 ? Math.min(explicit, MOSQUITO_TWO_ACRES_SQFT) : base.mosquitoTreatableSqFt,
+  });
 }
 
 function generateEstimate(input) {
@@ -1183,7 +1247,7 @@ function generateEstimate(input) {
 
   // ── 1. Calculate property profile ──────────────────────────
   const propertyTypeForProfile = profileIsCommercial ? 'commercial' : input.propertyType;
-  const property = calculatePropertyProfile({
+  const propertyProfileInput = {
     homeSqFt: input.homeSqFt,
     stories: input.stories,
     storiesSource: input.storiesSource,
@@ -1242,6 +1306,11 @@ function generateEstimate(input) {
     yearBuilt: input.yearBuilt,
     constructionMaterial: input.constructionMaterial,
     foundationType: input.foundationType,
+    // The lookup's trust verdict on those two (false = the record's own evidence marks the value weak), and on the home size (false =
+    // a wrong-premise lookup's size no person confirmed): only the WDO price reads them.
+    constructionTrusted: input.constructionTrusted,
+    foundationTrusted: input.foundationTrusted,
+    homeSizeTrusted: input.homeSizeTrusted,
     roofType: input.roofType,
     nearWater: input.nearWater,
     waterDistance: input.waterDistance,
@@ -1262,7 +1331,8 @@ function generateEstimate(input) {
     foundationSqFt: input.foundationSqFt,
     buildingSlabSqFt: input.buildingSlabSqFt,
     newConstructionSlabSqFt: input.newConstructionSlabSqFt,
-  });
+  };
+  const property = calculatePropertyProfile(propertyProfileInput);
 
   // ── 2. Derive property-driven pricing modifiers (v2 port) ─
   const modifiers = deriveModifiers(property);
@@ -1311,11 +1381,28 @@ function generateEstimate(input) {
     legacyPricingRules: legacyPricingRules(input),
     // Two-story roof-point stamp (see legacyTwoStoryRoof above): true = priced before the rule, no factor.
     legacyTwoStoryRoof: legacyTwoStoryRoof(input),
+    // WDO size + construction stamp (see legacyWdoFlat above): true = priced before the rule, the $250 flat price.
+    legacyWdoFlat: legacyWdoFlat(input, 'wdo_inspection'),
     // One-time pest stamp (see legacyOneTimePestBuffer above): true = priced before the rule (2.2 multiple, plan age step).
     legacyOneTimePestBuffer: legacyOneTimePestBuffer(input),
+    // Pest-above-table stamp (see legacyPestAboveTable above): true = priced before the rule (flat above 5,500 sq ft).
+    legacyPestAboveTable: legacyPestAboveTable(input),
+    // Whole-home sizing stamp (see legacyWholeHomeSizing above): true = priced before the rule (the ground-floor footprint basis).
+    legacyWholeHomeSizing: legacyWholeHomeSizing(input),
+    // Specialty prices stamp (see legacySpecialty1126 above): true = priced before them (old room curve, hand-priced lots above 2
+    // acres, $250 wasp level).
+    legacySpecialty1126: legacySpecialty1126(input),
+    // On an estimate priced before the specialty prices: the services of the three priced under them (added by this or an earlier
+    // revision), so the next revision and replay keep them there while the older lines keep theirs.
+    ...(legacySpecialty1126(input)
+      ? {
+        specialty1126CurrentServices: [...new Set([...(input.specialty1126CurrentServices || []), ...(input.addedServiceKeys || [])]
+          .filter((key) => SPECIALTY_1126_SERVICES.has(key)))],
+      }
+      : {}),
     // On a legacy estimate: the services priced under the CURRENT rules (added by this or an earlier revision), so the
     // next revision and replay keep them there while the older lines keep theirs.
-    ...(legacyPricingRules(input) || legacyTwoStoryRoof(input)
+    ...(legacyPricingRules(input) || legacyTwoStoryRoof(input) || legacyWdoFlat(input)
       ? { currentRulesServices: [...new Set([...(input.currentRulesServices || []), ...(input.addedServiceKeys || [])])] }
       : {}),
     pestProgramFloorArmed,
@@ -1358,6 +1445,23 @@ function generateEstimate(input) {
     delete propertyForCommercialDetection.propertyType;
   }
   const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
+  // Whole-home sizing inputs for the flea package, cockroach treatment, bed bug treatment and rodent guarantee.
+  // calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
+  // derives footprint = homeSqFt / stories when none was supplied, so the pricers need the caller's original flag and footprint.
+  // wholeHomeSizingLegacy: a quote priced before the rule keeps the ground-floor basis it was sold on.
+  // wholeHomeSizingCommercial: the whole-home rule is for homes. A commercial building keeps the footprint path exactly (a
+  // commercial caller sends a measured building footprint beside a placeholder homeSqFt, which is not a living area).
+  const wholeHomeSizing = {
+    wholeHomeFootprintUnknown: input.footprintUnknown === true,
+    wholeHomeExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
+    wholeHomeSizingLegacy: legacyWholeHomeSizing(input),
+    wholeHomeSizingCommercial: propertyIsCommercial,
+    // Public website quote, no home size posted: the server lookup's measured whole home replaces the route's 2,000 default
+    // (both keys are set by the route or restored by the replay from a stored row, never read from a client body). The input
+    // keys keep the name flea gave them; resolveWholeHomeSize reads them for every whole-home service.
+    fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
+    fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
+  };
   const addCommercialManualQuote = (service) => {
     const result = buildCommercialManualQuoteResult(service, property, { commercialSubtype });
     // Dedupe only against an existing MANUAL row of the same service. A priced
@@ -1465,6 +1569,7 @@ function generateEstimate(input) {
         modifiers,
         // A quote priced before the one-time pest rule keeps the home-age step it was sold with.
         legacyOneTimePestBuffer: legacyOneTimePestBuffer(input, 'pest_control'),
+        legacyPestAboveTable: legacyPestAboveTable(input),
         pestProgramFloorArmed,
         pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved,
       });
@@ -1503,7 +1608,7 @@ function generateEstimate(input) {
       // which only paid back if the customer stayed past visit ~3.
       if (result.roachType && result.roachType !== 'none') {
         const pestOptions = serviceOptions(services.pest);
-        const initialRoach = pricePestInitialRoach(property, {
+        const initialRoach = pricePestInitialRoach({ ...property, ...wholeHomeSizing }, {
           roachType: result.roachType,
           standalone: false,
           autoFiredFromRecurringPest: true,
@@ -1714,6 +1819,11 @@ function generateEstimate(input) {
         // synthesized lot arrives as lotSizeMeasured:false and routes the
         // line to review. Undefined = admin / measured lot, unchanged.
         lotSizeMeasured: input.lotSizeMeasured,
+        // A quote priced before the specialty prices keeps the flat curve and the hand-price hold above 2 acres.
+        legacySpecialty1126: legacySpecialty1126(input, 'mosquito'),
+        // A lot above 2 acres is priced from the SAME home at exactly 2 acres (its own hardscape, lot category and treatable area),
+        // plus $85 per added acre. Built here because the profile owns those derivations.
+        twoAcreProperty: mosquitoTwoAcreProperty(property, propertyProfileInput),
       });
       result.annual = Math.round(result.annual);
       result.monthly = Math.round(result.annual / 12 * 100) / 100;
@@ -2087,6 +2197,8 @@ function generateEstimate(input) {
         // A quote priced before the rule keeps the 2.2 multiple (the existing path, unchanged). A bedroom-band plan's one-time visit
         // is never on the new rule: it keeps the existing band-anchored path whatever the stamp says (new rule = footprint-priced only).
         legacyOneTimePestBuffer: legacyOneTimePestBuffer(input, 'one_time_pest') || planPestLine?.pricingBasis === 'caller_stated_bedroom_count',
+        // Only read when the visit prices its own quarterly baseline (no plan on the quote); with a plan it anchors on the plan line.
+        legacyPestAboveTable: legacyPestAboveTable(input),
       });
       lineItems.push(result);
     }
@@ -2206,7 +2318,7 @@ function generateEstimate(input) {
         skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
       });
     } else {
-      const result = pricePestInitialRoach(property, {
+      const result = pricePestInitialRoach({ ...property, ...wholeHomeSizing }, {
         ...pestInitialRoachOptions,
         roachType: standaloneRoachMeta.roachType,
         standalone: true,
@@ -2278,12 +2390,14 @@ function generateEstimate(input) {
   if (services.bedBug && !useCommercialManualQuote(services.bedBug, 'pest_control', { scopedOneTime: bedBugScoped })) {
     const bedBugOptions = bedBugScopeOpts;
     const includeInternalPricing = shouldIncludeInternalPricing(input, bedBugOptions);
-    const result = priceBedBugTreatment(property, {
+    const result = priceBedBugTreatment({ ...property, ...wholeHomeSizing }, {
       ...bedBugOptions,
       urgency: bedBugOptions.urgency ?? input.urgency ?? 'standard',
       afterHours: bedBugOptions.afterHours ?? input.afterHours ?? false,
       includeInternalCostBasis: includeInternalPricing && bedBugOptions.includeInternalCostBasis === true,
       isInternal: includeInternalPricing,
+      // A quote priced before the specialty prices keeps the per-room cost curve it was sold with.
+      legacySpecialty1126: legacySpecialty1126(input, 'bed_bug'),
     });
     lineItems.push(includeInternalPricing ? result : stripBedBugInternalPricing(result));
   }
@@ -2292,7 +2406,19 @@ function generateEstimate(input) {
   // synthetic 2,000 sqft homeSqFt for an unmeasured commercial building —
   // an unmeasured warehouse would get a firm residential price (codex #3594 P1).
   if (services.wdo && !useCommercialManualQuote(services.wdo, 'pest_control')) {
-    const result = priceWDO(property);
+    // Staff revisions re-price on current rules; customer replays keep the sent price (owner 09-26 ruling, same decision as #8626):
+    // a revision posts fresh inputs with the server-derived stamp stripped (estimate-client-identity-fields), so a delivered $250
+    // quote a staff member edits and re-sends prices off the table. Only a replay carries input.legacyWdoFlat from the saved stamp.
+    // A service object can carry a staff-entered construction (like the exclusion's constructionType); the lookup's value and its
+    // trust verdict ride the property profile. A quote saved before the rule keeps the flat price (input.legacyWdoFlat).
+    const wdoOptions = typeof services.wdo === 'object' && services.wdo !== null ? services.wdo : {};
+    const result = priceWDO(property, {
+      legacyWdoFlat: legacyWdoFlat(input, 'wdo_inspection'),
+      constructionType: wdoOptions.constructionType,
+      constructionTrusted: wdoOptions.constructionType ? true : undefined,
+      foundationType: wdoOptions.foundationType,
+      foundationTrusted: wdoOptions.foundationType ? true : undefined,
+    });
     lineItems.push(result);
   }
   if ((services.flea || services.fleaExterior) && !useCommercialManualQuote(services.flea || services.fleaExterior, 'pest_control')) {
@@ -2322,14 +2448,10 @@ function generateEstimate(input) {
       // Server-derived replay signal only (estimate-flea-size-replay.js): a stored estimate quoted on the
       // ground-floor footprint keeps that size basis. Absent = the live whole-home rule.
       fleaSizeBasis: input.fleaSizeBasisReplay,
-      // calculatePropertyProfile clears footprintUnknown once a measured footprint exists; the flea sizing needs the original flag.
-      fleaFootprintUnknown: input.footprintUnknown === true,
-      // Public website quote, no home size posted: the server lookup's measured whole home replaces the 2,000 default (flea only).
-      fleaMeasuredHomeSqFt: input.fleaMeasuredHomeSqFt,
-      fleaHomeSqFtIsDefault: input.homeSqFtIsDefault === true,
-      // The footprint the caller supplied. The profile's own footprint is homeSqFt / stories when none was supplied, so it
-      // cannot tell a measurement from a derivation (and would divide a building footprint by stories twice).
-      fleaExplicitFootprint: input.footprintSqFt ?? input.footprint ?? null,
+      // The caller's original footprintUnknown flag, the footprint it supplied (the profile's own footprint is homeSqFt / stories
+      // when none was supplied, so it cannot tell a measurement from a derivation) and the lookup's measured whole home.
+      // priceFlea keeps its own basis key (fleaSizeBasis) and does not read wholeHomeSizingLegacy.
+      ...wholeHomeSizing,
     });
     lineItems.push(result);
   }
@@ -2486,6 +2608,8 @@ function generateEstimate(input) {
       afterHours: services.stinging.afterHours || false,
       hasRecurringPest: activeServiceKeys.includes('pest_control'),
       legacyUrgentRemoval: legacyPricingRules(input),
+      // A quote priced before the specialty prices keeps the $250 second level (and its species names).
+      legacySpecialty1126: legacySpecialty1126(input, 'stinging_insect'),
     });
     lineItems.push(result);
   }
@@ -2695,9 +2819,16 @@ function generateEstimate(input) {
     // rows, and a section row has no aggregate equivalent-point fields.
     const exclusionResult = rodentExclusionV2Summary
       || lineItems.find(li => li.service === 'rodent_exclusion' || li.service === 'exclusion');
+    // One story count for the whole line: a count in the guarantee's own options scales a footprint and picks the tier alike.
+    const guaranteeStories = opts.stories || property.stories || 1;
+    // A caller's own homeSqFt is the total living area (the Admin V2 path passes it). The fallback is the home's TOTAL living
+    // area too (owner 2026-11-26 "whole home"), with a review mark when that size may be the ground floor only; a quote priced
+    // before that falls back to the ground-floor footprint, as sold (resolveGuaranteeHomeSize reads wholeHomeSizingLegacy).
+    // The line records the size it tiered on and its source (lineFields), as the cockroach and bed bug lines do.
+    const guaranteeSize = resolveGuaranteeHomeSize({ ...property, ...wholeHomeSizing, stories: guaranteeStories }, opts.homeSqFt);
     const guaranteeOpts = {
-      homeSqFt: opts.homeSqFt || property.footprint || 2000,
-      stories: opts.stories || property.stories || 1,
+      homeSqFt: guaranteeSize.homeSqFt || 2000,
+      stories: guaranteeStories,
       roofType: exclusionRoofType(opts.roofType || property.roofType || 'shingle'),
       eligibility: opts.eligibility || {},
     };
@@ -2712,7 +2843,7 @@ function generateEstimate(input) {
         + (services.exclusion?.specialty || 0)
       );
     }
-    const result = priceRodentGuarantee(guaranteeOpts);
+    const result = { ...priceRodentGuarantee(guaranteeOpts), ...guaranteeSize.lineFields };
     // A held exclusion (barrel footage pending) is not warranty eligible, so no separate guarantee is added either.
     if (result.eligible && exclusionResult?.warrantyEligible !== false) lineItems.push(result);
   }
@@ -3525,7 +3656,11 @@ function generateEstimate(input) {
   // the rules that priced them.
   for (const line of lineItems) {
     if (line && TWO_STORY_ROOF_SERVICES.has(line.service)) line.legacyTwoStoryRoof = legacyTwoStoryRoof(input, line.service);
+    if (line && WDO_FLAT_SERVICES.has(line.service)) line.legacyWdoFlat = legacyWdoFlat(input, line.service);
+    if (line && SPECIALTY_1126_SERVICES.has(line.service)) line.legacySpecialty1126 = legacySpecialty1126(input, line.service);
     if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
+    if (line && PEST_ABOVE_TABLE_SERVICES.has(line.service)) line.legacyPestAboveTable = legacyPestAboveTable(input);
+    if (line && WHOLE_HOME_SIZING_SERVICES.has(line.service)) line.legacyWholeHomeSizing = legacyWholeHomeSizing(input);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
   }
 

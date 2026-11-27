@@ -101,6 +101,8 @@ const TECHNICIAN_ALLOW_LIST = [
   // field overrides; the Field Estimator UI is admin-only). Codex #5568 r3.
   { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/protocols(\/.*)?$/ },
   { bucket: 'own-visits', methods: ANY, pattern: /^\/api\/admin\/protocols\/job-card(\/.*)?$/ },
+  // Mix safety rules (owner 2026-11-27): the tech reads them for the tank (no customer data). Writes are requireAdmin.
+  { bucket: 'own-visits', methods: READ, pattern: /^\/api\/admin\/product-mix-rules(\/check)?$/ },
   // Neighborhood gate codes from a visit (owner 2026-10-03): add a code that
   // worked, or report one wrong. The router pins both to a visit on the
   // technician's own route; the directory itself stays admin-only.

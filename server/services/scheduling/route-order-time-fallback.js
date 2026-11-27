@@ -21,7 +21,10 @@ const DONE_OR_UNDER_WAY = ['completed', 'en_route', 'on_site'];
  *  number dropped), then the target placed by arrival window start, after
  *  every completed stop and the stop under way. A same-customer, same-window,
  *  same-pin sibling takes the target right after it. Stops with no number
- *  other than the target stay out of the list. A target that is itself
+ *  other than the target stay out of the list, so on a day with no other
+ *  numbered stop the list is the target alone: the writer numbers nothing
+ *  then (arrival-route.js placeByTimeAfterRefusal), because every reader
+ *  already lists that day by arrival time. A target that is itself
  *  completed or under way keeps its number: null. */
 function timeFallbackOrder(rows, target) {
   if (DONE_OR_UNDER_WAY.includes(target.status)) return null;
