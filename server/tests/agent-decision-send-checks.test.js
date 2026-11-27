@@ -560,8 +560,8 @@ describe('infrastructure failures are retryable at every wrapper, never permanen
   const { blockReasonIsEtaInfrastructure } = require('../services/agent-decision-send-checks');
 
   test('the exported set names both codes; verdicts about the message are not in it', () => {
-    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_claim_recompute_unavailable', 'eta_recheck_failed']);
-    for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today']) {
+    expect([...ETA_INFRASTRUCTURE_FAILURE_REASONS].sort()).toEqual(['eta_claim_recheck_failed', 'eta_claim_recompute_unavailable', 'eta_recheck_failed', 'route_status_recheck_failed']);
+    for (const verdict of ['eta_claim_stale_facts', 'eta_claim_no_longer_en_route', 'eta_claim_no_snapshot', 'eta_claim_superseded_fix', 'eta_claim_visit_not_today', 'route_status_changed', 'route_status_unbound']) {
       expect(isEtaInfrastructureFailure(verdict)).toBe(false);
     }
     expect(Object.isFrozen(ETA_INFRASTRUCTURE_FAILURE_REASONS)).toBe(true);

@@ -244,10 +244,10 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // were emailed, when, and whether to the address on the account; never the address), the findings of the older visits SERVICE HISTORY lists,
 // and prompt rules for both plus "no warranty terms". A new optional section and a prompt revision (fact key stays 'n'), so the numbers move
 // to "77" / "78" (here) and "79" / "80" (B1); 69-76 are taken by the other texting AI gap PRs in flight.
-// OPEN TIMES GAP 1 (owner 2026-11-26 "BUILD 1-6"): a day the customer named joins the first three OPEN TIMES days. The section's
-// days change (no new section, fact key 'n'), so
-// the numbers move to "89" / "90" (here) and "91" / "92" (B1); 81-84 are gap 4.s (in flight) and 85-88 gap 3.s (merged).
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}89_n`;
+// TODAY ROUTE STATUS (texting AI gap 4, owner 2026-11-26 "BUILD 1-6"): before the tech is en route, TODAY's visit line carries the
+// tracker's stop count as one ROUTE STATUS sentence the model copies word for word, plus one prompt clause. The render changed, so the
+// numbers move to "81" / "82" (here) and "83" / "84" (B1): gap 2 took 77-80, gap 3 took 85-88 and gap 1 89-92 (both merged), 69-76 are held by the other gap builds.
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}81_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -257,16 +257,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}89_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}90_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}82_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers92_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers84_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}91_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}92_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}83_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}84_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
@@ -3719,7 +3719,15 @@ function buildLiveEtaSnapshot(context) {
       ...(Number.isFinite(g.fixAtMs) ? { fixAtMs: g.fixAtMs } : {}),
     }))
     .filter((g) => g.scheduledServiceIds.length);
-  return entries.length ? { entries } : null;
+  // TODAY ROUTE STATUS (gap 4): the stop count sentence(s) the facts carried, re-derived at send time by
+  // sms-eta-freshness (a changed count refuses the send). A context that opted in always persists the array,
+  // EMPTY when no sentence was given or the read failed, so route wording added later is refused at send
+  // (route_status_unbound). A context that did not opt in has no key: the snapshot is exactly as before.
+  if (!Array.isArray(context?.routeStatusGroups)) return entries.length ? { entries } : null;
+  const routeStatus = context.routeStatusGroups
+    .filter((g) => g && g.scheduledServiceId != null && typeof g.sentence === 'string' && g.sentence)
+    .map((g) => ({ scheduledServiceId: g.scheduledServiceId, scheduledServiceIds: (g.scheduledServiceIds || []).filter((id) => id != null), sentence: g.sentence, ...(g.stop ? { stop: g.stop } : {}) }));
+  return { entries, routeStatus };
 }
 
 // Deterministic backstop (independent review finding, PR #5334): today only
@@ -3795,6 +3803,9 @@ function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount 
   // the same shared step the send-time check uses.
   const reply = normalizeGsmPunctuation(stripTrackLinks(rawReply));
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  // TODAY ROUTE STATUS (gap 4): a stop count only as a word-for-word copy of a ROUTE STATUS fact sentence.
+  const routeViolation = require('./sms-route-status').routeStatusDraftViolation(reply, factsBlock);
+  if (routeViolation) return liveEtaFail(routeViolation);
   const stateViolation = arrivalStateViolation(reply, factsBlock, techNames);
   if (stateViolation) return liveEtaFail(stateViolation);
   // Every LIVE ETA line, not only the first (audit P1): a customer with two distinct live stops has two
@@ -4835,8 +4846,9 @@ ${missedVisitRules}- Voice bans, on top of the house voice: never write "Good qu
   // resolveFreshTechPosition + calculateBoundedTrackingEta bounds the
   // customer tracking page uses). The model may state THAT number only —
   // never compute or invent one — and share the link with it.
+  // TODAY ROUTE STATUS (gap 4) rides the same gate-on clause: the stop count sentence, copied word for word.
   const liveEtaClause = realAnswersOn
-    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK.'
+    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK. When TODAY\'s visit line carries ROUTE STATUS, you may answer where the tech is or whether they are still coming today with that one sentence, copied word for word — it is a count of stops, never a time: add no time, no minutes and nothing about where the tech is, and say nothing else about stops.'
     : '';
   // Round-34 P2: route wording is authorized by an EN-ROUTE fact only. An ON-SITE
   // fact authorizes arrived/on-site wording only — "on the way" beside it is false
@@ -5741,7 +5753,14 @@ function buildFactsBlock(context, extras = {}) {
               parts.push(`TRACKING LINK: ${stripSmsUrlScheme(s.liveEta.trackUrl)}`);
             }
           } else if (s.isToday && liveState === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
-          else if (s.isToday) parts.push('no live tech location known');
+          else if (s.isToday) {
+            parts.push('no live tech location known');
+            // TODAY ROUTE STATUS (gap 4): the tracker's stop count before the tech is en route, as one finished sentence.
+            // Only a real-answers context ever carries it (context-aggregator includeRouteStatus); gate-checked again here.
+            if (gateEnvValue('GATE_SMS_REAL_ANSWERS') && typeof s.routeStatus === 'string' && s.routeStatus) {
+              parts.push(`ROUTE STATUS (copy word for word): "${s.routeStatus}"`);
+            }
+          }
           return `- ${parts.join(', ')}`;
         })
         .join('\n')
@@ -6928,8 +6947,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // the staff facts (prepaid visits left) are for a real-answers draft only; gate off adds no key, so the call stays byte-identical
     const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
