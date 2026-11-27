@@ -25,7 +25,8 @@
  *                              and the row is not stale (30 minutes).
  *     one shift, starts later  moved_earlier: its start moves back to the GPS time (the
  *                              technician's favor), original kept and audited, only if no
- *                              other shift is in the gap and the week is open.
+ *                              other shift is in the gap and the week is open. A move of
+ *                              more than 30 minutes also rings one admin bell.
  *     one shift, starts more than 5 minutes earlier   flag_early_tap: pay unchanged, one
  *                              admin bell ("clocked in N min before the truck arrived").
  *     one shift, within 5 minutes earlier   ok_within_tolerance.
@@ -58,6 +59,10 @@ const FUTURE_TOLERANCE_MS = 2 * MIN;
 // A shift created from a row older than this is a late catch-up (the job was down, or the
 // switch was just turned on): a person decides, the job does not backdate hours.
 const MAX_START_LAG_MS = 30 * MIN;
+// A start the truck moves back by more than this still moves (owner 2026-11-26, truck sets
+// start), and also rings one admin bell (owner 2026-11-26 "FIX"): a late tap hours after the
+// arrival is legal, but the office should see a big change to paid time.
+const BIG_MOVE_BELL_MS = 30 * MIN;
 const BATCH = 50;
 const ALERT_LINK = '/admin/timetracking?tab=entries';
 const ALERT_CATEGORY = 'payroll';
@@ -155,7 +160,11 @@ function decideDay({ entries, eventAt, now }) {
   return { action: 'ok_within_tolerance', detail, shift };
 }
 
-const needsBell = (action) => action === 'flag_early_tap' || action === 'needs_review';
+// Exact times, never the rounded minutes_moved (30 min + 100 ms is over the line).
+const isBigMove = (action, detail) => action === 'moved_earlier'
+  && Date.parse(detail?.original_clock_in) - Date.parse(detail?.clock_in) > BIG_MOVE_BELL_MS;
+const needsBell = (action, detail) => action === 'flag_early_tap' || action === 'needs_review'
+  || isBigMove(action, detail);
 
 const REVIEW_WHY = {
   shift_voided: 'a shift that day was voided',
@@ -178,7 +187,14 @@ async function raiseStartBell({ row, technician, workDate, action, detail }, rai
     const first = String(technician?.name || 'technician').trim().split(/\s+/)[0].slice(0, 20) || 'technician';
     const eventAt = new Date(row.event_at);
     let spec;
-    if (action === 'flag_early_tap') {
+    if (action === 'moved_earlier') {
+      const minutes = Math.round(Number(detail.minutes_moved));
+      spec = {
+        area: 'Billing',
+        action: `check ${first}'s moved start`,
+        why: `Start moved back ${minutes} min to the truck's GPS start at ${formatETTime(eventAt)} — check it was work.`,
+      };
+    } else if (action === 'flag_early_tap') {
       const minutes = Math.round(Number(detail.minutes_early));
       spec = {
         area: 'Billing',
@@ -233,7 +249,7 @@ async function stamp(trx, rowId, now, action, detail) {
     .update({
       applied_at: now,
       applied_action: action,
-      applied_detail: JSON.stringify({ ...detail, ...(needsBell(action) ? { notified: false } : {}) }),
+      applied_detail: JSON.stringify({ ...detail, ...(needsBell(action, detail) ? { notified: false } : {}) }),
     });
 }
 
@@ -340,7 +356,7 @@ async function applyTruckStarts({ now = new Date(), raise = null, technicianIds 
       if (!result) continue;
       if (result.action.startsWith(SKIP)) summary.skipped += 1; else summary.applied += 1;
       logger.info(`[truck-start] tech=${result.row.technician_id} ${result.workDate} ${result.action}`);
-      if (needsBell(result.action)) {
+      if (needsBell(result.action, result.detail)) {
         const technician = result.technician
           || await db('technicians').where({ id: result.row.technician_id }).first('id', 'name');
         const sent = await raiseStartBell({
@@ -359,7 +375,7 @@ async function applyTruckStarts({ now = new Date(), raise = null, technicianIds 
   // shift writes above are limited to the current day.
   const pending = await scoped(db('truck_clock_in_shadow as s'), 's.technician_id')
     .join('technicians as t', 't.id', 's.technician_id')
-    .whereIn('s.applied_action', ['flag_early_tap', 'needs_review'])
+    .whereIn('s.applied_action', ['flag_early_tap', 'needs_review', 'moved_earlier'])
     .whereRaw("s.applied_detail->>'notified' = 'false'")
     .orderBy('s.applied_at')
     .limit(BATCH)
@@ -377,6 +393,7 @@ module.exports = {
   applyTruckStarts,
   EARLY_TOLERANCE_MS,
   MAX_START_LAG_MS,
+  BIG_MOVE_BELL_MS,
   waitForTruckStartWrites,
-  _test: { skipReason, decideDay, applyRow, autoCloseAt, isDeferred },
+  _test: { skipReason, decideDay, applyRow, autoCloseAt, isDeferred, needsBell },
 };

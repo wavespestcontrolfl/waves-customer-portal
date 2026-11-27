@@ -4012,7 +4012,9 @@ function reportNoteVisitRefusal({ ok, reason, svc, profile, eligible }) {
   if (!ok) return reason;
   // A failed profile lookup is an outage the sheet may retry (503), not an ineligible visit.
   if (!profile) return 'profile_unavailable';
-  if (!eligible) return 'not_pest_control';
+  // The completion takes a note only on the report's pest layout (detectServiceLine of the visit label), so a pest
+  // profile under a label read as another line is refused here too (409): the sheet writes the writer's report.
+  if (!eligible || detectServiceLine(svc.service_type || '') !== 'pest') return 'not_pest_control';
   return svc.customer_id ? null : VISIT_NO_CUSTOMER_CODE;
 }
 // Dark gate ahead of the limiter: while off, a request is the 404 and never spends the staff bucket. Paid calls: a cap

@@ -142,8 +142,10 @@ function draftStamp({ autoSendSafe, requireReview, lintPass, verifierEnabled, fa
  * are OPEN TIMES, LABEL FACTS and re-service state, which have their own
  * send-time rechecks. The prepaid visits left and the PREP GUIDE (includeSmsStaffFacts) are part of the block the drafter wrote from, so they are
  * part of the hash: a guide edited or unpublished, or a booked visit whose assigned guide changed, between the draft and the send changes it.
- * A guide read that FAILED (prepGuide null while the facts were asked for) throws: unlike the drafter, which writes without the section, a
- * hash taken without it could equal an earlier hash taken without it. Database reads only, no model call.
+ * The REPORT DELIVERY sentences and the older visits' findings (texting AI gap 2) are in the block too: a report delivery row that changed
+ * (queued to sent, a bounce, the account's email changed) between the draft and the send changes the hash.
+ * A guide or report delivery read that FAILED (null while the facts were asked for) throws: unlike the drafter, which writes without the
+ * section, a hash taken without it could equal an earlier hash taken without it. Database reads only, no model call.
  */
 async function factsFingerprintFor(customer, at, dbh = db) {
   // Both sides render from the stored row itself, never a caller's partial
@@ -155,6 +157,8 @@ async function factsFingerprintFor(customer, at, dbh = db) {
   const staffFacts = require('../config/feature-gates').gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const context = await ContextAggregator.getContextForCustomer(row, { includeLiveEta: false, includeVisitLoops: true, ...(staffFacts ? { includeSmsStaffFacts: true } : {}) });
   if (staffFacts && context?.prepGuide === null) throw new Error('prep guide could not be read');
+  // the same for the REPORT DELIVERY sentences (texting AI gap 2): a failed read must not hash as "no report delivery"
+  if (staffFacts && context?.reportDeliveries === null) throw new Error('report delivery could not be read');
   const block = buildFactsBlock(context, { now: at });
   return require('node:crypto').createHash('sha256').update(String(block)).digest('hex');
 }

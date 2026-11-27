@@ -1389,10 +1389,20 @@ function refusePlacement(serviceId, source, reason, date) {
 
 // Route order time fallback (owner 2026-11-01): the check refused, so number the day by arrival time
 // (route-order-time-fallback.js) instead of leaving the visit last. Ordering only, no arrival simulation;
-// runs inside placeInSavepoint's savepoint, under the tech-day lock it holds.
+// runs inside placeInSavepoint's savepoint, under the tech-day lock it holds. A day with no other numbered
+// stop is left without numbers: it lists by arrival time as it is.
 async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId, reason }) {
   const order = timeFallbackOrder(context.rows, { ...context.target, id: serviceId, technician_id: technicianId });
   if (!order) return null;
+  // The visit alone: a number on it would list it first, whatever its hour. Drop its own leftover number.
+  if (order.length === 1) {
+    if (context.target.route_order != null) {
+      await sp('scheduled_services').where({ id: serviceId })
+        .where({ scheduled_date: date, technician_id: technicianId }).update({ route_order: null });
+    }
+    logger.info(`[arrival-route] route order left to arrival time after refusal: service=${String(serviceId).slice(0, 8)} reason=${reason}`);
+    return null;
+  }
   await writeOrderNumbers(sp, order, date, technicianId);
   logger.info(`[arrival-route] route order placed by time after refusal: service=${String(serviceId).slice(0, 8)} reason=${reason}`);
   await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',

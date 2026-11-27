@@ -982,9 +982,11 @@ describe('the read-free pre-screens select any Zelle word and price grammar (and
     expect(bodyNeedsPaymentRecheck(body)).toBe(false);
     expect(bodyNeedsBillingBoundaryCheck(body)).toBe(false);
   });
-  test('the boundary pre-screen is the recheck pre-screen, status vocabulary included', () => {
-    expect(bodyNeedsBillingBoundaryCheck).toBe(bodyNeedsPaymentRecheck);
+  test('the boundary pre-screen is the recheck pre-screen, status vocabulary included; a report delivery sentence alone is rechecked, never billing-fingerprinted', () => {
     expect(bodyNeedsBillingBoundaryCheck("You're paid up.", { promptVersion: V12 })).toBe(true);
+    const report = 'The service report for your Quarterly Pest Control visit on Friday, Nov 20 has not been emailed yet.';
+    expect(bodyNeedsPaymentRecheck(report)).toBe(true);
+    expect(bodyNeedsBillingBoundaryCheck(report)).toBe(false);
   });
 });
 
@@ -1004,3 +1006,53 @@ describe('auto-send recheck: a second receipt that arrived after drafting makes 
   });
 });
 
+// REPORT DELIVERY (texting AI gap 2): a body stating whether a visit's service report was emailed is re-rendered from today's delivery rows at
+// send. The fake context carries what sms-staff-facts.loadReportDeliveryFacts returns; the sentences are the drafter's real renderer.
+describe('outgoingAmountsStale - the REPORT DELIVERY sentences are rechecked at send', () => {
+  const PENDING = 'The service report for your Quarterly Pest Control visit on Friday, Nov 20 has not been emailed yet.';
+  const SENT = 'The service report for your Quarterly Pest Control visit on Friday, Nov 20 was emailed on Friday, Nov 20 to your email address on file.';
+  const visit = (over = {}) => ({ recordId: 'sr-1', serviceType: 'Quarterly Pest Control', serviceDate: '2026-11-20', state: 'sent', sentOn: '2026-11-20', recipient: 'account', ...over });
+  const billing = { outstandingBalance: 0, hasProcessingPayment: false, recentPayments: [], recentPaymentsTruncated: false, invoiceStatuses: [], hasDepositActivity: false };
+  const live = (reportDeliveries) => ContextAggregator.getContextForCustomer.mockResolvedValue({ billing, reportDeliveries });
+  const run = (body, extra = {}) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, dbh: dbWithCustomer({ id: 'c1' }), inboundMessage: 'did my report go out?', ...extra });
+
+  test('an unchanged sentence passes, read with the report facts only, and is not judged as a payment status', async () => {
+    live({ visits: [visit()] });
+    await expect(run(`Hi Pat! ${SENT}`)).resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).toHaveBeenLastCalledWith({ id: 'c1' }, { includeSmsStaffFacts: { reports: true } });
+  });
+
+  test('a delivery row that moved on refuses as report_delivery_changed (queued -> sent, a bounce, the row gone)', async () => {
+    live({ visits: [visit()] });
+    await expect(run(PENDING)).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    live({ visits: [visit({ recipient: 'undelivered' })] });
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    live({ visits: [] });
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    // an AI body that starts a report sentence of its own wording is held too
+    live({ visits: [visit()] });
+    await expect(run('The service report for your visit went to your inbox.')).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+  });
+
+  test('a read that failed is retryable (report_delivery_recheck_failed); no customer fails closed', async () => {
+    live(null);
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_recheck_failed' });
+    ContextAggregator.getContextForCustomer.mockRejectedValue(new Error('db down'));
+    await expect(run(SENT)).resolves.toEqual({ stale: true, reason: 'report_delivery_recheck_failed' });
+    await expect(run(SENT, { customerId: null })).resolves.toEqual({ stale: true, reason: 'amount_recheck_no_customer' });
+    const { blockReasonIsBillingInfrastructure } = require('../services/agent-decision-send-checks');
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (report_delivery_recheck_failed)')).toBe(true);
+    expect(blockReasonIsBillingInfrastructure('amount no longer authorized (report_delivery_changed)')).toBe(false);
+  });
+
+  test('a staff edit: a retained sentence of the rendered form is rechecked; the staff member\'s own report wording is theirs', async () => {
+    live({ visits: [visit({ state: 'pending', sentOn: undefined, recipient: undefined })] });
+    await expect(run(`Hi Pat, ${SENT}`, { humanEditedBody: true, trustOwedAmounts: true })).resolves.toEqual({ stale: true, reason: 'report_delivery_changed' });
+    await expect(run('The service report for your visit was resent this morning.', { humanEditedBody: true, trustOwedAmounts: true })).resolves.toEqual({ stale: false });
+  });
+
+  test('a body with no report sentence reads nothing for it', async () => {
+    await expect(run('See you Tuesday!')).resolves.toEqual({ stale: false });
+    expect(ContextAggregator.getContextForCustomer).not.toHaveBeenCalled();
+  });
+});
