@@ -27,6 +27,27 @@ describe('namedDayMatcher', () => {
     expect(namedDayMatcher('Dec 3')('Thursday, November 3')).toEqual([]);
   });
 
+  test('a weekday right before its date is one day: "Thursday Dec 10" never takes the earlier Thursday', () => {
+    const m = namedDayMatcher('Thursday Dec 10 or Friday Dec 11');
+    expect(m('Thursday, December 3')).toEqual([]);
+    expect(m('Friday, December 4')).toEqual([]);
+    expect(m('Thursday, December 10')).toEqual(['weekday:thursday+date:12/10']);
+    expect(m('Friday, December 11')).toEqual(['weekday:friday+date:12/11']);
+    expect(namedDayMatcher('Thu, 12/10')('Thursday, December 10')).toEqual(['weekday:thursday+date:12/10']);
+    expect(namedDayMatcher('Friday the 11th')('Friday, December 11')).toEqual(['weekday:friday+day:11']);
+    // a weekday and a date apart in the text stay two requests
+    expect(namedDayMatcher('Thursday works, or else Dec 11')('Thursday, December 3')).toEqual(['weekday:thursday']);
+  });
+
+  test('a date with a year matches only a picker day of that year (ISO); none with no ISO date', () => {
+    const m = namedDayMatcher('12/3/2027');
+    expect(m('Thursday, December 3', '2026-12-03')).toEqual([]);
+    expect(m('Friday, December 3', '2027-12-03')).toEqual(['date:12/3/2027']);
+    expect(m('Thursday, December 3')).toEqual([]);
+    expect(namedDayMatcher('Dec 3, 2026')('Thursday, December 3', '2026-12-03')).toEqual(['date:12/3/2026']);
+    expect(namedDayMatcher('12/3/26')('Thursday, December 3', '2026-12-03')).toEqual(['date:12/3/2026']);
+  });
+
   test('no named day, or a word that is not a day', () => {
     expect(namedDayMatcher('Anytime is fine')).toBeNull();
     expect(namedDayMatcher('I sat outside in the sun on mon')).toBeNull();
@@ -110,6 +131,25 @@ describe('fetchOpenTimesData: a named day past the first three', () => {
     const d = fresh();
     const r = await d.fetchOpenTimesData({ city: 'Venice', customerId: 'c1', schedulingIntent: true, schedulerOffer: { source: 'book', serviceKey: '' } });
     expect(r).toEqual({ block: null, days: [], withheld: 'no_book_service' });
+  });
+
+  test('"Thursday Dec 10": that Thursday joins, not the first one; the days keep their { date, windows } shape', async () => {
+    const d = fresh();
+    const r = await d.fetchOpenTimesData({ city: 'Venice', customerId: 'c1', schedulingIntent: true, namedDay: namedDayMatcher('Thursday Dec 10 please') });
+    expect(r.days.map((x) => x.date)).toEqual(['Monday, November 30', 'Tuesday, December 1', 'Wednesday, December 2', 'Thursday, December 10']);
+    expect(Object.keys(r.days[3])).toEqual(['date', 'windows']);
+  });
+
+  test('a date in a year past the horizon adds nothing', async () => {
+    const d = fresh();
+    const r = await d.fetchOpenTimesData({ city: 'Venice', customerId: 'c1', schedulingIntent: true, namedDay: namedDayMatcher('12/10/2027') });
+    expect(r.days).toHaveLength(3);
+  });
+
+  test('a failed funnel service lookup is withheld fetch_failed, not no_book_service', async () => {
+    const d = fresh();
+    const r = await d.fetchOpenTimesData({ city: 'Venice', customerId: 'c1', schedulingIntent: true, schedulerOffer: { source: 'book', serviceKey: '', lookupFailed: true } });
+    expect(r).toEqual({ block: null, days: [], withheld: 'fetch_failed' });
   });
 
   test('a named day the send-time recheck still finds: the recheck reads every picker day', async () => {

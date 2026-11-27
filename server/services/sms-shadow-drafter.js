@@ -654,16 +654,16 @@ const OPEN_TIMES_MAX_SLOTS_PER_DAY = 3;
 const OPEN_TIMES_MAX_NAMED_DAYS = 2;
 
 // The OPEN TIMES days of one picker read: candidates are every day the picker offers, in its order, each
-// { date, windows }. The first OPEN_TIMES_MAX_DAYS days with a window, then the first later day for each name
+// { date, windows, iso } (iso = the picker's own YYYY-MM-DD, which a named date with a year is checked against). The first OPEN_TIMES_MAX_DAYS days with a window, then the first later day for each name
 // the customer used that those days do not already answer (namedDay: sms-open-times-intent namedDayMatcher on the inbound text).
 function selectOfferDays(candidates, namedDay = null) {
   const open = candidates.filter((d) => d.windows.length);
   const days = open.slice(0, OPEN_TIMES_MAX_DAYS);
   if (!namedDay) return days;
-  const answered = new Set(days.flatMap((d) => namedDay(d.date)));
+  const answered = new Set(days.flatMap((d) => namedDay(d.date, d.iso)));
   const named = [];
   for (const d of open.slice(OPEN_TIMES_MAX_DAYS)) {
-    const fresh = namedDay(d.date).filter((key) => !answered.has(key));
+    const fresh = namedDay(d.date, d.iso).filter((key) => !answered.has(key));
     if (!fresh.length) continue;
     fresh.forEach((key) => answered.add(key));
     named.push(d);
@@ -672,8 +672,9 @@ function selectOfferDays(candidates, namedDay = null) {
   return [...days, ...named];
 }
 
-// { block, days } for the facts block, from the selected days.
-function renderOfferDays(days) {
+// { block, days } for the facts block, from the selected days (each { date, windows }, as before).
+function renderOfferDays(selected) {
+  const days = selected.map(({ date, windows }) => ({ date, windows }));
   return { block: days.length ? days.map((d) => `- ${d.date}: ${d.windows.join(', ')}`).join('\n') : null, days };
 }
 
@@ -835,6 +836,7 @@ async function loadSchedulerDays(offer, customerId, { fresh = false } = {}) {
 //      (a completed visit carries a display name, not a key), through the
 //      same key table — ambiguous or unmapped = withheld.
 // Actual bait, WDO, palm-injection and every unlisted service map to nothing.
+// null (not '') when the lookup itself failed: the offer then carries lookupFailed, and the draft stores fetch_failed.
 async function bookFunnelKeyFor(identity) {
   try {
     const map = require('./sms-book-funnel-map');
@@ -854,8 +856,13 @@ async function bookFunnelKeyFor(identity) {
     return keys.size === 1 ? [...keys][0] : '';
   } catch (err) {
     logger.warn(`[sms-shadow] funnel service lookup failed (${err.message}); OPEN TIMES withheld`);
-    return '';
+    return null;
   }
+}
+
+// A /book or website-engine offer for a funnel key: '' = no funnel service books the job; null = the lookup failed (lookupFailed).
+function funnelOffer(base, serviceKey) {
+  return { ...base, serviceKey: serviceKey || '', ...(serviceKey === null ? { lookupFailed: true } : {}) };
 }
 
 // Where OPEN TIMES come from with GATE_SMS_OFFERS_SCHEDULER on: the picker
@@ -865,7 +872,7 @@ async function bookFunnelKeyFor(identity) {
 async function schedulerOfferFor(identity, estimateId) {
   if (estimateId) return { source: ESTIMATE_OFFER_SOURCE, estimateId };
   if (SCHEDULER_VISIT_REASONS.has(identity.reason)) return { source: SCHEDULER_OFFER_SOURCE, scheduledServiceId: identity.scheduledServiceId || null };
-  return { source: BOOK_OFFER_SOURCE, serviceKey: await bookFunnelKeyFor(identity) };
+  return funnelOffer({ source: BOOK_OFFER_SOURCE }, await bookFunnelKeyFor(identity));
 }
 
 // The website engine's days for a text with no scheduler picker: the customer's
@@ -901,12 +908,12 @@ async function websiteOfferFor({ serviceType, estimateId, city }) {
       serviceKey = await require('./estimate-converter').funnelKeyForEstimateId(estimateId);
     } catch (err) {
       logger.warn(`[sms-shadow] estimate funnel service lookup failed (${err.message}); OPEN TIMES withheld`);
-      return { source: WEBSITE_OFFER_SOURCE, serviceKey: '', city, estimateId };
+      return { ...funnelOffer({ source: WEBSITE_OFFER_SOURCE }, null), city, estimateId };
     }
     return serviceKey ? { source: WEBSITE_OFFER_SOURCE, serviceKey, city, estimateId } : null;
   }
   const serviceKey = String(serviceType || '').trim() ? await bookFunnelKeyFor({ serviceType }) : 'pest_control';
-  return { source: WEBSITE_OFFER_SOURCE, serviceKey, city };
+  return { ...funnelOffer({ source: WEBSITE_OFFER_SOURCE }, serviceKey), city };
 }
 
 // Where the city-based fallback gets its times: the website engine under
@@ -958,10 +965,11 @@ function excludeCurrentWindowSlots(slots, startMinutes) {
 async function fetchSchedulerOpenTimesData({ customerId, schedulerOffer, namedDay = null }) {
   let timer = null;
   const startedAt = Date.now();
-  // A /book or website-engine offer with no funnel service (bait, WDO, trapping, slab, wasp, flea...) never reaches a picker.
+  // A /book or website-engine offer with no funnel service (bait, WDO, trapping, slab, wasp, flea...) never reaches a picker;
+  // a failed service lookup is fetch_failed, not a job /book cannot take.
   if ([BOOK_OFFER_SOURCE, WEBSITE_OFFER_SOURCE].includes(schedulerOffer.source) && !schedulerOffer.serviceKey) {
-    logger.info('[sms-shadow] OPEN TIMES withheld — the job has no /book service');
-    return { block: null, days: [], withheld: 'no_book_service' };
+    logger.info('[sms-shadow] OPEN TIMES withheld — the job has no /book service, or its lookup failed');
+    return { block: null, days: [], withheld: schedulerOffer.lookupFailed ? 'fetch_failed' : 'no_book_service' };
   }
   try {
     const timeout = new Promise((_, reject) => {
@@ -978,7 +986,7 @@ async function fetchSchedulerOpenTimesData({ customerId, schedulerOffer, namedDa
     const candidates = loaded.days.map((d) => {
       const date = schedulerDayLabel(d);
       const slots = cur && cur.date === date ? excludeCurrentWindowSlots(d.slots, cur.startMinutes) : d.slots;
-      return { date, windows: pickSchedulerOfferWindows(slots) };
+      return { date, windows: pickSchedulerOfferWindows(slots), iso: d.date };
     });
     const rendered = renderOfferDays(selectOfferDays(candidates, namedDay));
     return rendered.block ? rendered : { ...rendered, withheld: 'no_open_days' };
@@ -1020,6 +1028,7 @@ async function fetchOpenTimesData({ city, customerId, schedulingIntent, estimate
     // a day with no slot that survives arrival-window formatting is skipped (selectOfferDays)
     const candidates = (result?.days || []).map((d) => ({
       date: openTimesDayLabel(d),
+      iso: d.date,
       windows: (d.slots || [])
         .map((s) => {
           const range = arrivalWindowRange(s.startTime24);

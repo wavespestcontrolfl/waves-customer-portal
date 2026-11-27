@@ -73,7 +73,7 @@ describe('websiteOfferFor — the offer a text with no scheduler picker gets', (
     funnelKeyForEstimateId.mockResolvedValue('');
     await expect(drafter.websiteOfferFor({ ...base, estimateId: 'est-1' })).resolves.toBeNull();
     funnelKeyForEstimateId.mockRejectedValue(new Error('db down'));
-    await expect(drafter.websiteOfferFor({ ...base, estimateId: 'est-1' })).resolves.toMatchObject({ serviceKey: '' });
+    await expect(drafter.websiteOfferFor({ ...base, estimateId: 'est-1' })).resolves.toMatchObject({ serviceKey: '', lookupFailed: true });
   });
 });
 
@@ -103,6 +103,9 @@ describe('fetchOpenTimesData with a website-engine offer', () => {
   test('an empty service key, nothing offered, or an engine error leaves OPEN TIMES out and never throws', async () => {
     // gap 1: each empty result carries the reason code the draft row stores
     await expect(drafter.fetchOpenTimesData(args({ schedulerOffer: offer({ serviceKey: '' }) }))).resolves.toEqual({ block: null, days: [], withheld: 'no_book_service' });
+    expect(textOfferDays).not.toHaveBeenCalled();
+    // a failed service lookup is fetch_failed, never no_book_service (pre-push audit)
+    await expect(drafter.fetchOpenTimesData(args({ schedulerOffer: offer({ serviceKey: '', lookupFailed: true }) }))).resolves.toEqual({ block: null, days: [], withheld: 'fetch_failed' });
     expect(textOfferDays).not.toHaveBeenCalled();
     textOfferDays.mockResolvedValueOnce(null);
     await expect(drafter.fetchOpenTimesData(args())).resolves.toEqual({ block: null, days: [], withheld: 'no_picker_times:website_engine' });
