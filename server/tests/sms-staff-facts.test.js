@@ -319,9 +319,11 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
     [PREPAY, TOTAL, 'Are there any extra fees if I pay for the year up front?'],
     [PREPAY, TOTAL, 'How much to prepay on autopay?'],
     [PREPAY, TOTAL, 'Can I finance the prepay amount? How much is it?'],
-    // ...a way to pay no list knows, by its grammar (a pay word, then with / using / via / by)
+    // ...a way to pay no list knows, by its grammar (a pay word, then with / using / via / by; the thing put to use)
     [PREPAY, TOTAL, 'How much if I pay for the year up front with my HSA?'],
     [PREPAY, TOTAL, 'How much to prepay by plastic?'],
+    [PREPAY, TOTAL, 'If I put the year on my Chase, how much to prepay?'],
+    [PREPAY, TOTAL, 'Can I use my points if I pay for the year up front? How much?'],
     [PREPAY, TOTAL, 'Does it cost extra if I prepay? How much?'],
     [LISTED, FEE, 'Is there a setup fee if I pay by debit?'],
     [LISTED, FEE, 'Can I put the setup fee on my Visa?'],
@@ -344,6 +346,9 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
     [PREPAY, TOTAL, 'Can I prepay for the season?'],
     [PREPAY, TOTAL, 'How much if I prepay for 90 days?'],
     [PREPAY, TOTAL, 'How much to prepay the first one?'],
+    [PREPAY, TOTAL, 'How much to prepay 6mo?'],
+    [PREPAY, TOTAL, 'How much to prepay through March?'],
+    [PREPAY, TOTAL, 'How much to prepay the next 2?'],
     [PREPAY, FEE_PREPAY, 'Is the setup fee waived if I prepay six months?'],
   ])('off target: %#', (terms, reply, inboundText) => {
     expect({ reply, inboundText, ok: checker(terms)(reply, inboundText) }).toEqual({ reply, inboundText, ok: false });
@@ -354,7 +359,8 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
     for (const q of ['Can you check if there is a setup fee?', 'I will check with my husband. Is there a setup fee?', 'Is the setup fee a one-time fee?', 'Is there a setup fee for the first visit?',
       'Is there a setup fee for six months of service?']) expect({ q, ok: listed(FEE, q) }).toEqual({ q, ok: true });
     for (const q of ['How much to pay for 12 months up front?', 'How much if I prepay for one year?', 'How much if I prepay for 1 year?', 'How much to prepay this year?',
-      'Can you check how much it is to prepay?', 'Are all visits included if I prepay? How much?', 'How much if I pay by the year?', 'How much do I save by paying for the year up front?']) {
+      'Can you check how much it is to prepay?', 'Are all visits included if I prepay? How much?', 'How much if I pay by the year?', 'How much do I save by paying for the year up front?',
+      'How much to prepay 12mo?', 'How much to prepay 1 yr?']) {
       expect({ q, ok: prepay(TOTAL, q) }).toEqual({ q, ok: true });
     }
     for (const q of ['Can you check my estimate? How much is the pest control?', 'How much is the fee per application?']) expect({ q, ok: prepay(PRICE, q) }).toEqual({ q, ok: true });
@@ -369,7 +375,8 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
     test.each([
       ['Is there a setup fee?', INVOICE], ['Is there a setup fee?', `Hi Dana, ${INVOICE} Thanks!`], ['Is the setup fee waived?', RECEIPT],
       ['How much if I pay for the year up front?', INVOICE], ['Can I prepay?', RECEIPT], ['How much would my prepayment be?', INVOICE],
-      ['How many visits are left if I prepay?', LEFT],
+      // the prepaid count answers its own question, but lends no cover to an invoice line beside it
+      ['Is there a setup fee? How many visits do I have left?', `${LEFT} ${INVOICE}`],
       // known cost: a receipt question that names the fee or the prepayment itself (no "I paid") goes to a person too
       ['Did my prepayment go through?', RECEIPT], ['Did you get my payment for the setup fee?', RECEIPT],
     ])('held: %s', (inboundText, reply) => { expect({ reply, ok: check(reply, inboundText) }).toEqual({ reply, ok: false }); });
@@ -378,6 +385,8 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
       ['Is there a setup fee?', FEE_PREPAY], ['How much is it, and is there a setup fee?', `${PRICE} ${FEE_PREPAY}`],
       // the customer's own payment keeps its answer: "I paid" is no question about the fee or the year
       ['I already paid the setup fee, did it go through?', RECEIPT], ['I prepaid for the year, did you get it?', RECEIPT],
+      // ...a count question is answered by the prepaid count alone, whatever else it names
+      ['How many visits are left if I prepay?', LEFT],
       // ...and a question that names neither is judged as before
       ['Did my payment go through?', RECEIPT], ['Is my invoice paid?', INVOICE], ['How many visits do I have left on my prepaid plan?', LEFT],
     ])('not held: %s', (inboundText, reply) => { expect({ reply, ok: check(reply, inboundText) }).toEqual({ reply, ok: true }); });
