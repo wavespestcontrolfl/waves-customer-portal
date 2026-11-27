@@ -1229,15 +1229,26 @@ const HELD_PLACE_TAIL = 'You can still complete. The visit record keeps the plac
 const TETRINO_WARNING_TAIL = 'You can still complete.';
 // Tetrino above this rate (fl oz per 1,000 sq ft) is the high rate: it wants high current chinch pressure on the record.
 const TETRINO_HIGH_RATE = 0.367;
+// The rate the row will be recorded at: the plan's own, else the typed amount over the area (fl oz per 1,000 sq ft), else 0.
+function tetrinoRateOf(row, lawnSqft) {
+  if (!row) return 0;
+  const planned = Number(rateOf(row)?.rate);
+  if (planned > 0) return planned;
+  const { totalAmount, amountUnit } = submittedAmount(row.totalAmount, row.amountUnit);
+  const area = areaOf(row, lawnSqft);
+  return hasAmount(row) && amountUnit === 'fl_oz' && area > 0 ? (Number(totalAmount) / area) * 1000 : 0;
+}
 // The May scout warnings above the Complete button: the record is missing, the recorded decision's product is not on the sheet, or
 // the high rate is on the sheet without high chinch pressure recorded. None holds Complete (owner 2026-11-26).
-function tetrinoWarningsOf({ scout, decision, recorded, onSheet, rows }) {
+function tetrinoWarningsOf({ scout, decision, recorded, onSheet, rows, lawnSqft }) {
   if (!scout) return [];
   const lines = [];
   if (!recorded) lines.push('Record the May insect scouting decision.');
   else if (decision.target !== 'none' && !onSheet) lines.push('Update the plan with the recorded Tetrino decision.');
   const row = rows.find((other) => sameId(other.productId, scout.productId));
-  const highRate = Number(row && rateOf(row)?.rate) > TETRINO_HIGH_RATE;
+  // A scout-only decision does not cover an application: Tetrino on the sheet beside it is flagged, and still recorded.
+  if (recorded && decision.target === 'none' && row) lines.push('The recorded scout-only decision does not cover Tetrino. Record what you found, or take Tetrino off.');
+  const highRate = tetrinoRateOf(row, lawnSqft) > TETRINO_HIGH_RATE;
   const highPressure = recorded && decision.target === 'chinch' && String(decision.currentObservations || '').trim() && decision.pressure === 'high';
   if (highRate && !highPressure) lines.push('The high Tetrino rate needs high current chinch pressure recorded on this visit.');
   return lines.map((line) => `${line} ${TETRINO_WARNING_TAIL}`);
@@ -1261,7 +1272,7 @@ const noProductNoteJoined = (note, rows, newSod) => {
   return text.includes(newSod.noProductNote) ? text : [text, newSod.noProductNote].filter(Boolean).join(' ');
 };
 
-function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ sodWait = '', tetrinoBusy, noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
@@ -1274,6 +1285,8 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [sodWait, sodWait],
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
+    // The scout decision is saving and the plan is being read again: Complete would send the old rows.
+    [tetrinoBusy, 'Wait for the scout decision to save.'],
     [assessmentReady === false, 'Wait for the lawn check to finish.'],
     [unusable, unusableMessage(ctx.assessment?.unusableReason)],
     [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
@@ -2050,9 +2063,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const tetrinoScoutOnly = tetrinoRecorded && tetrinoScout.target === 'none';
   // The May scout record only warns (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"):
   // the prompt stays, the server accepts Tetrino without it, and Complete is not held.
-  const tetrinoWarnings = tetrinoWarningsOf({ scout: sheetCtx.tetrinoScout, decision: tetrinoScout, recorded: tetrinoRecorded, onSheet: tetrinoOnSheet, rows });
+  const tetrinoWarnings = tetrinoWarningsOf({ scout: sheetCtx.tetrinoScout, decision: tetrinoScout, recorded: tetrinoRecorded, onSheet: tetrinoOnSheet, rows, lawnSqft });
   // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
-  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ sodWait, tetrinoBusy: tetrinoScoutBusy, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
   const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...tetrinoWarnings];
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
