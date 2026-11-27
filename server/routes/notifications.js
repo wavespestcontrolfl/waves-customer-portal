@@ -1260,13 +1260,13 @@ async function reminderContactProfile(req, res) {
 
 // The profile is an active, undeleted row whose OWN account is the signed-in account (COALESCE(account_id, id)), not
 // only a row whose id equals the account id: a primary profile moved to another account is refused. `lock`: take the
-// customers row lock (the lock a merge takes) in the caller's transaction.
+// customers row lock (the lock a merge takes) in the caller's transaction; 'share' takes a shared lock (for a read).
 async function profileOnAccount(req, customerId, { conn = db, lock = false } = {}) {
   const accountId = req.accountId || req.customer?.account_id || req.customerId;
   if (!accountId || !customerId) return false;
   const q = conn('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
     .whereRaw('COALESCE(account_id, id) = ?::uuid', [accountId]);
-  if (lock) q.forUpdate();
+  if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
   return !!(await q.first('id'));
 }
 
@@ -1282,7 +1282,14 @@ router.get('/reminder-contacts/:customerId', async (req, res, next) => {
     const customerId = await reminderContactProfile(req, res);
     if (!customerId) return undefined;
     const VisitRecipient = require('../services/call-visit-recipient');
-    res.json({ reminderContacts: await VisitRecipient.listReminderContacts(customerId) });
+    // The list is read in one transaction under a shared lock on the profile row, after the account is checked again
+    // there: a profile moved to another account meanwhile never shows its people to the former account.
+    const list = await db.transaction(async (trx) => {
+      if (!(await profileOnAccount(req, customerId, { conn: trx, lock: 'share' }))) return null;
+      return VisitRecipient.listReminderContacts(customerId, { conn: trx });
+    });
+    if (!list) return res.status(403).json({ error: 'Property is not available for this account' });
+    res.json({ reminderContacts: list });
   } catch (err) {
     next(err);
   }

@@ -18,6 +18,7 @@ jest.mock('../models/db', () => {
     q.whereNull = () => q;
     q.whereRaw = () => q;
     q.forUpdate = () => q;
+    q.forShare = () => q;
     q.first = async () => mockProfiles.current[id] || undefined;
     return q;
   };
@@ -71,7 +72,7 @@ test('the holder reads the list of one of their own profiles', async () => {
   const res = await call('GET', `/reminder-contacts/${OWN}`);
   expect(res.status).toBe(200);
   expect(res.body.reminderContacts).toEqual([expect.objectContaining({ firstName: 'Bob', hasAppAccess: false })]);
-  expect(VisitRecipient.listReminderContacts).toHaveBeenCalledWith(OWN);
+  expect(VisitRecipient.listReminderContacts).toHaveBeenCalledWith(OWN, { conn: expect.any(Function) });
 });
 
 test('stop and restart are recorded as the customer\'s own choice', async () => {
