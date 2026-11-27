@@ -7,12 +7,12 @@ runner installs no packages and performs no migrations at startup.
 
 The root `.nvmrc` selects Node 20 for development and all jobs in the main CI
 workflow. Use your version manager to select it before installing dependencies.
-With nvm already installed, run:
+With nvm already installed, select the Node version and install dependencies (`~/.claude/bin/npm-ci-serial` on the owner's multi-session Mac — never bare `npm ci`, failing closed if the wrapper is unavailable; `npm ci` in isolated CI, cloud sandboxes, or other single-user machines):
 
 ```sh
 nvm install
 nvm use
-npm ci
+~/.claude/bin/npm-ci-serial   # owner's multi-session Mac; use `npm ci` in isolated CI/single-user machines
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client
@@ -30,10 +30,17 @@ The runner prints the URL, checkout path, commit SHA and assigned ports. Its API
 Vite, debugger and control listener bind to loopback. Ports never silently move.
 `npm run dev:client` remains the standalone frontend-only Vite command.
 
-Create another checkout with `npm run worktree:create -- task-slug [destination]`.
-This fetches origin/main, creates feat/task-slug, installs dependencies within
-that checkout and assigns ports. An interrupted install can be resumed with
-`npm ci` in the new checkout; do not share node_modules between worktrees.
+Create another checkout with `npm run worktree:create -- task-slug [destination]` in isolated CI or single-user environments. This fetches origin/main, creates `feat/task-slug`, runs bare `npm ci` (`scripts/dev/worktree.js`), and assigns ports. On the owner's multi-session Mac, do **not** run `worktree:create` (it bypasses the install queue) — instead run:
+
+```sh
+git fetch origin main
+git worktree add -b feat/<task-slug> <destination> origin/main
+cd <destination>
+~/.claude/bin/npm-ci-serial
+npm run worktree:setup
+```
+
+An interrupted install can be resumed in the new checkout with `~/.claude/bin/npm-ci-serial` on the owner's multi-session Mac (or `npm ci` in isolated CI/single-user machines); do not share `node_modules` between worktrees.
 
 ## Dev database
 
@@ -211,7 +218,9 @@ nonproduction environment. Production is refused by both its environment ID
 and the environment-name allowlist.
 
 Start with `npm run dev:doctor -- --remote`. On a fresh checkout, run
-`npm run worktree:setup` and `npm ci` first using the Node version in `.nvmrc`.
+`npm run worktree:setup` and install dependencies (`~/.claude/bin/npm-ci-serial`
+on the owner's multi-session Mac; `npm ci` in isolated CI/single-user machines)
+first using the Node version in `.nvmrc`.
 Select the verified dev cluster in `.tmp/dev/database.env` as described above,
 then explicitly run `npm run qa:database` to create this worktree's empty database.
 Do not copy another worktree's private database selection or context file.
