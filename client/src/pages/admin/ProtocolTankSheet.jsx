@@ -15,13 +15,16 @@ const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDi
 const fillText = (fill) => `${num(fill.amount)} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
 const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
 const isSpreader = (item) => item.tankAmounts?.application === "spreader";
-// How a product goes on: a spreader, an addition to another product's mix (the program names it: the surfactant in the Celsius
-// weed mix), or its own single-product tank.
-const OWN_TANK = "Separate single-product tank";
-function applicationMethod(item) {
+const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+// How a product goes on, from the program's own mix marks: a spreader; added to another product's mix (the surfactant and
+// Certainty in the Celsius weed mix); the base of a mix others are added to; applied alone. With no mark, neutral wording.
+function applicationMethod(item, products) {
+  const amounts = item.tankAmounts || {};
   if (isSpreader(item)) return "Spreader";
-  const mixWith = item.tankAmounts?.mixWith;
-  return mixWith ? `Add to the ${mixWith} mix` : OWN_TANK;
+  if (amounts.mixWith) return `Add to the ${amounts.mixWith} mix`;
+  const partners = products.filter((other) => other.tankAmounts?.mixWith && nameKey(item.product.name).startsWith(nameKey(other.tankAmounts.mixWith)));
+  if (partners.length) return `Tank with: ${partners.map((other) => other.product.name).join(", ")}`;
+  return amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
 }
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
@@ -49,7 +52,8 @@ function amountRows(amounts) {
 // The checks that once withheld a product's amount, now short warnings beside it (owner 2026-11-26: warn, never hide).
 function productCautions(item, exclusions) {
   const { product, tankAmounts: amounts = {} } = item;
-  const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "").startsWith("staugustine"));
+  // The whole species only: a named cultivar exclusion (Floratam, an unknown cultivar) stays on the excluded-turf line.
+  const excludesDefaultTurf = exclusions.some((species) => ["staugustine", "staugustinegrass"].includes(nameKey(species)));
   return [
     !product.labelVerifiedAt && "Label not verified in the app.",
     excludesDefaultTurf && "Not labeled for St. Augustine.",
@@ -57,6 +61,8 @@ function productCautions(item, exclusions) {
     amounts?.application === "spray" && !TANK_MIX_CATEGORIES.has(product.mixingOrderCategory) && "Tank mixing not set in the app. Check the label.",
     PLAN_STATE_NOTES[amounts?.planState],
     item.fieldHold && "On hold: see the warning above.",
+    // The program's required notes for this product, selected or not (the sheet-wide warnings list only the selected ones).
+    ...(item.gateNotes || []).filter((note) => note.severity === "required").map((note) => note.text),
   ].filter(Boolean);
 }
 
@@ -66,7 +72,6 @@ function productCautions(item, exclusions) {
 export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
   const products = (plan.items || []).filter((item) => item.product);
-  const ownTank = products.some((item) => applicationMethod(item) === OWN_TANK);
   const sheet = (
     <>
       <FieldMasthead variant="staff" />
@@ -82,7 +87,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             Reference sheet, not a pesticide container label or approval to combine every product.
             Follow each product label for mixing, PPE, application restrictions and re-entry.
           </p>
-          {ownTank && <p className="mt-2">Each product marked &ldquo;{OWN_TANK}&rdquo; needs its own tank. Do not combine those products in one tank.</p>}
+          <p className="mt-2">Products are not approved to be combined in one tank unless their card says so.</p>
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
         {equipment?.carrierGalPer1000 > 0 && (
@@ -122,7 +127,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
               <h3>{product.name}</h3>
               <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            <p className="mt-2 font-medium">{applicationMethod(item)}</p>
+            <p className="mt-2 font-medium">{applicationMethod(item, products)}</p>
             <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}

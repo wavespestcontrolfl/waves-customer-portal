@@ -35,7 +35,8 @@ describe("110-gallon tank reference", () => {
     plan.items.push({ ...plan.items[0], product: { ...plan.items[0].product, id: 'second', name: 'Synthetic fertilizer' } });
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector('.protocol-print-sheet')]) {
-      expect(within(surface).getAllByText('Separate single-product tank')).toHaveLength(2);
+      expect(within(surface).getAllByText('Mixing: follow this card and the label')).toHaveLength(2);
+      expect(within(surface).getByText('Products are not approved to be combined in one tank unless their card says so.')).toBeInTheDocument();
       expect(within(surface).getAllByText('180 minutes')).toHaveLength(2);
       expect(within(surface).getAllByText('Keep off until dry')).toHaveLength(2);
       expect(within(surface).getAllByText('Synthetic fertilizer restriction')).toHaveLength(2);
@@ -134,7 +135,7 @@ describe("110-gallon tank reference", () => {
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Spreader")).toBeInTheDocument();
       expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
-      expect(within(surface).queryByText(/needs its own tank/)).not.toBeInTheDocument();
+      expect(within(surface).queryByText(/Apply alone|Mixing: follow/)).not.toBeInTheDocument();
     }
   });
 
@@ -147,8 +148,36 @@ describe("110-gallon tank reference", () => {
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
       expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
-      expect(within(surface).queryByText(/needs its own tank/)).not.toBeInTheDocument();
+      expect(within(surface).queryByText(/Apply alone|Mixing: follow/)).not.toBeInTheDocument();
       expect(within(surface).getByText("0.25% of the spray volume")).toBeInTheDocument();
+    }
+  });
+
+  it("named cultivar exclusions do not read as a species-wide prohibition", () => {
+    const plan = fixture();
+    plan.items[0].product.excludedTurfSpecies = ["floratam", "st_augustine_unknown_cultivar"];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).queryByText("Not labeled for St. Augustine.")).not.toBeInTheDocument();
+    expect(within(container).getByText("Excluded turf: floratam, st_augustine_unknown_cultivar")).toBeInTheDocument();
+  });
+
+  it("the mix base names what the program adds to it; an apply-alone product says so; an unselected product prints its required notes", () => {
+    const plan = fixture();
+    const spray = (id, name, extra) => ({ selected: false, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "dry_wg_wdg_wp_df" },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
+    plan.items = [
+      spray("cel", "Celsius WG", {}),
+      spray("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }),
+      spray("tet", "Tetrino Insecticide", { applyAlone: true }),
+      { ...spray("step", "Synthetic removal step", {}), gateNotes: [{ key: "x", severity: "required", text: "Keep the synthetic 2(ee) sheet on hand." }, { key: "y", severity: "note", text: "Synthetic note only." }] },
+    ];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Tank with: Certainty Turf Herbicide")).toBeInTheDocument();
+      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).getByText("Apply alone in its own tank")).toBeInTheDocument();
+      expect(within(surface).getByText("Keep the synthetic 2(ee) sheet on hand.")).toHaveClass("text-alert-fg");
+      expect(within(surface).queryByText("Synthetic note only.")).not.toBeInTheDocument();
     }
   });
 
@@ -174,7 +203,7 @@ describe("110-gallon tank reference", () => {
     ["unverified label", (p) => { p.items[0].product.labelVerifiedAt = null; }, "Label not verified in the app."],
     ["non-tank product", (p) => { p.items[0].product.mixingOrderCategory = "granular"; }, "Tank mixing not set in the app. Check the label."],
     ["excluded St. Augustine", (p) => { p.items[0].product.excludedTurfSpecies = ["St. Augustine"]; }, "Not labeled for St. Augustine."],
-    ["unknown St. Augustine cultivar", (p) => { p.items[0].product.excludedTurfSpecies = ["floratam", "bitterblue", "st_augustine_unknown_cultivar"]; }, "Not labeled for St. Augustine."],
+    ["unknown St. Augustine cultivar", (p) => { p.items[0].product.excludedTurfSpecies = ["floratam", "bitterblue", "st_augustine_unknown_cultivar"]; }, "Excluded turf: floratam, bitterblue, st_augustine_unknown_cultivar"],
     ["unselected conditional", (p) => { p.items[0].selected = false; p.items[0].conditional = true; p.items[0].fullTankMix = null; }, "Conditional: confirm the trigger first."],
     ["reached application limit", (p) => { p.items[0].tankAmounts.planState = "capped"; p.items[0].fullTankMix = null; }, "Limit reached: do not apply at this visit."],
     ["city hold", (p) => { p.items[0].tankAmounts.planState = "held"; }, "City hold: do not apply at this visit."],
@@ -195,7 +224,7 @@ describe("110-gallon tank reference", () => {
     plan.items[0].tankAmounts = { application: "spray", ratePer1000: 0.227, rateUnit: "oz", per100Gal: null, fullTank: null, backpack4Gal: null };
     plan.warnings = [{ code: "missing_calibration", message: "No sprayer test on file for the selected tank, so tank amounts are not shown. Test the sprayer." }];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
-    expect(within(container).getByText(/needs its own tank. Do not combine those products in one tank/)).toBeInTheDocument();
+    expect(within(container).getByText("Products are not approved to be combined in one tank unless their card says so.")).toBeInTheDocument();
     expect(within(container).getByText("No amount")).toBeInTheDocument();
     expect(within(container).getByText(/No sprayer test on file for the selected tank/)).toBeInTheDocument();
   });

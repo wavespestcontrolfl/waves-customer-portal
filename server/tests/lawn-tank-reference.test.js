@@ -45,6 +45,25 @@ describe('fill amounts', () => {
   });
 });
 
+describe('the rate a recipe line states', () => {
+  const arena = { name: 'Arena 50 WDG', default_rate_per_1000: 0.29, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
+  const raw = 'Arena 50 WDG — chinch bugs found at the edge of a damaged patch (count first), 0.147 oz per 1,000 sq ft (6.4 oz per acre) in 4 gal per 1,000 sq ft into the thatch';
+  test('a label-rate row or no row takes the recipe line\'s rate, not the catalog default', () => {
+    for (const v13Line of [{ row: { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', gates: {} }, state: 'spot' }, undefined]) {
+      expect(tankReference({ product: arena, item: conditional(raw), v13Line, backpack: BACKPACK })).toMatchObject({
+        ratePer1000: 0.147, rateSource: 'recipe_line_rate', backpack4Gal: { amount: 0.147, carrierGalPer1000: 4 },
+      });
+    }
+  });
+  test('a staged row rate outranks the line, and a range states no one rate', () => {
+    const row = { applicationMode: 'spot', ratePer1000: 0.2, rateUnit: 'oz', gates: {} };
+    expect(tankReference({ product: arena, item: conditional(raw), v13Line: { row, state: 'spot' } })).toMatchObject({ ratePer1000: 0.2, rateSource: 'protocol_rate' });
+    const velista = { name: 'Velista', default_rate_per_1000: 0.5, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
+    expect(tankReference({ product: velista, item: conditional('Velista — fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days') }))
+      .toMatchObject({ ratePer1000: 0.5, rateSource: 'catalog_default_rate' });
+  });
+});
+
 describe('the carrier the job calculation already uses', () => {
   const dimension = { name: 'Dimension 2EW', default_rate_per_1000: 0.5, rate_unit: 'fl oz', mixing_order_category: 'ec_ew' };
   test('the spring catch-up hose pass sizes on its row carrier (1 gal), not the rig at 2 gal, as roundsCatchUp.carrierFor does', () => {

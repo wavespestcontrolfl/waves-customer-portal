@@ -676,7 +676,7 @@ describe('the tank sheet fill amounts on the v13 program', () => {
     const body = await lawnMix({ month: '5' });
     // amount = rate per 1,000 sq ft x (tank gallons / carrier gal per 1,000 sq ft)
     expect(itemFor(body, TETRINO).tankAmounts).toMatchObject({
-      application: 'spray', bigTank: true, ratePer1000: 0.367, rateSource: 'protocol_rate',
+      application: 'spray', bigTank: true, ratePer1000: 0.367, rateSource: 'protocol_rate', applyAlone: true, mixWith: null,
       per100Gal: { gallons: 100, amount: 36.7, amountUnit: 'fl oz', carrierGalPer1000: 1, carrierSource: 'calibration' },
       fullTank: { gallons: 110, amount: 40.37 },
       backpack4Gal: { gallons: 4, amount: 1.104, carrierGalPer1000: 1.33 },
@@ -686,7 +686,9 @@ describe('the tank sheet fill amounts on the v13 program', () => {
     expect(arena.jobMix).toBeNull();
     expect(arena.tankAmounts).toMatchObject({
       planState: 'spot', bigTank: false, per100Gal: null, fixedCarrierGalPer1000: 4, fixedCarrierSource: 'line',
-      backpack4Gal: { amount: 0.29, amountUnit: 'oz', carrierGalPer1000: 4, carrierSource: 'line' },
+      // The label-rate row states no rate: the recipe line's 0.147 oz, never the catalog's 0.29 oz.
+      ratePer1000: 0.147, rateSource: 'recipe_line_rate',
+      backpack4Gal: { amount: 0.147, amountUnit: 'oz', metricAmount: 4.2, metricUnit: 'g', carrierGalPer1000: 4, carrierSource: 'line' },
     });
     expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
       ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },

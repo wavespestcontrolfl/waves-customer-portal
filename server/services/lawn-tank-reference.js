@@ -48,6 +48,20 @@ function concentrationPercent(row, raw) {
   return found && Number(found[1]) > 0 ? Number(found[1]) : null;
 }
 
+// The rate the recipe line states ("0.147 oz per 1,000 sq ft"), for a line whose staged row states none (a label-rate row, or no
+// row): the recipe's first stated rate, never the catalog default beside it. A range first ("0.5 to 0.7 oz") states no one rate.
+const LINE_RATE = /(\d+(?:\.\d+)?)(\s*to\s*\d+(?:\.\d+)?)?\s*(fl\.?\s*oz|oz|lb)\s+per\s+1,?000\s*sq\.?\s*ft/i;
+function recipeRateOptions(row, raw) {
+  const options = v13RateOptions(row);
+  if (options.protocolRate || options.deriveNutrientFirst) return { options, lineRate: false };
+  const found = String(raw || '').match(LINE_RATE);
+  if (!found || found[2]) return { options, lineRate: false };
+  return { options: { protocolRate: { rate: Number(found[1]), unit: found[3].replace(/\.\s*|\s+/g, ' ').trim() } }, lineRate: true };
+}
+
+// How the program mixes the product: added to another product's mix (gates.tankMixWith), or applied alone (gates.applyAlone).
+const mixFields = (row) => ({ mixWith: row?.gates?.tankMixWith || null, applyAlone: row?.gates?.applyAlone === true });
+
 const isTwoAndHalfGallonJug = (product) => /^\s*2\.5\s*-?\s*gal/i.test(String(product?.container_size || ''));
 
 function isSpreaderProduct(product, rateUnit) {
@@ -114,13 +128,15 @@ function goesInBigTank(product, item, row) {
 function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack }) {
   if (!product) return null;
   const { row, state: planState } = v13Line || {};
-  const rateArgs = { product, ...nutrientTargets, ...v13RateOptions(row) };
+  const recipe = recipeRateOptions(row, item.raw);
+  const rateArgs = { product, ...nutrientTargets, ...recipe.options };
   const rate = calculateProductAmount({ ...rateArgs, lawnSqft: 1000, carrierGalPer1000: 0 });
   const percent = concentrationPercent(row, item.raw);
   const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false };
-  const base = { ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: rate.rateSource, concentrationPercent: percent, planState: planState || null, ...none };
-  // A product the program adds to another product's mix (the surfactant and Certainty in the Celsius weed mix): no tank of its own.
-  base.mixWith = row?.gates?.tankMixWith || null;
+  const base = {
+    ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: recipe.lineRate ? 'recipe_line_rate' : rate.rateSource,
+    concentrationPercent: percent, planState: planState || null, ...mixFields(row), ...none,
+  };
   if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader' };
   const [lineCarrier, lineSource] = fixedCarrier(item, row);
   // A backpack picked as the rig is not the big tank: no 100 gal or full-tank fill, whatever sets the carrier.
