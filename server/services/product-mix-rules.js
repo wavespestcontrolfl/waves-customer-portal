@@ -171,6 +171,7 @@ function presentRule(row) {
     jarTestRequired: Boolean(row.jar_test_required),
     active: row.active !== false,
     updatedAt: row.updated_at || null,
+    version: row.version == null ? null : Number(row.version),
   };
 }
 
@@ -230,7 +231,7 @@ async function insertOrUpdate(trx, row) {
   const result = await trx.raw(
     `INSERT INTO product_mix_rules (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})
      ON CONFLICT ${target}
-     DO UPDATE SET ${UPSERT_COLUMNS.map((c) => `${c} = EXCLUDED.${c}`).join(', ')}, updated_at = now()
+     DO UPDATE SET ${UPSERT_COLUMNS.map((c) => `${c} = EXCLUDED.${c}`).join(', ')}, updated_at = now(), version = product_mix_rules.version + 1
      RETURNING *, (xmax = 0) AS inserted`,
     columns.map((c) => row[c]),
   );
@@ -248,17 +249,25 @@ async function createRule(trx, fields, actorId) {
 
 const STALE = 'This rule changed. Reload it.';
 
-// `updatedAt` is the row's updated_at as the edit form loaded it. A save from a form older than the row is a 409, so a
-// stale form never overwrites a newer verdict. The JSON answer carries milliseconds and the column microseconds, so the
-// two match within 2 ms (the driver's parse can land 1 ms low).
-async function editRule(trx, id, fields, actorId, updatedAt) {
+// `version` is the rule's version as the screen loaded it (migration 20261127170000; every write adds 1). An edit or a
+// remove from an older screen is a 409, so a stale form never overwrites a newer verdict or removes a re-pointed rule.
+function loadedVersion(version) {
+  const n = Number(version);
+  if (version == null || version === '' || !Number.isInteger(n) || n < 1) throw httpError(400, 'Reload the rule before saving it.');
+  return n;
+}
+
+async function lockCurrent(trx, id, version) {
   if (!UUID_RE.test(String(id))) throw httpError(404, 'Rule not found');
-  const loadedAt = updatedAt ? new Date(updatedAt) : null;
-  if (!loadedAt || Number.isNaN(loadedAt.getTime())) throw httpError(400, 'Reload the rule before saving it.');
-  const target = await trx('product_mix_rules').where({ id }).forUpdate()
-    .first(trx.raw('*, (abs(extract(epoch from updated_at) * 1000 - ?) < 2) AS version_matches', [loadedAt.getTime()]));
+  const expected = loadedVersion(version);
+  const target = await trx('product_mix_rules').where({ id }).forUpdate().first();
   if (!target) throw httpError(404, 'Rule not found');
-  if (!target.version_matches) throw httpError(409, STALE);
+  if (Number(target.version) !== expected) throw httpError(409, STALE);
+  return target;
+}
+
+async function editRule(trx, id, fields, actorId, version) {
+  const target = await lockCurrent(trx, id, version);
   // A removed rule comes back only through Add rule, never by saving an edit form opened before it was removed.
   if (target.active === false) throw httpError(409, 'This rule was removed. Add it again to bring it back.');
   const same = await trx('product_mix_rules').where(keyOf(fields)).whereNot({ id }).first();
@@ -266,7 +275,7 @@ async function editRule(trx, id, fields, actorId, updatedAt) {
   let row;
   try {
     [row] = await trx('product_mix_rules').where({ id })
-      .update({ ...fields, active: true, updated_by: actorId, updated_at: trx.fn.now() }).returning('*');
+      .update({ ...fields, active: true, updated_by: actorId, updated_at: trx.fn.now(), version: trx.raw('version + 1') }).returning('*');
   } catch (err) {
     // A create for the same target committed between the check and the update.
     if (err && err.code === UNIQUE_VIOLATION) throw httpError(409, TARGET_TAKEN);
@@ -283,16 +292,17 @@ async function upsertRule(input, { id = null, actorId = null } = {}) {
   const fields = normalizeRuleInput(input);
   return db.transaction(async (trx) => {
     await assertProductsExist(trx, fields);
-    const row = id ? await editRule(trx, id, fields, actorId, input && input.updatedAt) : await createRule(trx, fields, actorId);
+    const row = id ? await editRule(trx, id, fields, actorId, input && input.version) : await createRule(trx, fields, actorId);
     return presentRule(row);
   });
 }
 
-async function deactivateRule(id, { actorId = null } = {}) {
-  if (!UUID_RE.test(String(id || ''))) return null;
+// Remove (soft). `version` is the rule's version as the list showing it was loaded: a stale Remove is a 409.
+async function deactivateRule(id, { actorId = null, version } = {}) {
   return db.transaction(async (trx) => {
-    const [row] = await trx('product_mix_rules').where({ id }).update({ active: false, updated_by: actorId, updated_at: trx.fn.now() }).returning('*');
-    if (!row) return null;
+    await lockCurrent(trx, id, version);
+    const [row] = await trx('product_mix_rules').where({ id })
+      .update({ active: false, updated_by: actorId, updated_at: trx.fn.now(), version: trx.raw('version + 1') }).returning('*');
     await audit(trx, 'product_mix_rules.removed', row, actorId);
     return presentRule(row);
   });
@@ -322,7 +332,10 @@ function evaluatePair(x, y, rules, notesById) {
     (String(r.product_a_id).toLowerCase() === xid && inGroup(y, r.group_b))
     || (String(r.product_a_id).toLowerCase() === yid && inGroup(x, r.group_b))));
   const restrictions = [surfactantRestriction(x, y), surfactantRestriction(y, x), surfactantConflict(x, y)].filter(Boolean);
-  const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => ({ kind: 'catalog', ruleId: null, jarTestRequired: false, ...note }));
+  // Under a pair rule the catalog's free text is background only: listed as an older note, never as a second verdict.
+  const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => (pairRule
+    ? { ...note, kind: 'catalog_note', ruleId: null, jarTestRequired: false, verdict: null, reason: `Catalog note (older): ${note.reason}` }
+    : { kind: 'catalog', ruleId: null, jarTestRequired: false, ...note }));
   const groupEntries = groupRules.map((r) => ruleEntry(r, 'group'));
   const entries = [...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupEntries, ...restrictions, ...catalog];
   let lead = (pairRule && entries[0]) || worst(groupEntries) || worst([...restrictions, ...catalog]);

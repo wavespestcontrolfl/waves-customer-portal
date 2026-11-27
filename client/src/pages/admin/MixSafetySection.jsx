@@ -216,7 +216,8 @@ function TankCheck({ products }) {
                   <ul className="mt-1 list-disc pl-5 text-14 text-ink-secondary">
                     {/* The server lists the headline entry first; the rest are every other match, once. */}
                     {pair.entries.slice(1).map((entry, i) => (
-                      <li key={i}>{VERDICT_TEXT[entry.verdict]?.label || entry.verdict}: {entry.reason}</li>
+                      // An older catalog note under a pair rule carries no verdict of its own.
+                      <li key={i}>{entry.verdict ? `${VERDICT_TEXT[entry.verdict]?.label || entry.verdict}: ` : ""}{entry.reason}</li>
                     ))}
                   </ul>
                 )}
@@ -269,7 +270,7 @@ export default function MixSafetySection() {
       jarTestRequired: form.jarTestRequired,
       // An edit carries the version it was loaded at; the server answers 409 "This rule changed. Reload it." when the
       // rule changed since.
-      ...(form.id ? { updatedAt: form.updatedAt } : {}),
+      ...(form.id ? { version: form.version } : {}),
     };
     try {
       await readJson(await (form.id
@@ -288,7 +289,7 @@ export default function MixSafetySection() {
   async function removeRule(rule) {
     setError("");
     try {
-      await readJson(await adminFetch(`/admin/product-mix-rules/${rule.id}`, { method: "DELETE" }));
+      await readJson(await adminFetch(`/admin/product-mix-rules/${rule.id}?version=${rule.version}`, { method: "DELETE" }));
       setNotice("Rule removed");
       await loadRules();
     } catch (err) {
@@ -306,7 +307,7 @@ export default function MixSafetySection() {
     reason: rule.reason,
     source: rule.source || "",
     jarTestRequired: rule.jarTestRequired,
-    updatedAt: rule.updatedAt,
+    version: rule.version,
   });
 
   return (

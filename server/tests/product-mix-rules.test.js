@@ -108,7 +108,7 @@ describe('checkMix', () => {
     mockTables.product_mix_rules.push(rule(5, { product_a_id: SPEEDZONE.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.' }));
     const pair = (await mix.checkMix([DEMAND.id, SPEEDZONE.id])).pairs[0];
     expect(pair).toMatchObject({ verdict: 'ok', reason: 'Owner checked.' });
-    expect(pair.entries.map((e) => e.kind)).toEqual(['pair', 'catalog', 'catalog']);
+    expect(pair.entries.map((e) => e.kind)).toEqual(['pair', 'catalog_note', 'catalog_note']);
   });
 
   test('an id that is not a product never throws: it is listed as not found and its pairs read unknown', async () => {
@@ -215,6 +215,18 @@ test('a category naming fertilizer (Micronutrient Fertilizer) is in the fertiliz
   const SEQUESTAR = { id: id(14), name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient', category: 'Micronutrient Fertilizer' };
   mockTables.products_catalog.push(SEQUESTAR);
   expect((await mix.checkMix([SEQUESTAR.id, CELSIUS.id])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not tank mix Celsius with fertilizer.' });
+});
+
+test('under a pair rule a catalog note is an older note, never a second verdict: Celsius + 90/10', async () => {
+  const NIS = { id: id(15), name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' };
+  mockTables.products_catalog = mockTables.products_catalog.map((p) => (p === CELSIUS ? { ...CELSIUS, compatibility_notes: 'Requires NIS surfactant. Do NOT tank-mix with fertilizer.' } : p));
+  mockTables.products_catalog.push(NIS);
+  mockTables.product_mix_rules.push(rule(12, { product_a_id: CELSIUS.id, product_b_id: NIS.id, verdict: 'caution', reason: 'Approved weed mix. In February and June to September, spray Celsius alone: no surfactant.' }));
+  const pair = (await mix.checkMix([NIS.id, CELSIUS.id])).pairs[0];
+  expect(pair).toMatchObject({ verdict: 'caution', reason: 'Approved weed mix. In February and June to September, spray Celsius alone: no surfactant.' });
+  expect(pair.entries.slice(1)).toEqual([expect.objectContaining({
+    kind: 'catalog_note', verdict: null, reason: 'Catalog note (older): Celsius WG label note: Requires NIS surfactant. Do NOT tank-mix with fertilizer.',
+  })]);
 });
 
 describe('the headline entry', () => {

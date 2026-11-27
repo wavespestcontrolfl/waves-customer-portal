@@ -23,6 +23,7 @@ jest.mock('../services/audit-log', () => ({
 beforeAll(() => { jest.spyOn(console, 'log').mockImplementation(() => {}); });
 
 const migration = require('../models/migrations/20261127143000_product_mix_rules');
+const versionMigration = require('../models/migrations/20261127170000_product_mix_rules_version_and_prefix');
 const mix = require('../services/product-mix-rules');
 
 (SKIP ? describe.skip : describe)('product_mix_rules (real PG)', () => {
@@ -66,6 +67,7 @@ const mix = require('../services/product-mix-rules');
       ids[key] = inserted.id;
     }
     await migration.up(mockTrx);
+    await versionMigration.up(mockTrx);
   });
 
   afterEach(async () => { await mockTrx.rollback(); mockTrx = null; mockAudit.fail = false; mockAudit.events = []; });
@@ -107,13 +109,13 @@ const mix = require('../services/product-mix-rules');
   test('upsert keeps one row per pair, reactivates a removed rule, and a removed rule stops answering', async () => {
     const created = await mix.upsertRule({ productAId: ids.fert, productBId: ids.copper, verdict: 'caution', reason: 'Jar test first.', jarTestRequired: true });
     expect((await mix.checkMix([ids.copper, ids.fert])).pairs[0]).toMatchObject({ verdict: 'caution', jarTestRequired: true });
-    await mix.deactivateRule(created.id);
+    await mix.deactivateRule(created.id, { version: created.version });
     expect((await mix.checkMix([ids.copper, ids.fert])).pairs[0].verdict).toBe('unknown');
     expect((await mix.listRules()).some((r) => r.id === created.id)).toBe(false);
     const again = await mix.upsertRule({ productAId: ids.copper, productBId: ids.fert, verdict: 'never', reason: 'Owner said no.' });
     expect(again.id).toBe(created.id);
     expect(again).toMatchObject({ verdict: 'never', active: true });
-    await expect(mix.upsertRule({ productAId: ids.celsius, productBId: ids.certainty, verdict: 'ok', reason: 'x', updatedAt: again.updatedAt }, { id: created.id }))
+    await expect(mix.upsertRule({ productAId: ids.celsius, productBId: ids.certainty, verdict: 'ok', reason: 'x', version: again.version }, { id: created.id }))
       .rejects.toMatchObject({ statusCode: 409 });
   });
   test('the label fields are read: allows_surfactant = false and a typed irac_group', async () => {
@@ -139,35 +141,60 @@ const mix = require('../services/product-mix-rules');
     await expect(mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'never', reason: 'x' })).rejects.toThrow('audit_log write failed');
     expect(await mockTrx('product_mix_rules').where({ product_a_id: ids.copper, group_b: 'fertilizer' })).toHaveLength(0);
     const seeded = await mockTrx('product_mix_rules').where({ product_a_id: ids.tetrino, group_b: 'any' }).first();
-    await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x', updatedAt: seeded.updated_at }, { id: seeded.id })).rejects.toThrow('audit_log write failed');
-    await expect(mix.deactivateRule(seeded.id)).rejects.toThrow('audit_log write failed');
+    await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x', version: seeded.version }, { id: seeded.id })).rejects.toThrow('audit_log write failed');
+    await expect(mix.deactivateRule(seeded.id, { version: seeded.version })).rejects.toThrow('audit_log write failed');
     expect(await mockTrx('product_mix_rules').where({ id: seeded.id }).first()).toMatchObject({ verdict: 'never', active: true });
   });
 
   test('saving an edit of a rule removed meanwhile is a 409 and does not bring it back', async () => {
     const tetrino = await mockTrx('product_mix_rules').where({ product_a_id: ids.tetrino, group_b: 'any' }).first();
-    await mix.deactivateRule(tetrino.id);
-    await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x', updatedAt: tetrino.updated_at }, { id: tetrino.id }))
+    await mix.deactivateRule(tetrino.id, { version: tetrino.version });
+    // Even with the version the remove left, an edit never brings a removed rule back.
+    await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x', version: tetrino.version + 1 }, { id: tetrino.id }))
       .rejects.toMatchObject({ statusCode: 409 });
     expect(await mockTrx('product_mix_rules').where({ id: tetrino.id }).first()).toMatchObject({ active: false, verdict: 'never' });
   });
 
   test('an edit onto another row\'s product + group target is a 409', async () => {
     const tetrino = await mockTrx('product_mix_rules').where({ product_a_id: ids.tetrino, group_b: 'any' }).first();
-    await expect(mix.upsertRule({ productAId: ids.celsius, groupB: 'fertilizer', verdict: 'ok', reason: 'x', updatedAt: tetrino.updated_at }, { id: tetrino.id }))
+    await expect(mix.upsertRule({ productAId: ids.celsius, groupB: 'fertilizer', verdict: 'ok', reason: 'x', version: tetrino.version }, { id: tetrino.id }))
       .rejects.toMatchObject({ statusCode: 409, message: 'A rule for this pair already exists. Edit that one.' });
   });
 
-  test('a save from a form loaded before the rule changed is a 409 and keeps the newer verdict; a current save works', async () => {
+  test('every write adds 1 to version; a save or remove from an older screen is a 409, even right after another write', async () => {
     const loaded = (await mix.listRules()).find((r) => r.productAId === ids.tetrino && r.groupB === 'any');
-    // Another admin saves first: the row's version moves on.
-    await mockTrx('product_mix_rules').where({ id: loaded.id }).update({ verdict: 'never', reason: 'Newer.', updated_at: mockTrx.raw("updated_at + interval '1 second'") });
-    const edit = { productAId: ids.tetrino, groupB: 'any', verdict: 'caution', reason: 'Older form.' };
-    await expect(mix.upsertRule({ ...edit, updatedAt: loaded.updatedAt }, { id: loaded.id })).rejects.toMatchObject({ statusCode: 409, message: 'This rule changed. Reload it.' });
-    expect(await mockTrx('product_mix_rules').where({ id: loaded.id }).first()).toMatchObject({ reason: 'Newer.' });
+    expect(loaded.version).toBe(1);
+    const edit = { productAId: ids.tetrino, groupB: 'any', verdict: 'never', reason: 'Newer.' };
+    // Another admin saves first, in the same instant (one transaction: the same now()), so only the counter tells them apart.
+    const newer = await mix.upsertRule({ ...edit, version: loaded.version }, { id: loaded.id });
+    expect(newer).toMatchObject({ version: 2, updatedAt: loaded.updatedAt });
+    await expect(mix.upsertRule({ ...edit, reason: 'Older form.', version: loaded.version }, { id: loaded.id }))
+      .rejects.toMatchObject({ statusCode: 409, message: 'This rule changed. Reload it.' });
+    await expect(mix.deactivateRule(loaded.id, { version: loaded.version })).rejects.toMatchObject({ statusCode: 409 });
+    expect(await mockTrx('product_mix_rules').where({ id: loaded.id }).first()).toMatchObject({ reason: 'Newer.', active: true, version: 2 });
     await expect(mix.upsertRule(edit, { id: loaded.id })).rejects.toMatchObject({ statusCode: 400 });
-    const fresh = (await mix.listRules()).find((r) => r.id === loaded.id);
-    await expect(mix.upsertRule({ ...edit, updatedAt: fresh.updatedAt }, { id: loaded.id })).resolves.toMatchObject({ reason: 'Older form.' });
+    await expect(mix.deactivateRule(loaded.id, {})).rejects.toMatchObject({ statusCode: 400 });
+    await expect(mix.deactivateRule(loaded.id, { version: 2 })).resolves.toMatchObject({ active: false, version: 3 });
+    const again = await mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'never', reason: 'Back.' });
+    expect(again.version).toBe(4);
+  });
+
+  test('migration 20261127170000 applies the caution fix when a name matches only by prefix, once, and down() reverses it', async () => {
+    const fix = require('../models/migrations/20261127160000_product_mix_rules_certainty_nis_caution');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    mockAudit.events = [];
+    const [a, b] = [ids.certainty, ids.nis].sort();
+    const row = () => mockTrx('product_mix_rules').where({ product_a_id: a, product_b_id: b }).first();
+    await mockTrx('products_catalog').where({ id: ids.certainty }).update({ name: 'Certainty Turf Herbicide 1.25 oz' });
+    await fix.up(mockTrx);
+    expect(await row()).toMatchObject({ verdict: 'ok' });
+    await versionMigration.up(mockTrx);
+    expect(await row()).toMatchObject({ verdict: 'caution', reason: 'Card leaves both out in February and June to September', version: 2 });
+    await versionMigration.up(mockTrx);
+    expect(mockAudit.events.map((e) => e.action)).toEqual(['migration:20261127170000_product_mix_rules_version_and_prefix:up']);
+    await versionMigration.down(mockTrx);
+    expect(await row()).toMatchObject({ verdict: 'ok', reason: 'Both go in the Celsius weed mix.' });
+    expect(await mockTrx.schema.hasColumn('product_mix_rules', 'version')).toBe(false);
   });
 
   test('migration 20261127160000 makes Certainty + 90/10 caution once, keeps an admin edit, and down() reverses it', async () => {

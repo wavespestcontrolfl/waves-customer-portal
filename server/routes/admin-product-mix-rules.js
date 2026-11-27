@@ -47,10 +47,11 @@ router.put('/:id', requireAdmin, async (req, res, next) => {
   } catch (err) { sendError(res, next, err); }
 });
 
-// DELETE /api/admin/product-mix-rules/:id — remove from the screen (soft: active = false).
+// DELETE /api/admin/product-mix-rules/:id?version=N — remove from the screen (soft: active = false). N is the rule's
+// version as the list showed it; a stale Remove is a 409.
 router.delete('/:id', requireAdmin, async (req, res, next) => {
   try {
-    const rule = await mixRules.deactivateRule(req.params.id, { actorId: req.technicianId });
+    const rule = await mixRules.deactivateRule(req.params.id, { actorId: req.technicianId, version: req.query.version });
     if (!rule) return res.status(404).json({ error: 'Rule not found' });
     return res.json({ rule });
   } catch (err) { return sendError(res, next, err); }

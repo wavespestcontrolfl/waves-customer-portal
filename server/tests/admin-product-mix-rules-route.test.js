@@ -154,7 +154,7 @@ describe('an admin', () => {
   });
 
   test('edit of a rule that does not exist is a 404', async () => {
-    expect((await call('put', '/api/admin/product-mix-rules/00000000-0000-4000-8000-0000000000ff', { ...good, updatedAt: '2026-11-27T12:00:00.000Z' })).status).toBe(404);
+    expect((await call('put', '/api/admin/product-mix-rules/00000000-0000-4000-8000-0000000000ff', { ...good, version: 1 })).status).toBe(404);
   });
 
   test('an edit without the version the form loaded is a 400 and writes nothing', async () => {

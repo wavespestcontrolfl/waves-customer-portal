@@ -150,3 +150,23 @@ describe('20261127160000_product_mix_rules_certainty_nis_caution', () => {
     expect(knex).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127170000_product_mix_rules_version_and_prefix', () => {
+  const fix = require('../models/migrations/20261127170000_product_mix_rules_version_and_prefix');
+
+  test('adds an integer version (default 1) and repeats the caution fix for prefix-matched names', () => {
+    const text = fs.readFileSync(path.join(__dirname, '..', 'models', 'migrations', '20261127170000_product_mix_rules_version_and_prefix.js'), 'utf8');
+    expect(text).toContain("t.integer('version').notNullable().defaultTo(1)");
+    expect(text).toContain("'ilike'");
+    expect(fix._AFTER).toEqual({ verdict: 'caution', reason: 'Card leaves both out in February and June to September' });
+    expect(`migration:${fix._MIGRATION}:down`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false), hasColumn: jest.fn(async () => false), alterTable: jest.fn() };
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex.schema.alterTable).not.toHaveBeenCalled();
+  });
+});

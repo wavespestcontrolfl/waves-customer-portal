@@ -96,7 +96,7 @@ describe("MixSafetySection", () => {
   });
 
   it("an edit sends the version it loaded, and a stale save shows the server's reload message", async () => {
-    const rules = LIST.rules.map((r) => ({ ...r, updatedAt: "2026-11-27T12:00:00.000Z" }));
+    const rules = LIST.rules.map((r) => ({ ...r, version: 3 }));
     fetch.mockImplementation(async (url, opts = {}) => {
       if (opts.method === "PUT") return respond({ error: "This rule changed. Reload it." }, false);
       return respond({ ...LIST, rules });
@@ -108,7 +108,32 @@ describe("MixSafetySection", () => {
     await waitFor(() => expect(screen.getByText("This rule changed. Reload it.")).toBeInTheDocument());
     const put = fetch.mock.calls.find(([, opts]) => opts?.method === "PUT");
     expect(put[0]).toBe("/api/admin/product-mix-rules/r1");
-    expect(JSON.parse(put[1].body)).toMatchObject({ updatedAt: "2026-11-27T12:00:00.000Z", groupB: "fertilizer", verdict: "never" });
+    expect(JSON.parse(put[1].body)).toMatchObject({ version: 3, groupB: "fertilizer", verdict: "never" });
+  });
+
+  it("Remove sends the version the list showed, and a stale Remove shows the reload message", async () => {
+    const rules = LIST.rules.map((r) => ({ ...r, version: 7 }));
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === "DELETE") return respond({ error: "This rule changed. Reload it." }, false);
+      return respond({ ...LIST, rules });
+    });
+    render(<MixSafetySection />);
+    const table = await screen.findByRole("table", { name: "Mix safety rules" });
+    fireEvent.click(within(within(table).getAllByRole("row")[2]).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(screen.getByText("This rule changed. Reload it.")).toBeInTheDocument());
+    expect(fetch.mock.calls.find(([, opts]) => opts?.method === "DELETE")[0]).toBe("/api/admin/product-mix-rules/r2?version=7");
+  });
+
+  it("an older catalog note under a pair rule shows without a verdict word", async () => {
+    const check = { pairs: [{ ...CHECK.pairs[0], entries: [CHECK.pairs[0].entries[0], { kind: "catalog_note", verdict: null, reason: "Catalog note (older): Celsius WG label note: Requires NIS surfactant." }] }] };
+    fetch.mockImplementation(async (url) => respond(String(url).includes("/check?") ? check : LIST));
+    render(<MixSafetySection />);
+    await screen.findByRole("table", { name: "Mix safety rules" });
+    fireEvent.change(screen.getByLabelText("Tank product 1"), { target: { value: CELSIUS.id } });
+    fireEvent.change(screen.getByLabelText("Tank product 2"), { target: { value: CERTAINTY.id } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    const result = await screen.findByRole("list", { name: "Tank check result" });
+    expect(within(result).getByText("Catalog note (older): Celsius WG label note: Requires NIS surfactant.")).toBeInTheDocument();
   });
 
   it("allows up to 5 tank products", async () => {
