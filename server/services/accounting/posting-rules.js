@@ -563,6 +563,52 @@ function buildCustomerCreditEntry({
 }
 
 /**
+ * 4f. Estimate Deposit Credit Restored on Full Invoice Refund.
+ *     When a fully refunded invoice had consumed an estimate deposit, returnAppliedCreditOnRefund()
+ *     restores that deposit back to available credit while keeping the original deposit_credit line
+ *     items on the invoice. Posts an accrual-only adjusting entry that reverses earned revenue
+ *     (and any deposit-funded sales tax uncovered by billed cash principal) and restores 2300.
+ */
+function buildDepositRestoreOnRefundEntry({
+  invoiceId,
+  invoiceNumber = null,
+  restoreDate,
+  allowanceCents = 0,
+  taxCents = 0,
+  customerId = null,
+  serviceLine = null,
+  memo = null,
+}) {
+  const allowance = posInt(allowanceCents, 'allowanceCents');
+  const tax = posInt(taxCents, 'taxCents');
+  const total = allowance + tax;
+  if (total <= 0) throw new AccountingError(400, 'Restored deposit total must be > 0');
+
+  const invoiceRef = String(invoiceId);
+  const meta = { customerId, serviceLine, invoiceRef };
+  const lines = [];
+  if (allowance > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, debitCents: allowance, creditCents: 0, ...meta });
+  }
+  if (tax > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: tax, creditCents: 0, ...meta });
+  }
+  lines.push({ accountCode: SYSTEM_CODES.UNEARNED_REVENUE, debitCents: 0, creditCents: total, ...meta });
+
+  return {
+    entryDate: restoreDate,
+    entryType: 'adjusting',
+    basisScope: 'accrual_only',
+    sourceType: 'refund_deposit_restore',
+    sourceId: invoiceRef,
+    idempotencyKey: `refund-deposit-restore:${invoiceId}`,
+    reference: invoiceNumber || invoiceRef,
+    memo: memo || `Estimate deposit restored on refunded invoice ${invoiceNumber || invoiceId}`,
+    lines,
+  };
+}
+
+/**
  * 4c. Refund of an unused customer deposit (reverses 2300 Unearned Revenue + 4085 Surcharge
  *     instead of 4090 Refunds & Allowances, so accrual revenue is unaffected).
  */
@@ -1165,6 +1211,7 @@ module.exports = {
   buildRefundReversalEntry,
   buildDepositRefundEntry,
   buildDepositRefundReversalEntry,
+  buildDepositRestoreOnRefundEntry,
   buildDisputeWithdrawalEntry,
   buildDisputeReinstatementEntry,
   buildCustomerCreditEntry,

@@ -58,6 +58,7 @@ const {
   allocateCumulativePayrollSettlement,
   summarizeSalesTaxLines,
   summarize1099VendorLines,
+  get1099VendorSummary,
   summarizeBalanceSheetKpis,
 } = require('../services/accounting/statements');
 const {
@@ -90,6 +91,7 @@ const {
   extractStripeDisputeTokens,
   buildExpenseSplits,
   buildInvoiceGlPayload,
+  buildRefundedDepositRestorePayload,
   buildInvoiceDeltaEntry,
   resolveBankTxnGlAccount,
   classifyTaxFilingSettlement,
@@ -2347,5 +2349,169 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
       .toEqual({ action: 'clear', vendorId: null });
     expect(decideExpenseVendorAction({ expVendorName: '', existingVendorId: vA, matchedActiveVendor: null, vendorById }))
       .toEqual({ action: 'keep', vendorId: vA });
+  });
+
+  test('Codex R7: refunded deposit-credited invoices restore 2300 liability and 1099 reversals preserve card/platform exclusions', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // 1. Non-taxable $300 invoice funded by $100 estimate deposit + $200 cash, then fully refunded
+    const depInv = {
+      id: 'inv-dep-ref-1',
+      invoice_number: 'WPC-DEP-1',
+      status: 'refunded',
+      subtotal: '300.00',
+      discount_amount: '0',
+      tax_amount: '0',
+      total: '200.00',
+      credit_applied: '0',
+      line_items: [
+        { description: 'Termite treatment', amount: 300 },
+        { description: 'Estimate deposit applied', category: 'deposit_credit', amount: -100 },
+      ],
+      service_type: 'termite',
+      service_date: '2026-11-01',
+      updated_at: '2026-11-08T15:00:00Z',
+      property_type: 'single_family',
+    };
+    const invJe = buildInvoiceGlPayload(depInv, new Set());
+    const depRestoreJe = buildRefundedDepositRestorePayload(depInv, new Set());
+    expect(depRestoreJe).not.toBeNull();
+    expect(depRestoreJe.idempotencyKey).toBe('refund-deposit-restore:inv-dep-ref-1');
+    expect(depRestoreJe.basisScope).toBe('accrual_only');
+    expect(depRestoreJe.entryDate).toBe('2026-11-08');
+
+    const depCycle = accumulateEntries(accounts, [
+      rules.buildPaymentEntry({ paymentId: 'dep-100', paymentDate: '2026-10-20', grossCents: 10000, method: 'stripe', isDeposit: true }),
+      invJe,
+      rules.buildPaymentEntry({ paymentId: 'pay-200', paymentDate: '2026-11-02', grossCents: 20000, method: 'stripe', invoiceId: 'inv-dep-ref-1' }),
+      rules.buildRefundEntry({ refundId: 'ref-200', refundDate: '2026-11-08', subtotalCents: 20000, taxCents: 0, method: 'stripe', invoiceId: 'inv-dep-ref-1' }),
+      depRestoreJe,
+    ]);
+    expect(bal(depCycle, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(depCycle, SYSTEM_CODES.STRIPE_CLEARING)).toBe(10000);
+    expect(bal(depCycle, SYSTEM_CODES.UNEARNED_REVENUE)).toBe(10000);
+    expect(bal(depCycle, SYSTEM_CODES.REV_TERMITE_PROJECTS) - bal(depCycle, SYSTEM_CODES.REV_REFUNDS_ALLOWANCES)).toBe(0);
+
+    // Paid (non-refunded) invoice produces no deposit restoration entry
+    expect(buildRefundedDepositRestorePayload({ ...depInv, status: 'paid' }, new Set())).toBeNull();
+
+    // Taxable $107 invoice ($100 + $7 tax) funded by $105 deposit + $2 cash: deposit restore clears remaining $5 sales tax
+    const taxDepInv = {
+      ...depInv,
+      id: 'inv-dep-ref-tax',
+      invoice_number: 'WPC-DEP-TAX',
+      subtotal: '100.00',
+      tax_amount: '7.00',
+      total: '2.00',
+      line_items: [
+        { description: 'Commercial service', amount: 100 },
+        { description: 'Estimate deposit applied', category: 'deposit_credit', amount: -105 },
+      ],
+      service_type: 'commercial',
+      property_type: 'commercial',
+    };
+    const taxDepRestore = buildRefundedDepositRestorePayload(taxDepInv, new Set());
+    const cashRefundTax = computeProratedRefundTaxCents(200, taxDepInv, '2.00');
+    expect(cashRefundTax).toBe(200);
+    const taxDepCycle = accumulateEntries(accounts, [
+      rules.buildPaymentEntry({ paymentId: 'dep-105', paymentDate: '2026-10-20', grossCents: 10500, method: 'stripe', isDeposit: true }),
+      buildInvoiceGlPayload(taxDepInv, new Set()),
+      rules.buildPaymentEntry({ paymentId: 'pay-2', paymentDate: '2026-11-02', grossCents: 200, method: 'stripe', invoiceId: 'inv-dep-ref-tax' }),
+      rules.buildRefundEntry({ refundId: 'ref-2', refundDate: '2026-11-08', subtotalCents: 200 - cashRefundTax, taxCents: cashRefundTax, method: 'stripe', invoiceId: 'inv-dep-ref-tax' }),
+      taxDepRestore,
+    ]);
+    expect(bal(taxDepCycle, SYSTEM_CODES.SALES_TAX_PAYABLE)).toBe(0);
+    expect(bal(taxDepCycle, SYSTEM_CODES.UNEARNED_REVENUE)).toBe(10500);
+    expect(bal(taxDepCycle, SYSTEM_CODES.REV_COMMERCIAL_PEST) - bal(taxDepCycle, SYSTEM_CODES.REV_REFUNDS_ALLOWANCES)).toBe(0);
+
+    // Annual prepay invoice with $100 deposit and $0 recognized leaves 2300 intact (no double-credit);
+    // once $100+ is recognized into revenue, deposit restore re-credits 2300
+    const prepayDepInv = { ...depInv, id: 'inv-prepay-dep', annual_prepay_term_id: 'term-dep-1' };
+    expect(buildRefundedDepositRestorePayload(prepayDepInv, new Set(), { recognizedUnearnedCents: 0 })).toBeNull();
+    const prepayDepRestore = buildRefundedDepositRestorePayload(prepayDepInv, new Set(), { recognizedUnearnedCents: 25000 });
+    expect(validateJournalEntryInput(prepayDepRestore).totalCents).toBe(10000);
+
+    // End-to-end dryRun sync previews BOTH the invoice entry and the deposit restoration entry
+    const syncConn = (table) => {
+      const chain = {
+        leftJoin: () => chain,
+        join: () => chain,
+        where: () => chain,
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'invoices as i') return Promise.resolve([depInv]);
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    syncConn.raw = (sql) => sql;
+    syncConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const syncRes = await syncSubledgersToGl({ fromDate: '2026-11-01', toDate: '2026-11-30', dryRun: true, conn: syncConn });
+    expect(syncRes.invoices.would_post).toBe(2);
+    expect(syncRes.invoices.errors).toEqual([]);
+
+    // 2. 1099-NEC reversals preserve credit-card and platform exclusions (never subtract card reversal from ACH payments)
+    const rawSnippets = [];
+    const mock1099Conn = () => {
+      const chain = {
+        join: () => chain,
+        leftJoin: () => chain,
+        where: () => chain,
+        whereBetween: () => chain,
+        whereIn: () => chain,
+        whereNull: () => chain,
+        orderBy: () => chain,
+        select: (...cols) => {
+          for (const c of cols) if (typeof c === 'string') rawSnippets.push(c);
+          return Promise.resolve([]);
+        },
+      };
+      return chain;
+    };
+    mock1099Conn.raw = (sql) => {
+      rawSnippets.push(sql);
+      return sql;
+    };
+    await get1099VendorSummary({ year: 2026, conn: mock1099Conn });
+    expect(rawSnippets.some((s) => s.includes('e.reverses_entry_id') && s.includes("ca.sub_type = 'credit_card'"))).toBe(true);
+    expect(rawSnippets.some((s) => s.includes('cl.debit_cents > 0'))).toBe(true);
+    expect(rawSnippets).toContain('close_orig.memo as original_entry_memo');
+
+    const rev1099 = summarize1099VendorLines(
+      [
+        { vendor_id: 'v1', display_name: 'Contractor A', entity_type: 'sole_prop', w9_received_at: '2026-01-05', entry_id: 'e-card', entry_type: 'operational', payment_method: null, debit_cents: 100000, credit_cents: 0, paid_by_credit_card: true },
+        { vendor_id: 'v1', display_name: 'Contractor A', entity_type: 'sole_prop', w9_received_at: '2026-01-05', entry_id: 'e-card-rev', entry_type: 'reversal', payment_method: null, debit_cents: 0, credit_cents: 100000, paid_by_credit_card: true },
+        { vendor_id: 'v1', display_name: 'Contractor A', entity_type: 'sole_prop', w9_received_at: '2026-01-05', entry_id: 'e-upwork', entry_type: 'operational', payment_method: null, entry_memo: 'Upwork contract', debit_cents: 50000, credit_cents: 0, paid_by_credit_card: false },
+        { vendor_id: 'v1', display_name: 'Contractor A', entity_type: 'sole_prop', w9_received_at: '2026-01-05', entry_id: 'e-upwork-rev', entry_type: 'reversal', payment_method: null, entry_memo: 'Reversal of JE #10', original_entry_memo: 'Upwork contract', debit_cents: 0, credit_cents: 50000, paid_by_credit_card: false },
+        { vendor_id: 'v1', display_name: 'Contractor A', entity_type: 'sole_prop', w9_received_at: '2026-01-05', entry_id: 'e-ach', entry_type: 'operational', payment_method: 'ach', debit_cents: 300000, credit_cents: 0, paid_by_credit_card: false },
+      ],
+      [],
+      200000,
+    );
+    expect(rev1099.vendors).toHaveLength(1);
+    expect(rev1099.vendors[0].total_paid_cents).toBe(300000);
+    expect(rev1099.vendors[0].excluded_1099k_cents).toBe(0);
+    expect(rev1099.vendors[0].filing_required).toBe(true);
   });
 });

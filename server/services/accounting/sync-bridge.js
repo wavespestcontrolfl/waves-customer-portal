@@ -703,6 +703,44 @@ function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
   });
 }
 
+/**
+ * Pure: build the idempotent accrual-only deposit restoration JE when a fully refunded
+ * invoice had consumed an estimate deposit. returnAppliedCreditOnRefund() restores the
+ * deposit to available customer credit while leaving deposit_credit lines on the invoice,
+ * so we reverse earned revenue (and any deposit-funded sales tax uncovered by billed cash
+ * principal) and re-credit 2300 Unearned Revenue.
+ */
+function buildRefundedDepositRestorePayload(inv, prepayInvoiceIds, { recognizedUnearnedCents = 0 } = {}) {
+  if (String(inv?.status || '').trim().toLowerCase() !== 'refunded') return null;
+  if (inv.annual_prepay_covered_term_id) return null;
+  const depositCents = invoiceDepositCreditCents(inv);
+  if (depositCents <= 0) return null;
+  const restoreDate = timestampToEtDate(inv.updated_at) || invoiceIssueDate(inv);
+  if (!restoreDate) return null;
+
+  const principalCents = billedInvoicePrincipalCents(inv);
+  const taxCents = safeNonNegCents(inv.tax_amount);
+  const taxRestoreCents = Math.min(depositCents, Math.max(0, taxCents - principalCents));
+  const nonTaxDepositCents = depositCents - taxRestoreCents;
+  const isAnnualPrepay = Boolean(inv.annual_prepay_term_id || prepayInvoiceIds?.has(String(inv.id)));
+  const allowanceCents = isAnnualPrepay
+    ? Math.min(nonTaxDepositCents, Math.max(0, Math.trunc(Number(recognizedUnearnedCents) || 0)))
+    : nonTaxDepositCents;
+  if (allowanceCents + taxRestoreCents <= 0) return null;
+
+  const isCommercial = isCommercialProperty(inv.property_type);
+  const serviceLine = isCommercial ? 'commercial' : (inv.service_type || 'pest');
+  return rules.buildDepositRestoreOnRefundEntry({
+    invoiceId: inv.id,
+    invoiceNumber: inv.invoice_number,
+    restoreDate,
+    allowanceCents,
+    taxCents: taxRestoreCents,
+    customerId: inv.customer_id,
+    serviceLine,
+  });
+}
+
 async function loadBookedInvoiceState(conn, invoiceId) {
   const rows = await conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
@@ -745,7 +783,20 @@ async function reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx) {
   );
 }
 
-async function syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx) {
+async function syncRefundedInvoiceDepositRestore(trx, inv, prepayInvoiceIds, prepayTermByInvoiceId, ctx) {
+  if (String(inv?.status || '').trim().toLowerCase() !== 'refunded') return;
+  if (inv.annual_prepay_covered_term_id || invoiceDepositCreditCents(inv) <= 0) return;
+  const isAnnualPrepay = Boolean(inv.annual_prepay_term_id || prepayInvoiceIds.has(String(inv.id)));
+  const termId = inv.annual_prepay_term_id || prepayTermByInvoiceId?.get(String(inv.id)) || null;
+  const recognizedUnearnedCents = isAnnualPrepay && termId
+    ? await loadRecognizedUnearnedForTerm(trx, termId)
+    : 0;
+  const restoreEntry = buildRefundedDepositRestorePayload(inv, prepayInvoiceIds, { recognizedUnearnedCents });
+  if (!restoreEntry) return;
+  await postOrPreview(restoreEntry, ctx, 'invoices', { connOverride: trx });
+}
+
+async function syncSingleInvoiceRow(inv, prepayInvoiceIds, prepayTermByInvoiceId, ctx) {
   const desired = buildInvoiceGlPayload(inv, prepayInvoiceIds);
   const fallbackDate = invoiceIssueDate(inv);
   const updatedDate = timestampToEtDate(inv.updated_at);
@@ -758,17 +809,18 @@ async function syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx) {
 
     if (totalEntryCount === 0) {
       if (!desired) return;
-      await postOrPreview(desired, ctx, 'invoices', { connOverride: trx });
-      return;
+      const posted = await postOrPreview(desired, ctx, 'invoices', { connOverride: trx });
+      if (!posted) return;
+    } else if (adjDate) {
+      const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, totalEntryCount);
+      if (!adjEntry) {
+        ctx.stats.invoices.skipped += 1;
+      } else {
+        await postOrPreview(adjEntry, ctx, 'invoices', { isAdjustment: true, connOverride: trx });
+      }
     }
 
-    if (!adjDate) return;
-    const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, totalEntryCount);
-    if (!adjEntry) {
-      ctx.stats.invoices.skipped += 1;
-      return;
-    }
-    await postOrPreview(adjEntry, ctx, 'invoices', { isAdjustment: true, connOverride: trx });
+    await syncRefundedInvoiceDepositRestore(trx, inv, prepayInvoiceIds, prepayTermByInvoiceId, ctx);
   };
 
   if (ctx.dryRun) {
@@ -780,7 +832,7 @@ async function syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx) {
 
 async function reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements = false) {
   let q = conn('gl_journal_entries as e')
-    .join('invoices as i', conn.raw("(e.source_type = 'invoice' AND e.source_id = i.id::text) OR (e.source_type = 'unearned_recognition' AND e.source_id = 'covered-inv:' || i.id::text)"));
+    .join('invoices as i', conn.raw("(e.source_type IN ('invoice', 'refund_deposit_restore') AND e.source_id = i.id::text) OR (e.source_type = 'unearned_recognition' AND e.source_id = 'covered-inv:' || i.id::text)"));
   if (hasPayerStatements) q = q.leftJoin('payer_statements as ps', 'ps.id', 'i.payer_statement_id');
 
   const voided = await q
@@ -844,11 +896,16 @@ async function syncInvoices(conn, from, to, ctx) {
   ]);
 
   const prepayInvoiceIds = new Set();
+  const prepayTermByInvoiceId = new Map();
   if (hasPrepayTerms) {
     const termRows = await conn('annual_prepay_terms')
       .whereNotNull('prepay_invoice_id')
-      .select('prepay_invoice_id');
-    for (const t of termRows) prepayInvoiceIds.add(String(t.prepay_invoice_id));
+      .select('id', 'prepay_invoice_id');
+    for (const t of termRows) {
+      const k = String(t.prepay_invoice_id);
+      prepayInvoiceIds.add(k);
+      prepayTermByInvoiceId.set(k, t.id);
+    }
   }
 
   let q = conn('invoices as i').leftJoin('customers as c', 'c.id', 'i.customer_id');
@@ -917,6 +974,9 @@ async function syncInvoices(conn, from, to, ctx) {
                   .orWhereRaw("ge.source_type = 'unearned_recognition' AND ge.source_id = 'covered-inv:' || i.id::text");
               });
           });
+      }).orWhere((refundedInWin) => {
+        refundedInWin.where('i.status', 'refunded')
+          .whereRaw("DATE(i.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
       });
       if (hasPayerStatements) {
         win.orWhere((stmtWin) => {
@@ -940,7 +1000,7 @@ async function syncInvoices(conn, from, to, ctx) {
   for (const inv of nonTestRows) {
     const restoredCents = restoredCreditByInv.get(String(inv.id)) || 0;
     const enriched = restoredCents > 0 ? { ...inv, refund_restored_credit_cents: restoredCents } : inv;
-    await syncSingleInvoiceRow(enriched, prepayInvoiceIds, ctx);
+    await syncSingleInvoiceRow(enriched, prepayInvoiceIds, prepayTermByInvoiceId, ctx);
   }
 
   await reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements);
@@ -3653,6 +3713,7 @@ module.exports = {
   decideExpenseVendorAction,
   buildExpenseSplits,
   buildInvoiceGlPayload,
+  buildRefundedDepositRestorePayload,
   buildInvoiceDeltaEntry,
   timestampToUtcDate,
 };

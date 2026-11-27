@@ -933,7 +933,9 @@ function isSalesTaxRemittanceSource(sourceType, idempotencyKey) {
 }
 
 function isSalesTaxRefundSource(sourceType) {
-  return sourceType === 'refund' || sourceType === 'refund_reversal';
+  return sourceType === 'refund'
+    || sourceType === 'refund_reversal'
+    || sourceType === 'refund_deposit_restore';
 }
 
 /**
@@ -1041,7 +1043,7 @@ function isExcluded1099Payment(row) {
   if (row.paid_by_credit_card) return true;
   const rawMethod = String(row.payment_method || '').trim().toLowerCase();
   const normalizedMethod = (rawMethod === 'credit' || rawMethod === 'credit_card') ? 'card' : rawMethod;
-  const text = [row.line_memo, row.entry_memo, row.display_name].filter(Boolean).join(' ');
+  const text = [row.line_memo, row.entry_memo, row.original_entry_memo, row.display_name].filter(Boolean).join(' ');
   const channel = paymentChannel(normalizedMethod, text);
   return EXCLUDED_1099_CHANNELS.has(channel);
 }
@@ -1141,7 +1143,7 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
   const from = `${targetYear}-01-01`;
   const to = `${targetYear}-12-31`;
   const creditCardExistsRaw = conn.raw(
-    "EXISTS (SELECT 1 FROM gl_journal_lines cl JOIN gl_accounts ca ON ca.id = cl.account_id WHERE cl.entry_id = e.id AND cl.credit_cents > 0 AND ca.sub_type = 'credit_card') as paid_by_credit_card",
+    "EXISTS (SELECT 1 FROM gl_journal_lines cl JOIN gl_accounts ca ON ca.id = cl.account_id WHERE ca.sub_type = 'credit_card' AND ((cl.entry_id = e.id AND (cl.credit_cents > 0 OR cl.debit_cents > 0)) OR (e.reverses_entry_id IS NOT NULL AND cl.entry_id = e.reverses_entry_id AND (cl.credit_cents > 0 OR cl.debit_cents > 0)))) as paid_by_credit_card",
   );
 
   const [vendorLines, unlinkedLines] = await Promise.all([
@@ -1159,6 +1161,7 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
         'e.id as entry_id',
         'e.entry_type',
         'e.memo as entry_memo',
+        'close_orig.memo as original_entry_memo',
         'l.memo as line_memo',
         'l.payment_method',
         'l.debit_cents',
@@ -1187,6 +1190,7 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
         'e.entry_number',
         conn.raw('e.entry_date::text as entry_date'),
         'e.memo as entry_memo',
+        'close_orig.memo as original_entry_memo',
         'l.memo as line_memo',
         'l.payment_method',
         'l.debit_cents',
