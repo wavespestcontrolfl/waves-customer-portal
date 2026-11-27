@@ -28,6 +28,8 @@ const AMOUNT_BLOCK_NOTES = {
   payment_status_changed: 'The payment status this scheduled reply states no longer matches the account',
   payment_status_recheck_no_customer: 'This scheduled reply states a payment status but the customer could not be loaded',
   payment_status_recheck_failed: 'The payment-status recheck for this scheduled reply could not be completed',
+  report_delivery_changed: 'The service report delivery this scheduled reply states no longer matches the records',
+  report_delivery_recheck_failed: 'The service report delivery recheck for this scheduled reply could not be completed',
 };
 // The fire-time amount / Zelle / payment-status recheck for one claimed
 // scheduled reply (extracted from the send loop so the pre-screen and the
