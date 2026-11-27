@@ -190,21 +190,23 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'call_log_id');
-      // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. Decided ONCE per
-      // call: only the pass that first records this call's row for the number may list them, so a reprocess of the same call
-      // (whatever its new extraction says) never widens a "just this visit" answer. A row this call already wrote means the
-      // decision was made. ON CONFLICT DO NOTHING, so a later call never changes a listed person, never narrows one ("just this
-      // visit" removes nobody) and never clears a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
-      const callDecidedBefore = !callLogId || (existing && existing.call_log_id && String(existing.call_log_id) === String(callLogId));
-      if (!entry.thisVisitOnly && !callDecidedBefore) await trx.raw(
-        `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (customer_id, phone_key) DO NOTHING`,
-        [visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
-      );
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
       if (existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
       if (existing) await trx(TABLE).where({ id: existing.id }).del();
       await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
+      // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
+      // CREATES this visit's row for the number may list them: a reprocess of any call, or a second call about the same visit,
+      // finds the row and lists nobody, so no replay order can widen a "just this visit" answer (the cost: a later call that
+      // says "always" about a visit that already has the person adds nothing; a call about another visit does). ON CONFLICT DO
+      // NOTHING, so a call never changes a listed person, never narrows one ("just this visit" removes nobody) and never clears
+      // a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
+      if (!entry.thisVisitOnly) {
+        await trx.raw(
+          `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (customer_id, phone_key) DO NOTHING`,
+          [visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
+        );
+      }
       return 'created';
     });
     if (outcome === 'customer_mismatch') { result.skipped.push({ reason: 'customer_mismatch' }); continue; }

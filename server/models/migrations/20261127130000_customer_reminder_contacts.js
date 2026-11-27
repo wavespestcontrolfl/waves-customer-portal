@@ -44,5 +44,10 @@ exports.down = async function down(knex) {
   await knex.raw('LOCK TABLE customer_reminder_contacts IN ACCESS EXCLUSIVE MODE');
   const stop = await knex('customer_reminder_contacts').whereNotNull('stopped_at').first('id');
   if (stop) throw new Error('customer_reminder_contacts holds recorded stops; refusing to drop them (turn GATE_CALL_GIVEN_VISIT_TEXTS off and keep the stops first)');
+  // The list's copies go with it (the older per-visit code must not honor a person on visits the caller never named them
+  // for); rows a call recorded directly stay.
+  if (await knex.schema.hasTable('visit_text_recipients')) {
+    await knex('visit_text_recipients').where({ source: 'customer_reminder_contact' }).del();
+  }
   await knex.schema.dropTable('customer_reminder_contacts');
 };

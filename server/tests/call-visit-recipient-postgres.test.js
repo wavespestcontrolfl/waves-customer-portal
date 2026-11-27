@@ -557,19 +557,20 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(list[0].stopped_at).toBeNull();
       });
 
-      test('a reprocess of the SAME call never widens its "just this visit" answer; a later call can', async () => {
+      test('once a visit has the person, no reprocess and no second call about that visit lists them; a call about another visit can', async () => {
         await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
         const CARL = phone(61);
         await record({}, entry({ phone_e164: CARL, appointment_texts_scope: 'this_visit' }));
         await record({}, entry({ phone_e164: CARL }));
-        await record({}, entry({ phone_e164: CARL, appointment_texts_scope: 'ongoing' }));
-        expect(await listed()).toHaveLength(0);
         const [{ id: laterCall }] = await db('call_log').insert({ direction: 'inbound', from_phone: ANI, to_phone: OUR_LINE }).returning('id');
         try {
           await record({ callLogId: laterCall }, entry({ phone_e164: CARL, appointment_texts_scope: 'ongoing' }));
+          expect(await listed()).toHaveLength(0);
+          await record({ callLogId: laterCall, scheduledServiceId: otherVisitId }, entry({ phone_e164: CARL, appointment_texts_scope: 'ongoing' }));
           expect((await listed()).map((row) => row.phone_key)).toEqual([CARL.slice(-10)]);
         } finally {
           await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+          await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).del();
           await db('call_log').where({ id: laterCall }).del();
         }
       });
@@ -1386,7 +1387,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
       test('a row with NO customer_id (never bound) is ineligible: no text, no link', async () => {
         await db('scheduled_services').where({ id: visitId }).update({ track_token_expires_at: new Date(Date.now() + 86400000), status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
-        await record();
+        // a visit-only person (not on the every-visit list, which would replace the unbound row with a fresh copy)
+        await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await record({}, entry({ appointment_texts_scope: 'this_visit' }));
         const [{ id }] = await rows();
         const token = await VisitRecipient.ensureTrackToken(id, customerId);
         await db('visit_text_recipients').where({ id }).update({ customer_id: null });
