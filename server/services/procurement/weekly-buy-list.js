@@ -104,6 +104,9 @@ function addDemand(group, productId, qty, unit, reason) {
   held.reasons.add(reason);
 }
 
+// A visit that applies nothing: an inspection or an internal-only consultation (the close-out leaves no treatment for it).
+const isIdleVisit = (v) => v.internal_only === true || INSPECTION_SERVICE_RE.test(String(v.service_type || ''));
+
 // The forecast finds lawn visits by their service name (lawn, fertiliz, turf), so it can plan a visit this list does
 // not call a lawn visit ("Tree & Shrub Fertilization"). Lawn demand counts only for visits the close-out reads as lawn
 // (detectServiceLine); a visit the forecast planned that is not one is warned about on its list, not counted, so it
@@ -111,7 +114,8 @@ function addDemand(group, productId, qty, unit, reason) {
 function addLawnDemand(groups, visitById, forecast) {
   const groupOf = (serviceId) => {
     const visit = visitById.get(String(serviceId));
-    if (!visit) return null;
+    // An inspection matched into the forecast by its name leaves no treatment: it adds no demand and no warning.
+    if (!visit || isIdleVisit(visit)) return null;
     const g = groups.get(visit.groupKey);
     if (visit.line === 'lawn') return g;
     g.lawnMismatch.add(String(visit.id));
@@ -176,7 +180,7 @@ function deriveDemand({ visits, forecast, mix, kit }) {
 // nothing planned (counted, so the list never reads complete). A visit that applies nothing (an inspection, an
 // internal-only consultation) is not a gap.
 function addPlannedDemand(g, v, { line, mix, planned }) {
-  const idle = v.internal_only === true || INSPECTION_SERVICE_RE.test(String(v.service_type || ''));
+  const idle = isIdleVisit(v);
   if (line === 'lawn') {
     g.hasLawn = true;
     if (!planned && !idle) g.unplanned += 1;
@@ -232,14 +236,27 @@ function lineNotes(product, line) {
 // delivery in a form that gives no pack cost has NO cost here (the line is unpriced: the sticker price is never shown as the
 // full cost). A stated shipping + tax row is costed by calcLandedCost, as the comparison does for it; one that also has a
 // delivery or hazmat estimate on top reads "plus shipping".
+// A delivery charge the landed cost does NOT already hold: a hazmat fee, or a shipping estimate that is not the same figure
+// as the shipping_cost already in it (a manual quote stores one entered shipping in BOTH columns; the price-sync worker stores
+// only the estimate).
+function extraDelivery(row) {
+  const estimate = Number(row.shipping_estimate);
+  const inCost = row.shipping_cost != null && Number(row.shipping_cost) === estimate;
+  return Number(row.hazmat_fee_estimate) > 0 || (estimate > 0 && !inCost);
+}
+
 function packCostCents(row, price) {
   if (!row || !(price > 0)) return { cents: null, plusShipping: false };
   if (row.shipping_cost != null || row.tax_rate != null) {
     return {
       cents: Math.round(calcLandedCost(price, row.shipping_cost, row.tax_rate) * 100),
-      plusShipping: Number(row.shipping_estimate) > 0 || Number(row.hazmat_fee_estimate) > 0,
+      plusShipping: extraDelivery(row),
     };
   }
+  // A landed price needs its unit stated: a blank unit is neither "each" nor "oz" here (the comparison's own default of oz for a
+  // blank unit is not trusted), so such a row has no delivered cost.
+  const unit = String(row.unit_normalized ?? '').trim();
+  if (row.landed_unit_price != null && !unit) return { cents: null, plusShipping: false };
   const { scoreVendorRows, quantityToOz } = require('../../routes/admin-inventory');
   const oz = quantityToOz(row.quantity);
   // A pack sold by item count ("25 ea"): the comparison ranks it per item. The catalog's own container is this pack, so one
@@ -248,7 +265,7 @@ function packCostCents(row, price) {
   const carriesDelivery = ['landed_unit_price', 'shipping_estimate', 'hazmat_fee_estimate', 'rebate_estimate'].some((c) => row[c] != null);
   // A count row is resolved when a shipping rule or estimate was added, or it states a landed price per item (valid when its unit
   // is a count unit; equal to the sticker is valid: free delivery). Otherwise the per-item figure is only the sticker.
-  const landedPerItem = Number(row.landed_unit_price) > 0 && parsePackCount(`1 ${row.unit_normalized || ''}`) != null;
+  const landedPerItem = Number(row.landed_unit_price) > 0 && parsePackCount(`1 ${unit}`) != null;
   const delivered = oz > 0 ? scored.deliveredPerOz * oz : (scored.shipping != null || landedPerItem) && scored.rankPerUnit * (price / scored.perUnit);
   if (delivered > 0) return { cents: Math.round(delivered * 100), plusShipping: false };
   return { cents: carriesDelivery ? null : Math.round(price * 100), plusShipping: false };
@@ -422,9 +439,13 @@ function productForStore(product, store) {
   const storeWords = wordsOf(store);
   if (!storeWords.length) return product;
   const vendorId = product.catalogRow.auto_reorder_vendor_id;
-  const branchRows = product.pricingRows.filter((r) => (!vendorId || r.vendor_id === vendorId) && hasWordRun(storeWords, wordsOf(r.branch_name)));
+  // Store words beyond the branch name name a supplier ("SiteOne" in "SiteOne Sarasota"): such a store needs the row's vendor
+  // AND branch to match, so another vendor's "Sarasota" row never clears the note. A store of the branch name alone needs the branch.
+  const supplierNamed = (r) => hasWordRun(storeWords, wordsOf(r.vendor_name));
+  const namesSupplier = (r) => storeWords.length > wordsOf(r.branch_name).length;
+  const branchRows = product.pricingRows.filter((r) => (!vendorId || r.vendor_id === vendorId) && hasWordRun(storeWords, wordsOf(r.branch_name)) && (!namesSupplier(r) || supplierNamed(r)));
   if (!branchRows.length) return { ...product, otherBranch: true };
-  const supplierHit = (r) => (hasWordRun(storeWords, wordsOf(r.vendor_name)) ? 0 : 1);
+  const supplierHit = (r) => (supplierNamed(r) ? 0 : 1);
   const price = (r) => Number(r.price_amount ?? r.price) || Infinity;
   const row = [...branchRows].sort((a, b) => supplierHit(a) - supplierHit(b) || price(a) - price(b))[0];
   const picked = { row, vendorName: row.vendor_name, vendor: { code: row.vendor_code, name: row.vendor_name } };

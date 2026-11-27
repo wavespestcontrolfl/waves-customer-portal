@@ -73,6 +73,23 @@ describe('demand per technician', () => {
     visit('v3', 'a', 'Lawn Care Treatment'), visit('v4', 'b', 'Lawn Care Treatment'), visit('v5', 'b', 'Lawn Care Treatment'),
   ];
 
+  test('an inspection or internal-only visit the forecast matched by name adds no demand and no warning, before anything is accumulated', () => {
+    const forecast = {
+      serviceIds: ['i1', 'i2', 'l1'],
+      products: [{ productId: 'lawn-1', inventoryUnit: 'gal', appointments: [{ serviceId: 'i1', inventoryAmount: 2 }, { serviceId: 'i2', inventoryAmount: 3 }, { serviceId: 'l1', inventoryAmount: 1 }], mismatchAppointments: [{ serviceId: 'i1' }] }],
+      errors: [{ serviceId: 'i1', message: 'no plan' }], noUsablePlan: ['i2'], partialPlan: ['i1'], skippedNonProgram: [{ serviceId: 'i2' }],
+    };
+    const groups = deriveDemand({
+      visits: [visit('i1', 'a', 'Lawn Inspection'), visit('i2', 'a', 'Lawn Care Treatment', '2026-12-07', { internal_only: true }), visit('l1', 'a', 'Lawn Care Treatment')],
+      forecast, mix: noMix, kit: [],
+    });
+    const g = groups.get('a');
+    expect(g.demand.get('lawn-1')).toMatchObject({ qty: 1, unit: 'gal' }); // only the treatment
+    expect(g).toMatchObject({ lawnNoPlan: 0, lawnNoUsable: 0, lawnPartial: 0, unplanned: 0 });
+    expect(g.unitProblems.size).toBe(0);
+    expect(g.lawnMismatch.size).toBe(0);
+  });
+
   test('lawn: each forecast appointment lands on its visit\'s technician; a visit not booked is left out', () => {
     const groups = deriveDemand({ visits, forecast: lawnForecast, mix: noMix, kit: [] });
     expect(groups.get('a').demand.get('lawn-1')).toMatchObject({ qty: 1.5, unit: 'gal' });
@@ -351,6 +368,16 @@ describe('stock, packs and cost', () => {
       expect(packOf({ shipping_cost: '10', hazmat_fee_estimate: '5' })).toMatchObject({ packCents: 10000, plusShipping: true });
     });
 
+    test('"plus shipping" only for a delivery cost the total does not hold: a manual quote\'s duplicate fields, an estimate alone, a cost alone, two different figures', () => {
+      expect(packOf({ shipping_cost: '10', shipping_estimate: '10' })).toMatchObject({ packCents: 10000, plusShipping: false }); // one entered shipping, stored in both columns
+      expect(packOf({ shipping_cost: '10' })).toMatchObject({ packCents: 10000, plusShipping: false });
+      expect(packOf({ shipping_cost: '0', shipping_estimate: '0' })).toMatchObject({ packCents: 9000, plusShipping: false });
+      expect(packOf({ tax_rate: '0.1', shipping_estimate: '10' })).toMatchObject({ packCents: 9900, plusShipping: true }); // an estimate the price does not hold
+      expect(packOf({ shipping_cost: '10', shipping_estimate: '12' })).toMatchObject({ packCents: 10000, plusShipping: true });
+      // an estimate alone is added by the comparison's own delivered cost, so it is in the total
+      expect(packOf({ shipping_estimate: '10' })).toMatchObject({ packCents: 10000, plusShipping: false });
+    });
+
     test('a price-sync row with only a landed unit price (per ounce) costs the pack at that delivered price', () => {
       const row = { landed_unit_price: '0.8', unit_normalized: 'oz', normalized_unit_price: '0.703125', source_type: 'price_report' };
       expect(packOf(row)).toMatchObject({ packCents: 10240, plusShipping: false }); // 0.80 x 128 oz
@@ -394,6 +421,13 @@ describe('stock, packs and cost', () => {
       expect(listFor('Sarasota', rows).items[0]).toMatchObject({ estCostCents: 10000 });
     });
 
+    test('a store that names a supplier needs that vendor AND the branch: another vendor\'s row of the same branch keeps the note', () => {
+      const other = [rowOf({ vendor_id: 'v2', vendor_name: 'Other Supply', branch_name: 'Sarasota', price: '85', price_amount: '85', is_best_price: true })];
+      expect(listFor('SiteOne Sarasota', other).items[0]).toMatchObject({ otherBranch: true });
+      expect(listFor('SiteOne Sarasota', [...other, rowOf({ branch_name: 'Sarasota' })]).items[0]).toMatchObject({ otherBranch: false, estCostCents: 9000 });
+      expect(listFor('Sarasota', other).items[0]).toMatchObject({ otherBranch: false }); // the branch alone, no supplier named
+    });
+
     test('no match: the current pick, and the line says it is not from the store\'s branch', () => {
       const out = listFor('SiteOne Venice', rows);
       expect(out.items[0]).toMatchObject({ estCostCents: 8000, otherBranch: true });
@@ -407,8 +441,8 @@ describe('stock, packs and cost', () => {
 
     test('a branch row of another vendor than the product\'s set vendor is not used', () => {
       const own = { ...productOf(rows), catalogRow: { auto_reorder_vendor_id: 'v2' } };
-      const out = run(new Map([['a', group([['p1', demand(10)]])]]), [own], new Map([['a', { name: 'Alex Sample', supplyStore: 'SiteOne Sarasota' }]])).get('a');
-      expect(out.items[0]).toMatchObject({ estCostCents: 10000 }); // Other Supply's Sarasota row (85.00 + 15.00 estimate), not SiteOne's 95.00
+      const out = run(new Map([['a', group([['p1', demand(10)]])]]), [own], new Map([['a', { name: 'Alex Sample', supplyStore: 'Sarasota' }]])).get('a');
+      expect(out.items[0]).toMatchObject({ estCostCents: 10000, otherBranch: false }); // Other Supply's Sarasota row (85.00 + 15.00 estimate), not SiteOne's
     });
   });
 
@@ -425,6 +459,10 @@ describe('stock, packs and cost', () => {
       expect(countPack({ shipping_estimate: '10' }).packCents).toBe(6000);
       expect(countPack({ landed_unit_price: '2.4', unit_normalized: 'lot', source_type: 'price_report' }).packCents).toBeNull();
       expect(countPack({}).packCents).toBe(5000);
+      // a landed price needs its unit stated: blank is neither "each" nor "oz"
+      for (const unit_normalized of [null, '', '  ']) {
+        expect(countPack({ landed_unit_price: '2', unit_normalized, source_type: 'price_report' }).packCents).toBeNull();
+      }
       // free delivery: a landed per-item price equal to the sticker per-item price (50 / 25) is a valid quote, not an unknown
       expect(countPack({ landed_unit_price: '2', unit_normalized: 'each', source_type: 'price_report' }).packCents).toBe(5000);
     });
