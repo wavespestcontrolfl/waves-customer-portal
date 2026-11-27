@@ -30,8 +30,6 @@ const YESTERDAY = new Date(DAY_START.getTime() - 60 * 60 * 1000);
 const EARLIER_TODAY = new Date(DAY_START.getTime() + 1000);
 const MONTH_START = startOfETMonth(NOW);
 const LAST_MONTH = new Date(MONTH_START.getTime() - 60 * 60 * 1000);
-// "This month, before today": the month's first moment (the run that parks it sees it as an earlier day).
-const THIS_MONTH_EARLIER = new Date(Math.min(MONTH_START.getTime() + 1000, YESTERDAY.getTime()));
 const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 
 jest.setTimeout(60000);
@@ -81,7 +79,7 @@ jest.setTimeout(60000);
       [row] = await mockConn('vendor_orders').insert({
         restock_request_id: request.id, adapter: 'stickermule', vendor_id: vendor.id, status: ledger.status || 'needs_review', error: `${reason}: parked`,
         amount_cents: ledger.amount ?? null, placed_at: ledger.placedAt || null, created_at: ledger.createdAt || at, updated_at: at,
-        evidence: JSON.stringify({ bell: { title: 'Auto-order needs review: x', body: 'order manually', v }, ...(bell ? { bellAt: at.toISOString() } : {}) }),
+        evidence: JSON.stringify({ bell: { title: 'Auto-order needs review: x', body: 'The robot will try again', v }, ...(ledger.mark === false ? {} : { retryMark: 'v1' }), ...(bell ? { bellAt: at.toISOString() } : {}) }),
       }).returning('*');
       if (bell) {
         [note] = await mockConn('notifications').insert({
@@ -119,11 +117,32 @@ jest.setTimeout(60000);
     });
 
     test('over_monthly_cap in the same month retries on a later day only when the month now has room', async () => {
-      const fits = await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: THIS_MONTH_EARLIER, at: YESTERDAY, amount: 31400 } });
-      await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: THIS_MONTH_EARLIER, at: YESTERDAY, amount: 99000000 } });
-      await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: THIS_MONTH_EARLIER, at: YESTERDAY, amount: null } });
-      await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: THIS_MONTH_EARLIER, at: EARLIER_TODAY, amount: 100 } });
-      expect(await dispatchable()).toEqual([fits.request.id]);
+      // A pinned mid-month clock (the findDispatchable read takes `now`), so the test holds on the 1st of a month too.
+      const pinned = new Date('2026-12-16T11:10:00Z');
+      const earlier = new Date('2026-12-02T11:20:00Z');
+      const yesterday = new Date('2026-12-15T11:20:00Z');
+      const earlierToday = new Date('2026-12-16T10:30:00Z');
+      const fits = await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: earlier, at: yesterday, amount: 31400 } });
+      await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: earlier, at: yesterday, amount: 99000000 } });
+      await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: earlier, at: yesterday, amount: null } });
+      await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: earlier, at: earlierToday, amount: 100 } });
+      expect(await dispatchable(pinned)).toEqual([fits.request.id]);
+    });
+
+    test('a month-rollover cap park restored by a run-level failure today waits for tomorrow, however old its created_at', async () => {
+      const lastMonthPark = await fixture({ ledger: { reason: 'over_monthly_cap', createdAt: LAST_MONTH, at: LAST_MONTH, amount: 31400 } });
+      const down = adapter(async () => { throw Object.assign(new Error('Chrome is down'), { runLevel: true }); });
+      await expect(retry(lastMonthPark.request, down)).rejects.toThrow('Chrome is down');
+      expect(new Date((await ledgerOf(lastMonthPark.request)).created_at).getTime()).toBe(LAST_MONTH.getTime()); // restored as it was
+      expect(await dispatchable()).toEqual([]); // but today's attempt is spent
+      expect(await dispatchable(new Date(Date.now() + DAY))).toEqual([lastMonthPark.request.id]);
+    });
+
+    test('a park from before this change (no retry mark; its alert said "order manually") is never retried', async () => {
+      for (const reason of ['item_not_found', 'sku_not_found', 'over_monthly_cap']) {
+        await fixture({ ledger: { reason, mark: false, at: LAST_MONTH, createdAt: LAST_MONTH, amount: 100 } });
+      }
+      expect(await dispatchable()).toEqual([]);
     });
 
     test('a park after the buy click, or with an unknown outcome, never comes back', async () => {
@@ -164,6 +183,34 @@ jest.setTimeout(60000);
       expect(all[0].detail).toContain('item_not_found again'); // the text refreshed, no ring
       // And the same day it is not tried a second time.
       expect(await dispatchable()).toEqual([]);
+    });
+
+    test('the park alert tells staff the robot retries and to press Mark Ordered before buying by hand', async () => {
+      const { request } = await fixture();
+      await retry(request, adapter(refuse('item_not_found')));
+      const [alert] = await notes();
+      expect(alert.detail).toMatch(/The robot will try again on [A-Z][a-z]{2} \d{1,2}\. To buy it yourself, press Mark Ordered on the Restock tab first, then buy it\./);
+      expect(alert.detail).not.toMatch(/order manually/);
+      expect(alert.title).toMatch(/auto-order parked, robot retries|auto-order retries/);
+      expect((await ledgerOf(request)).evidence.retryMark).toBe('v1');
+      // A cap park says when too, and a park after the click never carries the mark.
+      const cap = await fixture();
+      await retry(cap.request, adapter(async () => ({ externalOrderNumber: 'SM-9', amountCents: 31400, evidence: {} })), { env: { ...ENV, AUTO_ORDER_MAX_MONTHLY_CENTS: '100' } });
+      expect((await notes()).map((n) => n.detail).join('\n')).toContain('when the month\'s order cap has room');
+      const ambiguous = await fixture();
+      await retry(ambiguous.request, adapter(async () => { throw Object.assign(new Error('unknown'), { ambiguous: true }); }));
+      expect((await ledgerOf(ambiguous.request)).evidence.retryMark).toBeUndefined();
+    });
+
+    test('Mark Ordered (the take-over) stops every retry, and a retry never starts on a request marked ordered', async () => {
+      const { request } = await fixture({ ledger: { reason: 'item_not_found' } });
+      expect(await dispatchable()).toEqual([request.id]);
+      const inventory = require('../services/inventory-operations');
+      await inventory.updateRestockRequest(request.id, { action: 'mark_ordered' }, { actorId: null });
+      expect(await dispatchable(new Date(Date.now() + 40 * DAY))).toEqual([]);
+      const a = adapter();
+      expect(await retry(request, a)).toMatchObject({ skipped: 'not_open_auto_request' });
+      expect(a.place).not.toHaveBeenCalled();
     });
 
     test('a different reason rings a new alert and closes the old one', async () => {
@@ -263,6 +310,16 @@ jest.setTimeout(60000);
       expect(rows[0].title).toMatch(/open 10 days/);
       expect(rows[0].read_at).not.toBeNull();
       expect(rows[0].metadata.dedupeKey).toBe(`restock-open:${request.id}`);
+    });
+
+    test('an order that may exist is never called "nothing ordered"', async () => {
+      const unknown = await fixture({ requestOver: { created_at: old(9) }, ledger: { reason: 'ambiguous_after_submit', placedAt: old(8), bell: false } });
+      const plain = await fixture({ requestOver: { created_at: old(9) } });
+      await sync(NOW);
+      const rows = await alerts();
+      const unknownRow = rows.find((r) => r.metadata.dedupeKey.endsWith(unknown.request.id));
+      expect(unknownRow.body).toMatch(/^Open since [A-Z][a-z]{2} \d{1,2}; no order recorded, check the Sticker Mule account\.$/);
+      expect(rows.find((r) => r.metadata.dedupeKey.endsWith(plain.request.id)).body).toMatch(/nothing ordered yet/);
     });
 
     test('closes itself when the request closes', async () => {

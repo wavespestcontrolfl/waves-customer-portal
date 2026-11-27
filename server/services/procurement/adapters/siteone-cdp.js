@@ -179,10 +179,14 @@ const STEP_WAIT = 20000; // bounded wait for the next checkout step
 const CONFIRMATION_WAIT = 30000; // bounded wait for the order number after the click
 const SETTLE_MS = 2500;
 const PO_PATTERN = /^[A-Z0-9-]{1,20}$/;
-// Price check before the buy click (owner 2026-11-27, "build fixes"): the cart's total divided by the package
-// count is the unit price SiteOne shows now. More than this many percent above the price on file parks the
-// order `price_jump` (nothing clicked; the dispatcher retries it on the next daily run). The cart total
-// carries sales tax, which the price on file does not, so a real jump of about 8% already trips it.
+// Price check before the buy click (owner 2026-11-27, "build fixes"): a total divided by the package count is
+// the unit price SiteOne shows now. More than this many percent above the price on file parks the order
+// `price_jump` (nothing clicked; the dispatcher retries it on the next daily run). It runs inside `gate`, so
+// EVERY total that reaches the cap check is checked: the cart total, the review total and the final total
+// re-asserted at the click. Tax: the page has no tax or subtotal node walked live (SELECTORS), so the totals
+// are compared WITH tax against the price on file, which has none. That is the strict side: a real jump of
+// about 8% (at roughly 7% tax) already trips it, and a trip only parks and retries; it never lets a total
+// above the limit through.
 const PRICE_JUMP_LIMIT_PERCENT = 15;
 
 class RefusedError extends Error {
@@ -609,17 +613,16 @@ async function readTotal(scope, selector, what, evidence) {
   return cents;
 }
 
-// Compares the unit price SiteOne shows with the price on file (the eligible vendor_pricing row the dispatcher
-// chose, in cents per package). No price on file = no check, as before, noted in evidence. A total that cannot
-// be read never reaches here: readTotal already refuses it (cart_total_unreadable).
-function checkPriceJump(run, cartCents) {
-  const { priceOnFileCents, quantity, evidence } = run;
+// Compares the unit price SiteOne shows (a total over the package count) with the price on file (the eligible
+// vendor_pricing row the dispatcher chose, in cents per package). No price on file = no check, as before,
+// noted in evidence. A total that cannot be read never reaches here: readTotal already refuses it.
+function checkPriceJump({ priceOnFileCents, quantity, evidence }, totalCents, what) {
   if (!(priceOnFileCents > 0)) { evidence.priceCheck = 'no_price_on_file'; return; }
-  const seenUnitCents = Math.round(cartCents / quantity);
-  evidence.priceCheck = { onFileCents: priceOnFileCents, seenUnitCents, limitPercent: PRICE_JUMP_LIMIT_PERCENT };
-  if (cartCents * 100 <= priceOnFileCents * quantity * (100 + PRICE_JUMP_LIMIT_PERCENT)) return;
+  const seenUnitCents = Math.round(totalCents / quantity);
+  evidence.priceCheck = { onFileCents: priceOnFileCents, seenUnitCents, limitPercent: PRICE_JUMP_LIMIT_PERCENT, checked: what };
+  if (totalCents * 100 <= priceOnFileCents * quantity * (100 + PRICE_JUMP_LIMIT_PERCENT)) return;
   const dollars = (c) => `$${(c / 100).toFixed(2)}`;
-  throw new RefusedError('price_jump', `SiteOne shows ${dollars(seenUnitCents)} a package (cart total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${dollars(priceOnFileCents)} on file; nothing was bought.`, evidence, cartCents);
+  throw new RefusedError('price_jump', `SiteOne's ${what} shows ${dollars(seenUnitCents)} a package (total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${dollars(priceOnFileCents)} on file; nothing was bought.`, evidence, totalCents);
 }
 
 async function verifyCartAndGate(run) {
@@ -627,7 +630,6 @@ async function verifyCartAndGate(run) {
   await verifyOwnRow(run);
   await verifyPickupTile(run);
   evidence.cartTotalCents = await readTotal(page, SELECTORS.cartTotal, 'cart total', evidence);
-  checkPriceJump(run, evidence.cartTotalCents);
   await run.gate(evidence.cartTotalCents, 'cart total');
   const go = await oneShown(page, SELECTORS.continueCheckout, 'checkout buttons', evidence);
   await go.click();
@@ -1012,14 +1014,16 @@ async function place(args, opts = {}) {
   const evidence = { adapter: 'siteone-cdp', dryRun };
   // A { ok: false } verdict is an ordinary refusal. The cap check THROWING is
   // the environment's problem (run-level), never a parked order.
+  const priceOnFileCents = Number(args.priceOnFileCents) || null;
   const gate = async (cents, what) => {
+    checkPriceJump({ priceOnFileCents, quantity: qty, evidence }, cents, what); // before the cap check: a jump never reserves money
     let verdict;
     try { verdict = await args.beforeSubmit(cents); } catch (e) { throw runLevel(`siteone cdp: cap check failed at the ${what}: ${String(e.message).slice(0, 120)}`); }
     if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence, cents);
   };
   const { browser, page } = await openPageInOwnerChrome(env, connect);
   const run = {
-    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, priceOnFileCents: Number(args.priceOnFileCents) || null, account: String(env.SITEONE_APPROVED_ACCOUNT).trim(), cartEmptyBefore: false, ownEntry: null, accountMismatch: false, added: false, poFilled: false, submitted: false,
+    page, vendorSku: sku, quantity: qty, poNumber: po, dryRun, evidence, gate, account: String(env.SITEONE_APPROVED_ACCOUNT).trim(), cartEmptyBefore: false, ownEntry: null, accountMismatch: false, added: false, poFilled: false, submitted: false,
     storeId: String(env.SITEONE_APPROVED_STORE_ID).trim(), pickupTokens: csv(env.SITEONE_APPROVED_PICKUP),
     opts: { settleMs: opts.settleMs ?? SETTLE_MS, confirmStep: opts.confirmStep ?? 1000 },
   };

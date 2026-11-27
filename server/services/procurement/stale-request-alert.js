@@ -26,7 +26,12 @@ function specFor({ request, days }) {
   const key = `${KEY_PREFIX}${request.id}`;
   const { etParts } = require('../../utils/datetime-et');
   const since = etParts(new Date(request.created_at));
-  const state = request.status === 'ordered' ? 'marked ordered, nothing received' : 'nothing ordered yet';
+  // An order that may exist at the vendor (an ambiguous submit, or a claim still in flight) is never "nothing ordered".
+  const vendorName = request.vendor_name && request.vendor_name.length <= 30 ? request.vendor_name : 'vendor';
+  const outcomeUnknown = (request.ledger_status === 'needs_review' && request.ledger_placed_at) || request.ledger_status === 'placing';
+  let state = 'nothing ordered yet';
+  if (outcomeUnknown) state = `no order recorded, check the ${vendorName} account`;
+  else if (request.status === 'ordered') state = 'marked ordered, nothing received';
   return {
     key,
     spec: {
@@ -51,10 +56,12 @@ async function syncStaleRequestAlerts({ knex = require('../../models/db'), now =
   const write = notify || require('./weekly-buy-alert').raiseOn(knex);
   const rows = await knex('product_restock_requests as prr')
     .leftJoin('products_catalog as pc', 'pc.id', 'prr.product_id')
+    .leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
+    .leftJoin('vendors as v', 'v.id', 'vo.vendor_id')
     .where('prr.source', 'auto_reorder')
     .whereNotIn('prr.status', ['received', 'cancelled'])
     .where('prr.created_at', '<=', new Date(now.getTime() - STALE_DAYS * DAY_MS))
-    .select('prr.id', 'prr.status', 'prr.created_at', 'pc.name as product_name');
+    .select('prr.id', 'prr.status', 'prr.created_at', 'pc.name as product_name', 'vo.status as ledger_status', 'vo.placed_at as ledger_placed_at', 'v.name as vendor_name');
   const live = new Set();
   const errors = [];
   for (const request of rows) {

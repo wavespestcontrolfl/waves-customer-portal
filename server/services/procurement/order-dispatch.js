@@ -90,7 +90,7 @@
 const db = require('../../models/db');
 const logger = require('../logger');
 const { gateEnvValue } = require('../../config/feature-gates');
-const { startOfETMonth, addETDays, etDateString, parseETDateTime } = require('../../utils/datetime-et');
+const { startOfETMonth, addETDays, etDateString, etParts, parseETDateTime } = require('../../utils/datetime-et');
 const { getVendorLoginCredentials } = require('../vendor-credentials');
 const { auditVendorOrder } = require('../audit-log');
 const { parsePackSize, parsePackCount, countUnitsCompatible, convertToOz } = require('../product-costing');
@@ -489,23 +489,37 @@ async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, acco
 // stays eligible and insertClaim re-arms that row (Codex r4 P1).
 //
 // A park BEFORE the buy click retries when its reason can have changed (owner 2026-11-27, "build fixes"):
-//   over_monthly_cap  -> once the ET month changes, or on a later day when the month's room now fits;
+//   over_monthly_cap  -> once the ET month changes, or when the month's room now fits the parked figure;
 //   sku_not_found, item_not_found, unavailable (out of stock), price_jump -> on a later ET day.
-// "Later day" = the row's updated_at (its last attempt) is before today's ET midnight, so a request is
-// tried at most once an ET day however many runners (server, Mac) pass over it. Pre-click = needs_review
-// with placed_at NULL: every post-click park (POST_SUBMIT_REASONS) and every unknown outcome stamps
-// placed_at, and the reason lists below are allow-lists, so those are never retried. A SiteOne cart that
-// is not empty is run-level (the claim is released, no row), so it already retries on the next run.
+// Every retry also needs "a later day": the row's updated_at (its last attempt, restored to now when an
+// attempt dies run-level) is before today's ET midnight, so a request is tried at most once an ET day
+// however many runners (server, Mac) pass over it. Pre-click = needs_review with placed_at NULL: every
+// post-click park (POST_SUBMIT_REASONS) and every unknown outcome stamps placed_at, and the reason lists
+// below are allow-lists, so those are never retried. A SiteOne cart that is not empty is run-level (the
+// claim is released, no row), so it already retries on the next run.
+// RETRY_MARK: only a park written by this code is retryable. Its alert says the robot will try again and
+// tells staff to press Mark Ordered BEFORE buying by hand (mark ordered takes the request lock the claim
+// takes, so a take-over and a retry can never both buy). A park from before has the old alert, "order
+// manually, then mark it ordered", and carries no mark: it is never retried.
 const RETRY_DAILY_REASONS = ['sku_not_found', 'item_not_found', 'unavailable', 'price_jump'];
 const RETRY_MONTHLY_REASON = 'over_monthly_cap';
+const RETRY_MARK = 'v1';
+const isRetryablePark = ({ reason, status, checkAccountFirst }) => status === 'needs_review' && !POST_SUBMIT_REASONS.has(reason) && !checkAccountFirst
+  && (RETRY_DAILY_REASONS.includes(reason) || reason === RETRY_MONTHLY_REASON);
+// When the robot next tries, in the alert's words (an ET calendar day: the next run is the next morning).
+function retryWhen(reason, now = new Date()) {
+  if (reason === RETRY_MONTHLY_REASON) return 'on a later day when the month\'s order cap has room (or when the month changes)';
+  const { month, day } = etParts(addETDays(now, 1));
+  return `on ${['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][month - 1]} ${day}`;
+}
 const parkReason = (error) => String(error || '').split(':')[0];
 const dryRunParkSql = (col) => `(${col}.status = 'needs_review' AND ${col}.error LIKE 'dry_run:%')`;
 function retryParkSql(col, now) {
   const reason = `split_part(${col}.error, ':', 1)`;
   const dayStart = parseETDateTime(`${etDateString(now)}T00:00`);
   return {
-    sql: `(${col}.status = 'needs_review' AND ${col}.placed_at IS NULL AND ((${reason} = ANY(?::text[]) AND ${col}.updated_at < ?) OR (${reason} = ? AND (${col}.created_at < ? OR ${col}.updated_at < ?))))`,
-    bindings: [RETRY_DAILY_REASONS, dayStart, RETRY_MONTHLY_REASON, startOfETMonth(now), dayStart],
+    sql: `(${col}.status = 'needs_review' AND ${col}.placed_at IS NULL AND ${col}.evidence->>'retryMark' = ? AND ${reason} = ANY(?::text[]) AND ${col}.updated_at < ?)`,
+    bindings: [RETRY_MARK, [...RETRY_DAILY_REASONS, RETRY_MONTHLY_REASON], dayStart],
   };
 }
 // A same-month cap park retries only when the month's room now fits the figure it was parked with.
@@ -533,6 +547,7 @@ async function findDispatchable(conn = db, { now = new Date(), env = process.env
 // The headline, why and done-when for a persisted bell. The title and body are written into the ledger row
 // (evidence.bell) and re-rung from it, so they keep their text and ride in the alert's detail; the
 // headline and why are one short line each, chosen from the kind of bell the title and body name.
+const RETRY_PHRASE = 'The robot will try again';
 // The words of parkBellText's account check, read back out of a persisted bell's body by
 // bellAlertParts (as 'Do NOT re-order' is), so the headline carries the check too.
 const ACCOUNT_CHECK = 'account first: if an order already in covers this request in full';
@@ -547,6 +562,13 @@ function bellAlertParts({ title, body, productName }) {
     };
   }
   if (/^Auto-order (?:failed|needs review)/.test(text) && !String(body || '').includes('Do NOT re-order')) {
+    if (String(body || '').includes(RETRY_PHRASE)) {
+      return {
+        action: named([(n) => `${n} auto-order parked, robot retries`, (n) => `${n} auto-order retries`]),
+        why: 'The robot will try again; to buy it yourself, press Mark Ordered first, then buy.',
+        doneWhen: 'restock_request_ordered',
+      };
+    }
     // A vendor the dispatcher never places for: an order placed by hand may already be in. The
     // check leads the alert itself — the detail alone would leave the headline at "order by hand".
     if (String(body || '').includes(ACCOUNT_CHECK)) {
@@ -692,7 +714,7 @@ async function reringPendingBells({ conn = db, notify = null, now = new Date() }
 // The bell a park rings — persisted with the outcome (evidence.bell) so a
 // failed send is re-rung, never lost. Post-submit reasons say do-NOT-re-order.
 function parkBell(args) { return versioned(parkBellText(args)); }
-function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst = false }) {
+function parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst = false, now = new Date() }) {
   if (reason === 'dry_run') {
     return {
       title: `Auto-order dry run: ${product.name} (${vendor.name})`,
@@ -702,6 +724,10 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   const title = `Auto-order ${status === 'failed' ? 'failed' : 'needs review'}: ${product.name} (${vendor.name})`;
   if (POST_SUBMIT_REASONS.has(reason)) {
     return { title, body: `${message} Do NOT re-order: check the ${vendor.name} account${placed?.externalOrderNumber ? ` (order ${placed.externalOrderNumber})` : ''} and reconcile by hand — receive the stock, or cancel with the vendor and then use Record vendor cancellation on the Restock tab.` };
+  }
+  // A retryable pre-click park says the robot tries again and to press Mark Ordered before buying by hand.
+  if (isRetryablePark({ reason, status, checkAccountFirst })) {
+    return { title, body: `${message} The restock request stays open. ${RETRY_PHRASE} ${retryWhen(reason, now)}. To buy it yourself, press Mark Ordered on the Restock tab first, then buy it.` };
   }
   // A pre-submit park: no order was sent, so the next step is an order placed by hand. A vendor the
   // dispatcher never places for (checkAccountFirst) gets ALL its orders by hand, on an account the
@@ -719,8 +745,8 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
 // The ledger row's parked state. placed_at = when the vendor call was
 // DISPATCHED (every post-submit park): the marker monthlySpentCents counts.
 // A placed order's number/total stay on the row even though it needs a human.
-function parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed }) {
-  const patch = { status, error: `${reason}: ${message}`.slice(0, 400), evidence: JSON.stringify({ ...(evidence || {}), bell }), updated_at: new Date() };
+function parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed, retryable = false }) {
+  const patch = { status, error: `${reason}: ${message}`.slice(0, 400), evidence: JSON.stringify({ ...(evidence || {}), bell, ...(retryable ? { retryMark: RETRY_MARK } : {}) }), updated_at: new Date() };
   if (amountCents != null) patch.amount_cents = amountCents;
   if (postSubmit) patch.placed_at = new Date();
   if (placed) {
@@ -747,7 +773,7 @@ async function park(conn, { ledger, request, product, vendor, adapterKey, reason
   const repeat = !!prior && prior.bellStamped && !!prior.bellV && prior.reason === reason && prior.status === status && !postSubmit;
   const bellText = parkBellText({ reason, status, product, vendor, request, amountCents, message, placed, checkAccountFirst });
   const bell = repeat ? { ...bellText, v: prior.bellV } : versioned(bellText);
-  const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed });
+  const patch = parkPatch({ status, reason, message, evidence, bell, amountCents, postSubmit, placed, retryable: isRetryablePark({ reason, status, checkAccountFirst }) });
   const transitioned = await conn.transaction(async (trx) => {
     let rowPatch = patch;
     let reopen = false;
@@ -984,8 +1010,8 @@ async function stampAuthorizedSku(trx, { request, pricing }) {
 async function priorRetryablePark(trx, requestId) {
   const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'error', 'evidence', 'amount_cents', 'created_at', 'placed_at');
   const reason = parkReason(row?.error);
-  if (!row || row.status !== 'needs_review' || row.placed_at || !(RETRY_DAILY_REASONS.includes(reason) || reason === RETRY_MONTHLY_REASON)) return null;
-  const evidence = meta(row.evidence);
+  const evidence = meta(row?.evidence);
+  if (!row || row.status !== 'needs_review' || row.placed_at || evidence.retryMark !== RETRY_MARK || !(RETRY_DAILY_REASONS.includes(reason) || reason === RETRY_MONTHLY_REASON)) return null;
   return { reason, status: row.status, error: row.error, amountCents: row.amount_cents, createdAt: row.created_at, evidence, bellV: evidence.bell?.v || null, bellStamped: !!evidence.bellAt };
 }
 
