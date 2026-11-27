@@ -229,6 +229,27 @@ describe('route order time fallback', () => {
     expect(numbers(late)).toEqual({ [SERVICE]: 3, s3: 4 });
   });
 
+  test('a day with no numbered stop keeps its arrival-time order: the visit gets no number', async () => {
+    // Every reader lists such a day by window start. A number on the visit alone listed a 10 AM visit
+    // ahead of the 8 AM stop.
+    mockDayRows = [timed('a1', '08:00', null), timed('a2', '13:00', null), timed('o1', '09:00', 1, { technician_id: 'tech-2' })];
+    const trx = fakeTrx({ row: saveRow({ window_start: '10:00:00', window_end: '11:00:00' }), stored: unpinned({ window_start: '10:00:00', window_end: '11:00:00' }) });
+    await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toBeNull();
+    expect(trx.writes).toEqual([]);
+    expect(refusalLines()).toEqual([line('route_unverified')]);
+    expect(placedLines()).toEqual([]);
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('on a day with no other numbered stop the visit drops its own leftover number', async () => {
+    mockDayRows = [timed('a1', '08:00', null), timed('a2', '13:00', null)];
+    const trx = fakeTrx({ stored: unpinned({ route_order: 1 }), current: { [SERVICE]: 1 } });
+    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toBeNull();
+    expect(trx.writeLog).toEqual([{ id: SERVICE, route_order: null, fence: { scheduled_date: DATE, technician_id: 'tech-1' } }]);
+    expect(placedLines()).toEqual([]);
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
   test('a visit that is itself under way keeps its number', async () => {
     mockDayRows = dayRows();
     const trx = fakeTrx({ stored: unpinned({ status: 'on_site', route_order: 3 }), current: { ...current, [SERVICE]: 3 } });
