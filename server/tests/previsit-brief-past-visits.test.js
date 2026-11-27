@@ -125,6 +125,14 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(visits[0].notes).not.toMatch(/4471|9902/);
   });
 
+  test('a price in an old note is removed; the recorded service label is kept as written', async () => {
+    const rows = [rec('price', '2026-11-12', 'Palm Fertilization (45 min)', { technician_notes: 'Repair estimate $1,250 for the screen. Fed both palms.' }), ...ROWS];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(visits[0].notes).toContain('Fed both palms.');
+    expect(visits[0].notes).not.toMatch(/1,250|\$/);
+    expect(visits[0].type).toMatch(/^Palm Fertilization/);
+  });
+
   test('an older stop never lists a later visit', async () => {
     const { past_visits: visits } = await deterministicVisitFacts({ ...SVC, scheduled_date: '2026-10-25' }, fakeDbh());
     expect(visits.map((v) => v.date)).toEqual(['2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01', '2026-06-01']);

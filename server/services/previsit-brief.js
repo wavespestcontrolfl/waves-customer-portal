@@ -127,6 +127,12 @@ function visitFactsGateEnabled() {
 // null so the key is omitted and the client keeps its single-visit section; a
 // product read failure only empties the names.
 const PAST_VISITS_LIMIT = 5;
+// An old note as a technician may read it: access codes masked (history spans the whole account, so a
+// code may belong to another home) and money amounts removed (no prices on technician screens).
+const NOTE_MONEY_RE = /\$\s?\d[\d,]*(?:\.\d+)?|\b\d[\d,]*(?:\.\d+)?\s?(?:dollars|bucks|usd)\b/gi;
+function pastVisitNoteText(notes) {
+  return redactAccessCodes(String(notes || '')).replace(NOTE_MONEY_RE, '[amount]');
+}
 
 // The record's own frozen key (service_data.completedServiceKey, stamped when the visit closed; present
 // even as null) wins over what the scheduled row says today; legacy records without it use the join.
@@ -172,9 +178,10 @@ async function loadPastVisits(dbh, svc) {
     }
     return rows.map((r) => ({
       date: calendarDay(r.service_date),
-      type: cleanText(normalizeServiceType(r.service_type) || r.service_type, 120),
+      // The label recorded for that visit, only its duration/price suffixes stripped: never re-labelled.
+      type: cleanText(briefServiceIdentity(r.service_type), 120),
       // History spans the whole account: a code written in a note for another home is masked.
-      notes: previewText(redactAccessCodes(r.technician_notes || '')),
+      notes: previewText(pastVisitNoteText(r.technician_notes)),
       // Every distinct product name of that visit: no cap here (the cap of 8 is for the brief's guidance).
       products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)), Infinity)
         .map((p) => ({ name: p.name })),
