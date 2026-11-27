@@ -325,16 +325,16 @@ customer's message by this rule.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
    a real record (never an automated text, an expired link or an unsent Gmail draft). No plain rule closes a bare "ok" or "yes":
-   the model is shown the message it answers (whole, with when it was sent; for a text, the last one sent to the number the yes
-   came from; for an email, the last Waves email sent to the address the reply came from, read from its HTML when it stored no
+   the model is shown the message it answers (whole, with when it was sent; for a text, the last one sent from the Waves line
+   the yes came to, to the number it came from; for an email, the last Waves email sent to the address the reply came from, read from its HTML when it stored no
    text, never a forward to staff) and says whether the yes accepts an offered day or time (`yes_to_offer`; a reply without it
    counts as yes). An email reply is cut at quoted history and signatures first, so "Yes" over "Sent from my iPhone" is a bare yes.
-   Its "accepts nothing new" counts only when it saw that whole message: a message cut short, one with no words, or none found
-   (a send whose Cc or Bcc was never captured stops the look) keeps the rule below. When it does, the bell closes only when the
+   A yes whose message was not shown whole (cut short, no words, or none found; a send whose Cc or Bcc was never captured stops
+   the look) stays owed by rule, with no model call: no reading and no booking can be checked against it. When the yes accepts an offer, the bell closes only when the
    model names the booking or held staff move that puts the visit at the offered day and time (the match is the model's: offers
    are free text, and each visit line gives the day with its weekday and the arrival window the customer is told; a visit waiting
    for the customer to pick a time is no booking, and a visit the customer is told only the day of states its day alone, so it
-   proves no offered time). An owed bell with a bare yes stays owed. A finished visit never answers a question about its result. A visit move (a new day or a new start)
+   proves no offered time; a failed read of what the customer was told skips the alert until the next sweep). An owed bell with a bare yes stays owed. A finished visit never answers a question about its result. A visit move (a new day or a new start)
    answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
    customer, a hand-off for the customer to pick a time (no time is booked), or a move on a visit that now waits for the
    customer's pick, is never an answer.

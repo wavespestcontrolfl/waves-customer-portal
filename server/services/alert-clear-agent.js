@@ -218,8 +218,8 @@ const customerEmailEvent = (row) => ({
 });
 // A booking's line states the day and time the visit holds now, so the model can judge a yes to an offered time. A visit handed to the
 // customer and not yet given a time (self-serve-notice.js awaitingCustomerPick: its date is a placeholder) books nothing: no proof.
-// A day-only visit (the customer is told only its day: day-only-ai-context.js loadDayOnlyCheck) states the day alone: its stored start
-// is the planner's, not a time the customer was given, so it proves the day only.
+// A day-only visit (the customer is told only its day: dayOnlyVisits) states the day alone: its stored start is the planner's, not a
+// time the customer was given, so it proves the day only.
 function visitEvent(row, dayOnly = false) {
   const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
   const waiting = awaitingCustomerPick(row);
@@ -457,12 +457,28 @@ async function customerRecordsAfter(r, anchor, customerId) {
         conn.raw('COALESCE(rl.notes = ?, false) AS pick_handoff', [require('./rain-out').PICK_LOG_MARKER]))),
   ]);
   const handed = estimates.map((row) => ({ row, at: witnessAt(row, anchor) })).filter((x) => x.at).map((x) => estimateEvent(x.row, x.at));
-  // Which of these visits the customer is told only the day of, as each stands now: one read (never throws; a failed one says day-only).
   const moved = moves.filter(realMove);
   const asVisit = (m) => ({ id: m.visit_id, scheduled_date: m.visit_date, window_start: m.window_start });
-  const dayOnly = await require('./day-only-ai-context').loadDayOnlyCheck(conn, [...booked, ...moved.map(asVisit)], r.now);
+  const dayOnly = await dayOnlyVisits(r, [...booked, ...moved.map(asVisit)]);
   return [...booked.map((row) => visitEvent(row, dayOnly(row))), ...done.map(doneVisitEvent), ...handed,
     ...moved.map((row) => rescheduleEvent(row, dayOnly(asVisit(row))))];
+}
+
+// Which visits the customer is told only the day of, as each stands now: time-promise.js loadTimeDisplay (showHour false), the reader
+// behind day-only-ai-context.js loadDayOnlyCheck. That helper treats a failed read as day-only, which is right for a customer-facing
+// AI; here a failed read (a throw, or a visit the read marks failed or did not judge) is a failed read like any other: the timeline is
+// incomplete, so the alert is skipped and looked at again on the next sweep.
+async function dayOnlyVisits(r, visits) {
+  if (!visits.length) return () => false;
+  try {
+    const display = await require('./time-promise').loadTimeDisplay(r.conn, visits, r.now);
+    if (visits.some((v) => !display.get(v.id) || display.get(v.id).failed === true)) throw new Error('time display unread');
+    return (row) => display.get(row.id)?.showHour === false;
+  } catch (err) {
+    r.state.complete = false;
+    logger.warn(`[alert-clear-agent] read time-display failed: ${err?.code || err?.name || 'error'}`);
+    return () => false;
+  }
 }
 
 // Every record after the anchor for this contact, to a safety cap. Texts, calls and staff email for the customer or the number.
@@ -495,14 +511,17 @@ async function resolveInboundText(r, sid) {
   const { conn, read } = r;
   const canonical = await read('trigger-message', () => messagesBase(conn)
     .where('m.channel', 'sms').where('m.direction', 'inbound').where('m.twilio_sid', sid)
-    .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone")));
+    .select('m.created_at', 'c.customer_id', conn.raw('left(m.body, 1500) as body'), conn.raw("COALESCE(NULLIF(m.metadata->>'sms_contact_phone', ''), NULLIF(c.contact_phone, '')) as phone"),
+      'c.our_endpoint_id as line'));
   // Through smsBase: the same recruiting exclusion and reservation filter as every other text-log read.
   const legacy = await read('trigger-sms', () => smsBase(conn).where('os.direction', 'inbound').where('os.twilio_sid', sid)
-    .select('os.created_at', 'os.customer_id', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone')));
+    .select('os.created_at', 'os.customer_id', conn.raw('left(os.message_body, 1500) as body'), conn.raw('os.from_phone as phone'), 'os.to_phone as line'));
   const found = [...canonical, ...legacy].filter((x) => x.created_at);
   if (!found.length) return null;
   const first = found.sort((a, b) => toDate(a.created_at) - toDate(b.created_at))[0];
-  return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id), phone: found.find((x) => x.phone)?.phone || null, body: first.body ?? found.find((x) => x.body)?.body ?? null };
+  // `line`: the Waves number the text came to (the conversation's endpoint, or the text-log row's to_phone).
+  return { at: toDate(first.created_at), customerId: uuidOrNull(first.customer_id) || uuidOrNull(found.find((x) => x.customer_id)?.customer_id), phone: found.find((x) => x.phone)?.phone || null,
+    line: found.find((x) => x.line)?.line || null, body: first.body ?? found.find((x) => x.body)?.body ?? null };
 }
 
 // What came before the text, and the pair a bare "yes" is judged on: the triggering text (carried from the canonical message the SID
@@ -510,29 +529,33 @@ async function resolveInboundText(r, sid) {
 async function smsContext(r, anchor, key, trigger) {
   const rows = await r.read('texts-before', () => scopeToContact(smsBase(r.conn), key, SMS_SCOPE)
     .where('os.created_at', '<=', anchor).where('os.created_at', '>=', new Date(anchor.getTime() - 3 * DAY_MS))
-    .orderBy('os.created_at', 'desc').limit(MODEL_CONTEXT_LINES).select(...SMS_COLUMNS, r.conn.raw('left(os.message_body, 1500) as message_body')));
+    .orderBy('os.created_at', 'desc').limit(MODEL_CONTEXT_LINES)
+    .select(...SMS_COLUMNS, 'os.from_phone', 'os.to_phone', r.conn.raw('left(os.message_body, 1500) as message_body')));
   const ordered = rows.slice().reverse();
   const hasTrigger = typeof trigger?.body === 'string';
   const shown = hasTrigger ? ordered.filter((x) => !(x.direction === 'inbound' && toDate(x.created_at).getTime() === anchor.getTime())) : ordered;
   const ctx = shown.map((x) => smsEvent(x, false).line);
-  const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor } : [...ordered].reverse().find((x) => x.direction === 'inbound');
+  // The reply: the text the bell names, or (a thread bell with no message id) the latest text in, with its own two numbers.
+  const lastIn = hasTrigger ? { message_body: trigger.body, created_at: anchor, from_phone: trigger.phone, to_phone: trigger.line }
+    : [...ordered].reverse().find((x) => x.direction === 'inbound');
   if (hasTrigger) ctx.push(`CUSTOMER TEXT (the text this alert is about): ${clean(trigger.body)}`);
   const lastAt = lastIn ? toDate(lastIn.created_at) : null;
-  // The message the reply answers went to the number the reply came from.
-  const sender = hasTrigger ? trigger.phone : key.phone;
-  const offer = lastAt ? await lastDeliveredText(r, lastAt, key, sender) : { body: '', at: null, whole: false };
+  const offer = lastAt ? await lastDeliveredText(r, lastAt, key, lastIn.from_phone, lastIn.to_phone) : { body: '', at: null, whole: false };
   return { ctx, reply: lastIn ? { lastBody: String(lastIn.message_body || ''), prevOutbound: offer.body, prevAt: offer.at, whole: offer.whole } : null };
 }
 
 // The last outbound text the customer actually received (delivered, or accepted by their app) before the reply, found by its own query:
 // never "the latest outbound row that happens to sit in the excerpt". Its send time comes with it: an offer's "tomorrow" is read from it.
-// It went to the number the reply came from: a text to the customer's other number is not what that number answered. With no sender
-// number, or no such text, the pair cannot be shown, so it is not whole and the booking requirement stays (guardBareYes).
-async function lastDeliveredText(r, before, key, senderPhone) {
+// It is the reply's own conversation: sent FROM the Waves line the reply came to, TO the number the reply came from. A text to the
+// customer's other number, or from another Waves line (another office, the billing line), is not what the reply answered. With
+// either number unknown, or no such text, the pair cannot be shown, so it is not whole and the booking requirement stays (guardBareYes).
+async function lastDeliveredText(r, before, key, senderPhone, linePhone) {
   const sender = phoneIdentityKey(senderPhone);
-  if (!sender) return { body: '', at: null, whole: false };
+  const line = phoneIdentityKey(linePhone);
+  if (!sender || !line) return { body: '', at: null, whole: false };
   const rows = await r.read('prev-offer', () => scopeToContact(smsBase(r.conn).where('os.direction', 'outbound').whereRaw(smsDeliveredSql('os'))
-    .where('os.created_at', '<', before).whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [sender]), key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
+    .where('os.created_at', '<', before).whereRaw(`${phoneIdentitySql('os.to_phone')} = ?`, [sender])
+    .whereRaw(`${phoneIdentitySql('os.from_phone')} = ?`, [line]), key, { customerColumn: 'os.customer_id', phoneColumns: ['os.to_phone'] })
     .orderBy('os.created_at', 'desc').limit(1)
     .select('os.created_at', r.conn.raw(`left(os.message_body, ${OFFER_CHARS}) as message_body`), r.conn.raw('length(os.message_body) as body_len')));
   if (!rows[0]) return { body: '', at: null, whole: false };
@@ -799,7 +822,9 @@ function ruleVerdict(alert, timeline, owed, now) {
   }
   const kinds = owed ? OWED_RULE_PROOFS : RULE_PROOFS;
   // A bare "ok" or "yes": whether it accepts an offered time, or needs nothing, is language, so no plain rule closes it. The model
-  // judges it, shown the message it answers (guardBareYes). An owed alert never goes to the model, so there it stays owed.
+  // judges it, shown the message it answers (guardBareYes). An owed alert never goes to the model, so there it stays owed. One whose
+  // message was not found whole stays owed with no paid call: no reading of the model could change that (guardBareYes).
+  if (!owed && bareYes(timeline) && !sawWholeOffer(timeline.reply)) return offerNotShown('rule');
   const hit = bareYes(timeline) ? null : timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
   if (hit) return answeredBy(hit, hit.proof);
   if (owed) return verdict('still_owed', 'rule', 'owed_open', 'we owe this and nothing answers it yet');
@@ -813,13 +838,18 @@ function ruleVerdict(alert, timeline, owed, now) {
 // it is one, only the booking or held staff move the model names as its proof answers it: a text, an email, a call, an estimate or
 // a "nothing to answer" never does. No plain rule closes any bare yes (ruleVerdict). Code checks only what records prove (a real
 // booking, never a visit waiting for the customer to pick a time; a staff move the visit still holds) and holds the model to its
-// own reading. The model's "accepts no offer" counts only when it saw the whole message the yes answers (`whole`: paired with the
-// number or address the yes came from, and not cut) and that message has words (an empty one, a picture text, was never shown).
+// own reading. A yes whose message was not shown whole (`whole`: paired with the yes's own conversation, and not cut; and the message
+// has words: an empty one, a picture text, was never shown) is answered by nothing: neither the model's "accepts no offer" nor a
+// booking can be checked against an offer no one saw.
 const ANSWERS_A_YES = ['booking', 'date_change'];
 const bareYes = (timeline) => !!timeline.reply && BARE_YES_RE.test(timeline.reply.lastBody);
 const sawWholeOffer = (reply) => reply.whole === true && String(reply.prevOutbound || '').trim() !== '';
+const offerNotShown = (source, model = null) => verdict('still_owed', source, 'yes_offer_not_shown',
+  'a bare yes whose message was not found whole, so what it accepts cannot be checked', { model });
 function guardBareYes(v, timeline) {
-  if (v.outcome === 'still_owed' || !bareYes(timeline) || (v.yesToOffer === false && sawWholeOffer(timeline.reply))) return v;
+  if (v.outcome === 'still_owed' || !bareYes(timeline)) return v;
+  if (!sawWholeOffer(timeline.reply)) return offerNotShown(v.source, v.model);
+  if (v.yesToOffer === false) return v;
   const named = v.outcome === 'answered' && v.proofId ? timeline.events.find((e) => e.type === v.proofType && e.id === v.proofId) : null;
   if (named && ANSWERS_A_YES.includes(named.proof)) return v;
   return verdict('still_owed', v.source, 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move named as the answer', { model: v.model });

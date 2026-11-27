@@ -19,6 +19,9 @@ const T0 = new Date(Date.now() - 3 * 3600 * 1000);
 const at = (minutes) => new Date(T0.getTime() + minutes * 60000);
 const tag = randomUUID().slice(0, 8);
 const phone = (n) => `+1555${String(Math.abs(parseInt(tag, 16) % 9000) + 1000)}${String(n).padStart(3, '0')}`.slice(0, 12);
+// The Waves line an inbound text comes to (the sms helper's default to_phone): the offer a yes answers is sent from it.
+const LINE = '+15550000002';
+const OTHER_LINE = '+15550000003';
 
 postgres('alert clear-up agent: readers on a real schema', () => {
   let db;
@@ -137,6 +140,13 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     } finally {
       spy.mockRestore();
     }
+    // A failed time-display read is a failed read: the timeline is incomplete, so the alert waits for the next sweep.
+    const failed = jest.spyOn(promise, 'loadTimeDisplay').mockImplementation(async (_conn, rows) => new Map(rows.map((x) => [x.id, { showHour: true, level: 'hour', eligible: false, failed: true }])));
+    try {
+      expect((await agent.buildTimeline(row)).complete).toBe(false);
+    } finally {
+      failed.mockRestore();
+    }
   });
 
   test('a sent staff email counts only when it provably reached this customer; a draft never does; SMS alerts see it too', async () => {
@@ -207,10 +217,10 @@ postgres('alert clear-up agent: readers on a real schema', () => {
   test('the triggering text is carried from the canonical message, and the offer before it makes a bare yes a reply pair', async () => {
     const cid = await customer();
     const sid = `SM${tag}f`;
-    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: phone(31) }).returning('id');
+    const [conv] = await db('conversations').insert({ channel: 'sms', customer_id: cid, contact_phone: phone(31), our_endpoint_id: LINE }).returning('id');
     made.conversations.push(conv.id);
     await db('messages').insert({ conversation_id: conv.id, channel: 'sms', direction: 'inbound', author_type: 'customer', body: 'Yes', twilio_sid: sid, created_at: T0 });
-    await sms({ customer_id: cid, direction: 'outbound', to_phone: phone(31), message_type: 'manual', status: 'delivered', message_body: 'We could come Friday at 10 am. Does that work?', created_at: at(-30), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: phone(31), message_type: 'manual', status: 'delivered', message_body: 'We could come Friday at 10 am. Does that work?', created_at: at(-30), metadata: { human_authored: 'true' } });
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const timeline = await agent.buildTimeline(row);
     expect(timeline.complete).toBe(true);
@@ -595,8 +605,8 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const cid = await customer();
     const sid = `SM${tag}o1`;
     const number = phone(75);
-    await sms({ customer_id: cid, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Friday at 10 am works for the visit?', created_at: at(-600), metadata: { human_authored: 'true' } });
-    await sms({ customer_id: cid, direction: 'outbound', to_phone: number, message_type: 'manual', status: 'queued', message_body: 'never delivered text', created_at: at(-100), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Friday at 10 am works for the visit?', created_at: at(-600), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'queued', message_body: 'never delivered text', created_at: at(-100), metadata: { human_authored: 'true' } });
     for (let i = 0; i < 15; i += 1) await sms({ customer_id: cid, direction: 'inbound', from_phone: number, message_body: `chatter ${i}`, created_at: at(-500 + i), status: 'received' });
     await sms({ customer_id: cid, direction: 'inbound', from_phone: number, twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
@@ -608,11 +618,36 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const cid = await customer();
     const sid = `SM${tag}o2`;
     const [main, other] = [phone(76), phone(77)];
-    await sms({ customer_id: cid, direction: 'outbound', to_phone: main, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
-    await sms({ customer_id: cid, direction: 'outbound', to_phone: other, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-10) });
-    await sms({ customer_id: cid, direction: 'inbound', from_phone: main, twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: main, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: other, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-10) });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: main, to_phone: LINE, twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
     expect(timeline.reply).toMatchObject({ prevOutbound: 'Can we come Friday at 10 am?', whole: true });
+  });
+
+  // One customer number, two Waves lines: a yes sent back to the office that offered Friday answers that offer, never a later bill
+  // from the billing line; a yes to the billing line answers the bill.
+  test('the offer behind a text "yes" is the last text from the Waves line the yes came to', async () => {
+    const cid = await customer();
+    const number = phone(78);
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'manual', status: 'delivered', message_body: 'Can we come Friday at 10 am?', created_at: at(-60), metadata: { human_authored: 'true' } });
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: OTHER_LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: 'Your invoice is ready.', created_at: at(-10) });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, twilio_sid: `SM${tag}o3`, message_body: 'Yes', created_at: T0, status: 'received' });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: OTHER_LINE, twilio_sid: `SM${tag}o4`, message_body: 'Ok', created_at: at(1), status: 'received' });
+    const toOffice = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=SM${tag}o3`));
+    expect(toOffice.reply).toMatchObject({ prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+    const toBilling = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=SM${tag}o4`));
+    expect(toBilling.reply).toMatchObject({ lastBody: 'Ok', prevOutbound: 'Your invoice is ready.', prevAt: at(-10), whole: true });
+  });
+
+  // A thread bell with no message id: the reply is the latest text in, and its own two numbers find the message it answers.
+  test('a thread bell with no message id pairs the latest text in by its own numbers', async () => {
+    const cid = await customer();
+    const number = phone(79);
+    await sms({ customer_id: cid, direction: 'outbound', from_phone: LINE, to_phone: number, message_type: 'reminder', status: 'delivered', message_body: 'Your visit is on Friday.', created_at: at(-60) });
+    await sms({ customer_id: cid, direction: 'inbound', from_phone: number, to_phone: LINE, message_body: 'OK', created_at: at(-5), status: 'received' });
+    const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}`));
+    expect(timeline.reply).toEqual({ lastBody: 'OK', prevOutbound: 'Your visit is on Friday.', prevAt: at(-60), whole: true });
   });
 
   test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {

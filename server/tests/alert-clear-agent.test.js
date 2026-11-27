@@ -239,7 +239,7 @@ describe('the model verdict and the proof check', () => {
   });
 
   test('a bare yes to an offered time closes only when the model names the booking as the answer', async () => {
-    const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' };
+    const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?', whole: true };
     const none = await runWith([], { outcome: 'nothing_to_answer', why: 'customer said yes', proof: null }, { reply });
     expect(none.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
     // A booking exists, but "nothing to answer" names no record: the model never said the booking is the answer.
@@ -583,7 +583,7 @@ describe('the booking requirement holds on every path', () => {
   // The audits' two cases. A numeric offer, a yes and an unrelated staff reply: never closed by the staff reply. An "OK" to a bill
   // that names a date: the model sees the exchange and may find nothing to answer; no word list decides it first.
   test('a yes to a numeric offer is held to a booking; an ok to a dated bill can be nothing to answer', async () => {
-    const numeric = await run([staffText()], { reply: { lastBody: 'yes', prevOutbound: 'Can we visit 12/4 between 9 and 11?' } }, judgeNames('E1'));
+    const numeric = await run([staffText()], { reply: { lastBody: 'yes', prevOutbound: 'Can we visit 12/4 between 9 and 11?', whole: true } }, judgeNames('E1'));
     expect(numeric.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
     const bill = jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'ok to an invoice note', proof: null, model: 'm', yesToOffer: false }));
     const dated = await run([], { reply: { lastBody: 'OK', prevOutbound: 'Your invoice is due 12/4.', whole: true } }, bill);
@@ -591,17 +591,23 @@ describe('the booking requirement holds on every path', () => {
     expect(dated.row).toMatchObject({ outcome: 'nothing_to_answer', source: 'ai' });
   });
 
-  // The model's "accepts no offer" counts only when it saw the whole message the yes answers: one cut short, or none paired with
-  // the number the yes came from, keeps the booking requirement.
-  test('a cut or unpaired message keeps the booking requirement, whatever the model reads', async () => {
+  // A yes whose message was not shown whole (cut short, none found in its own conversation, or no words) is answered by nothing:
+  // neither the model's "accepts no offer" nor a booking can be checked against an offer no one saw. It stays owed by rule, so no
+  // paid call is made.
+  test('a cut, unpaired or empty message keeps a bare yes owed by rule, with no model call, even with a booking after', async () => {
     const bill = () => jest.fn(async () => ({ outcome: 'nothing_to_answer', why: 'ok to a bill', proof: null, model: 'm', yesToOffer: false }));
     const cut = await run([], { reply: { lastBody: 'OK', prevOutbound: 'Your bill is ready.', whole: false } }, bill());
-    expect(cut.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
-    const unpaired = await run([], { reply: { lastBody: 'OK', prevOutbound: '', prevAt: null, whole: false } }, bill());
-    expect(unpaired.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+    expect(cut.deps.judge).not.toHaveBeenCalled();
+    expect(cut.row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_offer_not_shown' });
+    const unpaired = await run([booking], { reply: { lastBody: 'OK', prevOutbound: '', prevAt: null, whole: false } }, judgeNames('E1'));
+    expect(unpaired.deps.judge).not.toHaveBeenCalled();
+    expect(unpaired.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_offer_not_shown' });
     // A message with no words (a picture text, an email whose body was never read) was never shown: "whole" alone is not enough.
     const empty = await run([], { reply: { lastBody: 'OK', prevOutbound: '  ', prevAt: after(-30), whole: true } }, bill());
-    expect(empty.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+    expect(empty.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_offer_not_shown' });
+    // The guard holds the same line for a model answer: a named booking cannot answer a yes to an offer that was not shown.
+    const guarded = agent.guardBareYes({ outcome: 'answered', source: 'ai', proofType: 'visit', proofId: 'v1', model: 'm' }, timelineOf([booking], { reply: { lastBody: 'Yes', prevOutbound: 'Friday?', whole: false } }));
+    expect(guarded).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_offer_not_shown', model: 'm' });
   });
 
   // What a bare yes answers is language, so the model judges it, shown the message: a staff reply never closes the yes by rule.
@@ -746,7 +752,7 @@ describe('fingerprint: late evidence re-judges', () => {
 
 describe('a bare yes by email is held like one by text', () => {
   test('the email reply pair (the sent offer and the "yes") feeds the same booking guard', async () => {
-    const reply = { lastBody: 'Yes', prevOutbound: 'Could we come Friday at 10 am?' };
+    const reply = { lastBody: 'Yes', prevOutbound: 'Could we come Friday at 10 am?', whole: true };
     const deps = makeDeps({
       timeline: async () => timelineOf([staffText()], { reply, trigger: 'email:E1' }), candidates: async () => [alertRow({ category: 'inbound_email' })],
       judge: jest.fn(async () => ({ outcome: 'answered', why: 'staff replied', proof: 'E1', model: 'm' })),
