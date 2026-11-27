@@ -426,11 +426,13 @@ export default function PushSettingsV2() {
               active. Customer communication (texts, emails, calls, voicemails,
               new leads) and specific exceptions (such as failed payments and
               retired alerts like refunds) follow their own rules regardless of
-              the category toggle here. For all other categories below, any
-              saved on choice keeps it ringing on the shared admin bell, and a
-              saved off choice silences it when no active administrator has
-              saved it on. Each toggle controls that category&apos;s bell (and
-              phone banner, for categories that send push notifications).
+              the category toggle here. For other categories below, any saved on
+              choice permits eligible alerts on the shared admin bell (items
+              routed to Claude&apos;s queue, such as the AI decision review
+              list, still go there instead), and a saved off choice silences the
+              category when no active administrator has saved it on. Each toggle
+              controls that category&apos;s bell (and phone banner, for
+              categories that send push notifications).
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (
