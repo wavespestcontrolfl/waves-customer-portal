@@ -528,8 +528,8 @@ describe('POST /api/customer/profile/confirm-email', () => {
       dedupeKey: `profile_email_change:${CUSTOMER_ID}:req-1`,
       metadata: expect.objectContaining({ oldEmail: OLD_EMAIL, newEmail: NEW_EMAIL, severity: 'needs-you', doneWhen: 'email_change_reviewed' }),
     });
-    // Written in the change's own transaction (a savepoint of it), so a restart after commit cannot lose it.
-    expect(opts.trx && opts.trx.isSavepoint).toBe(true);
+    // Written in the change's own transaction, so the two commit together.
+    expect(typeof opts.trx).toBe('function');
     expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
     expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
   });
@@ -546,13 +546,20 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(opts.detail).toContain('New email: first_last@example.test');
   });
 
-  test('a failed alert never undoes or fails the change', async () => {
-    mockNotifyAdmin.mockClear().mockRejectedValueOnce(new Error('bell down'));
-    mockCode.checkCode.mockResolvedValue(okCheck());
-    mockApplyEmail.mockImplementation(async () => changed());
-    expect((await confirm('123456')).status).toBe(200);
-    await flush();
-    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+  test('a failed alert write fails the whole confirm (nothing commits), so the same code works on the retry', async () => {
+    for (const failure of [() => mockNotifyAdmin.mockRejectedValueOnce(new Error('bell down')), () => mockNotifyAdmin.mockResolvedValueOnce(null)]) {
+      mockNotifyAdmin.mockClear();
+      failure();
+      mockCode.checkCode.mockResolvedValue(okCheck());
+      mockApplyEmail.mockImplementation(async () => changed());
+      const res = await confirm('123456');
+      expect(res.status).toBe(500);
+      // The transaction callback threw: the mock db rejects, as Postgres would roll the change and the consume back.
+      await expect(mockDb.transaction.mock.results[mockDb.transaction.mock.results.length - 1].value).rejects.toBeTruthy();
+      await flush();
+      expect(mockSend).not.toHaveBeenCalled();
+      mockSend.mockClear();
+    }
   });
 
   test('an unchanged address and a wrong code raise no alert', async () => {

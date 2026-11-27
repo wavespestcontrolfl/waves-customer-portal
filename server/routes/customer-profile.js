@@ -232,33 +232,31 @@ function emailChangeWhy(name, oldEmail, newEmail) {
   return fits(short) ? short : 'A customer changed their email, and both addresses are in the details.';
 }
 
-// The office alert after a confirmed email change, written in the SAME transaction as the change (a restart after
-// commit cannot lose it; a retry of the spent code cannot re-raise it). It runs in a savepoint: a bell write that fails
-// rolls back only itself, is logged by code, and never undoes the change.
+// The office alert after a confirmed email change, written in the SAME transaction as the change: the two commit
+// together or not at all. A bell write that fails rolls the whole confirm back (the code is not consumed), the
+// customer sees "try again", and the same code works on the retry, so the office can never miss a saved change.
 async function raiseEmailChangeAlert(trx, { customerId, before, after, requestId }) {
   const name = [after.first_name, after.last_name].filter(Boolean).join(' ') || 'A customer';
   const oldEmail = clean(before.email);
   const newEmail = clean(after.email);
-  try {
-    await trx.transaction((sp) => require('../services/admin-alert-compose').raiseAdminAlert('customer', {
-      area: 'Customers',
-      action: 'Email changed in the app',
-      why: emailChangeWhy(name, oldEmail, newEmail),
-      severity: 'needs-you',
-      link: `/admin/customers?customerId=${customerId}`,
-      subject: { type: 'customer', id: String(customerId) },
-      doneWhen: 'email_change_reviewed',
-      who: 'person',
-    }, {
-      trx: sp,
-      bell: true,
-      dedupeKey: `profile_email_change:${customerId}:${requestId}`,
-      detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.`,
-      metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
-    }));
-  } catch (err) {
-    logger.warn(`[customer-profile] office email-change alert failed for ${customerId}: ${err.code || err.name || 'alert_failed'}`);
-  }
+  const written = await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
+    area: 'Customers',
+    action: 'Email changed in the app',
+    why: emailChangeWhy(name, oldEmail, newEmail),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${customerId}`,
+    subject: { type: 'customer', id: String(customerId) },
+    doneWhen: 'email_change_reviewed',
+    who: 'person',
+  }, {
+    trx,
+    bell: true,
+    dedupeKey: `profile_email_change:${customerId}:${requestId}`,
+    detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.`,
+    metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
+  });
+  // notifyAdmin answers null when its insert failed: that is a failure too.
+  if (!written) throw Object.assign(new Error('office alert not written'), { code: 'EMAIL_CHANGE_ALERT_FAILED' });
 }
 
 function holderOnly(req, res) {
