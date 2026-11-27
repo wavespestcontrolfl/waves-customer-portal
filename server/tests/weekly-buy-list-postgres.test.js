@@ -21,7 +21,7 @@ jest.mock('../services/waveguard-inventory-forecast', () => ({
 const { buildWeeklyBuyList } = require('../services/procurement/weekly-buy-list');
 const { runWeeklyBuyList } = require('../services/procurement/weekly-buy-alert');
 
-const TABLES = ['scheduled_services', 'technicians', 'products_catalog', 'vendors', 'vendor_pricing', 'notifications', 'services', 'service_completion_profiles'];
+const TABLES = ['scheduled_services', 'technicians', 'products_catalog', 'vendors', 'vendor_pricing', 'notifications', 'services', 'service_completion_profiles', 'product_restock_requests', 'vendor_orders'];
 const NOW = new Date('2026-12-09T12:00:00Z'); // Wednesday; the week is Dec 7 to Dec 12
 
 jest.setTimeout(60000);
@@ -41,6 +41,18 @@ jest.setTimeout(60000);
     const [vendor, other] = await mockConn('vendors').insert([{ id: randomUUID(), name: 'Synthetic Supply', code: 9998 }, { id: randomUUID(), name: 'Other Supply', code: 9999 }]).returning('id');
     const [cross] = await mockConn('products_catalog').insert({ id: randomUUID(), name: 'LESCO CrossCheck Plus', active: true, inventory_unit: 'gal', inventory_on_hand: '0.01' }).returning('id');
     await mockConn('products_catalog').insert({ id: randomUUID(), name: 'Synthetic Yard Sign', active: true, inventory_unit: 'each', inventory_on_hand: 0, per_completion_usage: 1, per_completion_service_lines: JSON.stringify(['pest']) });
+    // A kit product (one per pest visit) with orders in every state the list must read: marked ordered by hand,
+    // a placing automatic order on a still-open request, an ordered request whose order was revoked (its own
+    // request figure counts, not the revoked order's), and the ones that are NOT supply (an open request with no
+    // order, a received request).
+    const [stake] = await mockConn('products_catalog').insert({ id: randomUUID(), name: 'Synthetic Stake', active: true, inventory_unit: 'each', inventory_on_hand: 0, per_completion_usage: 1, per_completion_service_lines: JSON.stringify(['pest']) }).returning('id');
+    const request = (status, quantity) => ({ id: randomUUID(), product_id: stake.id, status, requested_quantity: quantity, unit: 'each' });
+    const requests = [request('ordered', 1), request('open', 1), request('open', 50), request('received', 50), request('ordered', 1)];
+    await mockConn('product_restock_requests').insert(requests);
+    await mockConn('vendor_orders').insert([
+      { id: randomUUID(), restock_request_id: requests[1].id, adapter: 'synthetic', status: 'placing', request_payload: JSON.stringify({ orderedQuantity: 1 }) },
+      { id: randomUUID(), restock_request_id: requests[4].id, adapter: 'synthetic', status: 'placed', placed_at: new Date(), request_payload: JSON.stringify({ orderedQuantity: 99 }), evidence: JSON.stringify({ revokedAt: '2026-12-01T00:00:00Z' }) },
+    ]);
     await mockConn('vendor_pricing').insert([
       { id: randomUUID(), product_id: cross.id, vendor_id: vendor.id, quantity: '2.5 gal', price: 100, price_amount: 100, is_best_price: true, is_active: true, approval_status: 'approved' },
       { id: randomUUID(), product_id: cross.id, vendor_id: other.id, quantity: '1 gal', price: 1, price_amount: 1, is_best_price: false, is_active: true, approval_status: 'pending' },
@@ -84,11 +96,16 @@ jest.setTimeout(60000);
       'The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out', // only CrossCheck is in this fixture catalog
     ]);
     const cross = tech.items.find((i) => i.name === 'LESCO CrossCheck Plus');
-    // 0.01 gal on hand covers little of it: one 2.5 gal pack each for the technician and the unassigned visit, so no spare is owed.
-    expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 10000, reasons: ['pest_mix'] });
+    // 0.01 gal on hand: the technician and the unassigned visit each open their own 2.5 gal pack, so one more
+    // sealed container is kept, once (on the technician's list).
+    expect(cross).toMatchObject({ unit: 'gal', packs: 2, packLabel: '2.5 gal', estCostCents: 20000, reasons: ['pest_mix', 'spare_floor'] });
+    expect(list.unassigned.items.find((i) => i.name === 'LESCO CrossCheck Plus')).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
     expect(cross.needQty).toBeCloseTo(7.5 / 128, 4);
     // The pending row at one dollar is not eligible: the approved 2.5 gal row decides the pack and the price.
     expect(list.unassigned.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 1, shortQty: 1, packs: null }); // no price on file
+    // 1 (marked ordered) + 1 (placing order) + 1 (revoked order: the request's own figure) = 3 on order for the 4 stakes needed
+    expect(tech.items.find((i) => i.name === 'Synthetic Stake')).toMatchObject({ needQty: 4, onOrder: 3, shortQty: 1 });
+    expect(list.unassigned.items.find((i) => i.name === 'Synthetic Stake')).toMatchObject({ needQty: 1, onOrder: 3, shortQty: 1 }); // the same 3 are spoken for
     expect(tech.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 4 }); // three pest visits and the roach job; not the assessment
     expect(list.unassigned.warnings).toEqual(['The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out']);
     expect(list.warnings).toEqual([]);

@@ -31,17 +31,21 @@ const money = (cents) => `$${(cents / 100).toFixed(2)}`;
 const plural = (n, one, many) => (n === 1 ? one : many);
 const hasContent = (group) => group.items.length > 0 || group.warnings.length > 0;
 
+// Every number says its unit and where it comes from: need and on hand in the stock unit, "already ordered" (bought,
+// not yet received), packs in the pack label, and the vendor the pack and price are from.
 function itemLine(item) {
-  const stock = `need ${num(item.needQty)} ${item.unit}, on hand ${num(item.onHand)} ${item.unit}`;
+  const ordered = item.onOrder > 0 ? `, already ordered ${num(item.onOrder)} ${item.unit}` : '';
+  const stock = `need ${num(item.needQty)} ${item.unit}, on hand ${num(item.onHand)} ${item.unit}${ordered}`;
+  const from = item.vendorName ? ` from ${item.vendorName}` : '';
   if (item.packs === 0) return `HOLD ${item.name}: short ${num(item.shortQty)} ${item.unit} (${stock}); N/P fertilizer blackout, not bought`;
-  if (item.packs == null) return `${item.name}: buy about ${num(item.shortQty)} ${item.unit}, no pack or price on file (${stock})`;
-  const spare = item.reasons.includes('spare_floor') ? ', includes one spare container' : '';
-  return `${item.packs} x ${item.packLabel || 'pack'} ${item.name} (${stock}${spare})`;
+  if (item.packs == null) return `${item.name}: buy about ${num(item.shortQty)} ${item.unit}, no pack or price on file${from} (${stock})`;
+  const spare = item.reasons.includes('spare_floor') ? ', includes one spare sealed container' : '';
+  return `${item.packs} x ${item.packLabel || 'pack'} ${item.name}${from} (${stock}${spare})`;
 }
 
 function detailFor(group, list) {
   const lines = [
-    `Store: ${group.supplyStore || 'not set'}`,
+    `Preferred store: ${group.supplyStore || 'not set'} (each line names the vendor its pack and price come from)`,
     `Week: ${monthDay(list.weekStart)} to ${monthDay(list.weekEnd)}${list.fromDate > list.weekStart ? `, counted from ${monthDay(list.fromDate)}` : ''}`,
     ...group.items.map(itemLine),
   ];
@@ -74,7 +78,7 @@ function whyFor(group) {
   const store = group.supplyStore && !breaksAlertRules(group.supplyStore) ? group.supplyStore : null;
   const parts = [];
   const { total, gap } = costParts(group);
-  if (n) parts.push([`${n} ${plural(n, 'product', 'products')} to buy${store ? ` at ${store}` : ''}`, total && `about ${total}`, gap && `${group.unpricedLines} unpriced`].filter(Boolean).join(', '));
+  if (n) parts.push([`${n} ${plural(n, 'product', 'products')} to buy${store ? `, preferred store ${store}` : ''}`, total && `about ${total}`, gap && `${group.unpricedLines} unpriced`].filter(Boolean).join(', '));
   if (held) parts.push(`${held} held for the fertilizer blackout`);
   if (w) parts.push(`${w} ${plural(w, 'warning', 'warnings')} to check`);
   const cut = cutAtWord(parts.join('; '), MAX_WHY_CHARS - 1);
@@ -96,18 +100,26 @@ function specFor(group, list) {
 }
 
 // What the alert states per product, for the next recheck to compare with.
-const stated = (group) => group.items.map((i) => ({ productId: i.productId, packs: i.packs, shortQty: i.shortQty }));
-const amountOf = (i) => (i.packs == null ? i.shortQty : i.packs);
+const stated = (group) => group.items.map((i) => ({ productId: i.productId, packs: i.packs, packLabel: i.packLabel, shortQty: i.shortQty }));
+
 // Everything the alert says, so a corrected store, pack label, price or note refreshes its text quietly. The
 // "counted from" day moves every day and is left out; growth (below) is the only reason to ring again.
 const signatureOf = (group, list) => JSON.stringify([
   stated(group), specFor(group, list).spec, detailFor(group, { ...list, fromDate: list.weekStart }),
 ]);
 
-// True when the list has a product the alert did not state, or more of one.
+// True when the list has a product to buy that the alert did not state, or more of one. Packs are compared with
+// packs only when both sides are whole packs of the same size; otherwise the short amount in stock units decides,
+// so a pack that became known or unknown with the same demand neither rings nor hides real growth.
 function growth(group, priorItems) {
-  const before = new Map((priorItems || []).map((i) => [String(i.productId), amountOf(i)]));
-  return stated({ items: buyLines(group) }).some((i) => !before.has(String(i.productId)) || amountOf(i) > before.get(String(i.productId)) + 1e-9);
+  // A held line was never stated as a purchase: when it becomes one, that is a new product to buy.
+  const before = new Map((priorItems || []).filter((i) => i.packs !== 0).map((i) => [String(i.productId), i]));
+  return stated({ items: buyLines(group) }).some((now) => {
+    const was = before.get(String(now.productId));
+    if (!was) return true;
+    const samePacks = now.packs != null && was.packs != null && (now.packLabel ?? null) === (was.packLabel ?? null);
+    return samePacks ? now.packs > was.packs : now.shortQty > was.shortQty + 1e-9;
+  });
 }
 
 // The standing row for a key, newest first, with what it last stated.

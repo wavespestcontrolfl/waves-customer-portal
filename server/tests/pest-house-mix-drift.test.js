@@ -48,6 +48,17 @@ describe('pest house mix: server copy matches the client close-out', () => {
     expect(isPestHouseMixVisit({ service_type: 'Pest Control Service', service_key_snapshot: 'one_time_pest_control' })).toBe(true);
   });
 
+  test('a bare label resolved to the one-time pest service by its profile gets the mix, as on the client; a typed form or bed bug visit does not', () => {
+    expect(isPestHouseMixVisit({ service_type: 'Pest Control Service', profile_service_key: 'one_time_pest_control' }))
+      .toBe(client.isPestDefaultMixVisit({ serviceType: 'Pest Control Service', completionProfile: { serviceKey: 'one_time_pest_control' } }));
+    expect(isPestHouseMixVisit({ service_type: 'Pest Control Service', profile_service_key: 'one_time_pest_control' })).toBe(true);
+    // the profile key wins over a stale snapshot, as in the close-out
+    expect(isPestHouseMixVisit({ service_type: 'Pest Control Service', profile_service_key: 'something_else', service_key_snapshot: 'one_time_pest_control' })).toBe(false);
+    // close-out surfaces that never open on the mix (SchedulePage isTypedFindings / isBedBugVisit)
+    expect(isPestHouseMixVisit({ service_type: 'Quarterly Pest Control', typed_findings: true })).toBe(false);
+    expect(isPestHouseMixVisit({ service_type: 'Quarterly Pest Control', profile_service_key: 'bed_bug_treatment' })).toBe(false);
+  });
+
   test('the catalog identity pass picks the same rows as the client and flags what is missing', () => {
     const rows = [
       { id: 1, name: 'LESCO CrossCheck Plus', inventory_unit: 'gal' },

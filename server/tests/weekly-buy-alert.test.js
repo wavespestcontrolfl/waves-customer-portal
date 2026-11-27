@@ -43,11 +43,11 @@ describe('alert text', () => {
     const composed = composeAdminAlert(spec); // throws when the headline or why break the alert rules
     expect(key).toBe('weekly-buy:tech-a:2026-12-07');
     expect(composed.headline).toBe("Inventory — buy Alex's supplies, week of Dec 7");
-    expect(composed.why).toBe('1 product to buy at Synthetic Supply North, about $107.00; 1 warning to check.');
+    expect(composed.why).toBe('1 product to buy, preferred store Synthetic Supply North, about $107.00; 1 warning to check.');
     expect(detailFor(list.technicians[0], list)).toBe([
-      'Store: Synthetic Supply North',
+      'Preferred store: Synthetic Supply North (each line names the vendor its pack and price come from)',
       'Week: Dec 7 to Dec 12',
-      '1 x 2.5 gal Synthetic Liquid (need 3.1 gal, on hand 1.2 gal)',
+      '1 x 2.5 gal Synthetic Liquid from Synthetic Supply (need 3.1 gal, on hand 1.2 gal)',
       'Estimated total: $107.00',
       'Notes:',
       '- Synthetic Liquid: stock not counted, treated as none on hand.',
@@ -65,8 +65,8 @@ describe('alert text', () => {
     const text = detailFor(group, listOf([group], { fromDate: '2026-12-09' }));
     expect(text).toContain('Week: Dec 7 to Dec 12, counted from Dec 9');
     expect(text).toContain('HOLD Held Fert: short 60 lb (need 60 lb, on hand 0 lb); N/P fertilizer blackout, not bought');
-    expect(text).toContain('No Price: buy about 4 gal, no pack or price on file (need 4 gal, on hand 0 gal)');
-    expect(text).toContain('2 x 1 gal House Liquid (need 3.1 gal, on hand 1.2 gal, includes one spare container)');
+    expect(text).toContain('No Price: buy about 4 gal, no pack or price on file from Synthetic Supply (need 4 gal, on hand 0 gal)');
+    expect(text).toContain('2 x 1 gal House Liquid from Synthetic Supply (need 3.1 gal, on hand 1.2 gal, includes one spare sealed container)');
   });
 
   test('the headline fits 60 characters for a long first name and for unassigned visits; the sentence fits 110', () => {
@@ -83,7 +83,7 @@ describe('alert text', () => {
   test('a store name that would break the alert rules is left out of the sentence, not the body', () => {
     const group = entry({ supplyStore: 'Synthetic Supply Inc. North Branch' });
     expect(whyFor(group)).not.toMatch(/Inc\./);
-    expect(detailFor(group, listOf([group]))).toContain('Store: Synthetic Supply Inc. North Branch');
+    expect(detailFor(group, listOf([group]))).toContain('Preferred store: Synthetic Supply Inc. North Branch');
   });
 });
 
@@ -146,13 +146,13 @@ describe('held lines, partial totals and a check-only list', () => {
     expect(composeAdminAlert(specFor(group, list).spec).headline).toBe("Inventory — check Alex's supplies, week of Dec 7");
     // beside a real purchase it stays a purchase list, and the count of products to buy leaves the hold out
     const mixed = entry({ items: [item(), held()] });
-    expect(whyFor(mixed)).toBe('1 product to buy at Synthetic Supply North, about $107.00; 1 held for the fertilizer blackout.');
+    expect(whyFor(mixed)).toBe('1 product to buy, preferred store Synthetic Supply North, about $107.00; 1 held for the fertilizer blackout.');
     expect(composeAdminAlert(specFor(mixed, list).spec).headline).toMatch(/buy Alex's supplies/);
   });
 
   test('a line with no price makes the total partial, in the sentence and the body', () => {
     const group = entry({ items: [item(), item({ productId: 'p2', name: 'No Price', packs: null, packLabel: null, estCostCents: null })], unpricedLines: 1 });
-    expect(whyFor(group)).toBe('2 products to buy at Synthetic Supply North, about $107.00, 1 unpriced.');
+    expect(whyFor(group)).toBe('2 products to buy, preferred store Synthetic Supply North, about $107.00, 1 unpriced.');
     expect(detailFor(group, listOf([group]))).toContain('Estimated total: $107.00; 1 line has no price, so the total leaves it out');
     const none = entry({ items: [item({ packs: null, packLabel: null, estCostCents: null })], estTotalCents: null, unpricedLines: 1 });
     expect(detailFor(none, listOf([none]))).toContain('Estimated total: 1 line has no price, so the total leaves it out');
@@ -165,6 +165,56 @@ describe('held lines, partial totals and a check-only list', () => {
     const result = await runWeeklyBuyList({ list: listOf([entry({ items: [held()], estTotalCents: null })]), io: fakeIo(), notify });
     expect(result.raised).toBe(1);
     expect(notify.mock.calls[0][1]).toBe("Inventory — check Alex's supplies, week of Dec 7");
+  });
+});
+
+describe('numbers say their unit and source', () => {
+  test('already ordered is shown in the stock unit, and a line from another vendor than the store names it', () => {
+    const group = entry({ items: [item({ onOrder: 2, vendorName: 'Other Supply' })] });
+    expect(detailFor(group, listOf([group]))).toContain('1 x 2.5 gal Synthetic Liquid from Other Supply (need 3.1 gal, on hand 1.2 gal, already ordered 2 gal)');
+  });
+});
+
+describe('growth compares like with like', () => {
+  const prior = (over) => [{ productId: 'p1', packs: 2, packLabel: '2.5 gal', shortQty: 4, ...over }];
+  const now = (over) => entry({ items: [item({ packs: 2, packLabel: '2.5 gal', shortQty: 4, ...over })] });
+
+  test('same pack size: packs decide', () => {
+    expect(growth(now({ packs: 3 }), prior())).toBe(true);
+    expect(growth(now({ packs: 2 }), prior())).toBe(false);
+    expect(growth(now({ packs: 1 }), prior())).toBe(false);
+  });
+
+  test('a pack that became unknown with the same demand does not ring; with more demand it does', () => {
+    expect(growth(now({ packs: null, packLabel: null, estCostCents: null, shortQty: 4 }), prior())).toBe(false);
+    expect(growth(now({ packs: null, packLabel: null, estCostCents: null, shortQty: 4.5 }), prior())).toBe(true);
+  });
+
+  test('a pack that became known with the same demand does not ring, and does not hide growth', () => {
+    const unknown = prior({ packs: null, packLabel: null });
+    expect(growth(now({ packs: 1, packLabel: '1 gal', shortQty: 4 }), unknown)).toBe(false); // one big pack count is not "more"
+    expect(growth(now({ packs: 9, packLabel: '1 gal', shortQty: 4 }), unknown)).toBe(false); // packs of a new size are not compared with nothing
+    expect(growth(now({ packs: 1, packLabel: '1 gal', shortQty: 5 }), unknown)).toBe(true);
+  });
+
+  test('a different pack size compares the short amount, not the pack count', () => {
+    expect(growth(now({ packs: 4, packLabel: '1 gal', shortQty: 4 }), prior())).toBe(false);
+    expect(growth(now({ packs: 1, packLabel: '5 gal', shortQty: 6 }), prior())).toBe(true);
+  });
+
+  test('a product that was held and is now to buy is a new product', () => {
+    expect(growth(now({ packs: 1 }), prior({ packs: 0, packLabel: null }))).toBe(true);
+  });
+
+  test('a ring is never suppressed when a new product becomes short, and a quiet refresh never rings', async () => {
+    const KEY = 'weekly-buy:tech-a:2026-12-07';
+    const standing = { open: true, cleared: false, weeklyBuy: { signature: 'old', items: prior() } };
+    const grown = notifier();
+    await runWeeklyBuyList({ list: listOf([entry({ items: [item({ packs: 2, packLabel: '2.5 gal', shortQty: 4 }), item({ productId: 'p9', name: 'Newly Short' })] })]), io: fakeIo({ standing: { [KEY]: standing }, open: [KEY] }), notify: grown });
+    expect(grown.mock.calls[0][3].ringOnRefresh()).toBe(true);
+    const quiet = notifier();
+    await runWeeklyBuyList({ list: listOf([entry({ items: [item({ packs: null, packLabel: null, estCostCents: null, shortQty: 4 })], estTotalCents: null })]), io: fakeIo({ standing: { [KEY]: standing }, open: [KEY] }), notify: quiet });
+    expect(quiet.mock.calls[0][3].ringOnRefresh()).toBe(false);
   });
 });
 

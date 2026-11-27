@@ -926,14 +926,14 @@ row's own signals.
 notifications only and orders, texts and charges nothing). One alert per technician (and one for visits with no technician) that has
 something to buy, a fertilizer-blackout hold or a warning for the Monday-to-Saturday week, raised under category `system` with `bell: true`,
 headline "Inventory — buy <first name>'s supplies, week of Dec 7" ("check" instead of "buy" when nothing is to be bought: only holds or
-warnings), why "<n> products to buy at <supply store>, about $<total>, <n> unpriced; <n> held for the fertilizer blackout; <n> warnings to
+warnings), why "<n> products to buy, preferred store <supply store>, about $<total>, <n> unpriced; <n> held for the fertilizer blackout; <n> warnings to
 check.", link `/admin/inventory?tab=restock`, done-when `supplies_bought`, who `person`. A held line (N/P fertilizer, June 1 to Sept 30) is
 not a product to buy. A line to buy with no price makes the total partial, and the body says how many lines it leaves out. `detail` has the
-store (`technicians.supply_store`), the week and one line per product ("2 x 1 gal Product (need N, on hand M)"), the estimated total, notes and
+preferred store (`technicians.supply_store`), the week and one line per product ("2 x 1 gal Product from <vendor> (need N, on hand M, already ordered K)"; the vendor is the one whose price row set the pack and price, which may not be the store; "already ordered" is bought and not yet received), the estimated total, notes and
 warnings (a lawn visit with no plan, visits of types the list does not plan yet, a house-mix product missing from the catalog). Estimate-slot
-holds, moved, no-show and skipped visits are not counted. dedupeKey `weekly-buy:<technician id|unassigned>:<ET Monday>`, with
+holds, moved, no-show and skipped visits are not counted. Taurus SC is left out of a visit's mix where the home's yearly label limit is reached or its count is unknown, as at close-out. One sealed container of each everyday pest liquid is kept after the week (opened containers do not combine). dedupeKey `weekly-buy:<technician id|unassigned>:<ET Monday>`, with
 `refreshOnDedupe`, raised through `raiseAdminAlertWithReopen`. Monday raises the week and closes every earlier week's alert. Tuesday to Saturday
-recounts from today: a list that gains a short product or more packs than the alert last stated rings once more; any other change to what the
+recounts from today: a list that gains a short product or more packs than the alert last stated rings once more (packs are compared only when both sides are whole packs of the same size, otherwise the short amount in stock units); any other change to what the
 alert says (a store, pack label, price, note, warning, or a smaller need) rewrites it quietly; an identical list writes nothing; a list with
 nothing left to buy and no warning closes (`closeAdminAlertKeys`). A person's Done stays done until the list grows.
 Read-only preview: `node server/scripts/weekly-buy-list.js [--json] [--date YYYY-MM-DD]`.

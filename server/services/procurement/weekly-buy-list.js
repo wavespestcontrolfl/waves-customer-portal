@@ -14,7 +14,10 @@
  *     buildWaveGuardInventoryForecast over the week's explicit date range. Each
  *     forecast appointment is mapped to its visit's technician.
  *   - pest house mix: the three-product tank mix every general-pest visit records
- *     (pest-house-mix.js, a tested copy of the client's mix).
+ *     (pest-house-mix.js, a tested copy of the client's mix). Taurus SC stays on a
+ *     visit only where the home's yearly label limit leaves room, judged as the
+ *     close-out judges it (taurus-yearly-count.js, one batched read, visits in date
+ *     order); an unknown count leaves it off.
  *   - per-completion supplies (yard signs, stickers, stakes): one per booked visit
  *     of a line the product names, by the close-out's own rule (supplies-consumption
  *     noKitReason, fed by the visit's completion profile: an internal-only
@@ -23,25 +26,32 @@
  * Visits of any other kind (roach, flea, bed bug, mosquito, rodent, tree and
  * shrub ...) are not planned; each technician's list says how many.
  *
- * Supply is products_catalog.inventory_on_hand, one company-wide count. With two
- * technicians drawing on it, stock goes to assigned technicians first (earliest
- * first visit, then id), then to visits with no technician. Short = need minus the stock given to
- * that technician. Packs are whole vendor packs, read the way the dispatcher
- * reads them (reorder-limit-suggestions: eligible price row, packFor, packReorder).
- * Spare floor: for the everyday pest liquids, one unopened container must still
- * be on the shelf after the week; it adds a container only when that is not true.
+ * Supply is products_catalog.inventory_on_hand plus what is already ordered and not
+ * received (a request marked ordered, or an automatic order placing or placed and not
+ * revoked; an open request with no order is not supply), one company-wide figure. With
+ * two technicians drawing on it, stock goes to assigned technicians first (earliest
+ * first visit, then id), then to visits with no technician. Short = need minus the stock
+ * given to that technician. Packs are whole vendor packs, read the way the dispatcher
+ * reads them (reorder-limit-suggestions: eligible price row, packFor, packReorder); each
+ * line names the vendor that row is from, which may not be the technician's store.
+ * Spare floor: for the everyday pest liquids, one SEALED container must remain after
+ * the week. Opened containers do not combine: each purchase leaves sealed only what its
+ * technician did not need to open, and the stock leaves whole containers after what was
+ * handed out. When none would remain, one container is added once.
  * N/P fertilizer is held June 1 - Sept 30 (fertilizer-blackout.js): listed, not bought.
  */
 const db = require('../../models/db');
 const { etParts, etWeekStart, etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
-const { convertInventoryQuantity } = require('../inventory-units');
+const { convertInventoryQuantity, normalizeInventoryUnit } = require('../inventory-units');
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { packFor, packReorder, pickPriceRow } = require('./reorder-limit-suggestions');
 const { fertilizerBlackoutHold, FERTILIZER_COLUMNS } = require('./fertilizer-blackout');
 const { appliesToLine, noKitReason, INSPECTION_SERVICE_RE } = require('../supplies-consumption');
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { isPestHouseMixVisit, resolveHouseMix, PEST_HOUSE_MIX } = require('./pest-house-mix');
+const { projectTaurusEligibility } = require('../taurus-yearly-count');
+const { RECEIVED_SETTLES_SQL } = require('./order-dispatch');
 
 // The forecast reads at most this many lawn visits (its own cap).
 const FORECAST_VISIT_LIMIT = 300;
@@ -72,7 +82,7 @@ function weekBounds(now = new Date()) {
 // ---- demand ----------------------------------------------------------------
 
 function newGroup() {
-  return { demand: new Map(), firstDate: null, lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set() };
+  return { demand: new Map(), firstDate: null, lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), taurusLeft: 0 };
 }
 
 // Sum demand for one product, kept in the unit of its first entry.
@@ -153,7 +163,9 @@ function addPlannedDemand(g, v, { line, mix, planned }) {
     if (!planned && !idle) g.unplanned += 1;
   } else if (isPestHouseMixVisit(v)) {
     for (const m of mix.matched) {
-      if (m.perVisit == null) g.unitProblems.add(String(m.product.id));
+      // The close-out drops Taurus SC where the home's label limit is reached or its history is unknown.
+      if (m.entry.key === 'taurus_sc' && v.taurus_ok === false) g.taurusLeft += 1;
+      else if (m.perVisit == null) g.unitProblems.add(String(m.product.id));
       else addDemand(g, m.product.id, m.perVisit, m.product.inventory_unit, 'pest_mix');
     }
     // A mix product missing from the catalog is a warning on every list whose visits need it, never a silent skip.
@@ -214,7 +226,7 @@ function planGroups({ groups, products, techs }) {
       if (!product) continue;
       const need = d.unit === product.unit ? d.qty : convertInventoryQuantity(d.qty, d.unit, product.unit);
       if (need == null) { groups.get(key).unitProblems.add(pid); continue; }
-      if (!stock.has(pid)) stock.set(pid, Math.max(0, product.onHand ?? 0));
+      if (!stock.has(pid)) stock.set(pid, Math.max(0, product.onHand ?? 0) + product.onOrder);
       const take = Math.min(stock.get(pid), need);
       stock.set(pid, exact(stock.get(pid) - take));
       sharing.set(pid, (sharing.get(pid) || 0) + 1);
@@ -223,6 +235,7 @@ function planGroups({ groups, products, techs }) {
       lines.get(key).push(line);
       notes.get(key).push(...lineNotes(product, line));
     }
+    if (groups.get(key).taurusLeft) notes.get(key).push(`Taurus SC is left out of ${groups.get(key).taurusLeft} ${plural(groups.get(key).taurusLeft, 'visit', 'visits')}: the home reached the label's yearly limit, or its count is unavailable.`);
   }
   applySpareFloor({ order, lines });
   const out = new Map();
@@ -230,14 +243,15 @@ function planGroups({ groups, products, techs }) {
   return out;
 }
 
-// One unopened container of an everyday liquid stays on the shelf: when the
-// company's stock plus every pack bought, less the week's whole need, is less
-// than one container, the first technician with demand for it buys one more.
+// One SEALED container of an everyday liquid stays on the shelf after the week. Opened containers do not
+// combine: a technician's purchase only leaves sealed what he did not need to open, and the company's stock
+// leaves sealed what whole containers remain after the stock handed out. When no sealed container would
+// remain, the first technician with demand for it buys one more.
 function applySpareFloor({ order, lines }) {
-  const floorIds = new Set(PEST_HOUSE_MIX.filter((e) => e.floor).map((e) => e.key));
+  const floorKeys = new Set(PEST_HOUSE_MIX.filter((e) => e.floor).map((e) => e.key));
   const byProduct = new Map();
   for (const key of order) for (const line of lines.get(key)) {
-    if (!line.product.floorKey || !floorIds.has(line.product.floorKey)) continue;
+    if (!line.product.floorKey || !floorKeys.has(line.product.floorKey)) continue;
     if (!byProduct.has(line.pid)) byProduct.set(line.pid, []);
     byProduct.get(line.pid).push(line);
   }
@@ -245,9 +259,11 @@ function applySpareFloor({ order, lines }) {
     const { product } = entries[0];
     const size = product.pack?.pack;
     if (product.hold || product.countOrder || !(size > 0)) continue;
-    const need = entries.reduce((sum, l) => sum + l.need, 0);
-    const bought = entries.reduce((sum, l) => sum + (l.packs || 0) * size, 0);
-    if (exact(Math.max(0, product.onHand ?? 0) + bought - need) >= exact(size - 1e-9)) continue;
+    const supply = Math.max(0, product.onHand ?? 0) + product.onOrder;
+    const drawn = entries.reduce((sum, l) => sum + (l.need - l.short), 0);
+    const sealedStock = Math.floor(exact((supply - drawn) / size) + 1e-9);
+    const sealedBought = entries.reduce((sum, l) => sum + Math.max(0, (l.packs || 0) - Math.ceil(l.short / size - 1e-9)), 0);
+    if (sealedStock + sealedBought >= 1) continue;
     const first = entries[0];
     first.packs = (first.packs || 0) + 1;
     first.label = product.packLabel || null;
@@ -266,7 +282,7 @@ const WARNING_TEXT = [
 function itemOf(l, cents) {
   return {
     productId: l.pid, name: l.product.name, needQty: l.need, unit: l.product.unit,
-    onHand: Math.max(0, l.product.onHand ?? 0), shortQty: l.short,
+    onHand: Math.max(0, l.product.onHand ?? 0), onOrder: l.product.onOrder, shortQty: l.short,
     packs: l.packs, packLabel: l.label, estCostCents: cents,
     vendorName: l.product.picked?.row?.vendor_name || l.product.picked?.vendorName || null, reasons: l.reasons,
   };
@@ -299,7 +315,7 @@ function groupEntry({ key, group, lines, notes, sharing, techs }) {
 // ---- read ------------------------------------------------------------------
 
 // One catalog row, its eligible price rows and the clock, as the planner reads it.
-function toPlanProduct({ row, pricing, now, floorKey = null }) {
+function toPlanProduct({ row, pricing, now, floorKey = null, onOrder = 0 }) {
   const unit = row.inventory_unit;
   const picked = pickPriceRow(pricing, row);
   const { pack, countOrder } = packFor(picked, unit);
@@ -307,6 +323,7 @@ function toPlanProduct({ row, pricing, now, floorKey = null }) {
   return {
     id: row.id, name: row.name, unit,
     onHand: row.inventory_on_hand == null || row.inventory_on_hand === '' ? null : Number(row.inventory_on_hand),
+    onOrder,
     hold: fertilizerBlackoutHold(row, now),
     picked, pack, countOrder,
     packLabel: String(picked.row?.quantity || '').trim() || null,
@@ -323,7 +340,7 @@ function weekVisits(knex, { fromDate, weekEnd }) {
     // An estimate-slot hold (customer_id NULL with a reservation stamp, live or awaiting cleanup) is not a booking;
     // a pending booking has a customer or no stamp. Same rule as scheduling/occupancy.js (includeHolds: false).
     .where((q) => q.whereNotNull('ss.customer_id').orWhereNull('ss.reservation_expires_at'))
-    .select('ss.id', 'ss.technician_id', 'ss.service_type', 'ss.scheduled_date', 'ss.is_callback', 'ss.service_key_snapshot', 'ss.service_id', 'ss.is_recurring');
+    .select('ss.id', 'ss.technician_id', 'ss.service_type', 'ss.scheduled_date', 'ss.is_callback', 'ss.service_key_snapshot', 'ss.service_id', 'ss.is_recurring', 'ss.customer_id', 'ss.property_id');
 }
 
 // What each visit's close-out will be, read the way the close-out reads it (its completion profile): an
@@ -338,14 +355,54 @@ async function withCompletionKind(visits, knex) {
     if (!kinds.has(key)) {
       const profile = await resolveCompletionProfileForScheduledService(v, knex);
       const { isInternalOnly } = resolveCompletionDeliveryPosture({ typedFindingsType: profile.findingsType || null, completionMode: profile.completionMode });
-      kinds.set(key, { internal_only: isInternalOnly, project_type: profile.projectType || null });
+      kinds.set(key, {
+        internal_only: isInternalOnly, project_type: profile.projectType || null,
+        profile_service_key: profile.serviceKey || null, typed_findings: Boolean(profile.findingsType),
+      });
     }
     out.push({ ...v, ...kinds.get(key) });
   }
   return out;
 }
 
-async function readCatalog(knex, { ids, mixRows, now }) {
+// What is already bought and not yet in stock, per product, in the product's stock unit: a request marked
+// ordered, and an automatic order that is placing or was placed and is not revoked (the live-order rule of
+// order-dispatch findLiveAutoOrder). An open request with no order is not supply. The quantity is what the
+// order actually holds (orderedQuantityFor: packages round up), else the request's own figure.
+async function readOnOrder(knex, ids) {
+  if (!ids.length) return [];
+  return knex('product_restock_requests as prr')
+    .leftJoin('vendor_orders as vo', function liveOrder() {
+      this.on('vo.restock_request_id', 'prr.id')
+        .andOn(knex.raw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL"))
+        .andOn(knex.raw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)"));
+    })
+    .whereIn('prr.product_id', ids)
+    .where((q) => q.where('prr.status', 'ordered').orWhere((live) => live.whereNotNull('vo.id').whereRaw(RECEIVED_SETTLES_SQL)))
+    .select('prr.id', 'prr.product_id', 'prr.requested_quantity', 'prr.unit', 'vo.request_payload');
+}
+
+const asObject = (value) => (typeof value === 'string' ? (() => { try { return JSON.parse(value) || {}; } catch { return {}; } })() : (value || {}));
+
+// Sum the on-order rows per product in its stock unit; a row that does not convert is reported, not guessed.
+function onOrderByProduct(orderRows, units, warnings) {
+  const total = new Map();
+  for (const row of orderRows) {
+    const held = Number(asObject(row.request_payload).orderedQuantity);
+    const qty = held > 0 ? held : Number(row.requested_quantity);
+    const unit = units.get(String(row.product_id));
+    const same = normalizeInventoryUnit(row.unit) === normalizeInventoryUnit(unit);
+    const converted = same ? qty : convertInventoryQuantity(qty, row.unit, unit);
+    if (converted == null || !(converted > 0)) {
+      warnings.push('An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.');
+      continue;
+    }
+    total.set(String(row.product_id), exact((total.get(String(row.product_id)) || 0) + converted));
+  }
+  return total;
+}
+
+async function readCatalog(knex, { ids, mixRows, now, warnings }) {
   const rows = ids.length
     ? await knex('products_catalog as pc')
       .leftJoin('vendors as v', 'v.id', 'pc.auto_reorder_vendor_id')
@@ -360,11 +417,22 @@ async function readCatalog(knex, { ids, mixRows, now }) {
       'vendor_pricing.vendor_sku', 'vendor_pricing.price', 'vendor_pricing.price_amount', 'vendor_pricing.tax_rate',
       'pv.name as vendor_name', 'pv.code as vendor_code')
     : [];
+  const onOrder = onOrderByProduct(await readOnOrder(knex, ids), new Map(rows.map((r) => [String(r.id), r.inventory_unit])), warnings);
   const floorKeyOf = new Map(mixRows.matched.map((m) => [String(m.product.id), m.entry.key]));
   return new Map(rows.map((row) => [String(row.id), toPlanProduct({
-    row, now, floorKey: floorKeyOf.get(String(row.id)) || null,
+    row, now, floorKey: floorKeyOf.get(String(row.id)) || null, onOrder: onOrder.get(String(row.id)) || 0,
     pricing: pricing.filter((p) => String(p.product_id) === String(row.id)),
   })]));
+}
+
+// Taurus SC stays on a visit's mix only where the home's yearly label limit leaves room (one batched ledger
+// read for every home this week, judged in visit order); an unknown count leaves it off, as the close-outs do.
+async function withTaurusAnswer(visits, { knex, now, mix, warnings }) {
+  if (!mix.matched.some((m) => m.entry.key === 'taurus_sc')) return visits;
+  const mixVisits = visits.filter((v) => isPestHouseMixVisit(v));
+  const { fits, failed } = await projectTaurusEligibility(mixVisits, { knex, now });
+  if (failed) warnings.push('Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.');
+  return visits.map((v) => (fits.has(v.id) ? { ...v, taurus_ok: fits.get(v.id) } : v));
 }
 
 /**
@@ -388,9 +456,10 @@ async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
   const kit = await knex('products_catalog').where('active', true).where('per_completion_usage', '>', 0)
     .select('id', 'per_completion_usage', 'per_completion_service_lines', 'inventory_unit');
 
-  const groups = deriveDemand({ visits, forecast, mix, kit });
+  const withTaurus = await withTaurusAnswer(visits, { knex, now, mix, warnings });
+  const groups = deriveDemand({ visits: withTaurus, forecast, mix, kit });
   const demandIds = new Set([...groups.values()].flatMap((g) => [...g.demand.keys()]));
-  const products = await readCatalog(knex, { ids: [...demandIds], mixRows: mix, now });
+  const products = await readCatalog(knex, { ids: [...demandIds], mixRows: mix, now, warnings });
   for (const pid of demandIds) if (!products.has(pid)) warnings.push('A product with scheduled need is no longer in the catalog.');
   const planned = planGroups({ groups, products, techs });
   const unassigned = planned.get(UNASSIGNED) || groupEntry({ key: UNASSIGNED, group: newGroup(), lines: [], notes: [], sharing: new Map(), techs });

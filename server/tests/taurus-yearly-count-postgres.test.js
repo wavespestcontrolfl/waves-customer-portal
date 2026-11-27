@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const knexLib = require('knex');
 const { randomUUID } = require('crypto');
-const { taurusYearlyCount } = require('../services/taurus-yearly-count');
+const { taurusYearlyCount, projectTaurusEligibility } = require('../services/taurus-yearly-count');
 
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
@@ -235,5 +235,62 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     expect((await count(newOwner, propA)).count).toBe(3);
     expect((await count(oldOwner, propA)).count).toBe(4);
     expect((await count(newOwner, null)).count).toBe(2);
+  });
+
+  describe('projectTaurusEligibility (the weekly buy list: one read for every home, judged in visit order)', () => {
+    const project = (visits, now = NOW) => projectTaurusEligibility(visits, { knex: db, now });
+
+    it('answers each home as the one-visit count does: same ledger, same label scenarios, same year bounds', async () => {
+      const roomy = randomUUID();
+      const full = randomUUID();
+      const oneHigh = randomUUID();
+      const handedOver = randomUUID();
+      for (let i = 0; i < 3; i += 1) await application({ cust: roomy, property: propA });
+      for (let i = 0; i < 4; i += 1) await application({ cust: full, property: propB });
+      await application({ cust: oneHigh, property: randomUUID(), date: OLD });
+      await application({ cust: oneHigh, property: null, date: OLD, withVisit: false });
+      await application({ cust: handedOver, property: null, date: NEW, withVisit: false }); // this account's, no home recorded
+      await application({ cust: randomUUID(), property: propA, date: NEW, product: otherId }); // not Taurus
+      const homes = [[roomy, propA], [full, propB], [oneHigh, null], [handedOver, null], [randomUUID(), randomUUID()]];
+      const visits = homes.map(([customer_id, property_id]) => ({ id: randomUUID(), customer_id, property_id, scheduled_date: '2026-12-11' }));
+      const { fits, failed } = await project(visits);
+      expect(failed).toBe(false);
+      for (const v of visits) {
+        const single = await count(v.customer_id, v.property_id);
+        expect(fits.get(v.id)).toBe(single.eligible);
+      }
+      // roomy (3 at 0.03%) fits, full (4) does not, a visit with no home counts the whole account (two at 0.06%: used up)
+      expect(visits.map((v) => fits.get(v.id))).toEqual([true, false, false, true, true]);
+    });
+
+    it('judges two visits at one home in date order, whoever drives them: the last application that fits uses the year up', async () => {
+      const cust = randomUUID();
+      for (let i = 0; i < 3; i += 1) await application({ cust, property: propA });
+      const early = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-12-08' };
+      const late = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-12-10' };
+      const { fits } = await project([late, early]); // asked out of order
+      expect(fits.get(early.id)).toBe(true);
+      expect(fits.get(late.id)).toBe(false);
+    });
+
+    it('a visit with no customer, or a failed read, leaves Taurus off', async () => {
+      const lone = { id: randomUUID(), customer_id: null, property_id: propA, scheduled_date: '2026-12-08' };
+      expect((await project([lone])).fits.get(lone.id)).toBe(false);
+      const broken = { raw: () => { const err = new Error('select * from secret'); err.code = '57014'; throw err; } };
+      const out = await projectTaurusEligibility([{ ...lone, customer_id: randomUUID() }], { knex: broken, now: NOW });
+      expect(out.failed).toBe(true);
+      expect(out.fits.get(lone.id)).toBe(false);
+    });
+
+    it('checks both years for a visit in the year before today', async () => {
+      const cust = randomUUID();
+      for (const date of ['2025-03-03', '2025-04-04', '2025-05-05', '2025-06-06']) await application({ cust, property: propA, date });
+      const now = new Date('2026-01-05T15:00:00Z');
+      const dec = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2025-12-30' };
+      const jan = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-01-06' };
+      const { fits } = await project([dec, jan], now);
+      expect(fits.get(dec.id)).toBe(false); // 2025 is used up
+      expect(fits.get(jan.id)).toBe(true);
+    });
   });
 });

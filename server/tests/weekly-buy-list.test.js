@@ -6,6 +6,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/waveguard-inventory-forecast', () => ({ buildWaveGuardInventoryForecast: jest.fn() }));
+jest.mock('../services/taurus-yearly-count', () => ({ projectTaurusEligibility: jest.fn() }));
 jest.mock('../services/service-completion-profiles', () => ({
   resolveCompletionProfileForScheduledService: jest.fn(),
   resolveCompletionDeliveryPosture: jest.requireActual('../services/service-completion-profiles').resolveCompletionDeliveryPosture,
@@ -13,6 +14,7 @@ jest.mock('../services/service-completion-profiles', () => ({
 
 const forecastModule = require('../services/waveguard-inventory-forecast');
 const profiles = require('../services/service-completion-profiles');
+const taurusModule = require('../services/taurus-yearly-count');
 const {
   buildWeeklyBuyList, weekBounds, deriveDemand, planGroups, toPlanProduct, UNASSIGNED,
 } = require('../services/procurement/weekly-buy-list');
@@ -22,7 +24,7 @@ const visit = (id, tech, type, date = '2026-12-07', extra = {}) => ({ id, techni
 const noMix = { matched: [], missing: [] };
 // A plan product: stock in fl_oz, one 1-gal pack (128 fl oz) at 100.00.
 const plan = (over = {}) => ({
-  id: 'p1', name: 'Synthetic Liquid', unit: 'fl_oz', onHand: 0, hold: false,
+  id: 'p1', name: 'Synthetic Liquid', unit: 'fl_oz', onHand: 0, onOrder: 0, hold: false,
   picked: { row: { vendor_name: 'Synthetic Supply', quantity: '1 gal' }, vendorName: 'Synthetic Supply' },
   pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, tax: 0, floorKey: null, ...over,
 });
@@ -130,6 +132,39 @@ describe('demand per technician', () => {
     expect(groups.get('a').unplanned).toBe(1);
   });
 
+  test('Taurus SC is left off the visits whose home has no label room, and the list says so', () => {
+    const mix = resolveHouseMix([
+      { id: 'taurus', name: 'Taurus SC', inventory_unit: 'fl_oz' }, { id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' },
+      { id: 'surf', name: 'LESCO 90/10 Nonionic Surfactant', inventory_unit: 'fl_oz' },
+    ]);
+    const visitsTaurus = [
+      visit('t1', 'a', 'Quarterly Pest Control', '2026-12-07', { taurus_ok: true }),
+      visit('t2', 'a', 'Quarterly Pest Control', '2026-12-08', { taurus_ok: false }),
+      visit('t3', 'b', 'Quarterly Pest Control', '2026-12-08', { taurus_ok: false }),
+    ];
+    const groups = deriveDemand({ visits: visitsTaurus, forecast: { products: [], serviceIds: [] }, mix, kit: [] });
+    expect(groups.get('a').demand.get('taurus').qty).toBe(1.6); // one visit of two
+    expect(groups.get('a').demand.get('cross').qty).toBe(5);
+    expect(groups.get('b').demand.has('taurus')).toBe(false);
+    const out = planGroups({ groups, products: new Map(), techs }); // the note rides the plan loop, whatever the catalog holds
+    expect(out.get('a').notes.join(' ')).toMatch(/Taurus SC is left out of 1 visit: the home reached the label's yearly limit, or its count is unavailable/);
+    expect(out.get('b').notes.join(' ')).toMatch(/left out of 1 visit/);
+  });
+
+  test('a bare pest label that resolves to the one-time pest service gets the mix; one that resolves to nothing is unplanned', () => {
+    const mix = resolveHouseMix([{ id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' }]);
+    const groups = deriveDemand({
+      visits: [
+        visit('b1', 'a', 'Pest Control Service', '2026-12-07', { profile_service_key: 'one_time_pest_control' }),
+        visit('b2', 'a', 'Pest Control Service', '2026-12-07', { profile_service_key: null }),
+        visit('b3', 'a', 'Quarterly Pest Control', '2026-12-07', { typed_findings: true }),
+      ],
+      forecast: { products: [], serviceIds: [] }, mix, kit: [],
+    });
+    expect(groups.get('a').demand.get('cross').qty).toBe(2.5);
+    expect(groups.get('a').unplanned).toBe(2);
+  });
+
   test('a house-mix product missing from the catalog is a warning on each list whose visits need the mix', () => {
     const mix = resolveHouseMix([{ id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' }]);
     const groups = deriveDemand({
@@ -186,6 +221,23 @@ describe('stock, packs and cost', () => {
     expect(at(128)).toMatchObject({ packs: 1, estCostCents: 10000 });
     expect(at(10, { tax: 0.07 })).toMatchObject({ packs: 1, estCostCents: 10700 });
     expect(run(new Map([['a', group([['p1', demand(10)]])]]), [plan()]).get('a').estTotalCents).toBe(10000);
+  });
+
+  test('what is already ordered counts as supply: the line shows it and buys only the rest', () => {
+    const out = run(new Map([['a', group([['p1', demand(300)]])]]), [plan({ onHand: 50, onOrder: 200 })]).get('a');
+    expect(out.items[0]).toMatchObject({ needQty: 300, onHand: 50, onOrder: 200, shortQty: 50, packs: 1 });
+    const covered = run(new Map([['a', group([['p1', demand(200)]])]]), [plan({ onHand: 50, onOrder: 200 })]).get('a');
+    expect(covered.items).toEqual([]);
+  });
+
+  test('two technicians split one stock and one open order, first visit first', () => {
+    const groups = new Map([
+      ['a', group([['p1', demand(150)]], { firstDate: '2026-12-07' })],
+      ['b', group([['p1', demand(150)]], { firstDate: '2026-12-08' })],
+    ]);
+    const out = run(groups, [plan({ onHand: 100, onOrder: 100 })]);
+    expect(out.get('a').items).toEqual([]); // 100 + 50 of the 200 supply
+    expect(out.get('b').items[0]).toMatchObject({ needQty: 150, onOrder: 100, shortQty: 100, packs: 1 }); // the remaining 50, then 100 to buy
   });
 
   test('a need in another unit is converted to the stock unit', () => {
@@ -249,6 +301,23 @@ describe('spare floor (one unopened container of the everyday liquids)', () => {
     expect(out.get('b').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
   });
 
+  test('opened containers do not combine: two technicians with small needs each open a container, so one sealed one is added once', () => {
+    const groups = new Map([
+      ['a', group([['p1', demand(10, 'fl_oz', ['pest_mix'])]], { firstDate: '2026-12-07' })],
+      ['b', group([['p1', demand(10, 'fl_oz', ['pest_mix'])]], { firstDate: '2026-12-08' })],
+    ]);
+    const out = run(groups, [liquid({ onHand: 0 })]);
+    expect(out.get('a').items[0]).toMatchObject({ packs: 2, reasons: ['pest_mix', 'spare_floor'] }); // one to open, one to keep sealed
+    expect(out.get('b').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] }); // one to open
+  });
+
+  test('stock on the shelf counts as sealed containers only as whole containers after the stock handed out', () => {
+    // 300 on hand, 10 handed out: 290 left = two whole containers, so nothing is added
+    expect(items(10, { onHand: 300 })).toEqual([]);
+    // 200 on hand, 100 handed out: 100 left is not a whole container
+    expect(items(100, { onHand: 200 })[0]).toMatchObject({ shortQty: 0, packs: 1, reasons: ['pest_mix', 'spare_floor'] });
+  });
+
   test('never for the surfactant or a lawn product, and not when there is no pack size', () => {
     expect(items(0.5, { onHand: 0, floorKey: 'surfactant' })[0]).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
     expect(run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ onHand: 100 })]).get('a').items).toEqual([]);
@@ -297,6 +366,7 @@ describe('buildWeeklyBuyList read wiring', () => {
     };
     const knex = jest.fn(make);
     knex.calls = calls;
+    knex.raw = jest.fn(() => 'RAW');
     return knex;
   }
 
@@ -342,6 +412,56 @@ describe('buildWeeklyBuyList read wiring', () => {
     expect(list.technicians[0].items).toMatchObject([{ productId: 'notice', needQty: 1 }]);
     const holdFilter = knex.calls[0].chain.where.mock.calls.map(([f]) => f).filter((f) => typeof f === 'function');
     expect(holdFilter).toHaveLength(2);
+  });
+
+  test('the pest mix asks for Taurus once for the whole week, and an unknown answer leaves it off with a warning', async () => {
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: [], serviceCount: 0, errors: [], skippedNonProgram: [], products: [] });
+    taurusModule.projectTaurusEligibility.mockResolvedValue({ fits: new Map([['q1', true], ['q2', false]]), failed: true });
+    const mixRows = [
+      { id: 'taurus', name: 'Taurus SC', inventory_unit: 'fl_oz' }, { id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' },
+      { id: 'surf', name: 'LESCO 90/10 Nonionic Surfactant', inventory_unit: 'fl_oz' },
+    ];
+    const knex = fakeKnex({
+      'scheduled_services as ss': [[
+        visit('q1', 'a', 'Quarterly Pest Control', '2026-12-09', { customer_id: 'c1', property_id: 'h1' }),
+        visit('q2', 'a', 'Quarterly Pest Control', '2026-12-10', { customer_id: 'c1', property_id: 'h1' }),
+        visit('q3', 'a', 'Cockroach Control', '2026-12-10', { customer_id: 'c1', property_id: 'h1' }),
+      ]],
+      technicians: [[{ id: 'a', name: 'Alex Sample', supply_store: null }]],
+      products_catalog: [mixRows, []],
+      'products_catalog as pc': [mixRows.map((r) => ({ ...r, inventory_on_hand: 0 }))],
+    });
+    const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    // only the general-pest visits are asked about, once
+    expect(taurusModule.projectTaurusEligibility).toHaveBeenCalledTimes(1);
+    expect(taurusModule.projectTaurusEligibility.mock.calls[0][0].map((v) => v.id)).toEqual(['q1', 'q2']);
+    expect(list.warnings).toEqual(['Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.']);
+    const taurus = list.technicians[0].items.find((i) => i.productId === 'taurus');
+    expect(taurus.needQty).toBe(1.6); // q1 fits, q2 does not
+  });
+
+  test('an order already placed or marked ordered is read once for the week and shown on the line', async () => {
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({
+      serviceIds: ['v1'], serviceCount: 1, errors: [], skippedNonProgram: [],
+      products: [{ productId: 'cross', inventoryUnit: 'fl_oz', appointments: [{ serviceId: 'v1', inventoryAmount: 400 }], mismatchAppointments: [] }],
+    });
+    const knex = fakeKnex({
+      'scheduled_services as ss': [[visit('v1', 'a', 'Lawn Care Treatment', '2026-12-09')]],
+      technicians: [[{ id: 'a', name: 'Alex Sample', supply_store: null }]],
+      products_catalog: [[], []],
+      'products_catalog as pc': [[{ id: 'cross', name: 'Synthetic Liquid', inventory_unit: 'fl_oz', inventory_on_hand: '50' }]],
+      vendor_pricing: [[{ product_id: 'cross', vendor_id: 'v', vendor_name: 'Synthetic Supply', quantity: '1 gal', is_best_price: true, price: '90', price_amount: '90', tax_rate: null }]],
+      'product_restock_requests as prr': [[
+        { product_id: 'cross', requested_quantity: '100', unit: 'fl_oz', request_payload: JSON.stringify({ orderedQuantity: 128 }) }, // dispatched order: what the packages hold
+        { product_id: 'cross', requested_quantity: '1', unit: 'gal', request_payload: null }, // marked ordered by hand: 1 gal = 128 fl oz
+        { product_id: 'cross', requested_quantity: '1', unit: 'lb', request_payload: null }, // does not convert: reported, not counted
+      ]],
+    });
+    const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    expect(knex.calls.filter((c) => c.table === 'product_restock_requests as prr')).toHaveLength(1);
+    // 50 on hand + 256 on order cover 306 of the 400 needed: 94 fl oz to buy, one 1 gal pack
+    expect(list.technicians[0].items).toMatchObject([{ needQty: 400, onHand: 50, onOrder: 256, shortQty: 94, packs: 1 }]);
+    expect(list.warnings).toEqual(['An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.']);
   });
 
   test('a forecast that fails fails the list: lawn need is never left out silently', async () => {

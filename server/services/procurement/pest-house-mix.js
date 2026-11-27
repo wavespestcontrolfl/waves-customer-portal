@@ -35,15 +35,21 @@ const RECURRING_GENERAL_PEST_RE =
 
 /**
  * True when this booked visit will record the house mix at close-out. Takes a
- * scheduled_services row: { service_type, is_callback, service_key_snapshot }.
+ * scheduled_services row: { service_type, is_callback, service_key_snapshot },
+ * plus what its completion profile says (the buy list reads it): profile_service_key
+ * (the catalog key the visit resolves to, which the close-out checks before the row's
+ * own snapshot) and typed_findings (a typed form never opens on the mix; neither does
+ * the bed bug visit, SchedulePage isTypedFindings / isBedBugVisit).
  */
 function isPestHouseMixVisit(visit) {
   const name = String(visit?.service_type || '').toLowerCase();
+  const key = String(visit?.profile_service_key || visit?.service_key_snapshot || '').toLowerCase();
+  if (visit?.typed_findings === true || key === 'bed_bug_treatment') return false;
   if (NON_MIX_SERVICE_RE.test(name)) return false;
   const isReservice = visit?.is_callback === true || /re-?service|callback/.test(name);
   if (isReservice || RECURRING_GENERAL_PEST_RE.test(name)) return true;
   // A bare "Pest Control Service" label carries no product line; the catalog key does.
-  return String(visit?.service_key_snapshot || '').toLowerCase() === 'one_time_pest_control';
+  return key === 'one_time_pest_control';
 }
 
 /**
