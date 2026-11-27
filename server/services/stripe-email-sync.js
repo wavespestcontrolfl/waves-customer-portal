@@ -10,15 +10,16 @@
  *  - Skipped with an office alert: a Stripe id another record also holds or another record's saved card uses, and any
  *    record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office sorts
  *    those out by hand instead of the app guessing.
- *  - No Stripe profile yet: re-checked twice a few minutes apart (a profile being created at the moment of the change
- *    links within seconds and was made with the old email), then finished.
+ *  - No Stripe profile yet: re-checked over about an hour (2, 4, 8, 16, 32 minutes), then finished. A profile being
+ *    created at the moment of the change was made with the old email and links when its create call returns; that
+ *    call is bounded by the Stripe client's timeout and retries (minutes at most), so the last re-check sees the link.
  *  - Stripe errors retry with backoff; after MAX_ATTEMPTS the office gets an alert.
  */
 const db = require('../models/db');
 const logger = require('./logger');
 
 const TABLE = 'stripe_email_sync_jobs';
-const MAX_ATTEMPTS = 6;
+const MAX_ATTEMPTS = 6; // Stripe errors after the profile is linked (not-linked re-checks count apart)
 const STRIPE_TIMEOUT_MS = 10000;
 const MERGE_RETIRED_PHONE_PREFIX = 'merged-';
 
@@ -27,12 +28,11 @@ const MERGE_RETIRED_PHONE_PREFIX = 'merged-';
 // just wrote the row), so two callers cannot both insert.
 async function enqueue(trx, customerId, source) {
   const rearmed = await trx(TABLE).where({ customer_id: customerId, status: 'pending' })
-    .update({ attempts: 0, last_error: null, source, next_attempt_at: trx.fn.now(), updated_at: trx.fn.now() });
+    .update({ attempts: 0, not_linked_checks: 0, last_error: null, source, next_attempt_at: trx.fn.now(), updated_at: trx.fn.now() });
   if (!rearmed) await trx(TABLE).insert({ customer_id: customerId, source });
 }
 
-const NOT_LINKED_RECHECKS = 2;
-const NOT_LINKED_RECHECK_MINUTES = 3;
+const NOT_LINKED_RECHECKS = 5;
 
 const backoffMinutes = (attempts) => Math.min(60, 2 ** attempts);
 
@@ -94,10 +94,11 @@ async function processJob(jobId) {
       return 'gone';
     }
     if (!customer.stripe_customer_id) {
-      if (job.attempts < NOT_LINKED_RECHECKS) {
+      const rechecks = job.not_linked_checks || 0;
+      if (rechecks < NOT_LINKED_RECHECKS) {
         await trx(TABLE).where({ id: job.id }).update({
-          attempts: job.attempts + 1, last_error: 'not_linked', updated_at: trx.fn.now(),
-          next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [NOT_LINKED_RECHECK_MINUTES]),
+          not_linked_checks: rechecks + 1, updated_at: trx.fn.now(),
+          next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [2 ** (rechecks + 1)]),
         });
         return 'recheck';
       }

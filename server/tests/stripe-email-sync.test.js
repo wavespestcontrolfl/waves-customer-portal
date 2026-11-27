@@ -89,16 +89,16 @@ describe('stripe-email-sync processJob', () => {
     await expect(own.processJob('job-1')).resolves.toBe('updated');
   });
 
-  test('no Stripe profile yet: two re-checks a few minutes apart, then finished (a profile mid-creation links in seconds)', async () => {
+  test('no Stripe profile yet: five re-checks over about an hour (counted apart from Stripe errors), then finished', async () => {
     let sync = load({ customers: [cust({ stripe_customer_id: null })] });
     await expect(sync.processJob('job-1')).resolves.toBe('recheck');
-    expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 1 });
-    sync = load({ job: { attempts: 2 }, customers: [cust({ stripe_customer_id: null })] });
+    expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 0, not_linked_checks: 1 });
+    sync = load({ job: { not_linked_checks: 5 }, customers: [cust({ stripe_customer_id: null })] });
     await expect(sync.processJob('job-1')).resolves.toBe('not_linked');
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'not_linked' });
     expect(updateEmail).not.toHaveBeenCalled();
     // Linked by the re-check: the email on file now goes to Stripe.
-    sync = load({ job: { attempts: 1 }, customers: [cust()] });
+    sync = load({ job: { not_linked_checks: 4 }, customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
   });
 
@@ -198,7 +198,7 @@ describe('stripe-email-sync enqueue', () => {
     const { trx, calls } = handle(true);
     await enqueue(trx, 'c1', 'app_email_change');
     expect(calls).toEqual([['update', 'stripe_email_sync_jobs', { customer_id: 'c1', status: 'pending' },
-      expect.objectContaining({ attempts: 0, last_error: null, source: 'app_email_change', next_attempt_at: 'NOW' })]]);
+      expect.objectContaining({ attempts: 0, not_linked_checks: 0, last_error: null, source: 'app_email_change', next_attempt_at: 'NOW' })]]);
   });
 
   test('no pending job: inserts one on the caller handle', async () => {
