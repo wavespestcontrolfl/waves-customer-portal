@@ -235,11 +235,16 @@ function buildRow(policy, result, rowKind = 'chain') {
     row_kind: rowKind,
     policy: recordedPolicyLabel(policy).slice(0, 120),
     ok: !!result?.ok,
-    // WHY the chain failed, from the first leg's code — the class the alert
+    // WHY the chain failed, from the first attempted leg's code (skipping
+    // circuit_open short-circuits so an attempted backup's timeout or quality
+    // failure is never masked by the skipped primary) — the class the alert
     // rules and eval selection key on; null on success. A rejection from the
     // caller's validate hook keeps that provenance (its codes are the
     // lane's own vocabulary — model-quality, not plumbing).
-    error_class: result?.ok ? null : classifyFailure(failures[0]?.reason || result?.reason || 'error', { validator: failures[0]?.validator === true }),
+    error_class: result?.ok ? null : (() => {
+      const primaryFailure = failures.find((f) => f?.reason !== 'circuit_open') || failures[0];
+      return classifyFailure(primaryFailure?.reason || result?.reason || 'error', { validator: primaryFailure?.validator === true });
+    })(),
     provider: result?.ok ? result.provider || null : null,
     model: result?.ok ? result.model || null : null,
     fallback_used: !!result?.fallbackUsed,

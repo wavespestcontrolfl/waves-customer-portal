@@ -939,6 +939,21 @@ function dispatchWithHardDeadline(route, routePayload, legMs) {
   return Promise.race([attempt, timedOut]).finally(() => clearTimeout(timer));
 }
 
+const PROVIDER_CAN_SERVE = {
+  [PROVIDER.OPENAI]: () => Boolean(process.env.OPENAI_API_KEY),
+  [PROVIDER.GEMINI]: (p) => !p.documents?.length && Boolean(geminiKey()),
+  [PROVIDER.ANTHROPIC]: (p) => Boolean(p.anthropicClient || (Anthropic && process.env.ANTHROPIC_API_KEY)),
+  [PROVIDER.TYPESAFE]: (p) => Boolean(process.env.TYPESAFE_API_KEY && p.questions && typeof p.questions === 'object' && !p.images?.length),
+  [PROVIDER.CLOUDFLARE]: (p) => Boolean((process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN) && process.env.CF_ACCOUNT_ID && p.questions && typeof p.questions === 'object'),
+};
+
+function canRouteServePayload(route, payload = {}) {
+  if (!route?.provider || !route.model) return false;
+  if (payload.audio && route.provider !== PROVIDER.GEMINI) return false;
+  const check = PROVIDER_CAN_SERVE[route.provider];
+  return typeof check === 'function' ? check(payload) : false;
+}
+
 // Execute one route inside runFallbackChain with optional hardDeadline and
 // sliding-window circuit breaker (GATE_LLM_CIRCUIT_BREAKER, dark by default).
 async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, hasBackup, signal }) {
@@ -957,7 +972,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ha
     ok: Boolean(result?.ok),
     reason: result?.reason || null,
     aborted: Boolean(signal?.aborted),
-    isProbe: gate.isProbe,
+    probeId: gate.probeId,
   });
   return result;
 }
@@ -1002,9 +1017,10 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
       ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
     const legMs = Math.min(shareMs, attemptCapMs);
     const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
+    const hasBackup = routes.slice(index + 1).some((backup) => canRouteServePayload(backup, payload));
     const result = await executeFallbackLeg(route, routePayload, legMs, {
       hardDeadline,
-      hasBackup: index < routes.length - 1,
+      hasBackup,
       signal: payload.signal,
     });
 

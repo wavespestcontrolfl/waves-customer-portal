@@ -1,6 +1,8 @@
 'use strict';
 
+const MODELS = require('../config/models');
 const circuitBreaker = require('../services/llm/circuit-breaker');
+const { classifyFailure } = require('../services/agent-control/taxonomy');
 
 describe('llm/circuit-breaker', () => {
   const savedEnv = {
@@ -8,6 +10,10 @@ describe('llm/circuit-breaker', () => {
     LLM_CIRCUIT_FAILURE_THRESHOLD: process.env.LLM_CIRCUIT_FAILURE_THRESHOLD,
     LLM_CIRCUIT_WINDOW_MS: process.env.LLM_CIRCUIT_WINDOW_MS,
     LLM_CIRCUIT_COOLDOWN_MS: process.env.LLM_CIRCUIT_COOLDOWN_MS,
+    OPENAI_API_KEY: process.env.OPENAI_API_KEY,
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    GATE_LLM_DISPATCH_METRICS: process.env.GATE_LLM_DISPATCH_METRICS,
   };
 
   beforeEach(() => {
@@ -31,7 +37,7 @@ describe('llm/circuit-breaker', () => {
     for (let i = 0; i < 10; i += 1) {
       circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1000 + i });
     }
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: 1020 })).toEqual({ allow: true, isProbe: false });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: 1020 })).toEqual({ allow: true, isProbe: false, probeId: null });
   });
 
   test('classifies only 429, 5xx, and provider timeouts as outage failures', () => {
@@ -46,37 +52,60 @@ describe('llm/circuit-breaker', () => {
     expect(circuitBreaker.isProviderOutageReason('openai', 'no_key')).toBe(false);
     expect(circuitBreaker.isProviderOutageReason('openai', 'empty_json')).toBe(false);
     expect(circuitBreaker.isProviderOutageReason('openai', 'anthropic_500')).toBe(false);
+    expect(classifyFailure('circuit_open')).toBe('provider');
   });
 
-  test('opens after threshold outage failures in window, skips only when hasBackup=true, and recovers via single half-open probe', () => {
+  test('keeps in-window failures across ordinary successes until window expires', () => {
+    process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
+    process.env.LLM_CIRCUIT_WINDOW_MS = '60000';
+
+    const t0 = 50_000;
+    circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: t0 });
+    circuitBreaker.afterAttempt('openai', { ok: true, now: t0 + 200 });
+    circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: t0 + 500 });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 600 })).toMatchObject({ allow: false, reason: 'circuit_open' });
+  });
+
+  test('opens after threshold outage failures in window, skips only when hasBackup=true, and only active probe settles recovery', () => {
     process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '3';
     process.env.LLM_CIRCUIT_COOLDOWN_MS = '30000';
 
     const t0 = 100_000;
     circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: t0 });
     circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_timeout', now: t0 + 1000 });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 1500 })).toEqual({ allow: true, isProbe: false });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 1500 })).toEqual({ allow: true, isProbe: false, probeId: null });
 
     // Third failure opens the circuit.
     circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_429', now: t0 + 2000 });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 3000 })).toEqual({ allow: false, reason: 'circuit_open' });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 3000 })).toMatchObject({ allow: false, reason: 'circuit_open' });
     // Never short-circuits when there is no backup route.
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: false, now: t0 + 3000 })).toEqual({ allow: true, isProbe: false });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: false, now: t0 + 3000 })).toEqual({ allow: true, isProbe: false, probeId: null });
+
+    // An unrelated in-flight success (started pre-open or no-backup leg) during cooldown must NOT close the circuit.
+    circuitBreaker.afterAttempt('openai', { ok: true, probeId: null, now: t0 + 4000 });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 4500 })).toMatchObject({ allow: false, reason: 'circuit_open' });
 
     // After cooldown, exactly one probe is admitted; concurrent callers still skip.
     const probeAt = t0 + 2000 + 30_000;
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: probeAt })).toEqual({ allow: true, isProbe: true });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: probeAt + 10 })).toEqual({ allow: false, reason: 'circuit_open' });
+    const probe1 = circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: probeAt });
+    expect(probe1).toMatchObject({ allow: true, isProbe: true });
+    expect(typeof probe1.probeId).toBe('number');
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: probeAt + 10 })).toMatchObject({ allow: false, reason: 'circuit_open' });
 
-    // Probe failure re-opens immediately.
-    circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_502', isProbe: true, now: probeAt + 20 });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: probeAt + 1000 })).toEqual({ allow: false, reason: 'circuit_open' });
+    // An unrelated completion while the probe is active must NOT settle or override the probe.
+    circuitBreaker.afterAttempt('openai', { ok: true, probeId: null, now: probeAt + 15 });
+    expect(circuitBreaker.getCircuitBreakerSnapshot(probeAt + 15).openai).toMatchObject({ state: 'half_open', probeInFlight: true });
 
-    // Next cooldown elapsed -> probe succeeds -> closes cleanly.
+    // Active probe failure re-opens immediately.
+    circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_502', probeId: probe1.probeId, now: probeAt + 20 });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: probeAt + 1000 })).toMatchObject({ allow: false, reason: 'circuit_open' });
+
+    // Next cooldown elapsed -> active probe succeeds -> closes cleanly.
     const recoverAt = probeAt + 20 + 30_000;
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt })).toEqual({ allow: true, isProbe: true });
-    circuitBreaker.afterAttempt('openai', { ok: true, isProbe: true, now: recoverAt + 50 });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt + 60 })).toEqual({ allow: true, isProbe: false });
+    const probe2 = circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt });
+    expect(probe2).toMatchObject({ allow: true, isProbe: true });
+    circuitBreaker.afterAttempt('openai', { ok: true, probeId: probe2.probeId, now: recoverAt + 50 });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt + 60 })).toEqual({ allow: true, isProbe: false, probeId: null });
     expect(circuitBreaker.getCircuitBreakerSnapshot(recoverAt + 60).openai).toMatchObject({ state: 'closed', recentFailures: 0 });
   });
 
@@ -86,18 +115,27 @@ describe('llm/circuit-breaker', () => {
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_503', aborted: true, now: 10_100 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_400', now: 10_200 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_refusal', now: 10_300 });
-    expect(circuitBreaker.beforeAttempt('anthropic', { hasBackup: true, now: 10_400 })).toEqual({ allow: true, isProbe: false });
+    expect(circuitBreaker.beforeAttempt('anthropic', { hasBackup: true, now: 10_400 })).toEqual({ allow: true, isProbe: false, probeId: null });
   });
 
-  test('dispatchWithFallback skips open primary immediately and falls back to secondary', async () => {
+  test('dispatchWithFallback skips open primary only when backup can serve the request, and never masks backup failure in metrics', async () => {
     process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
     process.env.OPENAI_API_KEY = 'test-openai';
     process.env.ANTHROPIC_API_KEY = 'test-anthropic';
+    process.env.GEMINI_API_KEY = 'test-gemini';
+    process.env.GATE_LLM_DISPATCH_METRICS = 'true';
 
     jest.resetModules();
+    const insertedRows = [];
+    jest.doMock('../models/db', () => jest.fn(() => ({
+      insert: async (row) => {
+        insertedRows.push(row);
+        return [1];
+      },
+    })));
     const mockAnthropicCreate = jest.fn().mockResolvedValue({
       id: 'msg_fallback',
-      model: 'claude-sonnet-5-5',
+      model: MODELS.WORKHORSE,
       stop_reason: 'end_turn',
       content: [{ type: 'text', text: '{"ok":true}' }],
       usage: { input_tokens: 10, output_tokens: 5 },
@@ -114,8 +152,8 @@ describe('llm/circuit-breaker', () => {
       cb.resetCircuitBreakers();
       const policy = {
         name: 'testCircuit',
-        primary: { provider: 'openai', model: 'gpt-5-mini' },
-        fallback: { provider: 'anthropic', model: 'claude-sonnet-5-5' },
+        primary: { provider: 'openai', model: MODELS.OPENAI_FAST },
+        fallback: { provider: 'anthropic', model: MODELS.WORKHORSE },
       };
 
       // Calls 1 & 2 hit OpenAI (503) and fail over to Anthropic, tripping the OpenAI circuit.
@@ -131,8 +169,56 @@ describe('llm/circuit-breaker', () => {
       expect(r3.fallbackUsed).toBe(true);
       expect(global.fetch).toHaveBeenCalledTimes(2);
       expect(r3.failures[0]).toMatchObject({ provider: 'openai', reason: 'circuit_open' });
+
+      // When backup lacks credentials, primary is NOT skipped even while open.
+      delete process.env.ANTHROPIC_API_KEY;
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_ok', status: 'completed', output_text: '{"ok":true}', usage: { input_tokens: 5, output_tokens: 5 } }),
+      });
+      const rNoKeyBackup = await llm.dispatchWithFallback(policy, { text: 'hi', jsonMode: true });
+      expect(rNoKeyBackup.ok).toBe(true);
+      expect(rNoKeyBackup.provider).toBe('openai');
+      expect(global.fetch).toHaveBeenCalledTimes(3);
+
+      // When backup cannot support the payload (Gemini does not support PDF documents), primary is NOT skipped.
+      const pdfPolicy = {
+        name: 'testPdfCircuit',
+        primary: { provider: 'openai', model: MODELS.OPENAI_FAST },
+        fallback: { provider: 'gemini', model: MODELS.GEMINI_FAST },
+      };
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_pdf', status: 'completed', output_text: '{"ok":true}', usage: { input_tokens: 5, output_tokens: 5 } }),
+      });
+      const rPdf = await llm.dispatchWithFallback(pdfPolicy, {
+        text: 'read pdf',
+        documents: [{ mimeType: 'application/pdf', data: 'JVBERi0=' }],
+        jsonMode: true,
+      });
+      expect(rPdf.ok).toBe(true);
+      expect(rPdf.provider).toBe('openai');
+      expect(global.fetch).toHaveBeenCalledTimes(4);
+
+      // When primary is skipped (circuit_open) and backup fails with a timeout,
+      // the dispatch row keeps circuit_open in failure_reasons AND classifies error_class from the backup's timeout.
+      process.env.ANTHROPIC_API_KEY = 'test-anthropic';
+      const timeoutErr = Object.assign(new Error('Request timed out'), { name: 'APIConnectionTimeoutError' });
+      mockAnthropicCreate.mockRejectedValueOnce(timeoutErr);
+      insertedRows.length = 0;
+      const rBothFailed = await llm.dispatchWithFallback(policy, { text: 'hi', jsonMode: true });
+      await new Promise((r) => setImmediate(r));
+      expect(rBothFailed.ok).toBe(false);
+      expect(rBothFailed.failures.map((f) => f.reason)).toEqual(['circuit_open', 'anthropic_timeout']);
+      const chainRow = insertedRows.find((r) => r.row_kind === 'chain');
+      expect(chainRow).toMatchObject({ ok: false, error_class: 'timeout' });
+      expect(JSON.parse(chainRow.failure_reasons).map((f) => f.reason)).toEqual(['circuit_open', 'anthropic_timeout']);
     } finally {
       global.fetch = savedFetch;
+      jest.dontMock('../models/db');
+      jest.dontMock('@anthropic-ai/sdk');
       jest.resetModules();
     }
   });
