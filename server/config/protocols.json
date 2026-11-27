@@ -3632,7 +3632,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Bed Bug Inspection / Scope\nInspect beds (seams, box spring, frame, headboard), resting areas, baseboards, furniture seams, luggage, outlets, next rooms\nDocument live bugs, cast skins, eggs, fecal spots, bites, rooms, prep status, occupancy type\nGrade: standard (2 treatments) or heavy (3 treatments), by the heavy rule",
+        "primary": "Bed Bug Inspection / Scope\nInspect beds (seams, box spring, frame, headboard), resting areas, baseboards, furniture seams, luggage, outlets, next rooms\nDocument live bugs, cast skins, eggs, fecal spots, customer-reported bites, rooms, prep status, occupancy type\nGrade: standard (2 treatments) or heavy (3 treatments), by the heavy rule",
         "secondary": "Photograph evidence before quoting or treating\nSend prep instructions and confirm customer can comply\nPlace interceptor cups under each bed and sofa leg and note the count\nEscalate severe, multi-unit, or cluttered jobs for office review\nBooked as heat or hybrid: Waves does not sell heat. Call the office before any treatment",
         "material_cost": "inspection",
         "labor_cost": "inspection",
@@ -3809,7 +3809,7 @@
       {
         "visit": 1,
         "month": "Any",
-        "primary": "Termite Inspection / WDO Support\nInspect foundation, plumbing penetrations, garage, attic access, windows, bath traps, expansion joints, moisture\nDocument swarmers, wings, mud tubes, damaged wood, conducive conditions, prior treatment",
+        "primary": "Termite Inspection / WDO Support\nInspect foundation, plumbing penetrations, garage, attic access, windows, bath traps, expansion joints, moisture\nDocument swarmers, wings, mud tubes, damaged wood, conducive conditions, evidence of prior treatment",
         "secondary": "Recommend bait, liquid, foam, or Bora-Care scope based on finding location\nCollect photos before treatment proposal\nEscalate active structural findings immediately",
         "material_cost": "0.00",
         "labor_cost": "inspection",

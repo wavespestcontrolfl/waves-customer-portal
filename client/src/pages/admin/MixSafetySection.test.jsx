@@ -63,6 +63,8 @@ describe("MixSafetySection", () => {
     expect(sourceLabel('Catalog row Celsius WG, compatibility_notes (migration 20260401000026): "Do NOT tank-mix with fertilizer."')).toBe("Catalog");
     expect(sourceLabel('server/config/protocols.json card line (X): "rate not on the label, Waves limit"')).toBe("Waves rule");
     expect(sourceLabel('migration 20261127240000 note: "not on the label"')).toBe("Other (see note)");
+    // The seeded TriTek and SuffOil-X rules (migration 20261127143000) cite the tree & shrub visit field guide.
+    expect(sourceLabel('server/config/protocols.json tree_shrub visit field guide, don\'t: "No oil and pyrethroid together"; notes: "Do not make oil + copper, oil + broad-spectrum pyrethroid, or neonic systemics a default production tank."')).toBe("Field guide");
     expect(sourceLabel("owner")).toBe("Owner");
     expect(sourceLabel("Supplier call 11-27")).toBe("Supplier call 11-27");
     expect(sourceLabel("")).toBe("—");

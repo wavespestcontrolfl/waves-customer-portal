@@ -57,7 +57,8 @@ export function sourceLabel(source) {
   const technical = /\.(json|js|md)\b|migration|safety_rules|card lines?\b|^Catalog row/i.test(text);
   if (!technical) return text;
   if (/^Catalog row/i.test(text)) return "Catalog";
-  if (/field-guide\.json .* limits:/i.test(text)) return "Field guide";
+  // The field guide file's limits, or the tree & shrub visit field guide on the card (the TriTek and SuffOil-X oil rules).
+  if (/field-guide\.json .* limits:|\bvisit field guide\b/i.test(text)) return "Field guide";
   // Only a quote that states what the label says reads "Label"; a mere mention ("not on the label") is not.
   if (/\b(the label (says|states|bars|bans|requires)|specimen label|label:)/i.test(text)) return "Label";
   if (/safety_rules|card lines?\b/i.test(text)) return "Waves rule";
