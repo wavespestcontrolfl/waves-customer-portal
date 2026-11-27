@@ -12,6 +12,7 @@ const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-
 const { dateOnlyString } = require('../utils/date-only');
 const { scrubPansDetailed } = require('../utils/pan-scrub');
 const { scrubNoteText } = require('../utils/note-secret-scrubber');
+const { scrubSecretText } = require('../utils/secret-text-scrubber');
 const { isSmsReaction } = require('./sms-intent');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
@@ -79,7 +80,7 @@ function hasLink(body) {
 
 // A sign-in or verification code (a bank, Google, a login): the access-code reader's own verification wording, plus login and
 // passcode forms it does not list. A gate or door code ("gate code is 1234") is not one of these.
-const SIGN_IN_CODE = /\b(?:log[- ]?in|sign[- ]?in|passcode|pass code|login)\b[^.?!\n]{0,24}\bcodes?\b|\bpasscodes?\b|\bcodes?\b[^.?!\n]{0,24}\b(?:log[- ]?in|sign[- ]?in)\b/i;
+const SIGN_IN_CODE = /\botp\b|\b(?:log[- ]?in|sign[- ]?in|passcode|pass code|login)\b[^.?!\n]{0,24}\bcodes?\b|\bpasscodes?\b|\bcodes?\b[^.?!\n]{0,24}\b(?:log[- ]?in|sign[- ]?in)\b/i;
 function hasSignInCode(body) {
   const text = String(body || '');
   return SIGN_IN_CODE.test(text) || require('./access-code-capture').VERIFICATION_CONTEXT.test(text);
@@ -89,7 +90,8 @@ function hasCardCredentials(body) {
   // Typographic dashes and full-width digits read as the plain ones, as the card and SSN screens expect.
   const text = String(body || '').normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-');
   // scrubNoteText reads a normalized copy (typographic dashes, full-width digits) and also finds SSNs, tokens and keys.
-  return CREDENTIAL_WORDS.test(text) || hasSignInCode(text) || scrubPansDetailed(text).count > 0 || scrubNoteText(text).removed > 0;
+  // scrubSecretText: labelled secrets in prose ("My OTP is 123456", "password: x", a PIN) and known secret formats.
+  return CREDENTIAL_WORDS.test(text) || hasSignInCode(text) || scrubSecretText(text).removed > 0 || scrubPansDetailed(text).count > 0 || scrubNoteText(text).removed > 0;
 }
 
 function parseMetadata(value) {
@@ -105,10 +107,11 @@ function mediaOf(row) {
 
 const isImageType = (type) => IMAGE_TYPES.has(String(type || '').split(';')[0].trim().toLowerCase());
 
-// The customer's stored image attachments: a stored object with an allow-listed image type.
+// The customer's image attachments, counted by content type even when the upload left no stored object, so a missing photo is
+// reported. Only an item with a stored key can be signed (signedPhotos).
 function photosOf(row) {
   if (row.direction !== 'inbound') return [];
-  return mediaOf(row).filter((item) => item && item.key && isImageType(item.contentType));
+  return mediaOf(row).filter((item) => item && isImageType(item.contentType));
 }
 
 // An app notification a device accepted is logged in sms_log (status 'sent', from_phone 'push', metadata.channel 'push'): it is
@@ -158,7 +161,7 @@ function windowStart(scheduledDate) {
 // The photos the customer sent (GATE_TECH_VISIT_TEXT_PHOTOS), as short-lived signed links. Only a stored object (S3 key) is
 // ever linked: a provider URL is never returned, and a photo that cannot be signed is left out.
 async function signedPhotos(row, sign) {
-  const media = photosOf(row);
+  const media = photosOf(row).filter((item) => item.key);
   if (!media.length) return [];
   // Stored objects only: any url / providerUrl on the item is dropped first, so a failed signature can never fall back to one.
   const signed = await sign(media.map(({ url, providerUrl, ...stored }) => stored));

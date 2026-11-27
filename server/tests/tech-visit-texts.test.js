@@ -113,7 +113,7 @@ describe('textVerdict', () => {
 
   test.each([
     'My verification code is 123456', 'your Google code is 482913', 'bank code 553311', 'login code: 884422', 'sign-in code 112233', 'use passcode 9988',
-    'the code to log in is 4455',
+    'the code to log in is 4455', 'My OTP is 123456', 'otp: 889900', 'my password is hunter2', 'PIN is 4821',
   ])('a sign-in or verification code hides the whole row, photos with it: %s', (body) => {
     const metadata = { media: [{ key: 'sms-media/inbound/a', contentType: 'image/jpeg' }] };
     expect(hasCardCredentials(body)).toBe(true);
@@ -321,6 +321,37 @@ describe('visitTexts', () => {
     const bad = await visitTexts(db, SVC, { now: NOW, sign: failed, withPhotos: true });
     expect(bad.texts[0].photos).toEqual([]);
     expect(JSON.stringify(bad)).not.toMatch(/twilio|old\.example/);
+  });
+
+  test('an OTP or password row never has its photo signed, even with photos on', async () => {
+    const sign = jest.fn(async (items) => items.map((m) => ({ ...m, url: `https://signed.example/${m.key}` })));
+    const img = { media: [{ key: 'sms-media/inbound/otp', contentType: 'image/jpeg' }] };
+    const rows = [
+      row('otp', '2026-11-22T15:00:00Z', { message_body: 'My OTP is 123456', metadata: img }),
+      row('gate', '2026-11-22T16:00:00Z', { message_body: 'the gate code is 1234', metadata: { media: [{ key: 'sms-media/inbound/gate', contentType: 'image/jpeg' }] } }),
+    ];
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
+    expect(out.texts.map((t) => t.id)).toEqual(['gate']);
+    expect(out.hidden).toBe(1);
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(sign).toHaveBeenCalledWith([{ key: 'sms-media/inbound/gate', contentType: 'image/jpeg' }]);
+    expect(JSON.stringify(out)).not.toMatch(/123456|otp/i);
+  });
+
+  test('an image whose upload left no stored key is counted, never signed; a photo-only row still reports it', async () => {
+    const sign = jest.fn();
+    const noKey = { media: [{ providerUrl: 'https://api.twilio.com/x/Media/1', contentType: 'image/jpeg' }] };
+    const rows = [
+      row('a-cap', '2026-11-22T15:00:00Z', { message_body: 'Brown patch by the gate', metadata: noKey }),
+      row('b-bare', '2026-11-22T16:00:00Z', { message_body: '', metadata: noKey }),
+    ];
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
+    expect(out.texts.map((t) => ({ id: t.id, photos: t.photos, photoCount: t.photoCount }))).toEqual([
+      { id: 'a-cap', photos: [], photoCount: 1 },
+      { id: 'b-bare', photos: [], photoCount: 1 },
+    ]);
+    expect(sign).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toMatch(/twilio/);
   });
 
   test('a visit with no customer reads nothing', async () => {
