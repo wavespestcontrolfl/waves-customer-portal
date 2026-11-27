@@ -1285,7 +1285,17 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
       const customerId = await reminderContactProfile(req, res);
       if (!customerId) return undefined;
       const VisitRecipient = require('../services/call-visit-recipient');
-      const entry = await VisitRecipient.setReminderContactStopped({ customerId, id: req.params.reminderId, stopped, by: 'customer' });
+      // The write runs under the profile's customers row lock (the lock a merge takes), after the account is checked
+      // again in the same transaction: a merge that retires the profile meanwhile cannot let this write reach the
+      // account that took it over.
+      const entry = await db.transaction(async (trx) => {
+        const profile = await trx('customers').where({ id: customerId }).forUpdate().first('id', 'deleted_at');
+        if (!profile || profile.deleted_at) return 'gone';
+        const ids = await accountPropertyIds(req, trx);
+        if (!ids.some((id) => String(id) === String(customerId))) return 'gone';
+        return VisitRecipient.setReminderContactStopped({ customerId, id: req.params.reminderId, stopped, by: 'customer', conn: trx });
+      });
+      if (entry === 'gone') return res.status(403).json({ error: 'Property is not available for this account' });
       if (!entry) return res.status(404).json({ error: 'Not found' });
       res.json({ reminderContact: entry });
     } catch (err) {

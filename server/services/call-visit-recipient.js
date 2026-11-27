@@ -1023,7 +1023,9 @@ async function setReminderContactStopped({ customerId, id, stopped, by, conn = d
     let changed = false;
     // Times come from clock_timestamp() (taken after the row lock), not now() (the transaction's start), so a later
     // write always carries a later time. A stop on the customer's own row counts whatever the restart time says.
-    if (stopped && !before.stopped) {
+    // An explicit Stop is saved on the customer's own row even when a merged-in stop already counts, so undoing that
+    // merge never brings the texts back.
+    if (stopped && !own.texts_stopped_at) {
       changed = (await conn(REMINDER_TABLE).where({ id: own.id }).whereNull('texts_stopped_at')
         .update({ texts_stopped_at: conn.raw('clock_timestamp()'), texts_stopped_by: by })) > 0;
     } else if (!stopped && before.stopped) {

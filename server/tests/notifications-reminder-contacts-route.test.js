@@ -6,7 +6,14 @@
 // Holder only, one of the account's own profiles only, by = 'customer'. The stop rules themselves (sticky, a mark never
 // a delete, every visit row of the number) are proven on real SQL in call-visit-recipient-postgres.test.js.
 
-jest.mock('../models/db', () => jest.fn());
+// The stop / restart write runs in a transaction that locks the profile's customers row (mockProfile answers it).
+const mockProfile = { current: null };
+jest.mock('../models/db', () => {
+  const trx = () => ({ where: () => ({ forUpdate: () => ({ first: async () => mockProfile.current }) }) });
+  const db = jest.fn();
+  db.transaction = jest.fn(async (fn) => fn(trx));
+  return db;
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/account-properties', () => ({
   ...jest.requireActual('../services/account-properties'),
@@ -43,6 +50,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
   mockSession.current = { customerId: OWN, customer: { id: OWN } };
+  mockProfile.current = { id: OWN, deleted_at: null };
 });
 
 const call = (method, path) => fetch(`${baseUrl}/api/notifications${path}`, { method, headers: { 'content-type': 'application/json' } })
@@ -58,10 +66,10 @@ test('the holder reads the list of one of their own profiles', async () => {
 test('stop and restart are recorded as the customer\'s own choice', async () => {
   const stop = await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/stop`);
   expect(stop).toMatchObject({ status: 200, body: { reminderContact: { stopped: true, stoppedBy: 'customer' } } });
-  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: OWN, id: REMINDER, stopped: true, by: 'customer' });
+  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: OWN, id: REMINDER, stopped: true, by: 'customer', conn: expect.any(Function) });
   const restart = await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/restart`);
   expect(restart).toMatchObject({ status: 200, body: { reminderContact: { stopped: false } } });
-  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: OWN, id: REMINDER, stopped: false, by: 'customer' });
+  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: OWN, id: REMINDER, stopped: false, by: 'customer', conn: expect.any(Function) });
 });
 
 test('another account\'s profile is refused and nothing is read or changed', async () => {
@@ -82,4 +90,14 @@ test('a bad id is a 400; an id not on this customer\'s list is a 404', async () 
   expect((await call('POST', `/reminder-contacts/${OWN}/not-a-uuid/stop`)).status).toBe(400);
   VisitRecipient.setReminderContactStopped.mockResolvedValueOnce(null);
   expect((await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/stop`)).status).toBe(404);
+});
+
+test('a profile merged away (or no longer on the account) between the check and the locked write changes nothing', async () => {
+  mockProfile.current = { id: OWN, deleted_at: '2026-11-27T10:00:00Z' };
+  expect((await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/restart`)).status).toBe(403);
+  mockProfile.current = { id: OWN, deleted_at: null };
+  const { accountPropertyIds } = require('../services/account-properties');
+  accountPropertyIds.mockResolvedValueOnce([OWN]).mockResolvedValueOnce([OTHER]);
+  expect((await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/restart`)).status).toBe(403);
+  expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
 });
