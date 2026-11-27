@@ -426,7 +426,6 @@
  *   GATE_TS_PEST_CHECK=true (Tree & Shrub live-insect check, owner 2026-10-05, tech-facing and storage only: GET /:serviceId/tree-shrub/fast-context adds `pestCheck`, the Fast Complete sheet shows a "Live insects found?" Yes / No block with insect-type chips, blocks Merit when only armored scale is picked, notes a live-finds-only product on a No, and the answers are FROZEN on the service record (structured_notes.treeShrubPestCheck). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsPestCheckLive(). Ships DARK; off = fast-context has no pestCheck key and nothing is stored.)
  *   GATE_ASSESSMENT_FAST_COMPLETE=true (Waves Assessment Fast Complete, owner 2026-10-09: the schedule payload carries `assessmentFastCompleteEnabled` for a visit whose completion profile is the assessment key, and admin Dispatch opens a one-screen sheet (talk note, photos, warm/cold/lost, recommended interests, the inspection credit toggle where the full form shows it) in place of the full form. Complete records the consultation outcome, then posts /complete with texts and the review ask off. Strict opt-in: exactly 'true', read at call time via assessmentFastCompleteLive(). Ships DARK; off = the full form as before.)
  *   GATE_LEAD_SERVICE_DISPLAY=true (Lead service names, owner 2026-10-09: the lead list and lead detail responses carry `service_display`, the lead's service named the way the booking catalog names it, and the Leads screen shows it with the stored text as a tooltip; lead search also matches the shown name. Display only: `leads.service_interest` is never rewritten and nothing is sent to a customer. Strict opt-in: exactly 'true', read at call time via leadServiceDisplayLive(). Ships DARK; off = the screen shows the stored text.)
- *   GATE_TS_NEONIC_CAP=true (Tree & Shrub yearly neonicotinoid cap per property, owner 2026-10-09, tech-facing; server/services/tree-shrub-neonic-ledger.js, server/config/tree-shrub-neonic-caps.js: Zylam and Safari share one dinotefuran cap, Merit has its own imidacloprid cap, each a label amount per acre per calendar year scaled to the property's bed area (customer_properties.bed_sqft); dinotefuran counts from any visit at the property, imidacloprid from tree & shrub visits only. GET /:serviceId/tree-shrub/fast-context adds `neonicCap`, the Fast Complete sheet shows how much of each capped product is left this year and holds Complete when an entered amount passes it. Like the live-insect check the hold is the sheet's; /complete does not refuse. No bed area = the yearly amount cannot be computed and the amount check blocks nothing; the application-count hold and the no-limit-on-file hold need no bed area and still apply. Nothing reaches the customer. Strict opt-in: exactly 'true' in every environment, read at call time via tsNeonicCapLive(). Ships DARK; off = fast-context has no neonicCap key and /complete never checks.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
  *   GATE_RESERVICE_ASKS=true (Re-service asks, step S1 of the consolidated re-service report, owner 2026-11-02: GET /:serviceId/reservice-asks answers every message in which the customer described the problem behind a pest or lawn re-service (booking words, texts, calls and emails, 10 days before the booking to now) through services/reservice-asks.js, and the AI report writer's one-time window on a re-service opens 10 days before the booking instead of at it. Read-only. Strict opt-in: exactly 'true' in every environment, read at call time via reserviceAsksLive(). Ships DARK; off = the route answers 404 {enabled:false} and the writer's window is as before.)
  *   GATE_RESERVICE_FOLD=true (re-service fold, owner 2026-11-17: a free pest or lawn re-service with no add-on line that the office books within 14 days before the same customer's next plan visit of that line books nothing; that one plan visit moves up to the re-service's time and the customer gets the existing "visit moved" text when the office's confirmation box is on. The rest of the plan stays put. Read at call time via reserviceFoldLive(), exact 'true'; the re-service link and AI booking come in later PRs, each behind its own gate. Off = booking is exactly as before. Kill switch: unset.)
@@ -447,7 +446,6 @@
  *   GATE_BOOK_PREFERRED_TIME=true (/book "Can't find a time?" block under the time picker: text-our-team link plus a preferred day/time request form -> POST /api/booking/preferred-time, which files an internal lead + one admin bell, and the lead closes itself as 'handled' (neither won nor lost, one admin FYI) when the customer later books online. Sends NOTHING to the customer (no SMS, no email, no confirmation text) and retires any open abandoned-booking intent for the same phone/session so the recovery worker cannot text them either. Strict opt-in in EVERY environment, read at call time via bookPreferredTimeLive(); the client learns it from GET /api/booking/config `preferred_time`. Off = the generic 404 on the POST and no block on the page.)
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). The appointment-page entry ALSO needs GATE_APPOINTMENT_PAGE (it rides that router). The Waves app entry — POST /api/schedule/:id/prep-photos and the prepPhotos field on GET /api/schedule/next — needs only this gate; flipping it opens both entry points. Off = the generic 404 on both POST routes: the anonymous appointment-page route answers it before any body parse (visitPrepPreParserGuard, mounted ahead of the shared parsers in index.js); the authenticated app route answers it after the schedule router's normal authentication and shared parsers (a logged-in route exposes nothing to an anonymous probe), before its own limiter and multipart parse. Neither GET payload carries a prepPhotos key. Surfaces when on: the appointment-page box, the app's Send photos button, the tech Visit Brief's Customer flagged block, the stop chip, and the office feed item. Sends nothing to a customer.)
- *   GATE_VISIT_PREP_TECH_ALERTS=true (PR 6, customer-visit-photos scope doc §5.4 item 4: the assigned field technician gets a tech-home card plus a one-line push — "A customer sent photos for a visit on your route" — when a customer submits visit prep photos. Strict opt-in, read at call time via visitPrepTechAlertsLive() in server/services/visit-prep-tech-alert.js. ALSO requires GATE_VISIT_PREP_PHOTOS live (nothing to alert about otherwise). Deliberately its OWN gate rather than GATE_TECH_VISIT_NOTIFICATIONS — that gate is off in production, and this can be the first tech visit card to go live; it reuses that mechanism's card/push plumbing (tech_notifications + PushService.sendToAdminUser) without depending on its gate. Recipient = the visit's CURRENT assigned technician, re-read fresh at send time — never the pre-lock row. No technician, or a non-assignable one → no card. Never fired for a duplicate-only resubmit. Sends nothing to a customer.)
  *   GATE_EMAIL_APP_LINKS=true (customer emails: anchors to customer pages on the portal host skip SendGrid's click rewrite (clicktracking=off) so iOS universal links / Android App Links open them in the Waves app - services/messaging/email-link-policy.js untrackAppLinks via sendOne. Strict opt-in, read at call time via emailAppLinksLive(). Off = every link tracked as before #7229. Keep OFF until the app lands on the tapped page: device test 2026-10-31 opened the iPhone app on Home for /?tab=billing and /book.)
  *   GATE_SMS_LINK_WRAP=true (every portal link in an outbound customer/lead SMS becomes a tracked /l/<code> short link stamped to the text it went out in, so clicks show for ALL texts including manual ones typed with a full link — services/messaging/sms-link-wrap.js, wired at the sendCustomerMessage choke point before countSegments. Strict opt-in, read at call time via smsLinkWrapLive(). Customer/lead SMS only, never internal or MMS bodies, never non-portal hosts or links already /l/; any shortener error keeps the original link and logs a warn — never blocks a send. Dark = every body byte-identical to today.)
  *   GATE_OUTLINK_TRACKING=true (prep guides: every link to an OUTSIDE site — Amazon, Chewy, Elanco, Bravecto, ... — in the prep email and the public /prep/:token page is rewritten at RENDER time to /go/<code> on the portal host, which logs the click (template key, prep visit, customer, sha256 ip hash, UA; bots skipped) and 302s to the exact original URL. Destinations are pre-registered outbound_links rows keyed by a hash of the URL — the route never reads a URL from the request, so it is not an open redirect — and are never tagged or altered. Own-site, portal, mailto and tel links are untouched; the prep PDF keeps direct links; template content is never edited. Strict opt-in, read at call time via outlinkTrackingLive(). The /go route itself stays live in every state so links already sent keep working after the gate is turned off. Off = byte-identical to today. Sends nothing to a customer.)
@@ -551,10 +549,6 @@ const gates = {
   // logGateStatus only; the route and service read visitPrepPhotosLive()
   // at call time below so a flip needs no redeploy.
   visitPrepPhotos: process.env.GATE_VISIT_PREP_PHOTOS === 'true',
-  // Tech card + push for a visit-prep photo submission (PR 6). Registered
-  // for logGateStatus only; the service reads visitPrepTechAlertsLive() at
-  // call time below so a flip needs no redeploy.
-  visitPrepTechAlerts: process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true',
   // Visit prep photos — automatic pest read (PR 5). Registered for
   // logGateStatus only; services/visit-prep-pest-read.js reads
   // visitPrepPestReadLive() at call time below (its own strict opt-in,
@@ -4831,11 +4825,6 @@ const gates = {
   // tsPestCheckLive().
   tsPestCheck: process.env.GATE_TS_PEST_CHECK === 'true',
 
-  // Tree & Shrub yearly neonicotinoid cap per property (owner 2026-10-09). Ships DARK in every
-  // environment. This entry is for logGateStatus only: the fast-context answer reads
-  // GATE_TS_NEONIC_CAP at call time via tsNeonicCapLive().
-  tsNeonicCap: process.env.GATE_TS_NEONIC_CAP === 'true',
-
   // Tree & Shrub report "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending): one
   // model call at completion, frozen, printed on the T&S report. Ships DARK in
   // every environment. This entry is for logGateStatus only: the completion
@@ -5383,12 +5372,6 @@ function tsLightingLive() {
 // the completion freeze of the live-insect answers.
 function tsPestCheckLive() {
   return process.env.GATE_TS_PEST_CHECK === 'true';
-}
-
-// GATE_TS_NEONIC_CAP read at CALL time — strict `=== 'true'`, dark in every
-// environment. The canonical reader for the T&S fast-context `neonicCap`.
-function tsNeonicCapLive() {
-  return process.env.GATE_TS_NEONIC_CAP === 'true';
 }
 
 // GATE_TS_TECH_PARAGRAPH read at CALL time — strict `=== 'true'`, dark in every
@@ -7107,18 +7090,6 @@ function leadEmailLinksLive() {
   return process.env.GATE_LEAD_EMAIL_LINKS === 'true';
 }
 
-// GATE_VISIT_PREP_TECH_ALERTS read at CALL time — strict `=== 'true'`, same
-// convention as visitPrepPhotosLive(). The canonical reader for
-// server/services/visit-prep-tech-alert.js. Deliberately independent of
-// GATE_TECH_VISIT_NOTIFICATIONS (unset in production): this gate alone
-// decides whether the customer-photos tech card/push go out, so it can be
-// the first tech visit card to go live without also turning on assignment/
-// reschedule/cancel cards. The service ALSO requires visitPrepPhotosLive()
-// — see its own header for why.
-function visitPrepTechAlertsLive() {
-  return process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true';
-}
-
 // GATE_HOME_LINE read at CALL time — strict `=== 'true'`. The canonical
 // reader for the customer home line (twilio.js deriveOutboundNumber and the
 // home-line sweep); the `homeLine` gates-map entry above is for
@@ -8190,7 +8161,7 @@ function callRingFactLive() {
   return process.env.GATE_CALL_RING_FACT === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
 // (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
 // GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
@@ -8514,8 +8485,6 @@ module.exports.tsOutlineLive = tsOutlineLive;
 module.exports.pestOutlineLive = pestOutlineLive;
 // GATE_MOSQUITO_OUTLINE reader, on its own line so gate PRs never conflict.
 module.exports.mosquitoOutlineLive = mosquitoOutlineLive;
-// GATE_TS_NEONIC_CAP reader, on its own line so gate PRs never conflict.
-module.exports.tsNeonicCapLive = tsNeonicCapLive;
 // GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
 module.exports.tsTechParagraphLive = tsTechParagraphLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
