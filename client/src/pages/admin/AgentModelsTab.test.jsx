@@ -345,7 +345,7 @@ describe("AgentModelsTab", () => {
     expect(within(dialog).getByRole("button", { name: "Draft eligible" })).toBeEnabled();
   });
 
-  it("warns on inbound Gemini moves only for direct-fetch lanes that fold instructions into the user turn", async () => {
+  it("warns on inbound Gemini moves only for lanes without a systemInstruction boundary (including combined-prompt callers like contact dictation)", async () => {
     adminFetch.mockImplementation(async (path, init) => {
       if (path === "/admin/agents/models") {
         const data = makeData();
@@ -369,9 +369,9 @@ describe("AgentModelsTab", () => {
             also: [],
           },
           {
-            id: "direct_inbound",
-            name: "Direct Gemini lane",
-            describe: "Direct-fetch caller",
+            id: "contact_dictation",
+            name: "Contact dictation decoder",
+            describe: "Sends combined prompt without separated system channel",
             area: "sms",
             continuity: "verified",
             inbound: true,
@@ -379,7 +379,7 @@ describe("AgentModelsTab", () => {
             lock: null,
             fanout: false,
             applies: "restart",
-            primary: { model: "g1", selector: null, pinEnv: "PIN_DIRECT_G", setEnv: "PIN_DIRECT_G", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: false },
+            primary: { model: "g1", selector: null, pinEnv: "GEMINI_CONTACT_DECODER_MODEL", setEnv: "GEMINI_CONTACT_DECODER_MODEL", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: true },
             fallback: null,
             retry: null,
             also: [],
@@ -398,18 +398,17 @@ describe("AgentModelsTab", () => {
     fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
     fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
     expect(await screen.findByText("PIN_SHARED_G=g2")).toBeInTheDocument();
-    expect(screen.queryByText(/direct-fetch Gemini|systemInstruction/)).toBeNull();
+    expect(screen.queryByText(/Moves inbound customer content onto Gemini/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Close" }));
 
-    const directCard = screen.getByText("Direct Gemini lane").closest(".p-4");
-    fireEvent.click(within(directCard).getByRole("button", { name: /Change/ }));
+    const contactCard = screen.getByText("Contact dictation decoder").closest(".p-4");
+    fireEvent.click(within(contactCard).getByRole("button", { name: /Change/ }));
     dialog = await screen.findByRole("dialog");
     fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
     fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
-    const warning = await screen.findByText(/Moves inbound customer content onto a direct-fetch Gemini lane/);
+    const warning = await screen.findByText(/Moves inbound customer content onto Gemini without a systemInstruction boundary/);
     expect(warning).toHaveAttribute("role", "alert");
-    expect(warning).toHaveTextContent(/Direct Gemini lane/);
-    expect(warning).toHaveTextContent(/systemInstruction/);
+    expect(warning).toHaveTextContent(/Contact dictation decoder/);
     expect(warning).not.toHaveTextContent(/Shared Gemini lane/);
   });
 });

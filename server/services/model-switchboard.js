@@ -339,9 +339,10 @@ const SHARED_GEMINI_PIN = 'GEMINI_VISION_MODEL env is shared by nine photo lanes
 // `inbound: true` = the lane's prompt carries customer or third-party content
 // (SMS, email, call transcripts, uploaded photos/PDFs, web forms). The shared
 // Gemini adapter (`llm/call.js`) sends `system` via Gemini's native
-// `systemInstruction`; lanes that still fetch Gemini directly without
-// `systemInstruction` carry `geminiFoldsSystem: true` so the Models tab warns
-// specifically when an inbound direct-fetch lane moves onto Gemini.
+// `systemInstruction`; lanes that still fetch Gemini directly OR send a
+// combined user `text` payload with no `system` channel carry
+// `geminiFoldsSystem: true` so the Models tab warns whenever an inbound lane
+// without a Gemini instruction boundary moves onto Gemini.
 const L = (id, name, file, policy, primary, fallback = null, extra = {}) => ({ id, name, file, policy, primary, fallback, ...extra });
 
 // voice_relay's E() parse + allowed hooks (below): VOICE_RELAY_INBOUND_MODEL is
@@ -479,7 +480,7 @@ const LANES = [
   L('lawn_paired_recheck', 'Lawn paired-photo recheck (last visit vs today)', 'lawn-paired-recheck.js', 'multimodal', P('lawnPairedRecheck', 'primary'), P('lawnPairedRecheck', 'fallback'), { inbound: true, note: 'GATE_LAWN_PAIRED_RECHECK, dark; one call per visit after the visit memory freezes; verdict is a closed enum (never customer copy) and a miss writes nothing (owner ruling 2026-09-29 round 3b)' }),
   // Tree & Shrub Fast Complete watch-signal read (GATE_TS_WATCH_LIST, dark): one small Gemini read per
   // photo that returns only watch-list keys for the technician's sheet, OpenAI on a Gemini miss.
-  L('ts_watch_signals', 'Tree & shrub watch-list signals (Fast Complete)', 'tree-shrub-assessment.js', 'multimodal', P('treeShrubWatchSignals', 'primary'), P('treeShrubWatchSignals', 'fallback'), { inbound: true, note: 'GATE_TS_WATCH_LIST, dark; keys only, tech-facing, never customer copy; a miss shows the sheet no read' }),
+  L('ts_watch_signals', 'Tree & shrub watch-list signals (Fast Complete)', 'tree-shrub-assessment.js', 'multimodal', P('treeShrubWatchSignals', 'primary'), P('treeShrubWatchSignals', 'fallback'), { inbound: true, geminiFoldsSystem: true, note: 'GATE_TS_WATCH_LIST, dark; keys only, tech-facing, never customer copy; a miss shows the sheet no read' }),
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
   // or serious Gemini answer, and Fable breaks a Gemini/Sol NAME disagreement
   // (grass type, what a finding is) only. Single leg, no automatic fallback.
@@ -501,7 +502,7 @@ const LANES = [
   L('property_trio', 'Property lookup trio (stories, roof)', 'property-lookup/ai-property-lookup.js', 'multimodal', T('WORKHORSE'), E('GEMINI_PROPERTY_MODEL', T('GEMINI_VISION_BEST')), { fanout: true, geminiFoldsSystem: true, also: [D(['OPENAI_PROPERTY_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini', { accepts: { providers: ['openai'], cap: 'vision' } })], note: 'consensus of the three legs' }),
   L('property_v2_vision', 'Property lookup v2 · vision legs', 'routes/property-lookup-v2.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('estimateVision', 'fallback'), { note: 'Gemini → Sol fallback, stopping at the first schema-valid result' }),
   L('turf_ocr', 'Turf-height gauge OCR', 'turf-height-ocr.js', 'multimodal', E('GEMINI_TURF_OCR_MODEL', T('GEMINI_VISION_BEST')), null, { fanout: true, inbound: true, geminiFoldsSystem: true, also: [T('VISION')], note: 'Claude + Gemini in parallel; consensus of both readings' }),
-  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
+  L('photo_scoring', 'Completion photo scoring', 'routes/admin-dispatch.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('photoCaptions', 'fallback'), { inbound: true, geminiFoldsSystem: true, note: `drives customer-facing health scores (owner 2026-07-21); Gemini-first, Claude fallback (owner 2026-09-24) · ${SHARED_GEMINI_PIN}` }),
   L('recap_clip_pick', 'Recap clip window pick', 'service-report/recap-clip-cut.js, config/models.js', 'multimodal', E('GEMINI_VISION_MODEL', T('GEMINI_VISION_BEST')), P('recapClipPick', 'fallback'), { note: `picks the 5-second window of a camera-glasses clip; the tech approves the recap before the customer sees it (owner 2026-11-01); Gemini-first, Claude fallback, then the middle window · ${SHARED_GEMINI_PIN}` }),
   L('vision_delta', 'Before / after vision delta', 'vision-delta.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
   L('lawn_quality_gate', 'Lawn photo-quality gate', 'lawn-intelligence.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback')),
@@ -514,7 +515,7 @@ const LANES = [
   L('image_screen', 'Generated image screen', 'content/hero-alt-vision.js', 'multimodal', P('imageScreen', 'primary'), P('imageScreen', 'fallback'), { note: 'blog image text/logo/uniform/van check; Sol first, Claude VISION backs it up' }),
   L('wdo_project_brief', 'WDO project brief + treatment-photo read', 'routes/admin-projects.js', 'multimodal', P('visionAnalysis', 'primary'), P('visionAnalysis', 'fallback'), { note: 'text-only briefs ride contentDraft' }),
   L('invoice_pdf', 'Vendor invoice PDF processing', 'email/invoice-processor.js', 'multimodal', T('ROUTINE'), null, { inbound: true }),
-  L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true }),
+  L('contact_dictation', 'Contact dictation decoder', 'contact-dictation.js', 'multimodal', D('GEMINI_CONTACT_DECODER_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true, geminiFoldsSystem: true }),
   L('address_recovery', 'Address street recovery', 'address-validation/recovery.js', 'multimodal', D('GEMINI_RECOVERY_MODEL', 'gemini-2.5-pro', { live: true, accepts: { providers: ['gemini'], cap: 'text' } }), null, { inbound: true, geminiFoldsSystem: true }),
 
   // ── Customer voice ──
@@ -637,18 +638,18 @@ const LANES = [
   // ── Specialized / locked ──
   L('call_extraction', 'Call extraction V2', 'call-recording-processor.js', 'locked',
     S('CALL_EXTRACTION_PROVIDER', { openai: D('CALL_EXTRACTION_MODEL', 'gpt-5.6-sol'), anthropic: T('CALL_EXTRACTION_ANTHROPIC'), gemini: D('GEMINI_EXTRACTION_MODEL', 'gemini-2.5-pro') }),
-    null, { inbound: true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'CALL_EXTRACTION_PROVIDER=openai|anthropic|gemini picks the primary; kill = gemini' }),
+    null, { inbound: true, geminiFoldsSystem: () => require('../config/feature-gates').callExtractionSystemPromptLive() !== true, lock: LOCK.benchmark('25-call bake-off 2026-07-18 · run a new bake-off to move it'), note: 'CALL_EXTRACTION_PROVIDER=openai|anthropic|gemini picks the primary; kill = gemini' }),
   L('call_extraction_v1', 'Call extraction V1 (runs first; V2 above is the gated shadow)', 'call-recording-processor.js', 'locked', D('GEMINI_EXTRACTION_V1_MODEL', 'gemini-3.5-flash', { accepts: { providers: ['gemini'], cap: 'text' } }), T('CALL_EXTRACTION_ANTHROPIC'), { inbound: true, geminiFoldsSystem: true, lock: LOCK.benchmark('authoritative extractor until V2 is promoted'), note: 'GATE_CALL_EXTRACTION_V1_FALLBACK (dark): a Gemini provider failure retries the same prompt on Claude (this fallback), then OpenAI (CALL_EXTRACTION_MODEL)' }),
   L('call_research', 'Call-research corpus miner', 'call-research-miner.js', 'locked',
     S('CALL_RESEARCH_PROVIDER',
       { openai: D('CALL_RESEARCH_MODEL', 'gpt-5.6-sol'), anthropic: E('CALL_RESEARCH_MODEL', T('CALL_RESEARCH_ANTHROPIC')), gemini: D('CALL_RESEARCH_MODEL', 'gemini-2.5-pro') },
       // call-research-miner.js:70-72 — the fallback never takes CALL_RESEARCH_MODEL
       { openai: LIT('gpt-5.6-sol', { providers: ['openai'], cap: 'text' }), anthropic: T('CALL_RESEARCH_ANTHROPIC') }),
-    null, { inbound: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18'), note: 'CALL_RESEARCH_PROVIDER=openai|anthropic|gemini picks the primary; CALL_RESEARCH_MODEL overrides the primary only' }),
+    null, { inbound: true, geminiFoldsSystem: true, lock: LOCK.benchmark('7-arm bake-off 2026-07-18'), note: 'CALL_RESEARCH_PROVIDER=openai|anthropic|gemini picks the primary; CALL_RESEARCH_MODEL overrides the primary only' }),
   L('transcription', 'Call transcription (primary + long-call verifier)', 'call-recording-processor.js', 'locked', D('OPENAI_TRANSCRIPTION_MODEL', 'gpt-4o-transcribe-diarize'), D('GEMINI_TRANSCRIPTION_MODEL', 'gemini-3.5-flash'), { inbound: true, geminiFoldsSystem: true, lock: LOCK.provider('audio pipeline with its own validation') }),
   L('transcript_label', 'Transcript speaker relabeling', 'call-recording-processor.js', 'locked', D(['OPENAI_TRANSCRIPT_LABEL_MODEL', 'OPENAI_MODEL'], 'gpt-5-mini'), null, { lock: LOCK.provider('audio pipeline') }),
   L('contact_pass', 'Second contact-pass STT (spelled emails, addresses)', 'call-recording-processor.js', 'locked', D('OPENAI_CONTACT_PASS_MODEL', 'gpt-4o-transcribe', { live: true }), null, { inbound: true, lock: LOCK.provider('speech-to-text') }),
-  L('call_sound_check', 'Call sound check (listens to the recording)', 'call-sound-check.js', 'locked', R('callSoundCheck'), null, { inbound: true, lock: LOCK.provider('audio input'), note: 'GATE_CALL_SOUND_CHECK; notes only, saved on the call; no second provider hears audio' }),
+  L('call_sound_check', 'Call sound check (listens to the recording)', 'call-sound-check.js', 'locked', R('callSoundCheck'), null, { inbound: true, geminiFoldsSystem: true, lock: LOCK.provider('audio input'), note: 'GATE_CALL_SOUND_CHECK; notes only, saved on the call; no second provider hears audio' }),
   L('tech_dictation', 'Tech field dictation', 'routes/tech-track.js', 'locked', D('OPENAI_DICTATION_MODEL', 'gpt-4o-transcribe', { live: true }), null, { lock: LOCK.provider('speech-to-text') }),
   L('voice_fill_transcription', 'Fast Complete voice fill · speech to text', 'fast-complete-voice-fill.js', 'locked', D('OPENAI_VOICE_FILL_TRANSCRIBE_MODEL', 'gpt-transcribe', { live: true }), null, { inbound: true, lock: LOCK.benchmark('32 recorded visits 2026-10-03: 19-20 forms filled perfectly vs 16 on gpt-4o-transcribe, both primed with the sheet\'s product names'), note: 'GATE_FAST_COMPLETE_VOICE_FILL; the clip is transcribed with the sheet\'s product names, then fast_complete_voice_fill maps it' }),
   L('embeddings', 'Knowledge embeddings', 'llm/embed.js', 'locked', T('OPENAI_EMBEDDING'), null, { lock: LOCK.migration('single provider by design; degrades to full-text search') }),
@@ -1248,7 +1249,7 @@ function getSwitchboard() {
       lock: lane.lock || null,
       fanout: !!lane.fanout,
       inbound: !!lane.inbound,
-      geminiFoldsSystem: !!lane.geminiFoldsSystem,
+      geminiFoldsSystem: typeof lane.geminiFoldsSystem === 'function' ? !!lane.geminiFoldsSystem() : !!lane.geminiFoldsSystem,
       skipsEqualLeg: !!lane.skipsEqualLeg,
       note: lane.note || null,
     };

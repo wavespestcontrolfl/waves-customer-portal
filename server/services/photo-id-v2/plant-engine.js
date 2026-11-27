@@ -56,6 +56,7 @@ const {
   buildIdentityCandidatesPrompt,
   buildIdentityVerifyPrompt,
   buildConditionIndexLine,
+  buildCustomerFactsBlock,
   buildConditionSelectionPrompt,
   buildEscalationPrompt,
   buildRefereePrompt,
@@ -1311,7 +1312,7 @@ async function callConditionSelection(images, promptArgs, timeoutMs, singleRead 
   const route = plantPolicy(singleRead)?.primary;
   return callWithProvider(route, {
     system: buildConditionSelectionPrompt(promptArgs),
-    text: 'Assess these photos against the list above.',
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\nAssess these photos against the list above.`,
     images,
     jsonMode: true,
     jsonSchema: CONDITIONS_SCHEMA,
@@ -1327,7 +1328,7 @@ async function callEscalation(images, promptArgs, timeoutMs, singleRead = false)
   const route = plantPolicy(singleRead)?.fallback;
   return callWithProvider(route, {
     system: buildEscalationPrompt(promptArgs),
-    text: 'Identify and assess these photos fresh.',
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\nIdentify and assess these photos fresh.`,
     images,
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,
@@ -2005,7 +2006,7 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
   const system = `${buildEscalationPrompt(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}`;
   const result = await callWithProvider(MODELS.ROUTES.plantIdReferee, {
     system,
-    text: 'Identify and assess these photos fresh, as the deciding vote.',
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\nIdentify and assess these photos fresh, as the deciding vote.`,
     images: run.images,
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,
