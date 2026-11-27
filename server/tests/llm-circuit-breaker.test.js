@@ -58,6 +58,21 @@ describe('llm/circuit-breaker', () => {
     expect(circuitBreaker.isProviderOutageReason('openai', 'empty_json')).toBe(false);
     expect(circuitBreaker.isProviderOutageReason('openai', 'anthropic_500')).toBe(false);
     expect(classifyFailure('circuit_open')).toBe('provider');
+
+    // Lawn assessment eval excludes circuit_open skips from billed legs so backup usage still prices cleanly.
+    const evalLib = require('../services/eval/lawn-visit-assessment-eval');
+    const analysis = {
+      status: 'complete',
+      provider: 'openai',
+      model: 'gpt-6-sol',
+      usage: { input_tokens: 1000, output_tokens: 500, reasoning_tokens: 0 },
+      failures: [{ provider: 'gemini', model: 'gemini-3.8-flash', reason: 'circuit_open' }],
+    };
+    const legs = evalLib.billedLegs(analysis);
+    expect(legs).toHaveLength(1);
+    expect(legs[0]).toMatchObject({ model: 'gpt-6-sol' });
+    expect(evalLib.legsCostUsd(legs)).toBeGreaterThan(0);
+    expect(evalLib.unpricedLegCount(legs)).toBe(0);
   });
 
   test('keeps in-window failures across ordinary successes until window expires', () => {
@@ -244,6 +259,24 @@ describe('llm/circuit-breaker', () => {
       expect(firstRes.ok).toBe(true);
       expect(firstRes.provider).toBe('anthropic');
       expect(firstRes.failures[0]).toMatchObject({ provider: 'openai', reason: 'circuit_open' });
+
+      // A primary route missing its provider must still fall back to secondary (never throw on empty reservation).
+      delete process.env.GATE_LLM_CIRCUIT_BREAKER;
+      mockAnthropicCreate.mockResolvedValueOnce({
+        id: 'msg_fallback_missing_provider',
+        model: MODELS.WORKHORSE,
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: '{"ok":true}' }],
+        usage: { input_tokens: 10, output_tokens: 5 },
+      });
+      const rMissingProvider = await llm.dispatchWithFallback({
+        name: 'testMissingProvider',
+        primary: { model: MODELS.OPENAI_FAST },
+        fallback: { provider: 'anthropic', model: MODELS.WORKHORSE },
+      }, { text: 'hi', jsonMode: true });
+      expect(rMissingProvider.ok).toBe(true);
+      expect(rMissingProvider.provider).toBe('anthropic');
+      expect(rMissingProvider.failures[0]).toMatchObject({ reason: 'no_route' });
     } finally {
       global.fetch = savedFetch;
       jest.dontMock('@anthropic-ai/sdk');

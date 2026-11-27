@@ -956,7 +956,7 @@ function canRouteServePayload(route, payload = {}) {
 }
 
 function takeReservedGate(reservationRef, provider) {
-  if (reservationRef.current?.provider !== provider) return null;
+  if (!reservationRef.current || !provider || reservationRef.current.provider !== provider) return null;
   const { gate } = reservationRef.current;
   reservationRef.current = null;
   return gate;
