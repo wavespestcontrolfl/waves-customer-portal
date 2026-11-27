@@ -926,9 +926,14 @@ export function ReportCard({
   draft, editing, stale, locked, photoCount, traced, blogPost, pestHeard = true, onEdit, onDoneEditing, onChangeText, onWriteAgain,
 }) {
   const textId = useId();
+  const extra = withLine(photoCount, traced);
+  if (draft.reportNote) {
+    return (
+      <ReportNoteCard draft={draft} textId={textId} stale={stale} locked={locked} extra={extra} blogPost={blogPost} pestHeard={pestHeard} onWriteAgain={onWriteAgain} />
+    );
+  }
   const edited = draft.text.trim() !== draft.base.trim();
   const parts = reportParts(draft.text);
-  const extra = withLine(photoCount, traced);
   return (
     <section className="tech-visit-card tech-report-card" aria-labelledby={`${textId}-title`}>
       <div className="tech-visit-section-head">
@@ -960,6 +965,42 @@ export function ReportCard({
       {pestHeard && <HeardLine facts={draft.facts} />}
       <div className="tech-visit-tile-grid">
         <Chip disabled={locked} label={editing ? 'Done editing' : 'Edit'} onClick={editing ? onDoneEditing : onEdit} />
+        <Chip disabled={locked} label="Write again" onClick={onWriteAgain} />
+      </div>
+    </section>
+  );
+}
+
+// Why the standard sentence stands in: the note step could not run (try again as is), the note held nothing for the
+// customer, or the tidied note broke a report rule (change the note).
+const NOTE_STEP_DOWN = new Set(['timeout', 'writer_unavailable', 'screen_unavailable']);
+export function fixedNoteLine(reason) {
+  if (NOTE_STEP_DOWN.has(reason)) return 'Your note could not be read just now, so the report shows the standard sentence. Write again to try once more.';
+  if (reason === 'no_note') return 'You left no note, so the report shows the standard sentence. Say what you did on the visit and write again to use your words.';
+  if (reason === 'note_too_long') return 'Your note is too long for the report, so the report shows the standard sentence. Shorten the note and write again.';
+  if (reason === 'nothing_for_customer') return 'Your note had nothing for the customer, so the report shows the standard sentence.';
+  return 'Your note could not go on the report as said, so the report shows the standard sentence. To try again, change the note on the visit and write again.';
+}
+
+// The report card on a note visit (GATE_REPORT_OWN_NOTE): the tech's own note as the customer will read it, tidied or
+// the standard sentence. It is not edited here: the tech changes the note on the visit and writes again.
+function ReportNoteCard({ draft, textId, stale, locked, extra, blogPost, pestHeard, onWriteAgain }) {
+  const fixed = draft.reportNote.source === 'fixed';
+  return (
+    <section className="tech-visit-card tech-report-card" aria-labelledby={`${textId}-title`}>
+      <div className="tech-visit-section-head">
+        <h3 id={`${textId}-title`} className="tech-visit-section-title">Your note on the customer’s report</h3>
+        <span className="tech-visit-muted">{fixed ? 'Standard sentence' : 'From your note'}</span>
+      </div>
+      {fixed && <p className="tech-visit-muted">{fixedNoteLine(draft.noteReason)}</p>}
+      {stale && (
+        <p className="tech-visit-muted tech-visit-status--warn" role="status">You changed the visit after this was written. Write it again so it matches.</p>
+      )}
+      <p className="tech-report-part-text">{draft.text}</p>
+      {extra && <p className="tech-visit-muted">{extra}</p>}
+      {blogPost && <p className="tech-visit-muted">At the bottom, from the Waves blog: {blogPost.title}</p>}
+      {pestHeard && <HeardLine facts={draft.facts} />}
+      <div className="tech-visit-tile-grid">
         <Chip disabled={locked} label="Write again" onClick={onWriteAgain} />
       </div>
     </section>

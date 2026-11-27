@@ -464,10 +464,10 @@ describe('resolveVisitProducts reuses the appointment plan for lawn visits (Code
     const ticked = await cards(['hyd']);
     expect(buildPlan).toHaveBeenLastCalledWith('svc1', expect.objectContaining({ selectedConditionalProductIds: ['hyd'] }));
     expect(ticked.find((c) => c.id === 'hyd')).toMatchObject({ conditional: false, planned: { amount: 6, unit: 'fl oz' } });
-    // The Job rules still hold: an unverified label withholds the ticked product's amount.
+    // The Job rules still apply, as a warning (owner 2026-11-26): an unverified label warns beside the ticked product's amount.
     const unverified = await jobCard.resolveVisitLines({ facts, protocols: {}, catalog, dbh: () => ({}), deps: { buildPlan }, selectedConditionalProductIds: ['hyd'] });
     const [, hyd] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: unverified.lines, verdicts: [], packSizes: {} });
-    expect(hyd).toMatchObject({ planned: null, amountNote: 'Label rate not yet verified — amount withheld' });
+    expect(hyd).toMatchObject({ planned: { amount: 6, unit: 'fl oz' }, amountNote: 'Label rate not yet verified' });
   });
 
   test('only the primary lawn plan\'s "if needed" and bermuda step lines are marked for a Use tick; an add-on\'s conditional line is not', async () => {
@@ -735,11 +735,23 @@ describe('mixForProduct', () => {
     } finally { delete process.env.GATE_LABEL_PIPELINE; }
   });
 
-  test('a categoryless (legacy/manual) misting-system visit gets no searched dose (Codex #4779 r8 P1)', async () => {
+  test('a categoryless visit with no protocol card gets the searched dose with the no-protocol warning; a categoryless general pest visit is judged as before (owner pick D18; owner 2026-11-26: warned, never blocked)', async () => {
+    const noCard = 'No treatment protocol for this visit (no catalog identity)';
+    const search = async (serviceType) => {
+      const dbh = makeDb({ scheduled_services: [{ ...visit, service_type: serviceType, service_category: null, service_key: null }], products_catalog: [product], equipment_calibrations: [live] });
+      return jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), evaluateApprovals: approve() }, ...at });
+    };
+    expect((await search('Barrier Treatment')).warnings).toContain(noCard);
+    expect((await search('Wildlife Trapping')).warnings).toContain(noCard);
+    expect((await search('Quarterly Pest Control')).warnings || []).not.toContain(noCard);
+  });
+
+  test('a categoryless (legacy/manual) misting-system visit gets the searched dose with a no-protocol warning (Codex #4779 r8 P1, owner 2026-11-26)', async () => {
     const mistingVisit = { ...visit, service_type: 'Mosquito Misting System Service', service_category: null, service_key: null };
     const dbh = makeDb({ scheduled_services: [mistingVisit], products_catalog: [product], equipment_calibrations: [live] });
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), evaluateApprovals: approve() }, ...at });
-    expect(out).toMatchObject({ amount: null, reason: 'No treatment protocol for this visit (no catalog identity)' });
+    expect(out.amount).toBe(6.215);
+    expect(out.warnings).toContain('No treatment protocol for this visit (no catalog identity)');
   });
 
   test('the Tank search builds the plan with the same Use ticks as the card', async () => {
@@ -751,12 +763,13 @@ describe('mixForProduct', () => {
     expect(buildPlan.mock.calls.at(-1)[1]).not.toHaveProperty('selectedConditionalProductIds');
   });
 
-  test('a lawn visit whose plan is blocked gets no searched dose either (Codex r11 P1)', async () => {
+  test('a lawn visit whose plan is blocked still gets the searched dose, with a warning (Codex r11 P1, owner 2026-11-26)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] } });
     const evaluateApprovals = approve();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
-    expect(out).toMatchObject({ amount: null, reason: 'Lawn plan blocked — amounts withheld', planBlocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] });
+    expect(out).toMatchObject({ amount: 6.215, planBlocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] });
+    expect(out.warnings).toContain(out.planBlocks[0].message);
     // A plan that fails to build is a block too.
     buildPlan.mockRejectedValue(new Error('boom'));
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
@@ -769,26 +782,30 @@ describe('mixForProduct', () => {
   });
 
 
-  test('a lawn visit at a non-primary address gets no plan and no searched dose (Codex r12 P1)', async () => {
+  test('a lawn visit at a non-primary address gets no plan, and a searched dose with a warning (Codex r12 P1, owner 2026-11-26)', async () => {
     const dbh = makeDb({ scheduled_services: [{ ...lawnVisit, address_diverges: true }], products_catalog: [product], equipment_calibrations: [live] });
     const buildPlan = jest.fn();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
-    expect(out).toMatchObject({ amount: null, planBlocks: [{ code: 'alternate_address' }] });
+    expect(out).toMatchObject({ amount: 6.215, planBlocks: [{ code: 'alternate_address' }] });
+    expect(out.warnings).toContain(out.planBlocks[0].message);
     expect(buildPlan).not.toHaveBeenCalled();
   });
 
-  test('a base line the resolver left unselected is withheld by the search, not dosed at the catalog rate (Codex r9 P1)', async () => {
+  test('a base line the resolver left unselected is warned by the search beside the catalog-rate dose (Codex r9 P1, owner 2026-11-26)', async () => {
     const dbh = makeDb({ scheduled_services: [lawnVisit], products_catalog: [product], equipment_calibrations: [live] });
     const loser = { raw: 'Fertilizer branch B', role: 'base', selected: false, selectionReason: 'mutually_exclusive_branch_not_selected', product: { id: 'p1' } };
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [loser], conditional: [] }, mixCalculator: { items: [], conditionalOptions: [] } });
     const evaluateApprovals = approve();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
-    expect(out).toMatchObject({ amount: null, reason: 'Not the fertilizer branch this property\'s plan selected — amount withheld', planBlocks: [{ code: 'base_not_selected' }] });
-    // PREMIUM_ONLY on an ineligible plan names its own reason; an unknown reason still withholds.
+    expect(out).toMatchObject({ amount: 6.215, planBlocks: [{ code: 'base_not_selected' }] });
+    expect(out.warnings).toContain('Not the fertilizer branch this property\'s plan selected');
+    // PREMIUM_ONLY on an ineligible plan names its own reason; an unknown reason warns too.
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [{ ...loser, selectionReason: 'premium_or_drought_prep_not_selected' }] }, mixCalculator: { items: [], conditionalOptions: [] } });
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).reason).toBe('Premium-only line, not on this plan — amount withheld');
+    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).warnings).toContain('Premium-only line, not on this plan');
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [{ ...loser, selectionReason: 'other' }] }, mixCalculator: { items: [], conditionalOptions: [] } });
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).amount).toBeNull();
+    const unknownReason = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
+    expect(unknownReason.amount).toBe(6.215);
+    expect(unknownReason.warnings).toContain('Not selected by this visit\'s plan');
     // The same product on a selected line (a winning branch) doses at the plan's rate.
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [] }, protocol: { base: [loser, { ...loser, selected: true }] }, mixCalculator: { items: [{ product: { id: 'p1' }, selected: true, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).toMatchObject({ amount: 11, rateSource: 'plan', planBlocks: [] });
@@ -802,17 +819,20 @@ describe('mixForProduct', () => {
     const dbh = (rows) => makeDb({ scheduled_services: [lawnVisit], products_catalog: rows, equipment_calibrations: [live] });
     // Ordinance blackout on an off-plan nitrogen product.
     const n = await jobCard.mixForProduct('n1', 110, { serviceId: 'svc1', dbh: dbh([urea]), deps: { buildPlan, evaluateApprovals: approve() }, ...at });
-    expect(n).toMatchObject({ amount: null, reason: expect.stringContaining('Nitrogen blackout'), planBlocks: [{ code: 'nitrogen_blackout' }] });
+    // Urea is dry (lb): no tank amount exists, and the blackout rides beside that as a warning (owner 2026-11-26).
+    expect(n).toMatchObject({ amount: null, ratePer1000: 2, planBlocks: [{ code: 'nitrogen_blackout' }] });
+    expect(n.warnings.join(' ')).toContain('Nitrogen blackout');
     // The manager-approval engine judges the searched product (off-protocol,
     // conditional, PGR, max rate, rotation) with the visit's plan and rate.
     const evaluateApprovals = jest.fn().mockResolvedValue({ blocks: [{ code: 'off_protocol_product', message: 'Celsius WG is not part of the current WaveGuard protocol card.' }], warnings: [] });
     const off = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals }, ...at });
-    expect(off).toMatchObject({ amount: null, reason: 'Celsius WG is not part of the current WaveGuard protocol card.', planBlocks: [{ code: 'off_protocol_product' }] });
+    expect(off).toMatchObject({ amount: 6.215, planBlocks: [{ code: 'off_protocol_product' }] });
+    expect(off.warnings).toContain('Celsius WG is not part of the current WaveGuard protocol card.');
     expect(evaluateApprovals).toHaveBeenCalledWith(expect.any(Function), expect.objectContaining({ plan: cleanPlan, products: [{ productId: 'p1', name: 'Celsius WG', rate: 0.113, rateUnit: 'oz' }] }));
     // Approved by every guard → doses normally under the same plan.
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: approve() }, ...at })).amount).toBe(6.215);
     // A chemical-group repeat is a warning (owner 2026-10-09, "show the mix amount"): the amount is given and the
-    // finding stays in planBlocks. Any other finding beside it still withholds the amount, with its own reason.
+    // finding stays in planBlocks. Any other finding beside it is a warning too (owner 2026-11-26): the amount is always given.
     const repeat = { code: 'repeat_hrac_group', message: 'Celsius WG repeats HRAC 2; last matching application was Celsius WG on 2026-03-01.' };
     const fracRepeat = { code: 'fungicide_frac_rotation_approval', message: 'Celsius WG repeats FRAC 11; last matching application was Artavia on 2026-03-01.' };
     // A label's limit on applications in a row (a third Velista) is shown the same way: beside the amount, not in place of it.
@@ -823,14 +843,17 @@ describe('mixForProduct', () => {
     }
     const both = jest.fn().mockResolvedValue({ blocks: [repeat, { code: 'off_protocol_product', message: 'Celsius WG is not part of the current WaveGuard protocol card.' }], warnings: [] });
     expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: both }, ...at }))
-      .toMatchObject({ amount: null, reason: 'Celsius WG is not part of the current WaveGuard protocol card.', rotationWarnings: [], planBlocks: [{ code: 'repeat_hrac_group' }, { code: 'off_protocol_product' }] });
+      .toMatchObject({ amount: 6.215, warnings: ['Celsius WG is not part of the current WaveGuard protocol card.'], rotationWarnings: [repeat.message], planBlocks: [{ code: 'repeat_hrac_group' }, { code: 'off_protocol_product' }] });
     // A product that repeats two groups (Headway: FRAC 3 and FRAC 11) shows both warnings.
     const two = jest.fn().mockResolvedValue({ blocks: [fracRepeat, { ...fracRepeat, message: 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.' }], warnings: [] });
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: two }, ...at })).rotationWarnings)
       .toEqual([fracRepeat.message, 'Celsius WG repeats FRAC 3; last matching application was Gravex on 2026-03-01.']);
-    // A failed approval read is not a group repeat: it still withholds.
+    // A failed approval read is not a group repeat: it warns with its own block, and the amount still shows (owner 2026-11-26).
     const failed = jest.fn().mockRejectedValue(new Error('rotation read failed'));
-    expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: failed }, ...at })).amount).toBeNull();
+    const unavailable = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: failed }, ...at });
+    expect(unavailable.amount).toBe(6.215);
+    expect(unavailable.planBlocks[0].code).toBe('approvals_unavailable');
+    expect(unavailable.warnings).toHaveLength(1);
   });
 
   test('a per-gallon pest product dilutes straight into the tank, range and all (PR r1 P2)', async () => {
@@ -922,21 +945,24 @@ describe('mixForProduct', () => {
   });
 
 
-  test('granular product → no tank amount even on a live rig (Codex r1 P1)', async () => {
+  test('granular product → no tank amount even on a live rig, its label rate shows beside the warning (Codex r1 P1, owner 2026-11-26)', async () => {
     const dbh = makeDb({
       scheduled_services: [visit],
       products_catalog: [{ id: 'hg', name: 'Headway G', default_rate_per_1000: 3, rate_unit: 'lb', label_verified_at: null }],
       equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110, system_name: 'Rig' }],
     });
     const out = await jobCard.mixForProduct('hg', 110, { serviceId: 'svc1', dbh, now: new Date('2026-09-04T12:00:00Z') });
-    expect(out).toMatchObject({ amount: null, tankMixable: false, reason: 'Not a tank mix — apply as labeled', tank: { calibrated: true } });
+    expect(out).toMatchObject({ amount: null, tankMixable: false, reason: 'Not a tank mix — apply as labeled', ratePer1000: 3, tank: { calibrated: true } });
+    expect(out.warnings).toContain('Not a tank mix — apply as labeled');
   });
 
-  test('an unverified label rate gets no dose on either basis (PR r2 P1)', async () => {
+  test('an unverified label rate still gets the dose on either basis, with a warning (PR r2 P1, owner 2026-11-26)', async () => {
     const dbh = makeDb({ scheduled_services: [visit], products_catalog: [{ ...product, label_verified_at: null }], equipment_calibrations: [live] });
-    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at })).toMatchObject({ amount: null, reason: 'Label rate not yet verified', rateVerified: false });
+    expect(await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, ...at })).toMatchObject({ amount: 6.215, warnings: ['Label rate not yet verified'], rateVerified: false });
     const gal = makeDb({ scheduled_services: [visit], products_catalog: [{ id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: null }], equipment_calibrations: [] });
-    expect((await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh: gal, ...at })).amount).toBeNull();
+    const perGallon = await jobCard.mixForProduct('d', 110, { serviceId: 'svc1', dbh: gal, ...at });
+    expect(perGallon.amount).toBe(22);
+    expect(perGallon.warnings).toContain('Label rate not yet verified');
   });
 
   test('live calibration → amount for 110 gal', async () => {
@@ -966,7 +992,7 @@ describe('PR review r4', () => {
     expect(chains.service_requests.orderByRawSql).toBe("CASE WHEN urgency = 'urgent' THEN 0 ELSE 1 END");
   });
 
-  test('the searched dose runs the approval engine strict; a failed approval read withholds the dose (hook P1)', async () => {
+  test('the searched dose runs the approval engine strict; a failed approval read warns beside the dose (hook P1, owner 2026-11-26)', async () => {
     const { mixForProduct } = jobCard;
     const visit = { id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care', assigned_equipment_system_id: null, assigned_calibration_id: null };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-08-01' };
@@ -985,8 +1011,9 @@ describe('PR review r4', () => {
     const evaluateApprovals = jest.fn().mockRejectedValue(new Error('rotation read failed'));
     const out = await mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, now: new Date('2026-09-04T12:00:00Z') });
     expect(evaluateApprovals.mock.calls[0][1]).toMatchObject({ strict: true });
-    expect(out.amount).toBeNull();
+    expect(out.amount).toBe(6.215);
     expect(out.planBlocks[0].code).toBe('approvals_unavailable');
+    expect(out.warnings).toHaveLength(1);
   });
 
   test('a failed open-requests read fails the card (503), never "nothing open" (P1)', async () => {
@@ -1093,12 +1120,12 @@ describe('PR review r5', () => {
     expect(out.lines.map((l) => l.product.id)).toEqual(['s']);
   });
 
-  test('a lawn card withholds the plan amount for an unverified label rate (P1)', async () => {
+  test('a lawn card keeps the plan amount for an unverified label rate and warns beside it (P1, owner 2026-11-26)', async () => {
     const line = (product) => ({ raw: 'x', role: 'base', selected: true, product, planMix: { amount: 12.4, amountUnit: 'fl oz' } });
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
     const [unverified] = await jobCard._test.buildProductCards({ facts, lines: [line({ id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: null })], verdicts: [], packSizes: {} });
-    expect(unverified.planned).toBeNull();
-    expect(unverified.amountNote).toBe('Label rate not yet verified — amount withheld');
+    expect(unverified.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+    expect(unverified.amountNote).toBe('Label rate not yet verified');
     const [verified] = await jobCard._test.buildProductCards({ facts, lines: [line({ id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' })], verdicts: [], packSizes: {} });
     expect(verified.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
     expect(verified.amountNote).toBeNull();
@@ -1136,17 +1163,19 @@ describe('PR review r6', () => {
     const product = { id: 'p', name: 'P', rate_unit: 'fl oz', inventory_on_hand: 1, inventory_unit: 'fl oz', label_verified_at: '2026-08-01' };
     const line = { raw: 'x', role: 'base', selected: true, product, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const [card] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: [line], verdicts: [], packSizes: {}, blocked: true });
-    expect(card.planned).toBeNull();
+    // Owner 2026-11-26: a plan block warns beside the amount, it never hides it.
+    expect(card.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+    expect(card.amountNote).toBe('Plan blocked, see the plan blocks');
     expect(card.short).toBe(true);
     expect(card.order.quantity).toBeCloseTo(11.4, 2);
   });
 
-  test('no usable rig withholds the card amounts with the tank reason (hook P1; expiry retired by #3935)', async () => {
+  test('no usable rig warns with the tank reason beside the card amounts (hook P1; expiry retired by #3935; owner 2026-11-26)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
     const [card] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: 'No carrier rate on file' });
-    expect(card.planned).toBeNull();
-    expect(card.amountNote).toBe('No carrier rate on file — amount withheld');
+    expect(card.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+    expect(card.amountNote).toBe('No carrier rate on file');
     const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [], packSizes: {}, tankReason: null });
     expect(ok.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
   });
@@ -1201,7 +1230,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   const prefs = { property_gate_code: '4545#', access_notes: 'Side gate', parking_notes: 'Driveway', pet_details: 'dog', pets_secured_plan: 'crated in garage', special_instructions: 'Enter from the north side', away_mode_until: '2099-01-01', watering_days: '["Mon"]', chemical_sensitivities: true, chemical_sensitivity_details: 'asthma, no pyrethroids' };
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
-  test('the scheduled T&S guide keeps label details but cannot bypass an unverified product label', async () => {
+  test('the scheduled T&S guide keeps the mix and warns beside it for an unverified product label (owner 2026-11-26)', async () => {
     process.env.GATE_PROTOCOL_SOP = 'true';
     try {
       const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
@@ -1209,8 +1238,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
       const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
       expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
-      expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toBeNull();
-      expect(card.protocol.procedure.fieldGuide.products.tritek.summary).toMatch(/Mix withheld/);
+      expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toEqual([1.28, 1.28]);
+      expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toBe('Label rate not yet verified');
+      expect(card.protocol.procedure.fieldGuide.products.tritek.summary).not.toMatch(/Mix withheld/);
       expect(card.protocol.procedure.fieldGuide.products.tritek.url).toMatch(/brandt/);
       // Holding a job must not mutate the shared admin reference.
       expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
@@ -1220,8 +1250,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   });
 
   // Owner 2026-10-29 ("i just want to warn techs"): weather never withholds a guide
-  // mix. A missing forecast shows it; an open label review (the label, not the weather) still withholds it.
-  test('the T&S guide shows a mix when only the forecast is missing, not when a label review is open', async () => {
+  // mix. A missing forecast shows it with no warning; an open label review (the label, not the weather) shows it with a
+  // warning (owner 2026-11-26: warned, never blocked).
+  test('the T&S guide shows a mix when only the forecast is missing, and a mix with a warning when a label review is open', async () => {
     process.env.GATE_PROTOCOL_SOP = 'true';
     const sourceCheck = require('../services/epa-product-label').checkEpaSource;
     try {
@@ -1235,7 +1266,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       const shown = await guide(oil);
       expect(shown.mix).toEqual([1.28, 1.28]);
       expect(shown.summary).not.toMatch(/Mix withheld/);
-      // An approved review whose facts are conditional stays open: it withholds the mix whatever the forecast.
+      expect(shown.mixWarning).toBeUndefined();
+      // An approved review whose facts are conditional stays open: it warns beside the mix whatever the forecast.
       sourceCheck.mockReset().mockResolvedValue({ status: 'current', checkedAt: 0 });
       process.env.GATE_LABEL_PIPELINE = 'true';
       const conditional = { status: 'conditional', value: null, quote: 'Do not apply if rain is expected (sites vary).', page: 3 };
@@ -1243,12 +1275,24 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       reviewed.label_weather_review = { active: { status: 'approved', source: { registration: '48813-1' }, productSnapshot: require('../services/product-label-weather').labelProductSnapshot(reviewed),
         facts: { minTempF: conditional, maxTempF: conditional, maxWindMph: conditional, rainFreeHours: conditional } } };
       const held = await guide(reviewed);
-      expect(held.mix).toBeNull();
-      expect(held.summary).toMatch(/Mix withheld/);
+      expect(held.mix).toEqual([1.28, 1.28]);
+      expect(held.mixWarning).toBe('Label weather review still open, see product checks');
     } finally {
       delete process.env.GATE_PROTOCOL_SOP;
       delete process.env.GATE_LABEL_PIPELINE;
     }
+  });
+
+  test('a plan block never masks the product-specific guide warnings (owner 2026-11-26)', () => {
+    const { fieldGuideMixWarning } = jobCard._test;
+    const verdict = { verdict: 'unknown', forecastGap: false, reason: 'No limit on file' };
+    expect(fieldGuideMixWarning({ blocks: [{ code: 'x' }], row: { label_verified_at: null }, verdict, labelSource: null }))
+      .toBe('Plan blocked, see the plan blocks · Label rate not yet verified · Spray check: No limit on file');
+    expect(fieldGuideMixWarning({ blocks: [], row: { label_verified_at: '2027-12-01' }, verdict: { verdict: 'ok' }, labelSource: null })).toBeNull();
+    // An active rain warning shows beside the guide's mix too (owner 2026-11-26).
+    expect(fieldGuideMixWarning({ blocks: [], row: { label_verified_at: '2027-12-01' }, verdict: { verdict: 'caution', level: 'warning', reason: 'rain 80% at 2 pm' }, labelSource: null })).toBe('Spray check: rain 80% at 2 pm');
+    expect(fieldGuideMixWarning({ blocks: [{ code: 'x' }], row: null, verdict: undefined, labelSource: null }))
+      .toBe('Plan blocked, see the plan blocks · Label rate not yet verified · No spray check for this product');
   });
 
   test('a visit stamped at a divergent address shows none of the primary home\'s codes, entry, parking (P1)', async () => {
@@ -1319,10 +1363,11 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       return { out, buildPlan };
     };
 
-    test('steps for products that show an amount stay, renumbered; an unverified label drops out', async () => {
+    test('steps for products that show an amount stay, renumbered; an unverified label warns and stays (owner 2026-11-26)', async () => {
       const { out } = await card(planWith());
-      expect(out.products.map((c) => [c.id, c.planned != null])).toEqual([['a', true], ['b', true], ['u', false]]);
-      expect(out.mixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, 'a'], [2, 'b']]);
+      expect(out.products.map((c) => [c.id, c.planned != null])).toEqual([['a', true], ['b', true], ['u', true]]);
+      expect(out.products.find((c) => c.id === 'u').amountNote).toBe('Label rate not yet verified');
+      expect(out.mixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, 'a'], [2, 'b'], [3, 'u']]);
       // The bermuda mix is the engine's whole order (its rows carry no amount): all step products have primary cards, none on hold.
       expect(out.bermudaMixingOrder.map((s) => [s.step, s.productId])).toEqual([[1, null], [2, 'a'], [3, 'b']]);
     });
@@ -1338,7 +1383,7 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       ];
       const { out } = await card(planWith({ mixCalculator: { carrierGalPer1000: 2, items, conditionalOptions: [] } }));
       expect(out.mixRequired).toEqual([{ text: 'Keep 25 ft from ponds, lakes and canals; skip that strip.', products: ['Alpha'] }]);
-      // An unverified label withholds its amount, not its conditions.
+      // An unverified label warns beside its amount and keeps its conditions.
       const both = ['Bravo', 'Unverified'];
       expect(out.bermudaRequired).toEqual([
         { text: 'Spray only when the bermuda is actively growing.', products: both },
@@ -1371,9 +1416,11 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       }
     });
 
-    test('a plan block, a plan outage and an alternate address leave no steps (and an alternate address reads no plan)', async () => {
+    test('a plan block keeps the steps (a warning, owner 2026-11-26); a plan outage and an alternate address leave no steps (and an alternate address reads no plan)', async () => {
       const blocked = (await card(planWith({ propertyGate: { month: 'Sep', visit: 9, blocks: [{ code: 'nitrogen_blackout', message: 'Blackout.' }] } }))).out;
-      expect([blocked.mixingOrder, blocked.bermudaMixingOrder]).toEqual([[], []]);
+      expect(blocked.mixingOrder.map((s) => s.productId)).toEqual(['a', 'b', 'u']);
+      expect(blocked.bermudaMixingOrder).toHaveLength(3);
+      expect(blocked.products.every((c) => c.planned != null && c.amountNote.includes('Plan blocked'))).toBe(true);
       const base = factsDb({ 'scheduled_services as ss': lawn, products_catalog: rows, property_preferences: prefs });
       const dbh = Object.assign((table) => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
       const down = await jobCard.buildJobCard('svc1', { dbh, deps: { buildPlan: jest.fn().mockRejectedValue(new Error('down')), getRecentCalls: async () => [], getHourly: async () => null, protocols: { programs: [] } }, now: new Date('2026-09-04T12:00:00Z') });
@@ -1383,11 +1430,12 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(away.buildPlan).not.toHaveBeenCalled();
     });
 
-    test('a product on a spray-check hold drops out of the order', async () => {
+    test('a product on a spray-check hold stays in the order with a warning (owner 2026-11-26)', async () => {
       const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
       const line = (id) => ({ raw: id, role: 'base', selected: true, product: rows.find((r) => r.id === id), planMix: { amount: 3, amountUnit: 'fl oz' } });
       const cards = await jobCard._test.buildProductCards({ facts, lines: [line('a'), line('b')], verdicts: [{ productId: 'b', verdict: 'hold', reason: 'wind' }], packSizes: {} });
-      expect(jobCard._test.mixingOrderForCards(steps('a', 'b'), cards).map((s) => [s.step, s.productId])).toEqual([[1, 'a']]);
+      expect(cards.find((c) => c.id === 'b').amountNote).toBe('Spray check: wind');
+      expect(jobCard._test.mixingOrderForCards(steps('a', 'b'), cards).map((s) => [s.step, s.productId])).toEqual([[1, 'a'], [2, 'b']]);
     });
 
     test('a hosted add-on card is not a mixing step', () => {
@@ -1406,9 +1454,9 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       test('the engine\'s whole order stands while every step product has a primary card, even with no amount on any', () => {
         expect(order(cards).map((st) => [st.step, st.productId])).toEqual([[1, null], [2, 'r'], [3, 'f'], [4, 'n']]);
       });
-      test('a step product on a spray hold, a plan block, or a step product with no primary card gives none', () => {
-        expect(order([card('r'), card('f', { verdict: 'hold' }), card('n')])).toEqual([]);
-        expect(order(cards, [{ code: 'x', message: 'Blocked.' }])).toEqual([]);
+      test('a spray hold or a plan block no longer hides it (owner 2026-11-26); a step product with no primary card gives none', () => {
+        expect(order([card('r'), card('f', { verdict: 'hold' }), card('n')])).toHaveLength(4);
+        expect(order(cards, [{ code: 'x', message: 'Blocked.' }])).toHaveLength(4);
         expect(order([card('r'), card('f')])).toEqual([]);
         expect(order([card('r'), card('f'), card('n', { addOnKey: 'area_addon_x' })])).toEqual([]);
       });
@@ -1877,12 +1925,12 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(lines.map((l) => [l.product.id, l.role, l.selected])).toEqual([['c', 'base', true], ['d', 'conditional', false], ['t', 'conditional', false]]);
   });
 
-  test('a spray-check Hold withholds the card amount like the tank search (hook P1)', async () => {
+  test('a spray-check Hold warns beside the card amount like the tank search (hook P1, owner 2026-11-26)', async () => {
     const line = { raw: 'x', role: 'base', selected: true, product: { id: 'p', name: 'P', rate_unit: 'fl oz', inventory_on_hand: 1, inventory_unit: 'fl oz', label_verified_at: '2026-08-01' }, planMix: { amount: 12.4, amountUnit: 'fl oz' } };
     const facts = { customerId: 'c1', scheduledDate: '2026-09-04' };
     const [held] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [{ productId: 'p', verdict: 'hold', reason: 'wind over 10 mph' }], packSizes: {} });
-    expect(held.planned).toBeNull();
-    expect(held.amountNote).toBe('Spray check: wind over 10 mph — amount withheld');
+    expect(held.planned).toEqual({ amount: 12.4, unit: 'fl oz' });
+    expect(held.amountNote).toBe('Spray check: wind over 10 mph');
     // Demand (shortage, order quantity) is unaffected by the hold.
     expect(held.short).toBe(true);
     const [ok] = await jobCard._test.buildProductCards({ facts, lines: [line], verdicts: [{ productId: 'p', verdict: 'ok', reason: null }], packSizes: {} });
@@ -1997,11 +2045,67 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
     const out = await jobCard.mixForProduct('r', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(out.context).toEqual({ line: 'Shell, Rock & Paver Weed Control', conditional: false });
+    // Owner 2026-11-26: no number exists here (the dose is the card's rate over the area sold), so the warning stands alone.
     expect(out.amount).toBeNull();
     expect(out.reason).toBe('Area add-on — apply the label rate on the card over the area sold; no tank amount');
+    expect(out.warnings).toContain('Area add-on — apply the label rate on the card over the area sold; no tank amount');
   });
 
-  test('a product the add-on protocol lists as "if needed" is withheld in the tank search, not dosed off the catalog (r3 P1)', async () => {
+  // Owner 2026-11-26: the tank search carries the booked rate's own words and its grass restriction, as the card does.
+  test('the Arena lawn insect spot add-on in the tank search keeps its St. Augustine restriction and carrier words', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const arena = { id: 'ar', name: 'Arena 50 WDG', default_rate_per_1000: 0.3, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' };
+    const run = async (scope) => {
+      const rows = { scheduled_services: [visit], products_catalog: [arena], equipment_calibrations: [live], product_aliases: [],
+        scheduled_service_addons: [{ service_name: 'Lawn Insect Spot Treatment', category: 'lawn_care', service_key: 'area_addon_lawn_insect_spot', ...(scope ? { area_addon_scope: JSON.stringify(scope) } : {}) }] };
+      const dbh = (t) => {
+        const table = String(t).split(' as ')[0];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+        chain.first = async () => (rows[table] || [])[0] ?? null;
+        chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+        return chain;
+      };
+      dbh.raw = (sql) => sql;
+      const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
+      return jobCard.mixForProduct('ar', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    };
+    const bermuda = await run({ tierSqFt: 1000, grassType: 'bermuda' });
+    expect(bermuda).toMatchObject({ amount: null, ratePer1000: 0.147, unit: 'oz', rateSource: 'governed' });
+    expect(bermuda.governedRates[0].text).toContain('4 gal of water per 1,000 sq ft');
+    // The label's own area basis, limit and safety line ride beside the rate, as on the card.
+    expect(bermuda.governedRates).toEqual([expect.objectContaining({ service: 'Lawn Insect Spot Treatment', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') })]);
+    expect(bermuda.warnings).toContain('Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
+    expect((await run(null)).warnings).toContain('Grass on the estimate is not on this visit (the rate is St. Augustine only)');
+    const ok = await run({ tierSqFt: 1000, grassType: 'st_augustine' });
+    expect(ok.warnings.join(' ')).not.toMatch(/Grass on the estimate/);
+  });
+
+  // Owner 2026-11-26: a granular area add-on has no tank amount, and the rate beside the warning is the BOOKED add-on rate, not the catalog default.
+  test('a granular area add-on shows its booked rate and unit in the tank search, never the catalog default', async () => {
+    const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
+    const snapshot = { id: 'sn', name: 'Snapshot 2.5TG', default_rate_per_1000: 9, rate_unit: 'oz', application_method: 'granular', label_verified_at: '2026-07-12' };
+    const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' };
+    const rows = { scheduled_services: [visit], products_catalog: [snapshot], equipment_calibrations: [live], scheduled_service_addons: [{ service_name: 'Bed Pre-Emergent Treatment', category: 'lawn_care', service_key: 'area_addon_bed_pre_emergent' }], product_aliases: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] }, area_addon: require('../config/protocols.json').area_addon };
+    const out = await jobCard.mixForProduct('sn', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, tankMixable: false, ratePer1000: 3.45, unit: 'lb', rateSource: 'governed' });
+    expect(out.warnings.join(' ')).toMatch(/Not a tank mix/);
+  });
+
+  test('a product the add-on protocol lists as "if needed" gets its catalog dose with a warning in the tank search (r3 P1, owner 2026-11-26)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'h', name: 'Headway', default_rate: '0.5-1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
     const visit = { customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' };
@@ -2024,9 +2128,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(buildPlan).toHaveBeenCalled();
     buildPlan.mockClear();
     expect(out.context).toEqual({ line: 'Tree & Shrub Care', conditional: true });
-    expect(out.amount).toBeNull();
-    expect(out.reason).toBe('Listed as "if needed" on Tree & Shrub Care — confirm the call before mixing');
-    expect(out.ratePerGallon).toBeNull();
+    expect(out.amount).toBe(0.5);
+    expect(out.warnings).toEqual(['Listed as "if needed" on Tree & Shrub Care — confirm the call before mixing', 'Applies to: Headway only for labeled ornamental disease and only if FRAC history allows']);
     // The same product as a selected primary line doses normally.
     protocols.tree_shrub.visits[0] = { visit: 9, month: 'Sep', primary: 'Headway 0.75 fl oz/gal foliar', secondary: '' };
     const selected = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
@@ -2034,14 +2137,15 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // The line's 0.75 fl oz/gal inside the 0.5-1 label band is the dose (r5 P1).
     expect(selected).toMatchObject({ amount: 0.75, rateSource: 'protocol' });
     // The same guard on the PRIMARY non-lawn visit (hook P1): a Tree & Shrub
-    // visit's own "if needed" Headway is withheld, its selected Talus doses.
+    // visit's own "if needed" Headway is warned, its selected Talus doses.
     rows.scheduled_services = [{ ...visit, service_type: 'Tree & Shrub Care', service_category: 'tree_shrub' }];
     rows.scheduled_service_addons = [];
     protocols.tree_shrub.visits[0] = { visit: 9, month: 'Sep', primary: 'Talus IGR 0.5 fl oz/gal for whitefly/scale nymphs', secondary: 'Headway only for labeled ornamental disease and only if FRAC history allows' };
     const primary = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(primary.context).toEqual({ line: null, conditional: true });
-    expect(primary.amount).toBeNull();
-    expect(primary.reason).toBe('Listed as "if needed" on this visit\'s protocol — confirm the call before mixing');
+    expect(primary.amount).toBe(0.5);
+    expect(primary.warnings[0]).toBe('Listed as "if needed" on this visit\'s protocol — confirm the call before mixing');
+    expect(primary.warnings[1]).toMatch(/^Applies to: Headway only for labeled ornamental disease/);
     rows.products_catalog = [{ ...product, id: 't', name: 'Talus IGR' }];
     const talus = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(talus.context).toEqual({ line: null, conditional: false });
@@ -2053,8 +2157,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     buildPlan.mockClear();
     const inspection = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(inspection.context).toEqual({ line: null });
-    expect(inspection.amount).toBeNull();
-    expect(inspection.reason).toBe('No treatment protocol for this visit (inspection)');
+    expect(inspection.amount).toBe(0.5);
+    expect(inspection.warnings).toEqual(['No treatment protocol for this visit (inspection)']);
     expect(buildPlan).not.toHaveBeenCalled();
     rows.scheduled_service_addons = [{ service_name: 'Tree & Shrub Care', category: 'tree_shrub' }];
     const viaAddon = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
@@ -2268,12 +2372,322 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       now: new Date('2026-12-08T14:00:00Z'),
     });
     expect(rows).toMatchObject({ amount: 2, ratePerGallon: { lo: 1, hi: 1 } });
-    // A row with another registration number, or none, gets no dose: not the card's 0.66 and not its stronger catalog rate.
+    // A row with another registration number, or none, gets the catalog rate with a warning (owner 2026-11-26): not the card's 0.66.
     for (const epa of ['53883-444', null]) {
-      expect(await mix({ ...tekko, epa_reg_number: epa }, antapex)).toMatchObject({ amount: null, ratePerGallon: null, reason: expect.stringContaining('53883-335') });
+      const warned = await mix({ ...tekko, epa_reg_number: epa }, antapex);
+      expect(warned.amount).not.toBeNull();
+      expect(warned.rateSource).toBe('catalog');
+      expect(warned.warnings.join(' ')).toContain('53883-335');
     }
     // The right registration with a weaker catalog band keeps that band.
     expect(await mix({ ...tekko, default_rate: '0.5' }, antapex)).toMatchObject({ amount: 1, ratePerGallon: { lo: 0.5, hi: 0.5 }, rateSource: 'catalog' });
+  });
+
+  // Owner 2026-11-26: two services that each declare their own tank rate (Antapex 20 g on a bed bug card, 10 g on the flea card)
+  // are a conflict like two label rates: one labeled amount per service.
+  test('a bed bug visit with a flea add-on shows one Antapex amount per service', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Bed Bug Treatment Service', service_category: 'specialty', service_key: 'bed_bug_treatment' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out.amount).toBeNull();
+    expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.unit, row.fromCard])).toEqual([['Bed Bug Treatment Service', 40, 'g', true], ['Flea Control Service', 20, 'g', true]]);
+    expect(out.warnings.join(' ')).toMatch(/is on more than one service on this visit/);
+  });
+
+  // Owner 2026-11-26: an "if needed" line keeps its card's exact rate; the selection warning rides beside it.
+  test('an "if needed" Antapex line shows the card rate, not the whole catalog band', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Bed Bug Treatment Service', service_category: 'specialty', service_key: 'bed_bug_treatment', followup_source_service_id: 'first' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 40, amountMax: null, unit: 'g', ratePerGallon: { lo: 20, hi: 20 }, rateSource: 'protocol', context: { conditional: true } });
+    expect(out.warnings.join(' ')).toMatch(/Listed as "if needed"/);
+  });
+
+  // Owner 2026-11-26: a tank line that names the product keeps its tank amount; each booked area add-on's rate rides under its name.
+  test('a Tree & Shrub visit with a Bed Pre-Emergent add-on keeps the booked add-on rate under its service name', async () => {
+    const protocols = { tree_shrub: { visits: [{ visit: 1, month: 'Any', primary: 'Snapshot 2.5TG 3 lb per 1,000 sq ft broadcast', secondary: '' }] }, area_addon: require('../config/protocols.json').area_addon };
+    const snapshot = { id: 'sn', name: 'Snapshot 2.5TG', default_rate_per_1000: 9, rate_unit: 'oz', application_method: 'granular', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-01-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [snapshot], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Bed Pre-Emergent Treatment', category: 'lawn_care', service_key: 'area_addon_bed_pre_emergent' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('sn', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-01-14T14:00:00Z') });
+    expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Bed Pre-Emergent Treatment', ratePer1000: 3.45, rateUnit: 'lb' })]);
+    expect(out.governedRates[0].text).toContain('3.45 lb per 1,000 sq ft');
+  });
+
+  // Owner 2026-11-26: the real April line states its rate in the same clause as its condition; the search still reads it.
+  test('the April Tree & Shrub Distance IGR "if needed" line shows its own 6-8 fl oz per 100 gal, narrowed to the label band', async () => {
+    const protocols = require('../config/protocols.json');
+    const distance = { id: 'di', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-04-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [distance], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('di', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 6, amountMax: 8, unit: 'fl_oz', ratePerGallon: { lo: 0.06, hi: 0.08 }, rateSource: 'protocol', context: { conditional: true } });
+    expect(out.warnings.join(' ')).toMatch(/Listed as "if needed"/);
+  });
+
+  // Owner 2026-11-26: the lawn plan stays the amount's source; a booked add-on's rate and grass warning ride under its service name.
+  test('a lawn plan that names Arena keeps the booked Lawn Insect Spot add-on rate and grass warning beside the plan amount', async () => {
+    const arena = { id: 'ar', name: 'Arena 50 WDG', default_rate_per_1000: 0.3, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'WaveGuard Lawn Care' }], products_catalog: [arena], equipment_calibrations: [{ carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 }], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Lawn Insect Spot Treatment', category: 'lawn_care', service_key: 'area_addon_lawn_insect_spot', area_addon_scope: JSON.stringify({ tierSqFt: 1000, grassType: 'bermuda' }) }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [] }, mixCalculator: { items: [{ product: { id: 'ar' }, mix: { ratePer1000: 0.2, rateUnit: 'oz' } }], conditionalOptions: [] } });
+    const protocols = { area_addon: require('../config/protocols.json').area_addon };
+    const out = await jobCard.mixForProduct('ar', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [], warnings: [] }) }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 11, rateSource: 'plan' });
+    expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Lawn Insect Spot Treatment', ratePer1000: 0.147 })]);
+    expect(out.warnings).toContain('Lawn Insect Spot Treatment: Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
+  });
+
+  // Owner 2026-11-26: an "if needed" line of the same product on another booked service is a row of its own, marked for confirmation.
+  test('a bed bug follow-up with a flea add-on shows the conditional Antapex row beside the flea row', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Bed Bug Treatment Service', service_category: 'specialty', service_key: 'bed_bug_treatment', followup_source_service_id: 'first' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.conditional === true])).toEqual([['Flea Control Service', 20, false], ['Bed Bug Treatment Service', 40, true]]);
+    expect(out.warnings).toContain('Bed Bug Treatment Service: Listed as "if needed" on Bed Bug Treatment Service — confirm the call before mixing');
+  });
+
+  // Owner 2026-11-26: the volume a protocol line states for its rate is compared to the rig's, like a label card's.
+  test('the April Distance IGR line warns when the picked rig sprays another volume than the 5 gal per 1,000 sq ft it states', async () => {
+    const protocols = require('../config/protocols.json');
+    const distance = { id: 'di', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-04-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [distance], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Tank #1', system_type: 'tank', tank_capacity_gal: '110.00' }], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('di', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 6.6, sprayVolumeGalPer1000: 5, coversSqft: 55000, labelCoversSqft: 22000, rigSprayGalPer1000: 2 });
+    expect(out.warnings.join(' ')).toMatch(/The card's rate is for 5 gal per 1,000 sq ft\. Tank #1 sprays 2/);
+  });
+
+  // Owner 2026-11-26: the flea cards state "1 gallon per 1,000 sq ft" in their own text; a rig at another volume is compared to it.
+  test('the flea Antapex line warns when the picked rig sprays another volume than the 1 gal per 1,000 sq ft it states', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Flea Control Service', service_category: 'specialty', service_key: 'flea_tick' }], products_catalog: [antapex], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Tank #1', system_type: 'tank', tank_capacity_gal: '110.00' }], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 1100, sprayVolumeGalPer1000: 1, coversSqft: 55000, labelCoversSqft: 110000, rigSprayGalPer1000: 2 });
+    expect(out.warnings.join(' ')).toMatch(/The card's rate is for 1 gal per 1,000 sq ft\. Tank #1 sprays 2/);
+  });
+
+  // Owner 2026-11-26: the "if needed" amount names the use it covers, in the line's own words.
+  test('the April Distance IGR "if needed" rate names the whitefly use and the scale hold', async () => {
+    const protocols = require('../config/protocols.json');
+    const distance = { id: 'di', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-04-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [distance], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('di', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
+    const applies = out.warnings.find((w) => w.startsWith('Applies to: '));
+    expect(applies).toMatch(/live whitefly finds only/);
+    expect(applies).toMatch(/scale: HOLD/);
+    expect(applies).not.toMatch(/\$\d/);
+  });
+
+  // Owner 2026-11-26: with no usable carrier the known per-area rate still shows; the missing carrier is the total's reason.
+  test('a per-1,000 sq ft product with no carrier keeps its rate and unit and gives the carrier reason for the total', async () => {
+    const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [product], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG per label' }] } } }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, unit: 'oz', ratePer1000: 0.113, reason: 'No carrier rate on file' });
+  });
+
+  // Owner 2026-11-26: an "if needed" tank use and a booked area rate of the same product show side by side, each under its own service.
+  test('a Tree & Shrub visit with conditional Acelepryn and a yearly lawn insect preventive add-on shows both', async () => {
+    // The seeded catalog shape: a per-area lawn rate only, no per-gallon band.
+    const acelepryn = { id: 'ac', name: 'Acelepryn Insecticide', default_rate_per_1000: 0.37, rate_unit: 'fl oz', label_verified_at: '2026-07-12' };
+    const protocols = {
+      tree_shrub: { visits: [{ visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal', secondary: 'Acelepryn Insecticide: 2 fl oz/100 gal for leaf-feeding caterpillars, live finds only; no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year; at least 1 gal of mix per 1,000 sq ft; at least 7 days between sprays ($5.66)' }] },
+      area_addon: require('../config/protocols.json').area_addon,
+    };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [acelepryn], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Yearly Lawn Insect Preventive', category: 'lawn_care', service_key: 'area_addon_lawn_insect_preventive' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('ac', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    // The line's own 2 fl oz per 100 gal, never the lawn rate through a rig: 100 gal x 0.02.
+    expect(out).toMatchObject({ amount: 2, unit: 'fl_oz', context: { line: null, conditional: true } });
+    expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Yearly Lawn Insect Preventive' })]);
+    // The conditional use keeps its numeric limits and carrier floor; the owner-only price goes.
+    const applies = out.warnings.find((w) => w.startsWith('Applies to: '));
+    expect(applies).toMatch(/no more than 0\.37 fl oz per 1,000 sq ft in one spray/);
+    expect(applies).toMatch(/at least 1 gal of mix per 1,000 sq ft/);
+    expect(applies).not.toMatch(/\$5\.66/);
+  });
+
+  // Owner 2026-11-26: a volume stated over another area is normalized before the rig comparison.
+  test('a line stating 1 gallon per 1,500 sq ft (the mosquito barrier card): a rig at 1 gal per 1,000 sq ft is compared to it', async () => {
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Barrier: Suspend Polyzone 1.1 fl oz per gallon, 1 gallon per 1,500 sq ft, with the mist blower from the ground up to 10 ft' }] } };
+    const polyzone = { id: 'pz', name: 'Suspend Polyzone', default_rate: '0.5-1.1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'backpack', system_name: 'Mist blower', carrier_gal_per_1000: 1, calibration_status: 'field_verified', tank_capacity_gal: '4.00' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [polyzone], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Mist blower', system_type: 'backpack', tank_capacity_gal: '4.00' }], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('pz', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ sprayVolumeGalPer1000: 0.6667, rigSprayGalPer1000: 1 });
+    expect(out.warnings.join(' ')).toMatch(/The card's rate is for 0\.67 gal per 1,000 sq ft\. Mist blower sprays 1/);
+  });
+
+  // Owner 2026-11-26: two services that each list the product only as "if needed" are rows of their own, with the full line text.
+  test('two services that list Antapex only as "if needed" show a row each, and the use text keeps its last restriction', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Perimeter work', secondary: `Atticus Antapex WSG 20 g per gallon on live finds only; ${'keep people and pets out until dry; '.repeat(14)}never tank-mix with oil` }] },
+      flea: { visits: [{ visit: 1, month: 'Any', primary: 'Flea work', secondary: 'Atticus Antapex WSG 10 g per gallon if fleas persist', lineMeta: { 'Atticus Antapex WSG 10 g per gallon if fleas persist': { catalogProductHints: ['Atticus Antapex WSG'], tankRatePerGallon: { amount: 10, unit: 'g' } } } }] },
+    };
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    const text = (out.warnings || []).join(' ');
+    // Each service keeps its own row: 20 g per gallon from the pest line, 10 from the flea card, at 2 gal.
+    expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.conditional])).toEqual([['Quarterly Pest Control', 40, true], ['Flea Control Service', 20, true]]);
+    expect(text).toMatch(/never tank-mix with oil/);
+  });
+
+  // Owner 2026-11-26: a percentage in a product name ("6% Fe") is not a dilution; the per-area catalog rate stands.
+  test('a line naming Sequestar 6% Fe does not turn the iron content into a tank dilution', async () => {
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Sequestar 6% Fe EDDHA per plant, drenched at the base' }] } };
+    const seq = { id: 'sq', name: 'Sequestar 6% Fe EDDHA', default_rate_per_1000: 2, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [seq], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('sq', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, ratePerGallon: null, ratePer1000: 2, reason: 'No carrier rate on file' });
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
@@ -2451,28 +2865,39 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       expect(buildPlan).not.toHaveBeenCalled();
     });
 
-    test('an unverified catalog label withholds the rate and keeps area, limit and safety', async () => {
+    test('an unverified catalog label warns beside the rate and keeps area, limit and safety (owner 2026-11-26)', async () => {
       const key = 'area_addon_lawn_insect_preventive';
       const unverified = catalog.map((row) => (row.name === PRODUCT_BY_KEY[key] ? { ...row, label_verified_at: null } : row));
       const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: unverified, dbh: () => ({}) });
       const [card] = await cardsFor(out.lines);
-      expect(card.governed).toMatchObject({ rate: null, rateNote: 'Label rate not yet verified — rate withheld', area: expect.any(String), limit: expect.any(String) });
-      // A Hold on an unverified label reports the Hold.
+      expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), rateNote: 'Label rate not yet verified', area: expect.any(String), limit: expect.any(String) });
+      // A Hold on an unverified label reports both, and the rate still shows.
       const [held] = await jobCard._test.buildProductCards({
         facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
         verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
       });
-      expect(held.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld' });
+      expect(held.governed).toMatchObject({ rate: expect.stringMatching(/\d/), rateNote: 'Spray check: wind over 10 mph · Label rate not yet verified' });
     });
 
-    test('a spray-check Hold withholds the rate and keeps area, limit and safety', async () => {
+    test('every failed check shows beside the governed rate, not just the first (owner 2026-11-26)', async () => {
+      const key = 'area_addon_lawn_insect_spot';
+      const unverified = catalog.map((row) => (row.name === PRODUCT_BY_KEY[key] ? { ...row, label_verified_at: null } : row));
+      const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, areaAddOnScope: { tierSqFt: 1000, grassType: 'bermuda' }, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog: unverified, dbh: () => ({}) });
+      const [card] = await jobCard._test.buildProductCards({
+        facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
+        verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
+      });
+      expect(card.governed.rateNote).toBe('Spray check: wind over 10 mph · Label rate not yet verified · Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)');
+    });
+
+    test('a spray-check Hold warns beside the rate and keeps area, limit and safety (owner 2026-11-26)', async () => {
       const key = 'area_addon_hardscape_weed';
       const out = await jobCard.resolveVisitLines({ facts: { serviceType: 'x', serviceCategory: 'lawn_care', serviceKey: key, scheduledDate: '2026-09-04', addons: [] }, protocols, catalog, dbh: () => ({}) });
       const [card] = await jobCard._test.buildProductCards({
         facts: { customerId: 'c1', scheduledDate: '2026-09-04' }, lines: out.lines, packSizes: {},
         verdicts: [{ productId: out.lines[0].product.id, verdict: 'hold', reason: 'wind over 10 mph' }],
       });
-      expect(card.governed).toMatchObject({ rate: null, rateNote: 'Spray check: wind over 10 mph — rate withheld', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('indaziflam') });
+      expect(card.governed).toMatchObject({ rate: expect.stringMatching(/\d/), rateNote: 'Spray check: wind over 10 mph', area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('indaziflam') });
     });
 
     test('a protocol product missing from the catalog adds no line (the card reports no products resolved)', async () => {
@@ -2498,13 +2923,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       });
 
       test.each([
-        ['no grass on the visit', { tierSqFt: 1000 }, 'Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld'],
-        ['no scope at all', null, 'Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld'],
-        ['another grass', { tierSqFt: 1000, grassType: 'bermuda' }, 'Grass on the estimate is bermuda, not St. Augustine — rate withheld'],
-        ['an unknown grass', { tierSqFt: 1000, grassType: 'unknown' }, 'Grass on the estimate is unknown, not St. Augustine — rate withheld'],
-      ])('the insect spot withholds the 2(ee) rate: %s', async (_name, scope, reason) => {
+        ['no grass on the visit', { tierSqFt: 1000 }, 'Grass on the estimate is not on this visit (the rate is St. Augustine only)'],
+        ['no scope at all', null, 'Grass on the estimate is not on this visit (the rate is St. Augustine only)'],
+        ['another grass', { tierSqFt: 1000, grassType: 'bermuda' }, 'Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)'],
+        ['an unknown grass', { tierSqFt: 1000, grassType: 'unknown' }, 'Grass on the estimate is unknown, not St. Augustine (this rate is St. Augustine only)'],
+      ])('the insect spot warns beside the 2(ee) rate (owner 2026-11-26): %s', async (_name, scope, reason) => {
         const card = await cardFor(spot, scope);
-        expect(card.governed).toMatchObject({ rate: null, rateNote: reason, grass: null, area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') });
+        expect(card.governed).toMatchObject({ rate: expect.stringMatching(/0\.147/), rateNote: reason, grass: null, area: expect.any(String), limit: expect.any(String), safety: expect.stringContaining('2(ee)') });
       });
 
       test('an add-on row carries its own scope onto the same card path', async () => {
@@ -2714,7 +3139,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(futureKeyed.lines).toEqual([]);
   });
 
-  test('the tank search withholds every dose on a rodent sanitation appointment (r8 P1)', async () => {
+  test('the tank search warns beside every dose on a rodent sanitation appointment (r8 P1, owner 2026-11-26)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
     const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Rodent Sanitation — Standard', service_category: 'rodent', service_key: 'rodent_sanitation_standard' }], products_catalog: [product], equipment_calibrations: [live], product_aliases: [], scheduled_service_addons: [] };
@@ -2729,13 +3154,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     };
     dbh.raw = (sql) => sql;
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { protocols: { rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }] } } }, now: new Date('2026-09-03T14:00:00Z') });
-    expect(out).toMatchObject({ amount: null, reason: 'No treatment protocol for this visit (rodent)', ratePer1000: null, context: { line: null } });
+    expect(out).toMatchObject({ amount: 6.215, warnings: ['No treatment protocol for this visit (rodent)'], context: { line: null } });
     // The same appointment by name alone (no key) keeps the rodent program's own read, as every legacy row does.
     rows.scheduled_services = [{ ...rows.scheduled_services[0], service_key: null }];
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { protocols: { rodent: { visits: [{ visit: 1, month: 'Any', primary: 'Inspect and assess activity' }] } } }, now: new Date('2026-09-03T14:00:00Z') })).amount).toBe(6.215);
   });
 
-  test('a lawn add-on on a non-lawn visit withholds the tank dose of a product no protocol names (r6 P1)', async () => {
+  test('a lawn add-on on a non-lawn visit warns beside the tank dose of a product no protocol names (r6 P1, owner 2026-11-26)', async () => {
     const live = { carrier_gal_per_1000: 2, expires_at: '2026-10-01T00:00:00Z', calibration_status: 'field_verified', tank_capacity_gal: 110 };
     const celsius = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
     const demand = { id: 'd', name: 'Demand CS', default_rate: '0.2-0.8', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
@@ -2758,7 +3183,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }] } };
     const opts = { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') };
     const held = await jobCard.mixForProduct('p1', 110, opts);
-    expect(held).toMatchObject({ amount: null, reason: 'Lawn Care has no plan on this visit — amount withheld', ratePer1000: null, context: { line: null } });
+    expect(held).toMatchObject({ amount: 6.215, warnings: ["Lawn Care has no plan on this visit — the lawn plan's checks did not run"], context: { line: null } });
     expect(buildPlan).not.toHaveBeenCalled();
     // The pest protocol's own product still doses under the pest line.
     rows.products_catalog = [demand];
@@ -2813,10 +3238,10 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: { items: [] } });
     const protocols = { tree_shrub: { visits: [{ visit: 9, month: 'Sep', primary: 'Headway G 3 lbs/1000 broadcast', secondary: '' }] } };
     const out = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
-    // The line is Headway G's, not Headway's: the lawn plan governs the search and its block withholds.
+    // The line is Headway G's, not Headway's: the lawn plan governs the search and its block warns beside the dose (owner 2026-11-26).
     expect(out.context).toEqual({ line: null });
     expect(buildPlan).toHaveBeenCalled();
-    expect(out).toMatchObject({ amount: null, planBlocks: [{ code: 'nitrogen_blackout' }] });
+    expect(out).toMatchObject({ amount: 0.5, planBlocks: [{ code: 'nitrogen_blackout' }], warnings: ['Nitrogen blackout is active.'] });
   });
 
   test('the lawn plan governs a product it names even when a non-lawn add-on\'s line names it too (hook P1)', async () => {
@@ -2846,15 +3271,15 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const planned = await jobCard.mixForProduct('fe', 110, opts);
     expect(planned).toMatchObject({ amount: 27.5, rateSource: 'plan', context: { line: null }, planBlocks: [] });
     expect(evaluateApprovals).toHaveBeenCalled();
-    // The plan's block withholds it too, add-on line or not.
+    // The plan's block warns beside it too, add-on line or not (owner 2026-11-26).
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: mix });
-    expect(await jobCard.mixForProduct('fe', 110, opts)).toMatchObject({ amount: null, planBlocks: [{ code: 'nitrogen_blackout' }] });
+    expect(await jobCard.mixForProduct('fe', 110, opts)).toMatchObject({ amount: 27.5, planBlocks: [{ code: 'nitrogen_blackout' }], warnings: ['Nitrogen blackout is active.'] });
     // A product the plan does not name stays under the add-on's line, and the plan's blackout says nothing about that mix.
     rows.products_catalog = [{ id: 'mn', name: 'Mn Combo', default_rate: '1-2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' }];
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
-    // A plan that failed to load names nothing knowably: it keeps governing, add-on line or not (hook P1).
+    // A plan that failed to load: the add-on's own known rate stays under its service name, and the outage warns beside it (owner 2026-11-26).
     buildPlan.mockRejectedValue(new Error('turf profile read failed'));
-    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: null, context: { line: null }, planBlocks: [{ code: 'plan_unavailable' }] });
+    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [{ code: 'plan_unavailable' }], warnings: ['Lawn plan unavailable right now.'] });
     // An alternate-address visit is not an outage: the add-on line governs there.
     rows.scheduled_services = [{ ...rows.scheduled_services[0], address_diverges: true }];
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });

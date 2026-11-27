@@ -130,7 +130,12 @@ const REASON_PROMOTES = { bait_monitoring: ['bait_station_key'], foam_drill: ['f
 // for trace rendering ("Pest & Rodent Control" reads as a trap lane there)
 // and must not decide tools.
 const laneOf = (serviceType, serviceKey) => (serviceKey ? resolveTraceEligibility({ serviceKey, displayName: serviceType || '' }).reason : null);
-const matchOf = (serviceType, serviceKey) => matchServiceProtocol(PROTOCOLS, serviceType, { serviceKey: serviceKey || null });
+// A service with no protocol card (the matcher's no_protocol: a name and key no rule claims) still has a tool line. Its tools
+// follow the general pest checklist, as they did when such a service was handed the general pest card.
+const matchOf = (serviceType, serviceKey) => {
+  const match = matchServiceProtocol(PROTOCOLS, serviceType, { serviceKey: serviceKey || null });
+  return match.reason === 'no_protocol' ? { ...match, programKey: 'pest' } : match;
+};
 // A rule the matcher claims by catalog KEY names the program outright; a
 // term match or a bare default leaves the line to the category and the name.
 const keyedProgram = (serviceKey) => (serviceKey ? MATCH_RULES.find((rule) => rule.serviceKeys?.includes(serviceKey))?.programKey || null : null);

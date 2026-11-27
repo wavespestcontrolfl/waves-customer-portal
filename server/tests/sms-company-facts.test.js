@@ -87,13 +87,13 @@ describe('gate on', () => {
     expect(system).toContain('COMPANY FACTS:\n- The COMPANY FACTS section');
     expect(system).not.toMatch(/general pest knowledge/i);
     expect(system).toContain('COMPANY FACTS section in the context block is owner-approved and authoritative');
-    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(system).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, SCHEDULE CHANGES, the thread');
   });
 
   test('prompt version is bumped, distinguishable, and fits the column', () => {
     // '_cf' = COMPANY FACTS, '_cfl' = + LABEL FACTS (PR #5416), '_cflv' = + VISIT STATUS & OPEN LOOPS (PR #5499), 'cflvp' = + PAYMENT FACTS (PR #5331), numeric token 5 = FREE RE-SERVICE (PR #5336) + a fresh identity above PR #5334's 3 (LIVE ETA) and #5416's 3_cfl (4 was the pre-contract claim checker, never merged); '7_m' (#5610) = the compact scheme: number 6 + one cumulative key 'm' (+ MISSED VISIT).
-    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers65_n');
-    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers65_n+e');
+    expect(REAL_ANSWERS_PROMPT_VERSION).toBe('house_voice_v12_real_answers81_n');
+    expect(currentPromptVersion()).toBe('house_voice_v12_real_answers81_n+e');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers_cf');
     expect(currentPromptVersion()).not.toBe('house_voice_v12_real_answers2');

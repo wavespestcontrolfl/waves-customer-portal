@@ -34,6 +34,24 @@ const RETAINED_HISTORY_STATUSES = ['cancelled', 'skipped', 'no_show', 'reschedul
 // customer-facing context (context-aggregator, comms drafting).
 const UPCOMING_SERVICE_STATUSES = ['pending', 'confirmed', 'en_route', 'on_site'];
 
+// Customer-facing tracker states that mean the visit is happening now. The
+// tracker writes track_state first and syncs `status` best-effort, so a row can
+// read `rescheduled` (or another non-upcoming status) while the tracking page
+// shows the live vehicle (Codex round-14 P2, PR #5334).
+const LIVE_TRACK_STATES = ['en_route', 'on_property'];
+
+// The row rule UPCOMING SERVICES lists by (context-aggregator.js
+// upcomingServicesBase + liveServicesQuery): an upcoming status, or TODAY with a
+// live track_state and no terminal status. The date floor (today onward) is the
+// caller's. Shared so the texting AI's schedule recheck accepts the same rows.
+function isUpcomingListedRow(row, todayStr) {
+  if (!row) return false;
+  if (UPCOMING_SERVICE_STATUSES.includes(row.status)) return true;
+  // the aggregator's day rule (live-eta-destination.js calendarDay): a pg DATE as a local Date
+  const { calendarDay } = require('../live-eta-destination');
+  return calendarDay(row.scheduled_date) === todayStr && LIVE_TRACK_STATES.includes(row.track_state) && !TERMINAL_ROW_STATUSES.includes(row.status);
+}
+
 // Invoice statuses that count toward what the customer currently owes
 // (delivered and collectible; excludes draft/scheduled/paid/void/prepaid).
 const OPEN_INVOICE_STATUSES = ['sent', 'viewed', 'overdue'];
@@ -44,4 +62,6 @@ module.exports = {
   RETAINED_HISTORY_STATUSES,
   UPCOMING_SERVICE_STATUSES,
   OPEN_INVOICE_STATUSES,
+  LIVE_TRACK_STATES,
+  isUpcomingListedRow,
 };

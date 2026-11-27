@@ -387,12 +387,14 @@ describe('pest-control pricing hardening', () => {
       visits: 4,
     }));
 
-    // $250 flat regardless of footprint (owner decision 2026-07-12, Q8).
-    expect(priceWDO({ footprint: 2500 }).price).toBe(250);
-    expect(priceWDO({ footprint: 3501 }).price).toBe(250);
-    const fallback = priceWDO({});
+    // $250 flat regardless of footprint on a quote saved before the 2026-11-26 size rule (owner decision 2026-07-12, Q8).
+    expect(priceWDO({ footprint: 2500 }, { legacyWdoFlat: true }).price).toBe(250);
+    expect(priceWDO({ footprint: 3501 }, { legacyWdoFlat: true }).price).toBe(250);
+    const fallback = priceWDO({}, { legacyWdoFlat: true });
     expect(fallback.price).toBe(250);
     expect(fallback.requiresManualReview).toBe(true);
+    // A new quote with no construction known: the block column of the size table (2,000 sq ft fallback footprint).
+    expect(priceWDO({}).price).toBe(150);
   });
 
   test('flea exterior area source handling is surfaced at top level', () => {

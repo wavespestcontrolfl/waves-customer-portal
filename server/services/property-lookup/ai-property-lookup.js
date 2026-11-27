@@ -19,6 +19,7 @@
  */
 
 const logger = require('../logger');
+const { readCountyConstruction } = require('../pricing-engine/structural-facts');
 const MODELS = require('../../config/models');
 const { lookupParcelByPoint, parcelGisTimeoutMs } = require('./parcel-gis');
 const { condoUnitFolioLive, lookupBusinessIdentityLive, commercialSuiteSizingLive } = require('../../config/feature-gates');
@@ -4983,13 +4984,10 @@ function normalizeManateeConstruction(value) {
   return normalizeCountyConstruction(value);
 }
 
+// County exterior-wall codes go through the shared county reader (pricing-engine/structural-facts.js): "steel frame" is metal,
+// never wood frame, wood + masonry is mixed, and an appraiser's code reads in full (it names what the wall is).
 function normalizeCountyConstruction(value) {
-  const text = String(value || '').toUpperCase();
-  if (/WOOD|FRAME/.test(text)) return 'WOOD_FRAME';
-  if (/BRICK/.test(text)) return 'BRICK';
-  if (/METAL|STEEL/.test(text)) return 'METAL';
-  if (/MASONRY|CONCRETE|BLOCK|CBS|CMU/.test(text)) return 'CBS';
-  return null;
+  return readCountyConstruction(value);
 }
 
 function normalizeManateeRoof(material, type) {
@@ -6101,6 +6099,7 @@ module.exports = {
   lookupPropertyFromCountyByParcel,
   searchCountyParcelByAddress,
   _private: {
+    normalizeCountyConstruction,
     findCharlottePrimaryRoofing,
     applyCountyGisTypeOverride,
     attachParcelMeta,

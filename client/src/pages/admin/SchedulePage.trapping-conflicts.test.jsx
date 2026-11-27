@@ -219,6 +219,17 @@ describe("submit reconciliation of protocol action markers", () => {
     expect(result.completedActions).toEqual(["Treated the perimeter"]);
   });
 
+  it("a confirmed no-card visit submits no card action: every selected label and every action marker leave the notes", () => {
+    const result = reconcileProtocolActions({
+      labels: ["Treated the perimeter"],
+      notes: ["[Protocol] Treated the perimeter", "[Action] Applied interior treatment", "[Found] Ants", "Plain prose stays"].join("\n"),
+      context: { ...pestContext, noCardConfirmed: true },
+    });
+    expect(result.reportProtocolActions).toEqual([]);
+    expect(result.completedActions).toEqual([]);
+    expect(result.reportTechnicianNotes).toBe(["[Found] Ants", "Plain prose stays"].join("\n"));
+  });
+
   it("prunes markers of excluded labels, spaced or not, and nothing else", () => {
     const result = reconcileProtocolActions({
       labels: ["Applied weed control", "Stale scout task", "Other stale task"],

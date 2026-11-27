@@ -10,7 +10,9 @@
  * VERIFIES it is selected, reads the FINAL total with tax + shipping and
  * runs the dispatcher's beforeSubmit(totalCents) cap check on it immediately
  * before the place-order click — only then, and only when SITEONE_BOT_DRY_RUN
- * is not set, does it submit. Whatever it left in the cart without
+ * is exactly 'false' (fail closed), does it submit. The server's dispatcher no
+ * longer loads this adapter (SiteOne orders run on the Mac, adapters/siteone-cdp.js);
+ * it stays for siteone-programs-check's readSignedIn. Whatever it left in the cart without
  * submitting (dry run, refusal) it clears again before closing.
  *
  * Hard rules (same boundary as the backlink signup runner):
@@ -1302,7 +1304,7 @@ async function checkoutAndSubmit(page, { vendorSku, qty, credentials, shipToToke
 }
 
 async function place(
-  { vendorSku, quantity, credentials, beforeSubmit, dryRun = String(process.env.SITEONE_BOT_DRY_RUN || '').toLowerCase() === 'true', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
+  { vendorSku, quantity, credentials, beforeSubmit, dryRun = process.env.SITEONE_BOT_DRY_RUN !== 'false', approvedShipTo = process.env.SITEONE_APPROVED_SHIP_TO },
   { launchBrowser = chromium ? defaultLaunch : null, resolveHostIps = filler.resolvePublicIps, upload = uploadEvidence, confirmationTimeoutMs = CONFIRMATION_TIMEOUT } = {},
 ) {
   if (!launchBrowser) throw runLevel('siteone bot: playwright unavailable');

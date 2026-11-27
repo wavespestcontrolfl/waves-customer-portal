@@ -805,6 +805,7 @@ describe('revertMerge', () => {
     invoice_followup_sequences: ['created_at', 'updated_at'],
     newsletter_subscribers: ['created_at', 'updated_at'],
     customer_properties: ['created_at', 'updated_at'],
+    home_notes: ['created_at', 'updated_at'],
     customer_refresh_tokens: ['created_at', 'updated_at'],
     // created_at ONLY — the regression class.
     customer_credit_ledger: ['created_at'],
@@ -3039,6 +3040,41 @@ describe('revertMerge', () => {
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/estimates row\(s\) recorded by this merge were updated after it/) });
     expect(state.repointedBack).toHaveLength(0);
     expect(state.journalUpdate).toBe(null);
+  });
+
+  it('home note: a note that moved with the merge and was edited afterwards blocks the undo; an untouched one moves back', async () => {
+    const edited = baseJournal();
+    edited.repointed_ids.tables['home_notes.customer_id'] = ['note-1'];
+    const refused = buildRevertTrx({
+      journal: edited,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        home_notes: { stillOnWinner: ['note-1'], verifiedRows: [{ id: 'note-1', updated_at: '2026-07-30T09:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(refused.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/home_notes row\(s\) recorded by this merge were updated after it/) });
+    expect(refused.state.repointedBack).toHaveLength(0);
+
+    const untouched = baseJournal();
+    untouched.repointed_ids.tables['home_notes.customer_id'] = ['note-1'];
+    const ok = buildRevertTrx({
+      journal: untouched,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        home_notes: { stillOnWinner: ['note-1'], verifiedRows: [{ id: 'note-1', created_at: '2026-06-01T00:00:00Z', updated_at: '2026-06-01T00:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(ok.trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['home_notes.customer_id']).toBe(1);
   });
 
   it("refuses on each unjournaled child an accepted estimate mints (card hold, deposit, booked visit)", async () => {
