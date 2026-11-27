@@ -24,7 +24,10 @@ const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g,
 const BLOCKED_PLAN_STATES = new Set(["capped", "held", "unavailable"]);
 const mixReady = (item) => Boolean(item.selected && !item.unavailable && !item.fieldHold && !item.tankAmounts?.skipped
   && !BLOCKED_PLAN_STATES.has(item.tankAmounts?.planState) && !isSpreader(item));
-const mixesInto = (additive, base) => Boolean(additive.tankAmounts?.mixWith) && nameKey(base.product.name).startsWith(nameKey(additive.tankAmounts.mixWith));
+// By product id only: the server resolves the program's tankMixWith names with the plan's own line resolver (mixWithProductIds).
+const mixesInto = (additive, base) => (additive.tankAmounts?.mixWithProductIds || []).includes(String(base.product.id));
+// A tankMixWith name the resolver could not tie to a product on this sheet: "No rule on file", never a guess.
+const unresolvedPartner = (item) => Boolean(item.tankAmounts?.mixWith) && !(item.tankAmounts?.mixWithProductIds || []).length;
 const GRANULAR_METHOD = { hand_shaker: "Hand shaker", spreader: "Spreader" };
 
 // The Bermuda removal step's shared tank, by product id from the server's step order (lawn-bermuda-removal.js mixOrderField:
@@ -41,25 +44,26 @@ function sharedTank(item, products, order) {
 // A base product and every ready product added to its mix: one shared tank.
 const baseTank = (base, products) => [base, ...products.filter((other) => mixReady(other) && mixesInto(other, base))].map((tankItem) => String(tankItem.product.id));
 
-// A card's tanks, each checked on its own: its mix line's tank, and each mixing order (base, Bermuda backpack) the product is a
-// step of. A pair is checked only among products that share one tank, so a base product and a backpack product never pair.
-function cardTanks(item, method, plan) {
-  const tanks = [method.tankIds || []];
-  if (mixReady(item)) {
-    for (const order of [plan.mixingOrder, plan.bermudaMixingOrder]) {
-      const steps = mixOrderIds(order);
-      if (steps.includes(String(item.product.id))) tanks.push(steps);
-    }
-  }
-  return tanks;
-}
 const uniqueByText = (lines) => lines.filter((entry, index) => lines.findIndex((other) => other.text === entry.text) === index);
-const cardMixWarnings = (item, method, plan) => uniqueByText(cardTanks(item, method, plan).flatMap((tank) => tankMixWarnings(tank, plan.mixCheck)));
-// One product line's warnings (the detailed product view), from the same path as its tank card.
+// One product line's warnings (its tank card, the detailed product view): its own mix line's tank only, so two rows of one
+// product (the weed mix and the Bermuda backpack) each keep their own tank.
 export function itemMixWarnings(item, plan) {
   if (!item?.product) return [];
   const products = (plan.items || []).filter((other) => other.product);
-  return cardMixWarnings(item, applicationMethod(item, products, plan.bermudaMixingOrder), plan);
+  return tankMixWarnings(applicationMethod(item, products, plan.bermudaMixingOrder).tankIds, plan.mixCheck);
+}
+// The sheet's tanks, by product id: each base tank its cards name (a base and the products added to its mix), and the Bermuda
+// backpack (the server's step order). The base mixing order lists products from several tanks; it is checked tank by tank.
+export function sheetTanks(plan) {
+  const products = (plan.items || []).filter((item) => item.product);
+  const base = products.filter((item) => !item.bermudaStep)
+    .map((item) => applicationMethod(item, products, plan.bermudaMixingOrder).tankIds).filter((ids) => ids?.length > 1);
+  return { base: base.filter((ids, index) => base.findIndex((other) => [...other].sort().join() === [...ids].sort().join()) === index), bermuda: mixOrderIds(plan.bermudaMixingOrder) };
+}
+// A mixing order's warnings: each tank checked on its own, among the products of the order.
+export function mixOrderWarnings(steps, tanks, mixCheck) {
+  const ids = mixOrderIds(steps);
+  return uniqueByText(tanks.flatMap((tank) => tankMixWarnings(tank.filter((id) => ids.includes(id)), mixCheck)));
 }
 
 // The one mix-line helper: the line's text, and the product ids it puts in the same tank (tankIds; null for no shared tank).
@@ -74,7 +78,8 @@ function applicationMethod(item, products, order) {
   const bases = products.filter((base) => mixReady(base) && mixesInto(item, base));
   if (bases.length) return line(`Add to the ${amounts.mixWith} mix`, [...new Set(bases.flatMap((base) => baseTank(base, products)))]);
   const partners = products.filter((other) => mixReady(other) && mixesInto(other, item));
-  return partners.length ? line(`Tank with: ${partners.map((other) => other.product.name).join(", ")}`, baseTank(item, products)) : neutral;
+  if (partners.length) return line(`Tank with: ${partners.map((other) => other.product.name).join(", ")}`, baseTank(item, products));
+  return unresolvedPartner(item) ? { ...neutral, unresolved: true } : neutral;
 }
 
 // The mix safety table's answer (server: /lawn-mix mixCheck) for each pair in one shared tank: nothing for Yes, and
@@ -114,27 +119,15 @@ export function tankMixWarnings(tankIds, mixCheck) {
 // The product ids of a mixing order (base or Bermuda): one tank.
 export const mixOrderIds = (order) => (order || []).filter((step) => step.productId).map((step) => String(step.productId));
 
-// Does a direction's text name a product: its full name, or its first word of four letters or more ("Celsius" for Celsius WG).
-const lower = (value) => (value == null ? "" : String(value).toLowerCase());
-function namesProduct(said, name) {
-  const full = lower(name).trim();
-  const first = full.split(/\s+/)[0] || "";
-  return Boolean(full) && (said.includes(full) || (first.length >= 4 && said.includes(first)));
-}
-
-// The warning lines that go directly under one direction; the direction's text is never rewritten.
-// byMember (a mixing-order step, a card's mixing directions): every pair with this product, or a product the text names.
-// Otherwise (a protocol line): only a pair with this product whose other product the text names.
-export function directionLines(warnings, { productId, text, byMember = true, verdicts = ["never"] }) {
-  const said = lower(text);
-  const own = lower(productId);
-  return warnings.filter((warning) => {
-    if (!verdicts.includes(warning.verdict) || !warning.pair) return false;
-    const members = [[warning.pair.productAId, warning.pair.productAName], [warning.pair.productBId, warning.pair.productBName]];
-    const mine = own ? members.findIndex(([id]) => lower(id) === own) : -1;
-    if (mine >= 0) return byMember || namesProduct(said, members[1 - mine][1]);
-    return byMember && members.some(([, name]) => namesProduct(said, name));
-  }).map((warning) => warning.text);
+// The warning lines that go directly under one direction (a mixing-order step, a card's directions, a protocol line): each
+// pair with that direction's product, by product id from the server's resolved lines. Never by name text; the direction's text
+// is never rewritten.
+export function directionLines(warnings, { productId, verdicts = ["never"] }) {
+  if (productId == null) return [];
+  const own = String(productId).toLowerCase();
+  return warnings.filter((warning) => verdicts.includes(warning.verdict) && warning.pair
+    && [warning.pair.productAId, warning.pair.productBId].some((id) => String(id).toLowerCase() === own))
+    .map((warning) => warning.text);
 }
 
 // The Celsius label's heat rule (server: lawn-weed-mix.js), on the surfactant card and the Celsius card whenever the sheet tells
@@ -265,12 +258,13 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         const exclusions = product.excludedTurfSpecies || [];
         const cautions = productCautions(item, exclusions, products);
         const method = applicationMethod(item, products, plan.bermudaMixingOrder);
-        const tankWarnings = cardMixWarnings(item, method, plan);
+        const tankWarnings = [...tankMixWarnings(method.tankIds, plan.mixCheck),
+          ...(method.unresolved ? [{ verdict: "unknown", text: MIX_CHECK_TEXT.unknown({}) }] : [])];
         const neverLines = tankWarnings.filter((warning) => warning.replacesLine);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
           ["Active ingredient", product.activeIngredient],
-          ["Application instruction", item.raw && <>{item.raw}{directionLines(tankWarnings, { productId: product.id, text: item.raw, byMember: false, verdicts: ["never", "caution"] })
+          ["Application instruction", item.raw && <>{item.raw}{directionLines(tankWarnings, { productId: product.id, verdicts: ["never", "caution"] })
             .map((text) => <span key={text} className="block font-medium text-alert-fg">{text}</span>)}</>],
           ["Application scope", item.scope],
           ["Signal word", product.signalWord],
@@ -298,7 +292,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
             <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
-            {product.mixingInstructions && directionLines(tankWarnings, { productId: product.id, text: product.mixingInstructions }).map((text) => <p key={text} className="mt-1 font-medium text-alert-fg">{text}</p>)}
+            {product.mixingInstructions && directionLines(tankWarnings, { productId: product.id }).map((text) => <p key={text} className="mt-1 font-medium text-alert-fg">{text}</p>)}
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
             <dl className="protocol-tank-meta mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{typeof value === "string" || typeof value === "number" ? String(value) : value}</dd></div>)}</dl>
             <div className="protocol-tank-meta mt-3 flex flex-wrap gap-4">

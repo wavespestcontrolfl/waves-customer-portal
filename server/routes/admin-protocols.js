@@ -1078,6 +1078,25 @@ function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipa
 // one headline per pair). The sheet's one mix-line helper (ProtocolTankSheet.jsx applicationMethod) decides which products
 // share a tank and shows the pairs of that tank. A warning only: it never hides or holds a product or an amount (owner
 // 2026-11-26), and a failed check is left out (logged) so the sheet still renders.
+// The program's tankMixWith names ("Celsius WG", "Recognition and Fusilade II"), resolved to catalog products the way the v13
+// migrations resolve a recipe name: the exact catalog name, else one exact alias; the protocol's short names (NIS) by an explicit
+// map to the catalog name. Never a fuzzy or partial match, so a seller word such as LESCO ties to nothing. The tank sheet ties a
+// mix and its mix check by these ids only (a product not on the sheet: no tank); a name that resolves to nothing gives [] and the
+// sheet says "No rule on file".
+const MIX_WITH_ALIASES = { nis: 'LESCO 90/10 Nonionic Surfactant' };
+function resolveMixWithName(name, products) {
+  return resolveCatalogProductForName(MIX_WITH_ALIASES[name.toLowerCase()] || name, products, { exactOnly: true });
+}
+function resolveMixWith(items, products) {
+  return items.map((item) => {
+    const mixWith = item.tankAmounts?.mixWith;
+    if (!mixWith) return item;
+    const ids = String(mixWith).split(/\s+and\s+|\s*\+\s*|\s*,\s*/i).map((name) => name.trim()).filter(Boolean)
+      .map((name) => resolveMixWithName(name, products)?.id).filter((id) => id != null && String(id) !== String(item.product?.id));
+    return { ...item, tankAmounts: { ...item.tankAmounts, mixWithProductIds: [...new Set(ids.map(String))] } };
+  });
+}
+
 async function sheetMixCheck(items) {
   const ids = [...new Set(items.filter((item) => item.product && item.tankAmounts?.application !== 'spreader').map((item) => String(item.product.id)))];
   if (ids.length < 2) return null;
@@ -1321,7 +1340,7 @@ router.get('/lawn-mix', async (req, res, next) => {
         tankAmounts: tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack }),
       };
     });
-    const items = bermuda.decorate(builtItems);
+    const items = resolveMixWith(bermuda.decorate(builtItems), products);
     const selectedItems = items.filter((item) => item.selected);
     // A mixing-order input: the line's recipe text, its catalog product, and the step marks.
     const mixInput = (item) => ({
@@ -2184,6 +2203,7 @@ router._internals = {
   isPricedProtocolLine,
   loadWindowSopPayload,
   renderWindowSopMarkdown,
+  resolveMixWith,
 };
 
 module.exports = router;

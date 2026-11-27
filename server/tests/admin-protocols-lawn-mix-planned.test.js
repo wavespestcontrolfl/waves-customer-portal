@@ -419,3 +419,31 @@ describe('lawn-mix mixCheck', () => {
     check.mockRestore();
   });
 });
+
+describe('resolveMixWith: the tank sheet ties a mix by product id, from the plan line resolver', () => {
+  const { resolveMixWith } = adminProtocolsRouter._internals;
+  const catalog = [
+    { id: 'cel', name: 'Celsius WG Herbicide', aliases: ['Celsius WG'] },
+    // No NIS alias on the row: the protocol's short name resolves by the explicit map.
+    { id: 'nis', name: 'LESCO 90/10 Nonionic Surfactant', aliases: [] },
+    { id: 'kflow', name: 'LESCO K-Flow 0-0-25', aliases: ['K-Flow'] },
+    { id: 'rec', name: 'Recognition Post Emergent Herbicide', aliases: ['Recognition'] },
+    { id: 'fus', name: 'Fusilade II Turf and Ornamental', aliases: ['Fusilade II'] },
+  ];
+  const line = (id, mixWith) => ({ product: { id }, tankAmounts: { mixWith } });
+
+  test('names and aliases resolve to ids; a seller word alone and an unknown name resolve to nothing', () => {
+    const [nis, cel, both, seller, unknown, none] = resolveMixWith([
+      line('nis', 'Celsius WG'), line('cel', 'NIS'), line('nis', 'Recognition Post Emergent Herbicide and Fusilade II'),
+      line('cel', 'LESCO'), line('cel', 'Unknown blend'), line('kflow', null),
+    ], catalog);
+    expect(nis.tankAmounts.mixWithProductIds).toEqual(['cel']);
+    expect(cel.tankAmounts.mixWithProductIds).toEqual(['nis']);
+    expect(both.tankAmounts.mixWithProductIds).toEqual(['rec', 'fus']);
+    // "LESCO" is the seller, not a product: no LESCO product attaches, and the sheet says "No rule on file".
+    expect(seller.tankAmounts.mixWithProductIds).toEqual([]);
+    expect(unknown.tankAmounts.mixWithProductIds).toEqual([]);
+    expect(none.tankAmounts).toEqual({ mixWith: null });
+  });
+});
+
