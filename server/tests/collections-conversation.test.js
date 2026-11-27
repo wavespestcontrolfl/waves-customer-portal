@@ -1478,7 +1478,7 @@ describe('account-level disclosure + registers', () => {
     convo._ensureSystemBlocks();
     expect(convo._systemBlocks).toHaveLength(2);
     expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FRIENDLY REMINDER/);
-    expect(convo._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(convo._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral' });
     expect(convo._systemBlocks[0].text).not.toContain(convo._ctx.customer.first_name);
     expect(convo._systemBlocks[1]).toEqual({
       type: 'text',
@@ -1490,7 +1490,7 @@ describe('account-level disclosure + registers', () => {
     expect(convo._ctx.register).toBe('firm');
     expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FIRM/);
     expect(convo._systemBlocks[0].text).not.toMatch(/REGISTER: FRIENDLY/);
-    expect(convo._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(convo._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral' });
   });
 
   test('firm/final registers speak a consequence ONLY when the state is true — read from the DB at disclosure', async () => {

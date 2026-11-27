@@ -3854,11 +3854,10 @@ class RelayConversation {
     //      reused. (Freezing the voice profile per call also matches its own
     //      documented kill-switch granularity: a revoke reaches the NEXT call.)
     //   2. Block 0 carries only the shared prompt (base rules + voice profile)
-    //      with a 1h TTL so calls arriving 5–60 minutes apart reuse the cached
-    //      prefix on turn 1. The per-caller KNOWN CALLER block rides Block 1
-    //      with a 5m breakpoint reused across turns of this call without
-    //      busting Block 0 across callers. (Anthropic requires longer TTL
-    //      breakpoints before shorter ones: 1h on Block 0, 5m on Block 1.)
+    //      with a 5m ephemeral breakpoint so calls arriving within 5 minutes
+    //      reuse the cached prefix on turn 1 with zero extra write premium.
+    //      The per-caller KNOWN CALLER block rides Block 1 (5m ephemeral) so
+    //      turns of this call stay cached without busting Block 0 across callers.
     //   3. The CLOCK moved OUT of `system`. It is re-rendered every turn by
     //      definition, so leaving it in the system prompt would invalidate the
     //      cache on every single turn — it now rides the user turn below.
@@ -3877,7 +3876,7 @@ class RelayConversation {
         {
           type: 'text',
           text: sharedPrompt,
-          cache_control: { type: 'ephemeral', ttl: '1h' },
+          cache_control: { type: 'ephemeral' },
         },
         ...(callerBlock ? [{
           type: 'text',

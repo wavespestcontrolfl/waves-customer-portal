@@ -874,14 +874,15 @@ class CollectionsConversation {
     this._promptRegister = this._ctx.register;
     const who = String(this._ctx.customer.first_name || '').replace(/[\r\n]+/g, ' ').trim() || 'the customer';
     // Block 0 is identical across every collections call in the same register
-    // on the same ET day — kept 1h so calls arriving 5–60 minutes apart reuse
-    // the shared prefix. The caller's first name rides Block 1 (5m TTL) so
-    // turns within this call stay cached without busting Block 0 across callers.
+    // on the same ET day (5m ephemeral breakpoint — keeps write cost at 1.25x
+    // since tool schemas also vary by call state). The caller's first name
+    // rides Block 1 so turns within this call stay cached without busting
+    // Block 0 across callers.
     this._systemBlocks = [
       {
         type: 'text',
         text: buildSystemPrompt({ today, register: this._ctx.register }),
-        cache_control: { type: 'ephemeral', ttl: '1h' },
+        cache_control: { type: 'ephemeral' },
       },
       {
         type: 'text',

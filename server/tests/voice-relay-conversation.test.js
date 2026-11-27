@@ -387,7 +387,7 @@ describe('RelayConversation — explicit end after capture', () => {
   });
 
   describe('prompt caching', () => {
-    test('system blocks + tools are built once and carry a 1h shared cache breakpoint', async () => {
+    test('system blocks + tools are built once and carry a shared cache breakpoint', async () => {
       process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
       try {
         const convo = new RelayConversation({ callSid: 'CAc', from: '+19415551234', send: jest.fn() });
@@ -395,7 +395,7 @@ describe('RelayConversation — explicit end after capture', () => {
         const first = convo._systemBlocks;
         expect(Array.isArray(first)).toBe(true);
         expect(first).toHaveLength(1);
-        expect(first[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+        expect(first[0].cache_control).toEqual({ type: 'ephemeral' });
         // The RENDERED clock block (the per-turn invalidator) is out; the prompt
         // RULE that tells her a clock exists stays.
         expect(first[0].text).not.toContain('<<<CLOCK DATA');
@@ -406,7 +406,7 @@ describe('RelayConversation — explicit end after capture', () => {
       }
     });
 
-    test('KNOWN CALLER rides a separate 5m block so two callers share a byte-identical 1h Block 0 prefix', async () => {
+    test('KNOWN CALLER rides a separate block so two callers share a byte-identical Block 0 prefix', async () => {
       process.env.VOICE_RELAY_CONTEXT_ENABLED = 'true';
       try {
         const a = new RelayConversation({ callSid: 'CAc-a', from: '+19415551234', send: jest.fn() });
@@ -418,7 +418,7 @@ describe('RelayConversation — explicit end after capture', () => {
         expect(a._systemBlocks).toHaveLength(2);
         expect(b._systemBlocks).toHaveLength(2);
         expect(a._systemBlocks[0].text).toBe(b._systemBlocks[0].text);
-        expect(a._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+        expect(a._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral' });
         expect(a._systemBlocks[0].text).not.toContain('KNOWN CALLER: Pat A');
         expect(a._systemBlocks[1]).toEqual({
           type: 'text',
