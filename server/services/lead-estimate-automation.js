@@ -206,7 +206,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     return { services, supported: false, unsupportedReason: manualScopeReason, review };
   }
 
-  const pestWanted = wants(/\bpest\b|\bant\b|\bcockroach\b|\broach\b/);
+  const pestWanted = wants(/\bpest\b|\bants?\b|\bcockroach(?:es)?\b|\broach(?:es)?\b/);
   if (pestWanted) {
     if (oneTime) {
       services.oneTimePest = {};
@@ -215,21 +215,21 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (wants(/\blawn\b|(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b(?!\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:shrubs?|trees?|palms?|ornamentals?)\b)|\bweed\b/)) {
+  if (wants(/\blawn\b|(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b(?!\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:shrubs?|trees?|palms?|ornamentals?)\b)|\bweeds?\b/)) {
     const lawnPest = wants(/\blawn pest\b/);
     if (pestWanted && !lawnPest) {
       services.lawn = { track: 'st_augustine', tier: 'enhanced' };
     } else if (lawnPest) {
       services.lawnPestControl = {};
       review.push('lawn_pest_control_defaulted');
-    } else if (oneTime || /\bweed\b/.test(text)) {
+    } else if (oneTime || /\bweeds?\b/.test(text)) {
       services.oneTimeLawn = { treatmentType: /\bfertilization\b/.test(text) ? 'fertilizer' : 'weed' };
     } else {
       services.lawn = { track: 'st_augustine', tier: 'enhanced' };
     }
   }
 
-  if (wants(/\bmosquito\b/)) {
+  if (wants(/\bmosquitoe?s?\b/)) {
     if (oneTime) {
       services.oneTimeMosquito = {};
     } else {
@@ -237,7 +237,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     }
   }
 
-  if (wants(/\btermite\b/)) {
+  if (wants(/\btermites?\b/)) {
     if (/\bmonitoring\b|\bprotection\b|\bbait\b/.test(text) || recurring) {
       // Trelona-only menu (owner 2026-07-28); 'advance' is replay-only.
       services.termite = { system: 'trelona', monitoringTier: 'basic' };
@@ -253,17 +253,17 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
 
   addTreeShrubService(wants, services, review);
 
-  if (wants(/\bflea\b|\btick\b/)) {
+  if (wants(/\bfleas?\b|\bticks?\b/)) {
     services.flea = {};
     review.push('flea_treatment_defaulted');
   }
 
-  if (wants(/\bwasp\b|\bhornet\b|\bstinging\b|\bbee\b/)) {
+  if (wants(/\bwasps?\b|\bhornets?\b|\bstinging\b|\bbees?\b/)) {
     services.stinging = { species: 'PAPER_WASP', tier: 2, removal: 'NONE' };
     review.push('stinging_insect_defaults_used');
   }
 
-  if (wants(/\bbed bug\b|\bbedbug\b/)) {
+  if (wants(/\bbed bugs?\b|\bbedbugs?\b/)) {
     services.bedBug = {
       method: 'CHEMICAL',
       rooms: 2,
@@ -279,7 +279,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     review.push('bed_bug_defaults_used');
   }
 
-  if (wants(/\brodent\b|\brat\b|\bmouse\b|\bmice\b/)) {
+  if (wants(/\brodents?\b|\brats?\b|\bmouse\b|\bmice\b/)) {
     if (/\bbait\b|\bstation\b/.test(text)) {
       services.rodentBait = {};
     } else {
@@ -312,6 +312,77 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     supported,
     unsupportedReason: supported ? null : 'service_not_mapped_for_automation',
     review,
+  };
+}
+
+function explicitFormBool(value) {
+  if (value === true) return true;
+  if (value === false) return false;
+  const text = String(value ?? '').trim().toLowerCase();
+  if (text === 'yes' || text === 'true') return true;
+  if (text === 'no' || text === 'false') return false;
+  return null;
+}
+
+function resolvePoolCageFeature(body, countyFeatures) {
+  const explicitCage = explicitFormBool(body.poolCage ?? body.pool_cage);
+  const poolCage = explicitCage !== null ? explicitCage : Boolean(countyFeatures?.poolCage);
+  if (!poolCage) return { poolCage: false };
+  const rawBodySize = firstNonEmpty(body.poolCageSize, body.pool_cage_size).toLowerCase();
+  const bodySize = ['small', 'medium', 'large', 'oversized'].includes(rawBodySize) ? rawBodySize : null;
+  const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
+  if (bodySize) {
+    const held = bodySize === 'large' || bodySize === 'oversized';
+    return {
+      poolCage: true,
+      poolCageSize: twoSizesOn ? (bodySize === 'oversized' ? 'large' : 'medium') : bodySize,
+      ...(twoSizesOn && held ? { poolCageReview: true } : {}),
+    };
+  }
+  return {
+    poolCage: true,
+    ...(countyFeatures?.poolCageSize ? { poolCageSize: countyFeatures.poolCageSize } : {}),
+    ...(countyFeatures?.poolCageReview === true ? { poolCageReview: true } : {}),
+  };
+}
+
+function resolveLeadFeatures(body, county) {
+  const cf = county?.features || null;
+  const cage = resolvePoolCageFeature(body, cf);
+  const explicitPool = explicitFormBool(body.pool);
+  const explicitWater = explicitFormBool(body.nearWater ?? body.near_water);
+  return {
+    pool: explicitPool !== null ? explicitPool : Boolean(cf?.pool || cage.poolCage),
+    ...cage,
+    ...(cf?.attachedGarage === true ? { attachedGarage: true } : {}),
+    shrubs: firstNonEmpty(body.shrubDensity, body.shrubs, cf?.shrubs).toLowerCase() || undefined,
+    trees: firstNonEmpty(body.treeDensity, body.trees).toLowerCase() || undefined,
+    complexity: firstNonEmpty(body.landscapeComplexity, body.complexity, cf?.complexity).toLowerCase() || undefined,
+    nearWater: explicitWater !== null ? explicitWater : Boolean(cf?.nearWater),
+  };
+}
+
+function countyTurfEngineFields(county) {
+  const turf = county?.turf;
+  if (!turf || !(Number(turf.estimatedTurfSf) > 0)) return {};
+  return {
+    estimatedTurfSf: Number(turf.estimatedTurfSf),
+    turfSource: turf.turfSource || null,
+    turfCappedToParcel: turf.turfCappedToParcel === true,
+  };
+}
+
+function countyMeasurementsSummary(county) {
+  return {
+    source: MEASUREMENTS_SOURCE,
+    homeSqFt: county.homeSqFt,
+    lotSqFt: county.lotSqFt,
+    ...(county.stories ? { stories: county.stories } : {}),
+    ...(county.propertyType ? { propertyType: county.propertyType } : {}),
+    ...(county.features ? { features: county.features } : {}),
+    ...(county.turf?.estimatedTurfSf > 0
+      ? { estimatedTurfSf: county.turf.estimatedTurfSf, turfSource: county.turf.turfSource || null }
+      : {}),
   };
 }
 
@@ -403,17 +474,11 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       treeShrubFootprintTrusted: false,
       stories: stories || 1,
       ...(storiesUnknownAboveTable ? { storiesSource: 'default' } : {}),
+      ...countyTurfEngineFields(county),
       propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,
       isCommercial: false,
-      features: {
-        pool: body.pool === true || String(body.pool || '').toLowerCase() === 'yes',
-        poolCage: body.poolCage === true || String(body.poolCage || body.pool_cage || '').toLowerCase() === 'yes',
-        shrubs: firstNonEmpty(body.shrubDensity, body.shrubs).toLowerCase() || undefined,
-        trees: firstNonEmpty(body.treeDensity, body.trees).toLowerCase() || undefined,
-        complexity: firstNonEmpty(body.landscapeComplexity, body.complexity).toLowerCase() || undefined,
-        nearWater: body.nearWater === true || String(body.nearWater || body.near_water || '').toLowerCase() === 'yes',
-      },
+      features: resolveLeadFeatures(body, county),
       services,
       leadSource: 'lead_webhook',
       address: leadDraftAddress({ intake, customer }),
@@ -624,9 +689,7 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
   // size instead, so staff never read "default size" on a real one.
   let gateRecord = readiness;
   if (engineInput.sizeSource === MEASUREMENTS_SOURCE) {
-    automation.measurements = {
-      source: MEASUREMENTS_SOURCE, homeSqFt: county.homeSqFt, lotSqFt: county.lotSqFt, ...(county.stories ? { stories: county.stories } : {}),
-    };
+    automation.measurements = countyMeasurementsSummary(county);
     gateRecord = {
       ...readiness,
       review: [...new Set((readiness.review || []).map((reason) => (reason === DEFAULTED_REVIEW ? FROM_COUNTY_REVIEW : reason)))],

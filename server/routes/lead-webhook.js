@@ -934,6 +934,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
       if (attached) {
         leadRecord = attached;
         attachedCallLead = true;
+        await linkLeadToDraftEstimate(leadRecord, createdEstimateId);
       }
 
       if (!leadRecord) {
@@ -959,6 +960,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           first_contact_channel: 'form',
           status: 'new',
           customer_id: customer.id,
+          ...(createdEstimateId ? { estimate_id: createdEstimateId } : {}),
           gclid: gclid || null,
           wbraid: wbraid || null,
           gbraid: gbraid || null,
@@ -984,7 +986,10 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
     // A lead that is handed off says so in its activity list.
     const handoff = quizHandoffFor({ priceAsk: quizPriceAsk, createdLead, lead: leadRecord });
     if (handoff) await notePriceHandoff(leadRecord.id);
-    else if (quizPriceAsk) await createLeadDraftEstimate();
+    else if (quizPriceAsk) {
+      await createLeadDraftEstimate();
+      await linkLeadToDraftEstimate(leadRecord, createdEstimateId);
+    }
 
     // Enroll in the local new_lead automation sequence (SendGrid-backed).
     // Moved here (was originally right after the auto-reply block, before
@@ -1403,6 +1408,21 @@ function quizHandoffFor({ priceAsk, createdLead, lead } = {}) {
   if (priceAsk !== true || createdLead !== true || !lead?.id || lead.is_commercial === true) return null;
   const token = mintLeadAttachToken(lead.id);
   return token ? { lead_id: lead.id, token, expires_in: ATTACH_TTL_SECONDS } : null;
+}
+
+// Guarded FK link from a lead row to its freshly created draft estimate.
+// Scoped to estimate_id IS NULL so an existing estimate link is never overwritten.
+async function linkLeadToDraftEstimate(leadRecord, estimateId) {
+  if (!leadRecord?.id || !estimateId || leadRecord.estimate_id) return;
+  try {
+    const updated = await db('leads')
+      .where({ id: leadRecord.id })
+      .whereNull('estimate_id')
+      .update({ estimate_id: estimateId, updated_at: new Date() });
+    if (Number(updated) > 0) leadRecord.estimate_id = estimateId;
+  } catch (err) {
+    logger.warn(`[lead-webhook] draft estimate link failed for lead ${leadRecord.id}: ${err.code || err.name || 'error'}`);
+  }
 }
 
 // The hand-off's line in the lead's activity list. A lead that is handed

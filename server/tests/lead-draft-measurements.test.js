@@ -188,7 +188,12 @@ describe('the draft builder\'s cache read', () => {
     expect(performPropertyLookup).toHaveBeenCalledTimes(1);
     expect(performPropertyLookup).toHaveBeenCalledWith(ADDRESS, { cacheOnly: true, persist: false });
     expect(draft.automation.sizeSource).toBe('county_assessed');
-    expect(draft.automation.measurements).toEqual({ source: 'county_assessed', homeSqFt: 1850, lotSqFt: 9200 });
+    expect(draft.automation.measurements).toEqual({
+      source: 'county_assessed',
+      homeSqFt: 1850,
+      lotSqFt: 9200,
+      propertyType: 'Single Family',
+    });
     expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 1850, lotSqFt: 9200, lotSizeMeasured: true, treeShrubFootprintTrusted: false });
     // The "default size" reason is gone from both records; the county one
     // takes its place, so auto-send still parks the draft for a person.
@@ -425,5 +430,205 @@ describe('the lead webhook reads the cache before its lock and schedules the ste
     const triage = src.indexOf('const triageDraftEstimate = await buildAutomatedLeadDraftEstimate({');
     expect(triage).toBeGreaterThan(caught);
     expect(src.slice(triage, src.indexOf('});', triage))).toContain('measurements: await pendingLeadMeasurements(createdEstimateId),');
+    // The webhook links the lead row to its draft estimate on creation.
+    expect(src).toContain('...(createdEstimateId ? { estimate_id: createdEstimateId } : {}),');
+  });
+});
+
+describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2026-11-27)', () => {
+  const { mapServiceInterestToEstimateServices } = require('../services/lead-estimate-automation');
+  const savedUnitGuard = process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+  const savedCageTwo = process.env.GATE_CAGE_TWO_SIZES;
+  const savedPhotoFacts = process.env.GATE_PEST_PRICE_PHOTO_FACTS;
+
+  afterEach(() => {
+    if (savedUnitGuard === undefined) delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    else process.env.GATE_UNIT_SCOPE_GUARDRAILS = savedUnitGuard;
+    if (savedCageTwo === undefined) delete process.env.GATE_CAGE_TWO_SIZES;
+    else process.env.GATE_CAGE_TWO_SIZES = savedCageTwo;
+    if (savedPhotoFacts === undefined) delete process.env.GATE_PEST_PRICE_PHOTO_FACTS;
+    else process.env.GATE_PEST_PRICE_PHOTO_FACTS = savedPhotoFacts;
+  });
+
+  test('trusted county Single Family clears property_type_unresolved under GATE_UNIT_SCOPE_GUARDRAILS', async () => {
+    process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true';
+    process.env.GATE_LEAD_DRAFT_PROPERTY_LOOKUP = 'true';
+    performPropertyLookup.mockResolvedValue(lookupOf(countyRecord()));
+
+    const draft = await buildAutomatedLeadDraftEstimate(readyLead());
+    expect(draft.automation.status).toBe('generated');
+    expect(draft.automation.generated).toBe(true);
+    expect(draft.automation.review).not.toContain('property_type_unresolved');
+    expect(draft.automation.review).toContain('property_measurements_from_county');
+    expect(draft.automation.engineInput.propertyType).toBe('Single Family');
+    expect(draft.monthly).toBeGreaterThan(0);
+  });
+
+  test('flagged or satellite-only propertyType stays unresolved and parks the draft', async () => {
+    process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true';
+    const flagged = countyMeasurements(lookupOf(countyRecord(), { fieldVerifyFlags: [{ field: 'propertyType', priority: 'HIGH' }] }));
+    expect(flagged.propertyType).toBeUndefined();
+    const draftFlagged = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: flagged });
+    expect(draftFlagged.automation.status).toBe('manual_review_required');
+    expect(draftFlagged.automation.review).toContain('property_type_unresolved');
+
+    const sat = countyMeasurements(lookupOf(countyRecord({ _propertyTypeSource: 'satellite' })));
+    expect(sat.propertyType).toBeUndefined();
+  });
+
+  test('record-backed pool cages price Medium (<600 sf) and hold Large/Oversized (>=601 sf) under GATE_CAGE_TWO_SIZES', async () => {
+    process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true';
+    process.env.GATE_CAGE_TWO_SIZES = 'true';
+
+    // 500 sq ft cage -> Medium -> priced, adds pool cage modifier above bare home.
+    const bareDraft = await buildAutomatedLeadDraftEstimate({
+      ...readyLead(),
+      measurements: countyMeasurements(lookupOf(countyRecord())),
+    });
+    const medMeasured = countyMeasurements(lookupOf(countyRecord(), {
+      pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: 500, poolCageSize: 'MEDIUM', poolCageLegacySize: 'MEDIUM',
+    }));
+    expect(medMeasured.features).toMatchObject({ pool: true, poolCage: true, poolCageSize: 'medium', poolCageSqft: 500 });
+    expect(medMeasured.features.poolCageReview).toBeUndefined();
+    const medDraft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: medMeasured });
+    expect(medDraft.automation.status).toBe('generated');
+    expect(medDraft.annual).toBeGreaterThan(bareDraft.annual);
+
+    // 1,200 sq ft cage -> Oversized (held four-size) -> sets poolCageReview -> parks under large_pool_cage.
+    const bigMeasured = countyMeasurements(lookupOf(countyRecord(), {
+      pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: 1200, poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED',
+    }));
+    expect(bigMeasured.features).toMatchObject({ poolCage: true, poolCageSize: 'large', poolCageReview: true, poolCageSqft: 1200 });
+    const bigDraft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: bigMeasured });
+    expect(bigDraft.automation.status).toBe('manual_review_required');
+    expect(bigDraft.automation.quoteRequired).toBe(true);
+    expect(bigDraft.automation.quoteRequiredReason).toBe('large_pool_cage');
+    expect(bigDraft.monthly).toBe(0);
+  });
+
+  test('form micro-taps override county cage (explicit no clears cage; explicit large cage holds)', async () => {
+    process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true';
+    process.env.GATE_CAGE_TWO_SIZES = 'true';
+    const countyWithCage = countyMeasurements(lookupOf(countyRecord(), {
+      pool: 'YES', poolSource: 'county', poolCage: 'YES', poolCageSqft: 1200, poolCageSize: 'LARGE', poolCageLegacySize: 'OVERSIZED',
+    }));
+    const noCageDraft = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ body: { poolCage: 'no' } }),
+      measurements: countyWithCage,
+    });
+    expect(noCageDraft.automation.engineInput.features.poolCage).toBe(false);
+    expect(noCageDraft.automation.status).toBe('generated');
+
+    const formLargeCage = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ body: { poolCage: 'yes', poolCageSize: 'large' } }),
+      measurements: countyMeasurements(lookupOf(countyRecord())),
+    });
+    expect(formLargeCage.automation.status).toBe('manual_review_required');
+    expect(formLargeCage.automation.quoteRequiredReason).toBe('large_pool_cage');
+  });
+
+  test('photo facts and aerial turf respect lookup confidence, _observed provenance, and AI divergences', () => {
+    process.env.GATE_PEST_PRICE_PHOTO_FACTS = 'true';
+    const lookup = {
+      propertyRecord: countyRecord(),
+      enriched: {
+        aiConfidence: 82,
+        turfSource: 'vision',
+        estimatedTurfSf: 4200,
+        hasAttachedGarage: true,
+        shrubDensity: 'HEAVY',
+        landscapeComplexity: 'COMPLEX',
+        nearWater: 'CANAL',
+        _observed: { shrubDensity: true, landscapeComplexity: false, nearWater: true },
+        fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM' }],
+      },
+      aiAnalysis: { aiDivergences: [{ field: 'nearWater' }] },
+    };
+    const measured = countyMeasurements(lookup);
+    // Lawn area flagged -> turf omitted, but non-disputed observed photo fact (shrubs) & county garage survive.
+    expect(measured.turf).toBeUndefined();
+    expect(measured.features).toMatchObject({ attachedGarage: true, shrubs: 'heavy' });
+    expect(measured.features.complexity).toBeUndefined(); // _observed: false
+    expect(measured.features.nearWater).toBeUndefined(); // disputed in aiDivergences
+
+    // Unflagged high-confidence turf flows through cleanly.
+    const cleanTurf = countyMeasurements(lookupOf(countyRecord(), {
+      aiConfidence: 85, turfSource: 'vision', estimatedTurfSf: 4200, turfCappedToParcel: false,
+    }));
+    expect(cleanTurf.turf).toEqual({ estimatedTurfSf: 4200, turfSource: 'vision', turfCappedToParcel: false });
+  });
+
+  test('plural service-interest keywords map cleanly instead of falling through to unsupported', () => {
+    expect(mapServiceInterestToEstimateServices('Ants and roaches in kitchen').services).toHaveProperty('pest');
+    expect(mapServiceInterestToEstimateServices('Mosquitoes in backyard').services).toHaveProperty('mosquito');
+    expect(mapServiceInterestToEstimateServices('Fleas and ticks').services).toHaveProperty('flea');
+    expect(mapServiceInterestToEstimateServices('Wasps on patio').services).toHaveProperty('stinging');
+    expect(mapServiceInterestToEstimateServices('Weeds in lawn').services).toHaveProperty('oneTimeLawn');
+  });
+
+  test('admin-leads withEstimatePreview marks county-verified SERVER drafts sendReady and strips internal columns', () => {
+    const { withEstimatePreview } = require('../routes/admin-leads')._estimatePreview;
+    const readyRow = {
+      id: 'lead-1',
+      estimate_id: 'est-1',
+      estimate_status: 'draft',
+      _est_source: 'lead_webhook',
+      _est_monthly: '42.00',
+      _est_annual: '504.00',
+      _est_onetime: null,
+      _est_authority: 'SERVER',
+      _est_archived_at: null,
+      _est_sent_at: null,
+      _est_scheduled_at: null,
+      _est_created_at: new Date(),
+      _est_data: JSON.stringify({
+        automation: {
+          leadEstimateAutomation: { status: 'ready', review: ['property_measurements_from_county'] },
+          draftEstimateAutomation: {
+            status: 'generated',
+            generated: true,
+            sizeSource: 'county_assessed',
+            measurements: { source: 'county_assessed', homeSqFt: 1850, lotSqFt: 9200, propertyType: 'Single Family' },
+          },
+        },
+      }),
+    };
+    const heldRow = {
+      ...readyRow,
+      id: 'lead-2',
+      estimate_id: 'est-2',
+      _est_authority: null,
+      _est_monthly: null,
+      _est_data: JSON.stringify({
+        quoteRequired: true,
+        quoteRequiredReason: 'large_pool_cage',
+        automation: {
+          draftEstimateAutomation: {
+            status: 'manual_review_required',
+            generated: false,
+            quoteRequired: true,
+            quoteRequiredReason: 'large_pool_cage',
+            provisionalTotals: { monthly: 48, annual: 576, oneTimeTotal: 0 },
+          },
+        },
+      }),
+    };
+    const [outReady, outHeld] = withEstimatePreview([readyRow, heldRow]);
+    expect(outReady).not.toHaveProperty('_est_data');
+    expect(outReady).not.toHaveProperty('_est_authority');
+    expect(outReady.estimate_preview).toMatchObject({
+      status: 'draft',
+      monthly: 42,
+      provisional: false,
+      sendReady: true,
+      sizeSource: 'county_assessed',
+    });
+    expect(outHeld.estimate_preview).toMatchObject({
+      status: 'draft',
+      monthly: 48,
+      provisional: true,
+      sendReady: false,
+      quoteRequiredReason: 'large_pool_cage',
+    });
   });
 });

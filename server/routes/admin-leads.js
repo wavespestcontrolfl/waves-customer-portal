@@ -776,6 +776,89 @@ router.put('/campaigns/:id', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
+function parseEstimateDataSafe(raw) {
+  if (!raw) return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function estimateRowIsSendReady(row) {
+  if (!row || row.status !== 'draft' || row.source === 'quote_wizard') return false;
+  try {
+    // Share-link presence is enforced authoritatively at POST /estimates/:id/send;
+    // the Leads list never reads credential columns (estimates.token).
+    require('./admin-estimates')._internals.assertEstimateSendable(row, { requireShareLink: false });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function buildEstimateRowForPreview(lead, estCols, estData) {
+  return {
+    id: lead.estimate_id,
+    status: lead.estimate_status ?? null,
+    source: estCols.source ?? null,
+    monthly_total: estCols.monthly ?? null,
+    annual_total: estCols.annual ?? null,
+    onetime_total: estCols.onetime ?? null,
+    pricing_authority: estCols.authority ?? null,
+    archived_at: estCols.archivedAt ?? null,
+    sent_at: estCols.sentAt ?? null,
+    scheduled_at: estCols.scheduledAt ?? null,
+    created_at: estCols.createdAt ?? null,
+    estimate_data: estData,
+  };
+}
+
+function previewMoney(primary, fallback) {
+  return Number(primary) || Number(fallback) || 0;
+}
+
+function buildEstimatePreview(lead, estCols) {
+  const estData = parseEstimateDataSafe(estCols.rawData) || {};
+  const automation = estData.automation || {};
+  const draft = automation.draftEstimateAutomation || {};
+  const gate = automation.leadEstimateAutomation || {};
+  const totals = draft.provisionalTotals || {};
+  const estRow = buildEstimateRowForPreview(lead, estCols, estData);
+  const reasons = [...(gate.review || []), ...(draft.review || [])].filter(Boolean);
+  return {
+    status: estRow.status,
+    source: estRow.source,
+    monthly: previewMoney(estCols.monthly, totals.monthly),
+    annual: previewMoney(estCols.annual, totals.annual),
+    oneTime: previewMoney(estCols.onetime, totals.oneTimeTotal),
+    provisional: String(estCols.authority ?? '').toUpperCase() !== 'SERVER',
+    sendReady: estimateRowIsSendReady(estRow),
+    sizeSource: draft.sizeSource ?? null,
+    measurements: draft.measurements ?? null,
+    quoteRequiredReason: draft.quoteRequiredReason ?? estData.quoteRequiredReason ?? null,
+    reviewReasons: [...new Set(reasons)],
+  };
+}
+
+function withEstimatePreview(rows = []) {
+  return rows.map((row) => {
+    const {
+      _est_source: source,
+      _est_monthly: monthly,
+      _est_annual: annual,
+      _est_onetime: onetime,
+      _est_authority: authority,
+      _est_archived_at: archivedAt,
+      _est_sent_at: sentAt,
+      _est_scheduled_at: scheduledAt,
+      _est_created_at: createdAt,
+      _est_data: rawData,
+      ...lead
+    } = row;
+    if (!lead.estimate_id || archivedAt) return lead;
+    const estCols = { source, monthly, annual, onetime, authority, archivedAt, sentAt, scheduledAt, createdAt, rawData };
+    return { ...lead, estimate_preview: buildEstimatePreview(lead, estCols) };
+  });
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // LEAD MANAGEMENT (/:id routes last to avoid catching /sources, /campaigns, /analytics)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -803,6 +886,16 @@ router.get('/', async (req, res, next) => {
         'lead_sources.channel as source_channel',
         'lead_call.to_phone as call_dialed_phone',
         'estimates.status as estimate_status',
+        'estimates.source as _est_source',
+        'estimates.monthly_total as _est_monthly',
+        'estimates.annual_total as _est_annual',
+        'estimates.onetime_total as _est_onetime',
+        'estimates.pricing_authority as _est_authority',
+        'estimates.archived_at as _est_archived_at',
+        'estimates.sent_at as _est_sent_at',
+        'estimates.scheduled_at as _est_scheduled_at',
+        'estimates.created_at as _est_created_at',
+        'estimates.estimate_data as _est_data',
         db.raw("technicians.name as assigned_name"),
       )
       .whereNull('leads.deleted_at');
@@ -919,7 +1012,7 @@ router.get('/', async (req, res, next) => {
       .offset((pg - 1) * lim);
 
     res.json({
-      leads: withSourceEvidence(await withServiceDisplay(leads)),
+      leads: withEstimatePreview(withSourceEvidence(await withServiceDisplay(leads))),
       total: parseInt(count, 10),
       page: pg,
       limit: lim,
@@ -2648,3 +2741,4 @@ function convertLeadFromBar({ leadId, body, expected = null }) {
 }
 module.exports.convertLeadFromBar = convertLeadFromBar;
 module.exports._relatedVisits = { leadRelatedVisitQuery, loadLeadRelatedVisits, RELATED_VISITS_LIMIT };
+module.exports._estimatePreview = { withEstimatePreview };
