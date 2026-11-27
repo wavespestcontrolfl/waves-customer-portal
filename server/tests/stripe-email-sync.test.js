@@ -102,10 +102,23 @@ describe('stripe-email-sync processJob', () => {
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
   });
 
-  test('no Stripe key on this process leaves the job pending without spending an attempt', async () => {
+  test('no Stripe key on this process leaves the job untouched (no attempt, same schedule), and drainDue claims nothing', async () => {
     const sync = load({ customers: [cust()], stripeResult: 'not_configured' });
     await expect(sync.processJob('job-1')).resolves.toBe('not_configured');
     expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(state.jobs[0].next_attempt_at).toBeUndefined();
+    jest.doMock('../config/stripe-config', () => ({ secretKey: undefined }));
+    await expect(sync.drainDue()).resolves.toEqual({});
+  });
+
+  test('a merge undo onto a record with no email alerts the office (Stripe may hold the other email)', async () => {
+    const sync = load({ job: { source: 'merge_undo' }, customers: [cust({ email: null })] });
+    await expect(sync.processJob('job-1')).resolves.toBe('no_email');
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/clear or fix it by hand/);
+    const app = load({ job: { source: 'app_email_change' }, customers: [cust({ email: null })] });
+    await app.processJob('job-1');
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
   test('a job an overlapping drain just rescheduled is not due, so it is left alone', async () => {

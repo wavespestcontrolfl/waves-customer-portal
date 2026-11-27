@@ -42,6 +42,10 @@ const OFFICE_COPY = {
     why: 'Another customer record uses the same Stripe profile, so the app left its email alone.',
     next: 'Do not change the Stripe email yet. First work out which customer record owns this Stripe profile; the other record may need its own.',
   },
+  undo_no_email: {
+    why: 'A merge undo gave this record its Stripe profile back, but the record has no email to put on it.',
+    next: 'Stripe may still carry the email of the record it was merged into. Check the Stripe profile email and clear or fix it by hand.',
+  },
   gave_up: {
     why: 'Stripe did not take the new email after several tries.',
     next: 'Compare the Stripe profile email with the customer record now, and fix Stripe by hand only if they differ.',
@@ -87,7 +91,12 @@ async function processJob(jobId) {
     }
     if (!customer.stripe_customer_id) { await finish(trx, job, 'done', 'not_linked'); return 'not_linked'; }
     const email = String(customer.email || '').trim();
-    if (!email) { await finish(trx, job, 'done', 'no_email'); return 'no_email'; }
+    if (!email) {
+      await finish(trx, job, 'done', 'no_email');
+      // After a merge undo the profile may still carry the kept customer's email: the office must look.
+      if (job.source === 'merge_undo') await alertOffice(trx, job, customer, 'undo_no_email');
+      return 'no_email';
+    }
     // Shared ownership, checked without locking other rows (locking them after our own row could invert a merge's
     // sorted lock order): another customer row on the same Stripe id, or another customer's saved card on it (the
     // merge code treats a card as ownership evidence). Either way the job is skipped and the office decides.
@@ -118,17 +127,15 @@ async function processJob(jobId) {
       });
       return 'retry';
     }
-    if (outcome === 'not_configured') {
-      // No Stripe key on this process: leave the job for a process that has one, without spending an attempt.
-      await trx(TABLE).where({ id: job.id }).update({ next_attempt_at: trx.raw(`now() + interval '10 minutes'`), updated_at: trx.fn.now() });
-      return 'not_configured';
-    }
+    if (outcome === 'not_configured') return 'not_configured'; // untouched: a process with a key takes it (drainDue)
     await finish(trx, job, 'done', 'updated');
     return 'updated';
   });
 }
 
 async function drainDue({ limit = 20 } = {}) {
+  // A process with no Stripe key claims nothing, so it can never delay a job a configured process would send.
+  if (!require('../config/stripe-config').secretKey) return {};
   const due = await db(TABLE).where({ status: 'pending' }).where('next_attempt_at', '<=', db.fn.now())
     .orderBy('next_attempt_at').limit(limit).pluck('id');
   const counts = {};

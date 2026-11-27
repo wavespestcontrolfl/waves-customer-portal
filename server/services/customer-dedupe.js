@@ -4543,6 +4543,9 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
       }
     }
 
+    // The kept customer takes over a Stripe profile here (ensureStripeCustomer is bypassed), so its own email may not be
+    // on it: a durable Stripe email sync job in this merge transaction (stripe-email-sync.js).
+    if (backfills.stripe_customer_id) await require('./stripe-email-sync').enqueue(trx, winnerId, 'merge');
     const [journal] = await trx('customer_merge_journal').insert({
       winner_customer_id: winnerId,
       loser_customer_id: loserId,

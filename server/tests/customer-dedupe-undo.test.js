@@ -491,6 +491,9 @@ describe('executeMerge repointed_ids journal record', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
 
     expect(result.backfills.stripe_customer_id).toBe('cus_derived');
+    // The kept customer takes over the Stripe profile here, so a Stripe email sync job for it is queued in the merge.
+    expect(trx.raw.mock.calls.some(([sql, b]) => String(sql).includes('INSERT INTO stripe_email_sync_jobs')
+      && Array.isArray(b) && b[0] === WINNER && b[1] === 'merge')).toBe(true);
     const recorded = JSON.parse(state.journal.repointed_ids);
     expect(recorded.stripe_transferred_id).toBe('cus_derived');
     // Loser cards alone identified it — the undo may restore it to the
