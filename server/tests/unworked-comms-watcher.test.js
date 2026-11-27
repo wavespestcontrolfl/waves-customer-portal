@@ -46,6 +46,11 @@ const request = (over = {}) => ({
   urgency: 'routine', status: 'new', created_at: '2026-08-04T12:00:00Z',
   customer_name: 'Test Customerfour', customer_id: 'cu-2', ...over,
 });
+const digitalLead = (over = {}) => ({
+  id: 'l1', lead_type: 'form_submission', first_name: 'Test', last_name: 'Leadfive',
+  phone: '+19415550199', email: 'lead5@example.com', service_interest: 'Quarterly Pest Control',
+  first_contact_at: '2026-08-05T15:00:00Z', estimate_id: 'e1', customer_id: 'cu-5', ...over,
+});
 
 describe('composeUnworkedCommsDigest', () => {
   test('itemKeys are lane-prefixed so ids from different tables never collide', () => {
@@ -210,6 +215,24 @@ describe('composeUnworkedCommsDigest', () => {
     expect(composed.summary).toBeNull();
   });
 
+  test('unworked digital leads compose their own section with channel label, pipeline deep-link, and lead: itemKeys', () => {
+    const composed = composeUnworkedCommsDigest({
+      digitalLeads: [
+        digitalLead({ id: 'l1', lead_type: 'form_submission', total_count: 2 }),
+        digitalLead({ id: 'l2', lead_type: 'email_inquiry', first_name: null, last_name: null, email: 'inbox@example.com', service_interest: 'Ants', total_count: 2 }),
+      ],
+    });
+    expect(composed.subject).toBe('ACT: 2 unworked comms at end of day — 0 callbacks, 0 follow-ups, 0 unanswered texts, 0 open requests, 2 unworked leads');
+    expect(composed.digitalLeads).toBe(2);
+    expect(composed.headline).toBe('Comms — 2 unworked leads');
+    expect(composed.summary).toBeNull();
+    expect(composed.itemKeys).toEqual(['lead:l1', 'lead:l2']);
+    expect(composed.text).toContain('Digital leads waiting >30 min with no human reply');
+    expect(composed.text).toContain('Test Leadfive [web form]');
+    expect(composed.text).toContain('inbox@example.com [email]');
+    expect(composed.html).toContain('/admin/pipeline?lead=l1');
+  });
+
   test('a lane failure gets no headline/summary — the ops-digest.js FIX default (engineering, Activity-only) applies', () => {
     const composed = composeUnworkedCommsDigest(
       { unanswered: [thread()] },
@@ -244,6 +267,7 @@ describe('runUnworkedCommsWatcher', () => {
     loadDroppedFollowUps: async () => [],
     loadUnansweredThreads: async () => [],
     loadOpenServiceRequests: async () => [],
+    loadUnworkedDigitalLeads: async () => [],
     sentRecently: never,
     stampSendMarker: noop,
     ...over,
@@ -323,6 +347,7 @@ describe('runUnworkedCommsWatcher', () => {
       loadDroppedFollowUps: boom,
       loadUnansweredThreads: boom,
       loadOpenServiceRequests: boom,
+      loadUnworkedDigitalLeads: boom,
     }));
     expect(result).toEqual({ skipped: 'query_failed' });
     expect(sendgrid.sendOne).not.toHaveBeenCalled();
@@ -386,11 +411,13 @@ describe('lane SQL binding integrity', () => {
     await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadOpenServiceRequests(new Date('2026-08-08T00:00:00Z'));
+    await loaders.loadUnworkedDigitalLeads(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadCallbackCalls(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
     await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
     await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
-    expect(captured.length).toBe(7);
-    expect(captured.slice(4).every(({ bindings }) => bindings.includeExpired === true)).toBe(true);
+    await loaders.loadUnworkedDigitalLeads(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
+    expect(captured.length).toBe(9);
+    expect(captured.slice(5).every(({ bindings }) => bindings.includeExpired === true)).toBe(true);
 
     const knexPg = require('knex')({ client: 'pg' });
     for (const { sql, bindings } of captured) {

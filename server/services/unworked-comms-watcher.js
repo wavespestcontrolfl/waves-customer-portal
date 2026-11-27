@@ -29,6 +29,17 @@ const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
 const { deliveryInstantSql } = require('./self-serve-estimates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
+const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
+const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
+const { personSentFilter } = require('./email/email-customer-link');
+
+const DIGITAL_LEAD_TYPES = Object.freeze(['form_submission', 'email_inquiry', 'voicemail', 'quote_wizard']);
+const DIGITAL_LEAD_LABELS = Object.freeze({
+  form_submission: 'web form',
+  email_inquiry: 'email',
+  voicemail: 'voicemail',
+  quote_wizard: 'quote wizard',
+});
 
 const watcherDisabled = () => ['1', 'true', 'on']
   .includes(String(process.env.UNWORKED_COMMS_WATCHER_DISABLED || '').toLowerCase());
@@ -530,19 +541,149 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
   return rows;
 }
 
+// Lane 5: unworked digital leads (web forms, email inquiries, voicemails, quote
+// wizard) sitting in status='new' past the 30-minute SLA with no recorded
+// response and no real human outreach (connected call, human text, delivered
+// estimate, person-sent Gmail email, or booked visit). Mirrors the shared
+// waiting-queue predicate (lead-waiting-queue.js) plus person-contact witnesses.
+async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = false } = {}) {
+  const { rows } = await db.raw(
+    `
+    SELECT l.id, l.lead_type, l.first_name, l.last_name, l.phone, l.email,
+           l.service_interest, l.first_contact_at, l.estimate_id, l.customer_id,
+           COUNT(*) OVER () AS total_count,
+           ARRAY_AGG(l.id::text) OVER () AS all_ids
+    FROM leads l
+    WHERE l.deleted_at IS NULL
+      AND l.status = 'new'
+      AND l.response_time_minutes IS NULL
+      AND l.converted_at IS NULL
+      AND l.first_contact_at IS NOT NULL
+      AND l.lead_type = ANY(CAST(:leadTypes AS text[]))
+      AND (CAST(:includeExpired AS boolean) OR l.first_contact_at >= now() - interval '30 days')
+      AND (CAST(:freshStart AS timestamptz) IS NULL OR l.first_contact_at >= CAST(:freshStart AS timestamptz))
+      AND l.first_contact_at <= CAST(:cutoff AS timestamptz) - interval '30 minutes'
+      AND NOT (LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) = ANY(CAST(:internalNames AS text[])))
+      AND NOT EXISTS (
+        SELECT 1 FROM call_log oc
+        WHERE oc.direction = 'outbound'
+          AND COALESCE(oc.duration_seconds, 0) >= 60
+          AND oc.created_at > l.first_contact_at
+          AND (
+            (l.customer_id IS NOT NULL AND oc.customer_id = l.customer_id)
+            OR (l.customer_id IS NULL
+              AND LENGTH(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g')) >= 10
+              AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
+                = RIGHT(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g'), 10))
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM sms_log os
+        WHERE os.direction = 'outbound'
+          AND os.message_type IN ('manual', 'ai_approved', 'ai_revised')
+          AND os.status IN ('queued', 'sent', 'delivered')
+          AND os.created_at > l.first_contact_at
+          AND NOT EXISTS (
+            SELECT 1 FROM message_drafts mdx
+            WHERE mdx.sms_log_id IS NULL
+              AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))
+              AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
+                                  AND os.created_at + interval '2 minutes'
+          )
+          AND (
+            (l.customer_id IS NOT NULL AND os.customer_id = l.customer_id)
+            OR (l.customer_id IS NULL
+              AND LENGTH(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g')) >= 10
+              AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
+                = RIGHT(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g'), 10))
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM estimates fe
+        WHERE fe.archived_at IS NULL
+          AND (
+            (l.estimate_id IS NOT NULL AND fe.id = l.estimate_id)
+            OR (l.customer_id IS NOT NULL AND fe.customer_id = l.customer_id)
+          )
+          AND (
+            (COALESCE(fe.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
+              AND fe.sent_at IS NOT NULL AND fe.sent_at > l.first_contact_at)
+            OR (COALESCE(fe.source, '') IN ('service_report_cta', 'plan_restart', 'plan_start')
+              AND COALESCE(fe.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
+              AND ${deliveryInstantSql('fe', 'lastDeliveredAt')} > l.first_contact_at)
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM emails em
+        WHERE ${personSentFilter('em')}
+          AND em.received_at > l.first_contact_at
+          AND NULLIF(LOWER(BTRIM(COALESCE(l.email, ''))), '') IS NOT NULL
+          AND STRPOS(LOWER(CONCAT_WS(',', em.to_address, em.cc_address, em.bcc_address)), LOWER(BTRIM(l.email))) > 0
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM scheduled_services ss
+        WHERE l.customer_id IS NOT NULL
+          AND ss.customer_id = l.customer_id
+          AND ss.created_at > l.first_contact_at
+          AND COALESCE(ss.status, '') <> 'cancelled'
+      )
+    ORDER BY l.first_contact_at DESC
+    LIMIT :cap
+    `,
+    {
+      cap: MAX_PER_SECTION,
+      cutoff,
+      includeExpired,
+      freshStart: SPEED_TO_LEAD_FRESH_START || null,
+      leadTypes: [...DIGITAL_LEAD_TYPES],
+      internalNames: [...INTERNAL_TEST_CUSTOMERS],
+    },
+  );
+  return rows;
+}
+
+function formatDigitalLeadRow(r) {
+  const fullName = [r.first_name, r.last_name].filter(Boolean).join(' ').trim();
+  const who = fullName || (r.email ? String(r.email).trim() : maskPhone(r.phone));
+  const kind = DIGITAL_LEAD_LABELS[r.lead_type] || String(r.lead_type || 'lead').replace(/_/g, ' ');
+  const interest = r.service_interest ? ` — ${String(r.service_interest).replace(/\s+/g, ' ').trim().slice(0, 120)}` : '';
+  return { who, kind, interest, when: etDateTime(r.first_contact_at) };
+}
+
+function appendDigitalLeadsSection(sectionText, sectionHtml, rows, totalCount, moreLine) {
+  if (!rows.length) return;
+  sectionText.push('Digital leads waiting >30 min with no human reply (forms, emails, voicemails, quote wizard):');
+  sectionText.push(...rows.map((r) => {
+    const f = formatDigitalLeadRow(r);
+    return `- ${f.when} ${f.who} [${f.kind}]${f.interest}`;
+  }));
+  sectionText.push(...moreLine(rows.length, totalCount));
+  sectionText.push('');
+  sectionHtml.push(
+    `<p><strong>Digital leads waiting &gt;30 min with no human reply</strong> (forms, emails, voicemails, quote wizard):</p><ul style="margin:0 0 12px 18px;padding:0;">${rows.map((r) => {
+      const f = formatDigitalLeadRow(r);
+      const link = `${adminPortalUrl()}/admin/pipeline?lead=${encodeURIComponent(r.id)}`;
+      return `<li style="margin:0 0 6px 0;">${esc(f.when)} <a href="${esc(link)}">${esc(f.who)}</a> [${esc(f.kind)}]${esc(f.interest)}</li>`;
+    }).join('')}</ul>${totalCount > rows.length ? `<p>…and ${totalCount - rows.length} more not shown</p>` : ''}`,
+  );
+}
+
 // Pure composition: null = the day is fully worked (the common, quiet case).
 // laneFailures ({ lane, message }) come from the per-lane fail-soft in
 // runUnworkedCommsWatcher: a failed lane's queue is INVISIBLE, so the digest
 // must still send (even with zero surviving items), name the failed lane in
 // the subject (FIX: — Adam's action is fixing the lane), and say the counts
 // are incomplete — a crashed lane must never read as a quiet day.
-function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [], requests = [] } = {}, laneFailures = []) {
+const plural = (count, singular) => `${count} ${singular}${count === 1 ? '' : 's'}`;
+
+function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered = [], requests = [], digitalLeads = [] } = {}, laneFailures = []) {
   const failures = (laneFailures || []).filter(Boolean);
   const a = (callbacks || []).filter((row) => row && !row.callback_card_summary);
   const callbackCards = (callbacks || []).filter((row) => row?.callback_card_summary);
   const b = (followUps || []).filter(Boolean);
   const c = (unanswered || []).filter(Boolean);
   const d = (requests || []).filter(Boolean);
+  const e = (digitalLeads || []).filter(Boolean);
   // Full per-lane counts ride each row as total_count (COUNT(*) OVER ()) —
   // the LIMIT keeps the email readable, but the SUBJECT and the "+N more"
   // lines must report everything: overflow rows would otherwise vanish
@@ -555,14 +696,16 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
   const bTotal = laneTotal(b);
   const cTotal = laneTotal(c);
   const dTotal = laneTotal(d);
-  const total = aTotal + bTotal + cTotal + dTotal;
+  const eTotal = laneTotal(e);
+  const total = aTotal + bTotal + cTotal + dTotal + eTotal;
   if (!total && !failures.length) return null;
   const moreLine = (shown, totalCount) => (totalCount > shown ? [`…and ${totalCount - shown} more not shown`] : []);
 
   const failedLaneNames = failures.map((f) => f.lane).join(', ');
+  const leadsSubjectSuffix = eTotal > 0 ? `, ${plural(eTotal, 'unworked lead')}` : '';
   const subject = failures.length
-    ? `FIX: comms digest lane${failures.length === 1 ? '' : 's'} failed (${failedLaneNames}) — ${total ? `${total} unworked comm${total === 1 ? '' : 's'} in surviving lanes` : 'surviving lanes clear'}`
-    : `ACT: ${total} unworked comm${total === 1 ? '' : 's'} at end of day — ${aTotal} callback${aTotal === 1 ? '' : 's'}, ${bTotal} follow-up${bTotal === 1 ? '' : 's'}, ${cTotal} unanswered text${cTotal === 1 ? '' : 's'}, ${dTotal} open request${dTotal === 1 ? '' : 's'}`;
+    ? `FIX: comms digest lane${failures.length === 1 ? '' : 's'} failed (${failedLaneNames}) — ${total ? `${plural(total, 'unworked comm')} in surviving lanes` : 'surviving lanes clear'}`
+    : `ACT: ${plural(total, 'unworked comm')} at end of day — ${plural(aTotal, 'callback')}, ${plural(bTotal, 'follow-up')}, ${plural(cTotal, 'unanswered text')}, ${plural(dTotal, 'open request')}${leadsSubjectSuffix}`;
 
   const sectionText = [];
   const sectionHtml = [];
@@ -610,6 +753,7 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     sectionText.push('');
     sectionHtml.push(`<p><strong>Service requests still open</strong> (no triage page exists — this email is the only nag):</p><ul style="margin:0 0 12px 18px;padding:0;">${d.map((r) => `<li style="margin:0 0 6px 0;">${r.customer_id ? `<a href="${esc(adminPortalUrl())}/admin/customers?customerId=${esc(r.customer_id)}">${esc(r.customer_name || 'Unknown customer')}</a>` : esc(r.customer_name || 'Unknown customer')} [${esc(String(r.category || '').replace(/_/g, ' '))}${r.urgency === 'urgent' ? ', URGENT' : ''}, ${ageDays(r)}d old] — ${esc(String(r.subject || '').replace(/\s+/g, ' ').trim().slice(0, 120))}</li>`).join('')}</ul>${dTotal > d.length ? `<p>…and ${dTotal - d.length} more not shown</p>` : ''}`);
   }
+  appendDigitalLeadsSection(sectionText, sectionHtml, e, eTotal, moreLine);
 
   const text = [
     `End-of-day check: ${total} open comm item${total === 1 ? '' : 's'} (rolling 30-day worklist — items stay until worked).`,
@@ -642,6 +786,7 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     // its id), so a customer texting again after a reply is a new item.
     fullSetItemKeys(c, { prefix: 'text:', idOf: (row) => (row.id == null ? null : `${row.source || 'sms'}:${row.endpoint || ''}:${row.id}`) }),
     fullSetItemKeys(d, { prefix: 'request:' }),
+    fullSetItemKeys(e, { prefix: 'lead:' }),
   ];
   const itemKeys = laneKeys.every(Array.isArray) ? laneKeys.flat() : null;
 
@@ -655,6 +800,7 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
     followUps: bTotal,
     unanswered: cTotal,
     requests: dTotal,
+    digitalLeads: eTotal,
     ...(failures.length
       // A lane failure needs an engineer, not the owner's comms triage —
       // no headline/summary here; the ops-digest.js default (FIX -> engineering,
@@ -662,26 +808,26 @@ function composeUnworkedCommsDigest({ callbacks = [], followUps = [], unanswered
       ? { failedLanes: failures.map((f) => f.lane) }
       // Admin-alerts-brevity scope (owner ruling 2026-09-28): short bell copy,
       // the full digest still lands in `detail`.
-      : unworkedCommsHeadlineAndSummary({ callbacks: aTotal, unanswered: cTotal, followUps: bTotal, requests: dTotal })),
+      : unworkedCommsHeadlineAndSummary({ callbacks: aTotal, digitalLeads: eTotal, unanswered: cTotal, followUps: bTotal, requests: dTotal })),
   };
 }
 
 // Lead the headline with the first NONZERO bucket in this priority order —
-// callbacks, unanswered texts, follow-ups, open requests — so a day with
-// zero callbacks but 93 unanswered texts reads "Comms — 93 unanswered
-// texts", never "Comms — 0 callbacks waiting". The summary lists whatever
-// nonzero buckets are left, or is omitted entirely when there are none.
+// callbacks, unworked digital leads, unanswered texts, follow-ups, open requests —
+// so a day with zero callbacks reads the next highest priority bucket cleanly.
 // (total > 0 is guaranteed by the caller — composeUnworkedCommsDigest
 // returns null before this runs when every bucket is zero.)
-function unworkedCommsHeadlineAndSummary({ callbacks, unanswered, followUps, requests }) {
+function unworkedCommsHeadlineAndSummary({ callbacks = 0, digitalLeads = 0, unanswered = 0, followUps = 0, requests = 0 }) {
   const phrase = (count, kind) => {
     if (kind === 'callback') return `${count} callback${count === 1 ? '' : 's'} waiting`;
+    if (kind === 'digitalLead') return `${count} unworked lead${count === 1 ? '' : 's'}`;
     if (kind === 'unanswered') return `${count} unanswered text${count === 1 ? '' : 's'}`;
     if (kind === 'followup') return `${count} follow-up${count === 1 ? '' : 's'} due`;
     return `${count} open request${count === 1 ? '' : 's'}`;
   };
   const buckets = [
     { count: callbacks, kind: 'callback' },
+    { count: digitalLeads, kind: 'digitalLead' },
     { count: unanswered, kind: 'unanswered' },
     { count: followUps, kind: 'followup' },
     { count: requests, kind: 'request' },
@@ -724,6 +870,14 @@ async function stampSendMarker(cutoff) {
   }
 }
 
+const WATCHER_LANES = [
+  { key: 'callbacks', label: 'callbacks', optKey: 'loadCallbackCalls', fallback: loadCallbackCalls },
+  { key: 'followUps', label: 'follow-ups', optKey: 'loadDroppedFollowUps', fallback: loadDroppedFollowUps },
+  { key: 'unanswered', label: 'unanswered texts', optKey: 'loadUnansweredThreads', fallback: loadUnansweredThreads },
+  { key: 'requests', label: 'service requests', optKey: 'loadOpenServiceRequests', fallback: loadOpenServiceRequests },
+  { key: 'digitalLeads', label: 'unworked leads', optKey: 'loadUnworkedDigitalLeads', fallback: loadUnworkedDigitalLeads },
+];
+
 async function runUnworkedCommsWatcher(opts = {}) {
   const windowCutoff = new Date();
 
@@ -733,12 +887,11 @@ async function runUnworkedCommsWatcher(opts = {}) {
   // fails independently: survivors still send, the failed lane is NAMED in
   // the email, and only an all-lanes failure keeps the query_failed
   // contract (the scheduler wrapper turns that into a job_health failure).
-  const lanes = [
-    { key: 'callbacks', label: 'callbacks', load: opts.loadCallbackCalls || loadCallbackCalls },
-    { key: 'followUps', label: 'follow-ups', load: opts.loadDroppedFollowUps || loadDroppedFollowUps },
-    { key: 'unanswered', label: 'unanswered texts', load: opts.loadUnansweredThreads || loadUnansweredThreads },
-    { key: 'requests', label: 'service requests', load: opts.loadOpenServiceRequests || loadOpenServiceRequests },
-  ];
+  const lanes = WATCHER_LANES.map(({ key, label, optKey, fallback }) => ({
+    key,
+    label,
+    load: opts[optKey] || fallback,
+  }));
   const settled = await Promise.allSettled(lanes.map((lane) => lane.load(windowCutoff)));
   const sections = {};
   const laneFailures = [];
@@ -827,7 +980,7 @@ async function runUnworkedCommsWatcher(opts = {}) {
     return { sent: false, error: true, ...composed };
   }
   await (opts.stampSendMarker || stampSendMarker)(windowCutoff);
-  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered, ${composed.requests} open requests)`);
+  logger.info(`[unworked-comms] sent: ${composed.total} unworked (${composed.callbacks} callbacks, ${composed.followUps} follow-ups, ${composed.unanswered} unanswered, ${composed.requests} open requests, ${composed.digitalLeads} digital leads)`);
   return { sent: true, ...composed };
 }
 
@@ -840,5 +993,6 @@ module.exports = {
     loadDroppedFollowUps,
     loadUnansweredThreads,
     loadOpenServiceRequests,
+    loadUnworkedDigitalLeads,
   },
 };
