@@ -140,7 +140,8 @@ function pastVisitNoteText(record) {
 // A recorded label (service or product name) with price tokens removed and whitespace folded.
 function pastVisitLabel(value, max) {
   const { stripPriceTokensFromText } = require('./protocol-reader');
-  const text = stripPriceTokensFromText(String(value || '')).replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
+  const text = stripPriceTokensFromText(String(value || '')).replace(NOTE_MONEY_RE, '')
+    .replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
   return cleanText(text, max);
 }
 // The product names recorded on that visit, as written that day (the catalog name only when none was

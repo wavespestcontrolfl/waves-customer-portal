@@ -181,6 +181,7 @@ describe('deterministicVisitFacts past_visits', () => {
       if (table === 'service_products as sp') {
         q.select = async () => [
           { service_record_id: 'r1', product_name: 'Example Potash 0-0-25 ($2.18)' },
+          { service_record_id: 'r1', product_name: 'Example Bait (USD 40)' },
           { service_record_id: 'r1', product_name: `${long} A` },
           { service_record_id: 'r1', product_name: `${long} B` },
         ];
@@ -189,7 +190,9 @@ describe('deterministicVisitFacts past_visits', () => {
     });
     expect(JSON.stringify(visits)).not.toMatch(/\$|125|2\.18/);
     expect(visits[0].type).toBe('Palm Treatment');
-    expect(visits[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', `${long} A`, `${long} B`]);
+    expect(visits[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', 'Example Bait', `${long} A`, `${long} B`]);
+    const usd = await deterministicVisitFacts(SVC, fakeDbh({ rows: [rec('u1', '2026-11-10', 'Palm Treatment (125 dollars)')] }));
+    expect(usd.past_visits[0].type).toBe('Palm Treatment');
   });
 
   test('an older stop never lists a later visit', async () => {
