@@ -144,11 +144,55 @@ describe('the deduction a pest visit now makes with allowNegative', () => {
       });
     });
 
-    test('an amount the stock covers never reads the history', async () => {
+    test('an amount over the ceiling is flagged even when the shelf covers it (owner 2026-11-26): 3000 fl oz on 9000 on hand', async () => {
       const trx = fakeTrx();
       const result = await deductProductInventory(trx, overdraw({ totalAmount: 3000, amountUnit: 'fl_oz' }, { ...args.product, inventory_on_hand: 9000 }));
-      expect(result.status).toBe('deducted');
+      expect(trx.writes).toEqual([]);
+      expect(result).toMatchObject({ status: 'not_deducted_implausible', stockBefore: 9000, remainingStock: 9000, amount: 3000 });
       expect(trx.reads).toEqual([]);
+    });
+
+    test('406 lb on 500 on hand, for a visit that may or may not go negative: flagged, stock and movements untouched', async () => {
+      const lb = { ...args.product, inventory_on_hand: '500', inventory_unit: 'lb' };
+      for (const allowNegative of [true, false]) {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, { ...args, product: lb, productInput: { totalAmount: 406, amountUnit: 'lb' }, allowNegative });
+        expect(trx.writes).toEqual([]);
+        expect(result).toMatchObject({ status: 'not_deducted_implausible', stockBefore: 500, remainingStock: 500, amount: 406, amountUnit: 'lb' });
+        expect(result.movementId).toBeUndefined();
+        expect(result.costUsed).toBeUndefined();
+      }
+    });
+
+    describe('the flag comes before every other early return', () => {
+      const over = { totalAmount: 406, amountUnit: 'lb' };
+      test.each([
+        ['stock is not tracked (no inventory_on_hand)', { inventory_on_hand: null, inventory_unit: 'lb' }],
+        ['stock is not a number', { inventory_on_hand: 'n/a', inventory_unit: 'lb' }],
+        ['the unit will not convert to the stock unit', { inventory_on_hand: '500', inventory_unit: 'each' }],
+      ])('%s', async (_name, productFields) => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, { ...args, product: { ...args.product, ...productFields }, productInput: over, allowNegative: true });
+        expect(trx.writes).toEqual([]);
+        expect(result).toMatchObject({ status: 'not_deducted_implausible', productId: args.product.id, amount: 406, amountUnit: 'lb' });
+      });
+
+      test('a visit before the latest physical count is flagged, not recorded as counted usage', async () => {
+        const guard = require('../services/inventory-count-guard');
+        const hold = jest.spyOn(guard, 'stockHoldFor').mockResolvedValue({ countedAt: new Date(), countMovementId: 'count-1' });
+        try {
+          const trx = fakeTrx();
+          const result = await deductProductInventory(trx, { ...args, product: { ...args.product, inventory_on_hand: '500', inventory_unit: 'lb' }, productInput: over, allowNegative: true });
+          expect(trx.writes).toEqual([]);
+          expect(result.status).toBe('not_deducted_implausible');
+        } finally { hold.mockRestore(); }
+      });
+
+      test('an ordinary amount on the same untracked product is untouched by the check', async () => {
+        const trx = fakeTrx();
+        const result = await deductProductInventory(trx, { ...args, product: { ...args.product, inventory_on_hand: null }, productInput: { totalAmount: 4, amountUnit: 'fl_oz' }, allowNegative: true });
+        expect(result.status).toBe('not_deducted');
+      });
     });
 
     test('a visit that may not go negative: an amount no visit uses is flagged, not refused (owner 2026-11-26)', async () => {

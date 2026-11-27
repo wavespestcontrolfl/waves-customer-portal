@@ -136,11 +136,11 @@ postgres('technician implausible product amount', () => {
   test('a technician over-ceiling submit completes (owner 2026-11-26): line recorded, stock untouched, line flagged', async () => {
     const f = await seedPestVisit();
     try {
-      // 600 lb against 500 on hand: over the 100 lb ceiling and more than the shelf holds, the case the advisory path covers.
-      const out = await complete(f, { role: 'technician', totalAmount: 600 });
+      // 406 lb against 500 on hand: over the 100 lb ceiling although the shelf could cover it. Flagged all the same.
+      const out = await complete(f, { role: 'technician', totalAmount: 406 });
       expect(out.status).toBe(200);
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
-      expect(await savedDeductions(f)).toEqual([expect.objectContaining({ productId: f.productId, amount: 600, amountUnit: 'lb', status: 'not_deducted_implausible' })]);
+      expect(await savedDeductions(f)).toEqual([expect.objectContaining({ productId: f.productId, amount: 406, amountUnit: 'lb', status: 'not_deducted_implausible' })]);
     } finally { await cleanup(f); }
   });
 
@@ -149,6 +149,23 @@ postgres('technician implausible product amount', () => {
     try {
       expect((await complete(f, { role: 'technician', totalAmount: 100 })).status).toBe(200);
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 1, stock: 400 });
+    } finally { await cleanup(f); }
+  });
+
+  // service_products.total_amount (and the FDACS ledger's quantity_applied) is NUMERIC(8,3): 99999.999 is the most it stores.
+  test('the column maximum 99999.999 lb completes flagged for a technician; 100000 lb is a 400 with nothing written and the claim released', async () => {
+    const f = await seedPestVisit();
+    try {
+      const over = await complete(f, { role: 'technician', totalAmount: 100000 });
+      expect(over.status).toBe(400);
+      expect(over.body).toMatchObject({ code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: f.productId });
+      expect(await writesFor(f)).toEqual({ records: 0, serviceProducts: 0, ownMovements: 0, allMovements: 0, stock: 500 });
+      const attempts = await mockPg('service_completion_attempts').where('service_id', f.serviceId);
+      expect(attempts.every((a) => a.status === 'failed')).toBe(true);
+      const atMax = await complete(f, { role: 'technician', totalAmount: 99999.999 });
+      expect(atMax.status).toBe(200);
+      expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
+      expect(await savedDeductions(f)).toEqual([expect.objectContaining({ amount: 99999.999, status: 'not_deducted_implausible' })]);
     } finally { await cleanup(f); }
   });
 

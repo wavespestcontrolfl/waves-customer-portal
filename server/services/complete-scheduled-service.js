@@ -1755,13 +1755,17 @@ function exceedsVisitLimit(line) {
 // over even when no single line is. A WeakSet: nothing is added to the submitted line, so nothing is saved or hashed.
 const OVER_VISIT_LIMIT_LINES = new WeakSet();
 // A submitted line is over its ceiling when vetProductAmounts marked it (its product's lines together are over) or it is over alone.
-const isOverVisitLimit = (submittedLine, judged) => OVER_VISIT_LIMIT_LINES.has(submittedLine) || exceedsVisitLimit(judged);
+const isOverVisitLimit = (submittedLine, judged) => Number.isFinite(judged.amount) && judged.amount > 0
+  && (OVER_VISIT_LIMIT_LINES.has(submittedLine) || exceedsVisitLimit(judged));
 
 // The ONE parse of a submitted product amount. An absent or empty amount is "no amount" (null); a number or a plain
 // decimal string is that number; anything else ("99999junk", "1e3", a boolean, an object, a negative) is invalid (NaN).
 // parseFloat/Number on the raw value would each read it differently, and a sink that read "99999junk" as 99,999 would
 // store a number the preflight never judged. The pattern has no overlapping quantifiers (the fraction needs its dot)
 // and the string is length-capped first, so a long digit run fails in linear time.
+// NUMERIC(8,3) tops out at 99999.999; Postgres rounds to 3 places, so 99999.9995 and up overflows.
+const MAX_STORABLE_AMOUNT = 99999.9995;
+const MAX_STORABLE_AMOUNT_TEXT = '99,999.999';
 const PLAIN_DECIMAL = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
 const MAX_AMOUNT_CHARS = 32;
 function strictProductAmount(raw) {
@@ -1777,6 +1781,14 @@ function strictProductAmount(raw) {
 function normalizeProductAmounts(lines, nameOf) {
   for (const line of lines) {
     const amount = strictProductAmount(line.totalAmount);
+    // service_products.total_amount and the FDACS ledger's quantity_applied are NUMERIC(8,3): a larger amount cannot be stored, so
+    // the insert would abort the whole completion. It is unreadable input like a malformed one, refused before any write.
+    if (amount >= MAX_STORABLE_AMOUNT) {
+      return { status: 400, body: {
+        error: `The amount for ${nameOf(line)} is too large to record. The most one line can hold is ${MAX_STORABLE_AMOUNT_TEXT}. Check the amount and submit again.`,
+        code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: line.productId,
+      } };
+    }
     if (Number.isNaN(amount)) {
       return { status: 400, body: {
         error: `The amount for ${nameOf(line)} is not a number. Enter the amount as a plain number and submit again.`,
@@ -1840,6 +1852,24 @@ async function vetProductAmounts(database, { products, skip = false }) {
   return null;
 }
 
+// A line over its product's ceiling still completes, but it is flagged and moves no stock and no cost. No later path can
+// deduct it or stop the visit (untracked stock, a unit that will not convert, a visit before a physical count, the hard
+// lockout). The office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount. Null when the line is not over.
+function implausibleDeduction(snapshot, inventoryProduct, productInput) {
+  const { amount, amountUnit } = snapshot;
+  if (!isOverVisitLimit(productInput, { amount, amountUnit })) return null;
+  const onHand = inventoryProduct.inventory_on_hand != null ? Number(inventoryProduct.inventory_on_hand) : NaN;
+  const stockBefore = Number.isFinite(onHand) ? onHand : null;
+  return {
+    ...snapshot,
+    status: 'not_deducted_implausible',
+    inventoryUnit: inventoryProduct.inventory_unit || amountUnit,
+    stockBefore,
+    remainingStock: stockBefore,
+    warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
+  };
+}
+
 async function deductProductInventory(trx, {
   product,
   productInput,
@@ -1865,6 +1895,11 @@ async function deductProductInventory(trx, {
     status: 'not_deducted',
     warning: null,
   };
+
+  // Owner "dont block", and owner 2026-11-26 for every role ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED"): a line over
+  // its product's ceiling is judged first, before every other early return and the hard lockout, whatever the shelf holds.
+  const implausible = implausibleDeduction(snapshot, inventoryProduct, productInput);
+  if (implausible) return implausible;
 
   const notDeductibleWarning = notDeductibleInputWarning(inventoryProduct, amount, amountUnit);
   if (notDeductibleWarning) return { ...snapshot, warning: notDeductibleWarning };
@@ -1898,19 +1933,6 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
-  // Owner "dont block", and owner 2026-11-26 for every role: the completion still succeeds, but an amount no visit uses
-  // moves no stock and no cost. It is judged before the hard lockout below, so a typo never stops a visit on a
-  // visit type that may not go negative. The office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
-  if (insufficient && isOverVisitLimit(productInput, { amount, amountUnit })) {
-    return {
-      ...snapshot,
-      status: 'not_deducted_implausible',
-      inventoryUnit,
-      stockBefore,
-      remainingStock: stockBefore,
-      warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
-    };
-  }
   // allowNegative is passed ONLY for an advisory-stock completion
   // (isStockAdvisoryCompletion): a lawn closeout (WaveGuard since the owner
   // directive 2026-08-03), a pest or a tree & shrub visit (owner 2026-10-20). The deduction proceeds,

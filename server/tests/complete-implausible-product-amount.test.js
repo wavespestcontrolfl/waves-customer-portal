@@ -52,7 +52,7 @@ describe('the fixed per-visit limit (a warning, never a refusal)', () => {
     expect(await marked(line(406.25))).toEqual({ out: null, over: [true] });
   });
 
-  // 50 lb on hand, so a line that would take more than the shelf holds is the case the advisory path covers. The row lock finds
+  // 50 lb on hand (the flag does not depend on the shelf: see the 500 lb case below). The row lock finds
   // no row, so the passed-in product is used; any write is recorded.
   const deduct = async (products, index, onHand = 50) => {
     const writes = [];
@@ -81,7 +81,16 @@ describe('the fixed per-visit limit (a warning, never a refusal)', () => {
     expect(writes).toEqual([]);
   });
 
-  test('lines each under the limit but together over it are flagged too, once the shelf cannot cover them', async () => {
+  test('406 lb on 500 lb on hand is flagged all the same: stock and cost untouched, nothing written (owner 2026-11-26)', async () => {
+    const products = line(406);
+    expect((await marked(products)).out).toBeNull();
+    const { result, writes } = await deduct(products, 0, 500);
+    expect(result).toMatchObject({ status: 'not_deducted_implausible', amount: 406, stockBefore: 500, remainingStock: 500 });
+    expect(result.costUsed).toBeUndefined();
+    expect(writes).toEqual([]);
+  });
+
+  test('lines each under the limit but together over it are flagged too, whatever the shelf holds', async () => {
     const products = [{ productId: CELSIUS, totalAmount: 60, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 60, amountUnit: 'lb', areaAddOnKey: 'x' }];
     expect((await marked(products)).over).toEqual([true, true]);
     expect((await deduct(products, 1)).result).toMatchObject({ status: 'not_deducted_implausible', amount: 60 });
@@ -251,6 +260,24 @@ describe('a malformed amount is refused with a 400 for every role, and the parse
     const out = await vet({ products });
     expect(out).toMatchObject({ status: 400, body: { code: 'INVALID_PRODUCT_AMOUNT', productId: CELSIUS } });
     expect(out.body.error).toBe('The amount for Celsius WG is not a number. Enter the amount as a plain number and submit again.');
+  });
+
+  test.each([
+    ['one over the column maximum', 100000],
+    ['a string over it', '100000.5'],
+    ['a million', 1000000],
+    ['rounds up past it', 99999.9995],
+  ])('an amount the numeric(8,3) column cannot store is a 400 before any write: %s', async (_name, totalAmount) => {
+    const products = [{ productId: CELSIUS, totalAmount, amountUnit: 'lb' }];
+    const out = await vet({ products });
+    expect(out).toMatchObject({ status: 400, body: { code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: CELSIUS } });
+    expect(out.body.error).toBe('The amount for Celsius WG is too large to record. The most one line can hold is 99,999.999. Check the amount and submit again.');
+    expect(mockCalls.filter((c) => c.write)).toEqual([]);
+  });
+
+  test('the column maximum itself is storable: 99999.999 is marked over the ceiling, never refused', async () => {
+    expect(await marked(line(99999.999))).toEqual({ out: null, over: [true] });
+    expect(await marked(line(99999.9994))).toEqual({ out: null, over: [true] });
   });
 
   test('a plain decimal string is parsed once and written back as the number every later reader sees', async () => {
