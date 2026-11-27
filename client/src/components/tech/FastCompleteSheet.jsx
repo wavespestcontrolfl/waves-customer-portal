@@ -1708,8 +1708,11 @@ function useReportDraft({ request, base, mode = null, houseMix = false }) {
     if (sequence !== sequenceRef.current) return;
     if (noted) {
       setWriting(false);
-      if (noted.stop) setWriteError(noted.stop);
-      else setDraft({ ...noted, base: noted.text, signature: draftSignature, deterministic: false, facts });
+      // A visit the tech no longer has keeps no earlier draft: Complete & send goes with it.
+      if (noted.stop) {
+        setDraft(null);
+        setWriteError(noted.stop);
+      } else setDraft({ ...noted, base: noted.text, signature: draftSignature, deterministic: false, facts });
       return;
     }
     let written = null;

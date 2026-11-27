@@ -44,6 +44,7 @@ function httpError(status, details = null) {
   return err;
 }
 const GATE_OFF = () => httpError(404, { enabled: false });
+const NOTE_GONE_403 = 'This visit is no longer yours to complete. Close the sheet and open your schedule again.';
 
 // `reportNote`: the note step's answer, an Error it throws, or a function of the call count.
 function makeRequest({ reportNote, complete = () => ({ success: true }) }) {
@@ -157,7 +158,7 @@ describe('the note step off or failing writes the report the old way', () => {
 
 describe('a visit the note step no longer gives this tech', () => {
   test.each([
-    ['reassigned (403)', httpError(403, { code: 'service_not_assigned' }), 'This visit is no longer yours to complete. Close the sheet and open your schedule again.'],
+    ['reassigned (403)', httpError(403, { code: 'service_not_assigned' }), NOTE_GONE_403],
     ['gone (404 not_found)', httpError(404, { code: 'not_found' }), 'This visit was not found. Close the sheet and open your schedule again.'],
   ])('%s: no writer call, the sheet says so, and the next write asks again', async (_label, refusal, message) => {
     const request = makeRequest({ reportNote: refusal });
@@ -174,6 +175,16 @@ describe('a visit the note step no longer gives this tech', () => {
     expect(request.bodies('/generate-report')).toEqual([]);
   }, 30000);
 });
+
+test('a rewrite that finds the visit reassigned drops the earlier draft: no Complete & send', async () => {
+  const request = makeRequest({ reportNote: (n) => (n === 1 ? { ok: true, source: 'cleaned', text: TIDIED } : httpError(403, { code: 'service_not_assigned' })) });
+  await writeReport(request, 'Your note on the customer’s report');
+  fireEvent.click(screen.getByRole('button', { name: 'Write again' }));
+  expect(await screen.findByText(NOTE_GONE_403, {}, { timeout: 10000 })).toBeTruthy();
+  expect(screen.queryByText(TIDIED)).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Complete & send' })).toBeNull();
+  expect(request.bodies('/complete')).toEqual([]);
+}, 30000);
 
 test('the note step turned off between the preview and the send: the form stays, the writer report goes out under a new key', async () => {
   const off = httpError(409, { code: 'REPORT_NOTE_OFF', error: 'The report note is turned off. Write the report again, then send.' });
