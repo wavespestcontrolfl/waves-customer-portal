@@ -1028,6 +1028,35 @@ function firstDefinedKey(obj, keys) {
   return undefined;
 }
 
+const TRENCHING_PRODUCT_KEYS = ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'];
+const TRENCHING_PRODUCT_DEFAULTS = Object.freeze(Object.fromEntries(
+  TRENCHING_PRODUCT_KEYS
+    .filter((key) => constants.SPECIALTY.trenching?.products?.[key])
+    .map((key) => {
+      const product = constants.SPECIALTY.trenching.products[key];
+      return [key, Object.freeze({
+        containerCost: Number(product.containerCost),
+        containerOz: Number(product.containerOz),
+        catalogProductName: product.catalogProductName,
+      })];
+    }),
+));
+
+function resetTrenchingProductDefaults() {
+  const trenching = constants.SPECIALTY.trenching;
+  if (!trenching) return;
+  trenching.linkContainerCostsToCatalog = true;
+  for (const [key, defaults] of Object.entries(TRENCHING_PRODUCT_DEFAULTS)) {
+    const target = trenching.products?.[key];
+    if (!target) continue;
+    target.containerCost = defaults.containerCost;
+    target.containerOz = defaults.containerOz;
+    target.catalogProductName = defaults.catalogProductName;
+    delete target.configuredContainerCost;
+    delete target.configuredContainerOz;
+  }
+}
+
 async function syncTrenchingContainerCostsFromCatalog(db) {
   const trenching = constants.SPECIALTY.trenching;
   if (trenching?.linkContainerCostsToCatalog !== true) return;
@@ -1054,6 +1083,11 @@ async function syncTrenchingContainerCostsFromCatalog(db) {
         warnCatalogRefusalOnce(`trenching.${key}.band`, `[pricing-engine] trenching ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`);
         continue;
       }
+      // Keep the pre-catalog configured bottle cost separate so rising costs on
+      // the included product (Taurus SC) never inflate the included chemical
+      // allowance subtracted from standard/premium trenching retail prices.
+      product.configuredContainerCost = Number(product.containerCost);
+      product.configuredContainerOz = Number(product.containerOz);
       product.containerCost = price;
       product.containerOz = oz;
     }
@@ -2196,7 +2230,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.SPECIALTY.wdo.brackets = mapped;
       }
     }
-    constants.SPECIALTY.trenching.linkContainerCostsToCatalog = true;
+    resetTrenchingProductDefaults();
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
       if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));

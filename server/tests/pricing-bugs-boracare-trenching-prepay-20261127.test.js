@@ -6,6 +6,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 const constants = require('../services/pricing-engine/constants');
 const { syncConstantsFromDB } = require('../services/pricing-engine/db-bridge');
 const { generateEstimate } = require('../services/pricing-engine/estimate-engine');
+const { priceTrenching } = require('../services/pricing-engine/service-pricing');
 const {
   annualPrepayDiscountComponents,
   estimateHasNoYear1PrepayPercent,
@@ -13,6 +14,9 @@ const {
 } = require('../services/estimate-converter');
 const { savedFloorReplaySignals } = require('../services/estimate-floor-signal-replay');
 const { CLIENT_IDENTITY_FIELDS, sanitizeClientIdentityFields } = require('../services/estimate-client-identity-fields');
+const { buildAutomatedLeadDraftEstimate, evaluateLeadEstimateAutomationReadiness } = require('../services/lead-estimate-automation');
+const { buildEstimateServiceRevisionDraft } = require('../services/estimate-add-service-request');
+const { resolveServerAuthoritativePricing } = require('../services/admin-estimate-persistence');
 
 function makePricingDb({ pricingConfigRows = [], catalogRows = [], approvedVendorPricingRows = [] } = {}) {
   const db = (table) => {
@@ -139,6 +143,59 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
     expect(constants.SPECIALTY.trenching.linkContainerCostsToCatalog).toBe(false);
     expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
   });
+
+  test('keeps the configured included allowance fixed when Taurus SC catalog cost rises (Taurus retail rises, Termidor never drops)', async () => {
+    const property = { homeSqFt: 2400, stories: 1, lotSqFt: 9000 };
+    const options = { perimeterLF: 200, dirtLF: 150, concreteLF: 50 };
+    const baseTaurus = priceTrenching(property, { ...options, productKey: 'taurus_sc' });
+    const baseTermidor = priceTrenching(property, { ...options, productKey: 'termidor_sc' });
+
+    const dbTaurusSpike = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [
+        // Taurus SC (the default included product) jumps from $95 -> $150/78oz.
+        { name: 'Taurus SC', best_price: 150, unit_size_oz: 78, best_vendor_pricing_id: 'vp-taurus' },
+      ],
+      approvedVendorPricingRows: [{ id: 'vp-taurus' }],
+    });
+    await expect(syncConstantsFromDB(dbTaurusSpike)).resolves.toBe(true);
+
+    const afterTaurus = priceTrenching(property, { ...options, productKey: 'taurus_sc' });
+    const afterTermidor = priceTrenching(property, { ...options, productKey: 'termidor_sc' });
+    expect(afterTaurus.price).toBeGreaterThan(baseTaurus.price);
+    expect(afterTaurus.productSurcharge).toBeGreaterThan(0);
+    expect(afterTermidor.price).toBe(baseTermidor.price);
+  });
+
+  test('consecutive syncs restore default bottle costs, sizes, and catalog names before applying overrides and sanity checks', async () => {
+    // Sync 1: catalog ratchets Termidor SC from default $174.72 -> $250.
+    const dbSync1 = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 250, unit_size_oz: 78, best_vendor_pricing_id: 'vp-1' }],
+      approvedVendorPricingRows: [{ id: 'vp-1' }],
+    });
+    await expect(syncConstantsFromDB(dbSync1)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
+
+    // Sync 2: link disabled with empty/partial product config -> restores default $174.72 (no carryover).
+    const dbSync2 = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: { link_container_costs_to_catalog: false } }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 250, unit_size_oz: 78, best_vendor_pricing_id: 'vp-1' }],
+      approvedVendorPricingRows: [{ id: 'vp-1' }],
+    });
+    await expect(syncConstantsFromDB(dbSync2)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.configuredContainerCost).toBeUndefined();
+
+    // Sync 3: link re-enabled with $400 spike (>2x of default $174.72, would have been <2x of stale $250) -> rejected.
+    const dbSync3 = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 400, unit_size_oz: 78, best_vendor_pricing_id: 'vp-3' }],
+      approvedVendorPricingRows: [{ id: 'vp-3' }],
+    });
+    await expect(syncConstantsFromDB(dbSync3)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
+  });
 });
 
 describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates', () => {
@@ -210,5 +267,129 @@ describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates
     const posted = { year1PrepayNoPercent: false, homeSqFt: 2000 };
     sanitizeClientIdentityFields(posted);
     expect(posted).toEqual({ homeSqFt: 2000 });
+  });
+
+  test('automated lead drafts preserve year1PrepayNoPercent through invoice calculation', async () => {
+    process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT = 'true';
+    const intake = {
+      email: 'lead@example.com',
+      serviceInterest: 'Lawn Care',
+      fullAddress: '123 Main St, Venice, FL 34285',
+      normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
+    };
+    const readiness = evaluateLeadEstimateAutomationReadiness({ intake, phone: '+19415550199' });
+    const draft = await buildAutomatedLeadDraftEstimate({
+      readiness,
+      intake,
+      body: { homeSqFt: 2000, lotSqFt: 8000, propertyType: 'single_family' },
+      measurements: null,
+    });
+    expect(draft.estimateData.engineResult.pricingMetadata.year1PrepayNoPercent).toBe(true);
+    expect(estimateHasNoYear1PrepayPercent(draft.estimateData)).toBe(true);
+    expect(resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: draft.annual || 720,
+      recurringServices: LAWN_ONLY,
+      estimateData: draft.estimateData,
+    })).toEqual({ amount: draft.annual || 720, discount: 0, rate: 0 });
+  });
+
+  test('adding a service to a saved quote preserves original prepay terms across both gate transitions', async () => {
+    // 1) Pre-gate quote (5% terms): adding lawn AFTER gate turns ON keeps 5% terms.
+    delete process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT;
+    const preGateEst = generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } });
+    const preGateSaved = {
+      estimate_data: {
+        inputs: { ...PROPERTY, services: { pest: { frequency: 'quarterly' } } },
+        result: { pricingMetadata: preGateEst.pricingMetadata },
+      },
+      monthly_total: 40,
+      annual_total: 480,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    };
+    process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT = 'true';
+    const preGateRev = await buildEstimateServiceRevisionDraft(preGateSaved, 'lawn_care');
+    expect(preGateRev.status).toBe('priced');
+    expect(estimateHasNoYear1PrepayPercent(preGateRev.draftEstimateData)).toBe(false);
+    expect(annualPrepayDiscountComponents({ recurringServices: BUNDLE, estimateData: preGateRev.draftEstimateData }).discountRate).toBeCloseTo(0.05, 5);
+    expect(preGateRev.draftEstimateData.inputs.year1PrepayNoPercent).toBeUndefined();
+
+    // 2) Post-gate quote (0% terms): adding lawn AFTER gate turns OFF keeps 0% terms.
+    const postGateEst = generateEstimate({ ...PROPERTY, services: { pest: { frequency: 'quarterly' } } });
+    const postGateSaved = {
+      estimate_data: {
+        inputs: { ...PROPERTY, services: { pest: { frequency: 'quarterly' } } },
+        result: { pricingMetadata: postGateEst.pricingMetadata },
+      },
+      monthly_total: 40,
+      annual_total: 480,
+      onetime_total: 0,
+      waveguard_tier: 'Bronze',
+    };
+    delete process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT;
+    const postGateRev = await buildEstimateServiceRevisionDraft(postGateSaved, 'lawn_care');
+    expect(postGateRev.status).toBe('priced');
+    expect(estimateHasNoYear1PrepayPercent(postGateRev.draftEstimateData)).toBe(true);
+    expect(annualPrepayDiscountComponents({ recurringServices: BUNDLE, estimateData: postGateRev.draftEstimateData }).discountRate).toBe(0);
+    expect(postGateRev.draftEstimateData.inputs.year1PrepayNoPercent).toBeUndefined();
+  });
+
+  test('CLIENT_FALLBACK admin saves strip forged stamps from every carrier and derive the stamp from gate (create) or stored row (revise)', async () => {
+    const noRecompute = async () => ({ recomputed: false, reason: 'NO_INPUTS' });
+    const clientPreview = { monthlyTotal: 60, annualTotal: 720, oneTimeTotal: 0 };
+
+    // Gate OFF on creation: client-forged true on EVERY carrier is stripped.
+    delete process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT;
+    const forgedCreate = {
+      pricingMetadata: { year1PrepayNoPercent: true },
+      routingMetadata: { year1PrepayNoPercent: true },
+      result: { pricingMetadata: { year1PrepayNoPercent: true }, routingMetadata: { year1PrepayNoPercent: true }, results: { pest: { pa: 112 } } },
+      engineResult: { pricingMetadata: { year1PrepayNoPercent: true }, lineItems: [] },
+      sendSnapshot: { year1PrepayNoPercent: true, pricingBundle: { year1PrepayNoPercent: true } },
+    };
+    const createOff = await resolveServerAuthoritativePricing({
+      estimateData: forgedCreate,
+      clientPreview,
+      quoteRequired: false,
+      recompute: noRecompute,
+    });
+    expect(createOff.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+    expect(estimateHasNoYear1PrepayPercent(forgedCreate)).toBe(false);
+
+    // Gate ON on creation: omitted stamp is stamped true by the server.
+    process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT = 'true';
+    const omittedCreate = { result: { results: { pest: { pa: 112 } } } };
+    await resolveServerAuthoritativePricing({
+      estimateData: omittedCreate,
+      clientPreview,
+      quoteRequired: false,
+      recompute: noRecompute,
+    });
+    expect(estimateHasNoYear1PrepayPercent(omittedCreate)).toBe(true);
+
+    // Fallback revision of a pre-gate stored quote while gate is ON: keeps false (5%).
+    const preGateStored = { result: { pricingMetadata: { legacyPricingRules: false } } };
+    const revPreGate = { result: { pricingMetadata: { year1PrepayNoPercent: true }, results: { pest: { pa: 112 } } } };
+    await resolveServerAuthoritativePricing({
+      estimateData: revPreGate,
+      clientPreview,
+      quoteRequired: false,
+      recompute: noRecompute,
+      storedEstimateData: preGateStored,
+    });
+    expect(estimateHasNoYear1PrepayPercent(revPreGate)).toBe(false);
+
+    // Fallback revision of a post-gate stored quote while gate is OFF: keeps true (0%).
+    delete process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT;
+    const postGateStored = { result: { pricingMetadata: { year1PrepayNoPercent: true } } };
+    const revPostGate = { result: { results: { pest: { pa: 112 } } } };
+    await resolveServerAuthoritativePricing({
+      estimateData: revPostGate,
+      clientPreview,
+      quoteRequired: false,
+      recompute: noRecompute,
+      storedEstimateData: postGateStored,
+    });
+    expect(estimateHasNoYear1PrepayPercent(revPostGate)).toBe(true);
   });
 });

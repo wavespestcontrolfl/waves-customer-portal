@@ -1504,8 +1504,10 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   };
 
   // Quote-required / manager-approval estimates carry no billable price yet —
-  // leave them exactly as today (authority null, no recompute).
+  // leave them exactly as today (authority null, no recompute), but never
+  // persist a client-forged Year-1 prepay stamp.
   if (quoteRequired) {
+    stampYear1PrepayOnClientFallbackSave(estimateData, { storedEstimateData });
     return { totals: clientPreview, audit, fallbackReason: null };
   }
 
@@ -1525,6 +1527,9 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   if (result && result.error && result.error.failClosed === true) throw result.error;
 
   if (result.recomputed) {
+    // Strip any client-posted Year-1 prepay stamp from top-level / snapshot
+    // carriers before replacing result/engineResult with the server's output.
+    stripYear1PrepayStamp(estimateData);
     // Overwrite the embedded result so the stored blob and the persisted
     // columns agree — blob/column divergence is exactly the bug class this fixes.
     estimateData.result = result.serverResult;
@@ -1597,6 +1602,8 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
   // A rodent guarantee row is refused too: the browser cannot set its price (see the function).
   guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData });
+  // Year-1 no-5% prepay stamp is server-owned on fallback saves too (never browser-forged).
+  stampYear1PrepayOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -2247,6 +2254,40 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
   const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
   for (const container of containers.length ? containers : [estimateData]) {
     container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyWholeHomeSizing: legacy };
+  }
+}
+
+function stripYear1PrepayStamp(estimateData) {
+  if (!isPlainRecord(estimateData)) return;
+  const carriers = [
+    estimateData.pricingMetadata,
+    estimateData.routingMetadata,
+    estimateData.result?.pricingMetadata,
+    estimateData.result?.routingMetadata,
+    estimateData.engineResult?.pricingMetadata,
+    estimateData.engineResult?.routingMetadata,
+    estimateData.sendSnapshot,
+    estimateData.sendSnapshot?.pricingBundle,
+  ];
+  for (const carrier of carriers) {
+    if (isPlainRecord(carrier)) delete carrier.year1PrepayNoPercent;
+  }
+}
+
+// Year-1 no-5% annual prepay stamp (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27):
+// server-owned across every carrier on CLIENT_FALLBACK / unpriced saves too —
+// strip browser-supplied stamps, then apply the stored decision on revisions or
+// the live gate decision on creation.
+function stampYear1PrepayOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isPlainRecord(estimateData)) return;
+  stripYear1PrepayStamp(estimateData);
+  const noPercent = storedEstimateData
+    ? require('./estimate-converter').estimateHasNoYear1PrepayPercent(storedEstimateData)
+    : require('../config/feature-gates').noYear1PrepayDiscountLive();
+  if (!noPercent) return;
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), year1PrepayNoPercent: true };
   }
 }
 
@@ -4393,5 +4434,6 @@ module.exports.assertNoFallbackRevisionOfLiveLink = assertNoFallbackRevisionOfLi
 module.exports.assertLiveRowMayJoinGroup = assertLiveRowMayJoinGroup;
 module.exports.liveGroupMoveDestinationIds = liveGroupMoveDestinationIds;
 module.exports.revisionGroupLockIds = revisionGroupLockIds;
+module.exports.stampYear1PrepayOnClientFallbackSave = stampYear1PrepayOnClientFallbackSave;
 module.exports.expiredRowRecoverableUnderGate = expiredRowRecoverableUnderGate;
 module.exports.stampContactMatchedLeadsClean = stampContactMatchedLeadsClean;

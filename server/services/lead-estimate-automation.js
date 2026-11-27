@@ -550,6 +550,10 @@ function compactLineItem(item = {}) {
   };
 }
 
+function year1PrepayMetadataStamp(meta) {
+  return meta && meta.year1PrepayNoPercent === true ? { year1PrepayNoPercent: true } : {};
+}
+
 function lineRequiresReview(line = {}) {
   return !!(
     line.quoteRequired ||
@@ -736,6 +740,7 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
               ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
                 ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }
                 : {}),
+              ...year1PrepayMetadataStamp(estimate.pricingMetadata),
             } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(compactLineItem),

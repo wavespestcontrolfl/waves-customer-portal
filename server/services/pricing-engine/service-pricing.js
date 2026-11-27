@@ -7333,6 +7333,16 @@ const TRENCH_CHART_VERDICTS = new Map([
   }],
 ]);
 
+function trenchingIncludedProductCostPerOz(includedProduct) {
+  const configuredCost = Number(includedProduct?.configuredContainerCost);
+  const configuredOz = Number(includedProduct?.configuredContainerOz);
+  const hasConfigured = Number.isFinite(configuredCost) && configuredCost > 0
+    && Number.isFinite(configuredOz) && configuredOz > 0;
+  const cost = hasConfigured ? configuredCost : includedProduct.containerCost;
+  const oz = hasConfigured ? configuredOz : includedProduct.containerOz;
+  return cost / oz;
+}
+
 function priceTrenching(property = {}, options = {}, replay) {
   const measurements = resolveTrenchingMeasurements(property || {}, options || {});
   const cfg = SPECIALTY.trenching;
@@ -7573,10 +7583,13 @@ function priceTrenching(property = {}, options = {}, replay) {
   const chemicalCostPerOz = containerCost / containerOz;
   const allocatedChemicalCost = productOz * chemicalCostPerOz;
   const includedProduct = cfg.products?.[cfg.defaultIncludedProductKey] || cfg.products?.[cfg.defaultProductKey] || product;
-  // The install price includes the included product at its standard rate over the labeled volume, a reduced volume or not.
+  // The install price includes the included product at its configured baseline
+  // rate over the labeled volume — kept separate from catalog cost ratchets so
+  // a wholesale increase on the included product raises standard retail instead
+  // of widening the allowance subtracted from premium products.
   const includedChemicalCost = labeledGallons *
     includedProduct.productOzPerFinishedGallonAtStandardRate *
-    (includedProduct.containerCost / includedProduct.containerOz);
+    trenchingIncludedProductCostPerOz(includedProduct);
   const chemicalPremiumCost = Math.max(0, allocatedChemicalCost - includedChemicalCost);
   const surchargePinned = trenchReplayPinApplies(replay, {
     productKey: productResolution.productKey,
