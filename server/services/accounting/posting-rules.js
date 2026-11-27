@@ -170,14 +170,34 @@ function cashAccountForPaymentMethod(methodKey) {
   return SYSTEM_CODES.STRIPE_CLEARING;
 }
 
-function buildPaymentLines({ cashAccount, creditAccount, net, fee, principal, surcharge, meta }) {
+function buildPaymentLines({ cashAccount, creditAccount, net, fee, principal, surcharge, arAllocations, meta }) {
   const lines = [
     { accountCode: cashAccount, debitCents: net, creditCents: 0, ...meta },
   ];
   if (fee > 0) {
     lines.push({ accountCode: SYSTEM_CODES.COGS_MERCHANT_FEES, debitCents: fee, creditCents: 0, ...meta });
   }
-  lines.push({ accountCode: creditAccount, debitCents: 0, creditCents: principal, ...meta });
+  if (Array.isArray(arAllocations) && arAllocations.length > 0) {
+    let allocSum = 0;
+    for (const a of arAllocations) {
+      const amt = posInt(a.amountCents, 'arAllocations[].amountCents');
+      if (amt <= 0) continue;
+      allocSum += amt;
+      lines.push({
+        accountCode: creditAccount,
+        debitCents: 0,
+        creditCents: amt,
+        customerId: a.customerId ?? meta.customerId,
+        serviceLine: a.serviceLine ?? meta.serviceLine,
+        invoiceRef: a.invoiceId ? String(a.invoiceId) : null,
+      });
+    }
+    if (allocSum !== principal) {
+      throw new AccountingError(400, 'arAllocations total must equal payment principal');
+    }
+  } else {
+    lines.push({ accountCode: creditAccount, debitCents: 0, creditCents: principal, ...meta });
+  }
   if (surcharge > 0) {
     lines.push({
       accountCode: SYSTEM_CODES.REV_CARD_SURCHARGE,
@@ -194,6 +214,7 @@ function buildPaymentLines({ cashAccount, creditAccount, net, fee, principal, su
  * 3. Customer Payment Captured (Stripe, Zelle, Check, Cash, or Estimate Deposit).
  *    - Stripe capture: DR 1050 Stripe Clearing (net) + DR 5400 Merchant Fees (fee)
  *                      / CR 1100 A/R (invoice principal) + CR 4085 Card Surcharge Recovery (surcharge)
+ *    - Payer Statement settlement: splits CR 1100 A/R across arAllocations[] per settled invoice.
  *    - Zelle/Check/Cash: DR 1010 Checking (or 1060 Undeposited Funds) / CR 1100 A/R
  *    - Estimate Deposit (unbilled): credits 2300 Unearned Revenue for face value + 4085 for surcharge.
  */
@@ -214,6 +235,7 @@ function buildPaymentEntry(input) {
     fee,
     principal: gross - surcharge,
     surcharge,
+    arAllocations: input.arAllocations || null,
     meta: {
       customerId: input.customerId ?? null,
       serviceLine: input.serviceLine ?? null,
@@ -380,6 +402,96 @@ function buildRefundReversalEntry({
 }
 
 /**
+ * 4c. Refund of an unused customer deposit (reverses 2300 Unearned Revenue + 4085 Surcharge
+ *     instead of 4090 Refunds & Allowances, so accrual revenue is unaffected).
+ */
+function buildDepositRefundEntry({
+  txnId,
+  refundDate,
+  principalCents,
+  surchargeCents = 0,
+  method = 'stripe',
+  customerId = null,
+  reference = null,
+  idempotencyKey = null,
+  reason = 'Customer deposit refund',
+}) {
+  const principal = posInt(principalCents, 'principalCents');
+  const surcharge = posInt(surchargeCents, 'surchargeCents');
+  const total = principal + surcharge;
+  if (total <= 0) throw new AccountingError(400, 'Deposit refund total must be > 0');
+
+  const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
+    ? SYSTEM_CODES.STRIPE_CLEARING
+    : SYSTEM_CODES.CHECKING_PRIMARY;
+  const lines = [];
+  if (principal > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.UNEARNED_REVENUE, debitCents: principal, creditCents: 0, customerId });
+  }
+  if (surcharge > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.REV_CARD_SURCHARGE, debitCents: surcharge, creditCents: 0, customerId });
+  }
+  lines.push({ accountCode: cashAccount, debitCents: 0, creditCents: total, customerId });
+
+  return {
+    entryDate: refundDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType: 'deposit_refund',
+    sourceId: String(txnId),
+    idempotencyKey: idempotencyKey || `deposit-refund:${txnId}`,
+    reference: reference || String(txnId),
+    memo: reason,
+    lines,
+  };
+}
+
+/**
+ * 4d. Bounced deposit refund / reinstatement (funds returned to Stripe Clearing).
+ */
+function buildDepositRefundReversalEntry({
+  txnId,
+  reversalDate,
+  principalCents,
+  surchargeCents = 0,
+  method = 'stripe',
+  customerId = null,
+  reference = null,
+  idempotencyKey = null,
+  reason = 'Deposit refund reversed',
+}) {
+  const principal = posInt(principalCents, 'principalCents');
+  const surcharge = posInt(surchargeCents, 'surchargeCents');
+  const total = principal + surcharge;
+  if (total <= 0) throw new AccountingError(400, 'Deposit refund reversal total must be > 0');
+
+  const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
+    ? SYSTEM_CODES.STRIPE_CLEARING
+    : SYSTEM_CODES.CHECKING_PRIMARY;
+  const lines = [
+    { accountCode: cashAccount, debitCents: total, creditCents: 0, customerId },
+  ];
+  if (principal > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.UNEARNED_REVENUE, debitCents: 0, creditCents: principal, customerId });
+  }
+  if (surcharge > 0) {
+    lines.push({ accountCode: SYSTEM_CODES.REV_CARD_SURCHARGE, debitCents: 0, creditCents: surcharge, customerId });
+  }
+
+  return {
+    entryDate: reversalDate,
+    entryType: 'operational',
+    basisScope: 'both',
+    sourceType: 'deposit_refund_reversal',
+    sourceId: String(txnId),
+    idempotencyKey: idempotencyKey || `deposit-refund-reversal:${txnId}`,
+    reference: reference || String(txnId),
+    memo: reason,
+    lines,
+  };
+}
+
+/**
  * 5. Stripe Payout Settled to Operating Bank Account.
  *    DR 1010 Checking / CR 1050 Stripe Clearing (zero P&L impact — pure balance-sheet settlement).
  */
@@ -421,6 +533,7 @@ function buildExpenseEntry({
   entryDate,
   paymentAccountCode = SYSTEM_CODES.CHECKING_PRIMARY,
   paymentAccountId = null,
+  paymentMethod = null,
   splits,
   vendorId = null,
   bankTransactionId = null,
@@ -441,6 +554,7 @@ function buildExpenseEntry({
       debitCents: amt,
       creditCents: 0,
       vendorId: s.vendorId || vendorId,
+      paymentMethod: s.paymentMethod || paymentMethod,
       serviceLine: s.serviceLine || null,
       scheduledServiceId: s.scheduledServiceId || null,
       memo: s.memo || null,
@@ -453,6 +567,7 @@ function buildExpenseEntry({
     debitCents: 0,
     creditCents: total,
     vendorId,
+    paymentMethod,
     bankTransactionId,
   };
 
@@ -709,6 +824,8 @@ module.exports = {
   buildStripeFeeEntry,
   buildRefundEntry,
   buildRefundReversalEntry,
+  buildDepositRefundEntry,
+  buildDepositRefundReversalEntry,
   buildStripePayoutEntry,
   buildExpenseEntry,
   buildTransferEntry,

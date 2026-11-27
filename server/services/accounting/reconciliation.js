@@ -115,13 +115,29 @@ async function startReconciliation({
     }
 
     let openingCents;
-    if (openingBalanceCents != null) {
+    if (prior) {
+      const priorEndingCents = Number(prior.ending_balance_cents);
+      if (openingBalanceCents != null) {
+        const supplied = Number(openingBalanceCents);
+        if (!Number.isSafeInteger(supplied)) {
+          throw new AccountingError(400, 'openingBalanceCents must be an exact integer in cents');
+        }
+        if (supplied !== priorEndingCents) {
+          throw new AccountingError(
+            409,
+            `Opening balance ($${(supplied / 100).toFixed(2)}) must match the prior finalized statement ending balance ($${(priorEndingCents / 100).toFixed(2)}).`,
+            'OPENING_BALANCE_MISMATCH',
+          );
+        }
+      }
+      openingCents = priorEndingCents;
+    } else if (openingBalanceCents != null) {
       openingCents = Number(openingBalanceCents);
       if (!Number.isSafeInteger(openingCents)) {
         throw new AccountingError(400, 'openingBalanceCents must be an exact integer in cents');
       }
     } else {
-      openingCents = prior ? Number(prior.ending_balance_cents) : 0;
+      openingCents = 0;
     }
 
     const diffCents = endingCents - openingCents;
@@ -246,7 +262,7 @@ async function getReconciliationWorkspace(reconciliationId, { conn = db } = {}) 
   };
 }
 
-async function toggleClearedLines(reconciliationId, { lineIds, cleared, conn = db }) {
+async function toggleClearedLines(reconciliationId, { lineIds, cleared, actorId = null, requestMeta = {}, conn = db }) {
   const validId = assertOptionalUuid(reconciliationId, 'reconciliationId');
   if (!validId) throw new AccountingError(400, 'reconciliationId is required');
   if (!Array.isArray(lineIds) || !lineIds.length) {
@@ -269,8 +285,9 @@ async function toggleClearedLines(reconciliationId, { lineIds, cleared, conn = d
     const account = await trx('gl_accounts').where({ id: rec.account_id }).first();
     const endDate = dateCellText(rec.statement_end_date);
 
+    let updatedRows = [];
     if (shouldClear) {
-      await trx('gl_journal_lines')
+      updatedRows = await trx('gl_journal_lines')
         .whereIn('id', cleanIds)
         .where('account_id', rec.account_id)
         .whereNull('reconciliation_id')
@@ -280,12 +297,14 @@ async function toggleClearedLines(reconciliationId, { lineIds, cleared, conn = d
             .where('status', 'posted')
             .where('entry_date', '<=', endDate);
         })
-        .update({ reconciliation_id: validId, cleared_at: trx.fn.now() });
+        .update({ reconciliation_id: validId, cleared_at: trx.fn.now() })
+        .returning('id');
     } else {
-      await trx('gl_journal_lines')
+      updatedRows = await trx('gl_journal_lines')
         .whereIn('id', cleanIds)
         .where('reconciliation_id', validId)
-        .update({ reconciliation_id: null, cleared_at: null });
+        .update({ reconciliation_id: null, cleared_at: null })
+        .returning('id');
     }
 
     const clearedLines = await trx('gl_journal_lines')
@@ -301,6 +320,28 @@ async function toggleClearedLines(reconciliationId, { lineIds, cleared, conn = d
         cleared_line_count: math.cleared_line_count,
         updated_at: trx.fn.now(),
       });
+
+    const changedLineIds = (updatedRows || []).map((r) => (typeof r === 'string' ? r : r.id)).filter(Boolean);
+    await recordAuditEvent({
+      actor_type: actorId ? 'technician' : 'system',
+      actor_id: actorId,
+      action: shouldClear ? 'accounting.reconciliation.clear_lines' : 'accounting.reconciliation.unclear_lines',
+      resource_type: 'gl_reconciliation',
+      resource_id: validId,
+      metadata: {
+        account_code: account.code,
+        statement_end_date: endDate,
+        cleared: shouldClear,
+        requested_line_ids: cleanIds,
+        changed_line_ids: changedLineIds,
+        cleared_line_count: math.cleared_line_count,
+        difference_cents: math.difference_cents,
+      },
+      ip_address: requestMeta.ip || null,
+      user_agent: requestMeta.userAgent || null,
+      critical: true,
+      trx,
+    });
 
     return getReconciliationWorkspace(validId, { conn: trx });
   });

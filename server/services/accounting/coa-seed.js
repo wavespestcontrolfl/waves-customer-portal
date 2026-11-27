@@ -715,6 +715,16 @@ function dateCellText(value) {
 }
 
 /**
+ * Read-only check returning any canonical system account codes missing from gl_accounts.
+ * Safe for dry runs and read-only report endpoints (never writes to the database).
+ */
+async function findMissingSystemAccountCodes(conn) {
+  const existing = await conn('gl_accounts').select('code');
+  const present = new Set(existing.map((r) => r.code));
+  return SYSTEM_ACCOUNTS.filter((a) => !present.has(a.code)).map((a) => a.code);
+}
+
+/**
  * Idempotently guarantees all system Chart of Accounts rows exist and bridges
  * legacy expense_categories rows where not already mapped.
  */
@@ -769,5 +779,6 @@ module.exports = {
   dollarsToCents,
   centsToDollars,
   dateCellText,
+  findMissingSystemAccountCodes,
   ensureSystemAccounts,
 };

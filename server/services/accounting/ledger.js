@@ -17,7 +17,6 @@ const { recordAuditEvent } = require('../audit-log');
 const {
   ACCOUNT_TYPES,
   NORMAL_BALANCE_BY_TYPE,
-  ensureSystemAccounts,
   naturalBalanceCents,
   dateCellText,
 } = require('./coa-seed');
@@ -102,6 +101,7 @@ function normalizeLine(raw, index) {
     vendor_id: assertOptionalUuid(pickKey(raw, 'vendorId', 'vendor_id'), `lines[${index}].vendorId`),
     service_line: optionalText(pickKey(raw, 'serviceLine', 'service_line'), 40),
     invoice_ref: optionalText(pickKey(raw, 'invoiceRef', 'invoice_ref'), 120),
+    payment_method: optionalText(pickKey(raw, 'paymentMethod', 'payment_method'), 30),
     scheduled_service_id: assertOptionalUuid(pickKey(raw, 'scheduledServiceId', 'scheduled_service_id'), `lines[${index}].scheduledServiceId`),
     bank_transaction_id: assertOptionalUuid(pickKey(raw, 'bankTransactionId', 'bank_transaction_id'), `lines[${index}].bankTransactionId`),
   };
@@ -289,6 +289,7 @@ async function postJournalEntry(input, { conn = db, actorId = null, requestMeta 
         vendor_id: l.vendor_id,
         service_line: l.service_line,
         invoice_ref: l.invoice_ref,
+        payment_method: l.payment_method,
         scheduled_service_id: l.scheduled_service_id,
         bank_transaction_id: l.bank_transaction_id,
       })),
@@ -353,6 +354,7 @@ async function reverseJournalEntry(entryId, { reversalDate = null, reason = '', 
       vendorId: l.vendor_id,
       serviceLine: l.service_line,
       invoiceRef: l.invoice_ref,
+      paymentMethod: l.payment_method,
       scheduledServiceId: l.scheduled_service_id,
     }));
 
@@ -397,10 +399,69 @@ async function reverseJournalEntry(entryId, { reversalDate = null, reason = '', 
   return conn.isTransaction ? run(conn) : conn.transaction(run);
 }
 
+/**
+ * Audited vendor-link backfill on an existing journal entry's unlinked P&L expense/COGS lines.
+ * Never mutates dollar amounts, accounts, or reconciled balance-sheet lines.
+ */
+async function linkJournalEntryVendor(entryId, { vendorId, reason = 'Link vendor for 1099 tracking', actorId = null, requestMeta = {}, conn = db } = {}) {
+  const validEntryId = assertOptionalUuid(entryId, 'entryId');
+  const validVendorId = assertOptionalUuid(vendorId, 'vendorId');
+  if (!validEntryId || !validVendorId) {
+    throw new AccountingError(400, 'entryId and vendorId are required');
+  }
+  const cleanReason = String(reason || '').trim().slice(0, 300) || 'Link vendor for 1099 tracking';
+
+  const run = async (trx) => {
+    const entry = await trx('gl_journal_entries').where({ id: validEntryId }).first('id', 'entry_number', 'status');
+    if (!entry) throw new AccountingError(404, 'Journal entry not found');
+    const vendor = await trx('gl_vendors').where({ id: validVendorId }).first('id', 'display_name', 'active');
+    if (!vendor) throw new AccountingError(404, 'Vendor not found');
+    if (!vendor.active) throw new AccountingError(409, `Vendor "${vendor.display_name}" is inactive`);
+
+    const eligible = await trx('gl_journal_lines as l')
+      .join('gl_accounts as a', 'a.id', 'l.account_id')
+      .where('l.entry_id', validEntryId)
+      .whereNull('l.vendor_id')
+      .whereNull('l.reconciliation_id')
+      .whereIn('a.account_type', ['cogs', 'expense'])
+      .select('l.id');
+    const lineIds = eligible.map((r) => r.id);
+    if (!lineIds.length) {
+      return { entry: await loadEntryWithLines(trx, validEntryId), updatedLines: 0 };
+    }
+
+    await trx('gl_journal_lines')
+      .whereIn('id', lineIds)
+      .update({ vendor_id: validVendorId });
+
+    await recordAuditEvent({
+      actor_type: actorId ? 'technician' : 'system',
+      actor_id: actorId,
+      action: 'accounting.je.link_vendor',
+      resource_type: 'gl_journal_entry',
+      resource_id: validEntryId,
+      metadata: {
+        entry_number: Number(entry.entry_number),
+        vendor_id: validVendorId,
+        vendor_name: vendor.display_name,
+        updated_line_ids: lineIds,
+        reason: cleanReason,
+      },
+      ip_address: requestMeta.ip || null,
+      user_agent: requestMeta.userAgent || null,
+      critical: true,
+      trx,
+    });
+
+    return { entry: await loadEntryWithLines(trx, validEntryId), updatedLines: lineIds.length };
+  };
+
+  return conn.isTransaction ? run(conn) : conn.transaction(run);
+}
+
 // ── Chart of Accounts CRUD ───────────────────────────────────────────────────
 
 async function listAccounts({ includeInactive = false, conn = db } = {}) {
-  await ensureSystemAccounts(conn);
   let q = conn('gl_accounts as a')
     .leftJoin('plaid_accounts as pa', 'pa.id', 'a.plaid_account_id')
     .orderBy('a.sort_order', 'asc')
@@ -770,6 +831,7 @@ module.exports = {
   validateJournalEntryInput,
   postJournalEntry,
   reverseJournalEntry,
+  linkJournalEntryVendor,
   loadEntryWithLines,
   listAccounts,
   createAccount,

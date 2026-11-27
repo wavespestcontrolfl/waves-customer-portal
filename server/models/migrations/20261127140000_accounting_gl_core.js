@@ -218,6 +218,7 @@ exports.up = async function up(knex) {
       t.uuid('vendor_id').references('id').inTable('gl_vendors').onDelete('SET NULL');
       t.string('service_line', 40);
       t.string('invoice_ref', 120);
+      t.string('payment_method', 30);
       t.uuid('scheduled_service_id');
       t.uuid('bank_transaction_id');
       t.uuid('reconciliation_id').references('id').inTable('gl_reconciliations').onDelete('SET NULL');
@@ -251,32 +252,43 @@ exports.up = async function up(knex) {
     CREATE OR REPLACE FUNCTION gl_assert_entry_balanced()
     RETURNS TRIGGER AS $$
     DECLARE
+      v_entry_ids UUID[];
       v_entry_id UUID;
       v_line_count INTEGER;
       v_debits BIGINT;
       v_credits BIGINT;
       v_status TEXT;
     BEGIN
-      v_entry_id := COALESCE(NEW.entry_id, OLD.entry_id);
-      SELECT status INTO v_status FROM gl_journal_entries WHERE id = v_entry_id;
-      IF v_status IS NULL THEN
-        RETURN NULL;
+      v_entry_ids := ARRAY[]::UUID[];
+      IF TG_OP <> 'DELETE' AND NEW.entry_id IS NOT NULL THEN
+        v_entry_ids := array_append(v_entry_ids, NEW.entry_id);
+      END IF;
+      IF TG_OP <> 'INSERT' AND OLD.entry_id IS NOT NULL
+         AND (TG_OP = 'DELETE' OR OLD.entry_id IS DISTINCT FROM NEW.entry_id) THEN
+        v_entry_ids := array_append(v_entry_ids, OLD.entry_id);
       END IF;
 
-      SELECT COUNT(*), COALESCE(SUM(debit_cents), 0), COALESCE(SUM(credit_cents), 0)
-        INTO v_line_count, v_debits, v_credits
-        FROM gl_journal_lines
-       WHERE entry_id = v_entry_id;
+      FOREACH v_entry_id IN ARRAY v_entry_ids LOOP
+        SELECT status INTO v_status FROM gl_journal_entries WHERE id = v_entry_id;
+        IF v_status IS NULL THEN
+          CONTINUE;
+        END IF;
 
-      IF v_line_count < 2 THEN
-        RAISE EXCEPTION 'gl_journal_entry % must have at least 2 lines (found %)', v_entry_id, v_line_count
-          USING ERRCODE = '23514';
-      END IF;
+        SELECT COUNT(*), COALESCE(SUM(debit_cents), 0), COALESCE(SUM(credit_cents), 0)
+          INTO v_line_count, v_debits, v_credits
+          FROM gl_journal_lines
+         WHERE entry_id = v_entry_id;
 
-      IF v_debits <> v_credits THEN
-        RAISE EXCEPTION 'gl_journal_entry % is out of balance: debits=% credits=%', v_entry_id, v_debits, v_credits
-          USING ERRCODE = '23514';
-      END IF;
+        IF v_line_count < 2 THEN
+          RAISE EXCEPTION 'gl_journal_entry % must have at least 2 lines (found %)', v_entry_id, v_line_count
+            USING ERRCODE = '23514';
+        END IF;
+
+        IF v_debits <> v_credits THEN
+          RAISE EXCEPTION 'gl_journal_entry % is out of balance: debits=% credits=%', v_entry_id, v_debits, v_credits
+            USING ERRCODE = '23514';
+        END IF;
+      END LOOP;
 
       RETURN NULL;
     END;
@@ -427,6 +439,11 @@ exports.up = async function up(knex) {
       v_locked BOOLEAN;
       v_rec_status TEXT;
     BEGIN
+      IF TG_OP = 'UPDATE' AND OLD.entry_id IS DISTINCT FROM NEW.entry_id THEN
+        RAISE EXCEPTION 'Journal line % cannot be moved between journal entries', OLD.id
+          USING ERRCODE = '23514';
+      END IF;
+
       SELECT entry_date INTO v_entry_date
         FROM gl_journal_entries
        WHERE id = COALESCE(NEW.entry_id, OLD.entry_id);
@@ -503,6 +520,12 @@ exports.up = async function up(knex) {
 };
 
 exports.down = async function down(knex) {
+  for (const tbl of ['gl_journal_entries', 'gl_reconciliations', 'gl_vendors', 'gl_periods']) {
+    if ((await knex.schema.hasTable(tbl)) && (await knex(tbl).first('id'))) {
+      throw new Error(`${tbl} holds accounting evidence. Preserve the schema and roll forward; do not drop it.`);
+    }
+  }
+
   await knex.raw('DROP TRIGGER IF EXISTS trg_gl_lines_immutability ON gl_journal_lines');
   await knex.raw('DROP FUNCTION IF EXISTS gl_enforce_line_immutability()');
   await knex.raw('DROP TRIGGER IF EXISTS trg_gl_entries_period_lock ON gl_journal_entries');

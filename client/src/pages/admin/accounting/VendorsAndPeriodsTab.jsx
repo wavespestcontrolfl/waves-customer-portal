@@ -195,8 +195,8 @@ export default function VendorsAndPeriodsTab({ onChanged }) {
                   <div key={k} className="flex flex-wrap gap-3 font-mono text-zinc-700">
                     <span className="w-36 font-sans font-medium">{k.replace(/_/g, " ")}:</span>
                     {syncResult.dry_run
-                      ? <span>would post {b.would_post}{b.would_reverse ? ` · would reverse ${b.would_reverse}` : ""} · skipped {b.skipped} · errors {b.errors.length}</span>
-                      : <span>posted {b.posted}{b.reversed ? ` · reversed ${b.reversed}` : ""} · skipped {b.skipped} · errors {b.errors.length}</span>}
+                      ? <span>would post {b.would_post}{b.would_adjust ? ` · would adjust ${b.would_adjust}` : ""}{b.would_reverse ? ` · would reverse ${b.would_reverse}` : ""}{b.would_link_vendors ? ` · would link ${b.would_link_vendors} vendor(s)` : ""} · skipped {b.skipped} · errors {b.errors.length}</span>
+                      : <span>posted {b.posted}{b.adjusted ? ` · adjusted ${b.adjusted}` : ""}{b.reversed ? ` · reversed ${b.reversed}` : ""}{b.linked_vendors ? ` · linked ${b.linked_vendors} vendor(s)` : ""} · skipped {b.skipped} · errors {b.errors.length}</span>}
                   </div>
                 );
               })}

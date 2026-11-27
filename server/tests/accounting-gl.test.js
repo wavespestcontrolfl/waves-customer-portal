@@ -48,16 +48,24 @@ const {
   computeBalanceSheet,
   computeCashFlowStatement,
   allocateCashReceiptToRevenue,
+  allocateCumulativeCashReceipt,
   summarizeSalesTaxLines,
+  summarize1099VendorLines,
 } = require('../services/accounting/statements');
-const { computeReconciliationMath, startReconciliation } = require('../services/accounting/reconciliation');
+const { computeReconciliationMath, startReconciliation, toggleClearedLines } = require('../services/accounting/reconciliation');
 const { lockPeriod } = require('../services/accounting/periods');
 const {
   syncSubledgersToGl,
   extractAppliedDepositCents,
   extractSurchargeCents,
+  resolvePaymentMethod,
   computeProratedRefundTaxCents,
+  allocateStatementPrincipalAcrossInvoices,
+  splitDepositRefundCents,
+  buildExpenseSplits,
+  buildInvoiceDeltaEntry,
 } = require('../services/accounting/sync-bridge');
+const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
 const { encryptTin, publicVendor } = require('../services/accounting/vendors');
 
 function makeSyntheticAccounts() {
@@ -524,6 +532,27 @@ describe('Admin Accounting Router security & dark-gate contract', () => {
     expect(writeRes.status).toBe(403);
     expect(writeRes.body.error).toMatch(/owner account/i);
   });
+
+  test('requires a client idempotencyKey on manual journal-entries and quick-transfer posts', async () => {
+    process.env.GATE_ACCOUNTING_GL = 'true';
+    mockUser = { role: 'admin', email: 'contact@wavespestcontrol.com', id: '00000000-0000-4000-8000-000000000099' };
+
+    const jeRes = await invokeRouter({
+      method: 'POST',
+      url: '/journal-entries',
+      body: { entryDate: '2026-11-15', memo: 'No key', lines: [] },
+    });
+    expect(jeRes.status).toBe(400);
+    expect(jeRes.body.error).toMatch(/idempotencyKey/i);
+
+    const xferRes = await invokeRouter({
+      method: 'POST',
+      url: '/quick-transfer',
+      body: { entryDate: '2026-11-15', amountCents: 10000 },
+    });
+    expect(xferRes.status).toBe(400);
+    expect(xferRes.body.error).toMatch(/idempotencyKey/i);
+  });
 });
 
 describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Basis, Sales Tax, Locks, Sync)', () => {
@@ -815,13 +844,16 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
         whereBetween: () => chain,
         whereRaw: () => chain,
         whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
         orWhere: () => chain,
         orWhereIn: () => chain,
         orWhereRaw: () => chain,
+        orderBy: () => chain,
         select: () => {
           if (table === 'gl_accounts') return Promise.resolve(accounts);
           if (table === 'gl_periods') return Promise.resolve([...lockedMonths].map((m) => ({ period_month: m, status: 'locked' })));
-          if (table === 'invoices as i') {
+          if (table === 'invoices as i' && !state.whereObj?.['i.status']) {
             return Promise.resolve([
               { id: 'inv-already-posted', invoice_number: 'WPC-1', customer_id: null, subtotal: '100', discount_amount: '0', tax_amount: '0', total: '100', credit_applied: '0', line_items: '[]', service_type: 'pest', service_date: '2026-11-05', property_type: 'single_family' },
               { id: 'inv-locked', invoice_number: 'WPC-2', customer_id: null, subtotal: '100', discount_amount: '0', tax_amount: '0', total: '100', credit_applied: '0', line_items: '[]', service_type: 'pest', service_date: '2026-10-15', property_type: 'single_family' },
@@ -866,5 +898,226 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
       { vendor_name: 'Unregistered Sub', count: 1, total_cents: 25000 },
     ]);
     expect(preview.payroll_runs.would_reverse).toBe(1);
+    expect(preview.missing_system_accounts).toEqual([]);
+  });
+
+  test('manual tender resolution routes checks/cash/unknown to Undeposited Funds and zelle/ach to Checking', () => {
+    expect(resolvePaymentMethod({ metadata: { payment_method: 'check' } })).toBe('check');
+    expect(resolvePaymentMethod({ metadata: { payment_method: 'cash' } })).toBe('cash');
+    expect(resolvePaymentMethod({ metadata: { payment_method: 'zelle' } })).toBe('zelle');
+    expect(resolvePaymentMethod({ payment_method_type: 'us_bank_account' })).toBe('ach_direct');
+    expect(resolvePaymentMethod({})).toBe('check');
+    const checkJe = rules.buildPaymentEntry({
+      paymentId: 'p-check',
+      paymentDate: '2026-11-12',
+      grossCents: 15000,
+      method: resolvePaymentMethod({ metadata: { payment_method: 'check' } }),
+    });
+    expect(checkJe.lines[0].accountCode).toBe(SYSTEM_CODES.UNDEPOSITED_FUNDS);
+  });
+
+  test('expense sync keeps partial tax deductibility as full book expense and splits owner draw only for shared bills', () => {
+    const suppliesAcct = { id: 'acc-5200', code: '5200', schedule_c_line: '22' };
+    // $100 supplies with $60 tax deduction -> 100% book expense (NO bogus $40 owner draw!)
+    const nonShared = buildExpenseSplits(
+      { amount: '100.00', tax_deductible_amount: '60.00', notes: 'Partial deduction note' },
+      suppliesAcct,
+      null,
+      10000,
+    );
+    expect(nonShared).toHaveLength(1);
+    expect(nonShared[0].amountCents).toBe(10000);
+    expect(nonShared[0].accountId).toBe('acc-5200');
+
+    // Explicit shared bill marker -> 60% business expense, 40% Owner Draws
+    const shared = buildExpenseSplits(
+      { amount: '100.00', tax_deductible_amount: '60.00', notes: 'Verizon [Shared bill: Cell Plan 60%]' },
+      suppliesAcct,
+      null,
+      10000,
+    );
+    expect(shared).toEqual([
+      { accountId: 'acc-5200', accountCode: null, amountCents: 6000, scheduledServiceId: undefined },
+      { accountCode: SYSTEM_CODES.OWNER_DRAWS, amountCents: 4000, memo: 'Shared bill personal share' },
+    ]);
+  });
+
+  test('payer statement receipts allocate A/R across child invoices and unused deposit refunds clear 2300 without P&L hit', () => {
+    const cust1 = '00000000-0000-4000-8000-000000000101';
+    const cust2 = '00000000-0000-4000-8000-000000000102';
+    const allocs = allocateStatementPrincipalAcrossInvoices(20700, [
+      { id: 'inv-1', customer_id: cust1, total: '107.00', credit_applied: '0', service_type: 'commercial', property_type: 'commercial' },
+      { id: 'inv-2', customer_id: cust2, total: '100.00', credit_applied: '0', service_type: 'pest', property_type: 'single_family' },
+    ]);
+    expect(allocs).toHaveLength(2);
+    const payJe = rules.buildPaymentEntry({
+      paymentId: 'stmt-pay-1',
+      paymentDate: '2026-11-15',
+      grossCents: 20700,
+      method: 'stripe',
+      arAllocations: allocs,
+    });
+    expect(validateJournalEntryInput(payJe).totalCents).toBe(20700);
+    expect(payJe.lines.filter((l) => l.accountCode === SYSTEM_CODES.ACCOUNTS_RECEIVABLE).map((l) => l.invoiceRef))
+      .toEqual(['inv-1', 'inv-2']);
+
+    // Unused deposit refund ($100 face + $3 surcharge = $103 refunded) clears 2300 + 4085 with zero accrual P&L hit
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const split = splitDepositRefundCents(10300, { amount: '100.00', card_surcharge: '3.00' });
+    expect(split).toEqual({ principalCents: 10000, surchargeCents: 300 });
+    const sums = accumulateEntries(accounts, [
+      rules.buildPaymentEntry({
+        paymentId: 'dep-ref-1',
+        paymentDate: '2026-11-01',
+        grossCents: 10300,
+        surchargeCents: 300,
+        isDeposit: true,
+      }),
+      rules.buildDepositRefundEntry({
+        txnId: 'txn_dep_ref_1',
+        refundDate: '2026-11-05',
+        principalCents: split.principalCents,
+        surchargeCents: split.surchargeCents,
+      }),
+    ]);
+    const bal = (code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+    expect(bal(SYSTEM_CODES.UNEARNED_REVENUE)).toBe(0);
+    expect(bal(SYSTEM_CODES.REV_CARD_SURCHARGE)).toBe(0);
+    expect(bal(SYSTEM_CODES.REV_REFUNDS_ALLOWANCES)).toBe(0);
+    expect(bal(SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+  });
+
+  test('buildInvoiceDeltaEntry creates exact balanced adjustment when invoice source changes', () => {
+    const desired = rules.buildInvoiceEntry({
+      invoiceId: 'inv-edit-1',
+      invoiceNumber: 'WPC-99',
+      issueDate: '2026-11-01',
+      subtotalCents: 12000,
+      taxCents: 840,
+      serviceLine: 'commercial',
+      isCommercial: true,
+    });
+    // Previously booked as $100 + $7 tax
+    const booked = new Map([
+      [SYSTEM_CODES.ACCOUNTS_RECEIVABLE, 10700],
+      [SYSTEM_CODES.REV_COMMERCIAL_PEST, -10000],
+      [SYSTEM_CODES.SALES_TAX_PAYABLE, -700],
+    ]);
+    const adj = buildInvoiceDeltaEntry({ id: 'inv-edit-1', invoice_number: 'WPC-99' }, desired.lines, booked, '2026-11-10');
+    expect(adj).not.toBeNull();
+    expect(validateJournalEntryInput(adj).totalCents).toBe(2140);
+  });
+
+  test('cumulative cash-basis allocation eliminates rounding drift across odd-cent partial payments', () => {
+    const accounts = makeSyntheticAccounts();
+    const revIdByCode = new Map(accounts.filter((a) => a.account_type === 'revenue').map((a) => [a.code, a.id]));
+    const commId = revIdByCode.get(SYSTEM_CODES.REV_COMMERCIAL_PEST);
+    // $2.00 revenue + $0.14 tax = $2.14 A/R, paid in 3 odd-cent installments ($0.71, $0.71, $0.72)
+    const profile = { arDebitedCents: 214, taxCents: 14, revenueSplits: [{ accountId: commId, amountCents: 200 }] };
+    const p1 = allocateCumulativeCashReceipt(0, 71, profile, 'commercial', revIdByCode);
+    const p2 = allocateCumulativeCashReceipt(71, 71, profile, 'commercial', revIdByCode);
+    const p3 = allocateCumulativeCashReceipt(142, 72, profile, 'commercial', revIdByCode);
+    const totalRev = (p1[0]?.signedCents || 0) + (p2[0]?.signedCents || 0) + (p3[0]?.signedCents || 0);
+    expect(totalRev).toBe(200);
+  });
+
+  test('1099-NEC summary excludes card, debit-card, credit-card-paid, and platform (1099-K) payments', () => {
+    const out = summarize1099VendorLines([
+      { vendor_id: 'v1', display_name: 'Bob Contractor', entity_type: 'sole_prop', w9_received_at: '2026-01-10', entry_id: 'e1', payment_method: 'check', debit_cents: 150000, credit_cents: 0, paid_by_credit_card: false },
+      { vendor_id: 'v1', display_name: 'Bob Contractor', entity_type: 'sole_prop', w9_received_at: '2026-01-10', entry_id: 'e2', payment_method: 'card', debit_cents: 100000, credit_cents: 0, paid_by_credit_card: true },
+      { vendor_id: 'v1', display_name: 'Bob Contractor', entity_type: 'sole_prop', w9_received_at: '2026-01-10', entry_id: 'e3', payment_method: 'ach', entry_memo: 'Upwork freelancer invoice', debit_cents: 80000, credit_cents: 0, paid_by_credit_card: false },
+    ], [], 200000);
+    expect(out.vendors[0].total_paid_cents).toBe(150000);
+    expect(out.vendors[0].excluded_1099k_cents).toBe(180000);
+    expect(out.vendors[0].filing_required).toBe(false);
+    expect(out.excluded_1099k_count).toBe(2);
+  });
+
+  test('reconciliation enforces opening balance continuity after first statement and audits cleared line toggles', async () => {
+    const acctId = '00000000-0000-4000-8000-000000000001';
+    const recId = '00000000-0000-4000-8000-000000000055';
+    const lineId = '00000000-0000-4000-8000-000000000066';
+    const fakeConn = (table) => {
+      const state = { whereObj: null };
+      const chain = {
+        where: (obj) => { state.whereObj = obj; return chain; },
+        orderBy: () => chain,
+        select: () => chain,
+        first: () => {
+          if (table === 'gl_accounts') {
+            return Promise.resolve({ id: acctId, code: '1010', name: 'Checking', sub_type: 'checking', account_type: 'asset', normal_balance: 'debit' });
+          }
+          if (table === 'gl_reconciliations' && state.whereObj?.status === 'in_progress') return Promise.resolve(null);
+          if (table === 'gl_reconciliations' && state.whereObj?.status === 'reconciled') {
+            return Promise.resolve({ statement_end_date: '2026-02-28', ending_balance_cents: 500000 });
+          }
+          return Promise.resolve(null);
+        },
+      };
+      return chain;
+    };
+    fakeConn.raw = (sql) => sql;
+    fakeConn.transaction = (cb) => cb(fakeConn);
+
+    await expect(startReconciliation({
+      accountId: acctId,
+      statementEndDate: '2026-03-31',
+      openingBalanceCents: 999999,
+      endingBalanceCents: 999999,
+      conn: fakeConn,
+    })).rejects.toThrow(/must match the prior finalized statement ending balance/i);
+
+    const audited = [];
+    const toggleConn = (table) => {
+      const chain = {
+        join: () => chain,
+        leftJoin: () => chain,
+        where: () => chain,
+        whereIn: () => chain,
+        whereNull: () => chain,
+        orWhere: () => chain,
+        forUpdate: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_journal_lines') return Promise.resolve([{ debit_cents: 10000, credit_cents: 0 }]);
+          if (table === 'gl_journal_lines as l') return Promise.resolve([]);
+          return chain;
+        },
+        first: () => {
+          if (table === 'gl_reconciliations') {
+            return Promise.resolve({ id: recId, account_id: acctId, status: 'in_progress', statement_end_date: '2026-03-31', opening_balance_cents: 500000, ending_balance_cents: 510000 });
+          }
+          if (table === 'gl_accounts') {
+            return Promise.resolve({ id: acctId, code: '1010', name: 'Checking', account_type: 'asset', normal_balance: 'debit' });
+          }
+          return Promise.resolve(null);
+        },
+        update: () => ({ returning: () => Promise.resolve([{ id: lineId }]) }),
+        insert: (row) => {
+          audited.push({ table, row });
+          return { returning: () => Promise.resolve([{ id: 'audit-1' }]) };
+        },
+      };
+      return chain;
+    };
+    toggleConn.raw = (sql) => sql;
+    toggleConn.fn = { now: () => new Date() };
+    toggleConn.transaction = (cb) => cb(toggleConn);
+
+    await toggleClearedLines(recId, { lineIds: [lineId], cleared: true, actorId: '00000000-0000-4000-8000-000000000099', conn: toggleConn });
+    expect(audited.some((a) => a.table === 'audit_log' && a.row.action === 'accounting.reconciliation.clear_lines')).toBe(true);
+  });
+
+  test('migration down() refuses rollback once accounting evidence exists', async () => {
+    const nonEmptyKnex = (tbl) => ({
+      first: () => Promise.resolve(tbl === 'gl_journal_entries' ? { id: 'je-1' } : null),
+    });
+    nonEmptyKnex.schema = { hasTable: () => Promise.resolve(true) };
+    await expect(migrationGl.down(nonEmptyKnex)).rejects.toThrow(/holds accounting evidence/i);
   });
 });

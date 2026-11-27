@@ -149,12 +149,41 @@ router.get('/journal-entries/:id', async (req, res) => {
   }
 });
 
+function requireSubmissionIdempotencyKey(req) {
+  const raw = req.body?.idempotencyKey || req.body?.idempotency_key || req.get('idempotency-key') || '';
+  const key = String(raw).trim();
+  if (key.length < 8 || key.length > 180) {
+    throw new ledger.AccountingError(
+      400,
+      'idempotencyKey (8-180 chars, or Idempotency-Key header) is required to prevent duplicate postings on retry',
+    );
+  }
+  return key;
+}
+
 router.post('/journal-entries', requireFullAccess, async (req, res) => {
   try {
-    const { entry, created } = await ledger.postJournalEntry(req.body, actorContext(req));
+    const idempotencyKey = requireSubmissionIdempotencyKey(req);
+    const { entry, created } = await ledger.postJournalEntry(
+      { ...(req.body || {}), idempotencyKey },
+      actorContext(req),
+    );
     res.status(created ? 201 : 200).json({ entry, created });
   } catch (err) {
     fail(res, 'postJournalEntry', err);
+  }
+});
+
+router.patch('/journal-entries/:id/vendor', requireFullAccess, async (req, res) => {
+  try {
+    const result = await ledger.linkJournalEntryVendor(req.params.id, {
+      vendorId: req.body?.vendorId || req.body?.vendor_id,
+      reason: req.body?.reason || '',
+      ...actorContext(req),
+    });
+    res.json(result);
+  } catch (err) {
+    fail(res, 'linkJournalEntryVendor', err);
   }
 });
 
@@ -174,7 +203,7 @@ router.post('/journal-entries/:id/reverse', requireFullAccess, async (req, res) 
 router.post('/quick-transfer', requireFullAccess, async (req, res) => {
   try {
     const b = req.body || {};
-    const sourceId = b.idempotencyKey || `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const sourceId = requireSubmissionIdempotencyKey(req);
     const payload = rules.buildTransferEntry({
       sourceId,
       entryDate: b.entryDate,
@@ -320,6 +349,7 @@ router.patch('/reconciliations/:id/lines', requireFullAccess, async (req, res) =
     const workspace = await reconciliation.toggleClearedLines(req.params.id, {
       lineIds: req.body?.lineIds,
       cleared: req.body?.cleared,
+      ...actorContext(req),
     });
     res.json(workspace);
   } catch (err) {

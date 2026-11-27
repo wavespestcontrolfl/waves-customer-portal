@@ -28,6 +28,13 @@ function blankLine() {
   return { accountId: "", debit: "", credit: "", memo: "" };
 }
 
+function mintSubmissionKey(prefix) {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}:${crypto.randomUUID()}`;
+  }
+  return `${prefix}:${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export default function JournalEntriesTab({ onChanged }) {
   const today = etDateString(new Date());
   const [entries, setEntries] = useState([]);
@@ -38,6 +45,7 @@ export default function JournalEntriesTab({ onChanged }) {
 
   // New JE dialog
   const [jeOpen, setJeOpen] = useState(false);
+  const [jeKey, setJeKey] = useState(() => mintSubmissionKey("manual-je"));
   const [entryDate, setEntryDate] = useState(today);
   const [entryType, setEntryType] = useState("adjusting");
   const [memo, setMemo] = useState("");
@@ -48,6 +56,7 @@ export default function JournalEntriesTab({ onChanged }) {
 
   // Quick Transfer dialog
   const [xferOpen, setXferOpen] = useState(false);
+  const [xferKey, setXferKey] = useState(() => mintSubmissionKey("manual-xfer"));
   const [xferDate, setXferDate] = useState(today);
   const [xferFrom, setXferFrom] = useState("");
   const [xferTo, setXferTo] = useState("");
@@ -104,6 +113,7 @@ export default function JournalEntriesTab({ onChanged }) {
           memo: l.memo.trim() || null,
         }));
       await postJson("/journal-entries", {
+        idempotencyKey: jeKey,
         entryDate,
         entryType,
         memo: memo.trim(),
@@ -111,6 +121,7 @@ export default function JournalEntriesTab({ onChanged }) {
         lines: payloadLines,
       });
       setJeOpen(false);
+      setJeKey(mintSubmissionKey("manual-je"));
       setMemo("");
       setReference("");
       setLines([blankLine(), blankLine()]);
@@ -130,6 +141,7 @@ export default function JournalEntriesTab({ onChanged }) {
     try {
       const amountCents = parseDollarsToCents(xferAmount);
       await postJson("/quick-transfer", {
+        idempotencyKey: xferKey,
         entryDate: xferDate,
         fromAccountId: xferFrom,
         toAccountId: xferTo,
@@ -137,6 +149,7 @@ export default function JournalEntriesTab({ onChanged }) {
         memo: xferMemo.trim(),
       });
       setXferOpen(false);
+      setXferKey(mintSubmissionKey("manual-xfer"));
       setXferAmount("");
       await loadData();
       onChanged?.();
