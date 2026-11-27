@@ -218,6 +218,24 @@ function trustedCountyStories(propertyRecord, facts, enriched) {
   return storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
 }
 
+function hasBlockingCountyDimensions(enriched) {
+  return hasBlockingDimensionFlag(enriched, 'squareFootage')
+    || hasBlockingDimensionFlag(enriched, 'lotSize');
+}
+
+function buildCountyMeasurementPayload({ homeSqFt, lotSqFt, stories, propertyType, features, pestPhotoFacts, turf }) {
+  return {
+    homeSqFt,
+    lotSqFt,
+    ...(stories ? { stories } : {}),
+    ...(propertyType ? { propertyType } : {}),
+    ...(features ? { features } : {}),
+    ...(pestPhotoFacts ? { pestPhotoFacts } : {}),
+    ...(turf ? { turf } : {}),
+    source: MEASUREMENTS_SOURCE,
+  };
+}
+
 // The county-assessed home and lot size a lookup result proves for a single-
 // family home, or null. Same arbitration as the estimator engine
 // (resolvePropertyFacts), held to its county-assessed source only.
@@ -233,26 +251,19 @@ function countyMeasurements(lookup) {
   if (facts.home?.source !== SQFT_SOURCES.COUNTY_ASSESSED || facts.lot?.source !== SQFT_SOURCES.COUNTY_ASSESSED) return null;
   // Require both county dimensions to be free of blocking (MEDIUM/HIGH) verify flags:
   // flagged squareFootage or lotSize must not ride alongside a trusted propertyType into a send-ready draft.
-  if (hasBlockingDimensionFlag(lookup.enriched, 'squareFootage')
-    || hasBlockingDimensionFlag(lookup.enriched, 'lotSize')) return null;
+  if (hasBlockingCountyDimensions(lookup.enriched)) return null;
   const homeSqFt = Math.round(Number(facts.home.value));
   const lotSqFt = Math.round(Number(facts.lot.value));
   if (!inRange(homeSqFt, HOME_SQFT_RANGE) || !inRange(lotSqFt, LOT_SQFT_RANGE)) return null;
-  const stories = trustedCountyStories(propertyRecord, facts, lookup.enriched);
-  const propertyType = trustedCountyPropertyType(propertyRecord, lookup.enriched);
-  const features = trustedCountyFeatures(lookup);
-  const pestPhotoFacts = trustedCountyPestPhotoFacts(lookup);
-  const turf = trustedCountyTurf(lookup.enriched);
-  return {
+  return buildCountyMeasurementPayload({
     homeSqFt,
     lotSqFt,
-    ...(stories ? { stories } : {}),
-    ...(propertyType ? { propertyType } : {}),
-    ...(features ? { features } : {}),
-    ...(pestPhotoFacts ? { pestPhotoFacts } : {}),
-    ...(turf ? { turf } : {}),
-    source: MEASUREMENTS_SOURCE,
-  };
+    stories: trustedCountyStories(propertyRecord, facts, lookup.enriched),
+    propertyType: trustedCountyPropertyType(propertyRecord, lookup.enriched),
+    features: trustedCountyFeatures(lookup),
+    pestPhotoFacts: trustedCountyPestPhotoFacts(lookup),
+    turf: trustedCountyTurf(lookup.enriched),
+  });
 }
 
 // The draft builder's read: cache only, never spends, never throws.
