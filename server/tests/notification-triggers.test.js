@@ -1698,4 +1698,73 @@ describe('registry labels on the bell row', () => {
     expect(stats.policySilenced).toBeUndefined();
     expect(PushService.sendToAdminUsers.mock.calls.length).toBe(1);
   });
+
+  test('keyed push deduplicates across replays even when every admin disabled bells (push-only prefs)', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const claims = new Set();
+    db.raw = jest.fn(async (sql, params) => {
+      if (/INSERT INTO sms_send_claims/i.test(sql)) {
+        const key = params[0];
+        if (claims.has(key)) return { rows: [] };
+        claims.add(key);
+        return { rows: [{ id: claims.size }] };
+      }
+      return { rows: [] };
+    });
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences'
+          ? tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }])
+          : tableMock([])
+    ));
+    NotificationService.notifyAdmin.mockClear();
+    PushService.sendToAdminUsers.mockClear();
+
+    const first = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-pushonly-1' },
+      { dedupeKey: 'relay-unbooked:CA-pushonly-1' },
+    );
+    expect(first.bellWritten).toBe(false);
+    expect(first.deduped).toBeUndefined();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+
+    const replay = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-pushonly-1' },
+      { dedupeKey: 'relay-unbooked:CA-pushonly-1' },
+    );
+    expect(replay.deduped).toBe(true);
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+  });
+
+  test('sandy_transfer_no_context pushOnly banner sends committed row words with waves-missed-call.caf sound', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+    ));
+    PushService.sendToAdminUsers.mockClear();
+
+    await triggerNotification('sandy_transfer_no_context', {
+      alertRowId: 'n-tx-1',
+      alertTitle: 'Jennifer transfer without context',
+      alertBody: 'A caller from ***-0199 was transferred — ask the caller to recap.',
+      alertLink: '/admin/communications#tab=calls&call=99',
+    }, { pushOnly: true, adminOnly: true, bellAuthorized: true });
+
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const [, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
+    expect(payloadFor('admin-1')).toMatchObject({
+      title: 'Jennifer transfer without context',
+      body: 'A caller from ***-0199 was transferred — ask the caller to recap.',
+      url: '/admin/communications#tab=calls&call=99',
+      sound: 'waves-missed-call.caf',
+    });
+  });
 });

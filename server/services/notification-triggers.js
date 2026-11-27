@@ -617,9 +617,9 @@ const TRIGGER_REGISTRY = {
     // Not tech-visible: technicians get no calls (owner 2026-10-02), so the Calls tab this links to is admin
     // only, and the row names no customer (technician visibility audit C19, owner 2026-11-04 "ok go for all").
     build: (p) => ({
-      title: `${agentName()} transfer without context`,
-      body: `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
-      link: callLink(p),
+      title: p.alertTitle || `${agentName()} transfer without context`,
+      body: p.alertBody || `A caller${p.from ? ` from ${maskPhone(p.from)}` : ''} was transferred to the office but the call summary could not be saved — ask the caller to recap.`,
+      link: p.alertLink || callLink(p),
     }),
   },
   // Direct watcher bells must also join the staff visibility allowlist.
@@ -1841,6 +1841,7 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
     }
 
     // Push: send to all admin/technician subscriptions whose user has push enabled.
+    let belllessClaimKey = null;
     try {
       const enabledUserIds = pushEnabledIds;
 
@@ -1855,6 +1856,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
       }
 
       if (enabledUserIds.length > 0) {
+        const claim = await claimBelllessKeyedPush({
+          triggerKey, dedupeKey, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
+        });
+        if (!claim.claimed) return { ...stats, deduped: true };
+        belllessClaimKey = claim.key;
         const wantsSoundByUser = new Map(
           activeAdmins.map((u) => {
             const pref = prefsByUser.get(u.id);
@@ -1977,9 +1983,13 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
         // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
-        if (stats.push?.superseded && !stats.push.sent) stats.push = { sent: 0, skipped: 'superseded_before_push' };
+        if (stats.push?.superseded && !stats.push.sent) {
+          await releaseBelllessKeyedPush(belllessClaimKey, false);
+          stats.push = { sent: 0, skipped: 'superseded_before_push' };
+        }
       }
     } catch (e) {
+      await releaseBelllessKeyedPush(belllessClaimKey, pushHandoffStarted);
       logger.error(`[notification-triggers] push dispatch failed: ${e.message}`);
       stats.pushFailed = pushHandoffStarted ? 'push_dispatch' : 'before_handoff';
       // A resumed event owns its retry: a failure before any handoff (the
@@ -1990,6 +2000,42 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
   } catch (err) {
     logger.error(`[notification-triggers] dispatch failed for ${triggerKey}: ${err.message}`);
     return { bellWritten: false, push: null, error: err.message };
+  }
+}
+
+const BELLLESS_PUSH_CLAIM_PREFIX = 'notif_push_dedupe:';
+
+function belllessPushClaimKey(triggerKey, dedupeKey) {
+  const raw = `${BELLLESS_PUSH_CLAIM_PREFIX}${triggerKey}:${dedupeKey}`;
+  if (raw.length <= 200) return raw;
+  const hash = require('crypto').createHash('sha256').update(raw).digest('hex');
+  return `${BELLLESS_PUSH_CLAIM_PREFIX}${hash}`;
+}
+
+// When every active admin disabled bells (push-only preference), writeBell never
+// runs so notifications.dedupe_key cannot suppress a replayed keyed push. Claim
+// the keyed push in sms_send_claims so replays stay single-shot independently of
+// bell visibility.
+async function claimBelllessKeyedPush({
+  triggerKey, dedupeKey, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
+}) {
+  if (!dedupeKey || pushOnly || pushOnDedupe || Array.isArray(deliveredSubscriptionIds) || anyBellEnabled || !enabledUserIds.length) {
+    return { claimed: true, key: null };
+  }
+  if (typeof db.raw !== 'function') return { claimed: true, key: null };
+  const key = belllessPushClaimKey(triggerKey, dedupeKey);
+  const { takeSendClaim } = require('./sms-send-claims');
+  const claimed = await takeSendClaim(key, db);
+  return { claimed, key };
+}
+
+async function releaseBelllessKeyedPush(claimKey, handoffStarted) {
+  if (!claimKey || handoffStarted) return;
+  try {
+    const { releaseSendClaim } = require('./sms-send-claims');
+    await releaseSendClaim(claimKey, db);
+  } catch (err) {
+    logger.warn(`[notification-triggers] failed to release keyed push claim: ${err?.code || err?.message || 'error'}`);
   }
 }
 

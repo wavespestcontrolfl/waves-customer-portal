@@ -146,7 +146,34 @@ describe('GET /api/admin/notifications/diagnose APNs/FCM reporting', () => {
         inactive: 1,
         byPlatform: { web: 1, ios: 1, android: 0 },
       });
+      expect(json.checks.pushTransportMatch).toMatchObject({ ok: true, active: 2, reachable: 1 });
       expect(json.summary).toEqual([]);
+    });
+  });
+
+  test('flags pushTransportMatch in summary when active subscriptions have no matching configured transport', async () => {
+    PushService.status.mockReturnValue({
+      available: true,
+      configured: false,
+      error: null,
+      apns: { configured: true, production: true },
+      fcm: { configured: false },
+    });
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain([{ id: 1, active: true, name: 'Web Only Admin' }]);
+      if (table === 'push_subscriptions') return chain([{ id: 's-web', active: true, platform: 'web' }]);
+      if (table === 'notification_preferences') return chain([]);
+      if (table === 'notifications') return chain([{ c: '3' }]);
+      return chain([]);
+    });
+
+    await withApp(adminNotificationsRouter, '/api/admin/notifications', async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/notifications/diagnose`);
+      const json = await res.json();
+      expect(res.status).toBe(200);
+      expect(json.checks.pushTransport.ok).toBe(true);
+      expect(json.checks.pushTransportMatch).toMatchObject({ ok: false, active: 1, reachable: 0 });
+      expect(json.summary).toContain('pushTransportMatch');
     });
   });
 

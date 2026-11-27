@@ -404,19 +404,30 @@ function buildPushTransportChecks(pushStatus) {
   };
 }
 
-function summarizeSubscriptions(subs) {
+function summarizeSubscriptions(subs, transportChecks) {
   const activeSubs = subs.filter((s) => s.active);
   const byPlatform = { web: 0, ios: 0, android: 0 };
   for (const s of activeSubs) {
     const p = s.platform === 'ios' || s.platform === 'android' ? s.platform : 'web';
     byPlatform[p] += 1;
   }
+  const reachable = (transportChecks?.vapid?.ok ? byPlatform.web : 0)
+    + (transportChecks?.apns?.ok ? byPlatform.ios : 0)
+    + (transportChecks?.fcm?.ok ? byPlatform.android : 0);
   return {
-    ok: activeSubs.length > 0,
-    total: subs.length,
-    active: activeSubs.length,
-    inactive: subs.length - activeSubs.length,
-    byPlatform,
+    pushSubscriptions: {
+      ok: activeSubs.length > 0,
+      total: subs.length,
+      active: activeSubs.length,
+      inactive: subs.length - activeSubs.length,
+      byPlatform,
+    },
+    pushTransportMatch: {
+      ok: activeSubs.length === 0 || reachable > 0,
+      active: activeSubs.length,
+      reachable,
+      byPlatform,
+    },
   };
 }
 
@@ -453,7 +464,7 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     // 4. push_subscriptions — auto-deactivated rows (410/404) are a common cause
     try {
       const subs = await db('push_subscriptions').where({ admin_user_id: userId });
-      report.checks.pushSubscriptions = summarizeSubscriptions(subs);
+      Object.assign(report.checks, summarizeSubscriptions(subs, report.checks));
     } catch (err) {
       report.checks.pushSubscriptions = { ok: false, error: err.message };
     }
