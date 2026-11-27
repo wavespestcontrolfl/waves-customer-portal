@@ -157,6 +157,23 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).not.toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
   });
 
+  test('no property named: a customer\'s one active property is the home priced, where the visit is stamped, even when it is not marked primary', async () => {
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    // The sole active property read (no id, no primary flag), the read by id, and no primary property.
+    const rows = (active) => (cond) => {
+      if (cond.id) return active.find((property) => property.id === cond.id);
+      return cond.is_primary ? undefined : active;
+    };
+    wireDb({ customers: HOME, customer_properties: rows([RENTAL]) });
+    expect((await bookBlankWdo()).finalPrice).toBe(275);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
+    // Two active properties: the visit is stamped with neither, and the customer's own home is priced.
+    lookup.mockClear();
+    wireDb({ customers: HOME, customer_properties: rows([RENTAL, { ...RENTAL, id: 'b9e1c3d4-1111-4a2b-9c3d-5e6f7a8b9c0d' }]) });
+    await bookBlankWdo();
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+  });
+
   test('a failed read never blocks a booking: the catalog price stands', async () => {
     lookup.mockRejectedValue(Object.assign(new Error('connection reset at 100 Example Ln'), { code: 'ECONNRESET' }));
     expect((await bookBlankWdo()).finalPrice).toBe(250);
@@ -207,7 +224,13 @@ describe('the office booking keeps the price a person gives', () => {
   test('a WDO main line beside a paid add-on line keeps the catalog price; a free one leaves the table price (the WDO filing fills its fee from the visit price only when the inspection is the only paid line)', async () => {
     lookup.mockResolvedValue(record(1600, 'block'));
     const PEST = { id: 'svc-pest', service_key: 'one_time_pest', category: 'pest_control', base_price: '150.00' };
-    wireDb({ customer_properties: undefined, customers: HOME, services: (cond) => (cond.id === 'svc-pest' ? PEST : WDO) });
+    const DISCOUNTS = {
+      'disc-free': { id: 'disc-free', name: 'Free add-on', discount_type: 'percentage', amount: '100.00', max_discount_dollars: null, is_active: true, show_in_invoices: true },
+      'disc-min200': { id: 'disc-min200', name: 'Big job credit', discount_type: 'fixed_amount', amount: '20.00', max_discount_dollars: null, is_active: true, show_in_invoices: true },
+    };
+    wireDb({ customer_properties: undefined, customers: HOME, services: (cond) => (cond.id === 'svc-pest' ? PEST : WDO), discounts: (cond) => DISCOUNTS[cond.id] });
+    const { manualEligibilityFailures } = require('../services/discount-engine');
+    manualEligibilityFailures.mockImplementation(async (row, _customer, { subtotal }) => (row.id === 'disc-min200' && subtotal < 200 ? ['needs a $200 line'] : []));
     const pest = (basePrice) => [{ serviceId: 'svc-pest', name: 'One-Time Pest', basePrice, price: basePrice }];
     expect((await bookBlankWdo({ serviceAddons: pest(150) })).finalPrice).toBe(400);
     // The screen showed the catalog price for that line, and the save is checked against it.
@@ -216,6 +239,15 @@ describe('the office booking keeps the price a person gives', () => {
     // A free add-on line ($0, or left blank): the inspection is still the visit's only paid line.
     expect((await bookBlankWdo({ serviceAddons: pest(0) })).finalPrice).toBe(150);
     expect((await bookBlankWdo({ serviceAddons: pest(null), wdoExpectedPrice: 150 })).finalPrice).toBe(150);
+    // An add-on line discounted to $0 is free too: the filing reads its net price.
+    expect((await bookBlankWdo({ serviceAddons: [{ ...pest(50)[0], discountId: 'disc-free' }] })).finalPrice).toBe(150);
+    // A main-line discount is checked once, at the price the line books at: one that needs a $200 line passes at the
+    // $250 catalog price beside a paid line ($230 + $150), and is refused at the $150 table price alone.
+    manualEligibilityFailures.mockClear();
+    expect((await bookBlankWdo({ serviceAddons: pest(150), primaryLineDiscount: { discountId: 'disc-min200' } })).finalPrice).toBe(380);
+    expect(manualEligibilityFailures.mock.calls.filter(([row]) => row.id === 'disc-min200')).toHaveLength(1);
+    await expect(bookBlankWdo({ primaryLineDiscount: { discountId: 'disc-min200' } })).rejects.toMatchObject({ status: 400 });
+    manualEligibilityFailures.mockReset();
     // The same inspection alone on its visit takes the table price.
     expect((await bookBlankWdo()).finalPrice).toBe(150);
   });

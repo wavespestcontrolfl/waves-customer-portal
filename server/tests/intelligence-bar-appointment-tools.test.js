@@ -1254,8 +1254,9 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
         scheduled_services: [chain()],
         ...extra,
       });
-      // The customer's own home (no saved primary property): its cached record is a 2,600 sq ft wood frame home.
-      wire({ customer_properties: [chain()] });
+      // The customer's own home (no active property read, no saved primary property): its cached record is a 2,600 sq ft
+      // wood frame home.
+      wire({ customer_properties: [chain(), chain()] });
       strictCacheOnlyPropertyLookup.mockClear();
       strictCacheOnlyPropertyLookup.mockResolvedValueOnce({
         enriched: { homeSqFt: 2600, constructionMaterial: 'WOOD_FRAME', fieldEvidence: { constructionMaterial: [{ sourceType: 'county', value: 'WOOD_FRAME' }] } },
@@ -1282,8 +1283,9 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       strictCacheOnlyPropertyLookup.mockClear();
       // No home size on record: the first size step, $150.
       strictCacheOnlyPropertyLookup.mockResolvedValueOnce({ enriched: {} });
-      // The customer's own home (no saved primary property) for the unlocked pass and both locked passes.
-      wireDb({ services: [catalog([wdo]), catalog([wdo]), catalog([wdo])], customer_properties: [chain(), chain(), chain()], scheduled_services: [chain()] });
+      // The customer's own home (no active property read, no saved primary property) for the unlocked pass and both
+      // locked passes.
+      wireDb({ services: [catalog([wdo]), catalog([wdo]), catalog([wdo])], customer_properties: Array.from({ length: 6 }, () => chain()), scheduled_services: [chain()] });
       const before = await ibBookingPricing({ customer: atHome, serviceType: 'WDO Inspection Service' });
       expect(before).toMatchObject({ price: 150, source: 'wdo_table' });
       const trx = jest.fn((table) => db(table));

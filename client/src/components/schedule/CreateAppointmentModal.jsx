@@ -2770,11 +2770,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const blankWdoLines = services.filter(lineIsBlankWdo).length;
   const hasBlankWdoLine = blankWdoLines > 0;
   // The appointments this form saves (the grouping helpers below are hoisted). A WDO line that is the main line of an
-  // appointment with another paid line (a price above $0, or a line the server prices itself) keeps the catalog price
-  // (the server's rule: the WDO filing fills its fee from the visit's price only when the inspection is the only paid
-  // line), so the question says so. A free line beside it, or a WDO add-on line, keeps the table price.
+  // appointment with another paid line keeps the catalog price (the server's rule: the WDO filing fills its fee from the
+  // visit's price only when the inspection is the only paid line), so the question says so. A paid line's own net is
+  // above $0: an entered price or the mosquito ladder, less its line discount. A free line beside it, or a WDO add-on
+  // line, keeps the table price.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
-  const lineIsPaid = (svc) => (lineHasEnteredPrice(svc) ? lineBaseAmount(svc) > 0 : lineIsServerPriced(svc));
+  const lineIsPaid = (svc) => {
+    const base = lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0);
+    return base - previewLineDiscount(svc?.lineDiscount, base) > 0;
+  };
   const wdoWithOtherLines = appointmentSubmitGroups.some((group) => lineIsBlankWdo(group.lines[0]) && group.lines.slice(1).some(lineIsPaid));
   const wdoQuoteKey = blankWdoLines === 1 ? wdoQuoteQuery({
     customerId: selectedCustomer?.id,

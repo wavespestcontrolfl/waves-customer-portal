@@ -3416,9 +3416,14 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   const primaryBaseFallback = primaryServerPrice != null
     ? primaryServerPrice
     : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
-  let mainLine = await priceMainLine(parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice'));
+  // A blank WDO main line at its table price, with add-on lines, is priced after them: beside a paid add-on line it keeps
+  // the catalog price (WDO_WITH_OTHER_LINES_NOTE), and its line discount is checked once, at the price it books at
+  // (pre-push audit P0, P1).
+  const blankWdoMain = primaryLinePrice == null && isWdoInspectionService(serviceRecord);
+  const mainLineAfterAddons = blankWdoMain && primaryServerPrice != null && Array.isArray(serviceAddons) && serviceAddons.length > 0;
+  let mainLine = mainLineAfterAddons ? null : await priceMainLine(parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice'));
   const appointmentServiceLines = [{
-    amount: mainLine.net || 0,
+    amount: mainLine?.net || 0,
     serviceKey: serviceRecord?.service_key || null,
     serviceCategory: serviceRecord?.category || null,
   }];
@@ -3485,12 +3490,11 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       weekendShift: addon.weekendShift,
     });
   }
-  // A blank WDO main line beside a paid add-on line keeps the catalog price (WDO_WITH_OTHER_LINES_NOTE): the WDO filing
-  // fills its fee from the visit's price only when the inspection is the visit's only paid line. A free add-on line
-  // leaves the table price (pre-push audit P0).
-  const blankWdoMain = primaryLinePrice == null && isWdoInspectionService(serviceRecord);
-  if (blankWdoMain && primaryServerPrice != null && addonLines.some((line) => Number(line.base) > 0)) {
-    mainLine = await priceMainLine(parseMoneyInput(serviceRecord.base_price ?? estimatedPrice, 'primaryLinePrice'));
+  if (mainLineAfterAddons) {
+    // The WDO filing fills its fee from the visit's price only when the inspection is the visit's only paid line: an
+    // add-on line whose own net (after its line discount) is above $0 is a paid line; a free one leaves the table price.
+    const paidAddon = addonLines.some((line) => Number(line.price) > 0);
+    mainLine = await priceMainLine(parseMoneyInput(paidAddon ? (serviceRecord.base_price ?? estimatedPrice) : primaryBaseFallback, 'primaryLinePrice'));
     appointmentServiceLines[0].amount = mainLine.net || 0;
   }
   if (blankWdoMain) wdoCheck.line(mainLine.base);

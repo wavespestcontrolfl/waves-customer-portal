@@ -61,7 +61,12 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, co
   if (!row) return written ? { address: written } : { refusal: 'no customer and no service address' };
   const { customerAtBookingProperty, sameHome } = require('./one-time-pest-booking-price');
   const { addressForCustomer } = require('./customer-pricing-ai');
-  const at = await customerAtBookingProperty(row, propertyId, conn);
+  // No property named: a booking stamps the customer's sole active property when there is exactly one
+  // (customer-properties soleActivePropertyId), so that property is the home priced, even one not marked primary
+  // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
+  const activeRows = propertyId || written ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
+  const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
+  const at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
   // A written address that is not the customer's home is read on its own record: only the account's own tier calls it
   // commercial, never the home's records (pre-push audit P0).
