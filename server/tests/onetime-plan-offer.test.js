@@ -2463,4 +2463,90 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(summary).not.toHaveProperty('reminder');
     });
   });
+
+  describe('1-click office prefill metadata & GATE_ONETIME_PLAN_EXPANDED_SERVICES (2026-11-27)', () => {
+    const savedExpanded = process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES;
+    let notifyAdmin;
+
+    beforeEach(() => {
+      notifyAdmin = jest.spyOn(require('../services/notification-service'), 'notifyAdmin').mockResolvedValue({ id: 'n-exp' });
+    });
+
+    afterEach(() => {
+      notifyAdmin.mockRestore();
+      if (savedExpanded === undefined) delete process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES;
+      else process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES = savedExpanded;
+    });
+
+    test('raiseOfficeItem attaches provisionalEstimateUrl, waiveSetupFee, offerEndDate, and clean expanded-service copy', async () => {
+      await _test.defaultDeps().raiseOfficeItem({
+        job: { ...JOB, service_key: 'lawn_inspection' },
+        customer: CUSTOMER,
+        offerDay: '2030-03-05',
+        reason: 'expanded_service_review',
+      });
+      expect(notifyAdmin).toHaveBeenCalledTimes(1);
+      const [, , why, options] = notifyAdmin.mock.calls[0];
+      expect(why).toBe('Their Waves assessment was done Tue, Mar 5 and qualifies for a plan offer.');
+      expect(options.metadata).toMatchObject({
+        provisionalEstimateUrl: '/admin/estimates?tab=new&customerId=cust-1&planOfferJobId=job-1',
+        offerEndDate: '2030-04-04',
+        waiveSetupFee: true,
+        serviceKey: 'lawn_inspection',
+        reason: 'expanded_service_review',
+      });
+      expect(options.detail).toContain('Pest or Lawn plan');
+    });
+
+    test('gate OFF keeps qualifyingJobs strictly to pest and cockroach; gate ON widens sweep to 4 expanded services while keeping dueOfferOfJob restricted', async () => {
+      const { dueOfferOfJob } = require('../services/onetime-plan-offer');
+      delete process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES;
+      const offDb = fakeDb({});
+      await runOnetimePlanOfferJob({ now: NOW, deps: { ..._test.defaultDeps(), db: offDb } });
+      expect(offDb.queriesOf('scheduled_services as s')).toHaveLength(0);
+
+      // Gate ON in live mode: unconverted free Waves Assessment (no invoice) passes jobPaid & routes to office item, NEVER auto-sending pest template.
+      process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+      process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES = 'true';
+      const assessmentJob = { id: 'job-assess', customer_id: 'cust-1', service_day: '2030-03-05', job_day: '2030-03-05', service_key: 'lawn_inspection' };
+      const deps = liveWorld({
+        tables: {
+          'scheduled_services as s': [assessmentJob],
+          customers: [CUSTOMER],
+          invoices: [],
+        },
+        planStartBlocker: jest.fn(async () => null),
+      });
+      const summary = await runOnetimePlanOfferJob({ now: NOW, deps });
+      expect(summary.office).toBe(1);
+      expect(summary.sent).toBe(0);
+      expect(summary.reasons.expanded_service_review).toBe(1);
+      expect(deps.mintPlanStartEstimate).not.toHaveBeenCalled();
+      expect(deps.sendWithLedger).not.toHaveBeenCalled();
+      expect(deps.raiseOfficeItem).toHaveBeenCalledWith(expect.objectContaining({
+        job: assessmentJob,
+        reason: 'expanded_service_review',
+      }));
+
+      // Expanded service with has_plan blocker is held (not sent to office).
+      const blockerDeps = liveWorld({
+        tables: {
+          'scheduled_services as s': [assessmentJob],
+          customers: [CUSTOMER],
+          invoices: [],
+        },
+        planStartBlocker: jest.fn(async () => 'has_plan'),
+      });
+      const blockedSummary = await runOnetimePlanOfferJob({ now: NOW, deps: blockerDeps });
+      expect(blockedSummary.held).toBe(1);
+      expect(blockedSummary.reasons.has_plan).toBe(1);
+      expect(blockerDeps.raiseOfficeItem).not.toHaveBeenCalled();
+
+      // dueOfferOfJob still queries ONLY JOB_SERVICE_KEYS (never auto-minting pest-only offer for an inspection).
+      const dueDb = fakeDb({ 'scheduled_services as s': [] });
+      await dueOfferOfJob(dueDb, { jobId: '11111111-1111-4111-8111-111111111111', customerId: 'cust-1', now: NOW });
+      const whereIns = dueDb.queriesOf('scheduled_services as s')[0].calls.filter(([m]) => m === 'whereIn');
+      expect(whereIns.some(([, , vals]) => Array.isArray(vals) && vals.length === 2 && vals.includes('one_time_pest_control'))).toBe(true);
+    });
+  });
 });
