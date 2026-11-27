@@ -204,51 +204,61 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
 
 // The email ledger statuses (email_messages.status) of the account holder's own report email: delivered, or did not go through. Any other
 // status (a complaint, an unsubscribe, a row still queued) says nothing about the inbox, so the sentence names no address then.
-const REPORT_EMAIL_DELIVERED = new Set(['sent', 'delivered', 'opened', 'clicked']);
-const REPORT_EMAIL_UNDELIVERED = new Set(['bounced', 'bounce', 'dropped', 'blocked', 'failed']);
 // How many of the latest completed visits the texting AI may report on (the customer asks about "my report", the last visit or the one before).
 const REPORT_DELIVERY_VISITS = 2;
 const cleanAddress = (value) => String(value || '').trim().toLowerCase();
-// A delivery queue status (service_report_deliveries.status) as what the customer may be told: not yet, not sent, or sent.
-const DELIVERY_STATE = { queued: 'pending', sending: 'pending', skipped: 'not_sent', failed: 'not_sent', cancelled: 'not_sent', sent: 'sent' };
+// The ACCOUNT HOLDER's own report email (email_messages.status of the key service_report_ready:<record>:primary) decides what the customer
+// is told, never the queue row alone: the queue row is the whole send (several recipients), so a holder email that went out beside a
+// service contact's that failed leaves the row queued or failed (Codex #8660 r1). Reached the holder ('delivered'), reached the provider
+// and did not reach the inbox ('undelivered'), went out with a status that says nothing more ('unknown'), was never sent ('not_sent':
+// suppressed or the provider call failed), or not attempted yet ('no_attempt'). Any other status: no sentence.
+const HOLDER_EMAIL = {
+  sent: 'delivered', delivered: 'delivered', opened: 'delivered', clicked: 'delivered',
+  bounced: 'undelivered', bounce: 'undelivered', dropped: 'undelivered',
+  complained: 'unknown', spam_report: 'unknown', unsubscribed: 'unknown',
+  blocked: 'not_sent', failed: 'not_sent', queued: 'no_attempt',
+};
+const HOLDER_RECEIVED = new Set(['delivered', 'undelivered', 'unknown']);
+// A report the holder never received, by the queue row's status and the holder's own email ('none' = no row for it): "not yet" while the
+// queue still holds the send, "not emailed" once the queue gave up and the holder's row proves no send (or a skip, which sends to no one).
+// Every other pair (a queue row marked sent with no holder email, ...) disagrees: no sentence, a person answers.
+const NOT_RECEIVED = {
+  'queued:none': 'pending', 'queued:no_attempt': 'pending', 'queued:not_sent': 'pending',
+  'sending:none': 'pending', 'sending:no_attempt': 'pending', 'sending:not_sent': 'pending',
+  'skipped:none': 'not_sent', 'skipped:not_sent': 'not_sent', 'failed:not_sent': 'not_sent', 'cancelled:not_sent': 'not_sent',
+};
 
-// Where a sent report went, judged from the account holder's own report email row: never the address itself. null with no single row (the
-// report may have gone only to a service contact, or the ledger lost it): no sentence then, a person answers.
-function reportRecipient(messages, accountEmail) {
-  if (messages.length !== 1) return null;
-  const status = String(messages[0].status || '').toLowerCase();
-  const address = cleanAddress(messages[0].recipient_email_snapshot);
-  if (REPORT_EMAIL_UNDELIVERED.has(status)) return 'undelivered';
-  if (!REPORT_EMAIL_DELIVERED.has(status) || !address) return 'unknown';
-  return accountEmail && address === accountEmail ? 'account' : 'other_address';
-}
-
-// One visit's delivery fact, or null when a person answers: no delivery row (or, never by the unique key, two), an unknown status, no service
-// name or day, or a sent row with no send time or no ledger row for the account holder's own email.
+// One visit's delivery fact, or null when a person answers: no delivery row (or, never by the unique key, two), two holder emails, no
+// service name or day, a received email with no send time, or a queue row and a holder email that disagree.
 function visitDelivery(record, { rows, own, accountEmail }) {
   const { dateOnlyString } = require('../utils/date-only');
-  const state = rows.length === 1 ? DELIVERY_STATE[String(rows[0].status || '').toLowerCase()] : undefined;
-  const visit = { recordId: record.id, serviceType: String(record.service_type || ''), serviceDate: dateOnlyString(record.service_date), state };
-  if (!state || !visit.serviceType || !visit.serviceDate) return null;
-  if (state !== 'sent') return visit;
-  const sentAt = rows[0].sent_at ? new Date(rows[0].sent_at) : null;
-  const recipient = reportRecipient(own, accountEmail);
-  if (!(sentAt?.getTime() >= 0) || !recipient) return null;
-  return { ...visit, sentOn: require('../utils/datetime-et').etDateString(sentAt), recipient };
+  const queue = rows.length === 1 ? String(rows[0].status || '').toLowerCase() : '';
+  const holder = own.length ? (own.length === 1 && HOLDER_EMAIL[String(own[0].status || '').toLowerCase()]) : 'none';
+  const visit = { recordId: record.id, serviceType: String(record.service_type || ''), serviceDate: dateOnlyString(record.service_date) };
+  if (!queue || !holder || !visit.serviceType || !visit.serviceDate) return null;
+  if (!HOLDER_RECEIVED.has(holder)) return NOT_RECEIVED[`${queue}:${holder}`] ? { ...visit, state: NOT_RECEIVED[`${queue}:${holder}`] } : null;
+  // the day the holder's own email went out (its own sent_at, not the queue row's: the row may still be retrying another recipient)
+  const sentAt = own[0].sent_at ? new Date(own[0].sent_at) : null;
+  if (!(sentAt?.getTime() >= 0)) return null;
+  const address = cleanAddress(own[0].recipient_email_snapshot);
+  const recipient = holder === 'delivered' ? (accountEmail && address === accountEmail ? 'account' : 'other_address') : holder;
+  return { ...visit, state: 'sent', sentOn: require('../utils/datetime-et').etDateString(sentAt), recipient };
 }
 
 /**
  * Whether the service report of each of the customer's latest completed visits went out by email (service_report_deliveries, the durable
  * queue the report email is sent from: one email row per visit, service_report_v1), as { visits: [{ recordId, serviceType, serviceDate,
  * state, sentOn, recipient }] } in visit order (newest first):
- *   state      'sent' | 'pending' (queued or sending: not yet) | 'not_sent' (skipped, failed or cancelled)
- *   sentOn     the ET calendar day of sent_at (YYYY-MM-DD), for 'sent' only
+ *   state      'sent' (the holder's own email went out) | 'pending' (the queue still holds it and the holder's email has not gone out) |
+ *              'not_sent' (the queue gave up and the holder's own email provably did not go out, or a skip): see visitDelivery
+ *   sentOn     the ET calendar day of the holder's own email's sent_at (YYYY-MM-DD), for 'sent' only
  *   recipient  for 'sent': 'account' (the account holder's own report email was delivered, to the email address the account carries NOW),
  *              'other_address' (delivered, to an address the account no longer carries), 'undelivered' (that email did not go through),
  *              or 'unknown' (the holder's own email row carries a status that says nothing): the address is never returned.
  *              A sent report with NO ledger row for the holder's own email is left out (it may have gone only to a service contact).
- * A visit with no delivery row (a report sent before the queue, or none), an unknown status or a sent row with no send time is left out: a
- * person answers. Never an email address, never a technician note. { visits: [] } when nothing qualifies; null when a read failed. Never throws.
+ * A visit with no delivery row (a report sent before the queue, or none), a queue row and holder email that disagree (a row marked sent with
+ * no holder email: it may have gone only to a service contact) or an email with no send time is left out: a person answers. Never an email
+ * address, never a technician note. { visits: [] } when nothing qualifies; null when a read failed. Never throws.
  */
 async function loadReportDeliveryFacts(customerId, records, { db } = {}) {
   if (!customerId || !db) return null;
@@ -262,7 +272,7 @@ async function loadReportDeliveryFacts(customerId, records, { db } = {}) {
       db('service_report_deliveries').whereIn('service_record_id', ids).where({ channel: 'email', report_template_version: 'service_report_v1' })
         .select('service_record_id', 'status', 'sent_at'),
       // the account holder's own report email (email-delivery.js serviceReportEmailIdempotencyKey: one key per visit and recipient role)
-      db('email_messages').whereIn('idempotency_key', ids.map(ownKey)).select('idempotency_key', 'status', 'recipient_email_snapshot'),
+      db('email_messages').whereIn('idempotency_key', ids.map(ownKey)).select('idempotency_key', 'status', 'recipient_email_snapshot', 'sent_at'),
     ]);
     const accountEmail = cleanAddress(customer?.email);
     const out = visits.map((record) => visitDelivery(record, {

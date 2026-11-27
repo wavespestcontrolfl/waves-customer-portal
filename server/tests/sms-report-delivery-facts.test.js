@@ -39,17 +39,18 @@ function fakeDb({ email = ACCOUNT, deliveries = [], ledger = [], fail = null } =
   });
   return { db, calls };
 }
-const ledgerRow = (id, status = 'delivered', address = ACCOUNT) => ({ idempotency_key: `service_report_ready:${id}:primary`, status, recipient_email_snapshot: address });
+const ledgerRow = (id, status = 'delivered', address = ACCOUNT, sentAt = new Date('2026-11-21T15:00:00Z')) => ({ idempotency_key: `service_report_ready:${id}:primary`, status, recipient_email_snapshot: address, sent_at: sentAt });
 
 describe('loadReportDeliveryFacts', () => {
-  test('a sent report: the ET day it went out, and "account" only when the holder\'s own email was delivered to the address the account has now', async () => {
+  test('a sent report: the ET day the holder\'s own email went out, and "account" only when it was delivered to the address the account has now', async () => {
     const { db, calls } = fakeDb({
       deliveries: [
-        // 01:30 UTC on Nov 21 is the evening of Nov 20 in ET
-        { service_record_id: 'sr-1', status: 'sent', sent_at: new Date('2026-11-21T01:30:00Z') },
-        { service_record_id: 'sr-2', status: 'sent', sent_at: new Date('2026-10-20T15:00:00Z') },
+        // the queue row's own sent_at is not the day told: the holder's email row is
+        { service_record_id: 'sr-1', status: 'sent', sent_at: new Date('2026-11-25T15:00:00Z') },
+        { service_record_id: 'sr-2', status: 'sent', sent_at: new Date('2026-10-25T15:00:00Z') },
       ],
-      ledger: [ledgerRow('sr-1', 'opened', ' Pat.Doe@Example.com '), ledgerRow('sr-2', 'delivered', 'old.address@example.com')],
+      // 01:30 UTC on Nov 21 is the evening of Nov 20 in ET
+      ledger: [ledgerRow('sr-1', 'opened', ' Pat.Doe@Example.com ', new Date('2026-11-21T01:30:00Z')), ledgerRow('sr-2', 'delivered', 'old.address@example.com', new Date('2026-10-20T15:00:00Z'))],
     });
     const out = await loadReportDeliveryFacts('c1', [record('sr-1', '2026-11-20'), record('sr-2', '2026-10-20'), record('sr-3', '2026-09-20')], { db });
     expect(out).toEqual({ visits: [
@@ -73,7 +74,7 @@ describe('loadReportDeliveryFacts', () => {
         { service_record_id: 'n', status: 'sent', sent_at: new Date('2026-11-03T14:00:00Z') },
         { service_record_id: 'u', status: 'sent', sent_at: new Date('2026-11-04T14:00:00Z') },
       ],
-      ledger: [ledgerRow('b', 'bounced'), ledgerRow('u', 'complained')],
+      ledger: [ledgerRow('b', 'bounced', ACCOUNT, new Date('2026-11-02T14:00:00Z')), ledgerRow('u', 'complained')],
     });
     const one = async (id) => (await loadReportDeliveryFacts('c1', [record(id, '2026-11-01')], { db })).visits;
     expect(await one('q')).toEqual([expect.objectContaining({ state: 'pending' })]);
@@ -83,6 +84,43 @@ describe('loadReportDeliveryFacts', () => {
     expect(await one('n')).toEqual([]);
     expect(await one('u')).toEqual([expect.objectContaining({ state: 'sent', recipient: 'unknown' })]);
     expect(await one('none')).toEqual([]); // no queue row: a person answers
+  });
+
+  // Codex #8660 r1: the queue row is the whole send. A holder email that went out beside a service contact's that failed leaves the row
+  // queued (retrying) or failed: the holder's own row decides, and a pair that disagrees says nothing.
+  test('a partial send: the holder\'s own email decides; a queue row and holder email that disagree render nothing', async () => {
+    const at = new Date('2026-11-21T15:00:00Z');
+    const { db } = fakeDb({
+      deliveries: [
+        { service_record_id: 'pq', status: 'queued', sent_at: null }, // holder got it, a contact is being retried
+        { service_record_id: 'pf', status: 'failed', sent_at: null }, // holder got it, a contact failed for good
+        { service_record_id: 'fx', status: 'failed', sent_at: null }, // the holder's own email failed too
+        { service_record_id: 'fn', status: 'failed', sent_at: null }, // failed, no holder email row: unknown who got what
+        { service_record_id: 'sn', status: 'sent', sent_at: at }, // marked sent, no holder row: maybe only a service contact
+        { service_record_id: 'qr', status: 'queued', sent_at: null }, // a retry after the holder's first attempt failed
+        { service_record_id: 'sb', status: 'sent', sent_at: at }, // marked sent, yet the holder's email was suppressed
+        { service_record_id: 'sq', status: 'sent', sent_at: at }, // marked sent, the holder's email row still queued
+      ],
+      ledger: [ledgerRow('pq', 'delivered', ACCOUNT, at), ledgerRow('pf', 'opened', ACCOUNT, at), ledgerRow('fx', 'failed', ACCOUNT, null),
+        ledgerRow('qr', 'failed', ACCOUNT, null), ledgerRow('sb', 'blocked', ACCOUNT, null), ledgerRow('sq', 'queued', ACCOUNT, null)],
+    });
+    const one = async (id) => (await loadReportDeliveryFacts('c1', [record(id, '2026-11-20')], { db })).visits;
+    expect(await one('pq')).toEqual([expect.objectContaining({ state: 'sent', sentOn: '2026-11-21', recipient: 'account' })]);
+    expect(await one('pf')).toEqual([expect.objectContaining({ state: 'sent', sentOn: '2026-11-21', recipient: 'account' })]);
+    expect(await one('fx')).toEqual([expect.objectContaining({ state: 'not_sent' })]);
+    expect(await one('fn')).toEqual([]);
+    expect(await one('sn')).toEqual([]);
+    expect(await one('qr')).toEqual([expect.objectContaining({ state: 'pending' })]);
+    expect(await one('sb')).toEqual([]);
+    expect(await one('sq')).toEqual([]);
+  });
+
+  test('a received email with no send time, or two holder rows, render nothing', async () => {
+    const { db } = fakeDb({
+      deliveries: [{ service_record_id: 'nt', status: 'sent', sent_at: new Date() }, { service_record_id: 'two', status: 'sent', sent_at: new Date() }],
+      ledger: [ledgerRow('nt', 'delivered', ACCOUNT, null), ledgerRow('two'), ledgerRow('two')],
+    });
+    expect((await loadReportDeliveryFacts('c1', [record('nt', '2026-11-20'), record('two', '2026-11-19')], { db })).visits).toEqual([]);
   });
 
   test('an account with no email on file never reads as "account"', async () => {
