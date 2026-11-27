@@ -86,8 +86,12 @@ function assertRevocableLocked(locked, row) {
 // Exception: a received request whose automatic order landed AFTER that
 // receipt (ledger evidence.landedAfterReceive) — the order is still out, so
 // it is revocable; the request stays received (Codex r27 P1).
-function assertRequestInFlight(req, lockedEvidence) {
+function assertRequestInFlight(req, lockedEvidence, locked = null) {
   if (req?.status === 'received' && lockedEvidence.landedAfterReceive) return;
+  // A CANCELLED request whose automatic order may be out (a post-submit park, with or without placed_at) is the one
+  // block no other action clears: it holds every sibling claim for the product. Recording the vendor cancellation
+  // revokes the order and leaves the request cancelled.
+  if (req?.status === 'cancelled' && locked && require('./order-dispatch').isMaybePlaced(locked)) return;
   if (!req || !new Set(['open', 'ordered']).has(req.status)) {
     throw refusal('request_not_in_flight', `restock request is ${req?.status || 'missing'} — ${req?.status === 'received' ? 'the stock was received; nothing to revoke' : 'not an order in flight'}`, { requestStatus: req?.status || null });
   }
@@ -104,7 +108,7 @@ async function revokeOrder(row, { actorType = 'system', actorId = null } = {}) {
     const locked = await trx('vendor_orders').where({ id: row.id }).forUpdate().first('status', 'error', 'placed_at', 'evidence', 'external_order_number', 'amount_cents', 'updated_at');
     assertRevocableLocked(locked, row);
     const req = await trx('product_restock_requests').where({ id: row.restock_request_id }).forUpdate().first('status', 'metadata');
-    assertRequestInFlight(req, parseEvidence(locked.evidence));
+    assertRequestInFlight(req, parseEvidence(locked.evidence), locked);
     const revokedAt = new Date().toISOString();
     // The row's reconciliation bell ("cancel with the vendor or record the
     // revoke") is now obsolete: close the notification done and strip the
@@ -118,7 +122,7 @@ async function revokeOrder(row, { actorType = 'system', actorId = null } = {}) {
     await require('./order-dispatch').retireLedgerBells(trx, row.id, 'The vendor cancellation of this order was recorded');
     // Cancelled, not reopened (see the header). A received request stays
     // received — its stock was counted.
-    if (req.status !== 'received') await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
+    if (!['received', 'cancelled'].includes(req.status)) await trx('product_restock_requests').where({ id: row.restock_request_id }).update({
       status: 'cancelled',
       closed_at: new Date(),
       metadata: JSON.stringify({ ...parseEvidence(req.metadata), autoOrderCancelled: 'revoked_vendor_order', autoOrderCancelledAt: revokedAt, revokedVendorOrderId: row.id }),

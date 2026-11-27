@@ -1356,9 +1356,11 @@ async function settledFinalCents(conn, { ledger, placed, quoteCents }) {
 // Stages after a committed claim: price → binding total → vendor call →
 // post-submit detector → record. Every exit is a park, a record, or a
 // run-level throw after releasing the claim.
-// The eligible price row's price, in cents per package; null = none on file (the adapter then skips its check).
-const priceCents = (price) => { const n = Number(price); return Number.isFinite(n) && n > 0 ? Math.round(n * 100) : null; };
-const priceArgs = (adapter, pricing) => (adapter.checksPrice ? { priceOnFileCents: priceCents(pricing.price_amount ?? pricing.price) } : {});
+// The eligible price row's price per package in millionths of a dollar (its column has 4 decimals, so this is exact):
+// the adapter compares totals against it without rounding the price to cents first. A price above 0 is never 0 here,
+// so it can never switch the check off; null = none on file (the adapter then skips its check).
+const priceMicros = (price) => { const n = Number(price); return Number.isFinite(n) && n > 0 ? Math.max(1, Math.round(n * 1e6)) : null; };
+const priceArgs = (adapter, pricing) => (adapter.checksPrice ? { priceOnFileMicros: priceMicros(pricing.price_amount ?? pricing.price) } : {});
 const poNumberFor = (ledger) => `WAVES-${String(ledger.id).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8).toUpperCase()}`;
 
 async function dispatchClaimed(conn, claim, { registry, notify, now, env }) {
@@ -1760,6 +1762,7 @@ module.exports = {
   liveOrderSql,
   isMaybePlaced,
   isOutstandingOrder,
+  priceMicros,
   landedAfterReceiveFor,
   settleLandedAfterReceive,
   runVendorOrderDispatch,

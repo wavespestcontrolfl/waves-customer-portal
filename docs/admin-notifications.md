@@ -960,7 +960,7 @@ Read-only preview: `node server/scripts/weekly-buy-list.js [--json] [--date YYYY
 server's daily `runVendorOrderDispatch` reconcile step, no gate: it writes admin notifications only). One standing bell per request from the
 auto-reorder sweep (`source` `auto_reorder`, any status but received or cancelled) older than 7 days. Category `system` with `bell: true`, area
 Inventory, headline "Inventory — check the <product> restock, open N days", why "Open since Nov 23; no order recorded, check the Sticker Mule account." (an order may exist that the portal never recorded: an ambiguous submit, or one placed by hand) (or "marked ordered,
-nothing received"), link `/admin/inventory?tab=restock`, done-when `request_closed`, who `person`. dedupeKey `restock-open:<request id>`, raised
+nothing received"), link `/admin/inventory?tab=restock&requestId=<request id>` (the tab loads that row), done-when `request_closed`, who `person`. dedupeKey `restock-open:<request id>`, raised
 through `raiseAdminAlertWithReopen` with `refreshOnDedupe` and a `ringOnRefresh` that is always false: it rings once, the day count then refreshes
 the row quietly, and a person's Done stays done. Each run closes (`closeAdminAlertKeys`) the alert of a request that is received, cancelled or
 gone. It does not overlap `macWatchdog` (a SiteOne request the Mac did not touch for 30 hours goes to the office); this one reports any

@@ -616,13 +616,16 @@ async function readTotal(scope, selector, what, evidence) {
 // Compares the unit price SiteOne shows (a total over the package count) with the price on file (the eligible
 // vendor_pricing row the dispatcher chose, in cents per package). No price on file = no check, as before,
 // noted in evidence. A total that cannot be read never reaches here: readTotal already refuses it.
-function checkPriceJump({ priceOnFileCents, quantity, evidence }, totalCents, what) {
-  if (!(priceOnFileCents > 0)) { evidence.priceCheck = 'no_price_on_file'; return; }
+// The price on file is in millionths of a dollar (priceOnFileMicros, exact) and is never rounded: the limit is
+// quantity x price x 1.15 in whole micro-dollars against the total in cents x 10,000 (integers, all well under 2^53).
+function checkPriceJump({ priceOnFileMicros, quantity, evidence }, totalCents, what) {
+  if (!(priceOnFileMicros > 0)) { evidence.priceCheck = 'no_price_on_file'; return; }
   const seenUnitCents = Math.round(totalCents / quantity);
-  evidence.priceCheck = { onFileCents: priceOnFileCents, seenUnitCents, limitPercent: PRICE_JUMP_LIMIT_PERCENT, checked: what };
-  if (totalCents * 100 <= priceOnFileCents * quantity * (100 + PRICE_JUMP_LIMIT_PERCENT)) return;
+  evidence.priceCheck = { onFileMicros: priceOnFileMicros, seenUnitCents, limitPercent: PRICE_JUMP_LIMIT_PERCENT, checked: what };
+  if (totalCents * 10000 * 100 <= priceOnFileMicros * quantity * (100 + PRICE_JUMP_LIMIT_PERCENT)) return;
   const dollars = (c) => `$${(c / 100).toFixed(2)}`;
-  throw new RefusedError('price_jump', `SiteOne's ${what} shows ${dollars(seenUnitCents)} a package (total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${dollars(priceOnFileCents)} on file. The robot placed no order; check the SiteOne account before ordering by hand.`, evidence, totalCents);
+  const onFile = `$${(priceOnFileMicros / 1e6).toFixed(4).replace(/(\.\d{2}\d*?)0*$/, '$1')}`; // 4 decimals, trailing zeros past cents dropped
+  throw new RefusedError('price_jump', `SiteOne's ${what} shows ${dollars(seenUnitCents)} a package (total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${onFile} on file. The robot placed no order; check the SiteOne account before ordering by hand.`, evidence, totalCents);
 }
 
 async function verifyCartAndGate(run) {
@@ -1014,9 +1017,9 @@ async function place(args, opts = {}) {
   const evidence = { adapter: 'siteone-cdp', dryRun };
   // A { ok: false } verdict is an ordinary refusal. The cap check THROWING is
   // the environment's problem (run-level), never a parked order.
-  const priceOnFileCents = Number(args.priceOnFileCents) || null;
+  const priceOnFileMicros = Number(args.priceOnFileMicros) || null;
   const gate = async (cents, what) => {
-    checkPriceJump({ priceOnFileCents, quantity: qty, evidence }, cents, what); // before the cap check: a jump never reserves money
+    checkPriceJump({ priceOnFileMicros, quantity: qty, evidence }, cents, what); // before the cap check: a jump never reserves money
     let verdict;
     try { verdict = await args.beforeSubmit(cents); } catch (e) { throw runLevel(`siteone cdp: cap check failed at the ${what}: ${String(e.message).slice(0, 120)}`); }
     if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence, cents);
@@ -1047,7 +1050,7 @@ module.exports = {
   loginRequired: false,
   quotesAtPlace: true,
   packagedQuantity: true,
-  checksPrice: true, // the dispatcher passes priceOnFileCents (the eligible price row, cents per package) to this adapter
+  checksPrice: true, // the dispatcher passes priceOnFileMicros (the eligible price row, millionths of a dollar per package) to this adapter
   acceptsPoNumber: true, // the dispatcher passes WAVES-<ledger id>: the order can be found by it after an ambiguous click
   preSubmitTotal: 'vendor', // the review total is read live, immediately before the click
   configured,

@@ -1443,6 +1443,28 @@ test('in the fertilizer blackout the claim holds a product whose N shows only in
 });
 
 
+describe('price on file passed to an adapter that checks it', () => {
+  test('exact in millionths of a dollar: $1.0060 stays 1006000, a price under half a cent is never 0, none stays null', () => {
+    expect(dispatch.priceMicros('1.0060')).toBe(1006000);
+    expect(dispatch.priceMicros(47)).toBe(47000000);
+    expect(dispatch.priceMicros('0.0040')).toBe(4000);
+    expect(dispatch.priceMicros('0.0000001')).toBe(1);
+    expect(dispatch.priceMicros(0)).toBeNull();
+    expect(dispatch.priceMicros(null)).toBeNull();
+    expect(dispatch.priceMicros('x')).toBeNull();
+  });
+
+  test('place gets priceOnFileMicros from the eligible price row (price_amount first), only when the adapter checks prices', async () => {
+    mockState.pricing = { vendor_sku: '4242', price: '314.00', price_amount: '313.9950', quantity: '500' };
+    const checks = mockAdapter({ checksPrice: true });
+    await run(checks);
+    expect(checks.place).toHaveBeenCalledWith(expect.objectContaining({ priceOnFileMicros: 313995000 }));
+    const plain = mockAdapter();
+    await run(plain);
+    expect(plain.place.mock.calls[0][0]).not.toHaveProperty('priceOnFileMicros');
+  });
+});
+
 describe('open-request alert wiring (runVendorOrderDispatch)', () => {
   const { syncStaleRequestAlerts } = require('../services/procurement/stale-request-alert');
   beforeEach(() => syncStaleRequestAlerts.mockClear());

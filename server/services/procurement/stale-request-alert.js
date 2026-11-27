@@ -47,7 +47,7 @@ function specFor({ request, days }) {
       action,
       why: breaksAlertRules(why) ? `Open since ${MONTHS[since.month - 1]} ${since.day}; no order recorded, check the vendor account.` : why,
       severity: 'needs-you',
-      link: LINK,
+      link: `${LINK}&requestId=${request.id}`,
       subject: { type: 'check', id: key },
       doneWhen: 'request_closed',
       who: 'person',

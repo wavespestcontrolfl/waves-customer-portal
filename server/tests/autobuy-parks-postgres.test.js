@@ -20,7 +20,7 @@ jest.mock('../models/db', () => {
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/audit-log', () => ({ auditVendorOrder: jest.fn(async () => 'audit-1') }));
 
-const TABLES = ['products_catalog', 'product_restock_requests', 'vendor_orders', 'vendors', 'vendor_pricing', 'notifications'];
+const TABLES = ['products_catalog', 'product_restock_requests', 'vendor_orders', 'vendors', 'vendor_pricing', 'notifications', 'scheduled_services', 'customers'];
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = new Date();
 const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
@@ -186,6 +186,26 @@ jest.setTimeout(60000);
       expect(await run(second, a)).toMatchObject({ status: 'placed' });
     });
 
+    test('a CANCELLED request with such an order blocks sibling claims, and Record vendor cancellation (not a hand-written revokedAt) clears it', async () => {
+      const first = await fixture({ ledger: noStamp, requestOver: { status: 'cancelled' } });
+      const [second] = await mockConn('product_restock_requests').insert({
+        product_id: first.product.id, status: 'open', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id }),
+      }).returning('*');
+      const a = adapter();
+      expect(await run(second, a)).toMatchObject({ skipped: 'prior_order_unreconciled' });
+      // The Restock tab lists the blocked request (default queue), with the order marked outstanding.
+      const { listRestockRequests } = require('../services/inventory-restock-queue');
+      const listed = (await listRestockRequests({ status: 'active' })).requests.find((r) => r.id === first.request.id);
+      expect(listed.order).toMatchObject({ outstanding: true, placedAt: null, id: first.row.id });
+      const revoke = require('../services/procurement/order-revoke');
+      const out = await revoke.recordVendorCancellation(first.request.id, { orderId: first.row.id, version: listed.order.version, actorId: null });
+      expect(out).toEqual({ requestStatus: 'cancelled' });
+      expect((await mockConn('product_restock_requests').where({ id: first.request.id }).first()).status).toBe('cancelled');
+      expect((await mockConn('notifications').where({ id: first.note.id }).first()).done_at).not.toBeNull();
+      expect((await listRestockRequests({ status: 'active' })).requests.find((r) => r.id === first.request.id)).toBeUndefined();
+      expect(await run(second, a)).toMatchObject({ status: 'placed' });
+    });
+
     test('the month\'s spend counts such an order too', async () => {
       await fixture({ ledger: { ...noStamp, amount: 31400, createdAt: NOW } });
       await mockConn('vendor_orders').update({ created_at: NOW });
@@ -264,6 +284,13 @@ jest.setTimeout(60000);
       expect(badRow.body).toBe(`Open since ${badRow.body.slice(11, badRow.body.indexOf(';'))}; no order recorded, check the vendor account.`);
       const longRow = rows.find((r) => r.metadata.dedupeKey.endsWith(snake.request.id));
       expect(longRow.title).toBe('Inventory — restock request open 120 days');
+    });
+
+    test('the alert links to its own request, so the tab loads that row', async () => {
+      const { request } = await fixture({ requestOver: { created_at: old(9) } });
+      await sync(NOW);
+      const [row] = await alerts();
+      expect(row.link).toBe(`/admin/inventory?tab=restock&requestId=${request.id}`);
     });
 
     test('the next day refreshes the same row quietly, and a read row stays read', async () => {

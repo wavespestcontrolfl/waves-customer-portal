@@ -18,7 +18,12 @@ function restockMeta(raw) {
 // r29 P2). The Restock badge counts the same rows (countActiveRestockRequests).
 function whereActiveRestock(query, hasOrders) {
   if (!hasOrders) return query.whereIn('prr.status', ['open', 'ordered']);
-  return query.where((q) => q.whereIn('prr.status', ['open', 'ordered']).orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)"));
+  // A cancelled request whose automatic order may be out still blocks the product's next claim: it stays listed so
+  // Record vendor cancellation can clear it (the one outstanding-order rule, order-dispatch.js).
+  const { maybePlacedSql } = require('./procurement/order-dispatch');
+  return query.where((q) => q.whereIn('prr.status', ['open', 'ordered'])
+    .orWhereRaw("(prr.status = 'received' AND NULLIF(vo.evidence->>'landedAfterReceive', '') IS NOT NULL)")
+    .orWhereRaw(`(prr.status = 'cancelled' AND NULLIF(vo.evidence->>'revokedAt', '') IS NULL AND ${maybePlacedSql('vo')})`));
 }
 
 // The Restock badge: how many requests the active queue lists, so the badge
