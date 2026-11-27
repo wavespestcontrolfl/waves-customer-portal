@@ -552,6 +552,16 @@ function logMovedSlot(row) {
 // no booked move, and while it is the newest move nothing is stated. The booking that
 // ends the pick (the customer's pick or Auto-Dispatch) logs its own row.
 const CUSTOMER_PICK_LOG_MARKER = 'customer_pick';
+// The day a move left. A booking that ends a customer-pick hand-off left the provisional
+// due date, which was never booked: its "from" is the slot the hand-off took the visit
+// off (the hand-off row's own original date).
+function bookedFrom(last, logs) {
+  const sameVisit = logs.filter((l) => String(l.scheduled_service_id) === String(last.scheduled_service_id));
+  const before = sameVisit[sameVisit.indexOf(last) + 1];
+  const fromHandOff = before && before.notes === CUSTOMER_PICK_LOG_MARKER
+    && calendarDay(before.new_date) === calendarDay(last.original_date);
+  return fromHandOff ? before.original_date : last.original_date;
+}
 function provenLastMove(visit, logs) {
   const last = logs.find((l) => String(l.scheduled_service_id) === String(visit.id) && logMovedSlot(l));
   if (!last || last.notes === CUSTOMER_PICK_LOG_MARKER || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
@@ -662,7 +672,7 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
     listed.push(slot);
     const proof = provenLastMove(visit, logs || []);
     if (!proof) continue;
-    const fromDate = calendarDay(proof.last.original_date);
+    const fromDate = calendarDay(bookedFrom(proof.last, logs || []));
     const toDay = calendarDay(proof.last.new_date);
     moves.push({
       logId: String(proof.last.id),
@@ -700,19 +710,24 @@ function stoppedGroups(rows) {
   }));
 }
 async function loadStopped(conn, customerId, now) {
-  const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+  const { UPCOMING_SERVICE_STATUSES, LIVE_TRACK_STATES, isUpcomingListedRow } = require('./visit-context/statuses');
+  const today = etDateString(now);
   const rows = (await conn('scheduled_services')
     .where({ customer_id: customerId })
-    .where('scheduled_date', '>=', etDateString(now)).where('scheduled_date', '<=', etDateString(addETDays(now, SCHEDULE_HORIZON_DAYS)))
-    .whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES])
+    .where('scheduled_date', '>=', today).where('scheduled_date', '<=', etDateString(addETDays(now, SCHEDULE_HORIZON_DAYS)))
+    // plus today's tracker-live rows (any status): UPCOMING SERVICES lists them
+    .where((q) => q.whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES])
+      .orWhere((live) => live.where('scheduled_date', today).whereIn('track_state', LIVE_TRACK_STATES)))
     .orderBy('scheduled_date').orderBy('window_start').orderBy('id')
     // one customer's next two months: a backstop, far above a real account
     .limit(200)
-    .select('id', 'service_type', 'scheduled_date', 'status', 'cancelled_at')) || [];
+    .select('id', 'service_type', 'scheduled_date', 'status', 'track_state', 'cancelled_at')) || [];
   // A skipped or cancelled row the schedule replaced (a live row of the same service on
   // the same day) is not news: the live visit is in UPCOMING SERVICES.
   const dayKey = (r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`;
-  const replaced = new Set(rows.filter((r) => UPCOMING_SERVICE_STATUSES.includes(r.status)).map(dayKey));
+  // UPCOMING SERVICES' own row rule: a replacement en route today that still reads
+  // rescheduled replaces the cancel too
+  const replaced = new Set(rows.filter((r) => isUpcomingListedRow(r, today)).map(dayKey));
   return stoppedGroups(rows.filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(dayKey(r)))).slice(0, SCHEDULE_STOPPED_LIMIT);
 }
 // `listed`: the listed visits whose slot held, as { id, date, start } in UPCOMING SERVICES'

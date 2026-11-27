@@ -174,6 +174,17 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     expect((await read([now], [booked, handOff], [listedFor(now)])).moves.map((m) => m.logId)).toEqual(['rl-9']);
   });
 
+  test('a booking that ends a customer-pick hand-off moved from the booked slot, never the provisional due date', async () => {
+    const handOff = move({ id: 'rl-1', original_date: '2026-11-27', new_date: '2026-12-04', new_window: null, notes: 'customer_pick', created_at: new Date('2026-11-24T15:00:00Z') });
+    const booked = move({ id: 'rl-9', original_date: '2026-12-04', original_window: null, new_date: '2026-12-05', new_window: '13:00:00-14:00:00', created_at: new Date('2026-11-25T15:00:00Z') });
+    const now = visit({ scheduled_date: '2026-12-05' });
+    const [m] = (await read([now], [booked, handOff], [listedFor(now)])).moves;
+    expect(m).toMatchObject({ logId: 'rl-9', fromDate: '2026-11-27', toDate: '2026-12-05', sameDay: false });
+    // an ordinary move after an ordinary move keeps its own "from"
+    const plain = move({ id: 'rl-1', original_date: '2026-11-27', new_date: '2026-12-04' });
+    expect((await read([now], [booked, plain], [listedFor(now)])).moves[0].fromDate).toBe('2026-12-04');
+  });
+
   test('a cross-day row that logged no window (the package date edit) is a day-only fact, whatever start the row holds', async () => {
     const dateOnly = move({ original_window: null, new_window: null });
     const out = await read([visit()], [dateOnly]);
@@ -202,6 +213,16 @@ describe('loadScheduleChanges: skipped and cancelled', () => {
       { visitIds: ['v2'], type: 'Lawn Care', status: 'skipped', date: '2026-12-10', lastDate: '2026-12-10', count: 1 },
       { visitIds: ['v4'], type: 'Pest Control', status: 'cancelled', date: '2026-12-18', lastDate: '2026-12-18', count: 1 },
     ]);
+  });
+
+  test('a replacement en route today whose status still reads rescheduled hides the cancel (UPCOMING SERVICES lists it)', async () => {
+    const today = '2026-11-26';
+    const cancelled = visit({ id: 'v3', status: 'cancelled', scheduled_date: today });
+    const live = visit({ id: 'v1', status: 'rescheduled', track_state: 'on_property', scheduled_date: today });
+    expect((await read([live, cancelled], [], [])).stopped).toEqual([]);
+    // the tracker is idle: a rescheduled row replaces nothing
+    const idle = visit({ id: 'v1', status: 'rescheduled', track_state: null, scheduled_date: today });
+    expect((await read([idle, cancelled], [], [])).stopped.map((g) => g.visitIds)).toEqual([['v3']]);
   });
 
   test('the visits one cancel stopped together (a cancelled plan) are one fact', async () => {
