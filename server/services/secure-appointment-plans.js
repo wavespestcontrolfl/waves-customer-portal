@@ -1544,6 +1544,7 @@ async function applyPerApplicationLaneStamp({ customerId, scheduledServiceId }) 
 }
 
 module.exports = {
+  customerHasCommercialChannel,
   recordSetupFeeClaimForInvoice,
   settledSetupClaimForInvoice,
   settledSetupClaimForEstimate,
