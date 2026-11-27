@@ -308,8 +308,8 @@ const REGISTER_RULES = {
   ],
 };
 
-function buildSystemPrompt({ firstName, today, register = 'friendly' }) {
-  const who = firstName || 'the customer';
+function buildSystemPrompt({ firstName, today, register = 'friendly' } = {}) {
+  const who = firstName || 'the named caller in the CALLER TO REACH block below';
   return [
     `You are ${agentName()}, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.`,
     // The current ET calendar date rides the prompt (gh prb-r11): without
@@ -872,11 +872,23 @@ class CollectionsConversation {
       logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
     }
     this._promptRegister = this._ctx.register;
-    this._systemBlocks = [{
-      type: 'text',
-      text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today, register: this._ctx.register }),
-      cache_control: { type: 'ephemeral' },
-    }];
+    const who = String(this._ctx.customer.first_name || '').replace(/[\r\n]+/g, ' ').trim() || 'the customer';
+    // Block 0 is identical across every collections call in the same register
+    // on the same ET day — kept 1h so calls arriving 5–60 minutes apart reuse
+    // the shared prefix. The caller's first name rides Block 1 (5m TTL) so
+    // turns within this call stay cached without busting Block 0 across callers.
+    this._systemBlocks = [
+      {
+        type: 'text',
+        text: buildSystemPrompt({ today, register: this._ctx.register }),
+        cache_control: { type: 'ephemeral', ttl: '1h' },
+      },
+      {
+        type: 'text',
+        text: `CALLER TO REACH: ${who}`,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
   }
 
   async _modelTurn() {

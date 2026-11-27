@@ -1476,12 +1476,21 @@ describe('account-level disclosure + registers', () => {
     await convo._contextReady;
     expect(convo._ctx.register).toBe('friendly');
     convo._ensureSystemBlocks();
+    expect(convo._systemBlocks).toHaveLength(2);
     expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FRIENDLY REMINDER/);
+    expect(convo._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
+    expect(convo._systemBlocks[0].text).not.toContain(convo._ctx.customer.first_name);
+    expect(convo._systemBlocks[1]).toEqual({
+      type: 'text',
+      text: `CALLER TO REACH: ${convo._ctx.customer.first_name}`,
+      cache_control: { type: 'ephemeral' },
+    });
     convo.verified = true;
     await convo._toolGetBalance();
     expect(convo._ctx.register).toBe('firm');
     expect(convo._systemBlocks[0].text).toMatch(/REGISTER: FIRM/);
     expect(convo._systemBlocks[0].text).not.toMatch(/REGISTER: FRIENDLY/);
+    expect(convo._systemBlocks[0].cache_control).toEqual({ type: 'ephemeral', ttl: '1h' });
   });
 
   test('firm/final registers speak a consequence ONLY when the state is true — read from the DB at disclosure', async () => {
