@@ -104,6 +104,20 @@ function contactPhoneForCall(row) {
   return resolveCallContactPhone(row);
 }
 
+function applyCohortVersionFilter(qb, { liveCatalogNames, aps, primaryVersions }) {
+  if (ROUTE_PROVIDER !== 'gemini') {
+    qb.whereIn('ai_extraction_prompt_version', primaryVersions);
+    return;
+  }
+  const fallbackProvider = 'anthropic';
+  const fallbackLive = extractionPromptVersion(liveCatalogNames, { systemLayout: systemLayoutLive(), provider: fallbackProvider });
+  const fallbackVersions = aps
+    ? [apsCohortVersion(liveCatalogNames, { provider: fallbackProvider })]
+    : [...new Set([CURRENT_PROMPT_VERSION, fallbackLive])];
+  qb.where((sub) => sub.where('ai_extraction_model', CURRENT_PRIMARY).whereIn('ai_extraction_prompt_version', primaryVersions))
+    .orWhere((sub) => sub.whereNot('ai_extraction_model', CURRENT_PRIMARY).whereIn('ai_extraction_prompt_version', fallbackVersions));
+}
+
 async function main({ aps = false, apsPass = null } = {}) {
   const db = dbConn();
   if (aps) console.log('\n=== -aps cohort (agent-proposed-slot prompt; same checks, only its own rows) ===');
@@ -134,11 +148,13 @@ async function main({ aps = false, apsPass = null } = {}) {
   const liveCatalogNames = bookableCallServices.map((s) => s.name).filter(Boolean);
   const { extractionPromptVersion } = require('../services/prompts/call-extraction-v1');
   // GATE_CALL_EXTRACTION_SYSTEM_PROMPT: with the gate on the processor stamps the system-layout
-  // cohort (`s`), so that is the live main cohort this run must match.
-  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames, { systemLayout: systemLayoutLive() });
+  // cohort (`s`), scoped to Gemini's systemInstruction channel hash ONLY for Gemini rows so
+  // OpenAI and Anthropic cohorts retain their existing hashes unchanged.
+  const LIVE_PROMPT_VERSION = extractionPromptVersion(liveCatalogNames, { systemLayout: systemLayoutLive(), provider: ROUTE_PROVIDER });
+  const primaryVersions = aps ? [apsCohortVersion(liveCatalogNames)] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])];
   const allRouteRows = await baseQuery()
     .whereIn('ai_extraction_model', CURRENT_ROUTE_MODELS)
-    .whereIn('ai_extraction_prompt_version', aps ? [apsCohortVersion(liveCatalogNames)] : [...new Set([CURRENT_PROMPT_VERSION, LIVE_PROMPT_VERSION])])
+    .where((qb) => applyCohortVersionFilter(qb, { liveCatalogNames, aps, primaryVersions }))
     // ai_extraction (the V1 legacy flat record) feeds demoteFailOpenOnV1AddressConflict,
     // exactly as the live path passes `extracted` to it.
     // metadata + source: resolveCallContactPhone needs both to resolve a
@@ -549,8 +565,8 @@ function systemLayoutLive() {
   return require('../config/feature-gates').callExtractionSystemPromptLive() === true;
 }
 
-function apsCohortVersion(liveCatalogNames) {
-  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true, systemLayout: systemLayoutLive() });
+function apsCohortVersion(liveCatalogNames, { provider = ROUTE_PROVIDER } = {}) {
+  return extractionPromptVersion(liveCatalogNames, { agentProposedSlotCommitment: true, systemLayout: systemLayoutLive(), provider });
 }
 
 // The whole run: with the gate on, the -aps cohort is evaluated first (its own full report) and

@@ -10881,21 +10881,26 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     // accounting (v2-promotion-readiness) derives failed fallback attempts
     // from these rows, since a both-legs-failed row stamps the primary model.
     const allSchema = failures.length > 0 && failures.every((f) => f.reason === 'extraction_schema_invalid');
+    const promptVersion = extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider });
     return allSchema
-      ? { status: 'schema_failed', extraction: null, errors: failures }
-      : { status: 'parse_failed', extraction: null, errors: failures.length ? failures : [{ message: res.reason || 'dispatch_failed' }] };
+      ? { status: 'schema_failed', extraction: null, errors: failures, promptVersion }
+      : { status: 'parse_failed', extraction: null, errors: failures.length ? failures : [{ message: res.reason || 'dispatch_failed' }], promptVersion };
   }
 
   // Serialize the object the dispatcher VALIDATED, not the raw text: the
   // dispatcher's loose parser repairs preambles/trailing commas, so a
   // repaired schema-valid response must not re-fail finalize's strict parse.
-  return finalizeV2Extraction(JSON.stringify(res.json), {
-    callId: opts.callId || null,
-    extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
-    // The catalog block is part of the rendered prompt, so the stamped
-    // version must carry its hash or cohorts mix under one version.
-    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout }),
-  });
+  const promptVersion = extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout, provider: res.provider || CALL_EXTRACTION_ROUTE.primary.provider });
+  return {
+    ...finalizeV2Extraction(JSON.stringify(res.json), {
+      callId: opts.callId || null,
+      extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
+      // The catalog block is part of the rendered prompt, so the stamped
+      // version must carry its hash or cohorts mix under one version.
+      promptVersion,
+    }),
+    promptVersion,
+  };
 }
 
 // ── Lead synopsis: the gate sentence and the record facts ──
@@ -13105,7 +13110,7 @@ const CallRecordingProcessor = {
     // GATE_CALL_EXTRACTION_SYSTEM_PROMPT, read ONCE for this pass for the same reason: the
     // request layout and every prompt-version stamp for this call use this one value.
     const systemPromptLayout = require('../config/feature-gates').callExtractionSystemPromptLive() === true;
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout });
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
@@ -13250,7 +13255,7 @@ const CallRecordingProcessor = {
           // Provenance = the model that actually produced the output (the
           // fallback leg stamps its own model), not the configured primary.
           ai_extraction_model: v2Result.extraction?.meta?.extraction_model || CALL_EXTRACTION_ROUTE.primary.model,
-          ai_extraction_prompt_version: v2PromptVersion,
+          ai_extraction_prompt_version: v2Result.promptVersion,
           updated_at: new Date(),
         };
         // Token-fenced: this write lands right after the longest provider
