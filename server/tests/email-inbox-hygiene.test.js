@@ -360,6 +360,8 @@ describe('collectUnansweredNudges', () => {
     expect(gmailClient.getThread).toHaveBeenCalledTimes(1);
     expect(gmailClient.getThread).toHaveBeenCalledWith('t-real');
     expect(db.raw.mock.calls[0][0]).toContain("LOWER(from_address) = 'localservices-noreply@google.com'");
+    expect(db.raw.mock.calls[0][0]).toContain('potential\\s+customer\\M');
+    expect(db.raw.mock.calls[0][0]).not.toContain('potential\\s+customer\\b');
   });
 });
 

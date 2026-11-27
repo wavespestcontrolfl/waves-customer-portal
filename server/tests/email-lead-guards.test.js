@@ -506,6 +506,32 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     );
   });
 
+  test('executeAutoAction does not exempt unauthenticated spam spoofing Google LSA call receipts from quarantine', async () => {
+    const inboxHygiene = require('../services/email/inbox-hygiene');
+    const quarantineSpy = jest.spyOn(inboxHygiene, 'quarantineMessage').mockResolvedValueOnce(undefined);
+    const knownSpy = jest.spyOn(inboxHygiene, 'isKnownSender').mockResolvedValueOnce({ known: false });
+    try {
+      const state = setupDb();
+      const result = await executeAutoAction(
+        makeEmail({
+          from_address: 'localservices-noreply@google.com',
+          from_name: 'Local Services by Google',
+          subject: 'New call from a potential customer',
+          authentication_results: 'mx.google.com; spf=fail; dkim=fail; dmarc=fail',
+        }),
+        makeClassification({ category: 'spam' }),
+      );
+      expect(result).toEqual({ ok: true });
+      expect(quarantineSpy).toHaveBeenCalledTimes(1);
+      expect(emailUpdates(state)).not.toContainEqual(
+        expect.objectContaining({ auto_action: 'lead_skipped_automated_sender' }),
+      );
+    } finally {
+      quarantineSpy.mockRestore();
+      knownSpy.mockRestore();
+    }
+  });
+
   test('Google Local Services non-call inquiry from localservices-noreply@google.com still reaches contact/review checks (never stores automated sender or drafts reply)', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
     const gmailClient = require('../services/email/gmail-client');

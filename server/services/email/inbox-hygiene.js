@@ -766,7 +766,7 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
          AND COALESCE(auto_action, '') <> 'lead_skipped_automated_sender'
          AND NOT (
            LOWER(from_address) = 'localservices-noreply@google.com'
-           AND COALESCE(subject, '') ~* '^\\s*(new|missed)\\s+call\\s+from\\s+a\\s+potential\\s+customer\\b'
+           AND COALESCE(subject, '') ~* '^\\s*(new|missed)\\s+call\\s+from\\s+a\\s+potential\\s+customer\\M'
          )
        ORDER BY received_at ASC
        LIMIT ${pageSize} OFFSET ${page * pageSize}`,

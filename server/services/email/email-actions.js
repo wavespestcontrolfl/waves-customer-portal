@@ -419,12 +419,16 @@ async function executeAutoAction(email, classification) {
       // commits on the outcome must not read it as a retryable failure.
       return { ok: true, skipped: true };
     }
-    if (isGoogleLsaCallReceipt(email.from_address, email.subject)) {
+    // Non-destructive categories only: destructive categories (spam,
+    // marketing_newsletter) already check aligned authentication in
+    // shouldSkipAutoAction above, so spoofed spam bearing Google's From and
+    // Subject still reaches quarantine.
+    if (!DESTRUCTIVE_CATEGORIES.has(classification.category) && isGoogleLsaCallReceipt(email.from_address, email.subject)) {
       await db('emails').where({ id: email.id }).update({
         auto_action: 'lead_skipped_automated_sender',
         updated_at: new Date(),
       });
-      logger.info(`[email-actions] Skipped ${classification.category} auto-action for Google LSA call receipt (email ${email.id})`);
+      logger.info(`[email-actions] Skipped auto-action for Google LSA call receipt (email ${email.id})`);
       return { ok: true, skipped: true };
     }
     switch (classification.category) {
