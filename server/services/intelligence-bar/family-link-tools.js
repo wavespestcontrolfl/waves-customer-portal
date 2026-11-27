@@ -44,7 +44,7 @@ const FAMILY_LINK_TOOLS = [
   {
     name: 'link_customer_family',
     description: `Link TWO customer profiles as the "Same family" (household): the customer page's Same family Link button. Use it when a relative or household member has their own profile (their own home, phone or plan) and the operator wants it tied to another customer's account. The first call returns a PREVIEW and writes nothing: both profiles, the family each is in now, and the family after the link. The operator approves on the confirmation card; the confirmed run re-checks it and refuses if anything changed.
-Effects: the linked profiles count as one multi-home family, so the 10% Multi-Home Discount can apply across their homes. Nothing is sent to anyone, and no price, visit, invoice, Bill-To payer, contact or login changes. If one profile is already in a family, the other joins that family.
+Effects: the linked profiles count as one multi-home family, so the 10% Multi-Home Discount can apply across their homes. Confirming sends nothing to anyone and changes no price, visit, invoice, Bill-To payer, contact or login; when the automatic Multi-Home Discount job is on, the card also says what it may do later (add the 10% to the other profile's upcoming visits, and its one email). If one profile is already in a family, the other joins that family.
 Refused with the reason: a profile not found or not active, the same profile twice, or the two profiles already in two different families (unlink one first with unlink_customer_family). Owner login only.
 Pass customer_id (the account) and other_customer_id (the family member's profile); find both with query_customers first. A family member with NO profile of their own is not this tool: add them as a contact on the account (the customer page Contacts section), or create their profile first. Billing one profile to another person is set_customer_bill_to.
 Use for: ${USE_FOR_LINK}.`,
@@ -76,7 +76,20 @@ Use for: "unlink her from that family", "remove this profile from the household 
 ];
 
 const refusal = (error, code, extra = {}) => ({ error, code, ...extra });
-const NOTHING_SENT = { kind: 'comms', text: 'Nothing is sent: no text, email or call goes to anyone.' };
+const NOTHING_SENT = { kind: 'comms', text: 'Confirming sends nothing: no text, email or call goes to anyone.' };
+
+// What the Multi-Home Discount jobs may do LATER because of the link (multi-home-discount-apply.js and
+// multi-home-discount-email.js), read from their own gates at call time so the card states only what is switched on.
+function laterEffects() {
+  const gates = require('../../config/feature-gates');
+  if (!gates.multiHomeAllHomesLive()) return [];
+  return [
+    { kind: 'billing', text: 'Later, automatically: if either profile started a plan with the Multi-Home Discount in the last 14 days, a job runs every 15 minutes and may add the same 10% to the other profile\'s upcoming visits. Unlinking does not take an added discount off.' },
+    gates.multiHomeDiscountEmailLive()
+      ? { kind: 'comms', text: 'Later, automatically: once that job has added the discount to every home, the paying address gets one "Your Multi-Home Discount is on" email.' }
+      : null,
+  ].filter(Boolean);
+}
 const NO_MONEY = { kind: 'operational', text: 'No price, visit, invoice, Bill-To payer, contact or login changes now.' };
 
 function displayName(row) {
@@ -163,10 +176,11 @@ async function buildLinkPlan(input, { database = db } = {}) {
       { kind: 'operational', text: 'Together they count as one multi-home family: the 10% Multi-Home Discount can apply across their homes under its usual rules.' },
       NO_MONEY,
       NOTHING_SENT,
-      { kind: 'operational', text: `Undo: Unlink ${joiner.name} (the profile that joins) in its Same family section, or ask the bar to unlink it.` },
+      ...laterEffects(),
+      { kind: 'operational', text: `Undo the link (not a discount already added): Unlink ${joiner.name} (the profile that joins) in its Same family section, or ask the bar to unlink it.` },
     ],
     sends_to_customer: false,
-    _version: { op: 'link', account: pinOf(mine), other: pinOf(other) },
+    _version: { op: 'link', account: pinOf(mine), other: pinOf(other), later: laterEffects().map((e) => e.text) },
     note: 'PREVIEW ONLY — nothing was changed. Confirm links exactly these two profiles; if anything changed it refuses.',
   };
 }

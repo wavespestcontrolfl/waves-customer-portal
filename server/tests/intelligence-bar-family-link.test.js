@@ -140,12 +140,31 @@ describe('link_customer_family', () => {
     expect(texts).toEqual(expect.arrayContaining([
       'Account: Robin Sample, 100 Test Ln, Bradenton, FL 34201',
       'Family member: Casey Sample, 200 Demo Ave, Sarasota, FL 34231',
-      'Nothing is sent: no text, email or call goes to anyone.',
+      'Confirming sends nothing: no text, email or call goes to anyone.',
       'No price, visit, invoice, Bill-To payer, contact or login changes now.',
     ]));
     expect(pinnedDisplay('link_customer_family', card)).toEqual({ account: 'Robin Sample', family_member: 'Casey Sample', family_after: 2, prices_change: 'no', sends_to_customer: 'nothing' });
     const contract = buildContract({ toolName: 'link_customer_family', params: { customer_id: A, other_customer_id: B }, displayParams: {}, preview: card, summary: 'x' });
     expect(JSON.stringify(contract)).toContain('Family member: Casey Sample');
+  });
+
+  it('names the automatic discount job and email only while their gates are on, and pins them', async () => {
+    const plain = await link();
+    expect(cardLines('link_customer_family', plain).some((l) => l.text.startsWith('Later, automatically'))).toBe(false);
+    process.env.GATE_MULTI_HOME_ALL_HOMES = 'true';
+    process.env.GATE_MULTI_HOME_DISCOUNT_EMAIL = 'true';
+    try {
+      const card = await link();
+      const later = cardLines('link_customer_family', card).filter((l) => l.text.startsWith('Later, automatically'));
+      expect(later.map((l) => l.kind)).toEqual(['billing', 'comms']);
+      expect(card._version.later).toHaveLength(2);
+      // A gate flipped between the card and Confirm is drift.
+      delete process.env.GATE_MULTI_HOME_DISCOUNT_EMAIL;
+      expect(await confirmLink(card)).toMatchObject({ code: 'preview_changed' });
+    } finally {
+      delete process.env.GATE_MULTI_HOME_ALL_HOMES;
+      delete process.env.GATE_MULTI_HOME_DISCOUNT_EMAIL;
+    }
   });
 
   it('shows the existing family when one side is already linked', async () => {
@@ -154,7 +173,7 @@ describe('link_customer_family', () => {
     expect(card.joins_existing).toBe(true);
     expect(card.family_after).toHaveLength(3);
     // The undo names the profile that joins (unlinking an original member would leave the newcomer linked).
-    expect(cardLines('link_customer_family', card).map((l) => l.text)).toContain('Undo: Unlink Robin Sample (the profile that joins) in its Same family section, or ask the bar to unlink it.');
+    expect(cardLines('link_customer_family', card).map((l) => l.text)).toContain('Undo the link (not a discount already added): Unlink Robin Sample (the profile that joins) in its Same family section, or ask the bar to unlink it.');
   });
 
   it.each([
