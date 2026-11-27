@@ -214,8 +214,7 @@ describe('the model verdict and the proof check', () => {
     await agent.runAlertClearAgent({ now: NOW, deps });
     return { deps, row: saved(deps)[0] };
   };
-  // At the slot the offers below name: Friday (2026-11-27) at 10 am.
-  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked', proof: 'booking', at: after(45), line: 'VISIT created after the alert', slot: { day: '2026-11-27', start: '10:00', end: '11:00' } });
+  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked', proof: 'booking', at: after(45), line: 'VISIT created after the alert' });
 
   test('answered with a real record after the alert is kept, with that record as proof', async () => {
     const { row } = await runWith([ev(), booking], { outcome: 'answered', why: 'visit booked for Friday', proof: 'E2' });
@@ -239,12 +238,15 @@ describe('the model verdict and the proof check', () => {
     expect(row).toMatchObject({ outcome: 'nothing_to_answer', source: 'ai' });
   });
 
-  test('a bare yes to an offered time with no booking stays still_owed; with a booking it may close', async () => {
+  test('a bare yes to an offered time closes only when the model names the booking as the answer', async () => {
     const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' };
     const none = await runWith([], { outcome: 'nothing_to_answer', why: 'customer said yes', proof: null }, { reply });
     expect(none.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
-    const booked = await runWith([booking], { outcome: 'nothing_to_answer', why: 'yes to a booked time', proof: null }, { reply });
-    expect(booked.row.outcome).toBe('nothing_to_answer');
+    // A booking exists, but "nothing to answer" names no record: the model never said the booking is the answer.
+    const unnamed = await runWith([booking], { outcome: 'nothing_to_answer', why: 'yes to a booked time', proof: null }, { reply });
+    expect(unnamed.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+    const named = await runWith([booking], { outcome: 'answered', why: 'booked Friday at 10', proof: 'E1' }, { reply });
+    expect(named.row).toMatchObject({ outcome: 'answered', proof_id: 'v1' });
   });
 
   test('why is cut to 14 words and card numbers are masked in what the model sees', () => {
@@ -520,38 +522,22 @@ describe('the booking requirement holds on every path', () => {
     await agent.runAlertClearAgent({ now: NOW, deps });
     return { deps, row: saved(deps)[0] };
   };
-  // At the offered slot: Friday (2026-11-27) at 10 am.
-  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked:pending', proof: 'booking', at: after(45), line: 'VISIT created', slot: { day: '2026-11-27', start: '10:00', end: '11:00' } });
-  const staffMove = (slot) => ev({ type: 'reschedule', id: 'rl-1', key: 'reschedule:rl-1', proof: 'date_change', at: after(50), line: 'VISIT MOVED by Waves staff', slot });
+  const booking = ev({ type: 'visit', id: 'v1', key: 'visit:v1:booked:pending', proof: 'booking', at: after(45), line: 'VISIT created' });
+  const staffMove = ev({ type: 'reschedule', id: 'rl-1', key: 'reschedule:rl-1', proof: 'date_change', at: after(50), line: 'VISIT MOVED by Waves staff' });
+  // Listed ids follow time: the staff text (minute 30) is E1, the booking or the move is E2.
+  const judgeNames = (ref) => jest.fn(async () => ({ outcome: 'answered', why: 'done', proof: ref, model: 'm' }));
 
-  test('a plain-rule staff text after a bare yes to an offer is still_owed until a booking exists', async () => {
-    const none = await run([staffText()]);
-    expect(none.row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
-    const booked = await run([staffText(), booking]);
-    expect(booked.row.outcome).toBe('answered');
+  // An unrelated move (9 to 11 after a yes to 3 PM) once lifted this guard and let a plain staff text close the yes. No rule closes a
+  // yes now: the model judges the offered day and time and must name the booking or move it judged.
+  test('no plain rule closes a bare yes to an offer: a staff text goes to the model, and an answer that names it is held', async () => {
+    const { deps, row } = await run([staffText(), staffMove], {}, judgeNames('E1'));
+    expect(deps.judge).toHaveBeenCalledTimes(1);
+    expect(row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
   });
 
-  test.each([
-    ['a staff move to 11 that Friday', staffMove({ day: '2026-11-27', start: '11:00', end: '12:00' })],
-    ['a booking at 10 on Saturday', { ...booking, slot: { day: '2026-11-28', start: '10:00', end: '11:00' } }],
-    ['a staff move that set no time', staffMove({ day: '2026-11-27', start: null, end: null })],
-    ['a booking with no slot', { ...booking, slot: null }],
-  ])('the offer named Friday at 10 am: %s does not answer the yes', async (_n, record) => {
-    expect((await run([staffText(), record])).row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
-  });
-
-  test('a yes to 3 PM, then a staff move from 9 to 11 that day, is still owed; a move to 3 PM answers it', async () => {
-    const reply3 = { lastBody: 'yes', prevOutbound: 'Can we come at 3 PM instead?' };
-    const toEleven = await run([staffText(), staffMove({ day: '2026-11-27', start: '11:00', end: '12:00' })], { reply: reply3 });
-    expect(toEleven.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
-    const toThree = await run([staffText(), staffMove({ day: '2026-11-27', start: '15:00', end: '16:00' })], { reply: reply3 });
-    expect(toThree.row.outcome).toBe('answered');
-  });
-
-  test('an offer that names a day and no time is met by a staff move to that day, even one that set no time', async () => {
-    const replyDay = { lastBody: 'ok', prevOutbound: 'Does Friday work for you?' };
-    expect((await run([staffText(), staffMove({ day: '2026-11-27', start: null, end: null })], { reply: replyDay })).row.outcome).toBe('answered');
-    expect((await run([staffText(), staffMove({ day: '2026-11-26', start: null, end: null })], { reply: replyDay })).row.outcome).toBe('still_owed');
+  test('the booking or the held staff move the model names answers it', async () => {
+    expect((await run([staffText(), booking], {}, judgeNames('E2'))).row).toMatchObject({ outcome: 'answered', proof_id: 'v1' });
+    expect((await run([staffText(), staffMove], {}, judgeNames('E2'))).row).toMatchObject({ outcome: 'answered', proof_id: 'rl-1' });
   });
 
   test('a model answered with a sent estimate is held the same way', async () => {
@@ -561,33 +547,14 @@ describe('the booking requirement holds on every path', () => {
   });
 });
 
-describe('the slot an offer names, for the yes check', () => {
-  test.each([
-    ['We could come Friday at 10 am. Does that work?', [[600, 600]], [5]],
-    ['Can we do 2-4 PM on Tues?', [[840, 960], [960, 960]], [2]],
-    ['between 2 and 4 pm', [[840, 960], [960, 960]], []],
-    ['11 AM to 1 PM Thursday or Sat', [[660, 780], [660, 660], [780, 780]], [4, 6]],
-    ['11-1 pm', [[660, 780], [780, 780]], []],
-    ['10 am and 2 pm', [[600, 600], [840, 840]], []],
-    ['around noon tomorrow', [[720, 720]], []],
-    ['We have an opening, does that work for you?', [], []],
-    ['our friend saw the Monitor', [], []],
-  ])('%s', (text, ranges, weekdays) => {
-    const offer = agent.offeredSlot(text);
-    expect(offer.ranges).toEqual(ranges);
-    expect([...offer.weekdays].sort()).toEqual(weekdays);
-  });
-
-  test('a window meets a named time when the time falls inside it; a window that ends at that time does not', () => {
-    const three = agent.offeredSlot('3 PM');
-    const fri = (start, end) => ({ day: '2026-11-27', start, end });
-    expect(agent.fitsOffer(fri('15:00', '16:00'), three)).toBe(true);
-    expect(agent.fitsOffer(fri('14:00', '15:00'), three)).toBe(false);
-    expect(agent.fitsOffer(fri('15:00', null), three)).toBe(true);
-    expect(agent.fitsOffer(fri(null, null), three)).toBe(false);
-    expect(agent.fitsOffer(fri(null, null), agent.offeredSlot('does that work?'))).toBe(true);
-    expect(agent.fitsOffer(fri('15:00', '16:00'), agent.offeredSlot('Saturday at 3 PM'))).toBe(false);
-    expect(agent.fitsOffer(null, three)).toBe(false);
+describe('a visit waiting for the customer to pick a time books nothing', () => {
+  test('no proof, and its line says no time is booked; once it has a time it is a booking with its day and time', () => {
+    const row = { id: 'v9', created_at: after(40), scheduled_date: new Date('2026-11-30T00:00:00Z'), window_start: null, window_end: null, customer_pick_by: after(1440), status: 'pending' };
+    const waiting = agent.visitEvent(row);
+    expect(waiting.proof).toBeNull();
+    expect(waiting.line).toMatch(/now waiting for the customer to pick a time .*; no time is booked, so this is no answer$/);
+    const placed = agent.visitEvent({ ...row, window_start: '10:00:00', window_end: '11:00:00' });
+    expect(placed).toMatchObject({ proof: 'booking', line: 'VISIT created after the alert, for 2026-11-30 10:00-11:00 (pending)' });
   });
 });
 
@@ -679,7 +646,10 @@ describe('fingerprint: late evidence re-judges', () => {
 describe('a bare yes by email is held like one by text', () => {
   test('the email reply pair (the sent offer and the "yes") feeds the same booking guard', async () => {
     const reply = { lastBody: 'Yes', prevOutbound: 'Could we come Friday at 10 am?' };
-    const deps = makeDeps({ timeline: async () => timelineOf([staffText()], { reply, trigger: 'email:E1' }), candidates: async () => [alertRow({ category: 'inbound_email' })] });
+    const deps = makeDeps({
+      timeline: async () => timelineOf([staffText()], { reply, trigger: 'email:E1' }), candidates: async () => [alertRow({ category: 'inbound_email' })],
+      judge: jest.fn(async () => ({ outcome: 'answered', why: 'staff replied', proof: 'E1', model: 'm' })),
+    });
     await agent.runAlertClearAgent({ now: NOW, deps });
     expect(saved(deps)[0]).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
   });
@@ -887,15 +857,14 @@ describe('a visit move answers only when Waves staff made it and the visit still
   test('a staff move the visit still holds is a date change, and the model reads where it went', () => {
     const e = agent.rescheduleEvent(move());
     expect(e.proof).toBe('date_change');
-    expect(e.slot).toEqual({ day: '2026-11-27', start: '15:00', end: '16:00' });
     expect(e.line).toBe('VISIT MOVED by Waves staff after the alert (admin_series), from 2026-11-23 09:00-10:00 to 2026-11-27 15:00-16:00; the visit still holds that time');
   });
 
   // The package follow-up date edit logs a day with no time. The visit's time now may come from a later job, so the move proves the
-  // day only: its slot has no start.
+  // day only, and its line says so: it never claims the visit holds a time.
   test('a staff move that set no time is day-only evidence, whatever time the visit shows now', () => {
     const e = agent.rescheduleEvent(move({ reason_code: 'admin_edit', original_window: null, new_window: null }));
-    expect(e).toMatchObject({ proof: 'date_change', slot: { day: '2026-11-27', start: null, end: null } });
+    expect(e.proof).toBe('date_change');
     expect(e.line).toMatch(/to 2026-11-27; the visit is still on that day; this move set no time$/);
   });
 

@@ -100,13 +100,15 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const cid = await customer();
     const sid = `SM${tag}c`;
     await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'yes', created_at: T0, status: 'received' });
-    const visit = async (status) => {
-      const [r] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-10', window_start: '09:00', window_end: '10:00', service_type: 'Pest Control', status, created_at: at(20) }).returning('id');
+    const visit = async (status, extra = {}) => {
+      const [r] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-10', window_start: '09:00', window_end: '10:00', service_type: 'Pest Control', status, created_at: at(20), ...extra }).returning('id');
       made.visits.push(r.id);
       return r.id;
     };
     await visit('cancelled');
     const live = await visit('pending');
+    // Handed to the customer and not yet given a time: a placeholder day, never a booking.
+    const waiting = await visit('pending', { window_start: null, window_end: null, customer_pick_by: at(1440) });
     const est = async (data) => {
       const [r] = await db('estimates').insert({ customer_id: cid, sent_at: at(25), status: 'sent', estimate_data: JSON.stringify(data) }).returning('id');
       made.estimates.push(r.id);
@@ -119,10 +121,9 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(timeline.complete).toBe(true);
     const found = timeline.events.filter((e) => e.proof).map((e) => `${e.proof}:${e.id}`).sort();
     expect(found).toEqual([`booking:${live}`, `estimate_sent:${handed}`].sort());
-    // The booking carries the day and time the visit holds, for the yes-to-an-offered-time check.
-    expect(timeline.events.find((e) => e.id === String(live))).toMatchObject({
-      slot: { day: '2027-01-10', start: '09:00', end: '10:00' }, line: 'VISIT created after the alert, for 2027-01-10 09:00-10:00 (pending)',
-    });
+    // The booking's line states the day and time the visit holds, so the model can judge a yes to an offered time.
+    expect(timeline.events.find((e) => e.id === String(live)).line).toBe('VISIT created after the alert, for 2027-01-10 09:00-10:00 (pending)');
+    expect(timeline.events.find((e) => e.id === String(waiting))).toMatchObject({ proof: null, line: expect.stringMatching(/waiting for the customer to pick a time/) });
   });
 
   test('a sent staff email counts only when it provably reached this customer; a draft never does; SMS alerts see it too', async () => {
@@ -296,8 +297,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const moves = (await agent.buildTimeline(row)).events.filter((e) => e.type === 'reschedule');
     expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since, handoff, dayOnly].sort());
     expect(moves.filter((e) => e.proof === 'date_change').map((e) => e.id).sort()).toEqual([held, sameDay, dayOnly].sort());
-    expect(moves.find((e) => e.id === held).slot).toEqual({ day: '2027-01-12', start: '15:00', end: '16:00' });
-    expect(moves.find((e) => e.id === dayOnly).slot).toEqual({ day: '2027-01-12', start: null, end: null });
+    expect(moves.find((e) => e.id === dayOnly).line).toMatch(/to 2027-01-12; the visit is still on that day; this move set no time$/);
     expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now: the visit has moved since, to 2027-01-12 15:00-16:00$/);
     expect(moves.find((e) => e.id === handoff).line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by Waves staff .*no time is booked, so this is no answer$/);
   });

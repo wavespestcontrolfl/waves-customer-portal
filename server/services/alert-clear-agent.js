@@ -17,7 +17,8 @@
  *   - an email a person sent: a Gmail SENT row (personSentFilter) that emailCustomerLink proves reached THIS customer, or, for a
  *     sender with no customer record, that was addressed to the sender; a DRAFT is never sent;
  *   - a quote that reached the customer: handedOffWithin + whereEstimateCustomerOwnership, never sent_at;
- *   - a booking: whereLiveBooking (not cancelled, skipped or no-show; never a system-generated child);
+ *   - a booking: whereLiveBooking (not cancelled, skipped or no-show; never a system-generated child), and never a visit waiting for
+ *     the customer to pick a time (self-serve-notice.js awaitingCustomerPick);
  *   - a visit move: a reschedule_log row a person at Waves made (STAFF_MOVE_INITIATORS), and only while the visit still holds the day
  *     and start it gave; a move by an automatic job or by the customer, or one moved again since, is context, never an answer.
  *
@@ -30,8 +31,8 @@
  *      rule 2 or a sent estimate may answer it, so the model can never close it.
  * The facts are computed here and handed to the model as fixed inputs. The model names the timeline event that answers the alert;
  * CODE then checks that event is in this alert's timeline, later than the alert, and a person's or a real record (never automated,
- * never a draft). A miss is still_owed. A bare "ok" or "yes" to an offered time is answered only by a booking or a held staff move at
- * the offered slot (the weekdays and clock times the offer names), on every path.
+ * never a draft). A miss is still_owed. A bare "ok" or "yes" to an offered time is answered only by the booking or held staff move the
+ * model names as its proof, on every path: no plain rule closes it, and the model judges the offered day and time.
  * Any error, refusal, timeout or unreadable reply is still_owed (fail safe), logged with no message text.
  *
  * Proof and fingerprint are computed over EVERY eligible row after the alert (to a safety cap); only the excerpts sent to the model
@@ -58,7 +59,7 @@ const { phoneIdentityKey } = require('../utils/phone');
 const { callStartedAt } = require('../utils/call-timeline');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { excludeRecruitingSmsLog, hideRecruitingThreadsFromNonAdmin } = require('../utils/recruiting-thread-scope');
-const { etDateString, etParts, parseETDateTime } = require('../utils/datetime-et');
+const { etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { operatorReplySql, smsDeliveredSql, personCallBackSql } = require('./staff-contact');
 const { personSentFilter, emailCustomerLink, extractEmailAddresses, capturedRecipients } = require('./email/email-customer-link');
 const { phoneIdentitySql } = require('./sms-response-policy');
@@ -115,7 +116,7 @@ Rules:
 - The FIXED FACTS are computed by Waves code. Do not question them.
 - "proof" is the id (E1, E2...) of the one AFTER event that answers the alert. It is required for "answered". It must be a delivered staff text, a sent staff email, a call a person answered, a booking, a visit move by Waves staff that the visit still holds, or a sent estimate. An automated text (reminder, en route, receipt, link), an unsent Waves DRAFT, a customer message, an expired link, or a visit move by the customer or an automatic job never answers anything.
 - A staff visit move answers a request to move the visit only when its new day and time fit what the customer asked.
-- "Ok" or "yes" to an offered time is answered only by a booking, or a staff move the visit still holds, after the alert that puts the visit on the offered day and time. A move that set no time does not answer a yes to a named time. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
+- "Ok" or "yes" to an offered time is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
 - Never return nothing_to_answer for a question, a request, or a promise Waves made.
 Reply with ONLY this JSON object, no code fence: {"outcome": "answered" | "nothing_to_answer" | "still_owed", "why": "<${MAX_WHY_WORDS} words or fewer>", "proof": "<event id or null>"}`;
 
@@ -195,12 +196,19 @@ const customerEmailEvent = (row) => ({
   type: 'email', id: String(row.id), key: `email:${row.id}:in`, at: toDate(row.received_at), inbound: true, proof: null, draft: false,
   line: `CUSTOMER EMAIL: ${clean(String(row.b || '').split(/On .{5,60} wrote:/)[0], 300)}`,
 });
-// A booking carries the day and time the visit holds now (`slot`), for the check of a yes to an offered time.
-const visitEvent = (row) => ({
-  type: 'visit', id: String(row.id), key: `visit:${row.id}:booked:${row.status}`, at: toDate(row.created_at), inbound: false, proof: 'booking', draft: false,
-  slot: slotOf(row.scheduled_date, row.window_start, row.window_end),
-  line: `VISIT created after the alert, for ${slotText(row.scheduled_date, row.window_start, row.window_end)} (${row.status})`,
-});
+// A booking's line states the day and time the visit holds now, so the model can judge a yes to an offered time. A visit handed to the
+// customer and not yet given a time (self-serve-notice.js awaitingCustomerPick: its date is a placeholder) books nothing: no proof.
+function visitEvent(row) {
+  const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
+  const waiting = awaitingCustomerPick(row);
+  return {
+    type: 'visit', id: String(row.id), key: `visit:${row.id}:booked:${row.status}`, at: toDate(row.created_at), inbound: false,
+    proof: waiting ? null : 'booking', draft: false,
+    line: waiting
+      ? `VISIT created after the alert, now waiting for the customer to pick a time (placeholder day ${dateText(row.scheduled_date)}); no time is booked, so this is no answer`
+      : `VISIT created after the alert, for ${slotText(row.scheduled_date, row.window_start, row.window_end)} (${row.status})`,
+  };
+}
 // A visit that finished after the alert is context only: a finished visit does not answer a question about its result.
 const doneVisitEvent = (row) => ({
   type: 'visit', id: String(row.id), key: `visit:${row.id}:completed`, at: toDate(row.completed_at), inbound: false, proof: null, draft: false,
@@ -218,8 +226,6 @@ const hhmm = (value) => {
   return match ? `${match[1].padStart(2, '0')}:${match[2]}` : null;
 };
 const slotText = (date, start, end) => (hhmm(start) ? `${dateText(date)} ${hhmm(start)}-${hhmm(end) || '?'}` : dateText(date));
-// The day and time a booking or a held staff move puts the visit at. A record that set no time has a slot with no start.
-const slotOf = (date, start, end) => ({ day: dateOnlyString(date), start: hhmm(start), end: hhmm(end) });
 const isStaffMove = (row) => STAFF_MOVE_INITIATORS.has(String(row.initiated_by || ''));
 function moverText(row) {
   const who = String(row.initiated_by || '');
@@ -240,8 +246,8 @@ const realMove = (row) => dateOnlyString(row.new_date) !== dateOnlyString(row.or
   || startOfWindow(row.new_window) !== startOfWindow(row.original_window);
 // A hand-off (`pick_handoff`: the log row carries rain-out.js PICK_LOG_MARKER) parks the visit on its due day with no time while the
 // customer picks one: it books nothing, so it is never a proof, whoever handed it off.
-// A move logged with a day and no time (the package follow-up date edit writes one) is day-only evidence: its slot has no start,
-// whatever time the visit shows now, since a later job may have set that time.
+// A move logged with a day and no time (the package follow-up date edit writes one) is day-only evidence: its line says it set no
+// time, whatever time the visit shows now, since a later job may have set that time.
 function rescheduleEvent(row) {
   const answers = !row.pick_handoff && isStaffMove(row) && moveStillHolds(row);
   const timed = !!startOfWindow(row.new_window);
@@ -258,7 +264,6 @@ function rescheduleEvent(row) {
   return {
     type: 'reschedule', id: String(row.id), key: `reschedule:${row.id}`, at: toDate(row.created_at), inbound: false,
     proof: answers ? 'date_change' : null, draft: false, line,
-    slot: answers ? slotOf(row.new_date, timed ? row.window_start : null, timed ? row.window_end : null) : null,
   };
 }
 
@@ -394,7 +399,7 @@ async function customerRecordsAfter(r, anchor, customerId) {
   const { handedOffWithin, whereEstimateCustomerOwnership, HANDOFF_COLS, witnessAt } = require('./call-commitments');
   const [booked, done, estimates, moves] = await Promise.all([
     read('visits', () => whereLiveBooking(conn('scheduled_services').where('customer_id', customerId).where('created_at', '>', anchor))
-      .orderBy('created_at', 'asc').limit(ROW_CAP).select('id', 'created_at', 'scheduled_date', 'window_start', 'window_end', 'status')),
+      .orderBy('created_at', 'asc').limit(ROW_CAP).select('id', 'created_at', 'scheduled_date', 'window_start', 'window_end', 'customer_pick_by', 'status')),
     // A visit that ran: completed_at set, after the alert, in a status that is not one that never ran; filtered, ordered and dated by
     // completed_at (the contact witnesses' completedVisitRows).
     read('visits-done', () => conn('scheduled_services').where('customer_id', customerId).whereNotNull('completed_at').where('completed_at', '>', anchor)
@@ -703,60 +708,29 @@ function ruleVerdict(alert, timeline, owed, now) {
     if (quiet) return quiet;
   }
   const kinds = owed ? OWED_RULE_PROOFS : RULE_PROOFS;
-  const hit = timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
+  // A bare yes to an offered time is the model's to judge (guardBareYes): no plain rule closes it.
+  const hit = bareYesToOffer(timeline) ? null : timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
   if (hit) return answeredBy(hit, hit.proof);
   if (owed) return verdict('still_owed', 'rule', 'owed_open', 'we owe this and nothing answers it yet');
   return null;
 }
 
-// The slot a bare yes accepted, read from the offer Waves sent before it (offers are free text; none is stored as data). Clock times
-// ("3 PM", "2-4 PM", "11 AM to 1 PM", "between 2 and 4 pm", "noon") become minute ranges; "10 am and 2 pm" is two times, not a range.
-// Weekday names and their common abbreviations become day numbers (0 = Sunday, as etParts). A relative day ("tomorrow") is not
-// read, so it constrains nothing.
-const OFFER_RANGE_RE = /\b(\d{1,2})(?::(\d{2}))?\s*(?:([ap])\.?m\.?)?\s*(-|–|to|and|until|till)\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b/gi;
-const OFFER_TIME_RE = /\b(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m\b|\bnoon\b/gi;
-const OFFER_WEEKDAY_RE = /\b(sun|mon|tue|wed|thu|fri|sat)(?:day|s|sday|nesday|r|rs|rsday|urday)?\b/gi;
-const WEEKDAY_NUMBERS = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 };
-const clockMinutes = (hour, minute, meridiem) => (Number(hour) % 12) * 60 + Number(minute || 0) + (/^p/i.test(meridiem || '') ? 720 : 0);
-const minutesOf = (value) => (value ? Number(value.slice(0, 2)) * 60 + Number(value.slice(3, 5)) : null);
-function offeredSlot(text) {
-  const body = String(text || '');
-  const ranges = [...body.matchAll(OFFER_RANGE_RE)].filter((m) => !(m[4].toLowerCase() === 'and' && m[3])).map((m) => {
-    const end = clockMinutes(m[5], m[6], m[7]);
-    const start = clockMinutes(m[1], m[2], m[3] || m[7]);
-    // "11-1 PM": a first hour after the last one is the morning's.
-    return [start > end ? start - 720 : start, end];
-  });
-  for (const m of body.matchAll(OFFER_TIME_RE)) {
-    const at = m[0].toLowerCase() === 'noon' ? 720 : clockMinutes(m[1], m[2], m[3]);
-    ranges.push([at, at]);
-  }
-  return { ranges, weekdays: new Set([...body.matchAll(OFFER_WEEKDAY_RE)].map((m) => WEEKDAY_NUMBERS[m[1].toLowerCase()])) };
-}
-// A booking or held staff move fits the accepted slot when its day is a weekday the offer names (if it names any) and, when the offer
-// names clock times, its window meets one of them. A record with no start never fits a named time: it is day-only evidence.
-function fitsOffer(slot, offer) {
-  if (!slot?.day) return false;
-  if (offer.weekdays.size && !offer.weekdays.has(etParts(parseETDateTime(`${slot.day}T12:00`)).dayOfWeek)) return false;
-  if (!offer.ranges.length) return true;
-  const start = minutesOf(slot.start);
-  if (start === null) return false;
-  const end = Math.max(minutesOf(slot.end) ?? start, start + 1);
-  return offer.ranges.some(([from, to]) => from < end && start <= to);
-}
-
-// "Ok" or "yes" to an offered time is answered only by a booking or a held staff move after the alert at the offered slot: on EVERY
-// path, a rule's staff text or an estimate included. A booking or move at another day or time, or one that set no time when the
-// offer named one, does not answer that yes.
+// "Ok" or "yes" to an offered time is answered only by the booking, or the held staff move, that the model names as its proof: on
+// EVERY path. No plain rule closes that yes (ruleVerdict), and a text, an email, a call, an estimate or a "nothing to answer" never
+// answers it. Whether the record is on the offered day and time is language (the offer is free text; no offer is stored as data, and
+// word lists over offers kept missing phrasings), so the model judges it from lines that state each record's day and time. Code
+// checks only what records prove: a real booking (never a visit waiting for the customer to pick a time) or a staff move the visit
+// still holds.
+const ANSWERS_A_YES = ['booking', 'date_change'];
 function bareYesToOffer(timeline) {
   const reply = timeline.reply;
-  if (!reply || !BARE_YES_RE.test(reply.lastBody) || !OFFER_RE.test(reply.prevOutbound)) return false;
-  const offer = offeredSlot(reply.prevOutbound);
-  return !timeline.events.some((e) => (e.proof === 'booking' || e.proof === 'date_change') && e.at > timeline.alertAt && fitsOffer(e.slot, offer));
+  return !!reply && BARE_YES_RE.test(reply.lastBody) && OFFER_RE.test(reply.prevOutbound);
 }
 function guardBareYes(v, timeline) {
   if (v.outcome === 'still_owed' || !bareYesToOffer(timeline)) return v;
-  return verdict('still_owed', v.source, 'yes_to_offer_no_booking', 'a yes to an offered time with no booking at that time', { model: v.model });
+  const named = v.outcome === 'answered' && v.proofId ? timeline.events.find((e) => e.type === v.proofType && e.id === v.proofId) : null;
+  if (named && ANSWERS_A_YES.includes(named.proof)) return v;
+  return verdict('still_owed', v.source, 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move named as the answer', { model: v.model });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------
@@ -1036,5 +1010,5 @@ module.exports = {
   // exported for tests
   defaultDeps, scopeToContact, redactForModel, buildTimeline, computeFacts, fingerprintOf, ruleVerdict, settleAiReply, parseJudgeReply, judgeInput, isOwedAlert, guardBareYes,
   makeBudget, unchanged, voicemailNote, proofOverflow, listedEvents, textBackWasSent, messagesBase, smsEvent, callEvent, callModel, NoKeyError, clean, MAX_ALERTS, SYSTEM_PROMPT,
-  rescheduleEvent, realMove, STAFF_MOVE_INITIATORS, offeredSlot, fitsOffer,
+  rescheduleEvent, realMove, STAFF_MOVE_INITIATORS, visitEvent,
 };

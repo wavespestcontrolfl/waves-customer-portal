@@ -324,9 +324,10 @@ customer's message by this rule.
    (title "we still owe", or `doneWhen: 'promise_fulfilled'`) is closed only by that rule or a sent estimate, never by the model.
    Everything else is ONE Claude call (lane `alert_clear_agent`, tier `ALERT_CLEAR`, Sonnet class, paid API, 150 a day at most). The
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
-   a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time needs a
-   booking or a held staff move after it at the offered slot (the weekdays and clock times the offer names; a record that set no
-   time never fits a named time), and a finished visit never answers a question about its result. A visit move (a new day or a new start)
+   a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time closes
+   only when the model names the booking or held staff move that puts the visit at the offered day and time (no plain rule closes
+   it, and the day-and-time match is the model's: offers are free text; a visit waiting for the customer to pick a time is no
+   booking), and a finished visit never answers a question about its result. A visit move (a new day or a new start)
    answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
    customer, or a hand-off for the customer to pick a time (no time is booked), is never an answer.
    Any doubt, error or refusal is `still_owed`. A bell is judged again only when a new record appears after it or the rules change.
