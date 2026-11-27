@@ -1,8 +1,14 @@
 const { launchBrowser } = require('../service-report/pdf-puppeteer');
-const { escapeHtml, hash, reject } = require('../staff-document-source');
+const { escapeHtml, hash, reject, parseSignedName, hasSignatureField } = require('../staff-document-source');
 const { withDocumentPdfCapacity } = require('./estimate-doc-pdf');
+const { getLogoBuffer } = require('./brand-logo');
 const { PDF_COLORS: C, PDF_SPACE: S, PDF_TYPE: T } = require('./pdf-tokens');
 const { etDateString, formatETTime } = require('../../utils/datetime-et');
+
+function logoDataUri() {
+  const buf = getLogoBuffer();
+  return buf ? `data:image/png;base64,${buf.toString('base64')}` : null;
+}
 
 function evidenceTime(value) {
   const date = new Date(value);
@@ -59,35 +65,49 @@ function cacheIssuedPdf(key, buffer) {
   }
 }
 
+function staffLabel(name, id) {
+  return name ? `${escapeHtml(name)} (${escapeHtml(id)})` : escapeHtml(id);
+}
+
 function recordEvidenceHtml(record, rendered) {
   if (!record) return '';
   const status = record.completed_at ? 'Completed record' : 'Open record — incomplete';
   const completed = record.completed_at ? escapeHtml(evidenceTime(record.completed_at)) : 'Not completed';
   const recordHash = escapeHtml(record.content_hash || 'Not recorded');
-  const ownerDisplay = record.owner_name ? `${record.owner_name} (${record.owner_id})` : record.owner_id;
-  return `<section class="evidence"><h2>${status}</h2><div class="grid"><div><b>Record ID</b>${escapeHtml(record.id)}</div><div><b>Owner</b>${escapeHtml(ownerDisplay)}</div><div><b>Due</b>${escapeHtml(evidenceTime(record.due_at))}</div><div><b>Completed</b>${completed}</div><div class="wide mono"><b>Recorded content SHA-256</b>${recordHash}</div></div>${checklistHtml(record, rendered)}</section>`;
+  return `<section class="evidence"><h2>${status}</h2><div class="grid"><div><b>Record ID</b>${escapeHtml(record.id)}</div><div><b>Staff member</b>${staffLabel(record.owner_name, record.owner_id)}</div><div><b>Due</b>${escapeHtml(evidenceTime(record.due_at))}</div><div><b>Completed</b>${completed}</div><div class="wide mono"><b>Recorded content SHA-256</b>${recordHash}</div></div>${checklistHtml(record, rendered)}</section>`;
+}
+
+function formatFieldAnswer(field, answer) {
+  if (field.type === 'checkbox') {
+    if (answer === true) return '[x] Yes — confirmed';
+    if (answer === false) return '[ ] No';
+    return '&nbsp;';
+  }
+  if (answer == null || answer === '') return '&nbsp;';
+  return escapeHtml(answer);
 }
 
 function fieldsHtml(rendered, record) {
-  if (!rendered.metadata.fields.length) return '';
-  const fields = rendered.metadata.fields.map(field => {
+  const allFields = rendered.metadata.fields || [];
+  if (!allFields.length) return '';
+  const isSignatureForm = rendered.kind === 'form' && hasSignatureField(allFields);
+  const signedName = isSignatureForm && record?.completed_at ? parseSignedName(record?.answers?.['signed-name']) : null;
+  const displayFields = signedName ? allFields.filter(field => field.id !== 'signed-name') : allFields;
+  const fields = displayFields.map(field => {
     const answer = record?.answers?.[field.id];
-    if (field.type === 'checkbox') {
-      const checked = answer === true;
-      const display = record ? (checked ? 'Yes' : 'No') : '&nbsp;';
-      return `<div class="field"><b>${escapeHtml(field.label)}${field.required ? '<small>Required</small>' : ''}</b><div class="answer${record ? '' : ' blank'}">${display}</div></div>`;
-    }
-    const blank = answer == null || answer === '';
-    return `<div class="field"><b>${escapeHtml(field.label)}${field.required ? '<small>Required</small>' : ''}</b><div class="answer${blank ? ' blank' : ''}">${blank ? '&nbsp;' : escapeHtml(answer)}</div></div>`;
+    const blank = field.type === 'checkbox' ? answer !== true && answer !== false : answer == null || answer === '';
+    return `<div class="field"><b>${escapeHtml(field.label)}${field.required ? '<small>Required</small>' : ''}</b><div class="answer${blank ? ' blank' : ''}">${formatFieldAnswer(field, answer)}</div></div>`;
   }).join('');
-  return `<section class="evidence fields"><h2>Form fields</h2>${fields}</section>`;
+  const formSignature = signedName
+    ? `<section class="evidence signature"><h2>Electronic signature</h2><p>Signed electronically under Florida Statutes 668.50 (Uniform Electronic Transaction Act).</p><div class="sign"><div><b>Signed by</b><strong>${escapeHtml(signedName)}</strong></div><div><b>Signed</b><strong>${escapeHtml(evidenceTime(record.completed_at))}</strong></div></div><div class="grid"><div><b>Staff member</b>${staffLabel(record.owner_name, record.owner_id)}</div><div><b>Record ID</b>${escapeHtml(record.id)}</div><div class="wide mono"><b>Recorded content SHA-256</b>${escapeHtml(record.content_hash || 'Not recorded')}</div></div></section>`
+    : '';
+  return `${displayFields.length ? `<section class="evidence fields"><h2>Form details</h2>${fields}</section>` : ''}${formSignature}`;
 }
 
 function signatureHtml(acknowledgment) {
   if (!acknowledgment) return '';
   const acknowledgedHash = escapeHtml(acknowledgment.content_hash || 'Not recorded');
-  const staffDisplay = acknowledgment.staff_name ? `${acknowledgment.staff_name} (${acknowledgment.technician_id})` : acknowledgment.technician_id;
-  return `<section class="evidence signature"><h2>Signed acknowledgment</h2><p>${escapeHtml(acknowledgment.statement)}</p><div class="sign"><div><b>Signed by</b><strong>${escapeHtml(acknowledgment.signed_name)}</strong></div><div><b>Signed</b><strong>${escapeHtml(evidenceTime(acknowledgment.acknowledged_at))}</strong></div></div><div class="grid"><div><b>Staff</b>${escapeHtml(staffDisplay)}</div><div><b>Acknowledgment ID</b>${escapeHtml(acknowledgment.id)}</div><div class="wide mono"><b>Acknowledged content SHA-256</b>${acknowledgedHash}</div></div></section>`;
+  return `<section class="evidence signature"><h2>Signed acknowledgment</h2><p>${escapeHtml(acknowledgment.statement)}</p><div class="sign"><div><b>Signed by</b><strong>${escapeHtml(acknowledgment.signed_name)}</strong></div><div><b>Signed</b><strong>${escapeHtml(evidenceTime(acknowledgment.acknowledged_at))}</strong></div></div><div class="grid"><div><b>Staff member</b>${staffLabel(acknowledgment.technician_name || acknowledgment.staff_name, acknowledgment.technician_id)}</div><div><b>Acknowledgment ID</b>${escapeHtml(acknowledgment.id)}</div><div class="wide mono"><b>Acknowledged content SHA-256</b>${acknowledgedHash}</div></div></section>`;
 }
 
 function documentTiming(detail, issued) {
@@ -123,6 +143,8 @@ async function renderStaffDocument(detail, { acknowledgment, record }) {
     const issued = Boolean(version.content_hash);
     const kind = documentKind(detail);
     const timing = documentTiming(detail, issued);
+    const logoUri = logoDataUri();
+    const logoImg = logoUri ? `<img class="brand-logo" src="${logoUri}" alt="Waves Pest Control" />` : '';
     const documentKey = detail.document?.template_key ? `<div><b>Document key</b><strong>${escapeHtml(detail.document.template_key)}</strong></div>` : '';
     const clauses = clausesHtml(rendered);
     const recordEvidence = recordEvidenceHtml(record, rendered);
@@ -131,15 +153,15 @@ async function renderStaffDocument(detail, { acknowledgment, record }) {
 
     await page.setContent(`<!doctype html><html><head><meta charset="utf-8"><style>
 *{box-sizing:border-box}html,body{margin:0;background:${C.white};-webkit-print-color-adjust:exact;print-color-adjust:exact}html{padding:0}body{padding:0 0 0 ${S.sm}px;font:${T.body}pt/1.5 Arial,sans-serif;color:${C.body}}.accent{position:fixed;z-index:10;top:0;bottom:0;left:0;width:5px;background:${C.blue}}
-.mast{margin-bottom:${S.lg}px;break-inside:avoid-page}.brand{display:flex;justify-content:space-between;align-items:flex-end;min-height:26px;padding-bottom:${S.sm}px;border-bottom:2px solid ${C.navy}}.brand strong{font-size:${T.h2}pt;color:${C.navy}}.brand span,.eyebrow,.label,.meta b,.grid b,.sign b,.citation b{display:block;color:${C.muted};font-size:${T.micro}pt;font-weight:700;letter-spacing:.55px;text-transform:uppercase}.brand span{letter-spacing:.8px}
+.mast{margin-bottom:${S.lg}px;break-inside:avoid-page}.brand{display:flex;justify-content:space-between;align-items:center;gap:${S.sm}px;min-height:46px;padding-bottom:${S.sm}px;border-bottom:2px solid ${C.navy}}.brand-left{display:flex;align-items:center;gap:10px}.brand-logo{width:42px;height:42px;object-fit:contain;display:block}.brand strong{font-size:${T.h2}pt;color:${C.navy}}.brand span,.eyebrow,.label,.meta b,.grid b,.sign b,.citation b{display:block;color:${C.muted};font-size:${T.micro}pt;font-weight:700;letter-spacing:.55px;text-transform:uppercase}.brand span{letter-spacing:.8px}
 .title{display:grid;grid-template-columns:minmax(0,1fr) 138px;gap:${S.lg}px;align-items:end;padding:${S.md}px 0 ${S.sm}px}.eyebrow{margin-bottom:${S.xxs}px}h1{margin:0;color:${C.navy};font-size:${T.h1}pt;line-height:1.12}.status{min-height:38px;padding:4px 0 4px ${S.sm}px;border-left:3px solid ${C.gold};text-align:right}.status b{display:block;color:${C.muted};font-size:${T.micro}pt;letter-spacing:.7px;text-transform:uppercase}.status strong{display:block;margin-top:3px;color:${C.navy};font-size:${T.caption}pt}.preview{margin-bottom:${S.sm}px;padding:${S.xs}px ${S.sm}px;border-left:3px solid ${C.gold};background:${C.warm};color:${C.navy};font-size:${T.caption}pt;font-weight:700}
 .meta{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid ${C.rule};border-radius:3px;overflow:hidden}.meta>div{min-height:47px;padding:${S.xs}px ${S.sm}px;border-right:1px solid ${C.rule};border-bottom:1px solid ${C.rule};overflow-wrap:anywhere}.meta>div:nth-child(3n){border-right:0}.meta strong{color:${C.navy};font-size:${T.caption}pt;line-height:1.3}.meta .hash{grid-column:1/-1;min-height:0;border:0}.meta .hash strong{font:400 ${T.caption}pt/1.3 "Courier New",monospace}
-.clause{margin-bottom:${S.lg}px;break-inside:auto}h2{display:flex;gap:${S.xs}px;align-items:baseline;margin:0 0 ${S.sm}px;padding:7px ${S.sm}px;border-top:1px solid ${C.rule};border-bottom:1px solid ${C.rule};background:${C.soft};color:${C.navy};font-size:${T.lead}pt;line-height:1.3;break-after:avoid-page}h2 i{color:${C.blue};font-style:normal}.copy p,.copy ul{margin:0 0 ${S.sm}px}.copy p,.copy li{orphans:3;widows:3}.copy ul{padding-left:${S.lg}px}.copy li{margin-bottom:${S.xxs}px}.copy strong{color:${C.navy}}a{color:${C.navy};text-decoration-color:${C.gold};text-underline-offset:2px}
+.clause{margin-bottom:${S.lg}px;break-inside:auto}h2{display:flex;gap:${S.xs}px;align-items:baseline;margin:0 0 ${S.sm}px;padding:7px ${S.sm}px;border-top:1px solid ${C.rule};border-bottom:1px solid ${C.rule};background:${C.soft};color:${C.navy};font-size:${T.lead}pt;line-height:1.3;break-after:avoid-page}h2 i{color:${C.blue};font-style:normal}.copy p,.copy ul,.copy ol,.copy table{margin:0 0 ${S.sm}px}.copy p,.copy li{orphans:3;widows:3}.copy ul,.copy ol{padding-left:${S.lg}px}.copy li{margin-bottom:${S.xxs}px}.copy strong{color:${C.navy}}.copy table{width:100%;border-collapse:collapse;font-size:${T.caption}pt;line-height:1.4;break-inside:avoid-page}.copy th{padding:6px 8px;border-bottom:2px solid ${C.navy};background:${C.soft};color:${C.navy};text-align:left;font-weight:700}.copy td{padding:6px 8px;border-bottom:1px solid ${C.rule};vertical-align:top}a{color:${C.navy};text-decoration-color:${C.gold};text-underline-offset:2px}
 .citation{margin-top:${S.sm}px;padding:${S.xs}px ${S.sm}px;border-left:3px solid ${C.gold};background:${C.warm};font-size:${T.caption}pt;line-height:1.4;overflow-wrap:anywhere;break-inside:avoid-page}.citation a,.citation span{display:block}.citation span{margin-top:3px;color:${C.muted}}
 .evidence{margin-top:${S.xl}px;break-inside:auto}.evidence h2{border-left:3px solid ${C.gold}}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid ${C.rule};border-radius:3px;overflow:hidden;font-size:${T.caption}pt;break-inside:avoid-page}.grid>div{min-height:48px;padding:${S.xs}px ${S.sm}px;border-right:1px solid ${C.rule};border-bottom:1px solid ${C.rule};overflow-wrap:anywhere}.grid>div:nth-child(2n){border-right:0}.grid .wide{grid-column:1/-1;border:0}.mono{font-family:"Courier New",monospace}.mono b{font-family:Arial,sans-serif}
 .checklist{margin-top:${S.sm}px}.checklist>div{padding:6px ${S.xs}px;border-bottom:1px solid ${C.rule};font-size:${T.caption}pt;break-inside:avoid-page}.checklist code{color:${C.navy};font-weight:700}.fields{border:1px solid ${C.rule};border-radius:3px}.fields h2{margin:0}.field{padding:${S.sm}px;border-bottom:1px solid ${C.rule};break-inside:auto}.field:last-child{border:0}.field>b{display:block;color:${C.navy};font-size:${T.caption}pt;break-after:avoid-page}.field small{margin-left:5px;color:${C.muted};font-size:${T.micro}pt;font-weight:400;letter-spacing:.4px;text-transform:uppercase}.answer{min-height:24px;padding:5px 0;border-bottom:1px solid ${C.rule};font-size:${T.body}pt;line-height:1.45;overflow-wrap:anywhere;white-space:pre-wrap;orphans:3;widows:3}.answer.blank{min-height:30px}
 .signature p{margin:0 0 ${S.md}px;color:${C.navy};orphans:3;widows:3}.sign{display:grid;grid-template-columns:1fr 1fr;gap:${S.lg}px;margin-bottom:${S.sm}px;break-inside:avoid-page}.sign>div{min-height:48px;padding:${S.xs}px 0;border-bottom:1px solid ${C.navy}}.sign strong{display:block;color:${C.navy};font-size:${T.caption}pt;line-height:1.35}
-</style></head><body><div class="accent"></div><header class="mast"><div class="brand"><strong>Waves Pest Control</strong><span>Controlled staff document</span></div><div class="title"><div><div class="eyebrow">${escapeHtml(kind)}</div><h1>${escapeHtml(rendered.title)}</h1></div><div class="status"><b>Document status</b><strong>${issued ? 'Issued controlled copy' : 'Draft — not issued'}</strong></div></div>${!issued ? `<div class="preview">${escapeHtml(timing)}</div>` : ''}<div class="meta"><div><b>Version</b><strong>${escapeHtml(version.version_number)}</strong></div><div><b>${issued ? 'Effective' : 'Preview'}</b><strong>${escapeHtml(timing)}</strong></div><div><b>Next review</b><strong>${escapeHtml(rendered.metadata.review_on || 'Unscheduled')}</strong></div><div><b>Document owner</b><strong>${escapeHtml(rendered.metadata.owner_role || 'Unassigned')}</strong></div><div><b>Document type</b><strong>${escapeHtml(kind)}</strong></div>${documentKey}<div class="hash"><b>Content SHA-256</b><strong>${escapeHtml(version.content_hash || 'DRAFT — no issued hash')}</strong></div></div></header><main>${clauses}${recordEvidence}${fields}${signature}</main></body></html>`, { timeout: PDF_RENDER_TIMEOUT_MS });
+</style></head><body><div class="accent"></div><header class="mast"><div class="brand"><div class="brand-left">${logoImg}<strong>Waves Pest Control</strong></div><span>Controlled staff document</span></div><div class="title"><div><div class="eyebrow">${escapeHtml(kind)}</div><h1>${escapeHtml(rendered.title)}</h1></div><div class="status"><b>Document status</b><strong>${issued ? 'Issued controlled copy' : 'Draft — not issued'}</strong></div></div>${!issued ? `<div class="preview">${escapeHtml(timing)}</div>` : ''}<div class="meta"><div><b>Version</b><strong>${escapeHtml(version.version_number)}</strong></div><div><b>${issued ? 'Effective' : 'Preview'}</b><strong>${escapeHtml(timing)}</strong></div><div><b>Next review</b><strong>${escapeHtml(rendered.metadata.review_on || 'Unscheduled')}</strong></div><div><b>Document owner</b><strong>${escapeHtml(rendered.metadata.owner_role || 'Unassigned')}</strong></div><div><b>Document type</b><strong>${escapeHtml(kind)}</strong></div>${documentKey}<div class="hash"><b>Content SHA-256</b><strong>${escapeHtml(version.content_hash || 'DRAFT — no issued hash')}</strong></div></div></header><main>${clauses}${recordEvidence}${fields}${signature}</main></body></html>`, { timeout: PDF_RENDER_TIMEOUT_MS });
     return await page.pdf({
       format: 'Letter', printBackground: true, timeout: PDF_RENDER_TIMEOUT_MS,
       margin: { top: '0.78in', right: '0.62in', bottom: '0.78in', left: '0.62in' }, displayHeaderFooter: true,

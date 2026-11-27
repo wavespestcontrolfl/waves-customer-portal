@@ -1062,3 +1062,82 @@ test('R7 cleanup: the remove click goes to the link handle inside the verified r
   expect(replaced.w.cart).toEqual([{ sku: SKU, qty: 2, entry: 'E1' }]);
   for (const r of [exact, replaced]) expectSafe(r.w);
 });
+
+// Price check before the click (owner 2026-11-27): every total that reaches the cap check (cart $105.93, review
+// and final $110.40, for 2 packages) is divided by the package count and compared, tax included, with the price
+// on file; more than 15% above parks `price_jump`. The price on file is exact (millionths of a dollar).
+const usd = (dollars) => Math.round(dollars * 1e6); // test helper: a price in dollars as priceOnFileMicros
+
+describe('price check against the price on file', () => {
+  test('the cart total over the limit parks before any cap check', async () => {
+    const { w, error, beforeSubmit } = await run({}, { args: { priceOnFileMicros: usd(46) } }); // limit 2 x 46 x 1.15 = 105.80 < 105.93
+    expect(error.refuse).toBe('price_jump');
+    expect(beforeSubmit).not.toHaveBeenCalled();
+    expect(w.placed).toBe(0);
+    expectSafe(w);
+  });
+
+  test('a cart under the limit but a final checkout total over it parks without a click', async () => {
+    // limit 2 x 47 x 1.15 = 108.10: the cart's 105.93 passes, the review's 110.40 does not.
+    const { w, error, calls } = await run({}, { args: { priceOnFileMicros: usd(47) } });
+    expect(error.refuse).toBe('price_jump');
+    expect(error.cents).toBe(11040);
+    expect(error.message).toContain('order');
+    expect(calls).toEqual([10593]); // the cap check ran on the cart total only
+    expect(w.placed).toBe(0);
+    expect(w.clicks).not.toContain('place-order');
+    expect(w.cart).toEqual([]); // the line this run added is taken out again
+    expect(error.evidence.cleanup).toBe('row_removed');
+    expectSafe(w);
+  });
+
+  test('every total at or under the limit goes on to the click, and the last one checked is the click\'s', async () => {
+    const { result, calls, w } = await run({}, { args: { priceOnFileMicros: usd(49) } }); // limit 112.70 >= 110.40
+    expect(result.externalOrderNumber).toBe('7700123');
+    expect(calls).toEqual([10593, 11040, 11040]);
+    expect(result.evidence.priceCheck).toEqual({ onFileMicros: usd(49), seenUnitCents: 5520, limitPercent: 15, checked: 'final claim check' });
+    expect(w.placed).toBe(1);
+    expectSafe(w);
+  });
+
+  test('a price with sub-cent digits is compared exactly: 10 packages at $1.0060 allow $11.569, so $11.60 parks (rounding to $1.01 would let it pass)', async () => {
+    const args = { quantity: 10, priceOnFileMicros: usd(1.006) };
+    const over = await run({ cartTotalText: '$11.60', reviewTotalText: '$11.60', reviewQtyText: 'Qty: 10' }, { args });
+    expect(over.error.refuse).toBe('price_jump');
+    expect(over.error.message).toContain('$1.006 on file');
+    expect(over.beforeSubmit).not.toHaveBeenCalled();
+    // $11.56 is under the exact limit and goes through the same check.
+    const under = await run({ cartTotalText: '$11.56', reviewTotalText: '$11.56', reviewQtyText: 'Qty: 10', confirmTotalText: '$11.56' }, { args });
+    expect(under.error?.refuse).not.toBe('price_jump');
+    expect(under.result.evidence.priceCheck.onFileMicros).toBe(1006000);
+  });
+
+  test('a price under half a cent never switches the check off', async () => {
+    const { error, beforeSubmit, w } = await run({ cartTotalText: '$1.00', reviewTotalText: '$1.00', reviewQtyText: 'Qty: 1' }, { args: { quantity: 1, priceOnFileMicros: usd(0.004) } });
+    expect(error.refuse).toBe('price_jump'); // limit 1 x 0.004 x 1.15 = $0.0046
+    expect(beforeSubmit).not.toHaveBeenCalled();
+    expect(w.placed).toBe(0);
+  });
+
+  test('a jump names both prices and cleans the cart', async () => {
+    const { w, error } = await run({}, { args: { priceOnFileMicros: usd(30) } });
+    expect(error.message).toContain('$52.97');
+    expect(error.message).toContain('$30.00 on file');
+    expect(error.cents).toBe(10593);
+    expect(w.cart).toEqual([]);
+    expectSafe(w);
+  });
+
+  test('no price on file keeps today\'s behavior and says so in evidence', async () => {
+    for (const args of [{}, { priceOnFileMicros: null }, { priceOnFileMicros: 0 }]) {
+      const { result } = await run({}, { args });
+      expect(result.externalOrderNumber).toBe('7700123');
+      expect(result.evidence.priceCheck).toBe('no_price_on_file');
+    }
+  });
+
+  test('the adapter declares the check, and the limit is 15 percent', () => {
+    expect(adapter.checksPrice).toBe(true);
+    expect(adapter._internals.PRICE_JUMP_LIMIT_PERCENT).toBe(15);
+  });
+});

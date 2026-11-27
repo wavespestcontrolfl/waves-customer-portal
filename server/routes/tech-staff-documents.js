@@ -19,6 +19,17 @@ router.use((req, res, next) => {
 
 const uuid = Joi.string().uuid();
 const actor = req => ({ id: req.technicianId, role: req.techRole });
+const requestEvidence = req => ({ ip: req.ip, user_agent: req.get('user-agent') });
+const pdfFilename = (detail, { acknowledgment, record } = {}) => {
+  const rawKey = String(detail.document?.template_key || 'staff-document').replace(/[^a-z0-9._-]+/gi, '-').replace(/^-+|-+$/g, '');
+  const versionNumber = detail.version?.version_number ? `-v${detail.version.version_number}` : '';
+  const suffix = acknowledgment?.id
+    ? `-acknowledged-${String(acknowledgment.id).replace(/[^a-z0-9-]+/gi, '').slice(0, 8)}`
+    : record?.id
+      ? `-record-${String(record.id).replace(/[^a-z0-9-]+/gi, '').slice(0, 8)}`
+      : '';
+  return `${rawKey || 'staff-document'}${versionNumber}${suffix}.pdf`;
+};
 const handle = fn => async (req, res, next) => {
   try { await fn(req, res); }
   catch (error) {
@@ -114,12 +125,12 @@ router.post('/:id/issue', requireAdmin, requireFullAccess, handle(async (req, re
 router.post('/versions/:id/acknowledge', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(Joi.object({ content_hash: Joi.string().length(64).required(), signed_name: Joi.string().max(180).required(), accepted: Joi.boolean().required() }), req.body);
-  res.json({ acknowledgment: await documents.acknowledge(req.params.id, req.body, actor(req)) });
+  res.json({ acknowledgment: await documents.acknowledge(req.params.id, req.body, actor(req), requestEvidence(req)) });
 }));
 router.post('/versions/:id/records', handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(Joi.object({ id: uuid, base_updated_at: Joi.string().isoDate(), content_hash: Joi.string().length(64).required(), owner_id: uuid.required(), due_at: Joi.string().required(), answers: Joi.object().required(), completed_steps: Joi.array().items(Joi.string()).max(80).required(), complete: Joi.boolean().required() }), req.body);
-  res.json({ record: await documents.saveRecord(req.params.id, { ...req.body, due_at: instant(req.body.due_at) }, actor(req)) });
+  res.json({ record: await documents.saveRecord(req.params.id, { ...req.body, due_at: instant(req.body.due_at) }, actor(req), requestEvidence(req)) });
 }));
 // Form prefill from the staff record (GATE_STAFF_DOC_PREFILL). Dark = 404 before any query. Reads only.
 router.get('/versions/:id/prefill', handle(async (req, res) => {
@@ -154,7 +165,7 @@ router.get('/:id/pdf', handle(async (req, res) => {
   }
   const { renderStaffDocumentPdf } = require('../services/pdf/staff-document-pdf');
   const pdf = await renderStaffDocumentPdf(detail, { acknowledgment, record });
-  res.type('application/pdf').set('Content-Disposition', 'attachment; filename="staff-document.pdf"').send(pdf);
+  res.type('application/pdf').set('Content-Disposition', `attachment; filename="${pdfFilename(detail, { acknowledgment, record })}"`).send(pdf);
 }));
 
 module.exports = router;

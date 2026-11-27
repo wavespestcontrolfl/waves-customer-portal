@@ -328,9 +328,9 @@ test('a cursor pages past the response cap: every open item exactly once, in one
 
 describe('GET /api/admin/needs-me', () => {
   const handler = router.stack.find((layer) => layer.route?.path === '/' && layer.route.methods.get).route.stack[0].handle;
-  const call = async (query, techRole = 'admin') => {
+  const call = async (query, techRole = 'admin', technician = null) => {
     const res = { set: jest.fn(), status: jest.fn(() => res), json: jest.fn() };
-    await handler({ query, techRole, technicianId: 'tech-7' }, res, (err) => { throw err; });
+    await handler({ query, techRole, technicianId: 'tech-7', technician }, res, (err) => { throw err; });
     return res;
   };
 
@@ -342,6 +342,16 @@ describe('GET /api/admin/needs-me', () => {
     expect(body).toEqual(expect.objectContaining({ generatedAt: expect.any(String), total: 1, warnings: [] }));
     // The bell's technician privacy rule (GATE_TECH_LOGIN_PRIVACY) needs the caller's technician id.
     expect(NotificationService.scopeAdminFeedToRole.mock.calls.map((c) => c.slice(1))).toEqual([['technician', 'tech-7']]);
+    // Non-owner callers filter out metadata.ownerOnly rows.
+    expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(true);
+  });
+
+  test('excludes ownerOnly rows for non-owner admins and includes them for the owner login', async () => {
+    await call({}, 'admin', { email: 'office@wavespestcontrol.com' });
+    expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(true);
+    mockCalls.length = 0;
+    await call({}, 'admin', { email: 'contact@wavespestcontrol.com' });
+    expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(false);
   });
 
   test('a malformed after cursor is a 400', async () => {
@@ -352,6 +362,21 @@ describe('GET /api/admin/needs-me', () => {
     expect((await call({ who: 'robot' })).status).toHaveBeenCalledWith(400);
     expect((await call({ area: 'Weather' })).status).toHaveBeenCalledWith(400);
   });
+});
+
+test('executeNeedsMeTool filters ownerOnly rows unless ownerAccess or fullAccess is true', async () => {
+  const { executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
+  mockCalls.length = 0;
+  await executeNeedsMeTool('needs_me', {});
+  expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(true);
+  // Legacy Intelligence Bar (GATE_IB_PLATFORM off) passes fullAccess: false + ownerAccess: true
+  // for the owner login — needs_me must still include ownerOnly items for the owner.
+  mockCalls.length = 0;
+  await executeNeedsMeTool('needs_me', {}, { fullAccess: false, ownerAccess: true });
+  expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(false);
+  mockCalls.length = 0;
+  await executeNeedsMeTool('needs_me', {}, { fullAccess: true });
+  expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(false);
 });
 
 test('the bar tool trims item text and drops internals (members, dedupe keys, read state)', async () => {

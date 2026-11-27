@@ -69,7 +69,7 @@ test('the authored procedure uses Field presentation while staff controls remain
   expect(authored.querySelector('details#scope')).toHaveTextContent('1. Scope');
   expect(clauseNav.closest('.staff-document-reader-body')).toBeNull();
   expect(screen.getByLabelText('Version history').closest('.staff-document-reader-body')).toBeNull();
-  expect(screen.queryByAltText('Waves Pest Control')).not.toBeInTheDocument();
+  expect(screen.getByAltText('Waves Pest Control')).toBeInTheDocument();
 });
 
 test('historical policies retain acknowledgment exports and cannot accept a new signature', () => {

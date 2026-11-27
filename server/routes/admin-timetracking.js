@@ -2539,10 +2539,16 @@ router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
     await recordAuditEvent({
       actor_type: 'admin',
       actor_id: req.technicianId || null,
-      action: 'company_document.downloaded',
-      resource_type: 'company_documents',
+      action: 'hr_document.download_url_issued',
+      resource_type: 'company_document',
       resource_id: doc.id,
-      metadata: { category: doc.category, technician_id: doc.technician_id || null },
+      ip_address: req.ip ? String(req.ip).slice(0, 64) : null,
+      user_agent: req.get('user-agent') ? String(req.get('user-agent')).slice(0, 255) : null,
+      metadata: {
+        category: doc.category || null,
+        technician_id: doc.technician_id || null,
+      },
+      critical: true,
     });
 
     res.json({ url, fileName: doc.file_name });
