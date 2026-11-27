@@ -54,6 +54,8 @@ function emptyVisitLoops() {
     missedVisit: null,
     weOwe: [],
     customerWaiting: [],
+    // SCHEDULE CHANGES (loadScheduleChanges): null = not read (or the read failed)
+    scheduleChanges: null,
   };
 }
 
@@ -501,6 +503,136 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
   return null;
 }
 
+// ── schedule changes ────────────────────────────────────────────────────────
+// What the schedule records prove about the customer's coming visits (texting AI
+// gap 3, owner 2026-11-26 "BUILD 1-6"): the thread can say "I asked to skip it" or
+// "you moved me" while UPCOMING SERVICES says something else, and the drafter could
+// not tell which was true. Two facts only, each one a finished sentence the drafter
+// renders (sms-shadow-drafter scheduleChangesSection):
+//  - moves: each listed visit's LAST move in reschedule_log (every writer that moves
+//    a visit logs it there: the rebooker for staff, the customer pages, auto-dispatch
+//    and scripted moves, the day re-plan and the bulk move). Stated only when the
+//    record proves it is the visit's current slot: the move's new day (and new start,
+//    when it logged one) must equal the row's schedule now. A row edited since by a
+//    writer that logs nothing, or a series sibling that moved with its anchor and has
+//    no row of its own, states nothing.
+//  - stopped: a coming visit whose own row says skipped or cancelled. A skip or cancel
+//    the customer only ASKED for is not here (the row is still live), so the draft
+//    has nothing to say it was done.
+// The listed visits are the first UPCOMING_LIMIT live rows from today on, in date
+// order, as UPCOMING SERVICES lists them. A day-only visit (the customer was told the
+// day, not the hour: day-only-ai-context) names no hour, and a same-day window change
+// on one says nothing. Never a reason, never a note, never a new time.
+const SCHEDULE_UPCOMING_LIMIT = 3;
+const SCHEDULE_STOPPED_LIMIT = 3;
+const SCHEDULE_HORIZON_DAYS = 60;
+const STOPPED_STATUSES = ['skipped', 'cancelled'];
+// A logged window ("09:00:00-11:00:00", "09:00-11:00" or a bare "09:00") -> its start
+// as "HH:MM:SS", or null. Writers store the internal job block as the end, so only
+// the start is the customer-facing window (the missed-visit read's rule).
+const loggedStart = (value) => missedWindowStart(value);
+const startMinutes = (value) => hhmmToMinutes(value);
+// A logged row that moved the visit's slot: another day, or another start that day.
+// A technician-only reassignment logs the same slot and is not a move.
+function logMovedSlot(row) {
+  const from = calendarDay(row.original_date);
+  const to = calendarDay(row.new_date);
+  if (!from || !to) return false;
+  return from !== to || startMinutes(loggedStart(row.original_window)) !== startMinutes(loggedStart(row.new_window));
+}
+// The day-only verdict for the moved visits. strict (the send-time rebuild): a failed
+// read throws, so an outage refuses retryably instead of flipping the sentence;
+// otherwise the AI-context rule (a failed read = day-only: never leak an hour).
+async function dayOnlyVerdicts(conn, rows, now, strict) {
+  if (!rows.length) return () => true;
+  if (!strict) return require('./day-only-ai-context').loadDayOnlyCheck(conn, rows, now);
+  const display = await require('./time-promise').loadTimeDisplay(conn, rows, now);
+  return (row) => {
+    const verdict = display.get(row.id);
+    if (!verdict || verdict.failed === true) throw new Error(`day-only read failed for visit ${row.id}`);
+    return verdict.showHour === false;
+  };
+}
+// The visit's newest slot-changing log row, when it is the slot the row holds now
+// ({ visit, last, movedAt, toStart }); null when there is none or it is not proven.
+function provenLastMove(visit, logs) {
+  const last = logs.find((l) => String(l.scheduled_service_id) === String(visit.id) && logMovedSlot(l));
+  if (!last || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
+  const toStart = loggedStart(last.new_window);
+  const sameStart = toStart == null ? visit.window_start == null : startMinutes(toStart) === startMinutes(visit.window_start);
+  const movedAt = toDate(last.created_at);
+  return sameStart && movedAt ? { visit, last, movedAt, toStart } : null;
+}
+async function loadScheduleChanges({ conn, customerId, now, deriveWindow, strict = false }) {
+  const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+  const today = etDateString(now);
+  const horizon = etDateString(addETDays(now, SCHEDULE_HORIZON_DAYS));
+  const rows = (await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '>=', today).where('scheduled_date', '<=', horizon)
+    .whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES])
+    .orderBy('scheduled_date').orderBy('window_start').orderBy('id')
+    // one customer's next two months: a backstop, far above a real account
+    .limit(200)
+    .select('id', 'visit_id', 'service_type', 'scheduled_date', 'status', 'window_start', 'window_end', 'window_display', 'time_window')) || [];
+  const live = rows.filter((r) => UPCOMING_SERVICE_STATUSES.includes(r.status));
+  const listed = live.slice(0, SCHEDULE_UPCOMING_LIMIT);
+
+  const moves = [];
+  if (listed.length) {
+    const logs = (await conn('reschedule_log')
+      .whereIn('scheduled_service_id', listed.map((r) => r.id))
+      // a nightly "not closed out" flag logs the old slot and no new one: not a move
+      .whereRaw("COALESCE(reason_code, '') <> 'customer_noshow'")
+      .whereNotNull('new_date')
+      .orderBy('created_at', 'desc').orderBy('id', 'desc')
+      .limit(500)
+      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at')) || [];
+    const proven = listed.map((visit) => provenLastMove(visit, logs)).filter(Boolean);
+    const dayOnly = await dayOnlyVerdicts(conn, proven.map((p) => p.visit), now, strict);
+    for (const { visit, last, movedAt, toStart } of proven) {
+      const hidden = dayOnly(visit) === true;
+      const fromDate = calendarDay(last.original_date);
+      const toDay = calendarDay(last.new_date);
+      // a same-day window change on a visit told only the day changed nothing the customer heard
+      if (hidden && fromDate === toDay) continue;
+      const fromStart = loggedStart(last.original_window);
+      moves.push({
+        logId: String(last.id),
+        visitId: String(visit.id),
+        type: visit.service_type || null,
+        movedOn: etDateString(movedAt),
+        fromDate,
+        fromStart: hidden ? null : fromStart,
+        toDate: toDay,
+        toStart: hidden ? null : toStart,
+        dayOnly: hidden,
+        fromWindow: !hidden && fromStart ? windowLabel({ window_start: fromStart }, deriveWindow) : null,
+        toWindow: !hidden && toStart ? windowLabel({ window_start: toStart }, deriveWindow) : null,
+      });
+    }
+  }
+
+  // A skipped or cancelled row the schedule replaced (a live row of the same service on
+  // the same day) is not news: the live visit is in UPCOMING SERVICES.
+  const replaced = new Set(live.map((r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`));
+  const stopped = rows
+    .filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(`${calendarDay(r.scheduled_date)}|${r.service_type || ''}`))
+    .slice(0, SCHEDULE_STOPPED_LIMIT)
+    .map((r) => ({ visitId: String(r.id), type: r.service_type || null, date: calendarDay(r.scheduled_date), status: r.status }));
+  return { moves, stopped };
+}
+// The schedule facts as one comparable string ('' when there are none, 'unread' when
+// the read failed): the send boundary rebuilds them and refuses when this changed, so
+// a later move, skip or cancel retires a reply written before it. Raw values only.
+function scheduleChangesSignature(scheduleChanges) {
+  if (!scheduleChanges || typeof scheduleChanges !== 'object') return 'unread';
+  const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
+  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, `${m.fromDate}T${m.fromStart ?? ''}`, `${m.toDate}T${m.toStart ?? ''}`, m.dayOnly === true)}`);
+  const stopped = (scheduleChanges.stopped || []).map((s) => `stopped:${key(s.visitId, s.type, s.date, s.status)}`);
+  return [...moves, ...stopped].join('|');
+}
+
 // ── open promises / asks ────────────────────────────────────────────────────
 // A short fingerprint of the commitment fields a draft can restate (kind, wording):
 // a staff edit that keeps the row open changes it.
@@ -656,7 +788,10 @@ async function loadCommitments({ conn, customerId, now, strict, asOf = null }) {
 // empty field, so an outage is a retryable recheck failure, never "the facts changed".
 // Commitments are skipped there (they have their own recheck) unless
 // withCommitments (the gratitude boundary needs the whole picture).
-async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false, asOf = null } = {}) {
+// withScheduleChanges: read SCHEDULE CHANGES (default: every drafting read; a strict
+// rebuild reads it only when the draft it checks showed it). A late draft (asOf) reads
+// it as it is now, like the window and delay facts: the reply goes out now.
+async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false, asOf = null, withScheduleChanges = !strict } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
   const ctx = { conn, now, deriveWindow, customerId, strict, asOf };
@@ -667,11 +802,12 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   const missedVisit = await read('missed visit', null, () => loadMissedVisit(ctx));
   const pastWindow = await read('past window', null, () => findPastWindow({ ...ctx, exclude: missedVisit }));
 
-  const [lateAlert, commitments] = await Promise.all([
+  const [lateAlert, commitments, scheduleChanges] = await Promise.all([
     read('late alert', null, () => loadLateAlert({ ...ctx, exclude: missedVisit })),
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
+    withScheduleChanges ? read('schedule changes', null, () => loadScheduleChanges(ctx)) : null,
   ]);
 
   // A confirmed miss leaves the row unstarted, so the same occurrence could also read
@@ -682,6 +818,7 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
   out.missedVisit = missedVisit;
   out.weOwe = commitments.weOwe;
   out.customerWaiting = commitments.customerWaiting;
+  out.scheduleChanges = scheduleChanges;
   return out;
 }
 
@@ -706,4 +843,4 @@ function visitStatusSignature(visitLoops) {
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, allOpenCallCommitments, allSmsLane };
+module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, scheduleChangesSignature, loadScheduleChanges, allOpenCallCommitments, allSmsLane };
