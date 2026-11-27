@@ -29,8 +29,8 @@ const realFreeze = jest.requireActual('../services/auto-dispatch/route-tiers').l
 beforeEach(() => { jest.clearAllMocks(); });
 
 describe('config', () => {
-  test('dayOnlyPromise is always recorded on the run config as true', () => {
-    expect(getAutoDispatchConfig().dayOnlyPromise).toBe(true);
+  test('dayOnlyPromise on the run config matches W20 NIGHT_FREEZE_ANY_PROMISE (false)', () => {
+    expect(getAutoDispatchConfig().dayOnlyPromise).toBe(false);
   });
 });
 

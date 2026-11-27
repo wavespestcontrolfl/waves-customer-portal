@@ -24,6 +24,37 @@ function memberHasUnrecordedChemicalAddOn(member) {
   return findings.some((f) => f && f.code === APPLICATION_REQUIRED_CODE);
 }
 
+function memberRequiresChemicalReviewHold(member) {
+  let notes = member?.record_notes;
+  if (typeof notes === 'string') {
+    try { notes = JSON.parse(notes); } catch { notes = null; }
+  }
+  return member?.record_status === 'completed'
+    && !['inspection_only', 'customer_declined'].includes(notes?.visitOutcome)
+    && !notes?.oneTimeRecapOnly
+    && memberHasUnrecordedChemicalAddOn(member);
+}
+
+async function holdUnrecordedChemicalAddOnMemberInvoices(trx, members) {
+  const affected = (members || []).filter(memberRequiresChemicalReviewHold);
+  if (!affected.length) return [];
+  const { stampChemicalReviewHoldOnVisitInvoices } = require('./complete-scheduled-service');
+  const heldIds = [];
+  for (const member of affected) {
+    try {
+      const { stampedIds } = await stampChemicalReviewHoldOnVisitInvoices(trx, {
+        serviceId: member.id,
+        recordId: member.record_id || null,
+        noWait: true,
+      });
+      heldIds.push(...stampedIds);
+    } catch (error) {
+      visitBusy(error);
+    }
+  }
+  return heldIds;
+}
+
 function office(reason, serviceId = null, extra = null) {
   return { state: 'office_required', reason, serviceId, invoiceId: null, ...(extra || {}) };
 }
@@ -630,7 +661,8 @@ async function createVisitCompletionInvoice(packetId, database = db) {
         .join('service_records as r', 'r.id', 'i.service_record_id')
         .where('i.packet_id', packet.id).orderBy('s.id')
         // The whole visit row: the prepay waiver judges coverage on it.
-        .select('s.*', 'r.status as record_status', 'r.structured_notes as record_notes');
+        .select('s.*', 'r.id as record_id', 'r.status as record_status', 'r.structured_notes as record_notes');
+      await holdUnrecordedChemicalAddOnMemberInvoices(trx, heldMembers);
       const parked = await parkQueuedSetupClaimsForOffice(trx, heldMembers, { packet, visit });
       if (parked.length) {
         await trx('visit_completion_packets').where({ id: packet.id }).update({
@@ -654,6 +686,7 @@ async function createVisitCompletionInvoice(packetId, database = db) {
       throw new Error('Visit billing member identity mismatch');
     }
     const result = await mintPacketInvoice({ packet, visit, members, customer, trx });
+    await holdUnrecordedChemicalAddOnMemberInvoices(trx, members);
     const held = result.state === 'office_required';
     await trx('service_visits').where({ id: visit.id }).update({
       billing_hold: held, billing_frozen_at: trx.fn.now(), updated_at: trx.fn.now(),
@@ -680,5 +713,5 @@ async function createVisitCompletionInvoice(packetId, database = db) {
 module.exports = {
   createVisitCompletionInvoice,
   deferredSetupClaimStillQueued,
-  _test: { memberBillingEligibility, memberHasUnrecordedChemicalAddOn },
+  _test: { memberBillingEligibility, memberHasUnrecordedChemicalAddOn, memberRequiresChemicalReviewHold, holdUnrecordedChemicalAddOnMemberInvoices },
 };

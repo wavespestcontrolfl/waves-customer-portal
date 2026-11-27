@@ -188,12 +188,12 @@ describe.each([['tiers', tiers, false], ['flex', flex, true]])('%s mode', (_name
 });
 
 describe('the run config', () => {
-  test('the run config records dayOnlyPromise: true while freezeReadArgs sets anyPromise: false', async () => {
+  test('the run config records dayOnlyPromise: false matching W20 freezeReadArgs (anyPromise: false)', async () => {
     setup(30, [reminderRow(30, {})]);
     dayPromise();
     await tiers();
     expect(skipCodes()).not.toContain('REMINDER_SENT_FROZEN');
-    expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(true);
+    expect(audit.startRun.mock.calls[0][0].dayOnlyPromise).toBe(false);
   });
 });
 

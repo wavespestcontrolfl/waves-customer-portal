@@ -9148,6 +9148,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);
             if (seenProductIds.has(rowIdentity)) continue;
             seenProductIds.add(rowIdentity);
+            const isResolvedAreaAddOnRow = Boolean(addOnTags?.get?.(areaAddOnGovernedRate.productRowKey(p)));
             if (p.rateUnit && !isValidRateUnit(p.rateUnit)) {
               const err = new Error(`Invalid product unit for ${p.name || p.productId}`);
               err.isOperational = true; err.statusCode = 400;
@@ -9184,8 +9185,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             if (
               !isIncompleteVisit
-              &&
-              requiresSqftForReportApplication(applicationMethod, reportServiceLine)
+              && !isResolvedAreaAddOnRow
+              && requiresSqftForReportApplication(applicationMethod, reportServiceLine)
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'sqft')
             ) {
               const err = new Error(`Square feet are required for ${product.name}`);
@@ -9234,7 +9235,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (serviceProductCols.zone_ids) serviceProductInsert.zone_ids = Array.isArray(p.zoneIds) ? p.zoneIds : [];
             if (serviceProductCols.targets) serviceProductInsert.targets = spotTargets.of(p);
             if (serviceProductCols.area_value) {
-              serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
+              serviceProductInsert.area_value = Number.isFinite(areaValue) && areaValue > 0 ? areaValue : null;
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
             Object.assign(serviceProductInsert, areaAddOnGovernedRate.addOnProductColumns(serviceProductCols, addOnTags, p));
@@ -11866,57 +11867,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
     };
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     let stampedHeldInvoiceIds = [];
-    if (!packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly) {
+    if (unrecordedChemicalAddOnHold && !recapReviewOnly) {
       // Lock and hold EVERY non-terminal, non-payer-billed invoice linked to this visit or
-      // service record (not just the newest lookup hit) so an older unpaid invoice for the
-      // same visit cannot remain collectible or keep active reminders. Then neutralize any
-      // open Stripe PaymentIntents (canceling confirmable intents / reconciling in-flight ones).
+      // service record — on BOTH standalone closeouts and grouped packet effects — so an older
+      // unpaid invoice for the same visit cannot remain collectible or keep active reminders.
+      // Then neutralize any open Stripe PaymentIntents (canceling confirmable intents / reconciling in-flight ones).
       const knownHeldIds = [...new Set([
         existingCompletionInvoice && !['paid', 'prepaid'].includes(existingCompletionInvoice.status) ? existingCompletionInvoice.id : null,
         preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status) ? preMintedInvoice.id : null,
       ].filter(Boolean))];
       try {
-        const { chemicalAddonHoldStamp, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
-        const invoicesToNeutralize = [];
+        let invoicesToNeutralize = [];
         await db.transaction(async (trx) => {
-          const visitInvoices = await trx('invoices')
-            .where((q) => {
-              q.where({ scheduled_service_id: svc.id });
-              if (record?.id) q.orWhere({ service_record_id: record.id });
-              if (knownHeldIds.length) q.orWhereIn('id', knownHeldIds);
-            })
-            .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-            .orderBy('id', 'asc')
-            .forUpdate()
-            .select('id', 'invoice_number', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
-          for (const heldInv of visitInvoices) {
-            // Skip third-party-billed invoices via the single withdrawal authority (row is already FOR UPDATE locked).
-            if (invoiceWithdrawnFromCustomer(heldInv)) continue;
-            const stamped = await trx('invoices')
-              .where({ id: heldInv.id })
-              .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-              .update({
-                scheduled_send_at: null,
-                scheduled_send_error: chemicalAddonHoldStamp(svc.id),
-                updated_at: new Date(),
-              });
-            // Pause ONLY active follow-up sequences in the same transaction after a successful
-            // stamp so prior office stops or payment-plan pauses keep their status and reason.
-            if (Number(stamped) > 0) {
-              stampedHeldInvoiceIds.push(heldInv.id);
-              if (heldInv.stripe_payment_intent_id) invoicesToNeutralize.push(heldInv);
-              await trx('invoice_followup_sequences')
-                .where({ invoice_id: heldInv.id, status: 'active' })
-                .update({
-                  updated_at: new Date(),
-                  status: 'paused',
-                  paused_reason: 'unrecorded_chemical_addon_review',
-                  paused_until: null,
-                  paused_by_admin_id: null,
-                  next_touch_at: null,
-                });
-            }
-          }
+          const held = await stampChemicalReviewHoldOnVisitInvoices(trx, {
+            serviceId: svc.id,
+            recordId: record?.id || null,
+            knownHeldIds,
+          });
+          stampedHeldInvoiceIds.push(...held.stampedIds);
+          invoicesToNeutralize = held.invoicesToNeutralize;
         });
         if (invoicesToNeutralize.length) {
           const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
@@ -17316,8 +17285,60 @@ async function completeScheduledService(completionInput, packetContext = null) {
   }
 }
 
+async function stampChemicalReviewHoldOnVisitInvoices(trx, {
+  serviceId,
+  recordId = null,
+  knownHeldIds = [],
+  noWait = false,
+}) {
+  const { chemicalAddonHoldStamp, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+  const lockQuery = trx('invoices')
+    .where((q) => {
+      q.where({ scheduled_service_id: serviceId });
+      if (recordId) q.orWhere({ service_record_id: recordId });
+      if (knownHeldIds.length) q.orWhereIn('id', knownHeldIds);
+    })
+    .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    .orderBy('id', 'asc')
+    .forUpdate();
+  if (noWait && typeof lockQuery.noWait === 'function') lockQuery.noWait();
+  const visitInvoices = await lockQuery.select('id', 'invoice_number', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
+  const stampedIds = [];
+  const invoicesToNeutralize = [];
+  for (const heldInv of visitInvoices) {
+    // Skip third-party-billed invoices via the single withdrawal authority (row is already FOR UPDATE locked).
+    if (invoiceWithdrawnFromCustomer(heldInv)) continue;
+    const stamped = await trx('invoices')
+      .where({ id: heldInv.id })
+      .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+      .update({
+        scheduled_send_at: null,
+        scheduled_send_error: chemicalAddonHoldStamp(serviceId),
+        updated_at: new Date(),
+      });
+    // Pause ONLY active follow-up sequences in the same transaction after a successful
+    // stamp so prior office stops or payment-plan pauses keep their status and reason.
+    if (Number(stamped) > 0) {
+      stampedIds.push(heldInv.id);
+      if (heldInv.stripe_payment_intent_id) invoicesToNeutralize.push(heldInv);
+      await trx('invoice_followup_sequences')
+        .where({ invoice_id: heldInv.id, status: 'active' })
+        .update({
+          updated_at: new Date(),
+          status: 'paused',
+          paused_reason: 'unrecorded_chemical_addon_review',
+          paused_until: null,
+          paused_by_admin_id: null,
+          next_touch_at: null,
+        });
+    }
+  }
+  return { stampedIds, invoicesToNeutralize };
+}
+
 module.exports = {
   completeScheduledService,
+  stampChemicalReviewHoldOnVisitInvoices,
   actualProductBlackoutBlocks,
   heldProductBlocks,
   freezeReportProductFacts,

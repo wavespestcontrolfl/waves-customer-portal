@@ -1354,13 +1354,60 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
 
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
     expect(source).toContain('scheduled_send_at: null');
-    expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(svc.id)');
+    expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(serviceId)');
     expect(source).toContain("where({ invoice_id: heldInv.id, status: 'active' })");
     expect(source).toContain('if (Number(stamped) > 0)');
-    // P0-1 & P0-2 (r7): locks all unpaid visit invoices and neutralizes/reconciles open PaymentIntents.
+    // P0-1 & P0-2 (r7) + P1 (GitHub r2): locks all unpaid visit invoices on both standalone and grouped packet closeouts and neutralizes/reconciles open PaymentIntents.
     expect(source).toContain("orderBy('id', 'asc')");
+    expect(source).toContain('if (unrecordedChemicalAddOnHold && !recapReviewOnly) {');
     expect(source).toContain('guardOpenPaymentIntentForPrepaid(heldInv)');
     expect(source).toContain('StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id)');
+    // P2 (GitHub r2): resolved area add-on rows are exempt from transactional 400 area_sqft_required so warn-never-block holds end to end.
+    expect(source).toContain('const isResolvedAreaAddOnRow = Boolean(addOnTags?.get?.(areaAddOnGovernedRate.productRowKey(p)));');
+    expect(source).toContain('&& !isResolvedAreaAddOnRow');
+    // P1 (GitHub r2): grouped packet records phase stamps existing unpaid member invoices and pauses active reminders.
+    const { _test: packetBillingTest } = require('../services/visit-completion-invoice');
+    const invoiceUpdates = [];
+    const seqUpdates = [];
+    const packetTrx = jest.fn((table) => {
+      if (table === 'invoices') {
+        const q = {
+          where: jest.fn(() => q),
+          whereNotIn: jest.fn(() => q),
+          orderBy: jest.fn(() => q),
+          forUpdate: jest.fn(() => q),
+          noWait: jest.fn(() => q),
+          select: jest.fn(async () => [
+            { id: 'inv-self-1', status: 'sent', stripe_payment_intent_id: 'pi_open_1', scheduled_send_error: null },
+            { id: 'inv-payer-1', status: 'sent', stripe_payment_intent_id: null, scheduled_send_error: 'payer_billed:payer-1' },
+          ]),
+          update: jest.fn(async (patch) => { invoiceUpdates.push(patch); return 1; }),
+        };
+        return q;
+      }
+      if (table === 'invoice_followup_sequences') {
+        const q = {
+          where: jest.fn(() => q),
+          update: jest.fn(async (patch) => { seqUpdates.push(patch); return 1; }),
+        };
+        return q;
+      }
+      throw new Error(`unexpected table ${table}`);
+    });
+    const heldPacketIds = await packetBillingTest.holdUnrecordedChemicalAddOnMemberInvoices(packetTrx, [{
+      id: 'svc-grouped-1',
+      record_id: 'rec-grouped-1',
+      record_status: 'completed',
+      record_notes: { lawnWarningFindings: [{ code: 'area_addon_application_required', limitType: 'area_addon_application_required' }] },
+    }]);
+    expect(heldPacketIds).toEqual(['inv-self-1']);
+    expect(invoiceUpdates).toHaveLength(1);
+    expect(invoiceUpdates[0]).toMatchObject({
+      scheduled_send_at: null,
+      scheduled_send_error: 'chemical_addon_review:svc-grouped-1',
+    });
+    expect(seqUpdates).toHaveLength(1);
+    expect(seqUpdates[0]).toMatchObject({ status: 'paused', paused_reason: 'unrecorded_chemical_addon_review' });
     // P0-1 (r7): /confirm route refuses held invoices too.
     const payV2Src = require('fs').readFileSync(require.resolve('../routes/pay-v2'), 'utf8');
     expect(payV2Src).toContain('if (invoiceHeldForChemicalReview(invoice))');

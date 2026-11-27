@@ -239,10 +239,12 @@ function moveRuleConfig(overrides, flexTierEnabled) {
     // other technicians' slots (`other_tech`) and apply.js refuses a change
     // (TECH_CHANGE_BLOCKED). Unassigned visits are unchanged.
     keepTech: overrides.keepTech ?? keepTechEnabled(),
-    // A day-only or unknown-window promise also freezes the visit (loadReminderFreeze opts.anyPromise); always so since
-    // GATE_DAY_ONLY_PROMISE was removed. Kept in config_snapshot as a recorded fact: the Auto-Dispatch page reads it to state
-    // the rule a run used, and a run saved before 2026-11-08 says false or has no key.
-    dayOnlyPromise: true,
+    // W20 (owner 2026-11-26): day-only confirmations are NOT frozen before the 72h reminder;
+    // only explicit time-window promises freeze the slot (told-visits.js NIGHT_FREEZE_ANY_PROMISE).
+    // Kept in config_snapshot as a recorded fact: AutoDispatchPage.jsx reads it to state the rule
+    // each run used — older snapshots saved with dayOnlyPromise: true still show "its day or time",
+    // while new runs record false and show "its time".
+    dayOnlyPromise: require('./told-visits').NIGHT_FREEZE_ANY_PROMISE === true,
   };
 }
 

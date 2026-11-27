@@ -277,6 +277,8 @@ async function readFawnSafe(lat, lng, cache, readFawn) {
   return cache.get(key);
 }
 
+const eventNames = (list) => (list.length ? list.map((a) => a.event) : undefined);
+
 async function sweep(now = new Date(), { readFawn } = {}) {
   const parts = etParts(now);
   if (parts.hour < SERVICE_HOURS_ET.start || parts.hour >= SERVICE_HOURS_ET.end) {
@@ -284,96 +286,97 @@ async function sweep(now = new Date(), { readFawn } = {}) {
   }
 
   const todayStr = etDateString(now);
-  const nowMinutes = parts.hour * 60 + parts.minute;
-  const stops = await upcomingStops(todayStr, nowMinutes);
-  if (stops.length === 0) return { checked: 0, alerted: 0 };
-
+  const stops = await upcomingStops(todayStr, parts.hour * 60 + parts.minute);
   const alertsCache = new Map();
   const fawnCache = new Map();
-  let alerted = 0;
-  let advisoriesSent = 0;
+  const counts = { storm: 0, advisory: 0 };
+
   for (const job of stops) {
     // No customer coordinates → nothing to probe. Quietly skip; the
     // tech still has the manual Rain Out button.
-    if (job.customer_latitude == null || job.customer_longitude == null) continue;
+    if ([job.customer_latitude, job.customer_longitude].some((v) => v == null)) continue;
 
-    let hours = null;
-    try {
-      hours = await getHourlyRainOutlook(job.customer_latitude, job.customer_longitude);
-    } catch (err) {
-      logger.info(`[storm-watch] hourly outlook failed for job ${job.id}: ${err.message}`);
-    }
+    const hours = await getHourlyRainOutlook(job.customer_latitude, job.customer_longitude)
+      .catch((err) => { logger.info(`[storm-watch] hourly outlook failed for job ${job.id}: ${err.message}`); return null; });
     const alerts = await readActiveAlertsSafe(job.customer_latitude, job.customer_longitude, alertsCache);
     // FAWN ground-truth fallback whenever hourly rows within the forecast window lack usable
     // heat-index or wind readings (even if the hourly array is nonempty with rainChance-only rows).
     const { sawHeat, sawWind } = hourlySafetyAdvisories(hours, now, []);
-    const fawn = (!sawHeat || !sawWind)
+    const fawn = !(sawHeat && sawWind)
       ? await readFawnSafe(job.customer_latitude, job.customer_longitude, fawnCache, readFawn)
       : null;
     const signal = stormSignal(hours, alerts, now, fawn);
     const timeLabel = displayTime(job.window_start);
-    const where = job.customer_city ? `${job.customer_city} stop` : 'next stop';
+    const city = job.customer_city || null;
+    const where = city ? `${city} stop` : 'next stop';
+    const basePayload = {
+      job_id: job.id,
+      customer_id: job.customer_id,
+      service_type: job.service_type,
+      window_start: job.window_start,
+      window_end: job.window_end,
+      city,
+    };
 
+    const pending = [];
     if (signal.shouldNudge && !(await alreadyAlertedToday(job.id, job.technician_id, todayStr, NOTIFICATION_TYPE))) {
-      try {
-        await db('tech_notifications').insert({
+      pending.push({
+        kind: 'storm',
+        row: {
           technician_id: job.technician_id,
           type: NOTIFICATION_TYPE,
           message: stormMessage(signal, timeLabel, where),
           payload: JSON.stringify({
-            job_id: job.id,
-            customer_id: job.customer_id,
-            service_type: job.service_type,
-            window_start: job.window_start,
-            window_end: job.window_end,
+            ...basePayload,
             rain_chance: signal.peak,
             has_thunder: signal.hasThunder,
-            ...(signal.severeAlerts.length ? { severe_alerts: signal.severeAlerts.map((a) => a.event) } : {}),
-            ...(signal.advisories.length ? { advisories: signal.advisories.map((a) => a.event) } : {}),
-            city: job.customer_city || null,
+            severe_alerts: eventNames(signal.severeAlerts),
+            advisories: eventNames(signal.advisories),
           }),
-        });
-        alerted += 1;
-      } catch (err) {
-        logger.error(`[storm-watch] notification insert failed for job ${job.id}: ${err.message}`);
-      }
+        },
+      });
     }
-    if (signal.advisories.length > 0) {
+    if (signal.advisories.length) {
       // Heat / wind advisories are alert-only safety banners — NEVER a rain-out reschedule prompt.
       // Evaluated independently of storm nudges so a simultaneous heat/wind advisory is not hidden
       // behind a storm card, and deduped per hazard category.
       const sentCategories = await sentAdvisoryCategoriesToday(job.id, job.technician_id, todayStr);
-      const unseenAdvisories = sentCategories.has('__legacy__')
-        ? []
-        : signal.advisories.filter((a) => !sentCategories.has(String(a.category || a.event)));
-      if (unseenAdvisories.length > 0) {
+      const unseenAdvisories = signal.advisories.filter(
+        (a) => !sentCategories.has('__legacy__') && !sentCategories.has(String(a.category || a.event)),
+      );
+      if (unseenAdvisories.length) {
         const eventsLabel = unseenAdvisories.map((a) => a.event).join(' & ');
-        try {
-          await db('tech_notifications').insert({
+        const whenWhere = [timeLabel, where].filter(Boolean).join(' ');
+        pending.push({
+          kind: 'advisory',
+          row: {
             technician_id: job.technician_id,
             type: ADVISORY_NOTIFICATION_TYPE,
-            message: `⚠️ ${eventsLabel} near your ${timeLabel ? `${timeLabel} ` : ''}${where} — safety advisory only (no schedule move).`,
+            message: `⚠️ ${eventsLabel} near your ${whenWhere} — safety advisory only (no schedule move).`,
             payload: JSON.stringify({
-              job_id: job.id,
-              customer_id: job.customer_id,
-              service_type: job.service_type,
-              window_start: job.window_start,
-              window_end: job.window_end,
+              ...basePayload,
               advisory_only: true,
               advisories: unseenAdvisories.map((a) => ({ event: a.event, category: a.category })),
-              city: job.customer_city || null,
             }),
-          });
-          advisoriesSent += 1;
-        } catch (err) {
-          logger.error(`[storm-watch] advisory insert failed for job ${job.id}: ${err.message}`);
-        }
+          },
+        });
+      }
+    }
+
+    for (const item of pending) {
+      try {
+        await db('tech_notifications').insert(item.row);
+        counts[item.kind] += 1;
+      } catch (err) {
+        logger.error(`[storm-watch] ${item.kind} insert failed for job ${job.id}: ${err.message}`);
       }
     }
   }
 
-  if (alerted > 0) logger.info(`[storm-watch] sweep alerted ${alerted}/${stops.length} upcoming stops`);
-  return advisoriesSent > 0 ? { checked: stops.length, alerted, advisories: advisoriesSent } : { checked: stops.length, alerted };
+  if (counts.storm > 0) logger.info(`[storm-watch] sweep alerted ${counts.storm}/${stops.length} upcoming stops`);
+  return counts.advisory > 0
+    ? { checked: stops.length, alerted: counts.storm, advisories: counts.advisory }
+    : { checked: stops.length, alerted: counts.storm };
 }
 
 module.exports = {
