@@ -18,6 +18,7 @@ const db = require('../../models/db');
 const { HQ, driveMin } = require('../auto-dispatch/geo');
 const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
+const { dateOnlyString } = require('../../utils/date-only');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays, loadTechShifts, shiftBounds } = require('../technician-eligibility');
 const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
@@ -1149,10 +1150,6 @@ function parseBlockMinute(value) {
   return m ? Number(m[1]) * 60 + Number(m[2]) : null;
 }
 
-function blockDateString(value) {
-  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
-}
-
 async function loadPracticeScheduleBlocks({ dateFrom, dateTo, noCustomerReads = false }) {
   if (!noCustomerReads || !capacityEnabled()) return [];
   const rows = await db('tech_schedule_blocks')
@@ -1179,7 +1176,7 @@ function coalesceOccupiedStops(stops) {
 function mergeScheduleBlockStops(dayStops, scheduleBlocks, date, techId) {
   if (!Array.isArray(scheduleBlocks) || !scheduleBlocks.length) return dayStops;
   const matching = scheduleBlocks
-    .filter((b) => blockDateString(b.date) === date && (b.technician_id == null || String(b.technician_id) === String(techId)))
+    .filter((b) => dateOnlyString(b.date) === date && (b.technician_id == null || String(b.technician_id) === String(techId)))
     .map((b) => ({ startMin: parseBlockMinute(b.start_time), endMin: parseBlockMinute(b.end_time), id: b.id }))
     .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin)
     .map((b, idx) => ({
