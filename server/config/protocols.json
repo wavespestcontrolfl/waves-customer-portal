@@ -2177,7 +2177,7 @@
         "visit": 2,
         "month": "Any",
         "primary": "Rodent Trapping Setup\nAttic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched\nSet each on a top plate, joist, rafter, pipe or beam with rub marks or droppings; screw or zip-tie every trap\nOn a floor or ledge: the trap at a right angle to the wall, trigger end against it\nAsk about peanut allergies in the home before baiting\nBait each trap pea-size: rotate peanut butter, nut meat, raisin, prune; peanut allergy: hazelnut spread or dried fruit\nMap each trap (A1 to A8) and photograph it in place",
-        "secondary": "Outdoor activity: quote the bait-station service (its own card); no bait on a trapping visit\nNo glue boards, and no open snap trap outdoors\nTell the customer: nobody in the attic, no children or pets near traps; call us on a snap or a dead-rat smell",
+        "secondary": "Outdoor activity: quote the bait-station service (its own card); no rodenticide bait on a trapping visit\nNo glue boards, and no open snap trap outdoors\nTell the customer: nobody in the attic, no children or pets near traps; call us on a snap or a dead-rat smell",
         "lineMeta": {
           "Attic only: set up to 8 Victor M326 expanded-trigger traps, spread across the attic (A1 to A8 on the trap map), never bunched": {
             "scope": "interior",
@@ -2211,7 +2211,7 @@
             "scope": "interior",
             "treatmentApplied": false
           },
-          "Outdoor activity: quote the bait-station service (its own card); no bait on a trapping visit": {
+          "Outdoor activity: quote the bait-station service (its own card); no rodenticide bait on a trapping visit": {
             "scope": "exterior",
             "treatmentApplied": false
           },
