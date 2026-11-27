@@ -44,7 +44,7 @@ const mix = require('../services/product-mix-rules');
       CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid());
       CREATE TABLE products_catalog (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(150) NOT NULL, category varchar(30),
-        active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
+        subcategory varchar(100), active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
         mixing_order_category varchar(50), allows_surfactant boolean,
         do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true
       );
@@ -119,7 +119,7 @@ const mix = require('../services/product-mix-rules');
   test('the label fields are read: allows_surfactant = false and a typed irac_group', async () => {
     const result = await mix.checkMix([ids.kflow, ids.nis, ids.typed, ids.oil]);
     const pair = (a, b) => result.pairs.find((p) => [p.productAId, p.productBId].sort().join() === [a, b].sort().join());
-    expect(pair(ids.kflow, ids.nis)).toMatchObject({ verdict: 'caution', source: 'catalog' });
+    expect(pair(ids.kflow, ids.nis)).toMatchObject({ verdict: 'never', source: 'catalog' });
     expect(pair(ids.typed, ids.oil)).toMatchObject({ verdict: 'never', reason: 'No oil and pyrethroid in the same tank.' });
   });
 
@@ -142,6 +142,14 @@ const mix = require('../services/product-mix-rules');
     await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x' }, { id: seeded.id })).rejects.toThrow('audit_log write failed');
     await expect(mix.deactivateRule(seeded.id)).rejects.toThrow('audit_log write failed');
     expect(await mockTrx('product_mix_rules').where({ id: seeded.id }).first()).toMatchObject({ verdict: 'never', active: true });
+  });
+
+  test('saving an edit of a rule removed meanwhile is a 409 and does not bring it back', async () => {
+    const tetrino = await mockTrx('product_mix_rules').where({ product_a_id: ids.tetrino, group_b: 'any' }).first();
+    await mix.deactivateRule(tetrino.id);
+    await expect(mix.upsertRule({ productAId: ids.tetrino, groupB: 'any', verdict: 'ok', reason: 'x' }, { id: tetrino.id }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(await mockTrx('product_mix_rules').where({ id: tetrino.id }).first()).toMatchObject({ active: false, verdict: 'never' });
   });
 
   test('an edit onto another row\'s product + group target is a 409', async () => {

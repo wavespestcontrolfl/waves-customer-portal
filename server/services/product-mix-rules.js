@@ -40,7 +40,8 @@ function iracCodes(product) {
 // group check list (a test keeps them equal). A product can sit in more than one group.
 const GROUPS = [
   { key: 'any', label: 'Any other product (apply alone)', test: () => true },
-  { key: 'fertilizer', label: 'Fertilizer', test: (p) => ['fertilizer', 'liquid_fertilizer'].includes(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' },
+  // A combination product counts too (catalog subcategory such as "Pre-emergent + fertilizer combo").
+  { key: 'fertilizer', label: 'Fertilizer', test: (p) => ['fertilizer', 'liquid_fertilizer'].includes(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' || /fertili[sz]er/.test(lower(p.subcategory)) },
   { key: 'surfactant', label: 'Surfactant or wetting agent', test: (p) => ['adjuvant', 'soil_surfactant'].includes(lower(p.category)) || /surfactant|wetting agent/.test(text(p)) },
   { key: 'oil', label: 'Spray oil', test: (p) => /spray oil|oil emulsion|horticultural oil|mineral oil|paraffinic oil|petroleum oil|neem oil/.test(text(p)) },
   { key: 'copper', label: 'Copper', test: (p) => /copper/.test(text(p)) },
@@ -55,7 +56,7 @@ const GROUP_KEYS = GROUPS.map((g) => g.key);
 const GROUP_BY_KEY = new Map(GROUPS.map((g) => [g.key, g]));
 const SEVERITY = { never: 3, caution: 2, ok: 1 };
 
-const PRODUCT_COLUMNS = ['id', 'name', 'category', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'mixing_order_category', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes'];
+const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'mixing_order_category', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes'];
 
 function validationError(message) {
   const err = new Error(message);
@@ -91,7 +92,7 @@ function catalogNotes(product) {
 function surfactantRestriction(product, other) {
   if (product.allows_surfactant !== false || !inGroup(other, 'surfactant')) return null;
   return {
-    kind: 'catalog', ruleId: null, jarTestRequired: false, verdict: 'caution', source: 'catalog',
+    kind: 'catalog', ruleId: null, jarTestRequired: false, verdict: 'never', source: 'catalog',
     reason: `Label: ${product.name} does not allow a surfactant in the tank.`, productId: product.id, productName: product.name,
   };
 }
@@ -225,6 +226,8 @@ async function editRule(trx, id, fields, actorId) {
   if (!UUID_RE.test(String(id))) throw httpError(404, 'Rule not found');
   const target = await trx('product_mix_rules').where({ id }).forUpdate().first();
   if (!target) throw httpError(404, 'Rule not found');
+  // A removed rule comes back only through Add rule, never by saving an edit form opened before it was removed.
+  if (target.active === false) throw httpError(409, 'This rule was removed. Add it again to bring it back.');
   const same = await trx('product_mix_rules').where(keyOf(fields)).whereNot({ id }).first();
   if (same) throw httpError(409, TARGET_TAKEN);
   let row;
@@ -274,7 +277,8 @@ function ruleEntry(rule, kind) {
 }
 
 // One pair's answer. The headline: the pair's own rule (the owner named both products), else the worst group rule,
-// else the worst catalog note; a label restriction (allows_surfactant = false) is never shown weaker than itself.
+// else the worst catalog note. A Never from a group rule (an apply-alone rule included) or from a label restriction
+// (allows_surfactant = false) always leads: a pair's own Yes or Caution never hides a prohibition, it stays listed.
 // entries lists the headline first, then every other match once.
 function evaluatePair(x, y, rules, notesById) {
   const xid = String(x.id).toLowerCase();
@@ -289,14 +293,25 @@ function evaluatePair(x, y, rules, notesById) {
   const groupEntries = groupRules.map((r) => ruleEntry(r, 'group'));
   const entries = [...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupEntries, ...restrictions, ...catalog];
   let lead = (pairRule && entries[0]) || worst(groupEntries) || worst([...restrictions, ...catalog]);
-  const restriction = worst(restrictions);
-  if (restriction && SEVERITY[restriction.verdict] > SEVERITY[lead.verdict]) lead = restriction;
+  const prohibition = [...groupEntries, ...restrictions].find((e) => e.verdict === 'never');
+  if (prohibition && lead.verdict !== 'never') lead = prohibition;
+  return headline(lead, entries);
+}
+
+function headline(lead, entries) {
   if (!lead) return { ...UNKNOWN, source: null, jarTestRequired: false, entries };
   return {
     verdict: lead.verdict, reason: lead.reason, source: lead.source,
     jarTestRequired: entries.some((e) => e.jarTestRequired),
     entries: [lead, ...entries.filter((e) => e !== lead)],
   };
+}
+
+// A pair where one product is not in the catalog: only the known product's apply-alone ('any') rules can answer it.
+function applyAloneOnly(known, rules) {
+  const kid = known ? String(known.id).toLowerCase() : null;
+  const entries = kid ? rules.filter((r) => r.group_b === 'any' && String(r.product_a_id).toLowerCase() === kid).map((r) => ruleEntry(r, 'group')) : [];
+  return headline(worst(entries), entries);
 }
 
 // For every pair in the list: the pair's own rule first (it wins: the owner named both products), then the group
@@ -320,7 +335,7 @@ async function checkMix(productIds = []) {
       const x = byId.get(ids[i]);
       const y = byId.get(ids[j]);
       const pair = { productAId: ids[i], productAName: x?.name || null, productBId: ids[j], productBName: y?.name || null };
-      if (!x || !y) { pairs.push({ ...pair, ...UNKNOWN, source: null, jarTestRequired: false, entries: [] }); continue; }
+      if (!x || !y) { pairs.push({ ...pair, ...applyAloneOnly(x || y, rules) }); continue; }
       pairs.push({ ...pair, ...evaluatePair(x, y, rules, notesById) });
     }
   }

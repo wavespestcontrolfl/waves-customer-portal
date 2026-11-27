@@ -128,18 +128,18 @@ describe('label fields and IRAC codes', () => {
   const NIS = { id: id(8), name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' };
   const KFLOW = { id: id(9), name: 'LESCO K-Flow 0-0-25', category: 'fertilizer', allows_surfactant: false };
 
-  test('allows_surfactant = false with a surfactant reads caution from the catalog, never "No rule"', async () => {
+  test('allows_surfactant = false with a surfactant reads Never from the catalog, never "No rule"', async () => {
     mockTables.products_catalog.push(NIS, KFLOW);
     const pair = (await mix.checkMix([KFLOW.id, NIS.id])).pairs[0];
-    expect(pair).toMatchObject({ verdict: 'caution', source: 'catalog', reason: 'Label: LESCO K-Flow 0-0-25 does not allow a surfactant in the tank.' });
+    expect(pair).toMatchObject({ verdict: 'never', source: 'catalog', reason: 'Label: LESCO K-Flow 0-0-25 does not allow a surfactant in the tank.' });
   });
 
   test('an owner "ok" for that pair still shows the label restriction as the headline, never a bare Yes', async () => {
     mockTables.products_catalog.push(NIS, KFLOW);
     mockTables.product_mix_rules.push(rule(6, { product_a_id: NIS.id, product_b_id: KFLOW.id, verdict: 'ok', reason: 'Owner said fine.' }));
     const pair = (await mix.checkMix([NIS.id, KFLOW.id])).pairs[0];
-    expect(pair.verdict).toBe('caution');
-    expect(pair.entries.map((e) => e.verdict)).toEqual(['caution', 'ok']);
+    expect(pair.verdict).toBe('never');
+    expect(pair.entries.map((e) => e.verdict)).toEqual(['never', 'ok']);
   });
 
   test('allows_surfactant unset (NULL) adds nothing', async () => {
@@ -170,6 +170,39 @@ describe('label fields and IRAC codes', () => {
 });
 
 describe('the headline entry', () => {
+  const TOPCHOICE = { id: id(10), name: 'Topchoice Granular Insecticide', category: 'insecticide', formulation: 'granular' };
+  const STONEWALL = { id: id(11), name: 'LESCO Stonewall 0.37% 18-0-10', category: 'herbicide', subcategory: 'Pre-emergent + fertilizer combo' };
+
+  test('a pair\'s own Yes never hides an apply-alone Never: the Never leads, the Yes stays listed', async () => {
+    mockTables.products_catalog.push(TOPCHOICE);
+    mockTables.product_mix_rules.push(
+      rule(8, { product_a_id: TOPCHOICE.id, group_b: 'any', verdict: 'never', reason: 'Spread Topchoice as its own pass.' }),
+      rule(9, { product_a_id: FERT.id, product_b_id: TOPCHOICE.id, verdict: 'ok', reason: 'Owner: fine.' }),
+    );
+    const pair = (await mix.checkMix([TOPCHOICE.id, FERT.id])).pairs[0];
+    expect(pair).toMatchObject({ verdict: 'never', reason: 'Spread Topchoice as its own pass.' });
+    expect(pair.entries.map((e) => e.reason)).toEqual(['Spread Topchoice as its own pass.', 'Owner: fine.']);
+  });
+
+  test('a pair\'s own Caution still beats a group Caution (only a Never overrides it)', async () => {
+    mockTables.product_mix_rules.push(rule(10, { product_a_id: CERTAINTY.id, group_b: 'herbicide', verdict: 'caution', reason: 'Group caution.' }));
+    expect((await mix.checkMix([CELSIUS.id, CERTAINTY.id])).pairs[0].reason).toBe('Approved weed mix, not in summer.');
+  });
+
+  test('a fertilizer combination product (catalog subcategory) matches the fertilizer group', async () => {
+    mockTables.products_catalog.push(STONEWALL);
+    const pair = (await mix.checkMix([STONEWALL.id, CELSIUS.id])).pairs[0];
+    expect(pair).toMatchObject({ verdict: 'never', reason: 'Do not tank mix Celsius with fertilizer.' });
+  });
+
+  test('an apply-alone rule still answers when the other product is not in the catalog', async () => {
+    mockTables.products_catalog.push(TOPCHOICE);
+    mockTables.product_mix_rules.push(rule(8, { product_a_id: TOPCHOICE.id, group_b: 'any', verdict: 'never', reason: 'Spread Topchoice as its own pass.' }));
+    const result = await mix.checkMix([id(998), TOPCHOICE.id]);
+    expect(result.pairs[0]).toMatchObject({ verdict: 'never', reason: 'Spread Topchoice as its own pass.', productBName: 'Topchoice Granular Insecticide' });
+    expect((await mix.checkMix([id(998), CELSIUS.id])).pairs[0].verdict).toBe('unknown');
+  });
+
   test('the strongest group rule leads the entries and is not repeated; a weaker one stays listed', async () => {
     mockTables.product_mix_rules.unshift(rule(7, { product_a_id: FERT.id, group_b: 'herbicide', verdict: 'caution', reason: 'Jar test the herbicide first.' }));
     const pair = (await mix.checkMix([FERT.id, CELSIUS.id])).pairs[0];
