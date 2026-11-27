@@ -764,6 +764,10 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
          AND is_archived = false
          AND received_at <= ?
          AND COALESCE(auto_action, '') <> 'lead_skipped_automated_sender'
+         AND NOT (
+           LOWER(from_address) = 'localservices-noreply@google.com'
+           AND COALESCE(subject, '') ~* '^\\s*(new|missed)\\s+call\\s+from\\s+a\\s+potential\\s+customer\\b'
+         )
        ORDER BY received_at ASC
        LIMIT ${pageSize} OFFSET ${page * pageSize}`,
       [oldest, normalizeAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com'), NUDGE_CATEGORIES, newest]
@@ -774,9 +778,11 @@ async function collectUnansweredNudges(now = new Date(), limit = 5) {
     if (page === 2) logger.warn('[inbox-hygiene] nudge candidates hit the 300-thread page cap — oldest unanswered threads may be deferred');
   }
 
+  const { isGoogleLsaCallReceipt } = require('./email-actions');
   const nudges = [];
   for (const email of deduped) {
     if (nudges.length >= limit) break;
+    if (isGoogleLsaCallReceipt(email.from_address, email.subject)) continue;
     try {
       const thread = await gmailClient.getThread(email.gmail_thread_id);
       const receivedAt = new Date(email.received_at).getTime();

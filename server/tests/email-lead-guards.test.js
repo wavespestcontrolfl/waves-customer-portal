@@ -33,6 +33,7 @@ jest.mock('../services/llm/call', () => ({
 
 const db = require('../models/db');
 const {
+  executeAutoAction,
   handleLeadInquiry,
   isHardSkippedLeadSender,
   isAutomatedSender,
@@ -478,6 +479,31 @@ describe('handleLeadInquiry — lead-creation guards', () => {
       expect.objectContaining({ auto_action: 'lead_skipped_automated_sender' }),
     );
     expect(state.firstTables).toHaveLength(0);
+  });
+
+  test('executeAutoAction skips Google LSA call receipts before category dispatch even when misclassified as complaint', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    const state = setupDb();
+
+    const result = await executeAutoAction(
+      makeEmail({
+        from_address: 'localservices-noreply@google.com',
+        from_name: 'Local Services by Google',
+        reply_to: 'localservices-noreply@google.com',
+        subject: 'New call from a potential customer',
+      }),
+      makeClassification({ category: 'complaint' }),
+    );
+
+    expect(result).toEqual({ ok: true, skipped: true });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(insertsFor(state, 'notifications')).toHaveLength(0);
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+    expect(gmailClient.modifyLabels).not.toHaveBeenCalled();
+    expect(emailUpdates(state)).toContainEqual(
+      expect.objectContaining({ auto_action: 'lead_skipped_automated_sender' }),
+    );
   });
 
   test('Google Local Services non-call inquiry from localservices-noreply@google.com still reaches contact/review checks (never stores automated sender or drafts reply)', async () => {

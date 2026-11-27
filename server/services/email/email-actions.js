@@ -419,6 +419,14 @@ async function executeAutoAction(email, classification) {
       // commits on the outcome must not read it as a retryable failure.
       return { ok: true, skipped: true };
     }
+    if (isGoogleLsaCallReceipt(email.from_address, email.subject)) {
+      await db('emails').where({ id: email.id }).update({
+        auto_action: 'lead_skipped_automated_sender',
+        updated_at: new Date(),
+      });
+      logger.info(`[email-actions] Skipped ${classification.category} auto-action for Google LSA call receipt (email ${email.id})`);
+      return { ok: true, skipped: true };
+    }
     switch (classification.category) {
       case 'spam':
         await handleSpam(email);
@@ -679,12 +687,15 @@ function leadMinConfidence() {
   return Number.isFinite(parsed) ? parsed : DEFAULT_LEAD_MIN_CONFIDENCE;
 }
 
+function isGoogleLsaCallReceipt(fromAddress, subject) {
+  return normalizeAddress(fromAddress) === GOOGLE_LSA_RECEIPT_SENDER
+    && GOOGLE_LSA_CALL_RECEIPT_SUBJECT_RE.test(String(subject || ''));
+}
+
 function isHardSkippedLeadSender(fromAddress, subject = null) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return false;
-  if (normalized === GOOGLE_LSA_RECEIPT_SENDER && GOOGLE_LSA_CALL_RECEIPT_SUBJECT_RE.test(String(subject || ''))) {
-    return true;
-  }
+  if (isGoogleLsaCallReceipt(normalized, subject)) return true;
   if (LEAD_HARD_SKIP_SENDERS.some((entry) => (
     entry.startsWith('@') ? normalized.endsWith(entry) : normalized === entry
   ))) return true;
@@ -1597,6 +1608,7 @@ module.exports = {
   // Exported for unit testing the lead-creation guards
   handleLeadInquiry,
   EMAIL_LEAD_SOURCE_TYPE,
+  isGoogleLsaCallReceipt,
   isHardSkippedLeadSender,
   isAutomatedSender,
   isWavesAutoAckReply,

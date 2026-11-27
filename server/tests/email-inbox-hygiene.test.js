@@ -332,6 +332,35 @@ describe('collectUnansweredNudges', () => {
     const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
     expect(nudges.map((n) => n.id)).toEqual(['e-b']);
   });
+
+  test('excludes previously processed Google LSA call receipts from unanswered nudges without calling Gmail', async () => {
+    setupDb({}, {
+      __raw: [[
+        {
+          id: 'e-lsa-old',
+          gmail_thread_id: 't-lsa',
+          from_address: 'localservices-noreply@google.com',
+          subject: 'New call from a potential customer',
+          auto_action: 'lead_created',
+          received_at: '2026-07-24T12:00:00Z',
+        },
+        {
+          id: 'e-real',
+          gmail_thread_id: 't-real',
+          from_address: 'prospect@example.com',
+          subject: 'Need pest control quote',
+          auto_action: 'lead_created',
+          received_at: '2026-07-24T12:00:00Z',
+        },
+      ]],
+    });
+    gmailClient.getThread.mockResolvedValue({ messages: [{ labelIds: ['INBOX'], internalDate: '0' }] });
+    const nudges = await collectUnansweredNudges(new Date('2026-07-28T12:00:00Z'));
+    expect(nudges.map((n) => n.id)).toEqual(['e-real']);
+    expect(gmailClient.getThread).toHaveBeenCalledTimes(1);
+    expect(gmailClient.getThread).toHaveBeenCalledWith('t-real');
+    expect(db.raw.mock.calls[0][0]).toContain("LOWER(from_address) = 'localservices-noreply@google.com'");
+  });
 });
 
 describe('sweepQuarantine — stuck-claim recovery', () => {
