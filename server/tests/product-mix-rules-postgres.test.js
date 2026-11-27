@@ -197,6 +197,34 @@ const mix = require('../services/product-mix-rules');
     expect(await mockTrx.schema.hasColumn('product_mix_rules', 'version')).toBe(false);
   });
 
+  test('migration 20261127180000 adds the 90°F line and a surfactant group caution once; down() reverses both', async () => {
+    const heat = require('../models/migrations/20261127180000_celsius_surfactant_heat');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    mockAudit.events = [];
+    const [other] = await mockTrx('products_catalog').insert({ name: 'Brand Q Wetting Agent', category: 'adjuvant' }).returning('id');
+    const [a, b] = [ids.celsius, ids.nis].sort();
+    const pairRow = () => mockTrx('product_mix_rules').where({ product_a_id: a, product_b_id: b }).first();
+    const groupRows = () => mockTrx('product_mix_rules').where({ product_a_id: ids.celsius, group_b: 'surfactant' });
+    expect((await mix.checkMix([ids.celsius, other.id])).pairs[0].verdict).toBe('unknown');
+    await heat.up(mockTrx);
+    await heat.up(mockTrx);
+    expect(await pairRow()).toMatchObject({ verdict: 'caution', reason: heat._PAIR_AFTER, version: 2 });
+    expect(await groupRows()).toEqual([expect.objectContaining({ verdict: 'caution', reason: heat._GROUP_RULE.reason, active: true })]);
+    // Any catalog surfactant now gets the seasonal + 90°F caution, not only LESCO 90/10.
+    expect((await mix.checkMix([other.id, ids.celsius])).pairs[0]).toMatchObject({ verdict: 'caution', reason: heat._GROUP_RULE.reason });
+    expect((await mix.checkMix([ids.nis, ids.celsius])).pairs[0]).toMatchObject({ verdict: 'caution', reason: heat._PAIR_AFTER });
+    expect(mockAudit.events.map((e) => e.action)).toEqual([
+      'migration:20261127180000_celsius_surfactant_heat:up:pair', 'migration:20261127180000_celsius_surfactant_heat:up:group',
+    ]);
+    await heat.down(mockTrx);
+    expect(await pairRow()).toMatchObject({ reason: heat._PAIR_BEFORE, version: 3 });
+    expect(await groupRows()).toHaveLength(0);
+    // An admin's own wording on the pair is kept.
+    await mockTrx('product_mix_rules').where({ product_a_id: a, product_b_id: b }).update({ reason: 'Owner wording.' });
+    await heat.up(mockTrx);
+    expect(await pairRow()).toMatchObject({ reason: 'Owner wording.' });
+  });
+
   test('migration 20261127160000 makes Certainty + 90/10 caution once, keeps an admin edit, and down() reverses it', async () => {
     const fix = require('../models/migrations/20261127160000_product_mix_rules_certainty_nis_caution');
     // The migration needs audit_log to exist (the event itself goes through the mocked recordAuditEvent).

@@ -170,3 +170,34 @@ describe('20261127170000_product_mix_rules_version_and_prefix', () => {
     expect(knex.schema.alterTable).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127180000_celsius_surfactant_heat', () => {
+  const fix = require('../models/migrations/20261127180000_celsius_surfactant_heat');
+  const seed = require('../models/migrations/20261127143000_product_mix_rules');
+
+  test('the heat line is the job sheet\'s own wording, on the pair and on a surfactant group caution', () => {
+    const sheet = fs.readFileSync(path.join(__dirname, '..', 'services', 'lawn-weed-mix.js'), 'utf8');
+    expect(sheet).toContain('const SURFACTANT_MAX_TEMP_F = 90;');
+    expect(sheet).toContain('const SURFACTANT_CHECK_NOTE = `Leave the surfactant out if it is ${SURFACTANT_MAX_TEMP_F}°F or hotter.`;');
+    expect(fix._HEAT).toBe('Leave the surfactant out if it is 90°F or hotter.');
+    const seeded = seed._SEED.find((r) => r.a[0] === 'Celsius WG' && r.b && r.b[0] === 'LESCO 90/10 Nonionic Surfactant');
+    expect(fix._PAIR_BEFORE).toBe(seeded.reason);
+    expect(fix._PAIR_AFTER).toBe(`${seeded.reason} Leave the surfactant out if it is 90°F or hotter.`);
+    expect(fix._GROUP_RULE).toMatchObject({ group_b: 'surfactant', verdict: 'caution' });
+    expect(fix._GROUP_RULE.reason).toContain('In February and June to September, spray Celsius alone: no surfactant.');
+    expect(fix._GROUP_RULE.reason.endsWith(fix._HEAT)).toBe(true);
+    expect(seed._GROUPS).toContain('surfactant');
+    for (const reason of [fix._PAIR_AFTER, fix._GROUP_RULE.reason]) expect(reason.length).toBeLessThanOrEqual(200);
+    expect(`migration:${fix._MIGRATION}:down:group`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    knex.raw = jest.fn();
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+});

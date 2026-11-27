@@ -104,11 +104,22 @@ describe('checkMix', () => {
     ]);
   });
 
-  test('a pair rule wins over a catalog note, which stays listed', async () => {
-    mockTables.product_mix_rules.push(rule(5, { product_a_id: SPEEDZONE.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.' }));
-    const pair = (await mix.checkMix([DEMAND.id, SPEEDZONE.id])).pairs[0];
-    expect(pair).toMatchObject({ verdict: 'ok', reason: 'Owner checked.' });
-    expect(pair.entries.map((e) => e.kind)).toEqual(['pair', 'catalog_note', 'catalog_note']);
+  test('under a pair rule a compatibility note is an older note only, and a do-not-mix item still raises a Yes to Caution', async () => {
+    // Demand CS has only compatibility_notes: a pair Yes stands, the note is listed without a verdict.
+    mockTables.product_mix_rules.push(rule(5, { product_a_id: CELSIUS.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.' }));
+    const free = (await mix.checkMix([DEMAND.id, CELSIUS.id])).pairs[0];
+    expect(free).toMatchObject({ verdict: 'ok', reason: 'Owner checked.' });
+    expect(free.entries.map((e) => [e.kind, e.verdict])).toEqual([['pair', 'ok'], ['catalog_note', null]]);
+    expect(free.entries[1].reason).toBe('Catalog note (older): Demand CS label note: Compatible with most insecticides and IGRs.');
+    // SpeedZone's do_not_tank_mix_with stays a Caution and leads over the pair's Yes; the pair stays listed.
+    const speedzonePair = rule(6, { product_a_id: SPEEDZONE.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.' });
+    mockTables.product_mix_rules.push(speedzonePair);
+    const restricted = (await mix.checkMix([DEMAND.id, SPEEDZONE.id])).pairs[0];
+    expect(restricted).toMatchObject({ verdict: 'caution', reason: 'SpeedZone Southern EW label: do not tank mix with Additives that alter spray-solution pH below 5 or above 8.' });
+    expect(restricted.entries.map((e) => [e.kind, e.verdict])).toEqual([['catalog', 'caution'], ['pair', 'ok'], ['catalog_note', null]]);
+    // A pair Never is never lowered by it.
+    speedzonePair.verdict = 'never';
+    expect((await mix.checkMix([DEMAND.id, SPEEDZONE.id])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Owner checked.' });
   });
 
   test('an id that is not a product never throws: it is listed as not found and its pairs read unknown', async () => {

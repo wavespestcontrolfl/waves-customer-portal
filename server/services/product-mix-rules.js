@@ -78,14 +78,15 @@ function asList(value) {
   return [];
 }
 
-// The catalog's own one-sided free text, as caution entries.
+// The catalog's own one-sided text, as caution entries. field names the catalog column: a do_not_tank_mix_with item is
+// a label restriction (it keeps its caution under a pair rule); compatibility_notes is free text (background only then).
 function catalogNotes(product) {
   const notes = asList(product.do_not_tank_mix_with)
     .map((item) => String(item || '').trim()).filter(Boolean)
-    .map((item) => ({ verdict: 'caution', reason: `${product.name} label: do not tank mix with ${item}`, source: 'catalog' }));
+    .map((item) => ({ verdict: 'caution', reason: `${product.name} label: do not tank mix with ${item}`, source: 'catalog', field: 'do_not_tank_mix_with' }));
   const compat = String(product.compatibility_notes || '').trim();
   // The note belongs to one product: its name leads, so it never reads as advice about the partner.
-  if (compat) notes.push({ verdict: 'caution', reason: `${product.name} label note: ${compat}`, source: 'catalog' });
+  if (compat) notes.push({ verdict: 'caution', reason: `${product.name} label note: ${compat}`, source: 'catalog', field: 'compatibility_notes' });
   return notes.map((note) => ({ ...note, productId: product.id, productName: product.name }));
 }
 
@@ -322,6 +323,7 @@ function ruleEntry(rule, kind) {
 // One pair's answer. The headline: the pair's own rule (the owner named both products), else the worst group rule,
 // else the worst catalog note. A Never from a group rule (an apply-alone rule included) or from a label restriction
 // (allows_surfactant = false) always leads: a pair's own Yes or Caution never hides a prohibition, it stays listed.
+// A catalog do-not-mix item (do_not_tank_mix_with) stays a Caution under a pair rule and raises a pair's Yes to it.
 // entries lists the headline first, then every other match once.
 function evaluatePair(x, y, rules, notesById) {
   const xid = String(x.id).toLowerCase();
@@ -332,13 +334,16 @@ function evaluatePair(x, y, rules, notesById) {
     (String(r.product_a_id).toLowerCase() === xid && inGroup(y, r.group_b))
     || (String(r.product_a_id).toLowerCase() === yid && inGroup(x, r.group_b))));
   const restrictions = [surfactantRestriction(x, y), surfactantRestriction(y, x), surfactantConflict(x, y)].filter(Boolean);
-  // Under a pair rule the catalog's free text is background only: listed as an older note, never as a second verdict.
-  const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => (pairRule
+  // Under a pair rule the catalog's free text (compatibility_notes) is background only: listed as an older note, never
+  // as a second verdict. A do-not-mix item stays a Caution entry.
+  const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => (pairRule && note.field === 'compatibility_notes'
     ? { ...note, kind: 'catalog_note', ruleId: null, jarTestRequired: false, verdict: null, reason: `Catalog note (older): ${note.reason}` }
     : { kind: 'catalog', ruleId: null, jarTestRequired: false, ...note }));
   const groupEntries = groupRules.map((r) => ruleEntry(r, 'group'));
   const entries = [...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupEntries, ...restrictions, ...catalog];
   let lead = (pairRule && entries[0]) || worst(groupEntries) || worst([...restrictions, ...catalog]);
+  const doNotMix = worst(catalog.filter((e) => e.kind === 'catalog'));
+  if (pairRule && doNotMix && SEVERITY[doNotMix.verdict] > SEVERITY[lead.verdict]) lead = doNotMix;
   const prohibition = [...groupEntries, ...restrictions].find((e) => e.verdict === 'never');
   if (prohibition && lead.verdict !== 'never') lead = prohibition;
   return headline(lead, entries);
