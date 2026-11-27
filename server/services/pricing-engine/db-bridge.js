@@ -1090,6 +1090,7 @@ function stageTrenchingCatalogState(ot = null) {
     const live = constants.SPECIALTY.trenching?.products?.[key] || {};
     const staged = {
       ...live,
+      label: defaults.label,
       containerCost: defaults.containerCost,
       containerOz: defaults.containerOz,
       catalogProductName: defaults.catalogProductName,
@@ -2358,12 +2359,18 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
-      setNumber(constants.SPECIALTY.boraCare, 'galCost', firstDefinedKey(bc, ['bc_gal', 'galCost', 'gal_cost']), Number);
-      setNumber(constants.SPECIALTY.boraCare, 'coverage', firstDefinedKey(bc, ['bc_cov', 'coverage', 'coverage_sqft']), Number);
+      const setPositive = (key, raw, max = Infinity) => {
+        const n = Number(raw);
+        if (raw != null && raw !== '' && Number.isFinite(n) && n > 0 && n <= max) {
+          constants.SPECIALTY.boraCare[key] = n;
+        }
+      };
+      setPositive('galCost', firstDefinedKey(bc, ['bc_gal', 'galCost', 'gal_cost']));
+      setPositive('coverage', firstDefinedKey(bc, ['bc_cov', 'coverage', 'coverage_sqft']));
       setNumber(constants.SPECIALTY.boraCare, 'equipCost', firstDefinedKey(bc, ['bc_equip', 'equipCost', 'equip_cost']), Number);
-      setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', firstDefinedKey(bc, ['marginDivisor', 'margin_divisor']), Number);
+      setPositive('marginDivisor', firstDefinedKey(bc, ['marginDivisor', 'margin_divisor']), 1);
       setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', firstDefinedKey(bc, ['min_job_price', 'minJobPrice']), Number);
-      setNumber(constants.SPECIALTY.boraCare, 'surfaceLaborSqFtPerHour', firstDefinedKey(bc, ['surface_labor_sqft_per_hr', 'surfaceLaborSqFtPerHour']), Number);
+      setPositive('surfaceLaborSqFtPerHour', firstDefinedKey(bc, ['surface_labor_sqft_per_hr', 'surfaceLaborSqFtPerHour']));
     }
     // Pre-slab step/link kill switches mutate in place across syncs, so EVERY
     // sync restores the in-code defaults before the row (if any) is applied —
