@@ -1165,6 +1165,13 @@ describe('PR review r5', () => {
       const [card] = await build({ isLawn: true }, { raw: `${product.name} — as labeled`, role: 'base', selected: true, product });
       expect(card.spreader).toBeNull();
     }
+    // A spot row's staged rate rides through resolution to the lookup, ahead of the line text and the catalog rate.
+    const spotPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Oct', visit: 10, blocks: [] }, mixCalculator: { items: [
+      { raw: 'Topchoice Granular Insecticide — 1 lb per 1,000 sq ft', role: 'conditional', conditional: true, selected: true, product: { id: 'tc' }, mix: null, spot: { ratePer1000: 2, rateUnit: 'lb' } },
+    ], conditionalOptions: [] } });
+    const spotLines = await jobCard.resolveVisitLines({ facts: { serviceId: 'svc1', isLawn: true, strip: { program: 'Lawn Care' } }, protocols: {}, catalog: [topchoice], dbh: () => ({}), deps: { buildPlan: spotPlan } });
+    const [spotCard] = await build({ isLawn: true }, spotLines.lines[0]);
+    expect(spotCard.spreader).toMatchObject({ setting: 8 });
     const [pest] = await build({ isLawn: false }, { raw: 'Synthetic ant bait granule', role: 'base', selected: true, product: { id: 'a', name: 'Synthetic ant bait granule', rate_unit: 'lb', label_verified_at: '2026-08-01' } });
     expect(pest.spreader).toBeNull();
   });

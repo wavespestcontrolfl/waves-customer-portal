@@ -37,6 +37,13 @@ describe('the spreader number for a rate', () => {
     expect(lineLbPer1000('LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader')).toBe(3.1);
     expect(lineLbPer1000('Bag — 2 to 3 lb per 1,000 sq ft')).toBeNull();
   });
+  test('the 13-0-13 bed line reads its bed rate (0.75 lb per 100 sq ft = 7.5 per 1,000), not its nitrogen cap: #16', () => {
+    const protocols = JSON.stringify(require('../config/protocols.json'));
+    const raw = /13-0-13 ornamental fertilizer \(LESCO 13-0-13[^"\\]*/.exec(protocols)[0];
+    expect(raw).toMatch(/caps nitrogen at 1 lb per 1,000 sq ft/);
+    expect(lineLbRate(raw)).toEqual({ rate: 7.5 });
+    expect(spreaderForLine({ productName: 'LESCO 13-0-13 60% PolyPlus Landscape', raw })).toMatchObject({ setting: 16, text: 'Spreader: LESCO #16, start number. Weigh test at first use.' });
+  });
   test('a ranged line states no one rate in any spelling, so it gets no number without a plan rate', () => {
     for (const raw of ['Topchoice — 1 to 2 lb per 1,000 sq ft', 'Topchoice — 1-2 lb per 1,000 sq ft', 'Topchoice — 1\u20132 lb per 1,000 sq ft']) {
       expect(lineLbRate(raw)).toEqual({ range: true });

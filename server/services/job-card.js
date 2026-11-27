@@ -1261,7 +1261,8 @@ function isTankMixable(product = {}) {
   return true;
 }
 
-// The LESCO spreader number for a granular line (spreader-settings.js), at the rate the card applies: the plan's, else a sold
+// The LESCO spreader number for a granular line (spreader-settings.js), at the rate the card applies: the plan's (its mix, else
+// a spot row's staged rate), else a sold
 // add-on's governed rate (when the card shows it), else the line's own lb rate, else the catalog rate when the line states none
 // (a ranged line takes no catalog rate). Every lawn granular spread by spreader (a product rated in lb, not applied as a gel, glue
 // board, station or injection), and another service's granular only when a row names its product. `withheld`: the card
@@ -1269,7 +1270,8 @@ function isTankMixable(product = {}) {
 // label with no plan mix, a line the plan marks unavailable, or a governed rate the card withholds.
 const NOT_SPREAD = /gel|glue|station|trunk|inject/i;
 function cardRate(line, product, governed, substituted) {
-  if (line.planMix?.ratePer1000 > 0) return { rate: line.planMix.ratePer1000, rateUnit: line.planMix.rateUnit };
+  const planned = [line.planMix, line.planSpot].find((entry) => entry?.ratePer1000 > 0);
+  if (planned) return { rate: planned.ratePer1000, rateUnit: planned.rateUnit };
   if (line.governed) return governed?.rate ? { rate: line.governed.ratePer1000, rateUnit: line.governed.rateUnit } : null;
   if (substituted || !spreaderSettings.lineLbRate(line.raw)) return { rate: product.default_rate_per_1000, rateUnit: product.rate_unit };
   return {};
@@ -1424,6 +1426,8 @@ async function resolveVisitProducts({ facts, protocols, catalog, dbh = db, deps 
         substitutedFor: item.substitution?.originalProductName || null,
         // The plan's own per-line state: a v13 line it marks unavailable (no linked row) gets no spreader number.
         planUnavailable: Boolean(item.unavailable),
+        // A spot row's own staged rate (the plan gives it no mix): the spreader number reads it before any fallback.
+        planSpot: item.spot,
         // Only the primary lawn plan's lines take the "Use" tick: the ids ride to the plan engine, never to an add-on's protocol.
         ...(takesUseTick(item) ? { planOption: true } : {}),
         // The id the engine matches a Use tick against: the original product's when an approved substitution swaps it.
