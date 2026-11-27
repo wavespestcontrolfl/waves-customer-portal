@@ -351,14 +351,15 @@ const KINDS_BY_PURPOSE = {
  * texts, anything in `excludePhones`, and anyone who has declined (declinedByRecipient). Fails closed: a
  * read error answers nobody (`throwOnError` re-throws it for the replay, which retries instead).
  */
-async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false, anyVisitStatus = false, copiedFor = null } = {}) {
+async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false, anyVisitStatus = false, copiedFor, recipientId } = {}) {
   if (!scheduledServiceId || !KINDS[kind]) return [];
   try {
     const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id', 'service_type');
     // `anyVisitStatus`: the tracker link also serves a visit that is on site or just completed (its own lifetime rule limits it); a send never does.
     if (!visit || (!anyVisitStatus && !LIVE_STATUSES.includes(String(visit.status)))) return [];
     assertStillCopiedFor(visit, copiedFor);
-    const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId }).orderBy('created_at', 'asc');
+    // `recipientId`: one person's recheck reads that row only.
+    const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId, ...(recipientId ? { id: recipientId } : {}) }).orderBy('created_at', 'asc');
     if (!rows.length) return [];
     const holder = await conn('customers').where({ id: visit.customer_id }).first('phone');
     const taken = new Set([...excludePhones, holder?.phone].map(lastTen).filter(Boolean));
@@ -848,7 +849,7 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   if (await require('./disclaimed-number-holds').disclaimedNumberHeldForVisit({ scheduledServiceId: meta.scheduled_service_id }, conn, { strict: true })) {
     return noVerdict('CALLBACK_NUMBER_HOLD', 'callback-number-hold');
   }
-  const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true, anyVisitStatus });
+  const contacts = await contactsForVisit(meta.scheduled_service_id, meta.kind, { conn, throwOnError: true, anyVisitStatus, recipientId: meta.visit_recipient_id || null });
   const mine = contacts.find((contact) => contact.visitRecipientId === meta.visit_recipient_id);
   if (!mine) return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
   // The row must be the one the send was built with: its id (found above) AND its customer binding. A caller with no recorded
