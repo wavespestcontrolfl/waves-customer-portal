@@ -687,6 +687,16 @@ describe('complete and send', () => {
     expect(screen.getByText('Bill: $95.00 due.')).toBeTruthy();
   });
 
+  test('the sent view lists the server\'s completion advisories', async () => {
+    const advisory = 'Taurus SC: 1.6 fl oz is over the label ceiling. It was recorded, not taken from stock, and the office will review it.';
+    const request = makeRequest({ complete: [{ success: true, completionAdvisories: [advisory] }] });
+    await openSheet(request);
+    await generate();
+    fireEvent.click(screen.getByRole('button', { name: 'Complete & send' }));
+    await screen.findByTestId('fast-complete-sent');
+    expect(screen.getByText(advisory)).toBeTruthy();
+  });
+
   test('a bill to a third-party payer is never shown as the customer\'s balance (Codex #5538)', async () => {
     await openSheet(makeRequest({ complete: [{ success: true, completionSmsStatus: 'sent', invoiceId: 'inv-1', invoiceTotal: 95, invoiceStatus: 'sent', invoicePayerBilled: true }] }));
     await generate();

@@ -1730,7 +1730,7 @@ async function getStub(checkId, conn = db) {
   };
 }
 
-// ---- A technician's own stubs (GATE_TECH_PAY_STUBS, routes/tech-payroll.js)
+// ---- A technician's own stubs (routes/tech-payroll.js)
 
 const TECH_CHECK_LIMIT = 60;
 

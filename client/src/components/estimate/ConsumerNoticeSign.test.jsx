@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// The Florida consumer notice card (GATE_ESTIMATE_CONSUMER_NOTICE): one render per state, the tap that opens the
+// The Florida consumer notice card: one render per state, the tap that opens the
 // signing page in the same tab, and the server's own 409 wording shown as is.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
@@ -17,7 +17,7 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('ConsumerNoticeSign', () => {
-  it('renders nothing without a block (gate off, or nothing to sign)', () => {
+  it('renders nothing without a block (nothing to sign)', () => {
     const { container } = render(<ConsumerNoticeSign token="t1" consumerNotice={undefined} />);
     expect(container).toBeEmptyDOMElement();
   });

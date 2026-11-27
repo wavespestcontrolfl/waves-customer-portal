@@ -1264,7 +1264,7 @@ async function recordCallCommitments({
   }
 }
 
-// GATE_CALL_APPLICANT_HANDLING. On a call from a job applicant or a vendor, what
+// On a call from a job applicant or a vendor, what
 // the office promised (an interview, a call back, "come by Monday") is not a
 // customer promise. Stored as kind 'other', which is in neither SLA_KINDS (the
 // pager) nor PROMPT_KINDS (the implicit deadline), and with no stated due_at
@@ -2753,8 +2753,8 @@ async function resolveScheduleVisit(ctx) {
   // changed time; it says nothing about a promised technician follow-up,
   // and closing that owed work on this evidence would drop it silently
   // (GH codex #4204 r7 P2).
-  // A make-up move (a missed recurring visit moved from the call,
-  // GATE_CALL_MAKEUP_MOVE) is the same proof under its own action.
+  // A make-up move (a missed recurring visit moved from the call)
+  // is the same proof under its own action.
   const { ACTIVITY_ACTION: RESCHEDULE_APPLIED, MAKEUP_ACTIVITY_ACTION: MAKEUP_APPLIED } = require("./call-reschedule-apply");
   const movedRow = commitment.kind !== "schedule_visit" ? null : await conn("activity_log")
     .whereIn("action", [RESCHEDULE_APPLIED, MAKEUP_APPLIED])
@@ -3620,7 +3620,7 @@ function scopeCommitmentRows(builder, { customerId = null, leadId = null, leadSi
 // other caller — the Intelligence Bar's read-only tool, the integrations
 // worker — gets a pure read and sees whatever those paths persisted.
 // A call that is not a customer or prospect: a vendor or partner (disposition vendor_logged, which a job applicant
-// shares when GATE_CALL_APPLICANT_HANDLING is on), a spam call (spam_discarded), or one whose valid extraction says the
+// shares), a spam call (spam_discarded), or one whose valid extraction says the
 // caller is a job applicant. A promise made on it stays on the Owed tab, but the promise-chaser bell, the follow-up
 // SLA pager and the overdue watchdog do not page for it (owner 2026-11-04). Over a
 // call_log alias; no bare question mark (a knex raw would read it as a binding).

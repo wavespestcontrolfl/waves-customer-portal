@@ -686,11 +686,8 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, onWrapChecking, collectOnSheet }) {
   if (submission.done) {
-    // The server's completion advisories (a 13-0-13 over the county limit, a history rule) are listed under the summary.
-    const advisories = (Array.isArray(submission.done.response?.completionAdvisories) ? submission.done.response.completionAdvisories : []).filter((text) => typeof text === 'string' && text);
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
-        {advisories.map((text) => <p key={text} className="tech-visit-muted tech-visit-status--warn" role="status">{text}</p>)}
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} response={submission.done.response} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         {collectOnSheet && <CollectPayment result={submission.done.response} />}
       </SavedView>
     );
@@ -761,7 +758,7 @@ function TreeShrubForm({ service, request, ctx, submission, locked, dictationPen
   // GATE_TS_PEST_CHECK: gate off (no ctx.pestCheck) = no block, nothing sent.
   const pestCheck = usePestCheck({ context: ctx.pestCheck, rows });
   const removeBlocked = (blockedRows) => blockedRows.forEach((row) => products.updateRow(row.productId, { active: false }));
-  // GATE_TS_NEONIC_CAP: gate off (no ctx.neonicCap) = no line and no hold. The hold is the sheet's; /complete does not refuse.
+  // Yearly neonicotinoid cap: no ctx.neonicCap (not loaded, or the read failed) = no line and no hold. The hold is the sheet's; /complete does not refuse.
   const neonicCap = useMemo(() => evaluateNeonicCap(ctx.neonicCap, rows), [ctx.neonicCap, rows]);
   const productBlock = firstText(pestCheck.evaluation.blockMessage, neonicCap.blockMessage);
   const missingReason = missingRequirement({ form, rows, slots: photos.slots, photoBusy: photos.busy, ctx, dictationPending }) || productBlock;

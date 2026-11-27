@@ -827,6 +827,6 @@ describe('readers that build their own query still reach the round', () => {
 
   test('the inventory forecast sizes demand from the plan, so it follows the round\'s step', () => {
     const source = require('fs').readFileSync(require('path').join(__dirname, '../services/waveguard-inventory-forecast.js'), 'utf8');
-    expect(source).toMatch(/await buildPlanForService\(service\.id,/);
+    expect(source).toMatch(/buildPlanForService\(service\.id,/); // inside a savepoint scope, so a failed plan cannot abort the caller's transaction
   });
 });

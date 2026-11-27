@@ -109,14 +109,14 @@ async function runSweep(dbh = db) {
   // outbound-review holds, already-texted visits, archived customers, and
   // ever-invited customers (all in the query — the per-customer advisory
   // lock below re-checks history at send time for the race window only).
-  const candidates = await dbh('scheduled_services as s')
+  const candidates = await require('./visit-hold').excludeHeld(dbh('scheduled_services as s')
     // Archived customers never get a payment-adjacent invite (codex #3234 r1
     // P1 — the archive route only stamps customers.deleted_at, and the
     // funnel has no deleted-customer guard of its own). Same join the
     // neighboring balance-reminder sweep uses.
     .join('customers as c', 's.customer_id', 'c.id')
     .whereNull('c.deleted_at')
-    .whereIn('s.status', LIVE_VISIT_STATUSES)
+    .whereIn('s.status', LIVE_VISIT_STATUSES), 's')
     .whereBetween('s.scheduled_date', [todayEt, horizonEt])
     .whereNull('s.card_link_sent_at')
     // Payer-billed visits resolve by the CANONICAL precedence (payer.js

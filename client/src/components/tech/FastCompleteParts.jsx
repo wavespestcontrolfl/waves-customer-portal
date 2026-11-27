@@ -255,13 +255,23 @@ export function SheetHeader({ titleId, title, service, visit, contact, done, loc
 
 // What the tech sees once the visit is saved; `children` carries a sheet's
 // own line under the summary (the pest sheet's sent-text result).
-export function SavedView({ service, summary, notice, onCompleted, children }) {
+// The server's completion warnings (a flagged over-ceiling amount, a product
+// not allowed on this lawn, a stock shortfall): warned, never blocked (owner
+// 2026-11-26). The full form lists the same strings on its saved screen.
+export function completionAdvisoriesOf(response) {
+  const list = Array.isArray(response?.completionAdvisories) ? response.completionAdvisories : [];
+  return [...new Set(list.filter((text) => typeof text === 'string' && text.trim()))];
+}
+
+export function SavedView({ service, summary, notice, response, onCompleted, children }) {
+  const advisories = completionAdvisoriesOf(response);
   return (
     <div className="tech-visit-body">
       <div className="tech-visit-card">
         <p className="tech-visit-muted">{[service?.address, service?.timeLabel].filter(Boolean).join(' · ') || 'This visit'}</p>
         <p>{summary}</p>
         {notice && <p className="tech-visit-muted tech-visit-status--warn" role="status">{notice}</p>}
+        {advisories.map((text) => <p key={text} className="tech-visit-muted tech-visit-status--warn" role="status">{text}</p>)}
         {children}
       </div>
       <div className="tech-visit-actions">

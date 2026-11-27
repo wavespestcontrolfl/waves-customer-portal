@@ -1,4 +1,4 @@
-// GATE_CALLBACK_SPOKEN_NUMBER_LINK: an office callback dials the voicemail's
+// Callback spoken-number link: an office callback dials the voicemail's
 // caller ID, but the caller spoke another number to ring back, and that number
 // may already be a customer's PRIMARY phone (a quote form filed minutes after
 // the voicemail). findCustomerViaCallbackSpokenNumber is the second chance the
@@ -85,24 +85,10 @@ const extractedJordan = { first_name: 'Jordan', last_name: 'Rivers' };
 
 beforeEach(() => {
   db.mockReset();
-  process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK = 'true';
 });
-afterAll(() => { delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK; });
 
 describe('findCustomerViaCallbackSpokenNumber', () => {
-  test('gate off: null and no query', async () => {
-    delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
-    mockDb({ call_log: [voicemail()], customers: [[customer()]] });
-    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
-    expect(tablesRead).toEqual([]);
-  });
 
-  test('gate set to anything but "true" stays off', async () => {
-    process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK = '1';
-    mockDb({ call_log: [voicemail()], customers: [[customer()]] });
-    expect(await findCustomerViaCallbackSpokenNumber(callbackCall(), extractedJordan)).toBeNull();
-    expect(tablesRead).toEqual([]);
-  });
 
   test('not an admin callback (inbound, other source, no related call): null', async () => {
     mockDb({ call_log: [voicemail()], customers: [[customer()]] });
@@ -340,12 +326,6 @@ describe('callback_spoken_number basis of the family-account card', () => {
     await expect(familyLink.retireCallbackSpokenNumberCard({ callLogId: 'cb-7', conn })).resolves.toBeUndefined();
   });
 
-  test('gate off: no suggestion and no card', async () => {
-    delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
-    const { conn, inserted } = cardTrx({ customers: [[customer()], []] });
-    expect(await familyLink.fileFamilyAccountCard(args(conn))).toBeNull();
-    expect(inserted).toHaveLength(0);
-  });
 
   test('an ordinary inbound call (not an admin callback) never takes the new basis', async () => {
     const { conn, inserted } = cardTrx({ customers: [[customer()], []] });
@@ -523,12 +503,6 @@ describe('callbackSpokenNumberSuggested (fail closed, retryable)', () => {
     await expect(run()).resolves.toBe(false);
   });
 
-  test('gate off: false, even with a lost card (nothing in this path runs)', async () => {
-    delete process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK;
-    mockDb({ call_log: [voicemail()], customers: [[customer()]] });
-    await expect(run({ cardReport: { failed: 'XX000' } })).resolves.toBe(false);
-    expect(tablesRead).toEqual([]);
-  });
 
   test('a failed lookup is UNKNOWN, not "no match": it throws the retryable error and names no phone', async () => {
     mockDb({ call_log: [voicemail()], customers: [Object.assign(new Error(`could not read ${SPOKEN} for Jordan`), { code: '57P01' })] });

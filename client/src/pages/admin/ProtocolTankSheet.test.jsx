@@ -117,6 +117,23 @@ describe("110-gallon tank reference", () => {
     expect(within(container).queryByText("Tank mixing not set in the app. Check the label.")).not.toBeInTheDocument();
   });
 
+  it("a spreader card shows the server's LESCO spreader number, on screen and in print, beside its rate", () => {
+    const plan = fixture();
+    const bag = (id, spreader) => ({ selected: true, product: { id, name: `Synthetic granular ${id}`, labelVerifiedAt: "2026-01-01" }, spreader,
+      tankAmounts: { application: "spreader", applicator: "spreader", ratePer1000: 3.125, rateUnit: "lb", per100Gal: null, fullTank: null, backpack4Gal: null } });
+    plan.items = [
+      bag("a", { setting: 9.5, basis: "start", text: "Spreader: LESCO #9½, start number. Weigh test at first use." }),
+      bag("b", { setting: null, text: "No spreader number for this rate: weigh test." }),
+      bag("c", null),
+    ];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Spreader: LESCO #9½, start number. Weigh test at first use.")).toBeInTheDocument();
+      expect(within(surface).getByText("No spreader number for this rate: weigh test.")).toBeInTheDocument();
+      expect(within(surface).getAllByText("3.125 lb / 1,000 sq ft")).toHaveLength(3);
+    }
+  });
+
   it("an overdue or estimated sprayer test shows the server's one warning line and keeps every amount", () => {
     const plan = fixture();
     plan.equipment.expiresAt = new Date(Date.now() - 60000).toISOString();
@@ -142,7 +159,7 @@ describe("110-gallon tank reference", () => {
   it("an additive whose base product is not on the sheet gets neutral wording, never its own tank or an add instruction", () => {
     const plan = fixture();
     plan.items = [{ selected: true, conditional: true, product: { id: "nis", name: "Synthetic surfactant", labelVerifiedAt: "2026-01-01", mixingOrderCategory: "adjuvant_last" },
-      tankAmounts: { application: "spray", concentrationPercent: 0.25, mixWith: "Celsius WG", per100Gal: null, fullTank: null,
+      tankAmounts: { application: "spray", concentrationPercent: 0.25, mixWith: "Celsius WG", mixWithProductIds: ["cel"], per100Gal: null, fullTank: null,
         backpack4Gal: { gallons: 4, amount: 1.28, amountUnit: "fl oz", carrierSource: "concentration" } } }];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
@@ -167,10 +184,10 @@ describe("110-gallon tank reference", () => {
       tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
     plan.items = [
       { ...spray("cel", "Celsius WG", {}), selected: true },
-      { ...spray("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }), selected: true },
+      { ...spray("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG", mixWithProductIds: ["cel"] }), selected: true },
       // Partners that are not today's instruction: unselected, or selected but at a limit.
-      spray("nis", "Synthetic surfactant", { mixWith: "Celsius WG" }),
-      { ...spray("cap", "Synthetic capped partner", { mixWith: "Celsius WG", planState: "capped" }), selected: true },
+      spray("nis", "Synthetic surfactant", { mixWith: "Celsius WG", mixWithProductIds: ["cel"] }),
+      { ...spray("cap", "Synthetic capped partner", { mixWith: "Celsius WG", mixWithProductIds: ["cel"], planState: "capped" }), selected: true },
       spray("tet", "Tetrino Insecticide", { applyAlone: true }),
       { ...spray("step", "Synthetic removal step", {}), gateNotes: [{ key: "x", severity: "required", text: "Keep the synthetic 2(ee) sheet on hand." }, { key: "y", severity: "note", text: "Synthetic note only." }] },
     ];
@@ -209,7 +226,7 @@ describe("110-gallon tank reference", () => {
     const item = (id, name, extra, selected) => ({ selected, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "dry_wg_wdg_wp_df" },
       tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
     for (const base of [item("cel", "Celsius WG", {}, false), item("cel", "Celsius WG", { planState: "capped" }, true)]) {
-      plan.items = [base, item("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }, true)];
+      plan.items = [base, item("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG", mixWithProductIds: ["cel"] }, true)];
       const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
       expect(within(container).queryByText(/Add to the|Tank with/)).not.toBeInTheDocument();
       unmount();
@@ -269,7 +286,7 @@ describe("110-gallon tank reference", () => {
     const rule = "Leave the surfactant out if it is 90°F or hotter.";
     const item = (id, name, extra, selected) => ({ selected, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "adjuvant_last" },
       tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
-    plan.items = [item("cel", "Celsius WG", {}, true), item("nis", "Synthetic surfactant", { mixWith: "Celsius WG", surfactantNote: rule }, true)];
+    plan.items = [item("cel", "Celsius WG", {}, true), item("nis", "Synthetic surfactant", { mixWith: "Celsius WG", mixWithProductIds: ["cel"], surfactantNote: rule }, true)];
     const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
     expect(within(container).getAllByText(rule)).toHaveLength(2);
     expect(within(document.querySelector(".protocol-print-sheet")).getAllByText(rule)).toHaveLength(2);
@@ -304,6 +321,178 @@ describe("110-gallon tank reference", () => {
       expect(within(surface).getAllByText("Same tank: Recognition + Fusilade II + Synthetic surfactant")).toHaveLength(3);
       expect(within(surface).queryByText(/Add to the|Tank with/)).not.toBeInTheDocument();
     }
+  });
+
+  // The mix safety table's answer (server /lawn-mix mixCheck): one pair per two products, shown under each shared tank line.
+  const weedMixPlan = (pairs) => {
+    const plan = fixture();
+    const item = (id, name, extra) => ({ selected: true, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "dry_wg_wdg_wp_df" },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
+    plan.items = [item("cel", "Celsius WG", {}), item("nis", "Synthetic surfactant", { mixWith: "Celsius WG", mixWithProductIds: ["cel"] })];
+    plan.mixCheck = pairs === undefined ? undefined : { pairs };
+    return plan;
+  };
+  const pair = (verdict, reason) => ({ productAId: "cel", productAName: "Celsius WG", productBId: "nis", productBName: "Synthetic surfactant", verdict, reason });
+
+  it.each([
+    ["caution", "Approved weed mix.", "Caution: Approved weed mix."],
+    // Unknown keeps the service's own words: read both labels, jar test first.
+    ["unknown", "No rule on file. Read both labels; jar test first.", "No rule on file. Read both labels; jar test first."],
+  ])("a %s pair shows its line under both cards' tank lines, on screen and in print, and the amounts stay", (verdict, reason, text) => {
+    const { container } = render(<ProtocolTankSheet plan={weedMixPlan([pair(verdict, reason)])} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Tank with: Synthetic surfactant")).toBeInTheDocument();
+      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).getAllByText(text)).toHaveLength(2);
+      // A warning only: both products keep their names and amounts.
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(2);
+    }
+  });
+
+  it("a Never pair replaces both cards' mix line with Do not mix, on screen and in print; products and amounts stay", () => {
+    const plan = weedMixPlan([pair("never", "Label: no surfactant.")]);
+    plan.items[1].raw = "Synthetic surfactant in the Celsius weed mix";
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      // The protocol's own line stays as written, with the pair's line under it (it names its partner, Celsius).
+      expect(within(surface).getByText("Synthetic surfactant in the Celsius weed mix")).toBeInTheDocument();
+      expect(within(surface).getAllByText("Do not mix: Celsius WG + Synthetic surfactant. Label: no surfactant. Ask the office before you mix this tank.")).toHaveLength(3);
+      expect(within(surface).queryByText("Tank with: Synthetic surfactant")).not.toBeInTheDocument();
+      expect(within(surface).queryByText("Add to the Celsius WG mix")).not.toBeInTheDocument();
+      expect(within(surface).getByRole("heading", { name: "Celsius WG" })).toBeInTheDocument();
+      expect(within(surface).getByRole("heading", { name: "Synthetic surfactant" })).toBeInTheDocument();
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(2);
+    }
+  });
+
+  it("in a tank of three, a Never pair replaces the mix line on all three cards, on screen and in print; amounts stay", () => {
+    const plan = bermudaPlan();
+    plan.mixCheck = { pairs: [
+      { productAId: "rec", productAName: "Recognition", productBId: "nis", productBName: "Synthetic surfactant", verdict: "never", reason: "Label bars it." },
+      { productAId: "rec", productAName: "Recognition", productBId: "fus", productBName: "Fusilade II", verdict: "caution", reason: "Jar test first." },
+    ] };
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Do not mix: Recognition + Synthetic surfactant. Label bars it. Ask the office before you mix this tank.")).toHaveLength(3);
+      // Fusilade II is not in the Never pair, and its card still never tells staff to combine the three.
+      expect(within(surface).queryByText(/^Same tank:/)).not.toBeInTheDocument();
+      // The Caution stays under the replaced line; every product keeps its card and amount.
+      expect(within(surface).getAllByText("Caution: Jar test first. (Recognition + Fusilade II)")).toHaveLength(3);
+      for (const name of ["Recognition", "Fusilade II", "Synthetic surfactant"]) expect(within(surface).getByRole("heading", { name })).toBeInTheDocument();
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(3);
+    }
+  });
+
+  it("a Never pair inside the card's tank warns under its mix line and its own directions, which stay as written", () => {
+    const plan = weedMixPlan([pair("never", "Label: no surfactant.")]);
+    plan.items[0].product.mixingInstructions = "Mix Celsius WG first, then add Synthetic surfactant.";
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Do not mix: Celsius WG + Synthetic surfactant. Label: no surfactant. Ask the office before you mix this tank.")).toHaveLength(3);
+      expect(within(surface).getByText("Mix Celsius WG first, then add Synthetic surfactant.")).toBeInTheDocument();
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(2);
+    }
+  });
+
+  it("ties by product id only: a LESCO product outside the tank gets no line, and an unresolved partner name says No rule on file", () => {
+    const plan = weedMixPlan([{ productAId: "cel", productAName: "Celsius WG", productBId: "nis", productBName: "LESCO 90/10 Nonionic Surfactant", verdict: "never", reason: "Fixture rule." }]);
+    plan.items[1].product.name = "LESCO 90/10 Nonionic Surfactant";
+    plan.items[0].raw = "Celsius WG + NIS broadleaf";
+    const other = (id, name, raw, extra) => ({ ...plan.items[1], raw, product: { ...plan.items[1].product, id, name }, tankAmounts: { ...plan.items[1].tankAmounts, ...extra } });
+    plan.items.push(
+      // Its text names the LESCO surfactant, but it shares no tank with Celsius: no line.
+      other("kflow", "LESCO K-Flow 0-0-25", "LESCO K-Flow 0-0-25 with LESCO 90/10 Nonionic Surfactant", { mixWith: null, mixWithProductIds: undefined }),
+      // The program names a partner the resolver could not tie to any product.
+      other("mys", "Synthetic additive", "Synthetic additive", { mixWith: "Unknown blend", mixWithProductIds: [] }),
+    );
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      const line = "Do not mix: Celsius WG + LESCO 90/10 Nonionic Surfactant. Fixture rule. Ask the office before you mix this tank.";
+      // The two mix lines and the Celsius protocol line ("NIS"), all by id.
+      expect(within(surface).getAllByText(line)).toHaveLength(3);
+      const kflow = within(surface).getByRole("heading", { name: "LESCO K-Flow 0-0-25" }).closest("section");
+      expect(within(kflow).queryByText(/^Do not mix: /)).not.toBeInTheDocument();
+      const unknown = within(surface).getByRole("heading", { name: "Synthetic additive" }).closest("section");
+      expect(within(unknown).getByText("No rule on file")).toBeInTheDocument();
+      expect(within(unknown).getByText("Mixing: follow this card and the label")).toBeInTheDocument();
+    }
+  });
+
+  it("one surfactant in both tanks: each row keeps its own tank; a Never pair in the backpack leaves the weed mix row alone", () => {
+    const plan = weedMixPlan([{ productAId: "rec", productAName: "Recognition", productBId: "nis", productBName: "Synthetic surfactant", verdict: "never", reason: "Fixture rule." }]);
+    const backpack = (id, name) => ({ ...plan.items[0], bermudaStep: true, product: { ...plan.items[0].product, id, name }, tankAmounts: { ...plan.items[0].tankAmounts } });
+    plan.items.push(backpack("rec", "Recognition"), backpack("nis", "Synthetic surfactant"));
+    plan.bermudaMixingOrder = [{ step: 1, productId: "rec", productName: "Recognition" }, { step: 2, productId: "nis", productName: "Synthetic surfactant" }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      // The two backpack cards only.
+      expect(within(surface).getAllByText("Do not mix: Recognition + Synthetic surfactant. Fixture rule. Ask the office before you mix this tank.")).toHaveLength(2);
+      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).getByText("Tank with: Synthetic surfactant")).toBeInTheDocument();
+    }
+  });
+
+  it("base tank and backpack tank are checked apart: a base product and a backpack product never pair, even through a shared product", () => {
+    const plan = weedMixPlan([{ productAId: "cel", productAName: "Celsius WG", productBId: "rec", productBName: "Recognition", verdict: "never", reason: "Fixture rule." }]);
+    delete plan.items[1].tankAmounts.mixWith;
+    delete plan.items[1].tankAmounts.mixWithProductIds;
+    plan.items.push({ ...plan.items[1], bermudaStep: true, product: { ...plan.items[1].product, id: "rec", name: "Recognition" } });
+    // The surfactant is in both tanks; Celsius only in the base tank, Recognition only in the backpack.
+    plan.mixingOrder = [{ step: 1, productId: "cel", productName: "Celsius WG" }, { step: 2, productId: "nis", productName: "Synthetic surfactant" }];
+    plan.bermudaMixingOrder = [{ step: 1, productId: "nis", productName: "Synthetic surfactant" }, { step: 2, productId: "rec", productName: "Recognition" }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).queryByText(/^Do not mix: /)).not.toBeInTheDocument();
+      expect(within(surface).getByText("Same tank: Synthetic surfactant + Recognition")).toBeInTheDocument();
+    }
+  });
+
+  it("a failed mix check shows one Mix check unavailable line, on screen and in print; products and amounts stay", () => {
+    const plan = weedMixPlan([]);
+    plan.mixCheck = { status: "unavailable", pairs: [] };
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Mix check unavailable. Check the labels.")).toHaveLength(1);
+      expect(within(surface).getByText("Tank with: Synthetic surfactant")).toBeInTheDocument();
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(2);
+    }
+  });
+
+  it("a Yes pair, no check (a failed check) or a product with no shared tank shows no mix safety line", () => {
+    for (const plan of [weedMixPlan([pair("ok", "Owner checked.")]), weedMixPlan(undefined), weedMixPlan(null)]) {
+      const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
+      expect(within(container).queryByText(/^Caution: |^Do not mix: |^No rule on file/)).not.toBeInTheDocument();
+      expect(within(container).getByText("Tank with: Synthetic surfactant")).toBeInTheDocument();
+      unmount();
+    }
+    // Not in the same tank (the partner is unselected): no line, even with a Never pair on the sheet.
+    const apart = weedMixPlan([pair("never", "Label: no surfactant.")]);
+    apart.items[1].selected = false;
+    const { container } = render(<ProtocolTankSheet plan={apart} />);
+    expect(within(container).queryByText(/^Do not mix: /)).not.toBeInTheDocument();
+  });
+
+  it("a pair that asks for a jar test says so on screen and in print, a Yes pair included", () => {
+    for (const verdict of ["ok", "caution"]) {
+      const { container, unmount } = render(<ProtocolTankSheet plan={weedMixPlan([{ ...pair(verdict, "Owner checked."), jarTestRequired: true }])} />);
+      for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+        expect(within(surface).getAllByText("Jar test first")).toHaveLength(2);
+      }
+      expect(within(container).queryAllByText("Caution: Owner checked.")).toHaveLength(verdict === "caution" ? 2 : 0);
+      unmount();
+    }
+  });
+
+  it("a shared tank of three names each pair; only pairs inside the tank show", () => {
+    const plan = bermudaPlan();
+    plan.mixCheck = { pairs: [
+      { productAId: "REC", productAName: "Recognition", productBId: "fus", productBName: "Fusilade II", verdict: "caution", reason: "Jar test first." },
+      { productAId: "fus", productAName: "Fusilade II", productBId: "nis", productBName: "Synthetic surfactant", verdict: "ok", reason: "Fine." },
+      { productAId: "rec", productAName: "Recognition", productBId: "other", productBName: "Not in this tank", verdict: "never", reason: "Elsewhere." },
+    ] };
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getAllByText("Caution: Jar test first. (Recognition + Fusilade II)")).toHaveLength(3);
+    expect(within(container).queryByText(/Elsewhere/)).not.toBeInTheDocument();
   });
 
   it("a blocked Bermuda removal step gives no mix line on any card, and the amounts stay", () => {

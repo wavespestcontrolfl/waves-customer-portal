@@ -327,13 +327,13 @@ describe('SMS operational evidence and ownership', () => {
     ['Garage code is #1234', 'garage_code'], ['Lockbox code: #1234', 'lockbox_code'],
     ['Our property gate code is #1234', 'property_gate_code'],
     ['The community gate code is #1234', 'neighborhood_gate_code'],
-    ['Gate code is #1234', null], ['Code is #1234', null],
+    ['Gate code is #1234', 'neighborhood_gate_code'], ['Code is #1234', null],
   ])('binds %s only to its explicit access field', (quote, field) => {
     const facts = ['garage_code', 'lockbox_code', 'property_gate_code', 'neighborhood_gate_code']
       .map((candidate) => fact({ field: candidate, quote, value: '#1234' }));
     const result = groundExtraction(extracted([], facts), { message: source(quote), properties });
     expect(result.facts.map((item) => item.field)).toEqual(field ? [field] : []);
-    for (const item of facts) expect(factVerdict(item, { properties, senderIsPrimary: true }))
+    for (const item of facts) expect(factVerdict(item, { properties, senderIsPrimary: true, messageBody: quote }))
       .toBe(item.field === field ? 'apply' : 'code_uncertain');
   });
 
@@ -667,8 +667,14 @@ describe('profile safeguards independent of model labels', () => {
   test('uses the central cross-provider policy with a budget reserved for fallback', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: extracted([], []) });
     await extractSmsOperations({ message: source('The controller is outside.'), properties });
-    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.highStakes);
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.smsOperationalActions);
     expect(dispatchWithFallback.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
+  });
+
+  test('the email channel keeps the highStakes policy (only texts were replay-tested)', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: extracted([], []) });
+    await extractSmsOperations({ channel: 'email', message: source('The controller is outside.'), properties });
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.highStakes);
   });
 });
 

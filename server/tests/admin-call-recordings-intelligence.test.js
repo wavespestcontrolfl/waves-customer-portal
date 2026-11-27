@@ -12,7 +12,7 @@ jest.mock('../services/sms-operational-actions', () => ({
   smsCommitmentsEnabled: jest.fn(() => false), listSmsCommitments: jest.fn(async () => []), applySmsCommitmentUpdate: jest.fn(),
 }));
 jest.mock('../services/call-reschedule-proposals', () => ({
-  enabled: jest.fn(), listProposals: jest.fn(), previewProposal: jest.fn(), applyProposal: jest.fn(), dismissProposal: jest.fn(),
+  listProposals: jest.fn(), previewProposal: jest.fn(), applyProposal: jest.fn(), dismissProposal: jest.fn(),
 }));
 jest.mock('../services/call-intelligence', () => ({ loadCallIntelligence: jest.fn() }));
 jest.mock('../services/callback-cards', () => ({
@@ -1023,7 +1023,7 @@ describe('POST /calls/:id/adopt-recording', () => {
 
 describe('proposal lifecycle routes', () => {
   const proposals = require('../services/call-reschedule-proposals');
-  beforeEach(() => { jest.clearAllMocks(); proposals.enabled.mockReturnValue(true); });
+  beforeEach(() => { jest.clearAllMocks(); });
   test('invalid pagination refuses before loading; a full page returns a next offset', () => withServer(async (base) => {
     const invalid = await fetch(`${base}/admin/call-recordings/proposals?offset=-1`);
     expect(invalid.status).toBe(400);
@@ -1033,7 +1033,7 @@ describe('proposal lifecycle routes', () => {
     expect(response.status).toBe(200);
     const body = await response.json();
     expect(body.proposals).toHaveLength(100);
-    expect(body).toMatchObject({ proposals_enabled: true, has_more: true, next_offset: 200 });
+    expect(body).toMatchObject({ has_more: true, next_offset: 200 });
     expect(proposals.listProposals).toHaveBeenCalledWith(db, { limit: 101, offset: 100, customerScope: null });
   }));
   test('dismissal passes the authenticated actor and preserves stale-version refusal', () => withServer(async (base) => {

@@ -775,7 +775,7 @@ const NotificationService = {
         if (Number.isFinite(windowMs) && windowMs > 0) {
           existingQuery = existingQuery.where('created_at', '>', trx.raw("NOW() - (? * interval '1 millisecond')", [Math.round(windowMs)]));
         }
-        // dedupeOpenOnly (optional, with dedupeKey; GATE_ALERT_RING_ONCE): only a
+        // dedupeOpenOnly (optional, with dedupeKey): only a
         // row nobody has closed (done_at IS NULL) is the standing one. A row a
         // person marked done is ignored, so the same key can ring again as a
         // fresh row; an open row is found at any age when no window is given.

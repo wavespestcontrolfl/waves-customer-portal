@@ -136,14 +136,18 @@ let serviceUpdateCount = 1;
 function scheduledQuery() {
   let tokenMode = false;
   let listMode = false; // nextUpcomingVisit: .limit(n).select(cols) → rows
+  let pageLimit = Infinity;
+  let pageOffset = 0;
   const q = {
-    limit: jest.fn(() => { listMode = true; return q; }),
-    offset: jest.fn(() => q),
+    limit: jest.fn((n) => { listMode = true; pageLimit = n; return q; }),
+    offset: jest.fn((n) => { pageOffset = n; return q; }),
     // nextUpcomingVisits / nextUpcomingVisit: …limit().offset().select(cols) → rows.
     select: jest.fn(() => {
       if (listMode) {
         if (visitLookupError) return Promise.reject(visitLookupError);
-        return Promise.resolve(upcomingVisitRows || (upcomingVisitRow ? [upcomingVisitRow] : []));
+        // several candidates are paged like the real query (limit + offset); one row stays the single answer
+        if (upcomingVisitRows) return Promise.resolve(upcomingVisitRows.slice(pageOffset, pageOffset + pageLimit));
+        return Promise.resolve(upcomingVisitRow ? [upcomingVisitRow] : []);
       }
       tokenMode = true; return q;
     }),
@@ -1065,6 +1069,50 @@ describe('which guide a visit gets (prepConfigMatches, prepFamilyForServiceType,
     const keywordGroup = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).find(([sql]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)));
     expect(keywordGroup[1]).toEqual(['%%']);
     expect(scheduledQueries.flatMap((q) => q.whereRaw.mock.calls).some(([sql]) => /NOT LIKE/.test(String(sql)))).toBe(false);
+  });
+
+  test('upcomingPrepGuideFor (texting AI gap 5): the soonest upcoming visit whose stop carries the named guide, by the same per-stop rule', async () => {
+    upcomingVisitRows = [
+      { ...VISIT, id: 'svc-1', service_type: 'Pest Control' },
+      { ...VISIT, id: 'svc-2', service_type: 'Lawn Health Inspection' }, // no guide: skipped, never a lawn guide by its name
+      { ...VISIT, id: 'svc-3', service_type: 'Lawn Fertilization' },
+      { ...VISIT, id: 'svc-4', service_type: 'Lawn Weed Control' },
+    ];
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-3' }, pestType: 'lawn', config: { emailTemplateKey: 'prep.lawn' } });
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'interior_pest')).toMatchObject({ visit: { id: 'svc-1' } });
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'mosquito')).toBeNull();
+    // a how-to guide or an unknown family is never a visit's guide
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'sprinkler_timer')).toBeNull();
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'nope')).toBeNull();
+    // bookedPrepGuide with the named family: that later visit's guide (source 'named') when the booked visit does not carry it,
+    // else the booked visit's guide as without it
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'lawn' })).toMatchObject({ visit: { id: 'svc-3' }, pestType: 'lawn', source: 'named' });
+    const own = await sender.bookedPrepGuide(['cust-1'], { family: 'interior_pest' });
+    expect(own).toMatchObject({ visit: { id: 'svc-1' }, pestType: 'interior_pest' });
+    expect(own).not.toHaveProperty('source');
+    // a named service no upcoming visit carries: no guide at all, never the first booking's unrelated one
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'mosquito' })).toBeNull();
+  });
+
+  test('upcomingPrepGuideFor scans every upcoming visit (no service-name pre-filter) and pages past the first ten', async () => {
+    upcomingVisitRows = [
+      ...Array.from({ length: 11 }, (_, i) => ({ ...VISIT, id: `svc-p${i}`, service_type: 'Pest Control' })),
+      { ...VISIT, id: 'svc-lawn', service_type: 'Lawn Fertilization' },
+    ];
+    scheduledQueries = [];
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-lawn' }, pestType: 'lawn' });
+    const raws = scheduledQueries.flatMap((q) => q.whereRaw.mock.calls);
+    expect(raws.some(([sql, args]) => /^\(LOWER\(service_type\) LIKE \?\)$/.test(String(sql)) && JSON.stringify(args) === JSON.stringify(['%%']))).toBe(true);
+    expect(raws.some(([, args]) => JSON.stringify(args) === JSON.stringify(['%lawn%']))).toBe(false);
+    expect(await sender.bookedPrepGuide(['cust-1'], { family: 'lawn' })).toMatchObject({ visit: { id: 'svc-lawn' }, source: 'named' });
+  });
+
+  test('upcomingPrepGuideFor: a later visit with a generic name whose ASSIGNED guide is the one named is found (the stop rule decides)', async () => {
+    upcomingVisitRows = [
+      { ...VISIT, id: 'svc-1', service_type: 'Pest Control' },
+      { ...VISIT, id: 'svc-2', service_type: 'Service Visit', prep_template_key: 'prep.lawn' },
+    ];
+    expect(await sender.upcomingPrepGuideFor(['cust-1'], 'lawn')).toMatchObject({ visit: { id: 'svc-2' }, pestType: 'lawn' });
   });
 
   test('bookedPrepGuide reads the whole stop from the snapshot its page state was judged on: a guide ANY live member carries decides, two guides or an unknown one name none, and only a stop with none is matched by its service types', async () => {

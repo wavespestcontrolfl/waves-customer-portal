@@ -1,9 +1,8 @@
 /**
- * 4:20 AM route re-order cron (server/services/scheduler.js, '20 4 * * *'): the inner borrow of the 4:10 writer
- * lock ('auto-dispatch-recurring') waits up to 25 minutes (owner 2026-11-04);
- * a wait that runs out still ledgers the skipped tick and fails the outer job, exactly as before.
- *
- * Mock baseline copied from scheduler-day-replan-cron.test.js.
+ * 4:20 AM schedule quality alert cron (server/services/scheduler.js, '20 4 * * *'):
+ * The retired nightly route-reorder pass no longer runs or contends for the
+ * 'auto-dispatch-recurring' writer lock; the tick runs schedule quality alert
+ * reconciliation only (runScheduleQualityAlertsOnly).
  */
 jest.mock('../utils/scheduled-cron', () => ({
   schedule: jest.fn(), scheduleTimeout: jest.fn(), scheduleInterval: jest.fn(),
@@ -40,14 +39,14 @@ jest.mock('../services/route-reorder', () => ({
 const cron = require('../utils/scheduled-cron');
 const { runExclusive } = require('../utils/cron-lock');
 const { isEnabled, gateEnvValue } = require('../config/feature-gates');
-const { runRouteReorderIfEnabled, recordSkippedTick } = require('../services/route-reorder');
+const { runRouteReorderIfEnabled, runScheduleQualityAlertsOnly } = require('../services/route-reorder');
 const logger = require('../services/logger');
 const { initScheduledJobs } = require('../services/scheduler');
 
 function registration() {
   isEnabled.mockImplementation((name) => name === 'cronJobs');
   initScheduledJobs();
-  const found = cron.schedule.mock.calls.filter(([expression, task]) => expression === '20 4 * * *' && String(task).includes("'route-tiers-nightly'"));
+  const found = cron.schedule.mock.calls.filter(([expression, task]) => expression === '20 4 * * *' && String(task).includes('runScheduleQualityAlertsOnly'));
   expect(found).toHaveLength(1);
   return found[0];
 }
@@ -56,21 +55,19 @@ beforeEach(() => {
   jest.clearAllMocks();
   gateEnvValue.mockReturnValue(true);
   runExclusive.mockImplementation(async (_key, task) => task());
-  runRouteReorderIfEnabled.mockResolvedValue({ status: 'completed', applied: 1, skipped: 0, failed: 0, ledgerId: 7 });
+  runScheduleQualityAlertsOnly.mockResolvedValue({ status: 'reconciled', created: 1, resolved: 2 });
 });
 
-test('only the inner writer-lock call waits, up to 25 minutes', async () => {
+test('4:20 AM cron runs quality alerts only and never invokes the retired nightly reorder pass', async () => {
   await registration()[1]();
-  expect(runExclusive.mock.calls[0][2]).toBeUndefined();
-  expect(runExclusive.mock.calls[1][2]).toEqual({ recordHealth: false, waitForLockMs: 25 * 60 * 1000 });
-  expect(runRouteReorderIfEnabled).toHaveBeenCalledTimes(1);
-});
-
-test('a wait that runs out still ledgers the skipped tick and fails the outer job', async () => {
-  recordSkippedTick.mockResolvedValue(9);
-  runExclusive.mockImplementation(async (name, task) => (name === 'auto-dispatch-recurring' ? { skipped: true, reason: 'lease_held' } : task()));
-  await registration()[1]();
-  expect(recordSkippedTick).toHaveBeenCalledWith('lease_held');
+  expect(runScheduleQualityAlertsOnly).toHaveBeenCalledTimes(1);
   expect(runRouteReorderIfEnabled).not.toHaveBeenCalled();
-  expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('route-reorder tick skipped (lease_held)'));
+  expect(runExclusive).not.toHaveBeenCalled();
+  expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('created=1 resolved=2'));
+});
+
+test('4:20 AM cron logs when quality alert reconciliation reports failure', async () => {
+  runScheduleQualityAlertsOnly.mockResolvedValueOnce({ status: 'failed' });
+  await registration()[1]();
+  expect(logger.error).toHaveBeenCalledWith('[route-reorder] quality-alerts-only cron run failed');
 });

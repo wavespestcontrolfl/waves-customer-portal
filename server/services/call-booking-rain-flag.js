@@ -1,6 +1,5 @@
 /**
- * Rain flag for phone bookings (owner 2026-10-08, GATE_CALL_BOOKING_RAIN_FLAG,
- * dark).
+ * Rain flag for phone bookings (owner 2026-10-08).
  *
  * The call pipeline books the time a person agreed with the caller; it never
  * chooses a time, so the rain ranking (rain-fit.js) has nothing to order
@@ -27,8 +26,6 @@ const {
   rainFitFor, withCatalogKeys, isWetWindow, inRainHorizon, boundedHourlyRain, RAIN_PCT, RAIN_AFTER_HOURS,
 } = require('./scheduling/rain-fit');
 const { etDateString, parseETDateTime, formatETTime } = require('../utils/datetime-et');
-
-const GATE = 'GATE_CALL_BOOKING_RAIN_FLAG';
 
 const dateOnly = (value) => (value instanceof Date ? etDateString(value) : String(value || '').slice(0, 10));
 const hhmm = (value) => String(value || '').slice(0, 5);
@@ -101,7 +98,7 @@ function visitWindow({ visit, scheduledDate, windowStart, windowEnd }) {
 // resolved (its service_key is the identity), else the visit's name.
 async function isOutdoorVisit(visit, catalogRow, db) {
   const serviceKey = (catalogRow && catalogRow.service_key) || null;
-  const services = await withCatalogKeys([{ name: visit.service_type || 'visit', serviceKey }], db, { gate: GATE });
+  const services = await withCatalogKeys([{ name: visit.service_type || 'visit', serviceKey }], db);
   return rainFitFor(services) === 'avoid';
 }
 
@@ -168,8 +165,6 @@ async function flagCallBookingRain({
   visit, scheduledDate, windowStart, windowEnd, catalogRow = null, callSid = null, today = new Date(), db, deps = {},
 } = {}) {
   try {
-    const { gateEnvValue } = require('../config/feature-gates');
-    if (!gateEnvValue(GATE)) return { flagged: false, reason: 'gate_off' };
     const window = visitWindow({ visit, scheduledDate, windowStart, windowEnd });
     if (!window) return { flagged: false, reason: 'no_window' };
     const todayYmd = etDateString(today);
@@ -185,4 +180,4 @@ async function flagCallBookingRain({
   }
 }
 
-module.exports = { flagCallBookingRain, GATE, _test: { peakChance } };
+module.exports = { flagCallBookingRain, _test: { peakChance } };

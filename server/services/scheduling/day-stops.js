@@ -86,6 +86,8 @@ function dayStopsQuery(db, { dateStr, technicianId = null, excludeStatuses, sele
   const q = db('scheduled_services')
     .where('scheduled_services.scheduled_date', dateStr);
   if (technicianId) q.where('scheduled_services.technician_id', technicianId);
+  // GATE_VISIT_HOLD: a held visit is on no route, day view or optimizer run (gate off: no clause).
+  require('../visit-hold').excludeHeld(q, 'scheduled_services');
   return q
     .whereNotIn('scheduled_services.status', excludeStatuses)
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')

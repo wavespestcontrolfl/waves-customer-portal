@@ -796,25 +796,16 @@ jest.mock('../services/customer-credit', () => ({
     });
   });
 
-  describe('the new-referral bell (GATE_REFERRAL_INBOUND_BELL)', () => {
+  describe('the new-referral bell', () => {
     let bell;
     let buttons;
     let NotificationService;
-    const saved = {};
     const TECH = randomUUID();
 
     beforeAll(() => {
-      for (const key of ['GATE_REFERRAL_INBOUND_BELL']) saved[key] = process.env[key];
-      process.env.GATE_REFERRAL_INBOUND_BELL = 'true';
       bell = require('../services/referral-inbound-bell');
       buttons = require('../services/admin-alert-buttons');
       NotificationService = require('../services/notification-service');
-    });
-    afterAll(() => {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key];
-        else process.env[key] = value;
-      }
     });
 
     // The bell list as an admin is served it.

@@ -931,8 +931,8 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // An unstamped estimate that kept only its inputs and asks for pest is a quote saved before the rule, on a first send and a resend alike.
   const priorPestAboveTable = require('../services/estimate-floor-signal-replay').savedLegacyPestAboveTableSignal(estimateData).legacyPestAboveTable;
   if (typeof priorPestAboveTable === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyPestAboveTable: priorPestAboveTable };
-  // The same for whole-home sizing (cockroach, bed bug, rodent guarantee on total living area; new quotes only, 2026-11-26): its own
-  // stamp, read before the snapshot is dropped. An unstamped estimate that kept only its inputs and asks for one of the three is a
+  // The same for whole-home sizing (bed bug, rodent guarantee on total living area; new quotes only, 2026-11-26): its own
+  // stamp, read before the snapshot is dropped. An unstamped estimate that kept only its inputs and asks for one of the two is a
   // quote saved before the rule, on a first send and a resend alike.
   const priorWholeHomeSizing = require('../services/estimate-floor-signal-replay').savedLegacyWholeHomeSizingSignal(estimateData).legacyWholeHomeSizing;
   if (typeof priorWholeHomeSizing === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyWholeHomeSizing: priorWholeHomeSizing };
@@ -4911,9 +4911,6 @@ router.get('/:id/proposal', async (req, res, next) => {
       // GATE_BUILDING_USE_TAX: a residential building use means bills carry no tax only while it is on (tax-calculator.js
       // step 1b); the builder's Taxable-box warning for a Residential pick follows it.
       buildingUseTaxLive: require('../config/feature-gates').buildingUseTaxLive(),
-      // GATE_LAWN_SPRAY_NO_TAX: lawn and tree & shrub visits bill untaxed only while it is on (TaxCalculator
-      // serviceNotTaxable); with it off the builder's Taxable-box warning predicts nothing for an untaxed business rule.
-      lawnSprayNoTaxLive: require('../config/feature-gates').lawnSprayNoTaxLive(),
       // Verified exemption (true / false; null = could not be read): an exempt customer's self-pay bills carry no tax whatever the
       // building use, so the builder's Taxable-box warning compares with not taxable (null: no warning).
       taxExemptVerified,

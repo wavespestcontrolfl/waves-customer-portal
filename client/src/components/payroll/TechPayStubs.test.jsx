@@ -59,15 +59,6 @@ describe('Pay stubs for a technician', () => {
     expect(screen.getByText('No pay stubs yet.')).toBeInTheDocument();
   });
 
-  it('gate off: the one request answers 404, the status is off and nothing renders', async () => {
-    adminFetch.mockImplementation(() => reply({ enabled: false }, false, 404));
-    const { result } = renderHook(() => useTechPayStubs());
-    await waitFor(() => expect(result.current.status).toBe('off'));
-    const { container } = render(<TechPayStubs stubs={result.current} />);
-    expect(container).toBeEmptyDOMElement();
-    expect(adminFetch).toHaveBeenCalledTimes(1);
-  });
-
   it('a failed request hides the tab and keeps the reason; a pending request renders nothing', async () => {
     adminFetch.mockImplementation(() => reply({ error: 'Pay stubs failed. Try again.' }, false, 500));
     const { result } = renderHook(() => useTechPayStubs());

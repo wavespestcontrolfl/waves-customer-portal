@@ -1387,6 +1387,17 @@ function refusePlacement(serviceId, source, reason, date) {
   return null;
 }
 
+// The visit alone on a day: a lone route_order = 1 would list it ahead of
+// earlier-hour stops added later (readers sort COALESCE(route_order, 999)).
+// Drop any leftover number and leave the day to arrival-time ordering.
+async function clearLoneRouteOrder(sp, { context, serviceId, date, technicianId }) {
+  if (context.target.route_order != null) {
+    await sp('scheduled_services').where({ id: serviceId })
+      .where({ scheduled_date: date, technician_id: technicianId }).update({ route_order: null });
+  }
+  return null;
+}
+
 // Route order time fallback (owner 2026-11-01): the check refused, so number the day by arrival time
 // (route-order-time-fallback.js) instead of leaving the visit last. Ordering only, no arrival simulation;
 // runs inside placeInSavepoint's savepoint, under the tech-day lock it holds. A day with no other numbered
@@ -1394,12 +1405,8 @@ function refusePlacement(serviceId, source, reason, date) {
 async function placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId, reason }) {
   const order = timeFallbackOrder(context.rows, { ...context.target, id: serviceId, technician_id: technicianId });
   if (!order) return null;
-  // The visit alone: a number on it would list it first, whatever its hour. Drop its own leftover number.
   if (order.length === 1) {
-    if (context.target.route_order != null) {
-      await sp('scheduled_services').where({ id: serviceId })
-        .where({ scheduled_date: date, technician_id: technicianId }).update({ route_order: null });
-    }
+    await clearLoneRouteOrder(sp, { context, serviceId, date, technicianId });
     logger.info(`[arrival-route] route order left to arrival time after refusal: service=${String(serviceId).slice(0, 8)} reason=${reason}`);
     return null;
   }
@@ -1438,6 +1445,9 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays }) 
   };
   if (!fit.feasible) return refuseOrNumberByTime(fit.reason || 'no_order');
   if (!fit.routeOrder) return refuseOrNumberByTime('no_order');
+  if (fit.routeOrder.length === 1) {
+    return clearLoneRouteOrder(sp, { context, serviceId, date, technicianId: row.technician_id });
+  }
   const order = await writeRouteOrder(sp, fit, serviceId);
   await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
     resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,

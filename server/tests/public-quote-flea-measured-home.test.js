@@ -186,8 +186,9 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
     expect((await quote()).one_time_total).toBe(350);
   });
 
-  // Whole-home sizing (owner 2026-11-26): the cockroach and bed bug treatments read the same server measurement flea does.
-  describe('cockroach and bed bug treatments use the server measurement too', () => {
+  // Whole-home sizing (owner 2026-11-26): the bed bug treatment reads the same server measurement flea does. The cockroach
+  // treatment prices on the ground-floor footprint of the posted size again (owner 2026-11-27) and never reads it.
+  describe('the bed bug treatment uses the server measurement too; the cockroach treatment does not', () => {
     const db = require('../models/db');
     const LOOKUP_2800 = { enriched: { storiesSource: 'verified', stories: 2, footprint: 1400, homeSqFt: 2800 }, propertyRecord: null };
     const PLAN_WITH_ROACH = { pest: { frequency: 'quarterly', roachType: 'regular' } };
@@ -201,28 +202,26 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
     };
     const wizard = (services, extra = {}) => quote({ homeSqFt: 2000, stories: 2, buildingSizeConfirmed: false, enriched: {}, services, ...extra });
 
-    test('the wizard\'s untouched 2,000 sq ft placeholder on a home the lookup measured at 2,800 sq ft: the plan-added cockroach treatment prices 2,800', async () => {
+    test('the wizard\'s untouched 2,000 sq ft placeholder on a home the lookup measured at 2,800 sq ft: the plan-added cockroach treatment keeps the posted footprint ($119)', async () => {
       mockServerLookup = null;
       const placeholder = await wizard(PLAN_WITH_ROACH);
       const placeholderRow = storedRow('pest_initial_roach');
       mockServerLookup = LOOKUP_2800;
       const measured = await wizard(PLAN_WITH_ROACH);
       const measuredRow = storedRow('pest_initial_roach');
-      expect(placeholderRow).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
-      // The stored row carries the size, its source and the posted size it replaced: the replay restores the measurement from it.
-      expect(measuredRow).toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
-      const { pricePestInitialRoach } = require('../services/pricing-engine/service-pricing');
-      const bracket = (homeSqFt) => pricePestInitialRoach({ homeSqFt, stories: 2 }, { roachType: 'regular' }).price;
-      expect(bracket(2800)).toBeGreaterThan(bracket(2000));
-      expect(measured.one_time_total - placeholder.one_time_total).toBe(bracket(2800) - bracket(2000));
-      // The pest plan itself is unchanged by the lookup (it stays on the footprint of the posted size).
+      // The same row and the same totals: the measurement never reaches the cockroach line.
+      expect(measuredRow).toEqual(placeholderRow);
+      expect(measuredRow.price).toBe(119);
+      expect(measuredRow).not.toHaveProperty('homeSizeBasis');
+      expect(measuredRow).not.toHaveProperty('fleaPostedHomeSqFt');
+      expect(measured.one_time_total).toBe(placeholder.one_time_total);
       expect(measured.monthly_total).toBe(placeholder.monthly_total);
     });
 
-    test('a customer-confirmed 2,000 sq ft home is never replaced', async () => {
+    test('a customer-confirmed 2,000 sq ft home prices the same cockroach line', async () => {
       mockServerLookup = LOOKUP_2800;
       await wizard(PLAN_WITH_ROACH, { buildingSizeConfirmed: true });
-      expect(storedRow('pest_initial_roach')).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
+      expect(storedRow('pest_initial_roach').price).toBe(119);
     });
 
     test('the bed bug treatment steps on the measured home as well', async () => {
@@ -265,7 +264,7 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
       expect(line(generateWithFleaRecord(generateEstimate, { ...cleared, homeSqFt: 1700 }, record))).toMatchObject({ footprintUsed: 1700, footprintSource: 'homeSqFt' });
     });
 
-    test('the stand-alone cockroach package (keyed): the lookup\'s measured home satisfies its size check, so it prices $289 instantly instead of parking as unmeasured', async () => {
+    test('the stand-alone cockroach package (keyed): the lookup\'s measured home does not change it (footprint price, same size check)', async () => {
       mockCatalogRows = { cockroach_control: { service_key: 'cockroach_control', name: 'Cockroach Treatment Service', instant: true, booking_enabled: true } };
       const keyed = (extra = {}) => quote({ serviceKey: 'cockroach_control', homeSqFt: 2000, stories: 2, buildingSizeConfirmed: false, enriched: {}, services: {}, ...extra });
       // No lookup measurement: the 2,000 sq ft placeholder is a guess, so the package parks for the team (unchanged).
@@ -273,26 +272,23 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
       const unmeasured = await keyed();
       expect(unmeasured).toMatchObject({ quote_required: true });
       expect(storedDraft().quoteRequiredReason).toBe('building_size_unmeasured_pest_footprint');
-      // The server lookup measured 2,800 sq ft: the measured bracket, an instant price, no size hold.
+      const unmeasuredRow = storedRow('pest_initial_roach');
+      // The server lookup measured 2,800 sq ft: the same answer and the same row.
       mockServerLookup = LOOKUP_2800;
       const measured = await keyed();
-      expect(measured.quote_required).not.toBe(true);
-      expect(measured.one_time_total).toBe(289);
-      expect(storedDraft().quoteRequired).toBe(false);
-      expect(storedRow('pest_initial_roach')).toMatchObject({
-        price: 289, homeSizeBasis: 'total_living_area', footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000,
-      });
-      // A customer-confirmed 2,000 sq ft home is a measured size of its own: $239, the lookup is not read.
+      expect(measured.quote_required).toBe(unmeasured.quote_required);
+      expect(measured.one_time_total).toBe(unmeasured.one_time_total);
+      expect(storedRow('pest_initial_roach')).toEqual(unmeasuredRow);
+      // A customer-confirmed 2,000 sq ft two-story home prices its 1,000 sq ft footprint: $202.50.
       const confirmed = await keyed({ buildingSizeConfirmed: true });
-      expect(confirmed.one_time_total).toBe(239);
-      expect(storedRow('pest_initial_roach')).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
+      expect(confirmed.one_time_total).toBe(202.5);
     });
 
     test('the public size ceiling applies to the measured home a line prices on: a 24,000 sq ft measurement behind the placeholder goes to the team, as a posted 24,000 does', async () => {
       const LOOKUP_24000 = { enriched: { storiesSource: 'verified', stories: 2, footprint: 12000, homeSqFt: 24000 }, propertyRecord: null };
       const LOOKUP_19000 = { enriched: { storiesSource: 'verified', stories: 2, footprint: 9500, homeSqFt: 19000 }, propertyRecord: null };
       mockServerLookup = LOOKUP_24000;
-      for (const services of [BED_BUG, { flea: {} }, PLAN_WITH_ROACH]) {
+      for (const services of [BED_BUG, { flea: {} }]) {
         const parked = await wizard(services);
         expect(parked).toMatchObject({ quote_required: true });
         expect(storedDraft()).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'home_size_above_public_limit' });
@@ -306,13 +302,17 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
       const under = await wizard(BED_BUG);
       expect(under.quote_required).not.toBe(true);
       expect(storedRow('bed_bug')).toMatchObject({ footprintUsed: 19000, footprintSource: 'lookup_measured_home' });
-      // A quote no line of which prices on the measurement is untouched by it (the pest plan stays on the posted size).
-      mockServerLookup = null;
-      const pestOnly = await wizard({ pest: { frequency: 'quarterly' } });
-      mockServerLookup = LOOKUP_24000;
-      const pestOnlyLooked = await wizard({ pest: { frequency: 'quarterly' } });
-      expect(pestOnlyLooked.quote_required).toBe(pestOnly.quote_required);
-      expect(pestOnlyLooked.monthly_total).toBe(pestOnly.monthly_total);
+      // A quote no line of which prices on the measurement is untouched by it (the pest plan and its cockroach treatment stay on
+      // the posted size).
+      for (const services of [{ pest: { frequency: 'quarterly' } }, PLAN_WITH_ROACH]) {
+        mockServerLookup = null;
+        const pestOnly = await wizard(services);
+        mockServerLookup = LOOKUP_24000;
+        const pestOnlyLooked = await wizard(services);
+        expect(pestOnlyLooked.quote_required).toBe(pestOnly.quote_required);
+        expect(pestOnlyLooked.monthly_total).toBe(pestOnly.monthly_total);
+        expect(pestOnlyLooked.one_time_total).toBe(pestOnly.one_time_total);
+      }
     });
 
     test('a commercial building keeps its measured footprint: a 6,000 sq ft one-story hotel, two rooms, light chemical, is $992 (not $962 on the 2,000 placeholder)', async () => {

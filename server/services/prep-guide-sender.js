@@ -416,14 +416,47 @@ async function completedPrepGuide({ scheduledServiceId = null, serviceRecordId =
  * { visit, pestType, config } or null with no booked visit; pestType and config are null when no single guide can be named. THROWS on a
  * lookup error, including a grouped stop whose members could not be read: a failed read is not "nothing booked".
  */
-async function bookedPrepGuide(customerIds) {
+// `family` (texting AI gap 5): the guide family the customer's text named ("the lawn treatment"). When the booked visit does not carry it,
+// the soonest upcoming visit that does is the one asked about (upcomingPrepGuideFor), returned with source 'named'; none upcoming carries
+// it = the booked visit's guide, as without it.
+async function bookedPrepGuide(customerIds, { family = null } = {}) {
   const [visit] = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, 1, { strict: true });
   if (!visit) return null;
+  const next = await stopPrepGuide(visit);
+  if (!family || next.pestType === family) return next;
+  // the customer named another service: that service's visit, or no guide at all (never the first booking's unrelated guide)
+  const named = await upcomingPrepGuideFor(customerIds, family);
+  return named ? { ...named, source: 'named' } : null;
+}
+
+// The guide one upcoming visit's STOP carries (bookedPrepGuide's rule): { visit, pestType, config }. THROWS on a lookup error.
+async function stopPrepGuide(visit) {
   // (a sibling the booking query itself would hide, a dispatch-owned booking nobody confirmed, is not part of what the customer sees)
   const { dispatchOwnedUnreviewed } = require('../routes/appointment-public');
   const stop = (visit.stop_members || [visit]).filter((row) => !dispatchOwnedUnreviewed(row));
   const projects = await db('projects').whereIn('scheduled_service_id', stop.map((row) => row.id)).whereNotNull('prep_template_key').select('prep_template_key');
   return { visit, ...singleGuide([...stop, ...projects].map((row) => row.prep_template_key).filter(Boolean), stop.map((row) => row.service_type)) };
+}
+
+/**
+ * The guide of the soonest upcoming visit whose stop carries the guide family `pestType` (texting AI gap 5: the customer named a service,
+ * "the lawn treatment", whose visit is not the next one). The same order and per-stop rule as bookedPrepGuide (stopPrepGuide: an assigned
+ * key on the visit or its linked project decides), over the customer's upcoming visits in booking order, paged past the first ten, at
+ * most NAMED_GUIDE_SCAN_MAX of them: past that, none. { visit, pestType, config } or null when none of them carries it.
+ * THROWS on a lookup error (a stop whose members could not be read included).
+ */
+const NAMED_GUIDE_SCAN_MAX = 50;
+async function upcomingPrepGuideFor(customerIds, pestType) {
+  const config = PREP_CONFIG[pestType];
+  if (!config || config.guide) return null;
+  // every upcoming visit (no service-name pre-filter): the stop's own guide (its prep_template_key, a linked project's key, else its
+  // service types) decides, exactly as for the booked visit
+  const visits = await upcomingFamilyVisits(customerIds, { serviceKeywords: [''] }, NAMED_GUIDE_SCAN_MAX, { strict: true });
+  for (const visit of visits) {
+    const guide = await stopPrepGuide(visit);
+    if (guide.pestType === pestType) return guide;
+  }
+  return null;
 }
 
 // A visit's prep key is never MOVED between guides. The automated lanes
@@ -760,6 +793,8 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
       // the predicate fails closed.
       onQueued: async () => {
         if (visit?.id && await isStreetLevelHoldVisit(visit.id)) return false;
+        // GATE_VISIT_HOLD: no prep guide for a visit on hold.
+        if (visit?.id && await require('./visit-hold').isVisitHeld(visit.id)) return false;
         dispatched = true;
         return true;
       },
@@ -1250,5 +1285,5 @@ async function sendPrepToCustomer({ customerId, pestType = 'flea', channel = 'bo
 
 module.exports = {
   sendPrepToCustomer, isSupportedPestType, isSupportedChannel, nextUpcomingVisit, settleHeldEnrollment, buildWateringBlock, PREP_CONFIG, CHANNELS, SMS_GUIDE_LINK_KEY,
-  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide, completedPrepGuide,
+  prepConfigMatches, prepFamilyForServiceType, bookedPrepGuide, completedPrepGuide, upcomingPrepGuideFor,
 };

@@ -297,9 +297,9 @@ async function assertNoClash(trx, deps, { dateStr, techId, written }) {
 
 /** Writes route_order = position for the technician's live stops, in the accepted order, and reads the numbers back. */
 async function writeRouteOrder(trx, deps, { dateStr, techId, order, finalStarts }) {
-  const rows = await trx('scheduled_services')
+  const rows = await require('../visit-hold').excludeHeld(trx('scheduled_services')
     .where({ scheduled_date: dateStr, technician_id: techId })
-    .whereNotIn('status', deps.excludedStatuses)
+    .whereNotIn('status', deps.excludedStatuses), 'scheduled_services')
     .whereRaw('(reservation_expires_at IS NULL OR reservation_expires_at > NOW())')
     .select('id', 'window_start');
   const want = new Set(order.map(String));

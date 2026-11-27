@@ -1437,6 +1437,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
       }
     };
     let result;
+    const holdRelease = require('../services/visit-hold').visitHoldLive() ? { releaseHold: true } : {};
     try {
       result = reanchor
         ? await SmartRebooker.rescheduleSeries(
@@ -1456,6 +1457,7 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             technicianId: slot.technician_id,
             expectAnchor: { scheduled_date: svc.scheduled_date, window_start: svc.window_start },
             sourceSurface: 'customer_web',
+            ...holdRelease,
             disclosedFuturePlacementDays: req.body.disclosed_future_placement_days ?? null,
             travelGap: true,
             // Number each moved visit's day (stop numbers only; no road
@@ -1494,6 +1496,8 @@ router.post('/:token', commitLimiter, async (req, res, next) => {
             // GATE_DAY_ONLY_PROMISE part B3: the picker's slots are hours the customer chose, recorded by this move's own UPDATE
             // (rebooker.js moveIntentColumns). Gate off: no key, so the call keeps today's exact arguments.
             ...(await dayPromiseMoveIntent(svc)),
+            // GATE_VISIT_HOLD: the customer's own link is the "I will call you when ready" call; it ends a hold.
+            ...holdRelease,
             // No arrivalGraceMinutes (owner ruling 2026-09-28, scope cut
             // Codex r1 P1 #5314): this page's own commit runs a STRICT
             // pre-verify travel probe that a grace-kept slot would fail

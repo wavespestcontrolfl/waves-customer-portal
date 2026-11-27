@@ -6302,7 +6302,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   // expired staff token must not disable an ordinary customer view.
   const adminDraftPreview = data?.adminDraftPreview === true;
   const readOnlyPreview = data?.verifiedStaffPreview === true || adminDraftPreview;
-  // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): /data carries cta.consumerNotice only with the gate on and a
+  // Florida consumer notice: /data carries cta.consumerNotice only for a
   // termite line on an open estimate. Until it reads 'signed' EVERY accept control is held off through this one flag
   // (slot-to-payment choice, confirm, the prepay confirm, the accept itself); the server refuses the accept too.
   const consumerNoticeBlocked = !!data?.cta?.consumerNotice && data.cta.consumerNotice.state !== 'signed';
@@ -10972,7 +10972,7 @@ function EstimateViewPageInner({ websiteMode = false, setFooterNoGuarantee = nul
   );
   const bookingContent = (
     <div id={BOOKING_SECTION_ID} style={{ scrollMarginTop: 76 }}>
-            {/* Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): right above the accept controls; absent with the gate off. */}
+            {/* Florida consumer notice: right above the accept controls; absent when the server does not ask for it. */}
             <ConsumerNoticeSign token={token} consumerNotice={cta?.consumerNotice} onRefusal={(status, body) => refuseStaleQuoteRef.current(status, body)} />
             {canShowSlotPicker && pickTimePrompt > 0 && !selectedSlotId
               ? <SlotIssueBanner key={pickTimePrompt} kind="pick_time" /> : null}

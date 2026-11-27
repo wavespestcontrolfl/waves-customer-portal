@@ -451,6 +451,9 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFi
 // close (same TECH_ACCESS_WINDOW_DAYS / dead-status contract).
 function scopeToAssignedTech(req, q) {
   technicianCurrentVisitFilter(req, q);
+  // GATE_VISIT_HOLD: a held visit is off the day, week, month and list feeds and the next-visit read (the office
+  // reaches it through the On hold list). Gate off: no clause.
+  require('../services/visit-hold').excludeHeld(q, 'scheduled_services');
 }
 
 // Column guard cache for the discount/provenance projection (GET /week,
@@ -6787,6 +6790,50 @@ router.post('/held-visits/:callLogId/dismiss', requireAdmin, async (req, res) =>
   }
 });
 
+// ─── Visit on hold, "customer will call" (GATE_VISIT_HOLD, owner 2026-11-27) ─────────────────────────────────
+// Gate off: all three answer 404 {enabled:false} before any read. The office puts any visit on hold; a technician only
+// his OWN live visit (the same ownership predicate the other tech visit writes use, 404 on a miss). Release and the
+// office list are admin only. Nothing here texts or emails a customer (services/visit-hold.js).
+const visitHoldService = require('../services/visit-hold');
+function visitHoldOff(res) {
+  return res.status(404).json({ enabled: false, error: 'Visit hold is not enabled' });
+}
+
+// GET /api/admin/schedule/on-hold — every held visit, oldest hold first (the office "On hold" list).
+router.get('/on-hold', requireAdmin, async (req, res, next) => {
+  try {
+    if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
+    return res.json({ enabled: true, visits: await visitHoldService.listHeldVisits({ conn: db }) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/hold { note? } — put one visit on hold.
+router.post('/:id/hold', async (req, res, next) => {
+  try {
+    if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
+    // Ownership is checked inside the writer, on the locked row (scopeReq), so a reassignment cannot slip past it.
+    const result = await visitHoldService.putVisitOnHold({
+      visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, scopeReq: req, conn: db,
+    });
+    return res.json({ success: true, changed: result.changed, heldAt: result.heldAt });
+  } catch (err) {
+    if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+// POST /api/admin/schedule/:id/hold/release — take one visit off hold (office only).
+router.post('/:id/hold/release', requireAdmin, async (req, res, next) => {
+  try {
+    if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
+    const result = await visitHoldService.releaseVisitHold({ visitId: req.params.id, conn: db });
+    return res.json({ success: true, changed: result.changed });
+  } catch (err) {
+    if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
 // GET /api/admin/schedule — day view (board + dispatch)
 // GATE_NEW_CALLER_BOOKING: a visit booked by address before its customer
 // exists reads "New caller" and offers Link customer on the visit sheet (PUT
@@ -7563,6 +7610,8 @@ router.get('/', async (req, res, next) => {
       visitCloseout: legacyCloseoutEnabled,
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
+      // GATE_VISIT_HOLD: both apps show the hold action only when this is true.
+      visitHold: visitHoldService.visitHoldLive(),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -12899,6 +12948,8 @@ async function planCollectiveEditDateMove(req) {
       // delta), so this call always lands as a series move.
       const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
         allowLive: true,
+        // GATE_VISIT_HOLD: an office edit of a held visit's date ends the hold (the move is the person's choice).
+        ...(visitHoldService.visitHoldLive() && req.techRole === 'admin' ? { releaseHold: true } : {}),
         qualityDates,
         adminWindowRules: true,
         overlapAdvisory: true,
@@ -24903,9 +24954,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // a new exposure surface. Computed AFTER the single ownership-scoped
     // fetch above, so the reassignment protection covers it; fail-soft —
     // a facts outage omits the key, never 500s the brief read.
-    // "Customer asked" words are read for THIS visit date (portal messages' window, reschedule notes): finalRecheck binds the visit's
-    // scheduled_date too when they ride the answer, as GET /:id/visit-texts does.
+    // "Customer asked" words are read for THIS visit date (portal messages' window, reschedule notes) and THIS visit's premises (the
+    // property-scoped requests): finalRecheck binds the visit's scheduled_date and its premises columns (the ones
+    // resolveVisitPropertyScope reads: property_id, the service address stamp, the source estimate) as read at the start, when they
+    // ride the answer, as GET /:id/visit-texts does for the date. A changed premises withholds the whole answer.
     let customerAskedBound = false;
+    const bindVisitPremises = (q) => {
+      for (const column of ['property_id', 'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip', 'source_estimate_id']) {
+        if (!(column in svc)) continue;
+        if (svc[column] == null) q.whereNull(`scheduled_services.${column}`);
+        else q.where(`scheduled_services.${column}`, svc[column]);
+      }
+      return q;
+    };
     const withFacts = async (payload) => {
       if (!PrevisitBrief.visitFactsGateEnabled()) return payload;
       try {
@@ -25002,7 +25063,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-          .modify((q) => (customerAskedBound ? q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date)) : q))
+          .modify((q) => (customerAskedBound ? bindVisitPremises(q.where('scheduled_services.scheduled_date', dateOnly(svc.scheduled_date))) : q))
           .modify((q) => technicianCurrentVisitFilter(req, q))
           .first('scheduled_services.id');
         return stillOwned ? payload : { brief: null };
@@ -25191,7 +25252,7 @@ router.get('/:id/visit-texts', async (req, res, next) => {
     const { customerId, scheduledDate } = req.query;
     if (typeof customerId !== 'string' || typeof scheduledDate !== 'string' || !customerId || !scheduledDate) return res.status(400).json({ error: 'customerId and scheduledDate are required' });
     if (String(svc.customer_id) !== customerId || dateOnly(svc.scheduled_date) !== scheduledDate) return res.status(404).json({ error: 'Scheduled service not found' });
-    const { texts, hidden, unavailable } = await require('../services/tech-visit-texts').visitTexts(db, svc, { withPhotos: require('../config/feature-gates').techVisitTextPhotosLive() });
+    const { texts, hidden, since, unavailable } = await require('../services/tech-visit-texts').visitTexts(db, svc, { withPhotos: require('../config/feature-gates').techVisitTextPhotosLive() });
     // Bound to the customer and the visit date the texts were read for: a merge or undo that moved the visit to another customer,
     // or a reschedule that moved the window, mid-read withholds the answer, as visit-brief's finalRecheck does for the customer.
     const stillOwned = await db('scheduled_services')
@@ -25199,7 +25260,7 @@ router.get('/:id/visit-texts', async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.id');
     if (!stillOwned) return res.status(404).json({ error: 'Scheduled service not found' });
-    res.json({ enabled: true, texts, hidden, ...(unavailable ? { unavailable: true } : {}) });
+    res.json({ enabled: true, texts, hidden, ...(since ? { since } : {}), ...(unavailable ? { unavailable: true } : {}) });
   } catch (err) { next(err); }
 });
 

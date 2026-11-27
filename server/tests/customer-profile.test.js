@@ -85,6 +85,8 @@ jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: (
 // The real composer (its rules throw in tests), with the bell write captured.
 const mockNotifyAdmin = jest.fn(async () => ({ id: 'n1' }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+const mockEnqueueStripeSync = jest.fn(async () => {});
+jest.mock('../services/stripe-email-sync', () => ({ enqueue: (...a) => mockEnqueueStripeSync(...a) }));
 
 const express = require('express');
 const auth = require('../middleware/auth');
@@ -397,6 +399,7 @@ describe('PUT /api/customer/profile', () => {
     expectGenericNotice(mockSend.mock.calls[0][0], OLD_EMAIL);
     // The office alert is for an EMAIL change only.
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockEnqueueStripeSync).not.toHaveBeenCalled();
   });
 
   test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
@@ -530,6 +533,8 @@ describe('POST /api/customer/profile/confirm-email', () => {
     });
     // Written in the change's own transaction, so the two commit together.
     expect(typeof opts.trx).toBe('function');
+    // Stripe's copy follows: a durable job queued on the same transaction handle.
+    expect(mockEnqueueStripeSync).toHaveBeenCalledWith(opts.trx, CUSTOMER_ID, NEW_EMAIL, 'app_email_change');
     expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
     expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
   });
@@ -563,7 +568,7 @@ describe('POST /api/customer/profile/confirm-email', () => {
   });
 
   test('an unchanged address and a wrong code raise no alert', async () => {
-    mockNotifyAdmin.mockClear();
+    mockNotifyAdmin.mockClear(); mockEnqueueStripeSync.mockClear();
     mockCode.checkCode.mockResolvedValue(okCheck());
     mockApplyEmail.mockImplementation(async () => ({ outcome: 'unchanged', before: { ...mockRow } }));
     await confirm('123456');
@@ -571,6 +576,7 @@ describe('POST /api/customer/profile/confirm-email', () => {
     await confirm('123456');
     await flush();
     expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockEnqueueStripeSync).not.toHaveBeenCalled();
   });
 
   test('the rowAllowed it hands the writer refuses an inactive row and a row on another account', async () => {

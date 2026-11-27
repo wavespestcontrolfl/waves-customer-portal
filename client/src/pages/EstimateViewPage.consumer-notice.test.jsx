@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): /data carries cta.consumerNotice only with the gate on and a
+// Florida consumer notice: /data carries cta.consumerNotice only for a
 // termite line. Until it reads 'signed' every accept control is held off through one flag; the page refetches when the
 // customer comes back from the signing page; a server 409 consumer_notice_required shows its message and refetches.
 import React from 'react';
@@ -117,7 +117,7 @@ describe('accept controls while the Florida consumer notice is unsigned', () => 
     await waitFor(() => expect(fetchMock.count('/accept')).toBe(1));
   });
 
-  it('no block in /data (gate off, or no termite line): the page is as before', async () => {
+  it('no block in /data (no termite line): the page is as before', async () => {
     stubLocalStorage();
     const fetchMock = makeFetch({ dataQueue: [payload(null)] });
     vi.stubGlobal('fetch', fetchMock);

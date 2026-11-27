@@ -4470,10 +4470,10 @@ async function createSelfBooking(payload = {}) {
       // Expired estimate-slot holds don't count (same predicate as
       // slot-reservation.js).
       const zoneCities = zone?.cities || [];
-      const conflictQuery = trx('scheduled_services')
+      const conflictQuery = require('../services/visit-hold').excludeHeld(trx('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', slotDateStr)
-        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
         .where(bookedVisitOrLiveHold)
         // COALESCE the nullable window_end (admin edits can leave a start
         // with no end) — same predicate as slot-reservation/rebooker.

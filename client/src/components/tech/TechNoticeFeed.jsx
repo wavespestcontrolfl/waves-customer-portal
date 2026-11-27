@@ -14,8 +14,8 @@
  *   - an open-visits card for `tech_open_visit_nudge` (tech-open-visit-nudge.js:
  *     the 7 PM "visits from today still open" reminder for techs who aren't
  *     texted) — same kept-until-"Got it" rule and cap
- *   - a photo card for `customer_visit_photos` (visit-prep-tech-alert.js,
- *     GATE_VISIT_PREP_TECH_ALERTS: a customer sent prep photos for a stop
+ *   - a photo card for `customer_visit_photos` (visit-prep-tech-alert.js:
+ *     a customer sent prep photos for a stop
  *     on this tech's route) — same kept-until-"Got it" rule and cap,
  *     sharing the visit-card slot
  *
@@ -585,8 +585,7 @@ function VisitCard({ n, onDismiss }) {
   );
 }
 
-// A customer's visit-prep photo submission (visit-prep-tech-alert.js,
-// GATE_VISIT_PREP_TECH_ALERTS). No customer name/address/note here — that
+// A customer's visit-prep photo submission (visit-prep-tech-alert.js). No customer name/address/note here — that
 // same lock-screen discipline extends to the card, not just the push. The
 // visit is usually days out and the tech app only opens today's route, so
 // the card names the visit's DATE instead of a tap-through that would dead-

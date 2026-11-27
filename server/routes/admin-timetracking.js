@@ -105,6 +105,8 @@ const ADMIN_TECH_RESPONSE_FIELDS = [
   'bouncie_imei', 'bouncie_vin', 'vehicle_name',
   // Start-of-day point (home address is staff PII: admin-only, never logged).
   'start_address', 'start_lat', 'start_lng',
+  // Team tab "Supply store": the supplier branch the Monday buy list names for this person.
+  'supply_store',
   // Team tab "Can move visits" switch.
   'can_move_visits',
   // Team tab "Can create estimates" switch (GATE_TECH_ESTIMATES).
@@ -218,6 +220,21 @@ function normalizeStartPoint(value) {
   const okLng = typeof lng === 'number' && Number.isFinite(lng) && lng >= -180 && lng <= 180;
   if (!okLat || !okLng) return { error: START_POINT_ERROR };
   return { patch: { start_address: address, start_lat: lat, start_lng: lng } };
+}
+
+const SUPPLY_STORE_MAX = 120;
+
+// `supplyStore` on PUT /technicians/:id: the supplier branch this person buys
+// from (free text, e.g. "SiteOne Lakewood Ranch"). undefined = leave alone;
+// null or blank = cleared. Same shape as payRateError: a message, or null.
+function supplyStoreError(body) {
+  const value = body.supplyStore;
+  const ok = value == null || (typeof value === 'string' && value.trim().length <= SUPPLY_STORE_MAX);
+  return ok ? null : `supplyStore must be null or text of at most ${SUPPLY_STORE_MAX} characters`;
+}
+
+function supplyStorePatch(value) {
+  return value === undefined ? {} : { supply_store: (typeof value === 'string' && value.trim()) || null };
 }
 
 // Authoritative admin check — reads from req.technician.role (the
@@ -1240,10 +1257,8 @@ async function updateTechnician(req, res, next) {
     if (workDays.error) return res.status(400).json({ error: workDays.error });
     const shiftHours = normalizeShiftHoursInput(body.shiftHours);
     if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
-    const badPayRate = payRateError(body);
-    if (badPayRate) return res.status(400).json({ error: badPayRate });
-    const badHireDate = hireDateError(body);
-    if (badHireDate) return res.status(400).json({ error: badHireDate });
+    const badBody = [payRateError, hireDateError, supplyStoreError].map((check) => check(body)).find(Boolean);
+    if (badBody) return res.status(400).json({ error: badBody });
 
     const outcome = await db.transaction(async (trx) => {
       // Every Staff identity writer takes the table lock before a row lock.
@@ -1298,6 +1313,7 @@ async function updateTechnician(req, res, next) {
       Object.assign(updates, estimateSwitch.patch);
       Object.assign(updates, techLine.patch);
       Object.assign(updates, startPoint.patch);
+      Object.assign(updates, supplyStorePatch(body.supplyStore));
       Object.assign(updates, workDays.patch);
       Object.assign(updates, shiftHours.patch);
 

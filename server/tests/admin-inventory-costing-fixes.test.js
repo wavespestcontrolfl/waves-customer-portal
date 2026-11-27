@@ -133,6 +133,7 @@ describe('POST /restock-requests/:id/action', () => {
         return requestRow.ledger || null; // assertManualActionAllowed's one read
       }
       if (q._table === 'product_inventory_movements') {
+        if (!q.called('insert')) return []; // receive's "an invoice already added this" read: nothing counted yet
         movements.push(q.args('insert')[0]);
         return [{ id: 'movement-1', ...q.args('insert')[0] }];
       }

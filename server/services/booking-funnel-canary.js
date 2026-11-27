@@ -29,14 +29,12 @@
  * line; a later outage is a fresh row and rings again. A read error is logged
  * and then rethrown, so job_health records the failed run.
  *
- * Dark-shipped: no-ops unless GATE_BOOKING_FUNNEL_CANARY=true (standard
- * feature-gate registry; owner flips). Read-only on booking_intents; sends
+ * Read-only on booking_intents; sends
  * no customer-facing communications — the SMS is an internal_alert to
  * ADAM_PHONE only.
  */
 const db = require('../models/db');
 const logger = require('./logger');
-const { isEnabled } = require('../config/feature-gates');
 
 const FAST_WINDOW_MS = 72 * 60 * 60 * 1000;
 const SLOW_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -126,9 +124,6 @@ async function countWindow(sinceMs) {
  * still cannot take down the scheduler tick or boot path that runs it.
  */
 async function runBookingFunnelCanary() {
-  if (!isEnabled('bookingFunnelCanary')) {
-    return { skipped: true };
-  }
   let fast;
   let slow;
   try {

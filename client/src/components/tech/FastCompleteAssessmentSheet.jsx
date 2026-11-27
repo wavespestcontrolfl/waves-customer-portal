@@ -249,7 +249,7 @@ export default function FastCompleteAssessmentSheet({ service, request, operator
 
 function SheetBody({ service, request, recorded, submission, locked, photos, dictationPending, onDictationPending, onCompleted }) {
   if (submission.done) {
-    return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
+    return <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} response={submission.done.response} onCompleted={() => onCompleted?.(submission.done.response || null)} />;
   }
   if (submission.recovering) return <ActionFeedback className="tech-visit-feedback tech-visit-loading">Checking for an unfinished completion…</ActionFeedback>;
   if (submission.restored) return <RecoveredCompletion submission={submission} />;

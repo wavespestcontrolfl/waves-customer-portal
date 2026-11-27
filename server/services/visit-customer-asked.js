@@ -58,10 +58,14 @@ const MONEY_AMOUNT_RES = [
   /[$€£]|\b(?:usd|dollars?|bucks?)\b|\b\d{1,3}(?:,\d{3})+\b|\b\d+\.\d{2}\b/i,
   // A whole-number amount with a billing unit: "149/month", "149 per application", "149 a visit".
   new RegExp(`\\b\\d+\\s*(?:/|per\\b|a\\b|an\\b|each\\b|every\\b)\\s*(?:${BILLING_UNITS})s?\\b`, 'i'),
+  // A number straight before a cadence word, no $ sign: "45 monthly", "99 yearly", "20 weekly". A frequency ("3 times a month",
+  // "2 dogs") has a word between the number and the cadence, so it stays.
+  /\b\d+\s*(?:monthly|yearly|annually|annual|quarterly|weekly|biweekly|bi-weekly|bimonthly|semiannually)\b/i,
   // A whole-number amount beside a pricing word, either order: "quoted 149", "149 total price", "for 149".
   new RegExp(`\\b(?:${PRICING_WORDS})\\b[^.\\n\\d]{0,20}\\b\\d{2,}\\b|\\b\\d{2,}\\b[^.\\n\\d]{0,12}\\b(?:${PRICING_WORDS})\\b|\\bfor\\s+\\d{3,}\\b`, 'i'),
 ];
-const moneyFree = (text) => !MONEY_AMOUNT_RES.some((re) => re.test(text));
+// Read as NFKC first: full-width digits and letters ("４９ ａ month") are the plain ones.
+const moneyFree = (text) => { const plain = String(text).normalize('NFKC'); return !MONEY_AMOUNT_RES.some((re) => re.test(plain)); };
 
 // A query builder never runs with a missing customer: knex turns { customer_id: null } into IS NULL.
 function requireCustomer(svc) {
@@ -70,6 +74,11 @@ function requireCustomer(svc) {
 
 // Return reason, booking note and reschedule note are about this appointment; the rest is the customer's, account-wide.
 const belongsToAppointment = (item) => item.kind === 'reservice_reason' || item.kind === 'booking_note' || item.appointment === true;
+
+// One wording, whatever the spelling around it: NFKC, lowercase, runs of spaces and punctuation collapsed, ends trimmed.
+const wordsKey = (text) => String(text).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+
+const KIND_PRIORITY = ['reservice_reason', 'booking_note', 'reservice_words', 'portal_request', 'portal_message'];
 
 const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);
 const compact = (value) => String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
@@ -356,8 +365,7 @@ async function portalItems(svc, dbh, singleSoon, codes) {
       return entry('portal_request', row.created_at, requestRowText(row, codes), { source: 'portal' }, codes);
     })
     .filter(Boolean)
-    .sort(newestFirst)
-    .slice(0, PORTAL_ROW_LIMIT);
+    .sort(newestFirst);
 }
 
 // At most MAX_ITEMS: the return reason (why the visit exists) always has its slot, the newest others fill the rest,
@@ -408,7 +416,6 @@ async function portalMessageItems(svc, dbh, singleSoon, codes) {
   return (rows || [])
     .filter((row) => !sequenceHeld.has(row.id))
     .filter((row) => compact(row.body) && safeMessage(compact(row.body), codes))
-    .slice(0, PORTAL_ROW_LIMIT)
     .map((row) => entry('portal_message', row.created_at, row.body, { source: 'portal', ...(accountWide ? { accountWide: true } : {}) }, codes));
 }
 
@@ -441,17 +448,22 @@ async function customerAskedFacts(svc, dbh) {
     safely('portal requests', () => portalItems(svc, dbh, single, codes)),
     safely('portal messages', () => portalMessageItems(svc, dbh, single, codes)),
   ]);
-  // One copy per wording within a scope, the newest kept. An item about this appointment (the return reason, the booking
-  // note, a reschedule note) is a different thing from the same words said account-wide, so each scope dedupes alone.
-  // The return reason is never dropped: it goes first, so a booking or reschedule note with the same words is the copy that
-  // yields.
+  // One copy per wording within a scope, across ALL sources, the first by priority kept: the return reason, the booking note, the
+  // re-service words, the portal requests, then the portal messages; inside one kind the newest first. An item about this
+  // appointment (the return reason, the booking note, a reschedule note) is a different thing from the same words said
+  // account-wide, so each scope dedupes alone. The return reason is never dropped: it ranks first.
+  // One pass: a duplicate never takes a slot from a distinct ask, and only a copy that is KEPT (not cut by its source's cap)
+  // blocks its repeats, so wording whose preferred copy is capped out still shows from a source with room.
   const seen = new Set();
-  const flat = lists.flat().filter(Boolean).sort(newestFirst);
-  const ordered = [...flat.filter((item) => item.kind === 'reservice_reason'), ...flat.filter((item) => item.kind !== 'reservice_reason')];
+  const rank = (item) => KIND_PRIORITY.indexOf(item.kind);
+  const ordered = lists.flat().filter(Boolean).sort((a, b) => rank(a) - rank(b) || newestFirst(a, b));
+  const taken = { portal_request: 0, portal_message: 0 };
   const items = ordered.filter((item) => {
-    const words = item.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    const words = wordsKey(item.text);
     const key = `${belongsToAppointment(item) ? 'appointment' : 'account'}|${words}`;
     if (!words || seen.has(key)) return false;
+    if (item.kind in taken && taken[item.kind] >= PORTAL_ROW_LIMIT) return false;
+    if (item.kind in taken) taken[item.kind] += 1;
     seen.add(key);
     return true;
   });

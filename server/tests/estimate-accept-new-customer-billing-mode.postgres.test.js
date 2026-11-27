@@ -379,6 +379,12 @@ suite('public accept — billing lane of the customer the accept creates', () =>
     const savedGates = {};
     beforeAll(() => { gates.forEach((g) => { savedGates[g] = process.env[g]; process.env[g] = 'true'; }); });
     afterAll(() => { gates.forEach((g) => { if (savedGates[g] === undefined) delete process.env[g]; else process.env[g] = savedGates[g]; }); });
+    // The Florida consumer notice is always on, and these fixtures are accepts by a customer the accept itself mints, who
+    // has no notice to sign. The park is what these tests pin, so the notice reads as signed here; the notice has its own
+    // suites (estimate-public-consumer-notice, estimate-consumer-notice).
+    let noticeSpy;
+    beforeEach(() => { noticeSpy = jest.spyOn(require('../services/estimate-consumer-notice'), 'consumerNoticeBlocksAccept').mockResolvedValue(false); });
+    afterEach(() => { noticeSpy.mockRestore(); });
 
     test('the minted customer parks with monthly_rate NULL, is outside billing-cron\'s selection, and a second accept on that phone converts per_application', async () => {
       const first = await estimateFixture(mockTransaction, {

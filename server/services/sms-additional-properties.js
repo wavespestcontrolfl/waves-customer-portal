@@ -10,8 +10,7 @@ const { scrubPans } = require('../utils/pan-scrub');
 
 const REASON = 'property_role_confirm';
 const OPEN = ['open', 'in_progress'];
-const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS')
-  && gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY') && process.env.GATE_CUSTOMER_PROPERTIES === 'true';
+const enabled = () => gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS') && process.env.GATE_CUSTOMER_PROPERTIES === 'true';
 const fail = (code, status = 409) => { throw Object.assign(new Error(code), { status }); };
 const sourceHash = (message) => hashExtractionSource(JSON.stringify([
   message.id, message.customer_id, message.direction, message.from_phone, message.to_phone,

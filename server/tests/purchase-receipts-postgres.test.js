@@ -862,7 +862,8 @@ jest.setTimeout(30000);
       expect(result.logged).toHaveLength(1);
       const [row] = await mockConn('notifications').whereRaw("metadata->>'dedupeKey' LIKE ?", ['purchase-receipt:%']);
       expect(row).toMatchObject({ title: 'Inventory — check the restock request for Taurus SC', body: 'Amazon delivery added Taurus SC; an open restock request may cover it.', done_at: null });
-      expect(row.detail).toContain('cancel that request in the Intelligence Bar');
+      expect(row.detail).toContain('choose Close, already counted on the Restock tab');
+      expect(row.detail).not.toContain('cancel that request');
       expect(row.metadata).toMatchObject({ doneWhen: 'restock_request_closed', productId: taurus.id, receivedQty: 156 });
 
       await sweep();

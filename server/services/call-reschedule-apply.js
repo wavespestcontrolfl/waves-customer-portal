@@ -890,7 +890,7 @@ async function afterCallMove({ conn, visit, plan, result, tag }) {
 }
 
 // ---------------------------------------------------------------------------
-// MAKE-UP MOVE (owner 2026-10-22, dark behind GATE_CALL_MAKEUP_MOVE).
+// MAKE-UP MOVE (owner 2026-10-22).
 //
 // Incident: a quarterly pest customer's recurring visit was MISSED (status
 // still 'confirmed', dated in the past, an unresolved customer_noshow row from

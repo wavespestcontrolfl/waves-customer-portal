@@ -1,7 +1,7 @@
 // The lawn outline layout (owner "build" 2026-10-31, scope page GfPfBfUu; every detailed outline since owner "flip the gate"
 // 2026-11-01): a year bar, round cards (a 9-visit rounds plan) or today's month list (every other plan), an after-a-visit
-// timeline, fact cards, a closed FAQ and a closed problem list. lawn-service-outline.js calls this module only while the
-// detailed outline (GATE_LAWN_OUTLINE_DETAIL) is live (lazy require, so this file never loads for the plain v13 outline) and
+// timeline, fact cards, a closed FAQ and a closed problem list. lawn-service-outline.js calls this module only for the
+// v13 outline (lazy require, so this file never loads for the old outline) and
 // hands it the outline's own helpers in `kit`, so nothing here requires that file back.
 //
 // The shapes below are the page's contract (client/src/pages/ServiceOutlinePage.jsx): yearBar, rounds, timeline, facts and faq

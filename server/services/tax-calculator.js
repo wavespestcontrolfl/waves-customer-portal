@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { MANATEE_ZIPS, SARASOTA_ZIPS, CHARLOTTE_ZIPS, LEE_ZIPS, COLLIER_ZIPS, DESOTO_ZIPS } = require('../config/county-zips');
-const { slabHomeNoTaxLive, lawnSprayNoTaxLive, buildingUseTaxLive, taxServiceCountyLive, slabBusinessSiteTaxLive } = require('../config/feature-gates');
+const { slabHomeNoTaxLive, buildingUseTaxLive, taxServiceCountyLive, slabBusinessSiteTaxLive } = require('../config/feature-gates');
 
 // Waves operates in ET. Use ET calendar date regardless of server TZ (Railway=UTC).
 function todayET() {
@@ -192,8 +192,8 @@ const TaxCalculator = {
     // Lawn and landscape treatments: Florida does not tax lawn spraying,
     // residential or nonresidential (Rule 12A-1.009(6)), and taxes pest control
     // only for an infestation of a nonresidential building, so tree and shrub
-    // and palm care is not taxed either (GATE_LAWN_SPRAY_NO_TAX).
-    if (lawnSprayNoTaxLive() && this.isGroundsTreatment(serviceType)) {
+    // and palm care is not taxed either.
+    if (this.isGroundsTreatment(serviceType)) {
       return { rate: 0, amount: 0, taxable: false, county: null, reason: 'Lawn and landscape treatment — not taxable (FL Rule 12A-1.009)' };
     }
 

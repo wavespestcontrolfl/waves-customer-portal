@@ -19,7 +19,6 @@ const { NORTH_PORT_FERTILIZER_SETBACKS } = require('./lawn-fertilizer-safety');
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const TEMPLATE_VERSION = 'mvp-1';
 const CONTENT_LIBRARY_VERSION = 'seed-v1';
-const V13_CONTENT_LIBRARY_VERSION = 'lawn-v13-copy-4';
 const V13_VISUAL_CONTENT_LIBRARY_VERSION = 'lawn-v13-visual-4';
 const PRODUCT_REGISTRY_VERSION = 'public-facts-v1';
 const PROTOCOL_VERSION = 'lawn-v4';
@@ -317,12 +316,6 @@ function outlineV13Live() {
   return featureGates.lawnV13Live?.() === true;
 }
 
-// GATE_LAWN_OUTLINE_DETAIL (live only with the v13 program): the v13 outline with the detail sections.
-// Off = the v13 outline exactly.
-function outlineDetailLive() {
-  return featureGates.lawnOutlineDetailLive?.() === true;
-}
-
 // The same categories, for every line of the month's step: the 12x step and each plan-size
 // variant (the 9x April bag), so a category one plan size uses is never missing. A fertilizer
 // analysis may have one-digit parts (44-0-0); Headway, Advion and the Topchoice add-on are v13 lines too.
@@ -394,13 +387,11 @@ function protocolVersion() {
   return featureGates.lawnV13Live?.() === true ? V13_PROTOCOL_VERSION : PROTOCOL_VERSION;
 }
 
-// The same for the outline's own words: the v13 outline and its detailed version
-// (GATE_LAWN_OUTLINE_DETAIL, drawn in the new layout since 2026-11-01) each stamp their own content version, so a
-// flip shows outlines built before it as updated. The Estimates list's stale check reads it, so it reads the gates
-// and the constants only.
+// The same for the outline's own words: the v13 outline (drawn in the detailed layout since 2026-11-01) stamps its own
+// content version, so a flip shows outlines built before it as updated. The Estimates list's stale check reads it, so it
+// reads the gate and the constants only.
 function contentLibraryVersion() {
-  if (!outlineV13Live()) return CONTENT_LIBRARY_VERSION;
-  return outlineDetailLive() ? V13_VISUAL_CONTENT_LIBRARY_VERSION : V13_CONTENT_LIBRARY_VERSION;
+  return outlineV13Live() ? V13_VISUAL_CONTENT_LIBRARY_VERSION : CONTENT_LIBRARY_VERSION;
 }
 
 function protocolVisitForMonth(turfType, month) {
@@ -601,20 +592,8 @@ const V13_COPY = Object.freeze({
   title: 'Your Waves Lawn Care Program Overview',
   intro: (customerName) => `Based on your estimate for ${customerName}. The program follows the time of year. What each visit applies is set on site: your grass, your local fertilizer rules, sun and shade, new sod, the weather, and the spots we map for insects, disease or bermudagrass.`,
   programLabel: 'Year-round, set to your lawn',
-  programTitle: 'How Your Program Works',
-  programBody: 'Most of the lawns we treat are St. Augustine, so the program is built around it. Each visit adjusts to the lawn in front of us, and every product is applied within its label.',
-  programTiles: Object.freeze([
-    { icon: 'whole_lawn', title: 'One whole-lawn pass per visit', text: 'A hose spray or a spreader pass at most visits; everything else is spot work' },
-    { icon: 'spots', title: 'Spot work, not blanket spraying', text: "Weed, insect, and disease products go only where they are needed, apart from the month's whole-lawn pass" },
-    { icon: 'count', title: 'Threshold counts first', text: 'Chinch bugs are counted with a bottomless can before any curative treatment' },
-    { icon: 'rotate', title: 'Resistance management', text: 'Chemical groups are rotated to slow resistance in weeds, insects, and disease' },
-  ].map((tile) => Object.freeze(tile))),
-  focusNote: 'Each step depends on turf condition, weather, label directions, and local rules.',
   yearTitle: 'Your Year At A Glance',
-  yearBody: 'Each visit follows the step for the month it falls in.',
   limitLabel: 'Local summer limits on nitrogen and phosphorus',
-  treatmentsTitle: 'Treatments That May Be Used',
-  treatmentsBody: 'Which ones a visit uses depends on the season, the weather, the label, local rules, and what the lawn shows.',
   visitSteps: Object.freeze([
     { icon: 'inspection', title: 'Check', text: 'Full inspection: color, density, weeds, insects, disease, irrigation coverage, and thatch' },
     { icon: 'decide', title: 'Decide', text: 'What to apply, set by what the lawn shows, the weather, the label, and local rules' },
@@ -703,18 +682,6 @@ function v13YearVisual(trackKey, jurisdictionRule) {
 // Text for a page or reader that does not draw the chart (the composer preview, the stored HTML).
 function v13YearLines(visual) {
   return visual.months.map((m) => `${FULL_MONTHS[m.month - 1]}: ${stepNames(m.main)}${m.asNeeded.length ? `; as needed: ${stepNames(m.asNeeded)}` : ''}`);
-}
-
-function v13FocusVisual(visit) {
-  const { main, asNeeded } = v13MonthSteps(visit);
-  return {
-    type: 'chips',
-    items: [
-      ...main.map((step) => ({ key: step, label: V13_STEP_LABELS[step], tier: 'main' })),
-      ...asNeeded.map((step) => ({ key: step, label: V13_STEP_LABELS[step], tier: 'as_needed' })),
-    ],
-    note: V13_COPY.focusNote,
-  };
 }
 
 const titledLines = (items) => items.map((item) => `${item.title}: ${item.text}`);
@@ -979,7 +946,7 @@ function legacySections({ modules, snapshot, tier, turf, turfText, month, season
 
 const tilesSection = (key, title, body, tiles) => makeSection(key, title, body, titledLines(tiles), { type: 'tiles', items: tiles });
 
-// GATE_LAWN_OUTLINE_DETAIL words (owner 2026-10-26: "this needs to be more detailed, and we should be using the
+// The detailed outline's words (owner 2026-10-26: "this needs to be more detailed, and we should be using the
 // protocols, and youtube transcripts to further develop it"; the decision page's choices, "do whatever you
 // recommend"). Each fact is a v13 rule (server/config/lawn-protocol-v13.json notes and safety_rules), an approved
 // report sentence (shared/watering-copy.json, shared/lawn-water-rain-copy.json) or a UF/IFAS fact; the month text
@@ -1159,18 +1126,11 @@ function v13ProductsSection(productList) {
 }
 
 // The v13 outline: the one v13 program for every lawn, every section boxed (owner 2026-10-24):
-// program tiles, month chips, a year chart, treatment cards that key its icons, the visit as four
+// the detailed layout's cards and month list, the visit as four
 // steps, rule, safety and after-visit tiles, and the exclusions as tags. Nothing in it depends on the
 // grass: the grass only blocks a bahia lawn, which has no v13 program. Each drawn section keeps text
 // bullets for readers that draw none (the composer preview, the stored HTML).
-function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [], now = new Date(), visualPlan = null }) {
-  const treatments = makeSection(
-    'treatment_categories',
-    V13_COPY.treatmentsTitle,
-    V13_COPY.treatmentsBody,
-    V13_TREATMENT_CATEGORIES.map((item) => `${item.label}: ${item.reason}`),
-    { type: 'categories', items: V13_TREATMENT_CATEGORIES.map((item) => ({ key: item.key, label: item.label, text: item.reason })) },
-  );
+function v13Sections({ month, trackKey, jurisdictionRule, productList = [], now = new Date(), visualPlan = null }) {
   const typicalVisit = makeSection('typical_visit', 'What A Typical Visit Includes', '', titledLines(V13_COPY.visitSteps), { type: 'steps', items: V13_COPY.visitSteps });
   const closing = [
     tilesSection('local_rules', V13_COPY.rulesTitle, '', v13RuleTiles(jurisdictionRule)),
@@ -1178,18 +1138,7 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
     tilesSection('after_visit', V13_COPY.afterVisitTitle, '', V13_COPY.afterVisitTiles),
     makeSection('not_included', V13_COPY.notIncludedTitle, '', V13_COPY.notIncludedTags, { type: 'tags', items: V13_COPY.notIncludedTags, note: V13_COPY.notIncludedNote }),
   ];
-  if (!outlineDetailLive()) {
-    const year = v13YearVisual(trackKey, jurisdictionRule);
-    return [
-      tilesSection('lawn_program', V13_COPY.programTitle, V13_COPY.programBody, V13_COPY.programTiles),
-      makeSection('season_focus', `${MONTHS[month - 1]} Service Focus`, monthVisitText(jurisdictionRule, month, PROGRAM_DETAIL_V13[month]?.whyNow || ''), visit ? v13FullOutlineBullets(visit) : [], v13FocusVisual(visit)),
-      makeSection('program_year', V13_COPY.yearTitle, V13_COPY.yearBody, v13YearLines(year), year),
-      treatments,
-      typicalVisit,
-      ...closing,
-    ];
-  }
-  // GATE_LAWN_OUTLINE_DETAIL: the new layout (lawn-outline-visual.js) from the same pieces; it folds the rest into its own
+  // The detailed layout (lawn-outline-visual.js) from the same pieces; it folds the rest into its own
   // sections. A plan drawn by month keeps the month list, whose open month replaces the Service Focus box.
   const monthList = () => {
     const months = v13MonthsVisual(trackKey, jurisdictionRule, month);
@@ -1200,8 +1149,8 @@ function v13Sections({ month, visit, trackKey, jurisdictionRule, productList = [
   });
 }
 
-// The new layout lives in its own module, loaded only while the detailed outline (GATE_LAWN_OUTLINE_DETAIL) is live: it needs
-// the converter and the seeder, which must never load for the plain v13 outline. It takes the outline's helpers in `kit`
+// The new layout lives in its own module, loaded only for the v13 outline: it needs
+// the converter and the seeder, which must never load for the old outline. It takes the outline's helpers in `kit`
 // instead of requiring this file back.
 const lawnOutlineVisual = () => require('./lawn-outline-visual');
 
@@ -1220,10 +1169,9 @@ function visualKit() {
   };
 }
 
-// The estimate's lawn plan ('rounds', 'months12' or 'unknown') while the detailed outline is live; null = the plain v13 or
-// gate-off outline, which draws no plan.
+// The estimate's lawn plan ('rounds', 'months12' or 'unknown') for the v13 outline; null = the old outline, which draws no plan.
 function visualPlanFor(estimateData) {
-  return outlineDetailLive() ? lawnOutlineVisual().resolveLawnPlan(estimateData) : null;
+  return outlineV13Live() ? lawnOutlineVisual().resolveLawnPlan(estimateData) : null;
 }
 
 // The words outside the sections (plan line, rounds intro); a null plan changes nothing.
@@ -1289,7 +1237,7 @@ async function buildOutline({ db, estimate, input = {}, now = new Date() }) {
   const visit = monthlyOutlineVisit(protocolVisitForMonth(trackKey, month), jurisdictionRule);
   const includeProductCards = input.includeProductCards === true;
   const productCards = await loadEligibleProductCards(db, { turfType: turf.turfType, visit, includeProductCards, productCardReason: variant.productCardReason });
-  const productList = outlineDetailLive() ? await loadV13ProductList(db, trackKey, jurisdictionRule) : [];
+  const productList = outlineV13Live() ? await loadV13ProductList(db, trackKey, jurisdictionRule) : [];
   const visualPlan = visualPlanFor(estimateData);
   const seasonText = approvedModuleText(modules, SEASON_MODULE_KEYS[seasonBand]);
   const turfText = approvedModuleText(modules, TURF_MODULE_KEYS[turf.turfType], approvedModuleText(modules, 'unknown_turf_summary'));

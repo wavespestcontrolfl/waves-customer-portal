@@ -13,6 +13,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { flaggedDeductionsOf, isFlaggedLine } = require('./flagged-product-lines');
 const { propertyServiceAreasEnabled, resolveVisitPropertyId, reviewedAreas } = require('./property-service-areas');
 const { resolveEligibility, recapServiceIdentity, loadRecapCatalogProducts } = require('./pest-recap');
 const { resolveMonthProducts } = require('./tree-shrub-month-products');
@@ -38,7 +39,7 @@ const { tsPestCheckLive } = require('./tree-shrub-pest-check');
 const {
   isNutriRootName, nutriRootPickerEvidence,
 } = require('./tree-shrub-fertilizer-evidence');
-const { tsNeonicCapLive, buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
+const { buildNeonicCapContext } = require('./tree-shrub-neonic-ledger');
 const PEST_CHECK_TYPES = require('../../shared/tree-shrub-pest-check.json').insectTypes;
 
 const ROTATION_WINDOW_DAYS = 60;
@@ -155,16 +156,23 @@ async function loadTreeShrubHistory(svc, knex, visitDate) {
     .orderBy('sr.created_at', 'desc')
     .orderBy('sr.id', 'desc')
     .limit(HISTORY_RECORD_LIMIT)
-    .select('sr.id', 'sr.status', 'sr.service_date', knex.raw("sr.service_data #> '{typedReportSnapshot,values}' as typed_values"));
+    .select('sr.id', 'sr.status', 'sr.service_date', 'sr.structured_notes', knex.raw("sr.service_data #> '{typedReportSnapshot,values}' as typed_values"));
   if (!records.length) return [];
   const products = await knex('service_products')
     .whereIn('service_record_id', records.map((r) => r.id))
     .orderBy('created_at')
-    .select('service_record_id', 'product_id', 'product_name', 'total_amount', 'amount_unit');
-  return records.map((record) => ({
-    ...record,
-    products: products.filter((p) => p.service_record_id === record.id),
-  }));
+    .select('id', 'service_record_id', 'product_id', 'product_name', 'total_amount', 'amount_unit');
+  // A line the completion flagged over its product's ceiling (owner 2026-11-26) is a recorded typo, never a default:
+  // its amount is blanked here, so no last-visit reader (last amount, last-visit product) can offer it again.
+  return records.map((record) => {
+    const flagged = flaggedDeductionsOf(record.structured_notes);
+    return {
+      ...record,
+      products: products
+        .filter((p) => p.service_record_id === record.id)
+        .map((p) => (isFlaggedLine(p, flagged) ? { ...p, total_amount: null, amount_unit: null } : p)),
+    };
+  });
 }
 
 // A count a typed snapshot froze: a whole number 0 to 9999 (the typed form's
@@ -593,18 +601,14 @@ async function buildTreeShrubFastContext(serviceId, knex = db) {
     // GATE_TS_PEST_CHECK: the "Live insects found?" block and its insect types.
     // Gate off = no key at all.
     ...(tsPestCheckLive() && { pestCheck: { insectTypes: PEST_CHECK_TYPES } }),
-    ...await neonicCapKey(svc, catalog, knex),
+    // What is left of each capped product at this property this year. The year is today's (ET), the day an
+    // ordinary completion records and /complete judges, not the scheduled day: a December visit closed in
+    // January spends January's allowance. A backfill is chosen at submit, after this read; /complete judges
+    // that one on its backfilled day.
+    neonicCap: await buildNeonicCapContext(svc, etDateString(), catalog, knex),
     // The sheet shows its Wrap-up section (a sheet from before the section was permanent still reads this key).
     wrapUp: true,
   };
-}
-
-// GATE_TS_NEONIC_CAP: what is left of each capped product at this property this year. Gate off = no
-// read and no key. The year is today's (ET), the day an ordinary completion records and /complete
-// judges, not the scheduled day: a December visit closed in January spends January's allowance. A
-// backfill is chosen at submit, after this read; /complete judges that one on its backfilled day.
-async function neonicCapKey(svc, catalog, knex) {
-  return tsNeonicCapLive() ? { neonicCap: await buildNeonicCapContext(svc, etDateString(), catalog, knex) } : {};
 }
 
 // The sheet's watch list for the visit month: key, label, signal, referOnly.

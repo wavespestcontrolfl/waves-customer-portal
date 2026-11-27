@@ -1,5 +1,5 @@
 /**
- * GET /api/contracts/:token for the Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): a notice issued from the
+ * GET /api/contracts/:token for the Florida consumer notice: a notice issued from the
  * estimate page carries fromEstimate: true, so the signing page can offer "Back to your estimate". Every other
  * contract keeps its payload exactly (no new key), and the estimate id/token never appear in it.
  * Synthetic data only.

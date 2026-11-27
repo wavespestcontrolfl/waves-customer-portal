@@ -1,7 +1,6 @@
 'use strict';
 
 const crypto = require('crypto');
-const { gateEnvValue } = require('../config/feature-gates');
 const { parseETDateTime } = require('../utils/datetime-et');
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { lockTriageCall } = require('../utils/triage-locks');
@@ -9,7 +8,6 @@ const { recordAuditEvent } = require('./audit-log');
 const { etWallClockOfConfirmedStart } = require('./call-triage-flags');
 const { loadCandidates, planRescheduleFromCall, applyReviewedCallReschedule, humanHandledRescheduleCard, ACTIVITY_ACTION } = require('./call-reschedule-apply');
 
-const enabled = () => gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD');
 const fail = (message, status = 409) => Object.assign(new Error(message), { status });
 const digest = (value) => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const norm = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -104,11 +102,11 @@ function customerWindow(date, start) {
 }
 
 async function stageProposal(conn, { callId, procGeneration = null, now = new Date(), retireOnly = false } = {}) {
-  if (!enabled() || !callId) return { staged: false };
+  if (!callId) return { staged: false };
   return conn.transaction(async (trx) => {
     await lockTriageCall(trx, callId);
     const call = await trx('call_log').where({ id: callId }).forUpdate().first();
-    if (!enabled() || !call || call.processing_token
+    if (!call || call.processing_token
       || (procGeneration != null && Number(call.processing_generation) !== Number(procGeneration))) return { staged: false };
     const retire = async () => {
       const card = await trx('triage_items').where({ call_log_id: callId, reason_code: 'reschedule_or_cancel', status: 'open' })
@@ -169,7 +167,6 @@ async function visitsForCard(conn, customerId, now) {
 }
 
 async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), customerScope = null } = {}) {
-  if (!enabled()) return [];
   let query = conn('triage_items as t').join('call_log as cl', 'cl.id', 't.call_log_id')
     .join('customers as c', 'c.id', 'cl.customer_id').whereNull('c.deleted_at').whereIn('t.status', openStates)
     .whereRaw("t.payload->'reschedule_proposal' IS NOT NULL");
@@ -207,7 +204,6 @@ async function listProposals(conn, { limit = 100, offset = 0, now = new Date(), 
 }
 
 async function previewProposal(conn, id, { visitId, now = new Date(), rebooker = null } = {}) {
-  if (!enabled()) throw fail('Reschedule proposals are disabled');
   const card = await conn('triage_items').where({ id }).whereIn('status', openStates).first();
   if (!card?.payload?.reschedule_proposal) throw fail('Proposal is no longer open', 404);
   const call = await conn('call_log').where({ id: card.call_log_id }).first();
@@ -279,7 +275,6 @@ async function applyProposal(conn, id, { actorId, visitId, previewHash, now = ne
     occurrenceIds: series.occurrenceIds || [], occurrences: series.occurrences,
     conflictSnapshot: preview.conflictSnapshot,
     guard: async (trx) => {
-      if (!enabled()) throw fail('Reschedule proposals are disabled');
       if (await hasLinkedFollowUps(trx, reviewedMoves(selected, preview.plan, series))) {
         throw fail('A linked follow-up appeared. Review both appointments from the schedule.');
       }
@@ -340,4 +335,4 @@ async function dismissProposal(conn, id, { actorId, expectedAt } = {}) {
   return { dismissed: true };
 }
 
-module.exports = { enabled, proposalAddress, proposalEvidence, customerWindow, stageProposal, listProposals, previewProposal, applyProposal, dismissProposal };
+module.exports = { proposalAddress, proposalEvidence, customerWindow, stageProposal, listProposals, previewProposal, applyProposal, dismissProposal };

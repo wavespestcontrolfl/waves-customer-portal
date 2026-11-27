@@ -1,8 +1,8 @@
 # Current-visit Protocol and SOP sheet
 
-`GATE_PROTOCOL_SOP` is off unless enabled. With the existing `GATE_JOB_CARD`
-enabled too, the drawer's Protocol tab uses the same resolved visit as its
-Job Card. Unsetting either gate restores the existing protocol presentation.
+With the existing `GATE_JOB_CARD` enabled, the drawer's Protocol tab uses the
+same resolved visit as its Job Card. Unsetting `GATE_JOB_CARD` restores the
+existing protocol presentation.
 
 The existing Job Card response carries the procedure; opening or downloading
 the SOP performs no additional API call or write. The Job Card's existing

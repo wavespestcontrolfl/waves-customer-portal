@@ -232,8 +232,8 @@ const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "an
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
-// The Pay stubs tab (GATE_TECH_PAY_STUBS) is open to every staff role; it falls back to
-// Timesheet (Dashboard for a technician) when off and waits (null) while its one
+// The Pay stubs tab is open to every staff role; it falls back to
+// Timesheet (Dashboard for a technician) when it cannot load and waits (null) while its one
 // request is pending. A technician's link to an office-only leaf opens Dashboard.
 export function resolveStaffTab(rawTab, role, payrollAvailable = false, payStubsStatus = "off", scoreboardStatus = "off") {
   if (role !== "admin" && OFFICE_ONLY_STAFF_TABS.has(rawTab)) return "dashboard";
@@ -3069,6 +3069,9 @@ const EMPTY_TECH_FORM = {
   startMode: "office",
   startText: "",
   startPoint: null,
+  // The supplier branch this person buys from (free text; the weekly buy list
+  // prints it). Edit only, like the start point.
+  supplyStore: "",
   // GATE_TECH_WORK_DAYS: weekdays this person works, stored 0 = Sunday. All
   // seven = every day (sent as null). Only sent while the server says the
   // gate is on (workDaysEnabled).
@@ -3198,6 +3201,9 @@ function GoogleSigninField({ enabled, tech, value, onChange }) {
   );
 }
 
+// The supply store goes in the save only when the admin changed it (absent = unchanged on the server).
+const supplyStorePatch = (value, loaded) => ((value ?? "") === (loaded ?? "") ? {} : { supplyStore: value });
+
 export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3218,6 +3224,8 @@ export function TeamTab({ showToast }) {
   // loaded sends no shiftHours, so saving another field never overwrites hours
   // another admin set meanwhile (the API keeps omitted hours).
   const [shiftLoaded, setShiftLoaded] = useState(null);
+  // The supply store as loaded: sent on save only when the admin changed it, so a stale form never overwrites another admin's edit.
+  const [storeLoaded, setStoreLoaded] = useState(null);
   // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
   // Service lines card never renders and nothing is fetched.
   const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
@@ -3348,7 +3356,7 @@ export function TeamTab({ showToast }) {
     setSaving(true);
     try {
       if (editingId) {
-        const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
+        const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
@@ -3357,6 +3365,7 @@ export function TeamTab({ showToast }) {
             ...buildWorkDaysPayload(workDaysEnabled, workDays),
             ...(shiftChanged ? buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd) : {}),
             startPoint: buildStartPointPayload(form),
+            ...supplyStorePatch(supplyStore, storeLoaded),
           }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
@@ -3372,7 +3381,7 @@ export function TeamTab({ showToast }) {
         showToast(stillThere ? `Technician updated — ${stillThere}` : "Technician updated");
         await saveGoogleSignin(editingId);
       } else {
-        const { startMode, startText, startPoint, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
+        const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
         const created = await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
           body: JSON.stringify({
@@ -3463,6 +3472,7 @@ export function TeamTab({ showToast }) {
   const startEdit = (tech) => {
     setEditingId(tech.id);
     setShiftLoaded({ start: tech.shift_start || "", end: tech.shift_end || "" });
+    setStoreLoaded(tech.supply_store);
     setForm({
       name: tech.name,
       phone: tech.phone || "",
@@ -3491,6 +3501,7 @@ export function TeamTab({ showToast }) {
         : [0, 1, 2, 3, 4, 5, 6],
       shiftStart: tech.shift_start || "",
       shiftEnd: tech.shift_end || "",
+      supplyStore: tech.supply_store,
       ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
         ? {
             startMode: "home",
@@ -3686,7 +3697,25 @@ export function TeamTab({ showToast }) {
                 picked from the list so it carries coordinates. */}
             {editingId && (
               <div style={{ gridColumn: "1 / -1" }}>
-                {" "}
+                {/* Where this person buys supplies (e.g. a SiteOne branch); the Monday
+                    buy list prints it as the store. Blank clears it. */}
+                <label
+                  htmlFor="tech-form-supply-store"
+                  style={{ display: "block", fontSize: 14, color: D.muted, marginBottom: 4 }}
+                >
+                  Supply store
+                </label>{" "}
+                <input
+                  id="tech-form-supply-store"
+                  key={editingId}
+                  defaultValue={form.supplyStore}
+                  maxLength={120}
+                  onChange={(e) =>
+                    setForm((f) => ({ ...f, supplyStore: e.target.value }))
+                  }
+                  placeholder="Supplier branch"
+                  style={{ ...sInput, marginBottom: 12 }}
+                />{" "}
                 <div style={{ fontSize: 14, color: D.muted, marginBottom: 4 }}>
                   Starts the day from
                 </div>{" "}

@@ -1,6 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const { proposalEvidence, proposalAddress, customerWindow, stageProposal, dismissProposal, listProposals } = require('../services/call-reschedule-proposals');
+const { proposalEvidence, proposalAddress, customerWindow, stageProposal, listProposals } = require('../services/call-reschedule-proposals');
 const { classifyTriageItem } = require('../services/triage-auto-resolve');
 
 describe('reviewed proposed times', () => {
@@ -63,34 +63,25 @@ function stageConn(call, card, { handledCard = null } = {}) {
 
 describe('proposal staging after call reprocessing', () => {
   test('a nonqualifying reprocess retires an unclaimed proposal but preserves a claimed one', async () => {
-    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const reprocessed = { id: 'call', customer_id: 'customer', processing_token: null, processing_generation: 2,
       v2_extraction_status: 'valid', ai_extraction_enriched: { meta: { is_spam: true } } };
     const payload = { reschedule_proposal: { call_generation: 1 }, other_evidence: { keep: true } };
-    try {
-      const openCard = { id: 'open-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
-        assigned_to: null, payload: { ...payload } };
-      const openConn = stageConn(reprocessed, openCard);
-      expect(await stageProposal(openConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
-      expect(openCard.payload).toEqual({ other_evidence: { keep: true } });
-      expect(openConn.updates).toHaveLength(1);
+    const openCard = { id: 'open-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
+      assigned_to: null, payload: { ...payload } };
+    const openConn = stageConn(reprocessed, openCard);
+    expect(await stageProposal(openConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
+    expect(openCard.payload).toEqual({ other_evidence: { keep: true } });
+    expect(openConn.updates).toHaveLength(1);
 
-      const claimedCard = { id: 'claimed-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'in_progress',
-        assigned_to: 'staff', payload: { ...payload } };
-      const claimedConn = stageConn(reprocessed, claimedCard);
-      expect(await stageProposal(claimedConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
-      expect(claimedCard.payload).toEqual(payload);
-      expect(claimedConn.updates).toHaveLength(0);
-    } finally {
-      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
-    }
+    const claimedCard = { id: 'claimed-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'in_progress',
+      assigned_to: 'staff', payload: { ...payload } };
+    const claimedConn = stageConn(reprocessed, claimedCard);
+    expect(await stageProposal(claimedConn, { callId: 'call', procGeneration: 2 })).toEqual({ staged: false });
+    expect(claimedCard.payload).toEqual(payload);
+    expect(claimedConn.updates).toHaveLength(0);
   });
 
   test('expired requests and human-handled sibling workflows retire only an unclaimed proposal', async () => {
-    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const quote = 'Could you come Thursday at two instead?';
     const call = { id: 'call', customer_id: 'customer', processing_token: null, processing_generation: 2,
       v2_extraction_status: 'valid', transcription: `Caller: ${quote}`,
@@ -98,34 +89,29 @@ describe('proposal staging after call reprocessing', () => {
         evidence: [{ field_path: '/scheduling/proposed_start_at', speaker: 'caller', quote }] } };
     const proposal = () => ({ id: 'proposal-card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
       assigned_to: null, payload: { reschedule_proposal: { call_generation: 1 }, keep: true } });
-    try {
-      const expired = proposal();
-      const expiredCall = { ...call, ai_extraction_enriched: { ...call.ai_extraction_enriched,
-        scheduling: { status: 'reschedule_requested', proposed_start_at: '2026-09-10T14:00:00-04:00' } } };
-      await stageProposal(stageConn(expiredCall, expired), { callId: 'call', procGeneration: 2, now: new Date('2026-09-11T00:00:00Z') });
-      expect(expired.payload).toEqual({ keep: true });
+    const expired = proposal();
+    const expiredCall = { ...call, ai_extraction_enriched: { ...call.ai_extraction_enriched,
+      scheduling: { status: 'reschedule_requested', proposed_start_at: '2026-09-10T14:00:00-04:00' } } };
+    await stageProposal(stageConn(expiredCall, expired), { callId: 'call', procGeneration: 2, now: new Date('2026-09-11T00:00:00Z') });
+    expect(expired.payload).toEqual({ keep: true });
 
-      for (const handledCard of [
-        { id: 'coord-claimed', status: 'in_progress' },
-        { id: 'coord-resolved', status: 'resolved', resolution_source: 'human' },
-        { id: 'coord-dismissed', status: 'dismissed', resolution_source: 'human' },
-      ]) {
-        const open = proposal();
-        await stageProposal(stageConn(call, open, { handledCard }), {
-          callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z'),
-        });
-        expect(open.payload).toEqual({ keep: true });
-      }
-
-      const claimed = { ...proposal(), status: 'in_progress', assigned_to: 'staff' };
-      await stageProposal(stageConn(call, claimed, { handledCard: { id: 'coord-claimed', status: 'in_progress' } }), {
+    for (const handledCard of [
+      { id: 'coord-claimed', status: 'in_progress' },
+      { id: 'coord-resolved', status: 'resolved', resolution_source: 'human' },
+      { id: 'coord-dismissed', status: 'dismissed', resolution_source: 'human' },
+    ]) {
+      const open = proposal();
+      await stageProposal(stageConn(call, open, { handledCard }), {
         callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z'),
       });
-      expect(claimed.payload).toHaveProperty('reschedule_proposal');
-    } finally {
-      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+      expect(open.payload).toEqual({ keep: true });
     }
+
+    const claimed = { ...proposal(), status: 'in_progress', assigned_to: 'staff' };
+    await stageProposal(stageConn(call, claimed, { handledCard: { id: 'coord-claimed', status: 'in_progress' } }), {
+      callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z'),
+    });
+    expect(claimed.payload).toHaveProperty('reschedule_proposal');
   });
 });
 
@@ -154,47 +140,33 @@ describe('superseded proposal staging', () => {
     { agent_committed_booking: true },
     { confirmed_start_at: '2099-09-10T15:00:00-04:00' },
   ])('a later agreement retires only the unclaimed request: %j', async (agreement) => {
-    const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
     const quote = 'Could you come Thursday at two instead?';
     const call = { id: 'call', customer_id: 'customer', processing_generation: 2, v2_extraction_status: 'valid',
       transcription: `Caller: ${quote}`, ai_extraction_enriched: {
         scheduling: { status: 'reschedule_requested', proposed_start_at: '2099-09-10T14:00:00-04:00', ...agreement },
         evidence: [{ field_path: '/scheduling/proposed_start_at', speaker: 'caller', quote }],
       } };
-    try {
-      for (const claimed of [false, true]) {
-        const card = { id: 'card', call_log_id: 'call', reason_code: 'reschedule_or_cancel',
-          status: claimed ? 'in_progress' : 'open', assigned_to: claimed ? 'staff' : null,
-          payload: { keep: true, reschedule_proposal: { call_generation: 1 } } };
-        const conn = stageConn(call, card);
-        expect(await stageProposal(conn, { callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z') }))
-          .toEqual({ staged: false });
-        expect(Boolean(card.payload.reschedule_proposal)).toBe(claimed);
-        expect(card.payload.keep).toBe(true);
-      }
-    } finally {
-      if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-      else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+    for (const claimed of [false, true]) {
+      const card = { id: 'card', call_log_id: 'call', reason_code: 'reschedule_or_cancel',
+        status: claimed ? 'in_progress' : 'open', assigned_to: claimed ? 'staff' : null,
+        payload: { keep: true, reschedule_proposal: { call_generation: 1 } } };
+      const conn = stageConn(call, card);
+      expect(await stageProposal(conn, { callId: 'call', procGeneration: 2, now: new Date('2099-09-09T12:00:00Z') }))
+        .toEqual({ staged: false });
+      expect(Boolean(card.payload.reschedule_proposal)).toBe(claimed);
+      expect(card.payload.keep).toBe(true);
     }
   });
 });
 
 test('terminal cleanup retires old evidence under the successful processing generation only', async () => {
-  const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
   const call = { id: 'call', customer_id: 'customer', processing_generation: 2, v2_extraction_status: 'valid' };
   const card = { id: 'card', call_log_id: 'call', reason_code: 'reschedule_or_cancel', status: 'open',
     assigned_to: null, payload: { keep: true, reschedule_proposal: { call_generation: 1 } } };
-  try {
-    await stageProposal(stageConn(call, card), { callId: 'call', procGeneration: 1, retireOnly: true });
-    expect(card.payload.reschedule_proposal).toBeDefined();
-    await stageProposal(stageConn(call, card), { callId: 'call', procGeneration: 2, retireOnly: true });
-    expect(card.payload).toEqual({ keep: true });
-  } finally {
-    if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
-  }
+  await stageProposal(stageConn(call, card), { callId: 'call', procGeneration: 1, retireOnly: true });
+  expect(card.payload.reschedule_proposal).toBeDefined();
+  await stageProposal(stageConn(call, card), { callId: 'call', procGeneration: 2, retireOnly: true });
+  expect(card.payload).toEqual({ keep: true });
 });
 
 
@@ -237,26 +209,7 @@ test.each(['resolved', 'dismissed'])('the attached-booking follow-up card %s rej
   }
 });
 
-test('gate rollback still allows a version-bound dismissal of an existing proposal', async () => {
-  const triage = require('../routes/admin-triage');
-  const transition = jest.spyOn(triage, 'transitionCore').mockImplementation(async (options) => {
-    await options.beforeTransition(() => ({ where: () => ({ first: async () => ({ payload: { reschedule_proposal: {} } }) }) }));
-    expect(options).toMatchObject({ id: 'card', nextStatus: 'dismissed', expectedUpdatedAt: '2026-09-13T04:00:00Z', requireVersion: true });
-    return { outcome: 'ok' };
-  });
-  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'false';
-  try {
-    await expect(dismissProposal({}, 'card', { actorId: 'staff', expectedAt: '2026-09-13T04:00:00Z' })).resolves.toEqual({ dismissed: true });
-  } finally {
-    delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    transition.mockRestore();
-  }
-});
-
-
 test('a full proposal page batches visits and preserves customer/address isolation', async () => {
-  const priorGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
   const cards = Array.from({ length: 100 }, (_, index) => ({
     id: `card-${index}`, customer_id: `customer-${index % 50}`,
     address_line1: 'Fallback address',
@@ -290,22 +243,17 @@ test('a full proposal page batches visits and preserves customer/address isolati
     };
     return query;
   };
-  try {
-    const result = await listProposals(conn, { now: new Date('2099-09-09T12:00:00Z') });
-    expect(result).toHaveLength(100);
-    expect(queries.sort()).toEqual(['customer_properties', 'scheduled_services', 'services', 'triage_items as t']);
-    for (const [index, card] of result.entries()) {
-      expect(card.candidates).toHaveLength(1);
-      expect(card.candidates[0]).toMatchObject({ id: `visit-${index % 50}`, service_name: 'Pest Control' });
-      expect(card.candidates[0]).not.toHaveProperty('internal_notes');
-      expect(card.candidates[0].display_address.address_line1).toBe(index % 50 === 0 ? 'Fallback address' : `Property ${index % 50}`);
-    }
-    tables['triage_items as t'] = [];
-    queries.length = 0;
-    await expect(listProposals(conn)).resolves.toEqual([]);
-    expect(queries).toEqual(['triage_items as t']);
-  } finally {
-    if (priorGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = priorGate;
+  const result = await listProposals(conn, { now: new Date('2099-09-09T12:00:00Z') });
+  expect(result).toHaveLength(100);
+  expect(queries.sort()).toEqual(['customer_properties', 'scheduled_services', 'services', 'triage_items as t']);
+  for (const [index, card] of result.entries()) {
+    expect(card.candidates).toHaveLength(1);
+    expect(card.candidates[0]).toMatchObject({ id: `visit-${index % 50}`, service_name: 'Pest Control' });
+    expect(card.candidates[0]).not.toHaveProperty('internal_notes');
+    expect(card.candidates[0].display_address.address_line1).toBe(index % 50 === 0 ? 'Fallback address' : `Property ${index % 50}`);
   }
+  tables['triage_items as t'] = [];
+  queries.length = 0;
+  await expect(listProposals(conn)).resolves.toEqual([]);
+  expect(queries).toEqual(['triage_items as t']);
 });

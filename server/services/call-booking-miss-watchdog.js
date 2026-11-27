@@ -50,12 +50,10 @@
  * via to_char in SQL — no JS Date round-trip across the UTC boundary.
  *
  * Alerting mirrors call-ingest-watchdog: one bell per call, deduped forever
- * via the notifications metadata dedupeKey, with a per-run cap so the first
- * enable over a backlog can't flood. A slot under a day away re-rings in ET
- * daytime until booked or until the office closes the call's triage cards
- * (REPEAT_WINDOW_HOURS). Every bell is tagged bell:true so the admin bell
- * policy cannot silence it. Dark by default behind
- * GATE_CALL_BOOKING_MISS_WATCHDOG. Read-only against call_log,
+ * via the notifications metadata dedupeKey, with a per-run cap so a backlog
+ * can't flood. The first ring stands alone (owner 2026-10-14): no repeat ring.
+ * Every bell is tagged bell:true so the admin bell
+ * policy cannot silence it. Read-only against call_log,
  * scheduled_services and triage_items; writes nothing but admin
  * notifications.
  *
@@ -67,7 +65,7 @@
  * DIFFERENT day than the call agreed (the office booked the wrong week) is a
  * new episode: it rings one fresh date-check bell ("Booked Wed Oct 28 ...; the
  * call agreed Wed Nov 4 ..."), and only then closes the old bells as replaced.
- * The first ring says the same instead of "nothing is on the calendar". Same gate, same lock; a close failure logs a
+ * The first ring says the same instead of "nothing is on the calendar". Same lock; a close failure logs a
  * warning and never stops the ring path.
  */
 
@@ -76,7 +74,7 @@ const logger = require('./logger');
 const { raiseAdminAlert, cutAtWord, MAX_HEADLINE_CHARS } = require('./admin-alert-compose');
 const { CUSTOMER_STAGES } = require('./customer-stages');
 const { QUIET_AGED_RULE, cardIsNewer } = require('./triage-auto-resolve');
-const { etParts, parseETDateTime, etDateString, addETDays, formatETTime } = require('../utils/datetime-et');
+const { etParts, parseETDateTime, etDateString, formatETTime } = require('../utils/datetime-et');
 const { callEndedAt } = require('../utils/call-timeline');
 
 // How far back each run looks. Four days: a Friday-evening call still sits
@@ -164,17 +162,11 @@ const MAX_ALERTS_PER_RUN = 8;
 // confirmed wall clock is treated as THE booking (offices book the agreed
 // noon slot as a 12:00 or 13:00 window, not to the minute).
 const WINDOW_MATCH_TOLERANCE_MINUTES = 120;
-// Repeat paging (owner ruling 2026-09-30): once the first bell has rung, a
-// miss whose slot starts within a day (until the slot's own start time)
-// re-rings every REPEAT_INTERVAL_MINUTES during ET daytime until it is
-// booked or the office closes the call's triage cards.
-const REPEAT_WINDOW_HOURS = 24;
-const REPEAT_INTERVAL_MINUTES = 120;
-const REPEAT_DAY_START_HOUR_ET = 7;
-const REPEAT_DAY_END_HOUR_ET = 21;
-// How far back a call can be and still repeat (slots are rarely booked more
-// than a few weeks out).
-const REPEAT_LOOKBACK_DAYS = 30;
+// Candidate-scan range: a slot starting within this many hours (or still its own
+// ET day) is read at any call age up to SCAN_LOOKBACK_DAYS (slots are rarely
+// booked more than a few weeks out).
+const SCAN_WINDOW_HOURS = 24;
+const SCAN_LOOKBACK_DAYS = 30;
 // Statuses of a scheduled_services row the office has acted on and closed out.
 const INACTIVE_STATUSES = new Set(['cancelled', 'rescheduled']);
 // The only statuses a namesake account's visit may have to clear a miss: a
@@ -783,9 +775,9 @@ function dateCheckAlert({ name, slot, call, mismatch, service = null, holdReason
 // The "book it" text: the call confirmed a slot and nothing is on the calendar. A
 // visit the call agent held says why instead (m.holdReason, owner 2026-11-18).
 // The full sentence (phone number, direction, call time) stays in `detail`.
-function bookItAlert(m, repeat) {
+function bookItAlert(m) {
   const { callAtET, contactPhone, direction } = callFacts(m.call);
-  const confirmed = `${repeat ? 'Still unbooked: confirmed' : 'Confirmed'} ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call`;
+  const confirmed = `Confirmed ${spokenSlot(m.slot.dateET, m.slot.minutes)} on a call`;
   // reviewOnly: a stamped slot whose call's new decision holds it (planOpenBookingMissBells).
   const held = Boolean(m.holdReason || m.reviewOnly);
   const verb = held ? 'review' : 'book';
@@ -799,8 +791,7 @@ function bookItAlert(m, repeat) {
       `for that date${m.call.customer_id ? '' : ' — and the call is not linked to any customer'}. ` +
       (m.holdReason ? `The call agent held this visit and did not book it, because ${m.holdReason}. ` : '') +
       likelyAccountSentence(m.likelyAccount) +
-      (held ? HELD_STEP : 'Book it in dispatch or call back to reset expectations.') +
-      (repeat ? ' This keeps ringing until the visit is booked or the call\'s cards are dismissed.' : ''),
+      (held ? HELD_STEP : 'Book it in dispatch or call back to reset expectations.'),
   };
 }
 
@@ -913,7 +904,7 @@ async function closeResolvedBookingMissBells({ now = new Date() } = {}) {
       if (raised >= MAX_ALERTS_PER_RUN) { waiting += 1; continue; }
       // A replacement bell for a call the call agent held says why and asks for a review, as its first bell did.
       const miss = { call, slot, mismatch: plan.ring.mismatch, holdReason, reviewOnly };
-      const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey, repeat: false })
+      const outcome = await ringMiss(miss, { dedupeKey: plan.ring.dedupeKey })
         .catch((err) => { logger.warn(`[call-booking-miss] failed to raise the replacement bell for call ${call.id}: ${err.message}`); return 'failed'; });
       // Close the old bells only once the replacement stands ('rung' or an
       // existing row under the same key). A suppressed or failed raise keeps them.
@@ -951,10 +942,6 @@ async function loadAgreedJobTaskCallIds(misses) {
 }
 
 async function runCallBookingMissWatchdog({ now = new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('callBookingMissWatchdog')) {
-    return { skipped: true, reason: 'gated_off' };
-  }
   // alreadyAlerted() is a read-then-notify with no unique constraint —
   // serialize ticks so deploy overlap can't double-ring.
   const { runExclusive } = require('../utils/cron-lock');
@@ -975,29 +962,19 @@ async function runInner({ now }) {
   // the extraction happens in JS, not SQL: ai_extraction_enriched has been
   // both json and stringified-text across its history, so a ->> filter
   // would silently drop the string-era rows. The window keeps this cheap.
-  // Repeats reach further back: a slot booked more than LOOKBACK_HOURS ahead
-  // (a Monday call for next Sunday) is only inside its repeat window after
+  // The scan reaches further back: a slot booked more than LOOKBACK_HOURS ahead
+  // (a Monday call for next Sunday) is only inside its window after
   // the call has left the first-ring window. Older rows are narrowed to ones
   // whose extraction text mentions a confirmed slot (both storage eras), and
-  // kept only when that slot is inside the repeat window. A call that
-  // already rang for a slot today or tomorrow (ET) is read at any age, so a
-  // visit booked months ahead still repeats in its last day.
-  const repeatScanStart = new Date(now.getTime() - REPEAT_LOOKBACK_DAYS * 86400 * 1000);
-  const soonDates = [etDateString(now), etDateString(addETDays(now, 1))];
-  const alertedSoonRows = await db('notifications')
-    .where({ recipient_type: 'admin' })
-    .whereRaw("metadata->>'dedupeKey' LIKE 'call-booking-miss:%'")
-    .whereRaw("metadata->>'confirmed_date_et' = ANY(?)", [soonDates])
-    .select(db.raw("metadata->>'call_log_id' AS call_log_id"));
-  const alertedSoonIds = [...new Set(alertedSoonRows.map((r) => r.call_log_id).filter(Boolean))];
+  // kept only when that slot is inside the scan range.
+  const scanRangeStart = new Date(now.getTime() - SCAN_LOOKBACK_DAYS * 86400 * 1000);
   const scanned = await db('call_log')
-    .where(function firstRingOrRepeat() {
+    .where(function firstRingOrScanRange() {
       this.where('created_at', '>=', windowStart)
         .orWhere(function recentConfirmed() {
-          this.where('created_at', '>=', repeatScanStart)
+          this.where('created_at', '>=', scanRangeStart)
             .whereRaw("ai_extraction_enriched::text LIKE '%confirmed_start_at%'");
         });
-      if (alertedSoonIds.length) this.orWhereIn('id', alertedSoonIds);
     })
     .where({ v2_extraction_status: 'valid' })
     .whereRaw("processing_status IS NOT NULL AND processing_status <> 'processing'")
@@ -1009,7 +986,7 @@ async function runInner({ now }) {
       db.raw("metadata->'held_visit_dismissed'->>'at' AS held_visit_dismissed_at"));
   // A call whose held row the office dismissed on Dispatch never rings (owner 2026-11-01).
   const calls = scanned.filter((c) => !c.held_visit_dismissed_at
-    && (new Date(c.created_at) >= windowStart || slotInRepeatRange(extractConfirmedSlot(c.ai_extraction_enriched), now)));
+    && (new Date(c.created_at) >= windowStart || slotInScanRange(extractConfirmedSlot(c.ai_extraction_enriched), now)));
 
   // One pass to find the confirmed slots, then one bulk booking lookup.
   const provisional = computeBookingMisses(calls, [], { now });
@@ -1030,62 +1007,21 @@ async function runInner({ now }) {
     if (verdict !== 'done_other_day') misses.push(m);
   }
 
-  // The calls a repeat may reach this tick: the slot is inside the repeat window,
-  // the office has not closed the call's cards, and no open bell is a standing date
-  // check. That call has a booked visit (on the wrong day), so a repeat must never
-  // re-ring it as "nothing is on the calendar"; the close pass, which ran first,
-  // owns that bell (it follows the visit, or turns it back into "book it").
-  const repeatIds = misses.filter((m) => repeatWindowOpen(m.slot, now)).map((m) => m.call.id);
-  const repeatable = new Set();
-  const lastRung = new Map();
-  if (repeatIds.length) {
-    const triageRows = await db('triage_items').whereIn('call_log_id', repeatIds).select('id', 'call_log_id', 'reason_code', 'status', 'resolution_source', 'resolution_rule', 'created_at');
-    const rungRows = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereRaw("metadata->>'call_log_id' = ANY(?)", [repeatIds])
-      .whereRaw("metadata->>'dedupeKey' LIKE 'call-booking-miss%'")
-      .groupByRaw("metadata->>'call_log_id'")
-      .select(db.raw("metadata->>'call_log_id' AS call_log_id"), db.raw('MAX(created_at) AS last_at'));
-    for (const r of rungRows) lastRung.set(r.call_log_id, new Date(r.last_at));
-    const dateCheckRows = await db('notifications')
-      .where({ recipient_type: 'admin' })
-      .whereNull('done_at')
-      .whereRaw("metadata->>'dedupeKey' LIKE ?", [`${BELL_DEDUPE_PREFIX}%`])
-      .whereRaw("metadata->>'call_log_id' = ANY(?)", [repeatIds])
-      .whereRaw("metadata->'mismatch'->>'date' IS NOT NULL")
-      .select(db.raw("metadata->>'call_log_id' AS call_log_id"));
-    const standingDateChecks = new Set(dateCheckRows.map((r) => r.call_log_id));
-    for (const id of repeatIds) {
-      if (!standingDateChecks.has(id) && !officeClosedCall(triageRows.filter((r) => r.call_log_id === id))) repeatable.add(id);
-    }
-  }
-
-  // GATE_ALERT_RING_ONCE (owner 2026-10-14): the first ring stands alone.
   const officeTaskCalls = await loadAgreedJobTaskCallIds(misses);
-  const ringOnce = require('../config/feature-gates').alertRingOnceLive();
   let alerted = 0;
-  let repeated = 0;
   for (const m of misses) {
-    if (alerted + repeated + raised >= MAX_ALERTS_PER_RUN) {
+    if (alerted + raised >= MAX_ALERTS_PER_RUN) {
       logger.warn(`[call-booking-miss] per-run alert cap hit (${MAX_ALERTS_PER_RUN}); the rest ring next tick`);
       break;
     }
     if (officeTaskCalls.has(String(m.call.id))) continue;
     const dedupeKey = `call-booking-miss:${m.call.id}`;
-    if (!(await alreadyAlerted(dedupeKey))) {
-      const outcome = await ringMiss(m, { dedupeKey, repeat: false });
-      if (outcome === 'rung') alerted += 1;
-      continue;
-    }
-    // Already rung once. Re-ring while the call is repeatable (above) and the
-    // last bell is older than the repeat interval.
-    if (ringOnce || !repeatable.has(m.call.id)) continue;
-    const last = lastRung.get(m.call.id);
-    if (last && now.getTime() - last.getTime() < REPEAT_INTERVAL_MINUTES * 60 * 1000) continue;
-    const outcome = await ringMiss(m, { dedupeKey: `call-booking-miss-repeat:${m.call.id}`, repeat: true });
-    if (outcome === 'rung') repeated += 1;
+    // Already rung once: the first ring stands alone (owner 2026-10-14).
+    if (await alreadyAlerted(dedupeKey)) continue;
+    const outcome = await ringMiss(m, { dedupeKey });
+    if (outcome === 'rung') alerted += 1;
   }
-  return { skipped: false, scanned: calls.length, misses: misses.length, alerted, repeated, closed, raised };
+  return { skipped: false, scanned: calls.length, misses: misses.length, alerted, closed, raised };
 }
 
 function likelyAccountSentence(account) {
@@ -1099,12 +1035,12 @@ function likelyAccountSentence(account) {
 // muted this pager from 2026-08-07 to 2026-09-30 while the job kept
 // reporting "alert fired" (owner ruling 2026-09-30: this alarm always
 // rings). Returns 'rung', 'deduped' or 'silenced'.
-async function ringMiss(m, { dedupeKey, repeat }) {
+async function ringMiss(m, { dedupeKey }) {
   // Headline and why follow docs/admin-notifications.md. The office booked a visit,
   // but not on the agreed day: the date check says the dates differ.
   const text = m.mismatch
     ? dateCheckAlert({ name: m.slot.name, slot: m.slot, call: m.call, mismatch: m.mismatch, service: m.slot.service, holdReason: m.holdReason, reviewOnly: m.reviewOnly })
-    : bookItAlert(m, repeat);
+    : bookItAlert(m);
   const created = await raiseAdminAlert(
     'alert',
     {
@@ -1124,10 +1060,8 @@ async function ringMiss(m, { dedupeKey, repeat }) {
       detail: text.detail,
       bell: true,
       // Top-level dedupeKey takes notifyAdmin's advisory-locked dedupe path
-      // (it writes the key into metadata itself): forever for the first
-      // bell, a rolling interval for repeats.
+      // (it writes the key into metadata itself): forever.
       dedupeKey,
-      ...(repeat ? { dedupeWindowMs: REPEAT_INTERVAL_MINUTES * 60 * 1000 } : {}),
       metadata: {
         call_log_id: m.call.id,
         customer_id: m.call.customer_id || null,
@@ -1135,7 +1069,6 @@ async function ringMiss(m, { dedupeKey, repeat }) {
         confirmed_time_et: clockOf(m.slot.minutes),
         confirmed_service: m.slot.service || null,
         ...(m.mismatch ? { mismatch: m.mismatch } : {}),
-        ...(repeat ? { repeat: true } : {}),
       },
     },
   );
@@ -1153,39 +1086,24 @@ async function ringMiss(m, { dedupeKey, repeat }) {
     logger.info(`[call-booking-miss] bell silenced (${created.reason || 'suppressed'}) for call ${m.call.id}`);
     return 'silenced';
   }
-  logger.warn(`[call-booking-miss] Unbooked confirmed slot on call ${m.call.id} (${maskPhone(callFacts(m.call).contactPhone)}, ${m.slot.dateET}) — ${repeat ? 'repeat' : 'alert'} fired`);
+  logger.warn(`[call-booking-miss] Unbooked confirmed slot on call ${m.call.id} (${maskPhone(callFacts(m.call).contactPhone)}, ${m.slot.dateET}) — alert fired`);
   return 'rung';
 }
 
-// The agreed slot starts within REPEAT_WINDOW_HOURS, or it is still the
-// slot's own ET day. This is the candidate-scan range only; repeatWindowOpen
-// additionally requires the slot not to have started.
-function slotInRepeatRange(slot, now = new Date()) {
+// The agreed slot starts within SCAN_WINDOW_HOURS, or it is still the
+// slot's own ET day. This is the candidate-scan range.
+function slotInScanRange(slot, now = new Date()) {
   if (!slot) return false;
   const pad = (n) => String(n).padStart(2, '0');
   const start = parseETDateTime(`${slot.dateET}T${pad(Math.floor(slot.minutes / 60))}:${pad(slot.minutes % 60)}`);
   if (!start || Number.isNaN(start.getTime())) return false;
-  if (start.getTime() - now.getTime() > REPEAT_WINDOW_HOURS * 3600 * 1000) return false;
+  if (start.getTime() - now.getTime() > SCAN_WINDOW_HOURS * 3600 * 1000) return false;
   return slot.dateET >= etDateString(now);
 }
 
-// Repeat window: the agreed slot starts within REPEAT_WINDOW_HOURS and has
-// not started yet, and it is daytime in ET (no overnight re-rings). Once the
-// slot's start time passes the repeats stop (owner 2026-10-01: they used to
-// run to the end of the slot's day, ringing at 23:22Z for a 1 PM slot); the
-// first bell still rings for a slot that already passed unbooked.
-function repeatWindowOpen(slot, now = new Date()) {
-  if (!slotInRepeatRange(slot, now)) return false;
-  const pad = (n) => String(n).padStart(2, '0');
-  const start = parseETDateTime(`${slot.dateET}T${pad(Math.floor(slot.minutes / 60))}:${pad(slot.minutes % 60)}`);
-  if (start.getTime() <= now.getTime()) return false;
-  const hourET = etParts(now).hour;
-  return hourET >= REPEAT_DAY_START_HOUR_ET && hourET < REPEAT_DAY_END_HOUR_ET;
-}
-
 // The office closed the call: a person resolved or dismissed at least one of
-// its triage cards (resolution_source 'human') and none is still open. That
-// stops repeats (the first bell already rang). Cards the nightly sweep
+// its triage cards (resolution_source 'human') and none is still open
+// (call-held-visits reads it). Cards the nightly sweep
 // ('auto'), the processor ('system') or event-driven resolvers (NULL) closed
 // are not an office decision and never silence the pager. A card the quiet_aged
 // sweep dismissed (resolution_rule QUIET_AGED_RULE) proves nothing: it counts as
@@ -1231,8 +1149,6 @@ module.exports = {
   HOLD_REASONS_BY_ROUTING,
   MAX_ALERTS_PER_RUN,
   WINDOW_MATCH_TOLERANCE_MINUTES,
-  REPEAT_INTERVAL_MINUTES,
-  repeatWindowOpen,
   officeClosedCall,
   INACTIVE_STATUSES,
   NAMESAKE_LIVE_STATUSES,

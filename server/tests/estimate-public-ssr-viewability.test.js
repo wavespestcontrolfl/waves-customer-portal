@@ -269,16 +269,13 @@ describe('handleEstimateView — SSR viewability gate', () => {
     });
   });
 
-  // Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE): only the React page can ask for the FDACS-13692, so an
+  // Florida consumer notice: only the React page can ask for the FDACS-13692, so an
   // accept-active termite estimate never gets the legacy page, whose accept would be refused with nothing to sign.
   describe('an estimate that needs the Florida consumer notice is never served the legacy page', () => {
     const TERMITE_ROW = {
       status: 'sent', expires_at: FUTURE, use_v2_view: false, sent_at: PAST, customer_id: 'cust-x', token: 'tok-ssr-gate',
       estimate_data: { result: { recurring: { services: [{ service: 'termite_bait', name: 'Termite Bait Stations', monthly: 40 }] }, oneTime: { items: [] } } },
     };
-    beforeEach(() => { process.env.GATE_ESTIMATE_CONSUMER_NOTICE = 'true'; });
-    afterEach(() => { delete process.env.GATE_ESTIMATE_CONSUMER_NOTICE; });
-
     test('explicit-v1 row on the /estimate/ mount falls through to the React view', async () => {
       const { res, next } = await runView(TERMITE_ROW, ESTIMATE_MOUNT);
       expect(next).toHaveBeenCalledTimes(1);

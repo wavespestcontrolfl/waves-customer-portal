@@ -821,6 +821,27 @@ const StripeService = {
   // `database`: the caller's transaction handle when this runs under a
   // held row lock (standalone Auto Pay replacement) — the customer read
   // and the link-back write must not take a second pool connection.
+  // The one Stripe write of the email sync (services/stripe-email-sync.js), with a short per-request timeout and NO SDK
+  // retries because the caller holds the customer row lock through it (the durable job retries after the lock is
+  // released). 'not_configured' when this process has no Stripe key.
+  // Who the Stripe profile itself says it belongs to (the metadata ensureStripeCustomer / ensurePayerStripeCustomer
+  // write). Same short timeout and no SDK retries as updateCustomerEmail. null when this process has no Stripe key.
+  async readCustomerOwner(stripeCustomerId, { timeout = 10000, maxNetworkRetries = 0 } = {}) {
+    const stripe = getStripe();
+    if (!stripe) return null;
+    const c = await stripe.customers.retrieve(stripeCustomerId, {}, { timeout, maxNetworkRetries });
+    return { deleted: Boolean(c.deleted), customerId: c.metadata?.waves_customer_id || null, payerId: c.metadata?.waves_payer_id || null, email: c.email || null };
+  },
+
+  // idempotencyKey: the sync passes one per job, profile and attempt (a retry reads Stripe's email first, so a lost
+  // response that did apply finishes without a second write, and a cached error never blocks the next attempt).
+  async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000, maxNetworkRetries = 0, idempotencyKey } = {}) {
+    const stripe = getStripe();
+    if (!stripe) return 'not_configured';
+    await stripe.customers.update(stripeCustomerId, { email }, { timeout, maxNetworkRetries, ...(idempotencyKey ? { idempotencyKey } : {}) });
+    return 'updated';
+  },
+
   async ensureStripeCustomer(customerId, { database = db } = {}) {
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');

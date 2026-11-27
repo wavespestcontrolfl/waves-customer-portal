@@ -704,7 +704,7 @@ describe('amountsProviderPreSendCheck / billingFingerprintForSend - billing unch
     expect(typeof check.afterMarker).toBe('function');
     const dbi = dbiWith('fp-1');
     await expect(check({ dbi })).resolves.toEqual({ ok: true });
-    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments t WHERE t.customer_id = ?'), Array(15).fill('c1'));
+    expect(dbi.raw).toHaveBeenCalledWith(expect.stringContaining('FROM payments t WHERE t.customer_id = ?'), Array(22).fill('c1'));
   });
   test('a payment landing after the recheck (fingerprint changed), an unreadable fingerprint, or none taken => retryable refusal', async () => {
     const check = amountsProviderPreSendCheck({ decision: { ...decision, billing_fingerprint: `fp-1@${require('../utils/datetime-et').etDateString()}` }, getBody: () => decision.suggested_message });

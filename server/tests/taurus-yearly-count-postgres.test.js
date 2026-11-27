@@ -14,7 +14,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 
 const knexLib = require('knex');
 const { randomUUID } = require('crypto');
-const { taurusYearlyCount } = require('../services/taurus-yearly-count');
+const { taurusYearlyCount, projectTaurusEligibility } = require('../services/taurus-yearly-count');
 
 const SKIP = !process.env.DATABASE_URL;
 const describeOrSkip = SKIP ? describe.skip : describe;
@@ -235,5 +235,115 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
     expect((await count(newOwner, propA)).count).toBe(3);
     expect((await count(oldOwner, propA)).count).toBe(4);
     expect((await count(newOwner, null)).count).toBe(2);
+  });
+
+  describe('projectTaurusEligibility (the weekly buy list: one read for every home, judged in visit order)', () => {
+    const project = (visits, now = NOW) => projectTaurusEligibility(visits, { knex: db, now });
+
+    it('answers each home as the one-visit count does: same ledger, same label scenarios, same year bounds', async () => {
+      const roomy = randomUUID();
+      const full = randomUUID();
+      const oneHigh = randomUUID();
+      const handedOver = randomUUID();
+      for (let i = 0; i < 3; i += 1) await application({ cust: roomy, property: propA });
+      for (let i = 0; i < 4; i += 1) await application({ cust: full, property: propB });
+      await application({ cust: oneHigh, property: randomUUID(), date: OLD });
+      await application({ cust: oneHigh, property: null, date: OLD, withVisit: false });
+      await application({ cust: handedOver, property: null, date: NEW, withVisit: false }); // this account's, no home recorded
+      await application({ cust: randomUUID(), property: propA, date: NEW, product: otherId }); // not Taurus
+      const homes = [[roomy, propA], [full, propB], [oneHigh, null], [handedOver, null], [randomUUID(), randomUUID()]];
+      const visits = homes.map(([customer_id, property_id]) => ({ id: randomUUID(), customer_id, property_id, scheduled_date: '2026-12-11' }));
+      const { fits, failed } = await project(visits);
+      expect(failed).toBe(false);
+      for (const v of visits) {
+        const single = await count(v.customer_id, v.property_id);
+        expect(fits.get(v.id)).toBe(single.eligible);
+      }
+      // roomy (3 at 0.03%) fits, full (4) does not, a visit with no home counts the whole account (two at 0.06%: used up)
+      expect(visits.map((v) => fits.get(v.id))).toEqual([true, false, false, true, true]);
+    });
+
+    it('judges two visits at one home in date order, whoever drives them: the last application that fits uses the year up', async () => {
+      const cust = randomUUID();
+      for (let i = 0; i < 3; i += 1) await application({ cust, property: propA });
+      const early = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-12-08' };
+      const late = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-12-10' };
+      const { fits } = await project([late, early]); // asked out of order
+      expect(fits.get(early.id)).toBe(true);
+      expect(fits.get(late.id)).toBe(false);
+    });
+
+    it('visits the same day are judged by window start (an unset time last), then id', async () => {
+      const cust = randomUUID();
+      for (let i = 0; i < 2; i += 1) await application({ cust, property: propA }); // two at the home: room for two more
+      const mk = (id, window_start) => ({ id, customer_id: cust, property_id: propA, scheduled_date: '2026-12-10', window_start });
+      // ids sort the opposite way to the times: the afternoon stop has the smallest id
+      const afternoon = mk('00000000-0000-4000-8000-000000000001', '14:00:00');
+      const morning = mk('00000000-0000-4000-8000-000000000002', '08:00:00');
+      const unset = mk('00000000-0000-4000-8000-000000000003', null);
+      const { fits } = await project([unset, afternoon, morning]);
+      expect([morning, afternoon, unset].map((v) => fits.get(v.id))).toEqual([true, true, false]);
+      // same time: the lower id goes first
+      const tieA = mk('00000000-0000-4000-8000-0000000000a1', '09:00:00');
+      const tieB = mk('00000000-0000-4000-8000-0000000000b1', '09:00:00');
+      const tie = await project([tieB, tieA, { ...morning, id: '00000000-0000-4000-8000-0000000000c1', scheduled_date: '2026-12-09' }]);
+      expect([tieA, tieB].map((v) => tie.fits.get(v.id))).toEqual([true, false]); // the earlier-day visit took the third; one more fits
+    });
+
+    it('a visit with no customer, or a failed read, leaves Taurus off', async () => {
+      const lone = { id: randomUUID(), customer_id: null, property_id: propA, scheduled_date: '2026-12-08' };
+      expect((await project([lone])).fits.get(lone.id)).toBe(false);
+      const broken = { raw: () => { const err = new Error('select * from secret'); err.code = '57014'; throw err; } };
+      const out = await projectTaurusEligibility([{ ...lone, customer_id: randomUUID() }], { knex: broken, now: NOW });
+      expect(out.failed).toBe(true);
+      expect(out.fits.get(lone.id)).toBe(false);
+    });
+
+    it('judges a visit in the ET year of its own date only: a December run reads a January 1 visit against the new year', async () => {
+      const cust = randomUUID();
+      for (const date of ['2026-03-03', '2026-04-04', '2026-05-05', '2026-06-06']) await application({ cust, property: propA, date }); // 2026 is used up
+      const now = new Date('2026-12-28T15:00:00Z');
+      const dec = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-12-30' };
+      const jan1 = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2027-01-01' };
+      const jan2 = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2027-01-02' };
+      const { fits } = await project([dec, jan1, jan2], now);
+      expect(fits.get(dec.id)).toBe(false); // 2026 has four
+      expect(fits.get(jan1.id)).toBe(true); // 2027 has none
+      expect(fits.get(jan2.id)).toBe(true);
+    });
+
+    it('charges a projected use to the new year only: three January visits in a row are all judged in 2027 and use it up one by one', async () => {
+      const cust = randomUUID();
+      for (let i = 0; i < 2; i += 1) await application({ cust, property: propA, date: '2027-01-02' }); // already 2 in 2027 (ledger rows may be future-dated in a test)
+      const visits = ['2027-01-03', '2027-01-04', '2027-01-05'].map((scheduled_date) => ({ id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date }));
+      const { fits } = await project(visits, new Date('2026-12-28T15:00:00Z'));
+      expect(visits.map((v) => fits.get(v.id))).toEqual([true, true, false]); // 2 + 2 = 4
+    });
+
+    it('two accounts at one property share the count: a use projected for one is charged to the other', async () => {
+      const oldOwner = randomUUID();
+      const newOwner = randomUUID();
+      for (let i = 0; i < 3; i += 1) await application({ cust: oldOwner, property: propA });
+      const first = { id: randomUUID(), customer_id: oldOwner, property_id: propA, scheduled_date: '2026-12-11' };
+      const second = { id: randomUUID(), customer_id: newOwner, property_id: propA, scheduled_date: '2026-12-12' };
+      const { fits } = await project([second, first]);
+      expect(fits.get(first.id)).toBe(true); // the fourth application at the home
+      expect(fits.get(second.id)).toBe(false); // the home has none left, whoever's account the visit is on
+      // the one-visit count agrees about the new owner's visit once the first has happened
+      expect((await count(newOwner, propA)).count).toBe(3);
+    });
+
+    it('a visit with no property charges the account-wide counter, and an account-wide count sees every property use', async () => {
+      const cust = randomUUID();
+      for (let i = 0; i < 2; i += 1) await application({ cust, property: propA });
+      const a = { id: randomUUID(), customer_id: cust, property_id: null, scheduled_date: '2026-12-08' }; // no property: counts the whole account (2)
+      const b = { id: randomUUID(), customer_id: cust, property_id: propA, scheduled_date: '2026-12-09' }; // sees a's use at propA
+      const c = { id: randomUUID(), customer_id: cust, property_id: propB, scheduled_date: '2026-12-10' }; // propB: sees only the account-wide (no-property) use of a
+      const d = { id: randomUUID(), customer_id: cust, property_id: null, scheduled_date: '2026-12-11' }; // account-wide again: 2 + a + b + c
+      const { fits } = await project([d, c, b, a]);
+      // a: 2 -> fits; b: 2 + a(no property counts for any home of the account) = 3 -> fits; c: propB has 0 + a = 1 -> fits;
+      // d: account-wide 2 + a + b + c = 5 -> does not fit
+      expect([a, b, c, d].map((v) => fits.get(v.id))).toEqual([true, true, true, false]);
+    });
   });
 });

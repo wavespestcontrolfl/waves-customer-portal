@@ -1,8 +1,9 @@
 'use strict';
 // Facts staff know and the texting agent may state (owner 2026-11-25, texting AI fix step 2: "feed the facts staff know"; owner ruling
 // 2026-09-30: price and fee questions are explained from the estimate and invoice on file): the open estimate's per-application price and
-// applications a year, a customer's prepaid visits left, the prep guide of the customer's booked visit and whether the latest visits' service
-// reports went out by email (never the address). This module only READS the facts.
+// applications a year, its setup fee and pay-for-the-year total (owner 2026-11-26: "let the AI answer everything"), a customer's prepaid
+// visits left, the prep guide of the customer's booked visit and whether the latest visits' service reports went out by email (never the
+// address). This module only READS the facts.
 // The numbers never reach the AI raw: each becomes one finished sentence in payment-status-contract.js (the same copy-verbatim contract as the
 // plan price and the balance, PR #5331), so a figure the AI writes in its own words is held. The guide's own published sentences reach it as the
 // PREP GUIDE section (sms-shadow-drafter.js prepGuideSection). Never a technician note or a visit note. A read that fails is null, never a guess.
@@ -18,18 +19,28 @@ const parsedData = (estimate) => {
   try { return JSON.parse(raw) || {}; } catch { return {}; }
 };
 
+// callSideBlockForEstimateData answers with one of these when it could not READ the call or the move: a failed read, not a verdict.
+const VERDICT_UNREAD = new Set(['call_verdict_unavailable', 'move_verdict_unavailable']);
+
 /**
- * True only when the customer's own estimate page would show this estimate, judged from the ESTIMATE ROW alone: not expired, not held off the
- * customer surface (a quarantine marker, an invalidated linkage, a pending reprice or an unverified address: estimateOffCustomerSurface), and
- * not an estimate whose visibility also depends on OTHER rows (a call-drafted estimate's call and lead, a new-home estimate's move: the public
- * routes' callSideBlockForEstimateData). Those can change with the estimate row untouched, so the send fingerprint (which hashes the estimate
- * row) could not see the change: they render no price here, and staff answer.
+ * True only when the customer's own estimate page would show this estimate: not expired, not held off the customer surface (a quarantine
+ * marker, an invalidated linkage, a pending reprice or an unverified address: estimateOffCustomerSurface), and passing the call-side verdict
+ * every public estimate route runs (callSideBlockForEstimateData): a call-drafted estimate's call and lead, a new-home estimate's move.
+ * Those rows can change with the estimate row untouched, so the send fingerprint hashes them too (billing-fingerprint.js). It finds them
+ * by the ids in estimate_data, read by JSON path, and a path reads nothing from data stored as a JSON string: a linked estimate stored
+ * that way states nothing here (its call or its move could change unseen at send). An estimate with neither link costs no read here.
+ * False = not on the page; null = the verdict could not be read (the caller fails the read).
  */
-function estimateOnCustomerSurface(estimate) {
+async function estimateOnCustomerSurface(estimate, db) {
   if (estimate.expires_at && new Date(estimate.expires_at).getTime() < Date.now()) return false;
+  const claims = require('../utils/estimate-claim-sql');
+  if (claims.estimateOffCustomerSurface(estimate)) return false;
   const data = parsedData(estimate);
-  if (data?.estimatorEngine?.callLogId || data?.move?.moveId) return false;
-  return !require('../utils/estimate-claim-sql').estimateOffCustomerSurface(estimate);
+  // (the two links the verdict reads: callSideBlockForEstimateData)
+  if (typeof estimate.estimate_data === 'string' && (data.move?.moveId || data.estimatorEngine?.callLogId)) return false;
+  const block = await claims.callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status });
+  if (!block) return true;
+  return VERDICT_UNREAD.has(block) ? null : false;
 }
 
 const toCents = (value) => {
@@ -38,19 +49,110 @@ const toCents = (value) => {
 };
 
 /**
- * What the open estimate lists per application, as { perApplication: [{ label, cents, applications }] }: the lines and the applications a
- * year of the per-application average model, the SAME model the estimate page and the delivery email read (estimate-monthly-average: it
- * reconciles each line against the stored plan total, so a line that does not add up is withheld). Only a price LISTED on the estimate, never
- * a total: the prepay invoice total, the setup fee and the one-time lines each have their own authority and stay with staff.
- * { perApplication: [] } when there is no estimate, it is not on the customer's own page (or depends on a call or move: see above), the customer
- * has more than one open estimate, or it lists none (a successful read of nothing); null when the read failed. Never throws.
+ * The estimate page's own answer for the open estimate: its live pricing bundle, resolved strictly (estimate-proposal-billing
+ * resolveLivePricing in rethrow mode: the member snapshot is reconciled first, and an unverified one is a failed read), and the page's "What
+ * you pay and when" box over that bundle, through the page's one assembly (estimate-public whatYouPayForEstimate) and its two live lookups
+ * (the billing lane, the deposit ledger). The page shows no box when it cannot read one of them; here that is a failed read, so it throws.
+ * The reconcile rewrites a lapsed member's estimate_data in place, so it works on a copy: { row, bundle, box }. box null = the page shows
+ * no box; bundle null = a price-locked estimate (no live pricing, so no box either).
+ */
+async function estimatePageFor(estimate) {
+  const row = structuredClone(estimate);
+  const live = await require('./estimate-proposal-billing').resolveLivePricing(row, { rethrow: true });
+  if (!live?.bundle) return { row, bundle: null, box: null };
+  const page = require('../routes/estimate-public');
+  const lookups = await page.whatYouPayAcceptLookups(row);
+  if (lookups.monthlyBilled == null || lookups.pendingDeposit == null) throw new Error('the billing lane or the deposit ledger could not be read');
+  return { row, bundle: live.bundle, box: page.whatYouPayForEstimate(row, parsedData(row), live.bundle, lookups) };
+}
+
+/**
+ * The setup fee as the estimate page states it, or null when its two readers disagree (a person answers):
+ *   { cents, prepayWaives, label }  the fee the first bill carries (the box: whatYouPayForData, the converter's own fee rule and frozen
+ *                                   amount), equal to the cent to the page's own fee row; prepayWaives only when the box AND that row both
+ *                                   say prepay waives it
+ *   { cents: 0, waived, label }     no fee on the first bill and no fee row; waived = the estimate's own record holds a waiver (a staff
+ *                                   waiver, or the returning-customer rule's STORED answer in either shape). The rule itself is never run here.
+ * label = the one service the estimate is for (one box line, one per-application line), else null: the sentence then names no service.
+ */
+function setupFeeFact({ box, bundle, row, perApplication }) {
+  const feeRow = (Array.isArray(bundle?.firstVisitFees) ? bundle.firstVisitFees : []).find((fee) => fee?.service === 'waveguard_setup');
+  const cents = toCents(box.setupFee) || 0;
+  if ((toCents(feeRow?.amount) || 0) !== cents) return null;
+  const label = box.lines.length === 1 && perApplication.length === 1 ? perApplication[0].label : null;
+  if (cents > 0) return { cents, prepayWaives: box.setupWaivedWithPrepay === true && feeRow.waivedWithPrepay === true, label };
+  const data = parsedData(row);
+  const waived = require('./estimate-converter').estimateOperatorSetupFeeWaived(data) === true
+    || require('./returning-setup-fee-waiver').holdsReturningSetupWaiver(data) === true;
+  return { cents: 0, waived, label };
+}
+
+/**
+ * The pay-for-the-year total of the plan the page shows by default, as { label, cents, applications }, or null. Stated only when it is
+ * provably the WHOLE prepay bill: three derivations must agree to the cent.
+ *   1. the accept lane's own figure for that plan: buildAnnualPrepayEstimateSuggestion priced on the page's bundle and default option (its
+ *      eligibility, deposit, reprice, quote and cadence guards all apply; it prices one recurring service only),
+ *   2. the bill the operator preview computes from the stored totals (annualPrepayInvoiceTotalForEstimate: one-time lines, commercial tax
+ *      and a deposit credit included), and
+ *   3. the invoice module's own dry run of that amount for this customer (InvoiceService.previewInvoiceTotals, the mirror of create()'s tax
+ *      rule): an account classed commercial is taxed on a bill whatever the estimate's services are, and 2 taxes commercial services only.
+ * The first is the coverage line alone, so equality proves the bill carries nothing else. A prepay bill never carries the setup fee, so an
+ * estimate that lists one must also show prepay waiving it. The line is the per-application line of the same plan (one line, same applications
+ * a year). Anything else (a bundle, a tier plan whose cadence this path cannot read, an existing customer) states no total. Nor does a
+ * termite annual plan: it signs before it pays (isTermiteAnnualSignBeforePayAccept), and its bill carries a Station Setup line that 1 and 2
+ * both leave out. Throws when a read failed: the accept lane marks a block that is no verdict (`unverified`: the customer's plan, a
+ * deposit or the call behind the estimate could not be read), and the caller answers null.
+ */
+async function prepayTotalFact({ row, box, bundle, setupFee, perApplication, db }) {
+  const [line] = perApplication;
+  if (!setupFee || !row.customer_id || perApplication.length !== 1 || box.lines.length !== 1 || box.lines[0].applicationsPerYear !== line.applications) return null;
+  if (setupFee.cents > 0 && !setupFee.prepayWaives) return null;
+  if (require('./estimate-converter').isTermiteAnnualSignBeforePayAccept(row, parsedData(row), 'prepay_annual')) return null;
+  const suggestion = await require('./annual-prepay-estimate-suggestion')
+    .buildAnnualPrepayEstimateSuggestion([row], { db, pricedOption: { bundle, key: box.selection.frequency } });
+  if (suggestion?.unverified) throw new Error(suggestion.blockReason);
+  if (!suggestion || suggestion.blocked || suggestion.coverageVisitCount !== line.applications) return null;
+  const cents = toCents(suggestion.amount);
+  const billed = toCents(await require('./estimate-manual-acceptance').annualPrepayInvoiceTotalForEstimate(row));
+  if (!cents || cents !== billed) return null;
+  const invoiced = await require('./invoice').previewInvoiceTotals({ customerId: row.customer_id, amount: suggestion.amount, database: db });
+  return toCents(invoiced.total) === cents ? { label: line.label, cents, applications: line.applications } : null;
+}
+
+/**
+ * The open estimate's setup fee and pay-for-the-year total, as { setupFee, prepayTotal } (each null when it may not be stated), from the
+ * page's own box. No box (the page shows none: a deposit, a credit, a one-time line, invoice mode, a monthly-billed or commercial plan,
+ * a quote that needs review) states neither. null when the page or the accept lane could not be read. Never throws.
+ */
+async function loadEstimateTerms(estimate, { perApplication, db }) {
+  try {
+    const { row, box, bundle } = await estimatePageFor(estimate);
+    if (!box) return { setupFee: null, prepayTotal: null };
+    const setupFee = setupFeeFact({ box, bundle, row, perApplication });
+    return { setupFee, prepayTotal: await prepayTotalFact({ row, box, bundle, setupFee, perApplication, db }) };
+  } catch (err) {
+    logger.warn(`[sms-staff-facts] setup fee and prepay total unavailable for estimate ${estimate.id}: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * What the open estimate lists per application, as { perApplication: [{ label, cents, applications }], terms }: the lines and the applications
+ * a year of the per-application average model, the SAME model the estimate page and the delivery email read (estimate-monthly-average: it
+ * reconciles each line against the stored plan total, so a line that does not add up is withheld), and `terms`, its setup fee and
+ * pay-for-the-year total (loadEstimateTerms: null when THAT read failed, so the price lines above stay usable). Never a first-visit total or a
+ * one-time line: those stay with staff.
+ * { perApplication: [], terms: nothing } when there is no estimate, it is not on the customer's own page, the customer has more than one open
+ * estimate, or it lists none (a successful read of nothing); null when the read failed. Never throws.
  */
 async function loadEstimateFacts(estimate, { db } = {}) {
-  const none = { perApplication: [] };
+  const none = { perApplication: [], terms: { setupFee: null, prepayTotal: null } };
   if (!estimate?.id) return none;
   if (!db) return null;
   try {
-    if (!estimateOnCustomerSurface(estimate)) return none;
+    const onPage = await estimateOnCustomerSurface(estimate, db);
+    if (onPage == null) throw new Error('the call or move behind the estimate could not be read');
+    if (!onPage) return none;
     // Which estimate does the customer mean? The context names the newest open one; with two or more open (two properties, two quotes for one
     // service) a price could be the wrong quote's, so a person answers.
     const open = await db('estimates').where({ customer_id: estimate.customer_id }).whereIn('status', ['sent', 'viewed']).whereNull('archived_at').limit(2).select('id');
@@ -62,7 +164,7 @@ async function loadEstimateFacts(estimate, { db } = {}) {
       const applications = Math.round(Number(service.visits));
       if (cents && applications > 0 && cleanLabel(service.label)) perApplication.push({ label: cleanLabel(service.label), cents, applications });
     }
-    return { perApplication };
+    return { perApplication, terms: await loadEstimateTerms(estimate, { perApplication, db }) };
   } catch (err) {
     logger.warn(`[sms-staff-facts] per-application price unavailable for estimate ${estimate.id}: ${err.message}`);
     return null;
@@ -173,19 +275,25 @@ function guideGroups(blocks, productNames) {
  * { sections: [] } when no guide covers the visit or the guide is not published (a successful read of nothing); null when the read failed.
  * Never throws: the drafter writes without a section, and a send-time check reads null as an outage (never as "nothing changed").
  */
-async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
+// The guide the completed services agree on, else null. A named service (`family`): only a guide of that service, never another
+// service's last guide.
+function lastGuideConfig(completed, family) {
+  const keys = new Set(completed.map((guide) => (family && guide.pestType !== family ? null : guide.config?.emailTemplateKey || null)));
+  return keys.size === 1 && [...keys][0] ? completed[0].config : null;
+}
+async function loadPrepGuideFacts(customerId, lastRecords, { db, family } = {}) {
   const none = { sections: [] };
   if (!customerId || !db) return null;
   const completedRecords = [].concat(lastRecords || []);
   try {
     const sender = require('./prep-guide-sender');
-    const booked = await sender.bookedPrepGuide([customerId]);
+    // `family` (texting AI gap 5): the service the customer named; a later upcoming visit that carries its guide comes back as source 'named'
+    const booked = await sender.bookedPrepGuide([customerId], { family });
     // No booked visit: the services that completed on the latest service day (the history is ordered by that date alone, so several can tie).
     // Each resolves to the guide it carried; they must all agree, else no guide is named.
     // (`lastRecords` null: the latest service day may run past the history page, so no completed service can be named)
     const completed = booked || lastRecords === null ? [] : await Promise.all(completedRecords.map((record) => sender.completedPrepGuide({ scheduledServiceId: record?.scheduled_service_id, serviceRecordId: record?.id, serviceType: record?.service_type })));
-    const configs = new Set(completed.map((guide) => guide.config?.emailTemplateKey || null));
-    const config = booked ? booked.config : (configs.size === 1 ? completed[0].config : null);
+    const config = booked ? booked.config : lastGuideConfig(completed, family);
     if (!config) return none;
     const loaded = await require('./email-template-library').loadTemplateByKey(config.emailTemplateKey, db);
     // the template must be one the customer's own page and the email sender would use: published (an active version) and not switched off
@@ -193,7 +301,7 @@ async function loadPrepGuideFacts(customerId, lastRecords, { db } = {}) {
     const raw = loaded.activeVersion.blocks;
     const blocks = typeof raw === 'string' ? JSON.parse(raw) : raw;
     const sections = guideGroups(blocks, await require('./company-facts-bank').readProductNames(db));
-    return sections.length ? { source: booked ? 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
+    return sections.length ? { source: booked ? booked.source || 'booked' : 'last', key: config.emailTemplateKey, label: config.label, sections } : none;
   } catch (err) {
     logger.warn(`[sms-staff-facts] prep guide unavailable for customer ${customerId}: ${err.message}`);
     return null;
