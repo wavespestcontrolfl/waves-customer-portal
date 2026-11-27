@@ -192,13 +192,16 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source', 'reminder_contact_id');
       const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
-      if (sameCustomer && existing.source === REMINDER_SOURCE && !(await copyLive(existing, visit.customer_id, trx))) {
-        // A list copy whose entry is gone (it stayed on another account in a merge) grants nothing. This call's own grant takes
-        // the row over IN PLACE: same customer, so its delivery claims stay (nothing is sent twice); its tracker token is
-        // cleared (an old link never comes back) and it is no longer a copy.
+      if (sameCustomer && existing.source === REMINDER_SOURCE) {
+        // A list copy on this visit becomes this call's own grant for the visit, IN PLACE: same customer, so its delivery
+        // claims stay (nothing is sent twice), and the visit keeps the person even if the list entry later goes. A copy whose
+        // entry is already gone (it stayed on another account in a merge) also loses its tracker token, so an old link never
+        // comes back.
+        const live = await copyLive(existing, visit.customer_id, trx);
         await trx(TABLE).where({ id: existing.id }).update({
-          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null, track_token: null,
+          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null,
           first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,
+          ...(live ? {} : { track_token: null }),
         });
       } else {
         if (sameCustomer) return 'kept';
@@ -278,7 +281,8 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
     // to that entry with its tracker token cleared (an entry id is never reused, so an old link never revives; the delivery
     // claims stay, so nothing is sent twice).
     await trx.raw(
-      `UPDATE ${TABLE} r SET reminder_contact_id = c.id, track_token = NULL
+      `UPDATE ${TABLE} r SET reminder_contact_id = c.id, track_token = NULL, first_name = c.first_name, last_name = c.last_name,
+              role = c.role, consent_version = c.consent_version, call_log_id = c.call_log_id
          FROM scheduled_services s, ${REMINDER_TABLE} c
         WHERE s.id = ? AND s.customer_id = ? AND r.scheduled_service_id = s.id AND r.customer_id = s.customer_id
           AND r.source = ? AND c.customer_id = s.customer_id AND c.phone_key = r.phone_key

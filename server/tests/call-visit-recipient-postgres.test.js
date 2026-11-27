@@ -595,27 +595,35 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
       });
 
+      test('a call about a visit that has a LIVE list copy makes it the call\'s own visit grant: it survives the entry going', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        const [copy] = await otherRows();
+        await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'a'.repeat(48)}` });
+        await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
+        const [row] = await otherRows();
+        expect(row).toMatchObject({ id: copy.id, source: 'call_caller_provided', reminder_contact_id: null, track_token: `vr_${'a'.repeat(48)}` });
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+      });
+
       test('a NEW list entry for the same number never revives an old copy or its link: the copy is rebound and its token cleared', async () => {
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [copy] = await otherRows();
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'b'.repeat(48)}` });
         await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
-        await db('customer_reminder_contacts').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x' });
+        await db('customer_reminder_contacts').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Robert', consent_version: 'x' });
         // before the next copy: the old copy names a gone entry, so it grants nothing and its token resolves nowhere
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [rebound] = await otherRows();
         const [entryNow] = await listed();
-        expect(rebound).toMatchObject({ id: copy.id, reminder_contact_id: entryNow.id, track_token: null });
+        expect(rebound).toMatchObject({ id: copy.id, reminder_contact_id: entryNow.id, track_token: null, first_name: 'Robert', consent_version: 'x', call_log_id: null });
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
       });
 
       test('a fresh call replaces a list copy the customer no longer lists (new id, call-recorded), and keeps one that is listed', async () => {
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [copy] = await otherRows();
-        const again = await record({ scheduledServiceId: otherVisitId });
-        expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
-        expect((await otherRows())[0].id).toBe(copy.id);
         await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'c'.repeat(48)}`, deliveries: { [`confirmation:${OTHER_DATE}T09:00`]: 'sent' } });
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
@@ -1220,7 +1228,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
       test('ONE call_log query per open-link request, covering both vetoes, and its plan uses the call_log last-10 indexes', async () => {
         const seen = [];
-        const counting = Object.assign((table) => { if (table === 'call_log') seen.push(table); return db(table); }, { raw: db.raw.bind(db), fn: db.fn });
+        const counting = Object.assign((table) => { if (table === 'call_log') seen.push(table); return db(table); }, { raw: db.raw.bind(db), fn: db.fn, transaction: db.transaction.bind(db) });
         expect(await VisitRecipient.visitForTrackToken(token, { conn: counting })).not.toBeNull();
         expect(seen).toEqual(['call_log']);
         // the plan: with sequential scans off, every number branch is answered by an index of migration 20261124200000
@@ -1254,7 +1262,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const failingAtHandoff = Object.assign((table) => {
           if (table === 'call_log') throw Object.assign(new Error(`select from call_log where phone '${BOB}' - connection terminated`), { code: '57P01' });
           return db(table);
-        }, { raw: db.raw.bind(db), fn: db.fn });
+        }, { raw: db.raw.bind(db), fn: db.fn, transaction: db.transaction.bind(db) });
         await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: visitId, kind: 'confirmation', excludePhones: [HOLDER], conn: failingAtHandoff });
         expect(sendCustomerMessage).toHaveBeenCalledTimes(1);
         const input = sendCustomerMessage.mock.calls[0][0];
@@ -1317,7 +1325,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const missing = Object.assign(new Error(`relation "${TABLE}" does not exist`), { code: '42P01' });
         const q = { where: () => q, select: async () => { throw missing; } };
         return q;
-      }, { raw: db.raw.bind(db), fn: db.fn });
+      }, { raw: db.raw.bind(db), fn: db.fn, transaction: db.transaction.bind(db) });
       // after the token lookup, an error answers as an unknown token (null), never an error
       expect(await VisitRecipient.visitForTrackToken(token, { conn: withoutChoicesTable })).toBeNull();
       // control: the same text goes out when the table can be read
@@ -1345,7 +1353,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const missing = Object.assign(new Error(`relation "${holdsTable}" does not exist for '${BOB}'`), { code: '42P01' });
         const q = { where: () => q, whereNull: () => q, first: async () => { throw missing; } };
         return q;
-      }, { raw: db.raw.bind(db), fn: db.fn });
+      }, { raw: db.raw.bind(db), fn: db.fn, transaction: db.transaction.bind(db) });
       // the strict option itself: a code-only throw where the default read says "no hold"
       const thrown = await Holds.disclaimedNumberHeld(BOB, withoutHoldsTable, { strict: true }).catch((e) => e);
       expect(thrown).toBeInstanceOf(Error);
