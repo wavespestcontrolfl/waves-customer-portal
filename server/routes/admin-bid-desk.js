@@ -305,7 +305,8 @@ async function saveBidUpdate(trx, bidId, value, { precheck = null } = {}) {
   const refusal = precheck ? precheck(bid) : null;
   if (refusal) return refusal;
   // A linked estimate must exist and not be archived (matching GET /estimates).
-  if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).whereNull('archived_at').first('id'))) {
+  // FOR SHARE holds the estimate row against a concurrent archive until this transaction commits.
+  if (value.estimateId && !(await trx('estimates').where({ id: value.estimateId }).whereNull('archived_at').forShare().first('id'))) {
     return { status: 400, body: { error: 'That estimate does not exist or is archived' } };
   }
   const built = buildPatch(bid, value);

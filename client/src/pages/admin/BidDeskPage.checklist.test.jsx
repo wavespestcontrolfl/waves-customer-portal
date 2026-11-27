@@ -144,7 +144,7 @@ it("invites the submission record when Submitted is chosen, and saves it without
   // Submitting with nothing typed is allowed.
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(1));
-  expect(patch.mock.calls[0][0].body).toEqual({ status: "submitted", decision_note: "", expected_updated_at: "2026-10-02T12:00:00.000Z" });
+  expect(patch.mock.calls[0][0].body).toEqual({ status: "submitted", expected_updated_at: "2026-10-02T12:00:00.000Z" });
   fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "Receipt 55" } });
   fireEvent.click(screen.getByRole("button", { name: "Save submission" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));

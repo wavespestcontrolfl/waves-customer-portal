@@ -99,19 +99,20 @@ describe('saveBidUpdate and checklist reorder hardening', () => {
   test('rejects archived estimates when linking estimateId', async () => {
     const queries = [];
     const trx = (table) => {
-      const state = { table, whereNulls: [] };
+      const state = { table, whereNulls: [], lockedShare: false };
       queries.push(state);
       const q = {
         where: () => q,
         whereNull: (col) => { state.whereNulls.push(col); return q; },
         forUpdate: () => q,
+        forShare: () => { state.lockedShare = true; return q; },
         first: async () => (table === 'bid_opportunities' ? { id: ID, status: 'new', updated_at: new Date('2026-10-02T12:00:00.000Z') } : undefined),
       };
       return q;
     };
     const out = await saveBidUpdate(trx, ID, { estimateId: '22222222-2222-4333-8444-555555555555' });
     expect(out).toEqual({ status: 400, body: { error: 'That estimate does not exist or is archived' } });
-    expect(queries.find((q) => q.table === 'estimates')?.whereNulls).toEqual(['archived_at']);
+    expect(queries.find((q) => q.table === 'estimates')).toMatchObject({ whereNulls: ['archived_at'], lockedShare: true });
   });
 
   test('enforces expected_updated_at concurrency fence on non-date updates when supplied', async () => {

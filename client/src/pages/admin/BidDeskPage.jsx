@@ -242,7 +242,37 @@ function BidTable({ bids, selectedId, onSelect, visibleColumns = ALL_BID_COLUMNS
 
 // A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
 const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
-const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE || message === RELOAD_FAILED_MESSAGE;
+const isFailure = (message) => message.startsWith("Not saved") || message.startsWith(UNCONFIRMED_MESSAGE) || message === RELOAD_FAILED_MESSAGE;
+
+// On a 409 conflict reload, refresh untouched decision fields from the server, keep only what the operator edited,
+// and explain both values whenever the server also changed the same field.
+function reconcileDecisionAfterReload(prevBid, nextBid, draftStatus, draftNote) {
+  const prevStatus = prevBid?.status ?? nextBid.status;
+  const prevNote = prevBid?.decision_note || "";
+  const nextNote = nextBid.decision_note || "";
+  const statusEdited = draftStatus !== prevStatus;
+  const noteEdited = draftNote !== prevNote;
+  const conflicts = [];
+  if (statusEdited && nextBid.status !== prevStatus && nextBid.status !== draftStatus) {
+    conflicts.push(`Decision is now "${STATUS_LABEL[nextBid.status] || nextBid.status}" on the server (your draft: "${STATUS_LABEL[draftStatus] || draftStatus}").`);
+  }
+  if (noteEdited && nextNote !== prevNote && nextNote !== draftNote) {
+    conflicts.push(`Note is now "${nextNote || "(empty)"}" on the server (your draft: "${draftNote || "(empty)"}").`);
+  }
+  return {
+    status: statusEdited ? draftStatus : nextBid.status,
+    note: noteEdited ? draftNote : nextNote,
+    conflictNote: conflicts.join(" "),
+  };
+}
+
+function decisionPatch(bid, status, note) {
+  const patch = {};
+  if (status !== bid.status) patch.status = status;
+  if (note !== (bid.decision_note || "")) patch.decision_note = note;
+  if (Object.keys(patch).length === 0) return { status, decision_note: note };
+  return patch;
+}
 
 function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   const [state, setState] = useState({ loading: true, error: "", bid: null, emails: [], extras: null });
@@ -260,10 +290,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
   // The due date typed but not saved yet, as of the last render (load() reads it without re-creating itself).
   const dueEditedAtNow = useRef(null);
   dueEditedAtNow.current = dueEditedAt;
+  const decisionDraftRef = useRef({ bid: null, status: "new", note: "" });
+  decisionDraftRef.current = { bid: state.bid, status, note };
 
-  // keepDrafts: the reload after a lost reply refreshes the bid as the server has it and leaves every unsaved field
-  // alone (Decision, Note, and a due date typed but not saved, still tied to the version it was typed on), as a
-  // successful save does. Only the save's own date (resetDueDraft) is re-read.
+  // keepDrafts: the reload after a 409 or lost reply refreshes the bid as the server has it, refreshes untouched
+  // fields so a retry cannot revert another operator's change, and preserves only fields the operator edited.
   const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false } = {}) => {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
@@ -277,16 +308,23 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
       if (!keepDrafts) {
         setStatus(data.bid.status);
         setNote(data.bid.decision_note || "");
+        return "";
       }
+      const prev = decisionDraftRef.current;
+      const merged = reconcileDecisionAfterReload(prev.bid, data.bid, prev.status, prev.note);
+      setStatus(merged.status);
+      setNote(merged.note);
+      return merged.conflictNote;
     } catch (err) {
       // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
       // instead of replacing the detail with an error (whose Retry would reload without the drafts).
       if (keepDrafts) {
         setState((s) => (s.bid ? { ...s, loading: false } : { loading: false, error: err.message, bid: null, emails: [], extras: null }));
         setMessage(RELOAD_FAILED_MESSAGE);
-        return;
+        return "";
       }
       setState({ loading: false, error: err.message, bid: null, emails: [], extras: null });
+      return "";
     }
   }, [bidId]);
   useEffect(() => { setMessage(""); load(); }, [load]);
@@ -328,14 +366,16 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         setMessage(`Not saved: ${err.message}`);
         if (err.status === 409) {
           onChanged();
-          await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+          const conflictNote = await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+          if (conflictNote) setMessage(`Not saved: ${err.message} ${conflictNote}`);
         }
       } else {
         // No answer arrived (the network dropped): the server may have written the change, so show what it has.
         // Awaited before the saves unlock (finally): a save made meanwhile would be overwritten by this older read.
         setMessage(UNCONFIRMED_MESSAGE);
         onChanged();
-        await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+        const conflictNote = await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+        if (conflictNote) setMessage(`${UNCONFIRMED_MESSAGE} ${conflictNote}`);
       }
       return false;
     } finally {
@@ -399,7 +439,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
           <Field id="bid-note" label="Note">
             <Textarea rows={2} maxLength={2000} value={note} onChange={(event) => setNote(event.target.value)} />
           </Field>
-          <Button disabled={busy} onClick={() => save({ status, decision_note: note }, "Decision saved")}>Save decision</Button>
+          <Button disabled={busy} onClick={() => save(decisionPatch(bid, status, note), "Decision saved")}>Save decision</Button>
         </div>
 
         {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}

@@ -403,7 +403,9 @@ it("opens a bid from the link in its bell, shows its emails and saves a typed da
 
 it("confirms a date as read and saves a decision with a note", async () => {
   const detail = { bid: bid(), emails: [] };
-  const patch = vi.fn(() => reply({ ok: true, bid: bid({ due_confirmed: true, status: "no_bid" }) }));
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ ok: true, bid: bid({ due_confirmed: true }) }))
+    .mockImplementationOnce(() => reply({ ok: true, bid: bid({ due_confirmed: true, status: "no_bid", decision_note: "Out of area" }) }));
   route({ "GET /admin/bid-desk/": () => reply({ bids: LIST }), "GET /admin/bid-desk/b1": () => reply(detail), "PATCH /admin/bid-desk/b1": patch });
   renderPage("/?bid=b1");
   fireEvent.click(await screen.findByRole("button", { name: "Confirm date as read" }));
@@ -510,23 +512,42 @@ it("keeps a closed SAM.gov notice banner visible even after needs_date_confirmat
   expect(await screen.findByText(/SAM\.gov no longer lists this notice as active\. Check the notice on SAM\.gov and decide the bid\./)).toBeInTheDocument();
 });
 
-it("reloads the bid after a 409 conflict on Save decision while preserving typed drafts", async () => {
+it("reloads the bid after a 409 conflict on Save decision, refreshes untouched fields, and sends only edited fields", async () => {
   let reads = 0;
-  const latest = bid({ updated_at: "2026-10-02T14:00:00.000Z" });
+  const latest = bid({ status: "no_bid", updated_at: "2026-10-02T14:00:00.000Z" });
   const patch = vi.fn()
     .mockImplementationOnce(() => reply({ error: "This bid changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }))
-    .mockImplementationOnce(() => reply({ ok: true, bid: { ...latest, status: "bid" } }));
+    .mockImplementationOnce(() => reply({ ok: true, bid: { ...latest, decision_note: "Checked scope" } }));
   route({
     "GET /admin/bid-desk/": () => reply({ bids: LIST }),
     "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
     "PATCH /admin/bid-desk/b1": patch,
   });
   renderPage("/?bid=b1");
-  fireEvent.change(await screen.findByLabelText("Decision"), { target: { value: "bid" } });
+  fireEvent.change(await screen.findByLabelText("Note"), { target: { value: "Checked scope" } });
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
   expect(await screen.findByText(/Not saved: This bid changed since you opened it/)).toBeInTheDocument();
   await waitFor(() => expect(reads).toBe(2));
+  // Another operator changed Decision to No bid while this operator edited Note: Decision refreshes, Note stays.
+  expect(screen.getByLabelText("Decision")).toHaveValue("no_bid");
+  expect(screen.getByLabelText("Note")).toHaveValue("Checked scope");
   fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
   await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
-  expect(patch.mock.calls[1][0].body).toEqual({ status: "bid", decision_note: "", expected_updated_at: "2026-10-02T14:00:00.000Z" });
+  expect(patch.mock.calls[1][0].body).toEqual({ decision_note: "Checked scope", expected_updated_at: "2026-10-02T14:00:00.000Z" });
+});
+
+it("shows both server and draft values when a 409 conflict changes the same decision field", async () => {
+  let reads = 0;
+  const latest = bid({ status: "bid", updated_at: "2026-10-02T15:00:00.000Z" });
+  const patch = vi.fn(() => reply({ error: "This bid changed since you opened it. Reload and check it again." }, { ok: false, status: 409 }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Decision"), { target: { value: "no_bid" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save decision" }));
+  expect(await screen.findByText(/Decision is now "Bid" on the server \(your draft: "No bid"\)/)).toBeInTheDocument();
+  expect(screen.getByLabelText("Decision")).toHaveValue("no_bid");
 });
