@@ -36,7 +36,7 @@ Create another checkout with `npm run worktree:create -- task-slug [destination]
 slug="my-task"
 dest="../wt-$slug"
 git fetch origin main \
-  && git worktree add -b "feat/$slug" "$dest" origin/main \
+  && git worktree add --no-track -b "feat/$slug" "$dest" origin/main \
   && (
     cd "$dest" \
       && nvm use \
