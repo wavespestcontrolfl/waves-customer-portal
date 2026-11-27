@@ -36,7 +36,7 @@ if (require.main === module) {
   process.env.DATABASE_URL = 'postgres://127.0.0.1:1/arrival-timing-report-unused';
 }
 
-const { firstPresent, normalizeEventType, pointFromPayload, pointFromSource, tripIdentity } = require('../../server/services/bouncie-payload');
+const { normalizeEventType, pointFromPayload, pointFromSource, tripEndTime, tripIdentity } = require('../../server/services/bouncie-payload');
 const { distanceMeters } = require('../../server/services/gps-arrival-detector');
 
 // "Standing still" as the planned idle rule judges it: 2 mph or less, within 25 m, on one trip.
@@ -183,8 +183,9 @@ function tallyEvent(tally, row) {
   const payload = asObject(row.payload) || {};
   const entry = tally[type] || (tally[type] = { rows: 0, withGps: 0, withEndTime: 0 });
   entry.rows += 1;
-  if (pointFromPayload(payload, type)) entry.withGps += 1;
-  if (type === 'trip-end' && firstPresent(payload.end?.timestamp, payload.timestamp)) entry.withEndTime += 1;
+  // A trip-end's GPS and its time are counted apart (the receiver needs both for one point).
+  if (type === 'trip-end' ? pointFromSource(payload.end) : pointFromPayload(payload, type)) entry.withGps += 1;
+  if (type === 'trip-end' && tripEndTime(payload)) entry.withEndTime += 1;
   return tally;
 }
 

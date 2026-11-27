@@ -3406,6 +3406,10 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacyTwoStoryRoof === 'boolean'
                 ? { legacyTwoStoryRoof: estimate.pricingMetadata.legacyTwoStoryRoof }
                 : {}),
+              // WDO size + construction stamp (2026-11-26).
+              ...(typeof estimate.pricingMetadata.legacyWdoFlat === 'boolean'
+                ? { legacyWdoFlat: estimate.pricingMetadata.legacyWdoFlat }
+                : {}),
               // One-time pest rule (new quotes only, 2026-11-26): its own stamp.
               ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
                 ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
@@ -3425,6 +3429,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
             name: item.name || item.label || item.displayName,
             ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
             ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
+            ...(typeof item.legacyWdoFlat === 'boolean' ? { legacyWdoFlat: item.legacyWdoFlat } : {}),
             ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
             ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
             ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),

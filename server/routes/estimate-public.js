@@ -3734,7 +3734,8 @@ function rawQuoteRequiredReason(item = {}) {
     ...(Array.isArray(item.manualReviewReasons) ? item.manualReviewReasons : []),
     ...(Array.isArray(item.measurementWarnings) ? item.measurementWarnings : []),
   ];
-  return candidates.find(isPresent) || null;
+  // A staff-only WDO note is never a customer-facing reason.
+  return candidates.filter((candidate) => !isWdoStaffNote(candidate)).find(isPresent) || null;
 }
 
 function fmtMoney(n) {
@@ -30212,12 +30213,18 @@ function sanitizePublicOneTimeBreakdown(breakdown) {
   };
 }
 
+// The staff-only WDO review notes (an unknown or untrusted home construction or foundation, owner 2026-11-26) ride the WDO line's
+// warnings and all start with one marker. The one-time sanitizer drops warnings from priced items; this removes a note itself wherever
+// a payload carries it, in a list or as a scalar (normalizeOneTimeBreakdown copies the first warning into the row's `reason`).
+const WDO_STAFF_NOTE_MARKER = require('../services/pricing-engine/constants').SPECIALTY.wdo.sizeTable.staffNoteMarker;
+const isWdoStaffNote = (value) => typeof value === 'string' && value.startsWith(WDO_STAFF_NOTE_MARKER);
 function stripInternalMarginFieldsDeep(value, depth = 0) {
   if (depth > 6 || !value || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map((entry) => stripInternalMarginFieldsDeep(entry, depth + 1));
+  if (Array.isArray(value)) return value.filter((entry) => !isWdoStaffNote(entry)).map((entry) => stripInternalMarginFieldsDeep(entry, depth + 1));
   const out = {};
   for (const [key, nested] of Object.entries(value)) {
     if (key === 'marginFloorMonthly') continue;
+    if (isWdoStaffNote(nested)) continue;
     // Internal evidence frozen into the send snapshot (one-time pest rule): never customer-facing.
     if (key === 'bandPricedPest' || key === 'oneTimePestCurrentServices' || key === 'oneTimePestChoice') continue;
     // An area add-on row's price knobs include the target margin: internal, like the margin floor.

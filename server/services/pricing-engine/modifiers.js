@@ -24,6 +24,7 @@ function pestAgeAdj(yearBuilt) {
 // Wood frame carries higher termite risk than block/ICF.
 function constructionMult(material) {
   switch ((material || '').toUpperCase()) {
+    case 'MIXED': // wood + masonry: priced as wood frame everywhere it was before the shared normalizer read it as MIXED
     case 'WOOD_FRAME': return 1.15;
     case 'STEEL_FRAME': return 0.95;
     case 'BLOCK':
@@ -90,7 +91,7 @@ function deriveNotes(profile = {}) {
     notes.push({ type: 'STRUCTURE', priority: 'HIGH',
       text: `${profile.foundationType} foundation — termite trenching approach must be modified.` });
   }
-  if ((profile.constructionMaterial || '').toUpperCase() === 'WOOD_FRAME') {
+  if (['WOOD_FRAME', 'MIXED'].includes((profile.constructionMaterial || '').toUpperCase())) {
     notes.push({ type: 'STRUCTURE', priority: 'HIGH',
       text: 'Wood frame — elevated termite risk. Recommend Bora-Care + bait station monitoring.' });
   }

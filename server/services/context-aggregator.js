@@ -20,6 +20,8 @@ const { dateOnlyString } = require('../utils/date-only');
 
 // The completed services read for SERVICE HISTORY (most recent first).
 const SERVICE_HISTORY_LIMIT = 5;
+// The visits SERVICE HISTORY lists (buildContext's serviceHistory slice), each with its findings when the texting AI asks for them.
+const SERVICE_HISTORY_FINDINGS_VISITS = 3;
 const { arrivalWindowRange } = require('../utils/sms-time-format');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 // LIVE ETA (GATE_SMS_REAL_ANSWERS): reuses the exact functions + bounds
@@ -256,16 +258,20 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
   } catch { return null; }
 }
 
-// Texting AI facts (owner 2026-11-25): the open estimate's per-application price (with its setup fee and pay-for-the-year total, owner 2026-11-26), the customer's prepaid visits left and the prep guide of the
-// booked (else last) visit (sms-staff-facts). Numbers and the guide's own published sentences only (never technician or visit notes); a read that
-// fails is null. OPT IN (`includeSmsStaffFacts`: true = all three, or an object naming the ones a caller needs): only the texting AI's draft and
-// the unanswered-text fingerprint (which hashes the block the draft was written from, guide included) ask for the guide; the send-time payment
-// recheck names the number facts it re-renders and never reads the guide. Every other caller skips the reads and the keys. The drafting callers
-// pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck asks regardless, so a reviewed card keeps its
-// live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows, never an earlier day's.
+// Texting AI facts (owner 2026-11-25): the open estimate's per-application price (with its setup fee and pay-for-the-year total, owner
+// 2026-11-26), the customer's prepaid visits left, the prep guide of the booked (else last) visit, and (owner 2026-11-26, texting AI gap
+// 2) whether the latest visits' service reports went out by email and the
+// findings of the OLDER visits SERVICE HISTORY lists (sms-staff-facts, loadLatestVisitFindings). Numbers, the guide's own published sentences,
+// a delivery state and the findings pipeline's own rows only (never technician or visit notes, never an email address); a read that fails is
+// null. OPT IN (`includeSmsStaffFacts`: true = all of them, or an object naming the ones a caller needs): only the texting AI's draft and
+// the unanswered-text fingerprint (which hashes the block the draft was written from, guide and report delivery included) ask for the guide
+// and the reports; the send-time payment recheck names the number facts it re-renders and never reads them. Every other caller skips the
+// reads and the keys. The drafting callers pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck
+// asks regardless, so a reviewed card keeps its live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows,
+// never an earlier day's.
 async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn }) {
-  if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null, prepGuide: null };
-  const want = optedIn === true ? { estimate: true, prepaid: true, guide: true } : optedIn;
+  if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null, prepGuide: null, reportFacts: {}, olderVisitFindings: [] };
+  const want = optedIn === true ? { estimate: true, prepaid: true, guide: true, reports: true, findings: true } : optedIn;
   const staffFacts = require('./sms-staff-facts');
   // The guide fallback reads the completed services of the latest service day: the history is ordered by that date alone, so several can tie.
   // The history is a short page (SERVICE_HISTORY_LIMIT rows): a latest day that fills it may continue past it, so no guide is named then.
@@ -278,7 +284,14 @@ async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, as
     want.prepaid ? staffFacts.loadPrepaidPlanFacts(customer.id, { db }) : null,
     want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db }) : null,
   ]);
-  return { estimateFacts, prepaidPlans, prepGuide };
+  const [reportFacts, olderVisitFindings] = await Promise.all([
+    // the latest completed visits' report emails (the key is absent unless asked for, so other callers' contexts keep their shape)
+    want.reports ? staffFacts.loadReportDeliveryFacts(customer.id, serviceHistory, { db }).then((reportDeliveries) => ({ reportDeliveries })) : {},
+    // "what did the tech find" about a visit before the last one: the findings of the older visits SERVICE HISTORY lists, by the same rule
+    // as the latest visit's (GATE_SMS_PROMPT_B1, customer-safe notes required, the findings pipeline's own rows only)
+    want.findings ? Promise.all((serviceHistory || []).slice(1, SERVICE_HISTORY_FINDINGS_VISITS).map((record) => loadLatestVisitFindings(record))) : [],
+  ]);
+  return { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings };
 }
 
 // GATE_SMS_PROMPT_B1 (change A, owner 2026-10-24): the LATEST finished visit's service_findings (title, detail, recommendation, severity,
@@ -1492,7 +1505,8 @@ class ContextAggregator {
 
     const lastService = serviceHistory[0] || null;
     const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
-        const { estimateFacts, prepaidPlans, prepGuide } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts });
+        const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts });
+    const visitFindings = [latestVisitFindings, ...olderVisitFindings];
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits
     // under the homeowner's customer_id — exclude those from both the
@@ -1666,13 +1680,14 @@ class ContextAggregator {
       lastService: lastService ? { type: lastService.service_type, date: lastService.service_date, notes: customerSafeVisitNotes(lastService) } : null,
       // v10 grounding: the last few visits with reviewed notes + areas —
       // "what did you do last time" is a routine customer text.
-      serviceHistory: serviceHistory.slice(0, 3).map((s, i) => ({
+      serviceHistory: serviceHistory.slice(0, SERVICE_HISTORY_FINDINGS_VISITS).map((s, i) => ({
         type: s.service_type,
         date: s.service_date,
         notes: customerSafeVisitNotes(s),
         areasServiced: Array.isArray(s.areas_serviced) ? s.areas_serviced : null,
-        // GATE_SMS_PROMPT_B1 (change A): the latest finished visit's findings; absent key when the gate is off or none were loaded
-        ...(i === 0 && latestVisitFindings ? { findings: latestVisitFindings } : {}),
+        // GATE_SMS_PROMPT_B1 (change A): the latest finished visit's findings, and (texting AI gap 2, opt-in, same rule) an older listed
+        // visit's; absent key when the gate is off or none were loaded
+        ...(visitFindings[i] ? { findings: visitFindings[i] } : {}),
       })),
       upcomingServices: upcomingServices.map((s, i) => withSeriesKey(withScheduledServiceId({
         type: s.service_type,
@@ -1782,6 +1797,8 @@ class ContextAggregator {
       estimateFacts,
       prepaidPlans,
       prepGuide,
+      // texting AI gap 2: `reportDeliveries`, absent unless includeSmsStaffFacts asked for it (null = the read failed)
+      ...reportFacts,
       propertyPrefs: propertyPrefs || {},
       // v10: property facts the drafter may draw on. Access CODES are
       // presence-booleans ONLY — the values never enter a prompt (they would

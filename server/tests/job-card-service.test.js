@@ -815,7 +815,9 @@ describe('mixForProduct', () => {
     // finding stays in planBlocks. Any other finding beside it still withholds the amount, with its own reason.
     const repeat = { code: 'repeat_hrac_group', message: 'Celsius WG repeats HRAC 2; last matching application was Celsius WG on 2026-03-01.' };
     const fracRepeat = { code: 'fungicide_frac_rotation_approval', message: 'Celsius WG repeats FRAC 11; last matching application was Artavia on 2026-03-01.' };
-    for (const finding of [repeat, fracRepeat]) {
+    // A label's limit on applications in a row (a third Velista) is shown the same way: beside the amount, not in place of it.
+    const thirdInARow = { code: 'successive_application_limit', message: "Celsius WG was the lawn's last 2 fungicide applications (2026-10-06, 2026-11-03). Its label allows no more than 2 in a row: use a fungicide of another group." };
+    for (const finding of [repeat, fracRepeat, thirdInARow]) {
       const warned = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh: dbh([product]), deps: { buildPlan, evaluateApprovals: jest.fn().mockResolvedValue({ blocks: [finding], warnings: [] }) }, ...at });
       expect(warned).toMatchObject({ amount: 6.215, rotationWarnings: [finding.message], planBlocks: [{ code: finding.code, message: finding.message }] });
     }

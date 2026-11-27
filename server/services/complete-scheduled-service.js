@@ -5321,7 +5321,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         db,
       ).catch(() => {});
       return ({ status: 409, body: {
-        error: 'The report note is turned off. Reload the sheet and complete again.',
+        error: 'The report note is turned off. Write the report again, then send.',
         code: 'REPORT_NOTE_OFF',
       } });
     }
@@ -6351,6 +6351,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               productId: block.productId || null,
               productName: block.productName || null,
               ...(block.evidence ? { evidence: block.evidence } : {}),
+              ...(block.approvable === false ? { approvable: false } : {}),
             })),
           };
       }

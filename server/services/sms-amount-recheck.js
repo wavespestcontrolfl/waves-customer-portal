@@ -173,7 +173,7 @@ async function liveZelleFacts({ customerId, invoiceId, dbh = db } = {}) {
 function bodyHasPaymentStatusVocabulary(body) {
   return paymentStatus.assertsPaymentStatus(String(body || ''), { inboundText: null });
 }
-function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
+function bodyNeedsMoneyRecheck(body, { inboundMessage = null, promptVersion = null, statusVocabulary = true } = {}) {
   const text = String(body || '');
   if (!text) return false;
   // a prepaid visit count (the rendered sentence or the model's own words) is judged and fingerprinted like an amount, whatever the customer asked;
@@ -183,8 +183,43 @@ function bodyNeedsPaymentRecheck(body, { inboundMessage = null, promptVersion = 
       && paymentStatus.assertsPaymentStatus(text, { inboundText: inboundMessage == null ? null : String(inboundMessage) })) return true;
   try { return !!require('./sms-suggest-mode').hasPriceQuote(text); } catch { return true; }
 }
-// A body the recheck judges also gets the billing-fingerprint check at the provider boundary (Codex round-49 P1).
-const bodyNeedsBillingBoundaryCheck = bodyNeedsPaymentRecheck;
+// A body with money in it also gets the billing-fingerprint check at the provider boundary (Codex round-49 P1). A report delivery sentence
+// alone is about no money: it is rechecked (reportDeliveryStale), not fingerprinted.
+const bodyNeedsBillingBoundaryCheck = bodyNeedsMoneyRecheck;
+
+// ---- REPORT DELIVERY (texting AI gap 2) ----------------------------------------------------------------------------------------------
+// A body that states whether a visit's service report was emailed (the drafter's REPORT DELIVERY sentences) is rechecked at send: each such
+// sentence must still be one today's delivery rows render (sms-shadow-drafter.reportDeliverySentences over a fresh read). A delivery that
+// moved on (queued to sent, a bounce, the account's email changed) refuses as report_delivery_changed; a read that failed as
+// report_delivery_recheck_failed (retryable).
+const REPORT_SENTENCE_START = 'The service report for your ';
+const DAY_TEXT = '[A-Z][a-z]+, [A-Z][a-z]{2} \\d{1,2}';
+// The rendered forms. A staff edit keeps its own wording: only a sentence of one of these forms is held to the live rows then.
+const REPORT_SENTENCE_RE = new RegExp(`The service report for your [^\\n]{1,80}? visit on ${DAY_TEXT} (?:has not been emailed(?: yet)?\\.|was emailed on ${DAY_TEXT}(?: to your email address on file| to an email address that is no longer yours on file|, but that email did not reach you)?\\.)`, 'g');
+const flatText = (text) => String(text || '').replace(/\s+/g, ' ').replace(/[\u2018\u2019]/g, "'");
+const claimsReportDelivery = (text) => flatText(text).includes(REPORT_SENTENCE_START);
+function bodyNeedsPaymentRecheck(body, options = {}) {
+  return claimsReportDelivery(body) || bodyNeedsMoneyRecheck(body, options);
+}
+async function reportDeliveryStale({ customerId, text, humanEditedBody = false, dbh = db }) {
+  const flat = flatText(text);
+  if (!flat.includes(REPORT_SENTENCE_START)) return { stale: false, rest: String(text || '') };
+  if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
+  try {
+    const context = await loadCustomerContext(customerId, dbh, { reports: true });
+    const live = context ? drafter.reportDeliverySentences(context.reportDeliveries) : null;
+    if (!live) return { stale: true, reason: 'report_delivery_recheck_failed' };
+    // an AI body: every report sentence it starts must be a live one, whole; a staff edit: only the sentences of the rendered forms
+    const starts = [...flat.matchAll(new RegExp(REPORT_SENTENCE_START, 'g'))].map((m) => m.index);
+    const claims = humanEditedBody === true ? [...flat.matchAll(REPORT_SENTENCE_RE)].map((m) => m.index) : starts;
+    if (!claims.every((at) => live.some((sentence) => flat.startsWith(sentence, at)))) return { stale: true, reason: 'report_delivery_changed' };
+    // the verified sentences are removed before the money rules judge the rest: a delivery sentence is not a payment status
+    return { stale: false, rest: live.reduce((rest, sentence) => rest.split(sentence).join(' '), flat) };
+  } catch (err) {
+    logger.warn(`[sms-amount-recheck] report delivery recheck failed for customer ${customerId}: ${err.message}; blocking send`);
+    return { stale: true, reason: 'report_delivery_recheck_failed' };
+  }
+}
 
 // The customer's current context, fresh, or null (no customer row / nothing loadable): never substituted by {} - a missing
 // context is a failed read, not an empty account.
@@ -357,7 +392,9 @@ async function outgoingAmountsStale({
   // Owner ruling 2026-10-01: the body is a STAFF EDIT of the AI draft (callers compare it with the stored draft; auto-send never sets this).
   humanEditedBody = false,
 } = {}) {
-  const text = String(body || '');
+  const report = await reportDeliveryStale({ customerId, text: body, humanEditedBody, dbh });
+  if (report.stale) return report;
+  const text = report.rest;
   if (strictForVersion(promptVersion) && humanEditedBody !== true) {
     const verdict = await paymentStatusVerdict({ customerId, body: text, snapshot: paymentStatusSnapshot, inboundMessage, dbh });
     return verdict.reason ? { stale: true, reason: verdict.reason } : { stale: false, ...(verdict.zelle ? { zelle: verdict.zelle } : {}) };
@@ -378,4 +415,5 @@ async function outgoingAmountsStale({
 module.exports = {
   outgoingAmountsStale, bodyAmountCents, outgoingZelleStale, zelleBodyContacts, zelleInvoiceStillEligible, liveZelleFacts,
   paymentStatusVerdict, paymentStatusSendBlockReason, bodyNeedsPaymentRecheck, bodyHasPaymentStatusVocabulary, bodyNeedsBillingBoundaryCheck,
+  reportDeliveryStale,
 };
