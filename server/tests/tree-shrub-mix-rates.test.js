@@ -35,8 +35,19 @@ describe('tree & shrub mix rates', () => {
 
   test('only the products with no verified label rate show "Label rate not on file"', () => {
     const missing = products.filter(([, p]) => p.mixRates.some((row) => row.labelRateMissing)).map(([key]) => key);
-    expect(missing.sort()).toEqual(['copper', 'sequestar']);
+    // Copper names no exact product; Sequestar's verified label directions are a dose row (Codex #8696 r1).
+    expect(missing.sort()).toEqual(['copper']);
     for (const key of missing) expect(rowsOf(key).every((row) => !row.perGallon && !row.dose)).toBe(true);
+  });
+
+  test('a product whose card lists verified label rates never shows "Label rate not on file"', () => {
+    const seq = products.find(([key]) => key === 'sequestar')[1];
+    expect(seq.rates.length).toBeGreaterThan(0);
+    expect(seq.mixRates).toEqual([expect.objectContaining({ dose: expect.stringContaining('2 oz per inch of trunk diameter') })]);
+    for (const [key, product] of products) {
+      const verified = (product.rates || []).some(([text]) => !/label needed/i.test(String(text)));
+      if (verified) expect([key, product.mixRates.some((row) => row.labelRateMissing)]).toEqual([key, false]);
+    }
   });
 
   test("a per-gallon row agrees with the product's declared rate (mix, or each target in mixes)", () => {

@@ -922,8 +922,9 @@
       "mixRates": [
         {
           "product": "Sequestar 6% Fe EDDHA",
-          "where": "Iron chlorosis",
-          "labelRateMissing": true
+          "where": "Iron chlorosis only: root zone, then irrigate in",
+          "dose": "Small shrubs: 2 oz each. Large shrubs and trees: up to 2 oz per inch of trunk diameter. Beds and groundcovers: up to 2 oz per 100 sq ft.",
+          "limit": "Never tank-mix with oil. No miticides in foliar sprays on trees."
         }
       ]
     },
