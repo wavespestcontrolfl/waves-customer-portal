@@ -178,6 +178,8 @@ function flatReply(text) {
 // sentence forms and idiom rule decide what counts (sms-label-facts.labelSentencesIn / sanctionSafeOnceDry).
 function withoutLabelWording(text) {
   const labelFacts = require('./sms-label-facts');
+  // (guarded: partial test doubles of sms-label-facts omit these helpers; the text is then judged whole, the stricter reading)
+  if (typeof labelFacts.sanctionSafeOnceDry !== 'function' || typeof labelFacts.labelSentencesIn !== 'function') return text;
   return sentencesOf(labelFacts.sanctionSafeOnceDry(text))
     .filter((sentence) => !labelFacts.labelSentencesIn(`- ${sentence}`).length)
     .join(' ')
