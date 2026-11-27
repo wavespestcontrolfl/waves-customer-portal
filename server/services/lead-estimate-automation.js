@@ -216,12 +216,11 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
   }
 
   if (wants(/\blawn\b|(?<!\b(?:shrub|shrubs|tree|trees|palm|palms|ornamental|ornamentals)\s)\bfertilization\b(?!\s(?:for|on|of|to)\s(?:the\s|my\s|our\s)?(?:shrubs?|trees?|palms?|ornamentals?)\b)|\bweeds?\b/)) {
-    const lawnPest = wants(/\blawn pest\b/);
-    if (pestWanted && !lawnPest) {
-      services.lawn = { track: 'st_augustine', tier: 'enhanced' };
-    } else if (lawnPest) {
+    if (wants(/\blawn pest\b/)) {
       services.lawnPestControl = {};
       review.push('lawn_pest_control_defaulted');
+    } else if (pestWanted) {
+      services.lawn = { track: 'st_augustine', tier: 'enhanced' };
     } else if (oneTime || (!recurring && wants(/\bweeds?\b/))) {
       services.oneTimeLawn = { treatmentType: /\bfertilization\b/.test(text) ? 'fertilizer' : 'weed' };
     } else {
