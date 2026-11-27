@@ -12,18 +12,19 @@
 const mockProfiles = { current: {} };
 jest.mock('../models/db', () => {
   const read = () => {
-    let id = null;
+    let ids = [];
     const q = {};
-    q.where = (arg) => { if (arg && arg.id) id = arg.id; return q; };
-    q.whereNull = () => q;
-    q.whereRaw = () => q;
+    q.whereIn = (_col, list) => { ids = list; return q; };
+    q.orderBy = () => q;
+    q.select = () => q;
     q.forUpdate = () => q;
     q.forShare = () => q;
-    q.first = async () => mockProfiles.current[id] || undefined;
+    q.then = (resolve, reject) => Promise.resolve(ids.map((id) => mockProfiles.current[id]).filter(Boolean)).then(resolve, reject);
     return q;
   };
   const db = jest.fn(read);
-  db.transaction = jest.fn(async (fn) => fn(Object.assign(jest.fn(read), { isTransaction: true })));
+  db.raw = jest.fn((sql) => sql);
+  db.transaction = jest.fn(async (fn) => fn(Object.assign(jest.fn(read), { isTransaction: true, raw: db.raw })));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -62,7 +63,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
   mockSession.current = { customerId: OWN, customer: { id: OWN } };
-  mockProfiles.current = { [OWN]: { id: OWN } };
+  mockProfiles.current = { [OWN]: { id: OWN, active: true, deleted_at: null, owner_account: OWN } };
 });
 
 const call = (method, path) => fetch(`${baseUrl}/api/notifications${path}`, { method, headers: { 'content-type': 'application/json' } })
@@ -109,8 +110,20 @@ test('a profile merged away (or no longer on the account) between the check and 
   const db = require('../models/db');
   db.transaction.mockImplementationOnce(async (fn) => {
     mockProfiles.current = {};
-    return fn(Object.assign(jest.fn(() => db()), { isTransaction: true }));
+    return fn(Object.assign(jest.fn(() => db()), { isTransaction: true, raw: db.raw }));
   });
   expect((await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/restart`)).status).toBe(403);
+  expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
+});
+
+test('a signed-in profile moved to another account after sign-in reaches nothing on its old account', async () => {
+  const SIBLING = '44444444-4444-4444-8444-444444444444';
+  mockProfiles.current = {
+    [OWN]: { id: OWN, active: true, deleted_at: null, owner_account: OTHER },
+    [SIBLING]: { id: SIBLING, active: true, deleted_at: null, owner_account: OWN },
+  };
+  expect((await call('GET', `/reminder-contacts/${SIBLING}`)).status).toBe(403);
+  expect((await call('POST', `/reminder-contacts/${SIBLING}/${REMINDER}/restart`)).status).toBe(403);
+  expect(VisitRecipient.listReminderContacts).not.toHaveBeenCalled();
   expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
 });

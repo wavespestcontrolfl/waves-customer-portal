@@ -1263,11 +1263,19 @@ async function reminderContactProfile(req, res) {
 // customers row lock (the lock a merge takes) in the caller's transaction; 'share' takes a shared lock (for a read).
 async function profileOnAccount(req, customerId, { conn = db, lock = false } = {}) {
   const accountId = req.accountId || req.customer?.account_id || req.customerId;
-  if (!accountId || !customerId) return false;
-  const q = conn('customers').where({ id: customerId, active: true }).whereNull('deleted_at')
-    .whereRaw('COALESCE(account_id, id) = ?::uuid', [accountId]);
+  const selfId = req.customerId;
+  if (!accountId || !customerId || !selfId) return false;
+  // Both rows, in id order (a stable lock order): the target profile, and the signed-in profile itself, which must
+  // still be on the account the session names (a profile moved away after sign-in reaches nothing).
+  const ids = [...new Set([String(customerId), String(selfId)])].sort();
+  const q = conn('customers').whereIn('id', ids).orderBy('id', 'asc')
+    .select('id', 'active', 'deleted_at', conn.raw('COALESCE(account_id, id) AS owner_account'));
   if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
-  return !!(await q.first('id'));
+  const rows = await q;
+  const byId = new Map(rows.map((r) => [String(r.id), r]));
+  const onAccount = (r) => !!r && !r.deleted_at && String(r.owner_account) === String(accountId);
+  const target = byId.get(String(customerId));
+  return onAccount(target) && target.active === true && onAccount(byId.get(String(selfId)));
 }
 
 const UUID_PARAM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
