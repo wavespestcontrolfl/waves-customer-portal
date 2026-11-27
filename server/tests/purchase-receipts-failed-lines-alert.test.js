@@ -41,9 +41,9 @@ jest.mock('../services/admin-alert-episodes', () => mockEpisodes);
 
 const { reconcileFailedLineAlert, failedLineEntry, failedEmailEntry, DEDUPE_KEY } = require('../services/purchase-receipts/failed-lines-alert');
 
-const entry = (n, receivedAt = '2026-11-25T15:00:00Z') => failedLineEntry({
-  receipt: { vendor: 'siteone' }, email: { received_at: receivedAt }, orderNumber: `INV${n}`, shipmentKey: `INV${n}`, lineNo: 1,
-  item: { title: `Product ${n} 50 LB. BAG` }, err: new Error(`boom ${n}`),
+const entry = (n, receivedAt = '2026-11-25T15:00:00Z', lineNo = 1, title = `Product ${n} 50 LB. BAG`) => failedLineEntry({
+  receipt: { vendor: 'siteone' }, email: { id: 'mail-a', received_at: receivedAt }, orderNumber: `INV${n}`, shipmentKey: `INV${n}`, lineNo,
+  item: { title }, err: new Error(`boom ${n}`),
 });
 const emailEntry = (id = 's1', receivedAt = '2026-11-25T15:00:00Z') => failedEmailEntry({ vendor: 'siteone', email: { id, received_at: receivedAt } });
 const rowFor = (e, extra = {}) => ({ vendor: e.vendor, order_number: e.orderNumber, shipment_key: e.shipmentKey, line_no: e.lineNo, raw_title: 'other', email_id: 'x', ...extra });
@@ -185,6 +185,29 @@ describe('what keeps and what drops an entry', () => {
     mockState.rows.push(rowFor(failed, { line_no: failed.lineNo, raw_title: 'Other', email_id: 'copy-b' }));
     mockEpisodes.raiseAdminAlertWithReopen.mockClear();
     expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(0);
+  });
+
+  test('a recorded sibling line with the same title never clears a rolled-back line (line 1 recorded, line 2 failed)', async () => {
+    const failed = entry(1, '2026-11-25T15:00:00Z', 2);
+    mockState.rows = [rowFor(failed, { line_no: 1, raw_title: 'Product 1 50 LB. BAG', email_id: 'mail-a' })];
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(1);
+    // Even when another copy also holds one row with that text, the failing email's own sibling makes it ambiguous.
+    mockState.rows.push(rowFor(failed, { line_no: 5, raw_title: 'product 1 50 lb bag', email_id: 'copy-b' }));
+    expect(await reconcileFailedLineAlert({ failed: [failed], settled: [] })).toBe(1);
+  });
+
+  test('text fallback is one-to-one: two failed entries with one text and one other-copy row clear neither', async () => {
+    const [one, two] = [entry(1, '2026-11-25T15:00:00Z', 1), entry(1, '2026-11-25T15:00:00Z', 2)];
+    mockState.rows = [rowFor(one, { line_no: 9, raw_title: 'Product 1 50 LB. BAG', email_id: 'copy-b' })];
+    expect(await reconcileFailedLineAlert({ failed: [one, two], settled: [] })).toBe(2);
+  });
+
+  test('a row that already matches another entry by line number cannot also clear a second entry by text', async () => {
+    const a = entry(1, '2026-11-25T15:00:00Z', 1, 'Taurus SC 78 oz');
+    const b = entry(1, '2026-11-25T15:00:00Z', 2, 'CrossCheck 1 gal');
+    mockState.rows = [rowFor(b, { line_no: 2, raw_title: 'Taurus SC 78 oz', email_id: 'copy-b' })];
+    expect(await reconcileFailedLineAlert({ failed: [a, b], settled: [] })).toBe(1);
+    expect(raised()[3].metadata.itemKeys).toEqual([a.key]);
   });
 
   test('another invoice, or another line with other text, never hides a failed line', async () => {

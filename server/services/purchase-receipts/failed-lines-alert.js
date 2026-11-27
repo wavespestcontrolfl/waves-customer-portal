@@ -48,7 +48,7 @@ const emailKey = (vendor, emailId) => `email|${vendor}|${emailId}`;
 function failedLineEntry({ receipt, email, orderNumber, shipmentKey, lineNo, item, err }) {
   const entry = { vendor: receipt.vendor, orderNumber: orderNumber || 'unknown', shipmentKey, lineNo };
   return {
-    ...entry, key: lineKey(entry), title: cutAtWord(String(item.title || '').trim(), 80), titleKey: normalizeTitle(item.title),
+    ...entry, key: lineKey(entry), title: cutAtWord(String(item.title || '').trim(), 80), titleKey: normalizeTitle(item.title), emailId: email.id,
     reason: cutAtWord(scrubSentryText(String(err.message || err).split('\n')[0]), 100),
     receivedAt: new Date(email.received_at).toISOString(),
   };
@@ -61,10 +61,20 @@ function failedEmailEntry({ vendor, email }) {
 
 // A line's identity across copies of one invoice. The sweep keys a SiteOne invoice by its number whichever email
 // carries it (siteOneInvoiceLines: the first copy handled owns the shipment), so a row from ANY email under the same
-// vendor and shipment_key counts, matched by line number, or by product text only when that text occurs exactly once
-// among the invoice's rows (a copy that numbered the lines differently); a repeated text proves nothing about which line it was.
-const byLine = (vendor, shipmentKey, lineNo) => `${vendor}|${shipmentKey}|line|${lineNo}`;
-const byTitle = (vendor, shipmentKey, title) => `${vendor}|${shipmentKey}|title|${normalizeTitle(title)}`;
+// vendor and shipment_key can be this line. The exact line number comes first. Product text is a one-to-one fallback
+// for a copy that numbered the lines differently, and clears an entry only when it is unambiguous: the entry's text
+// is the only failed entry with it on that invoice, exactly one row on the invoice has that text, that row came from
+// ANOTHER email (a sibling line of the failing email, even with identical text, is a different line) and its line
+// number is not another entry's own number. Texts that collapse to one normalized text count as the same text.
+const sameText = (row, entry) => normalizeTitle(row.raw_title) === entry.titleKey;
+
+function textClears(entry, rows, group) {
+  if (!entry.titleKey || entry.emailId == null) return false;
+  if (group.filter((other) => other.titleKey === entry.titleKey).length !== 1) return false;
+  const matches = rows.filter((row) => sameText(row, entry));
+  return matches.length === 1 && String(matches[0].email_id) !== String(entry.emailId)
+    && !group.some((other) => other.key !== entry.key && Number(other.lineNo) === Number(matches[0].line_no));
+}
 
 // Keys that already have a purchase_receipt_lines row: a line by its identity above; an email ONLY by a row whose
 // source email is that email (an older email's rows under the same invoice number say nothing about a newer read).
@@ -72,20 +82,20 @@ async function recordedKeys(entries, conn) {
   const recorded = new Set();
   const lines = entries.filter((entry) => entry.kind !== 'email');
   const shipments = [...new Set(lines.map((entry) => entry.shipmentKey))];
-  const identities = new Set();
-  const titleCounts = new Map();
+  const rowsByShipment = new Map();
   for (let i = 0; i < shipments.length; i += ROW_CHECK_CHUNK) {
     const rows = await conn('purchase_receipt_lines').whereIn('shipment_key', shipments.slice(i, i + ROW_CHECK_CHUNK))
-      .select('vendor', 'shipment_key', 'line_no', 'raw_title');
+      .select('vendor', 'shipment_key', 'line_no', 'raw_title', 'email_id');
     for (const row of rows) {
-      identities.add(byLine(row.vendor, row.shipment_key, row.line_no));
-      const title = byTitle(row.vendor, row.shipment_key, row.raw_title);
-      titleCounts.set(title, (titleCounts.get(title) || 0) + 1);
+      const id = `${row.vendor}|${row.shipment_key}`;
+      rowsByShipment.set(id, [...(rowsByShipment.get(id) || []), row]);
     }
   }
   for (const entry of lines) {
-    if (identities.has(byLine(entry.vendor, entry.shipmentKey, entry.lineNo))
-      || (entry.titleKey && titleCounts.get(byTitle(entry.vendor, entry.shipmentKey, entry.titleKey)) === 1)) recorded.add(entry.key);
+    const id = `${entry.vendor}|${entry.shipmentKey}`;
+    const rows = rowsByShipment.get(id) || [];
+    const group = lines.filter((other) => `${other.vendor}|${other.shipmentKey}` === id);
+    if (rows.some((row) => Number(row.line_no) === Number(entry.lineNo)) || textClears(entry, rows, group)) recorded.add(entry.key);
   }
   const emails = entries.filter((entry) => entry.kind === 'email');
   if (emails.length) {
