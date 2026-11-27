@@ -480,6 +480,32 @@ describe('handleLeadInquiry — lead-creation guards', () => {
     expect(state.firstTables).toHaveLength(0);
   });
 
+  test('Google Local Services non-call inquiry from localservices-noreply@google.com still reaches contact/review checks (never stores automated sender or drafts reply)', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    const gmailClient = require('../services/email/gmail-client');
+    const state = setupDb();
+
+    const result = await handleLeadInquiry(
+      makeEmail({
+        from_address: 'localservices-noreply@google.com',
+        from_name: 'Local Services by Google',
+        reply_to: 'localservices-noreply@google.com',
+        subject: 'New message from a potential customer',
+      }),
+      makeClassification({
+        extracted: {
+          person_name: '',
+          email: 'localservices-noreply@google.com',
+          phone: '',
+        },
+      }),
+    );
+
+    expect(result).toEqual({ action: 'lead_needs_review', reason: 'automated_sender_no_contact' });
+    expect(insertsFor(state, 'leads')).toHaveLength(0);
+    expect(gmailClient.createDraft).not.toHaveBeenCalled();
+  });
+
   test('prefixed no-reply sender with no real extracted contact never mints a lead or Gmail draft', async () => {
     process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
     const gmailClient = require('../services/email/gmail-client');
@@ -676,8 +702,10 @@ describe('lead-guard helpers', () => {
   test('isHardSkippedLeadSender matches the machine-noise list', () => {
     expect(isHardSkippedLeadSender('voicemail@twimlets.com')).toBe(true);
     expect(isHardSkippedLeadSender('anything@twimlets.com')).toBe(true);
-    expect(isHardSkippedLeadSender('localservices-noreply@google.com')).toBe(true);
-    expect(isHardSkippedLeadSender('LocalServices-NoReply@google.com')).toBe(true);
+    expect(isHardSkippedLeadSender('localservices-noreply@google.com', 'New call from a potential customer')).toBe(true);
+    expect(isHardSkippedLeadSender('LocalServices-NoReply@google.com', 'Missed call from a potential customer')).toBe(true);
+    expect(isHardSkippedLeadSender('localservices-noreply@google.com', 'New message from a potential customer')).toBe(false);
+    expect(isHardSkippedLeadSender('localservices-noreply@google.com')).toBe(false);
     // Marketplace-solicitor domains match by registrable domain, any local
     // part, subdomains included.
     expect(isHardSkippedLeadSender('team@bark.com')).toBe(true);
@@ -699,10 +727,13 @@ describe('lead-guard helpers', () => {
     expect(isAutomatedSender('notifications@anything.example.com')).toBe(true);
     expect(isAutomatedSender('notifications+leads@anything.example.com')).toBe(true);
     expect(isAutomatedSender('localservices-noreply@google.com')).toBe(true);
+    expect(isAutomatedSender('localservices-noreply+tag@google.com')).toBe(true);
     expect(isAutomatedSender('billing.no-reply@example.com')).toBe(true);
     expect(isAutomatedSender('alerts_do_not_reply@example.com')).toBe(true);
     expect(isAutomatedSender('noreply-forms@example.com')).toBe(true);
     expect(isAutomatedSender('donotreply+123@example.com')).toBe(true);
+    // Human mailboxes with a +noreply subaddress tag stay eligible for drafts/matching.
+    expect(isAutomatedSender('alex+noreply@example.com')).toBe(false);
     expect(isAutomatedSender('monoreply@example.com')).toBe(false);
     expect(isAutomatedSender('noah.reply@example.com')).toBe(false);
     expect(isAutomatedSender('jane.prospect@example.com')).toBe(false);

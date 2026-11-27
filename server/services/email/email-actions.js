@@ -622,12 +622,16 @@ async function findEmailLeadSourceId() {
 // which email-sync honors (auto-trash) before an email is ever classified.
 const LEAD_HARD_SKIP_SENDERS = [
   '@twimlets.com', // Twilio voicemail relay robots
-  // Google Local Services Ads automated call-receipt notifications ("New call
-  // from a potential customer"): caller details live behind a dashboard link,
-  // never in the email body, and the inbound Twilio call already creates the
-  // real lead and bell. Owner ruling 2026-11-27.
-  'localservices-noreply@google.com',
 ];
+
+// Google Local Services Ads automated call-receipt notifications ("New call
+// from a potential customer" / "Missed call from a potential customer"):
+// caller details live behind a dashboard link, and the inbound Twilio call
+// already creates the real lead and bell. Scoped to call-receipt subjects so
+// non-call LSA messages still reach the automated-sender contact/review guards.
+// Owner ruling 2026-11-27.
+const GOOGLE_LSA_RECEIPT_SENDER = 'localservices-noreply@google.com';
+const GOOGLE_LSA_CALL_RECEIPT_SUBJECT_RE = /^\s*(?:new|missed)\s+call\s+from\s+a\s+potential\s+customer\b/i;
 
 // Lead-marketplace solicitors (pay-to-unlock model, e.g. Bark): their
 // "X is looking for pest control" notifications NEVER contain the
@@ -653,8 +657,9 @@ const LEAD_MARKETPLACE_SOLICITOR_DOMAINS = ['bark.com', 'thumbtack.com'];
 const AUTOMATED_SENDER_LOCAL_PARTS = ['do-not-reply', 'no-reply', 'noreply', 'donotreply', 'notifications'];
 // Matches prefixed/suffixed no-reply mailboxes (e.g. localservices-noreply@,
 // billing.no-reply@, alerts_donotreply@, noreply-leads@) on token boundaries
-// so human addresses stay unaffected.
-const AUTOMATED_NOREPLY_TOKEN_RE = /(?:^|[._+-])(?:do[-_.]?not[-_.]?reply|no[-_.]?reply|noreply|donotreply)(?:$|[._+-])/i;
+// against the base local part (before any +tag) so human addresses like
+// alex+noreply@example.com stay unaffected.
+const AUTOMATED_NOREPLY_TOKEN_RE = /(?:^|[._-])(?:do[-_.]?not[-_.]?reply|no[-_.]?reply|noreply|donotreply)(?:$|[._-])/i;
 const AUTOMATED_RELAY_DOMAINS = [];
 
 // Subject of the Waves auto-acknowledgment automation email
@@ -674,9 +679,12 @@ function leadMinConfidence() {
   return Number.isFinite(parsed) ? parsed : DEFAULT_LEAD_MIN_CONFIDENCE;
 }
 
-function isHardSkippedLeadSender(fromAddress) {
+function isHardSkippedLeadSender(fromAddress, subject = null) {
   const normalized = normalizeAddress(fromAddress);
   if (!normalized) return false;
+  if (normalized === GOOGLE_LSA_RECEIPT_SENDER && GOOGLE_LSA_CALL_RECEIPT_SUBJECT_RE.test(String(subject || ''))) {
+    return true;
+  }
   if (LEAD_HARD_SKIP_SENDERS.some((entry) => (
     entry.startsWith('@') ? normalized.endsWith(entry) : normalized === entry
   ))) return true;
@@ -687,10 +695,9 @@ function isAutomatedSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   const at = normalized.lastIndexOf('@');
   if (at < 1) return false;
-  const localPart = normalized.slice(0, at);
-  const baseLocalPart = localPart.split('+')[0];
+  const baseLocalPart = normalized.slice(0, at).split('+')[0];
   if (AUTOMATED_SENDER_LOCAL_PARTS.includes(baseLocalPart)) return true;
-  if (AUTOMATED_NOREPLY_TOKEN_RE.test(localPart)) return true;
+  if (AUTOMATED_NOREPLY_TOKEN_RE.test(baseLocalPart)) return true;
   return domainMatches(normalized.slice(at + 1), AUTOMATED_RELAY_DOMAINS);
 }
 
@@ -796,7 +803,7 @@ async function handleLeadInquiry(email, classification) {
   const extracted = classification.extracted || {};
 
   // Guard: hard-skip senders are pure machine noise — never a lead (silent).
-  if (isHardSkippedLeadSender(email.from_address)) {
+  if (isHardSkippedLeadSender(email.from_address, email.subject)) {
     await db('emails').where({ id: email.id }).update({
       auto_action: 'lead_skipped_automated_sender',
       updated_at: new Date(),
