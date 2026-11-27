@@ -998,3 +998,67 @@ describe('PATCH /:id/status — an offer the applicant holds is withdrawn only b
     expect(mockDb.__rows()[0].status).toBe('rejected');
   });
 });
+
+describe('Interview link redaction & contact-change handoff invalidation', () => {
+  const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
+  afterEach(() => { mockStaffEmail = null; });
+
+  test('non-owner detail responses redact interview URLs and tokens from comms_history while owner keeps them', async () => {
+    const url = `https://portal.wavespestcontrol.com/careers/interview/${TOKEN}`;
+    mockDb.__setRows([appRow({
+      status: 'interview',
+      interview_token: TOKEN,
+      comms_history: [
+        { id: 'c1', stage: 'interview_invite', channel: 'sms', outcome: 'sent', body: `Pick a time here: ${url}` },
+        { id: 'c2', stage: 'interview_invite', channel: 'email', outcome: 'sent', subject: 'Interview invite', body: `Link: ${url} (${TOKEN})` },
+      ],
+    })]);
+
+    // Non-owner admin gets null interview_url and redacted comms_history.
+    mockStaffEmail = null;
+    const nonOwnerRes = await fetch(`${base}/api/admin/careers/${APP_ID}`);
+    const nonOwnerBody = await nonOwnerRes.json();
+    expect(nonOwnerRes.status).toBe(200);
+    expect(nonOwnerBody.application.interview_url).toBeNull();
+    expect(nonOwnerBody.application.has_interview_link).toBe(true);
+    expect(JSON.stringify(nonOwnerBody.application.comms_history)).not.toContain(TOKEN);
+    expect(nonOwnerBody.application.comms_history[0].body).toContain('/careers/interview/[link hidden]');
+    expect(nonOwnerBody.application.comms_history[1].body).toContain('/careers/interview/[link hidden]');
+
+    // Owner account keeps the full interview_url and unredacted history; stored DB row was never mutated.
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    const ownerRes = await fetch(`${base}/api/admin/careers/${APP_ID}`);
+    const ownerBody = await ownerRes.json();
+    expect(ownerRes.status).toBe(200);
+    expect(ownerBody.application.interview_url).toBe(url);
+    expect(ownerBody.application.comms_history[0].body).toContain(TOKEN);
+  });
+
+  test('changing applicant email or phone via PATCH /:id/contact invalidates pending interview invite handoff', async () => {
+    mockDb.__setRows([appRow({
+      status: 'reviewed',
+      contact_snapshot: { name: 'Jane Doe', phone: '9415550142', email: 'typo@example.com', city: 'Sarasota' },
+    })]);
+
+    let eligibilityBeforeEdit = null;
+    let eligibilityAfterEmailEdit = null;
+    mockSendStageComms.mockImplementationOnce(async (_app, _stage, opts) => {
+      eligibilityBeforeEdit = await opts.stillEligible();
+      // Simulate admin correcting the applicant's email before provider handoff completes.
+      const patchRes = await fetch(`${base}/api/admin/careers/${APP_ID}/contact`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Jane Doe', phone: '9415550142', email: 'fixed@example.com', city: 'Sarasota' }),
+      });
+      expect(patchRes.status).toBe(200);
+      eligibilityAfterEmailEdit = await opts.stillEligible();
+      return { sms: 'sent', email: 'stale' };
+    });
+
+    const res = await patch(APP_ID, { status: 'interview', notify: { sms: true, email: true } });
+    expect(res.status).toBe(200);
+    expect(eligibilityBeforeEdit).toBe(true);
+    expect(eligibilityAfterEmailEdit).toBe(false);
+  });
+});

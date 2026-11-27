@@ -52,11 +52,46 @@ function stripControlChars(value) {
   return String(value).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '').trim();
 }
 
+const INTERVIEW_LINK_RE = /(\/careers\/interview\/)([0-9a-f]{32,128})/gi;
+const INTERVIEW_LINK_HIDDEN = '[link hidden]';
+
+function redactInterviewString(value, tokenRe) {
+  let out = value.replace(INTERVIEW_LINK_RE, `$1${INTERVIEW_LINK_HIDDEN}`);
+  if (tokenRe) out = out.replace(tokenRe, INTERVIEW_LINK_HIDDEN);
+  return out;
+}
+
+function redactCommsHistory(history, token) {
+  const tokenRe = typeof token === 'string' && token.length >= 16
+    ? new RegExp(token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi')
+    : null;
+  return history.map((entry) => {
+    if (!entry || typeof entry !== 'object') return entry;
+    const next = { ...entry };
+    for (const field of ['body', 'subject', 'text', 'html']) {
+      if (typeof next[field] === 'string') next[field] = redactInterviewString(next[field], tokenRe);
+    }
+    return next;
+  });
+}
+
+function contactSnapshotOf(row) {
+  const raw = row && row.contact_snapshot;
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw) || {}; } catch { return {}; }
+  }
+  return typeof raw === 'object' ? raw : {};
+}
+
 function withoutToken(row, { includeInterviewUrl = false } = {}) {
   if (!row) return row;
   const { interview_token, ...rest } = row;
   return {
     ...rest,
+    ...(!includeInterviewUrl && Array.isArray(rest.comms_history)
+      ? { comms_history: redactCommsHistory(rest.comms_history, interview_token) }
+      : {}),
     has_interview_link: Boolean(interview_token),
     interview_url: includeInterviewUrl && interview_token ? RecruitingComms.interviewUrlFor(interview_token) : null,
   };
@@ -558,13 +593,22 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
     // booking (or re-booking) that landed since the committed row was read
     // makes that email obsolete — the confirmation already covers it.
     const sameInstant = (a, b) => (!a && !b) || (Boolean(a) && Boolean(b) && new Date(a).getTime() === new Date(b).getTime());
+    const prevContact = contactSnapshotOf(updated);
+    const normContact = (v) => (typeof v === 'string' ? v.trim() : '');
+    const sameContact = (row) => {
+      const curr = contactSnapshotOf(row);
+      const smsOk = !plan.wantSms || normContact(curr.phone) === normContact(prevContact.phone);
+      const emailOk = !plan.wantEmail || normContact(curr.email).toLowerCase() === normContact(prevContact.email).toLowerCase();
+      return smsOk && emailOk;
+    };
     const inviteStillCurrent = (row) => Boolean(row)
       && row.status === 'interview'
       && row.interview_token === updated.interview_token
       && sameInstant(row.interview_booked_at, updated.interview_booked_at)
-      && sameInstant(row.interview_at, updated.interview_at);
+      && sameInstant(row.interview_at, updated.interview_at)
+      && sameContact(row);
     const current = await db('job_applications').where({ id: updated.id })
-      .first('status', 'interview_token', 'interview_booked_at', 'interview_at');
+      .first('status', 'interview_token', 'interview_booked_at', 'interview_at', 'contact_snapshot');
     if (!inviteStillCurrent(current)) {
       throw Object.assign(new Error('stage changed before send'), { name: 'StaleStageError', code: 'stale_stage' });
     }
@@ -578,7 +622,7 @@ async function deliverStageComms(applicationId, technicianId, updated, plan) {
       : undefined;
     const stillEligible = async (conn = db) => {
       const now = await conn('job_applications').where({ id: updated.id })
-        .first('status', 'interview_token', 'interview_booked_at', 'interview_at');
+        .first('status', 'interview_token', 'interview_booked_at', 'interview_at', 'contact_snapshot');
       return inviteStillCurrent(now);
     };
 
@@ -689,7 +733,7 @@ router.patch('/:id/contact', async (req, res) => {
     const updated = await db.transaction(async (trx) => {
       const row = await trx('job_applications').where({ id: req.params.id }).forUpdate().first();
       if (!row) return null;
-      const prev = row.contact_snapshot && typeof row.contact_snapshot === 'object' ? row.contact_snapshot : {};
+      const prev = contactSnapshotOf(row);
       const nextContact = {
         ...prev,
         name,

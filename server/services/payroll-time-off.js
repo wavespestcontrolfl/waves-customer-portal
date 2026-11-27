@@ -511,6 +511,8 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
   requireUuid(technicianId, 'Technician');
   const v = validate(weekMinimumSchema, input);
   const actorId = actorOf(actor);
+  const shownLastDay = v.shown ? (v.shown.lastDay || null) : null;
+  const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
   const row = await conn.transaction(async (trx) => {
     // The lock finalizeRun takes: the setting never changes under a finalize. A draft read before the save is stale
     // after it (the check and its token change).
@@ -521,31 +523,33 @@ async function setWeekMinimum(technicianId, input, actor, conn = db) {
         // A hire date the calendar code cannot read is none, as the pay run reads it.
         trx.raw(`${require('./tech-rewards-pay-lines').HIRE_DATE_SQL} AS hire_date`));
     if (!tech) throw new PayrollError(404, 'Technician not found.');
-    if (v.shown && (!sameHours(v.shown.hours, tech.paid_week_minimum_hours) || (v.shown.lastDay || null) !== tech.last_day)) {
+    if (v.shown && (!sameHours(v.shown.hours, tech.paid_week_minimum_hours) || shownLastDay !== tech.last_day)) {
       throw new PayrollError(409, WEEK_MINIMUM_STALE);
     }
     // Clearing is always allowed: a setting kept from W-2 days must not come back when the person is W-2 again.
-    if (v.hours != null && tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
     // The first week counts the days from the hire date: without one it cannot be counted.
-    if (v.hours != null && !tech.hire_date) throw new PayrollError(409, 'Enter a readable hire date first (Staff), then set the minimum.');
+    if (v.hours != null) {
+      if (tech.employment_type !== 'w2') throw new PayrollError(409, 'A minimum paid week is for W-2 employees.');
+      if (!tech.hire_date) throw new PayrollError(409, 'Enter a readable hire date first (Staff), then set the minimum.');
+    }
     // Clearing the minimum keeps the last day on file: the paid weeks it shaped stay as they were, and a rehire (a
     // later hire date) does not read it again.
     const lastDay = v.lastDay === undefined ? tech.last_day : v.lastDay;
-    // A last day before the hire date ended an earlier stay (a rehire moved the hire date past it): the pay run no
-    // longer reads it, so it is not guarded and can be cleared or replaced.
-    const shownLast = tech.last_day && tech.hire_date && tech.last_day < tech.hire_date ? null : tech.last_day;
-    if (lastDay && lastDay !== tech.last_day && tech.hire_date && lastDay < tech.hire_date) {
-      throw new PayrollError(400, `The last day must be on or after the hire date (${tech.hire_date}).`);
-    }
-    if (lastDay !== tech.last_day && (lastDay || shownLast)) {
-      const earliest = [lastDay, shownLast].filter(Boolean).sort()[0];
-      const week = staffWeekStartForWorkDate(earliest);
+    if (lastDay !== tech.last_day) {
+      const hireDate = tech.hire_date || '';
+      if (lastDay && lastDay < hireDate) {
+        throw new PayrollError(400, `The last day must be on or after the hire date (${tech.hire_date}).`);
+      }
+      // A last day before the hire date ended an earlier stay (a rehire moved the hire date past it): the pay run no
+      // longer reads it, so it is not guarded and can be cleared or replaced.
+      const activeOldLast = tech.last_day >= hireDate ? tech.last_day : null;
+      const earliest = [lastDay, activeOldLast].filter(Boolean).sort()[0];
+      const week = earliest ? staffWeekStartForWorkDate(earliest) : null;
       // A final check of the employee, or a final run that left their time off unpaid with no check: either week is
       // closed, and a new last day could owe it more.
       if (await findFinalizedCheckOnOrAfter(trx, tech.id, week, true)) throw new PayrollError(409, LAST_DAY_PAID(week));
     }
     if (v.fromWeek || !sameHours(v.hours, tech.paid_week_minimum_hours)) {
-      const effectiveWeek = v.fromWeek || staffWeekStartForWorkDate(etDateString());
       if (await findFinalizedCheckOnOrAfter(trx, tech.id, v.fromWeek, true)) {
         throw new PayrollError(409, `A final pay run already covers this employee for the week of ${effectiveWeek} or later. Void that pay run first or pick a later week.`);
       }
