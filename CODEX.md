@@ -5,7 +5,7 @@ startup, debugging and QA procedure. Work from the task checkout, never another
 session's branch. No production database access is part of local setup.
 
 ```sh
-npm ci
+npm ci                       # on the owner's multi-session Mac, use ~/.claude/bin/npm-ci-serial
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client

@@ -1,14 +1,13 @@
 # Waves Pest Control — Operations Platform
 
-AI-native operations platform for Waves Pest Control & Lawn Care (SW Florida).
+AI-native operations platform for Waves Pest Control (SW Florida).
 One monorepo serves three surfaces plus the automation that runs the business:
 
-- **Admin portal** (`/admin/*`) — owner/CSR dashboard: dispatch, customers,
+- **Admin portal** (`/admin/*`) — owner/CSR dashboard and all new field technician UI: dispatch, customers,
   estimates, communications, revenue, SEO/content, and the ⌘K Intelligence Bar.
 - **Customer portal** (`/`) — customer-facing PWA: service tracking, reports,
   payments, referrals.
-- **Tech portal** (`/tech/*`) — field technician mobile app: route, protocols,
-  service completion, estimating.
+- **Tech portal** (`/tech/*`) — deprecated legacy field UI (new field features go in `/admin/*`).
 
 ## Stack
 
@@ -48,7 +47,7 @@ wiki/              Dispatch/service protocols (seeded into the in-app knowledge 
 ## Development
 
 ```bash
-npm ci
+npm ci                       # on the owner's multi-session Mac, use ~/.claude/bin/npm-ci-serial
 npm run worktree:setup
 npm run dev:managed-client # assigned frontend port; no database needed
 ```
@@ -70,8 +69,10 @@ Key commands:
 Railway only — project `waves-pest-control`. Build, start, health check and
 pre-deploy migrations are Railway service settings (Railway drops Config as
 Code on 2026-12-01). See `docs/DEPLOYMENT.md` for the full
-runbook. User-visible features ship dark behind `GATE_*` env switches
-(see `.env.example`).
+runbook. Changes that send customer comms, change prices, move money, delete
+data, spend money, add a public `/:token` route, or carry a named kill-switch
+risk ship dark behind `GATE_*` env switches (see `docs/gates-and-env.md`);
+everything else ships live.
 
 ## Where the real documentation lives
 
