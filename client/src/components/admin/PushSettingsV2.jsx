@@ -46,7 +46,11 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then((r) => {
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!r.ok) {
+      const err = new Error(`HTTP ${r.status}`);
+      err.status = r.status;
+      throw err;
+    }
     return r.json();
   });
 }
@@ -189,15 +193,23 @@ export default function PushSettingsV2() {
       });
       showToast("Preferences saved");
     } catch (e) {
-      // PUT updates rows one at a time and a dropped response can still mean
-      // some or all rows committed server-side: reload authoritative server
-      // preferences before reporting which settings are active.
-      const reloaded = await loadPreferences();
-      setPushError(
-        reloaded
-          ? `Couldn't confirm saving notification preferences (${e.message}). Reloaded saved settings from the server.`
-          : `Couldn't save notification preferences (${e.message}), and reloading saved settings failed. Try again before saving.`,
-      );
+      // Distinguish confirmed HTTP responses (the server transaction finished
+      // and rolled back) from dropped connections / timeouts (unknown outcome:
+      // the server request may still be in flight, so keep controls locked
+      // until the user explicitly reloads via Try again).
+      if (e?.status) {
+        const reloaded = await loadPreferences();
+        setPushError(
+          reloaded
+            ? `Couldn't save notification preferences (${e.message}). Reloaded saved settings from the server.`
+            : `Couldn't save notification preferences (${e.message}), and reloading saved settings failed. Try again before saving.`,
+        );
+      } else {
+        setPrefsFailed(true);
+        setPushError(
+          `Connection dropped while saving notification preferences (${e?.message || "network error"}). Try again once connected to reload saved settings before making changes.`,
+        );
+      }
     } finally {
       setSaving(false);
     }
@@ -392,7 +404,8 @@ export default function PushSettingsV2() {
               Customer communication (texts, emails, calls, voicemails, new
               leads) rings by default. Most categories below start off;
               categories that start on can also be silenced here. Each toggle
-              controls that category&apos;s bell and phone banner.
+              controls that category&apos;s bell (and phone banner, for
+              categories that send push notifications).
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (

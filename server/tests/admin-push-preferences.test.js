@@ -187,6 +187,7 @@ describe('a technician login (owner 2026-11-04)', () => {
     const onConflict = jest.fn(() => ({ merge: jest.fn().mockResolvedValue() }));
     const insert = jest.fn(() => ({ onConflict }));
     db.mockReturnValue({ insert });
+    db.transaction = jest.fn(async (fn) => fn(db));
     return insert;
   }
 

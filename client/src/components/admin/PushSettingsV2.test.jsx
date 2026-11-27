@@ -113,4 +113,20 @@ it('renders server-filtered triggers, labels all categories, locks switches duri
   expect(screen.getAllByRole('switch')[1]).toHaveAttribute('aria-checked', 'true');
   expect(screen.getAllByRole('switch')[0]).not.toBeDisabled();
   expect(alertSpy).not.toHaveBeenCalled();
+
+  // Unknown network drop: keeps controls locked until the user clicks Try again
+  // instead of racing a recovery GET against a still-running server write.
+  global.fetch = vi.fn((_url, options) => {
+    if (options?.method === 'PUT') return Promise.reject(new TypeError('Failed to fetch'));
+    return Promise.resolve({ ok: true, json: async () => reloadedAfterPartial });
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByText(/Connection dropped while saving notification preferences/)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+  for (const sw of screen.getAllByRole('switch')) {
+    expect(sw).toBeDisabled();
+  }
+  expect(global.fetch).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
 });

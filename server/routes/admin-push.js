@@ -359,31 +359,33 @@ router.put('/preferences', async (req, res, next) => {
       }
     }
     let touchedCategoryKey = false;
-    for (const u of updates) {
-      if (!u.key) continue;
-      // A technician mutes only the types it can receive; any other key is skipped.
-      if (req.techRole !== 'admin' && !techMayMute(u.key)) continue;
-      const isCategoryKey = typeof u.key === 'string' && u.key.startsWith('category:');
-      // Category rows only carry bell_enabled (push/sound are meaningless
-      // for the bell policy) — store the other flags as true so the
-      // /diagnose "disabled prefs" check doesn't flag them as muted pushes.
-      const row = isCategoryKey
-        ? { push_enabled: true, bell_enabled: !!u.bell_enabled, sound_enabled: true }
-        : {
-          push_enabled: !!u.push_enabled,
-          bell_enabled: !!u.bell_enabled,
-          sound_enabled: !!u.sound_enabled,
-        };
-      await db('notification_preferences')
-        .insert({
-          admin_user_id: adminUserId,
-          trigger_key: u.key,
-          ...row,
-        })
-        .onConflict(['admin_user_id', 'trigger_key'])
-        .merge({ ...row, updated_at: new Date() });
-      if (isCategoryKey) touchedCategoryKey = true;
-    }
+    await db.transaction(async (trx) => {
+      for (const u of updates) {
+        if (!u.key) continue;
+        // A technician mutes only the types it can receive; any other key is skipped.
+        if (req.techRole !== 'admin' && !techMayMute(u.key)) continue;
+        const isCategoryKey = typeof u.key === 'string' && u.key.startsWith('category:');
+        // Category rows only carry bell_enabled (push/sound are meaningless
+        // for the bell policy) — store the other flags as true so the
+        // /diagnose "disabled prefs" check doesn't flag them as muted pushes.
+        const row = isCategoryKey
+          ? { push_enabled: true, bell_enabled: !!u.bell_enabled, sound_enabled: true }
+          : {
+            push_enabled: !!u.push_enabled,
+            bell_enabled: !!u.bell_enabled,
+            sound_enabled: !!u.sound_enabled,
+          };
+        await trx('notification_preferences')
+          .insert({
+            admin_user_id: adminUserId,
+            trigger_key: u.key,
+            ...row,
+          })
+          .onConflict(['admin_user_id', 'trigger_key'])
+          .merge({ ...row, updated_at: new Date() });
+        if (isCategoryKey) touchedCategoryKey = true;
+      }
+    });
     // Apply an override toggle immediately instead of after the policy's
     // ~60s cache window.
     if (touchedCategoryKey) clearOverrideCache();
