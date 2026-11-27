@@ -361,7 +361,7 @@ describe('llm/circuit-breaker', () => {
       const pdfPolicy = {
         name: 'testPdfCircuit',
         primary: { provider: 'openai', model: MODELS.OPENAI_FAST },
-        fallback: { provider: 'gemini', model: MODELS.GEMINI_FAST },
+        fallback: { provider: 'gemini', model: MODELS.GEMINI_VISION_BEST },
       };
       global.fetch.mockResolvedValueOnce({
         ok: true,
@@ -433,10 +433,9 @@ describe('llm/circuit-breaker', () => {
       expect(rPdfTextOnly.ok).toBe(true);
       expect(rPdfTextOnly.provider).toBe('anthropic');
       cb.resetCircuitBreakers();
-      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
-      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
 
-      // When payload requires tools (Anthropic-only in dispatch()), OpenAI backup cannot serve it, so Anthropic primary is NOT skipped.
+      // When payload requires tools (Anthropic-only in dispatch()), OpenAI backup is closed/healthy
+      // yet still cannot serve tools, so Anthropic primary is NOT skipped.
       cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
       cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
       const toolsPolicy = {
@@ -544,5 +543,32 @@ describe('llm/circuit-breaker', () => {
     cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 3000 });
     expect(cb.isAvailable('anthropic', { now: 12999 })).toBe(false);
     expect(cb.isAvailable('anthropic', { now: 13000 })).toBe(true);
+
+    // A delayed 401 bound to a pre-rotation credential never poisons the replacement key.
+    process.env.ANTHROPIC_API_KEY = 'replacement-key-3';
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 14000, credential: 'rotated-key-2' });
+    expect(cb.isAvailable('anthropic', { now: 14100 })).toBe(true);
+
+    // An injected client (credential: null) returning 401 never suppresses the env credential.
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 14200, credential: null });
+    expect(cb.isAvailable('anthropic', { now: 14300 })).toBe(true);
+
+    // Cloudflare uses CF_ACCOUNT_ID + CF_WORKERS_AI_TOKEN / CF_API_TOKEN (matching callWorkersAIDecision).
+    const savedCfAcct = process.env.CF_ACCOUNT_ID;
+    const savedCfTok = process.env.CF_WORKERS_AI_TOKEN;
+    const savedCfApi = process.env.CF_API_TOKEN;
+    try {
+      process.env.CF_ACCOUNT_ID = 'acct-1';
+      process.env.CF_WORKERS_AI_TOKEN = 'bad-cf-tok';
+      delete process.env.CF_API_TOKEN;
+      cb.afterAttempt('cloudflare', { ok: false, reason: 'cloudflare_401', now: 15000 });
+      expect(cb.isAvailable('cloudflare', { now: 15100 })).toBe(false);
+      process.env.CF_WORKERS_AI_TOKEN = 'fixed-cf-tok';
+      expect(cb.isAvailable('cloudflare', { now: 15200 })).toBe(true);
+    } finally {
+      if (savedCfAcct === undefined) delete process.env.CF_ACCOUNT_ID; else process.env.CF_ACCOUNT_ID = savedCfAcct;
+      if (savedCfTok === undefined) delete process.env.CF_WORKERS_AI_TOKEN; else process.env.CF_WORKERS_AI_TOKEN = savedCfTok;
+      if (savedCfApi === undefined) delete process.env.CF_API_TOKEN; else process.env.CF_API_TOKEN = savedCfApi;
+    }
   });
 });

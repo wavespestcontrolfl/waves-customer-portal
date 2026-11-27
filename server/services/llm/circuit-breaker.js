@@ -53,7 +53,11 @@ function providerCredential(provider) {
   if (provider === 'anthropic') return process.env.ANTHROPIC_API_KEY || '';
   if (provider === 'gemini') return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
   if (provider === 'typesafe') return process.env.TYPESAFE_API_KEY || '';
-  if (provider === 'cloudflare') return `${process.env.CLOUDFLARE_ACCOUNT_ID || ''}:${process.env.CLOUDFLARE_API_TOKEN || ''}`;
+  if (provider === 'cloudflare') {
+    const token = process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN || '';
+    const account = process.env.CF_ACCOUNT_ID || '';
+    return token && account ? `${account}:${token}` : '';
+  }
   return '';
 }
 
@@ -75,14 +79,16 @@ function isModelResponseReason(provider, reason) {
   return suffix === 'refusal' || suffix === 'incomplete' || suffix.startsWith('finish_');
 }
 
-function isAuthCoolingDown(provider, now) {
+function isAuthCoolingDown(provider, now, credential) {
+  if (credential === null) return false;
   const entry = authFailures.get(provider);
   if (!entry) return false;
+  const current = credential === undefined ? providerCredential(provider) : credential;
   if (now >= entry.expiresAt || entry.credential !== providerCredential(provider)) {
     authFailures.delete(provider);
     return false;
   }
-  return true;
+  return entry.credential === current;
 }
 
 function breakerFor(provider) {
@@ -120,10 +126,10 @@ function isProviderOutageReason(provider, reason, { legMs = null } = {}) {
  * probe in flight. Used before skipping an open primary so two open providers
  * keep primary-first ordering instead of pinning all traffic to the backup.
  */
-function isAvailable(provider, { now = null } = {}) {
+function isAvailable(provider, { now = null, credential } = {}) {
   if (!llmCircuitBreakerLive() || !provider) return true;
   const ts = now ?? Date.now();
-  if (isAuthCoolingDown(provider, ts)) return false;
+  if (isAuthCoolingDown(provider, ts, credential)) return false;
   const breaker = breakers.get(provider);
   if (!breaker || breaker.state === 'closed') return true;
   return breaker.isAvailable(ts, { cooldownMs: cooldownMs() });
@@ -139,9 +145,11 @@ function isAvailable(provider, { now = null } = {}) {
  */
 function reserveBackup(providers = [], { now = null } = {}) {
   const ts = now ?? Date.now();
-  for (const provider of providers) {
+  for (const item of providers) {
+    const provider = typeof item === 'string' ? item : item?.provider;
+    const credential = typeof item === 'string' ? undefined : item?.credential;
     if (!provider) continue;
-    if (isAuthCoolingDown(provider, ts)) continue;
+    if (isAuthCoolingDown(provider, ts, credential)) continue;
     const breaker = breakers.get(provider);
     if (!breaker || breaker.state === 'closed') {
       return { available: true, reservation: null };
@@ -198,11 +206,20 @@ function releaseDisabledProbe(provider, probeId) {
   if (existing) existing.releaseProbe(probeId);
 }
 
-function recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts }) {
+function recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential }) {
+  const usedCred = credential === undefined ? providerCredential(provider) : credential;
+  if (!usedCred) return;
   if (authFailed) {
-    authFailures.set(provider, { expiresAt: ts + cooldownMs(), credential: providerCredential(provider) });
+    // Ignore delayed 401/403 completions from a rotated-out credential so they
+    // never poison the replacement key.
+    if (usedCred === providerCredential(provider)) {
+      authFailures.set(provider, { expiresAt: ts + cooldownMs(), credential: usedCred });
+    }
   } else if (ok || providerResponded) {
-    authFailures.delete(provider);
+    const existing = authFailures.get(provider);
+    if (existing && existing.credential === usedCred) {
+      authFailures.delete(provider);
+    }
   }
 }
 
@@ -214,12 +231,14 @@ function isActiveProbe(breaker, probeId) {
  * Record the outcome of an attempted provider call.
  * Callers must pass `aborted: true` when the caller's own AbortSignal fired so
  * caller-side cancellations (e.g. barge-in or client disconnect) never trip,
- * `legMs` so tight caller deadlines do not trip the provider-wide breaker, and
- * `generation` from `beforeAttempt` so stale pre-recovery completions never
+ * `legMs` so tight caller deadlines do not trip the provider-wide breaker,
+ * `credential` captured before dispatch (or `null` for an injected client) so
+ * delayed auth failures never mark a rotated or unrelated credential broken,
+ * and `generation` from `beforeAttempt` so stale pre-recovery completions never
  * immediately reopen a recovered circuit.
  */
 function afterAttempt(provider, {
-  ok = false, reason = null, aborted = false, probeId = null, generation = null, legMs = null, now = null,
+  ok = false, reason = null, aborted = false, probeId = null, generation = null, legMs = null, now = null, credential,
 } = {}) {
   if (!provider) return;
   if (!llmCircuitBreakerLive()) {
@@ -235,7 +254,7 @@ function afterAttempt(provider, {
   // Avoid calling Date.now() when nothing needs a timestamp.
   const needsClock = outage || authFailed || isActiveProbe(breaker, probeId);
   const ts = needsClock ? (now ?? Date.now()) : 0;
-  recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts });
+  recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential });
   breaker.settleAttempt({
     ok,
     providerResponded,
@@ -273,6 +292,7 @@ module.exports = {
   isProviderOutageReason,
   isModelResponseReason,
   isCredentialFailureReason,
+  providerCredential,
   getCircuitBreakerSnapshot,
   resetCircuitBreakers,
   DEFAULT_FAILURE_THRESHOLD,

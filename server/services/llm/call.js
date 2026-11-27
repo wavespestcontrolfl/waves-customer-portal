@@ -942,12 +942,19 @@ function dispatchWithHardDeadline(route, routePayload, legMs) {
 // Literal provider keys (never dereference PROVIDER.* at module load time —
 // tests that mock config/models without PROVIDER load this module via llm/deep).
 const PROVIDER_CAN_SERVE = {
-  openai: () => Boolean(process.env.OPENAI_API_KEY),
-  gemini: (p) => !p.documents?.length && Boolean(geminiKey()),
-  anthropic: (p) => Boolean(p.anthropicClient || (Anthropic && process.env.ANTHROPIC_API_KEY)),
-  typesafe: (p) => Boolean(process.env.TYPESAFE_API_KEY && p.questions && typeof p.questions === 'object' && !p.images?.length),
-  cloudflare: (p) => Boolean((process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN) && process.env.CF_ACCOUNT_ID && p.questions && typeof p.questions === 'object'),
+  openai: () => Boolean(circuitBreaker.providerCredential('openai')),
+  gemini: (p) => !p.documents?.length && Boolean(circuitBreaker.providerCredential('gemini')),
+  anthropic: (p) => Boolean(p.anthropicClient || (Anthropic && circuitBreaker.providerCredential('anthropic'))),
+  typesafe: (p) => Boolean(circuitBreaker.providerCredential('typesafe') && p.questions && typeof p.questions === 'object' && !p.images?.length),
+  cloudflare: (p) => Boolean(circuitBreaker.providerCredential('cloudflare') && p.questions && typeof p.questions === 'object'),
 };
+
+function credentialForPayload(provider, payload = {}) {
+  // An injected Anthropic client carries its own credentials separate from
+  // process.env.ANTHROPIC_API_KEY and must never share env-key auth cooldown.
+  if (provider === 'anthropic' && payload?.anthropicClient) return null;
+  return circuitBreaker.providerCredential(provider);
+}
 
 function modelSupportsPayload(route, payload) {
   if (route.provider === 'typesafe' && !TYPESAFE_PINNED_MODEL_RE.test(route.model)) return false;
@@ -986,6 +993,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ba
     if (reservationRef && gate.backupReservation) reservationRef.current = gate.backupReservation;
     return { ok: false, reason: gate.reason || 'circuit_open' };
   }
+  const credential = credentialForPayload(route.provider, routePayload);
   let result;
   try {
     result = hardDeadline ? await dispatchWithHardDeadline(route, routePayload, legMs) : await dispatch(route, routePayload);
@@ -1000,6 +1008,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ba
     probeId: gate.probeId,
     generation: gate.generation,
     legMs,
+    credential,
   });
   return result;
 }
@@ -1048,7 +1057,7 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
       const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
       const backupProviders = routes.slice(index + 1)
         .filter((backup) => canRouteServePayload(backup, payload))
-        .map((backup) => backup.provider);
+        .map((backup) => ({ provider: backup.provider, credential: credentialForPayload(backup.provider, payload) }));
       const result = await executeFallbackLeg(route, routePayload, legMs, {
         hardDeadline,
         backupProviders,
