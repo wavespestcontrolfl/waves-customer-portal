@@ -191,6 +191,20 @@ async function buildLinkPlan(input, { database = db } = {}) {
   };
 }
 
+// What happens to the rest of the family, by the writer's own rule (unlinkFamily): it deletes this profile's row, then
+// the last row too when exactly one is left. `rowCount` counts deleted profiles' rows, `others` shows only live ones.
+function whoStays(others, rowCount) {
+  const hidden = rowCount - 1 - others.length;
+  if (rowCount <= 1) return 'No other profile is left in this family (the others were removed), so only this profile\'s leftover link is cleared.';
+  if (rowCount === 2) {
+    return others.length
+      ? `${others[0].name} is then alone, so the family link is removed from both profiles.`
+      : 'The only other profile in this family is deleted, so its leftover link is cleared too (restoring that profile later does not bring the link back).';
+  }
+  if (!others.length) return `The other ${hidden} profiles in this family are deleted; their links stay, so they are still linked if restored.`;
+  return others.length === 1 ? `${others[0].name} stays in the family.` : `The other ${others.length} profiles stay linked to each other.`;
+}
+
 async function buildUnlinkPlan(input, { database = db } = {}) {
   const a = await loadProfile(database, input.customer_id, 'customer');
   if (a.error) return a;
@@ -212,13 +226,7 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
     stays_alone: dissolves && others.length > 0,
     effects: [
       { kind: 'operational', text: `${mine.name} is taken out of the Same family link.` },
-      !others.length && rowCount >= 2
-        ? { kind: 'operational', text: 'The only other profile in this family is deleted, so its leftover link is cleared too (restoring that profile later does not bring the link back).' }
-        : !others.length
-        ? { kind: 'operational', text: 'No other profile is left in this family (the others were removed), so only this profile\'s leftover link is cleared.' }
-        : dissolves
-        ? { kind: 'operational', text: `${others[0].name} is then alone, so the family link is removed from both profiles.` }
-        : { kind: 'operational', text: others.length === 1 ? `${others[0].name} stays in the family.` : `The other ${others.length} profiles stay linked to each other.` },
+      { kind: 'operational', text: whoStays(others, rowCount) },
       { kind: 'operational', text: `${mine.name} no longer counts in that multi-home family for the 10% Multi-Home Discount. A discount already on a visit stays.` },
       NO_MONEY,
       NOTHING_SENT,

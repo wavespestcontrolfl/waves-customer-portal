@@ -278,6 +278,14 @@ describe('unlink_customer_family', () => {
     expect(cardLines('unlink_customer_family', card).map((l) => l.text)).toContain('The only other profile in this family is deleted, so its leftover link is cleared too (restoring that profile later does not bring the link back).');
   });
 
+  it('a family whose other members are all deleted keeps their links', async () => {
+    families = { [A]: 'f' };
+    extraRows = { f: 2 };
+    const card = await unlink();
+    expect(card).toMatchObject({ dissolves: false, stays_alone: false });
+    expect(cardLines('unlink_customer_family', card).map((l) => l.text)).toContain('The other 2 profiles in this family are deleted; their links stay, so they are still linked if restored.');
+  });
+
   it('keeps the others linked in a bigger family', async () => {
     families = { [A]: 'f', [B]: 'f', [C]: 'f' };
     const card = await unlink();
