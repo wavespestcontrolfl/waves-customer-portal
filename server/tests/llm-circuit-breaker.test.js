@@ -37,7 +37,7 @@ describe('llm/circuit-breaker', () => {
     for (let i = 0; i < 10; i += 1) {
       circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1000 + i });
     }
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: 1020 })).toEqual({ allow: true, isProbe: false, probeId: null });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: 1020 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: null });
   });
 
   test('classifies only 429, 5xx, and provider timeouts as outage failures', () => {
@@ -78,13 +78,13 @@ describe('llm/circuit-breaker', () => {
     const t0 = 100_000;
     circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: t0 });
     circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_timeout', now: t0 + 1000 });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 1500 })).toEqual({ allow: true, isProbe: false, probeId: null });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 1500 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: 0 });
 
     // Third failure opens the circuit.
     circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_429', now: t0 + 2000 });
     expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 3000 })).toMatchObject({ allow: false, reason: 'circuit_open' });
     // Never short-circuits when there is no backup route.
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: false, now: t0 + 3000 })).toEqual({ allow: true, isProbe: false, probeId: null });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: false, now: t0 + 3000 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: 0 });
 
     // An unrelated in-flight success (started pre-open or no-backup leg) during cooldown must NOT close the circuit.
     circuitBreaker.afterAttempt('openai', { ok: true, probeId: null, now: t0 + 4000 });
@@ -110,8 +110,14 @@ describe('llm/circuit-breaker', () => {
     const probe2 = circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt });
     expect(probe2).toMatchObject({ allow: true, isProbe: true });
     circuitBreaker.afterAttempt('openai', { ok: true, probeId: probe2.probeId, now: recoverAt + 50 });
-    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt + 60 })).toEqual({ allow: true, isProbe: false, probeId: null });
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt + 60 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: 1 });
     expect(circuitBreaker.getCircuitBreakerSnapshot(recoverAt + 60).openai).toMatchObject({ state: 'closed', recentFailures: 0 });
+
+    // Stale pre-recovery completions (generation 0) arriving after recovery must NOT reopen the circuit.
+    for (let i = 0; i < 5; i += 1) {
+      circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_timeout', generation: 0, now: recoverAt + 70 + i });
+    }
+    expect(circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: recoverAt + 100 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: 1 });
   });
 
   test('disabling the gate mid-probe still releases the probe slot so re-enabling can recover', () => {
@@ -143,7 +149,56 @@ describe('llm/circuit-breaker', () => {
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_timeout', legMs: 5_000, now: 10_175 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_400', now: 10_200 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_refusal', now: 10_300 });
-    expect(circuitBreaker.beforeAttempt('anthropic', { hasBackup: true, now: 10_400 })).toEqual({ allow: true, isProbe: false, probeId: null });
+    expect(circuitBreaker.beforeAttempt('anthropic', { hasBackup: true, now: 10_400 })).toEqual({ allow: true, isProbe: false, probeId: null, generation: 0 });
+  });
+
+  test('when both primary and backup circuits are open, preserves primary-first ordering without claiming backup probe', async () => {
+    process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
+    process.env.LLM_CIRCUIT_COOLDOWN_MS = '30000';
+    process.env.OPENAI_API_KEY = 'test-openai';
+    process.env.ANTHROPIC_API_KEY = 'test-anthropic';
+
+    jest.resetModules();
+    const mockAnthropicCreate = jest.fn().mockRejectedValue(Object.assign(new Error('529'), { status: 529 }));
+    jest.doMock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({
+      messages: { create: mockAnthropicCreate },
+    })));
+    const savedFetch = global.fetch;
+    global.fetch = jest.fn(async () => ({ ok: false, status: 503, statusText: 'Service Unavailable', text: async () => 'down' }));
+    try {
+      const llm = require('../services/llm/call');
+      const cb = require('../services/llm/circuit-breaker');
+      cb.resetCircuitBreakers();
+      const policy = {
+        name: 'testBothOpen',
+        primary: { provider: 'openai', model: MODELS.OPENAI_FAST },
+        fallback: { provider: 'anthropic', model: MODELS.WORKHORSE },
+      };
+
+      // Trip both primary (openai) and backup (anthropic) circuits.
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
+      expect(cb.isAvailable('openai')).toBe(false);
+      expect(cb.isAvailable('anthropic')).toBe(false);
+
+      // Because backup is also cooling down, primary is NOT skipped (primary-first ordering preserved).
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_prim_recovered', status: 'completed', output_text: '{"ok":true}', usage: { input_tokens: 5, output_tokens: 5 } }),
+      });
+      const res = await llm.dispatchWithFallback(policy, { text: 'hi', jsonMode: true });
+      expect(res.ok).toBe(true);
+      expect(res.provider).toBe('openai');
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(mockAnthropicCreate).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = savedFetch;
+      jest.dontMock('@anthropic-ai/sdk');
+      jest.resetModules();
+    }
   });
 
   test('dispatchWithFallback skips open primary only when backup can serve the request, and never masks backup failure in metrics', async () => {

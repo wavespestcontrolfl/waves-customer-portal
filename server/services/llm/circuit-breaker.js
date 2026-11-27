@@ -74,16 +74,31 @@ function isProviderOutageReason(provider, reason, { legMs = null } = {}) {
 }
 
 /**
+ * Read-only availability check (never claims a half-open probe): returns false
+ * only when the gate is on and `provider` is currently cooling down or has a
+ * probe in flight. Used before skipping an open primary so two open providers
+ * keep primary-first ordering instead of pinning all traffic to the backup.
+ */
+function isAvailable(provider, { now = null } = {}) {
+  if (!llmCircuitBreakerLive() || !provider) return true;
+  const breaker = breakers.get(provider);
+  if (!breaker || breaker.state === 'closed') return true;
+  return breaker.isAvailable(now ?? Date.now(), { cooldownMs: cooldownMs() });
+}
+
+/**
  * Ask the breaker whether `provider` may be attempted right now.
- * Returns `{ allow: true, isProbe: boolean, probeId: number|null }`
- * or `{ allow: false, reason: 'circuit_open', isProbe: false, probeId: null }`.
+ * Returns `{ allow: true, isProbe: boolean, probeId: number|null, generation: number|null }`
+ * or `{ allow: false, reason: 'circuit_open', isProbe: false, probeId: null, generation: number|null }`.
  */
 function beforeAttempt(provider, { hasBackup = false, now = null } = {}) {
-  if (!llmCircuitBreakerLive() || !provider || !hasBackup) {
-    return { allow: true, isProbe: false, probeId: null };
+  if (!llmCircuitBreakerLive() || !provider) {
+    return { allow: true, isProbe: false, probeId: null, generation: null };
   }
   const breaker = breakerFor(provider);
-  if (breaker.state === 'closed') return { allow: true, isProbe: false, probeId: null };
+  if (!hasBackup || breaker.state === 'closed') {
+    return { allow: true, isProbe: false, probeId: null, generation: breaker.generation };
+  }
   return breaker.admitAttempt(now ?? Date.now(), { cooldownMs: cooldownMs() });
 }
 
@@ -91,10 +106,12 @@ function beforeAttempt(provider, { hasBackup = false, now = null } = {}) {
  * Record the outcome of an attempted provider call.
  * Callers must pass `aborted: true` when the caller's own AbortSignal fired so
  * caller-side cancellations (e.g. barge-in or client disconnect) never trip,
- * and `legMs` so tight caller deadlines do not trip the provider-wide breaker.
+ * `legMs` so tight caller deadlines do not trip the provider-wide breaker, and
+ * `generation` from `beforeAttempt` so stale pre-recovery completions never
+ * immediately reopen a recovered circuit.
  */
 function afterAttempt(provider, {
-  ok = false, reason = null, aborted = false, probeId = null, legMs = null, now = null,
+  ok = false, reason = null, aborted = false, probeId = null, generation = null, legMs = null, now = null,
 } = {}) {
   if (!provider) return;
   if (!llmCircuitBreakerLive()) {
@@ -115,6 +132,7 @@ function afterAttempt(provider, {
     outage,
     aborted,
     probeId,
+    generation,
     now: needsClock ? (now ?? Date.now()) : 0,
     failureThreshold: failureThreshold(),
     windowMs: windowMs(),
@@ -136,6 +154,7 @@ function resetCircuitBreakers() {
 }
 
 module.exports = {
+  isAvailable,
   beforeAttempt,
   afterAttempt,
   isProviderOutageReason,

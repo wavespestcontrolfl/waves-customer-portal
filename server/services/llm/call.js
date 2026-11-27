@@ -973,6 +973,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ha
     reason: result?.reason || null,
     aborted: Boolean(signal?.aborted),
     probeId: gate.probeId,
+    generation: gate.generation,
     legMs,
   });
   return result;
@@ -1018,7 +1019,8 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
       ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
     const legMs = Math.min(shareMs, attemptCapMs);
     const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
-    const hasBackup = routes.slice(index + 1).some((backup) => canRouteServePayload(backup, payload));
+    const hasBackup = routes.slice(index + 1)
+      .some((backup) => canRouteServePayload(backup, payload) && circuitBreaker.isAvailable(backup.provider));
     const result = await executeFallbackLeg(route, routePayload, legMs, {
       hardDeadline,
       hasBackup,

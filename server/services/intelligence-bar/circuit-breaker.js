@@ -34,6 +34,7 @@ class CircuitBreaker {
     this.openedAt = 0;
     this.activeProbeId = null;
     this._nextProbeId = 1;
+    this.generation = 0;
   }
 
   _pruneWindow(now, windowMs = this.windowMs) {
@@ -47,7 +48,16 @@ class CircuitBreaker {
     this._nextProbeId += 1;
     this.state = 'half_open';
     this.activeProbeId = probeId;
-    return { allow: true, isProbe: true, probeId };
+    return { allow: true, isProbe: true, probeId, generation: this.generation };
+  }
+
+  // Read-only check: true when closed or when a half-open probe slot is free,
+  // WITHOUT claiming the probe. Used to verify a backup provider is healthy
+  // before skipping an open primary.
+  isAvailable(now = Date.now(), { cooldownMs = this.cooldownMs } = {}) {
+    if (this.state === 'closed') return true;
+    if (this.state === 'open') return now - this.openedAt >= cooldownMs;
+    return this.activeProbeId === null;
   }
 
   isTripped() {
@@ -73,15 +83,15 @@ class CircuitBreaker {
 
   // Optional half-open probe admission (for multi-provider failover callers).
   admitAttempt(now = Date.now(), { cooldownMs = this.cooldownMs } = {}) {
-    if (this.state === 'closed') return { allow: true, isProbe: false, probeId: null };
+    if (this.state === 'closed') return { allow: true, isProbe: false, probeId: null, generation: this.generation };
     if (this.state === 'open') {
       if (now - this.openedAt < cooldownMs) {
-        return { allow: false, reason: 'circuit_open', isProbe: false, probeId: null };
+        return { allow: false, reason: 'circuit_open', isProbe: false, probeId: null, generation: this.generation };
       }
       return this._admitProbe();
     }
     if (this.activeProbeId !== null) {
-      return { allow: false, reason: 'circuit_open', isProbe: false, probeId: null };
+      return { allow: false, reason: 'circuit_open', isProbe: false, probeId: null, generation: this.generation };
     }
     return this._admitProbe();
   }
@@ -103,6 +113,7 @@ class CircuitBreaker {
       this.openedAt = 0;
       this.trippedUntil = 0;
       this.activeProbeId = null;
+      this.generation += 1;
       return;
     }
     if (outage) {
@@ -116,25 +127,7 @@ class CircuitBreaker {
     this.activeProbeId = null;
   }
 
-  // Optional probe-aware outcome recording: when open/half_open, only the
-  // active probe settles recovery; when closed, preserves in-window failures
-  // across ordinary successes when `resetOnSuccess === false`.
-  settleAttempt({
-    ok = false, outage = false, aborted = false, probeId = null, now = Date.now(),
-    failureThreshold = this.failureThreshold, windowMs = this.windowMs, cooldownMs = this.cooldownMs,
-  } = {}) {
-    if (this.state !== 'closed') {
-      if (this.state === 'half_open' && this.activeProbeId !== null && probeId === this.activeProbeId) {
-        this._settleProbe({ ok, outage, aborted, now, cooldownMs });
-      }
-      return;
-    }
-    if (aborted) return;
-    if (ok) {
-      if (this.resetOnSuccess) this.failures = [];
-      return;
-    }
-    if (!outage) return;
+  _recordClosedOutage(now, failureThreshold, windowMs, cooldownMs) {
     this._pruneWindow(now, windowMs);
     this.failures.push(now);
     if (this.failures.length >= failureThreshold) {
@@ -144,6 +137,29 @@ class CircuitBreaker {
       this.activeProbeId = null;
       logger.warn(`[circuit-breaker:${this.name}] TRIPPED — ${this.failures.length} failures in ${Math.round(windowMs / 1000)}s. Cooling down for ${Math.round(cooldownMs / 1000)}s.`);
     }
+  }
+
+  // Optional probe-aware outcome recording: when open/half_open, only the
+  // active probe settles recovery; when closed, ignores stale completions from
+  // before the most recent recovery (`generation !== this.generation`) and
+  // preserves in-window failures across ordinary successes when `resetOnSuccess === false`.
+  settleAttempt(opts = {}) {
+    const now = opts.now ?? Date.now();
+    const cooldownMs = opts.cooldownMs ?? this.cooldownMs;
+    if (this.state !== 'closed') {
+      if (this.state === 'half_open' && this.activeProbeId !== null && opts.probeId === this.activeProbeId) {
+        this._settleProbe({ ok: Boolean(opts.ok), outage: Boolean(opts.outage), aborted: Boolean(opts.aborted), now, cooldownMs });
+      }
+      return;
+    }
+    if (opts.generation != null && opts.generation !== this.generation) return;
+    if (opts.aborted) return;
+    if (opts.ok) {
+      if (this.resetOnSuccess) this.failures = [];
+      return;
+    }
+    if (!opts.outage) return;
+    this._recordClosedOutage(now, opts.failureThreshold ?? this.failureThreshold, opts.windowMs ?? this.windowMs, cooldownMs);
   }
 
   snapshot(now = Date.now(), { windowMs = this.windowMs, cooldownMs = this.cooldownMs } = {}) {
