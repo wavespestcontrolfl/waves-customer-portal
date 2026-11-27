@@ -754,10 +754,10 @@ async function runSweepHeld(now) {
   const windowStartDate = iso(windowStart);
   const targetDate = iso(target);
 
-  const visits = await db('scheduled_services')
+  const visits = await require('./visit-hold').excludeHeld(db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [windowStartDate, targetDate])
-    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereIn('scheduled_services.status', ['pending', 'confirmed']), 'scheduled_services')
     .where('scheduled_services.is_recurring', true)
     .whereNull('scheduled_services.balance_reminder_sent_at')
     .whereNull('customers.deleted_at')

@@ -213,13 +213,13 @@ async function loadDayStopRows(db, { technicianIds, dates, excludeIds }) {
   const dateList = [...new Set((dates || []).filter(Boolean))];
   if (!dateList.length) return [];
   const ids = [...(excludeIds || [])].map(String);
-  const query = db('scheduled_services')
+  const query = require('../visit-hold').excludeHeld(db('scheduled_services')
     .whereIn('scheduled_services.scheduled_date', dateList)
     .where((q) => {
       if (techIds.length) q.whereIn('scheduled_services.technician_id', techIds).orWhereNull('scheduled_services.technician_id');
       else q.whereNull('scheduled_services.technician_id');
     })
-    .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
+    .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled']), 'scheduled_services')
     .whereNotNull('scheduled_services.window_start')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id');
   if (ids.length) query.whereNotIn('scheduled_services.id', ids);
@@ -699,13 +699,13 @@ async function computeCurrentPlacement(service, prefs, ctx) {
   // location, and then the shared model overrides them), so skip the legacy
   // read instead of querying the same tech-day twice per evaluation.
   if (techId && !autoDispatchSharedModelLive()) {
-    const rows = await ctx.db('scheduled_services')
+    const rows = await require('../visit-hold').excludeHeld(ctx.db('scheduled_services')
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)
       .whereNot('scheduled_services.id', service.id)
       // 'rescheduled' phantom rows keep a stale date until staff action them —
       // not a real stop the tech will work, so exclude from detour/density too.
-      .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled'])
+      .whereNotIn('scheduled_services.status', ['cancelled', 'completed', 'skipped', 'rescheduled']), 'scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .select(...DAY_STOP_COLUMNS);
     neighbors = rows

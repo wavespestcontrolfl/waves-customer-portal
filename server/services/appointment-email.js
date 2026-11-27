@@ -331,6 +331,11 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
     logger.info(`[appointment-email] ${eventType} for ${holdVisitId} held: street-level address hold awaiting the office confirm`);
     return { ok: false, held: true, reason: 'street_level_hold' };
   }
+  // Visit on hold (GATE_VISIT_HOLD, owner 2026-11-27): no automated email about a held visit; a cancellation still goes.
+  if (holdVisitId && !/cancel/i.test(String(eventType || '')) && await require('./visit-hold').isVisitHeld(holdVisitId)) {
+    logger.info(`[appointment-email] ${eventType} for ${holdVisitId} held: the visit is on hold`);
+    return { ok: false, held: true, reason: 'visit_on_hold' };
+  }
   metadata = withPromisedSlot(metadata, { renderedSlotMs, scheduledServiceId });
   const customer = await loadCustomer(customerId);
   if (!customer) return { ok: false, skipped: true, reason: 'customer_not_found' };
@@ -420,6 +425,7 @@ async function sendTemplate({ customerId, templateKey, eventType, payload = {}, 
         // subject to a contact's decline (codex r23 security P2).
         onQueued: async () => {
           if (holdVisitId && await require('./street-level-hold').isStreetLevelHoldVisit(holdVisitId)) { abortedBy = 'street_level_hold'; return false; }
+          if (holdVisitId && !/cancel/i.test(String(eventType || '')) && await require('./visit-hold').isVisitHeld(holdVisitId)) { abortedBy = 'visit_on_hold'; return false; }
           if (moveHoldServiceId && await moveHoldLive(moveHoldServiceId, renderedSlotMs)) { abortedBy = 'move_hold'; return false; }
           // A move notice's own freshness (GATE_MOVE_NOTICE_EMAIL), as of the
           // handoff: a visit cancelled after its reschedule notice, or restored

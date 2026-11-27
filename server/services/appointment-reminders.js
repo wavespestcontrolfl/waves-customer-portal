@@ -4688,8 +4688,10 @@ const AppointmentReminders = {
     try {
       // A visit booked by address only has no customer yet: nobody to text, and no reminder row exists
       // for it (registerAppointment skips it). A quiet no-op, not a "no reminder row" warning.
-      const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+      const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('customer_id', 'held_at');
       if (visit && !visit.customer_id) return false;
+      // GATE_VISIT_HOLD: no confirmation text for a visit on hold. Nothing is marked sent; the recovery sweep sends it after the release.
+      if (require('./visit-hold').rowIsHeld(visit)) return false;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -4990,8 +4992,15 @@ const AppointmentReminders = {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
             .first('status', 'visit_id', 'customer_confirmed', 'source_action',
-              'customer_pick_by', 'last_auto_dispatch_at', 'window_start');
+              'customer_pick_by', 'last_auto_dispatch_at', 'window_start', 'held_at');
           svcVisitId = svc?.visit_id || null;
+          // GATE_VISIT_HOLD (owner 2026-11-27): no 72h / 24h reminder for a visit on hold. The row stays armed and nothing is
+          // marked sent, so the sweep resumes on its own when the office releases the hold.
+          if (require('./visit-hold').rowIsHeld(svc)) {
+            logger.info(`[appt-remind] Holding reminders for ${r.scheduled_service_id} — visit on hold`);
+            results.skipped++;
+            continue;
+          }
           bookedAfterNoPick = isBookedAfterNoPick(svc);
           const svcStatus = String(svc?.status || '').toLowerCase();
           // Owner ruling 2026-09-30: no 72h/24h reminder for a street-level

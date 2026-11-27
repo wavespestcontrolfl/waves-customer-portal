@@ -205,6 +205,7 @@ async function runInner() {
           AND s.window_start IS NOT NULL
           -- An uncleared street-level address hold was never dispatched: no late alert for it.
           AND NOT EXISTS (${heldVisitSql('s')})
+          ${require('./visit-hold').heldSqlGuard('s')}
       )
       SELECT
         c.job_id,

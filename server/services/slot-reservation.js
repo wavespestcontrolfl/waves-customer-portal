@@ -1823,10 +1823,10 @@ async function reserveSlot({
       // reclaims them, and the new reservation can overlap safely. Use
       // NOW() server-side instead of a JS-side `new Date()` to keep the
       // inequality consistent with the timestamp the INSERT will set.
-      const conflict = useCapacity ? null : await trx('scheduled_services')
+      const conflict = useCapacity ? null : await require('./visit-hold').excludeHeld(trx('scheduled_services')
         .where({ scheduled_date: date })
         .modify((q) => { if (techId) q.where('technician_id', techId); })
-        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
         .andWhere(bookedVisitOrLiveHold)
         .modify((q) => { if (makeRoom) q.whereNotIn('id', makeRoom.moveIds); })
         .modify((q) => applyWindowOverlapFilter(q, windowStart, windowEnd))
@@ -1846,11 +1846,11 @@ async function reserveSlot({
       if (reserveZone && !useCapacity) {
         const zoneSlug = zoneSlugOf(reserveZone);
         const zoneCities = reserveZone.cities || [];
-        const zoneConflict = await trx('scheduled_services')
+        const zoneConflict = await require('./visit-hold').excludeHeld(trx('scheduled_services')
           .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
           .where('scheduled_services.scheduled_date', date)
           .whereNull('scheduled_services.technician_id')
-          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+          .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
           .where(bookedVisitOrLiveHold)
           .modify((q) => { if (makeRoom) q.whereNotIn('scheduled_services.id', makeRoom.moveIds); })
           .where((q) => {
@@ -2400,11 +2400,11 @@ async function commitReservation({
     const makeRoomWritten = await moveMakeRoomStops(client, { row, estimate, serviceProfile, effectiveDurationMinutes, scheduledDate, useCapacity });
 
     if (windowEnd && !useCapacity) {
-      const conflict = await client('scheduled_services')
+      const conflict = await require('./visit-hold').excludeHeld(client('scheduled_services')
         .where({ scheduled_date: scheduledDate })
         .modify((q) => { if (row.technician_id) q.where('technician_id', row.technician_id); })
         .whereNot('id', scheduledServiceId)
-        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+        .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
         .andWhere((q) => {
           q.whereNull('reservation_expires_at')
             .orWhereRaw('reservation_expires_at > NOW()');

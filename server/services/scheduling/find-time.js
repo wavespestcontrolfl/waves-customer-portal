@@ -1350,9 +1350,9 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id) });
 
   // Load all scheduled services in date range, per tech, with coords
-  const services = await db('scheduled_services')
+  const services = await require('../visit-hold').excludeHeld(db('scheduled_services')
     .whereBetween('scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
     .whereNotNull('scheduled_services.window_start')
     .where((q) => {
       q.whereNull('scheduled_services.reservation_expires_at')

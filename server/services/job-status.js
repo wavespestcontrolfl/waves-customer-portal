@@ -377,6 +377,15 @@ async function transitionJobStatus({
   let legacyCompletionEvidenceMoment = null;
 
   async function doWrites(t) {
+    // GATE_VISIT_HOLD (owner 2026-11-27): a visit on hold is not worked. The office releases it first; cancel and skip stay open.
+    if (['en_route', 'on_site', 'completed'].includes(String(toStatus || '')) && require('./visit-hold').visitHoldLive()) {
+      const heldRow = await t('scheduled_services').where({ id: jobId }).whereNotNull('held_at').first('id');
+      if (heldRow) {
+        throw Object.assign(new Error('That visit is on hold: the customer will call. Release the hold first.'), {
+          statusCode: 409, status: 409, code: 'VISIT_ON_HOLD', isOperational: true,
+        });
+      }
+    }
     // Legacy outbound-review rows (created PENDING before the 2026-08-11
     // review-hold removal, PR #3361) activate lazily on their first live
     // transition: the hold used to force an office confirm that armed

@@ -760,6 +760,8 @@ async function sendPrepEmail({ customer, recipient, firstName, config, visit, pr
       // the predicate fails closed.
       onQueued: async () => {
         if (visit?.id && await isStreetLevelHoldVisit(visit.id)) return false;
+        // GATE_VISIT_HOLD: no prep guide for a visit on hold.
+        if (visit?.id && await require('./visit-hold').isVisitHeld(visit.id)) return false;
         dispatched = true;
         return true;
       },

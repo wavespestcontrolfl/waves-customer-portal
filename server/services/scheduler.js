@@ -10237,14 +10237,15 @@ function initScheduledJobs() {
         // are picked up today instead of never counting.
         const today = etDateString();
         const yesterday = etDateString(addETDays(new Date(), -1));
-        const candidates = await db('scheduled_services')
+        const candidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
           .whereBetween('scheduled_date', [yesterday, today])
           .whereIn('status', ['pending', 'confirmed'])
           // A street-level address hold the office has not cleared was never dispatched, so it cannot be
           // a customer no-show (no customer_noshow row, no repeated-miss outreach).
           .whereNotExists(function unclearedAddressHold() {
             require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
-          })
+          }), 'scheduled_services')
+          // GATE_VISIT_HOLD (above): a visit the customer asked us to hold was never due, so it cannot be a no-show.
           .select('id', 'scheduled_date', 'window_start', 'window_end');
 
         // Only flag services whose arrival window has already elapsed at
@@ -10456,6 +10457,23 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Unassigned timed visits check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 9:20AM — Visit-hold sweep (GATE_VISIT_HOLD, owner 2026-11-27). A visit the customer asked us to hold ("I will call
+  // you when ready"): when the next visit of the same plan series arrives first, the held visit closes as skipped (no make-up
+  // visit, no customer text); at day 14 one admin bell says to call and rebook; a bell whose hold ended closes itself.
+  // Gate off = no query. runExclusive: a deploy overlap must not run two. See server/services/visit-hold.js.
+  // =========================================================================
+  cron.schedule('20 9 * * *', async () => {
+    try {
+      await runExclusive('visit-hold-sweep', async () => {
+        const result = await require('./visit-hold').runVisitHoldSweep();
+        if (!result.skipped && (result.closed || result.rang || result.bellsClosed)) logger.info(`Visit-hold sweep: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Visit-hold sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 

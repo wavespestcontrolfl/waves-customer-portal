@@ -1281,13 +1281,13 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
   // what this detector exists to catch (codex P2 carried from round 4, P1
   // round 19).
   const promisedIds = await promisedVisitIds(conn, { now });
-  const rows = await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
+  const rows = await require('./visit-hold').excludeHeld(conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
     .whereIn('s.status', LIVE_STATUSES)
     .where((qb) => qb
       .whereBetween('s.scheduled_date', [etDateString(new Date(now.getTime() - 60 * 86400000)), etDateString(new Date(now.getTime() + 100 * 86400000))])
       .modify((inner) => { if (promisedIds.length) inner.orWhereIn('s.id', promisedIds); }))
     // An uncleared street-level address hold was never dispatched: no no-show for it.
-    .whereNotExists(unclearedHold)
+    .whereNotExists(unclearedHold), 's')
     .select('s.*', 'c.first_name', 'c.last_name', 'c.phone');
   // A recalled row that is NOT live still names a stop: the grouped reminder
   // is linked to whichever member won the send claim, and that member may
@@ -1300,10 +1300,10 @@ async function listNoShows(conn, { now = new Date(), limit = 100 } = {}) {
       .whereNotNull('visit_id').distinct('visit_id')).map((r) => r.visit_id)
     : [];
   const stranded = strandedStops.length
-    ? await conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
+    ? await require('./visit-hold').excludeHeld(conn('scheduled_services as s').join('customers as c', 'c.id', 's.customer_id')
       .whereIn('s.visit_id', strandedStops).whereIn('s.status', LIVE_STATUSES)
       .whereNotIn('s.id', rows.map((r) => r.id))
-      .whereNotExists(unclearedHold)
+      .whereNotExists(unclearedHold), 's')
       .select('s.*', 'c.first_name', 'c.last_name', 'c.phone')
     : [];
   const liveRows = [...rows, ...stranded]

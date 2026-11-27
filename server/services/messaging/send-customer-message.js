@@ -170,6 +170,26 @@ async function streetLevelHoldBlocksSend(input) {
   return false;
 }
 
+// Visit on hold (GATE_VISIT_HOLD, owner 2026-11-27): NO automated customer text, email or app message about a visit the
+// customer asked us to hold ("I will call you when ready") goes out until the office releases it. Same shared send step as
+// the street-level hold above: every visit-scoped send names its visit (appointmentId, metadata.scheduled_service_id /
+// scheduledServiceId, the composer's linked ids). A cancellation notice is still sent (the office cancelled it on purpose),
+// and a text a person typed is never held. Gate off: false before any read. A lookup error holds the send (retryable).
+const VISIT_HOLD_BLOCK = Object.freeze({
+  code: 'VISIT_ON_HOLD',
+  reason: 'Visit is on hold: the customer will call',
+});
+async function visitHoldBlocksSend(input) {
+  if (!require('../visit-hold').visitHoldLive()) return false;
+  if (['internal', 'admin', 'tech'].includes(input.audience)) return false;
+  if (input.purpose === 'appointment_cancellation') return false;
+  if (input.metadata?.humanAuthored === true || input.metadata?.human_authored === true || input.operatorInitiated === true) return false;
+  const linked = Array.isArray(input.metadata?.linked_scheduled_service_ids) ? input.metadata.linked_scheduled_service_ids : [];
+  const ids = [heldVisitIdOf(input), ...linked].filter(Boolean);
+  if (!ids.length) return false;
+  return (await require('../visit-hold').heldVisitIds(ids)).size > 0;
+}
+
 // A hand-composed text replayed from the scheduled-SMS queue whose reschedule link points at a visit that
 // can no longer be rescheduled (cancelled, skipped, completed, underway — the same status gate the
 // /reschedule/:token page applies on click, reschedule-eligibility RESCHEDULABLE_STATUSES) is a stale link:
@@ -1048,6 +1068,33 @@ async function sendCustomerMessageCore(input) {
     };
   }
 
+  // 6.355 Visit on hold (see visitHoldBlocksSend): nothing automated about a held visit reaches the customer.
+  if (await visitHoldBlocksSend(sendInput)) {
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput)} is on hold (${sendInput.purpose})`);
+    const blocked = { code: VISIT_HOLD_BLOCK.code, reason: VISIT_HOLD_BLOCK.reason };
+    const audit = await persistAudit({
+      input: sendInput,
+      policy,
+      segmentMeta,
+      validatorsPassed,
+      validatorsFailed: ['visit_on_hold'],
+      blockedBy: blocked,
+      identityTrust: resolvedTrust,
+      providerOutcome: null,
+    });
+    return {
+      sent: false,
+      blocked: true,
+      deliveryOutcome: 'not_sent',
+      code: blocked.code,
+      reason: blocked.reason,
+      retryable: true,
+      auditLogId: audit.id,
+      segmentCount: segmentMeta.segmentCount,
+      encoding: segmentMeta.encoding,
+    };
+  }
+
   // 6.36 Stale reschedule link on a scheduled operator text (see endedLinkedVisitBlocksSend): terminal.
   if (await endedLinkedVisitBlocksSend(sendInput)) {
     logger.info(`[send_customer_message] blocked: a linked visit is no longer reschedulable (${sendInput.entryPoint})`);
@@ -1326,6 +1373,13 @@ async function sendCustomerMessageCore(input) {
       return rememberBoundaryBlock(
         { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
         'street_level_hold_boundary',
+      );
+    }
+    // Visit-on-hold boundary re-check: a hold that commits during the provider's own awaits still stops the send.
+    if (await visitHoldBlocksSend(sendInput)) {
+      return rememberBoundaryBlock(
+        { ok: false, code: VISIT_HOLD_BLOCK.code, reason: VISIT_HOLD_BLOCK.reason, retryable: true },
+        'visit_hold_boundary',
       );
     }
     // Stale reschedule link boundary re-check: a visit cancelled / skipped / completed since step 6.36 read it
@@ -1908,5 +1962,6 @@ module.exports = {
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,
+    visitHoldBlocksSend,
   },
 };

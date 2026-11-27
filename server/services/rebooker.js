@@ -1910,9 +1910,13 @@ class SmartRebooker {
   }
 
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
+    // GATE_VISIT_HOLD backstop: a held visit moves only for a person who chose to (options.releaseHold), which ends the
+    // hold first; every automatic mover is refused here whatever its own selection missed.
+    const heldGuard = await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
     try {
       return await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
     } catch (err) {
+      if (heldGuard) await heldGuard.restore();
       // The single-row CAS found the row grouped AFTER the pre-read (codex
       // #3609 r13 P2): re-enter once so the fresh read routes through the
       // unit mover (whole-visit move) instead of moving the lone member.
@@ -2978,6 +2982,8 @@ class SmartRebooker {
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    // GATE_VISIT_HOLD backstop for a direct series caller (the single path already passed it).
+    await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
     // Direct series callers (customer pull-forward, explicit admin series
     // branch) reach the visit-unit choke point too (codex #3609 r1/r3): a
     // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)
@@ -3278,7 +3284,7 @@ class SmartRebooker {
       // deliberately exceptional date: a later occurrence pulled before the
       // anchor is still a later occurrence, and two rows never swap index
       // because one of them was moved across the other.
-      const readSiblings = () => trx('scheduled_services')
+      const readSiblingsRaw = () => trx('scheduled_services')
         .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
         .where('customer_id', service.customer_id)
         .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
@@ -3304,8 +3310,10 @@ class SmartRebooker {
           // sibling can still carry stale tracker stamps (or SMS guards)
           // from an aborted attempt that a partial reset left behind.
           'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
-          'track_sms_sent_at', 'arrival_sms_sent_at',
+          'track_sms_sent_at', 'arrival_sms_sent_at', 'held_at',
         );
+      // GATE_VISIT_HOLD: a held sibling other than the anchor is counted for cadence but never moved.
+      const readSiblings = async () => require('./visit-hold').markHeldSiblings(await readSiblingsRaw(), serviceId);
       // Read once UNLOCKED — only to learn the dates rung 1 must cover —
       // and again under the locks (below) for the rows the sweep writes.
       let siblings = await readSiblings();
