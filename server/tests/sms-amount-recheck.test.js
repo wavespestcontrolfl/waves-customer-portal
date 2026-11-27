@@ -888,11 +888,15 @@ describe('paymentStatusSendBlockReason - the estimate setup fee and pay-for-the-
     const sentences = [PRICE, FEE_PREPAY, TOTAL, INVOICE];
     for (const [inboundMessage, body] of [['Is there a setup fee?', INVOICE], ['How much if I pay for the year up front?', `Hi Dana, ${INVOICE}`],
       ['What will I pay if I prepay with my credit card?', TOTAL], ['Is there a setup fee if I pay by debit?', FEE_PREPAY], ['How much is it per visit with a credit card?', PRICE],
-      ['Can I prepay for six months?', TOTAL], ['How much to prepay the next visit?', TOTAL]]) {
+      ['Can I prepay for six months?', TOTAL], ['How much to prepay the next visit?', TOTAL],
+      // a one-time service, the prepay waiver alone for what the year costs, a receipt question that names the prepayment
+      ['Is there a setup fee for one-time pest control?', FEE_PREPAY], ['How much if I prepay for the year?', FEE_PREPAY], ['Did my prepayment go through?', TOTAL]]) {
       expect({ body, r: await run(body, { sentences, inboundMessage }) }).toEqual({ body, r: 'payment_status_unauthorized' });
     }
     // the year itself, in other words, is still answered
     await expect(run(TOTAL, { sentences, inboundMessage: 'How much if I prepay for one year?' })).resolves.toBeNull();
+    // ...and the waiver beside the total answers what the year costs
+    await expect(run(`${TOTAL} ${FEE_PREPAY}`, { sentences, inboundMessage: 'How much if I prepay for the year?' })).resolves.toBeNull();
   });
 
   test('a staff-edited body that keeps a waiver copy is still re-rendered', async () => {

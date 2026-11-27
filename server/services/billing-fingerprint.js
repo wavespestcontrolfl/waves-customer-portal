@@ -26,6 +26,8 @@ const uuidOf = (field) => `CASE WHEN (${field}) ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-
 // callSideBlockForEstimateData), so every row that verdict reads is hashed too: the call the draft was written from
 // (estimate_data.estimatorEngine.callLogId), the leads its linkage step resolves (each lead on that call's sid, and the lead the estimate
 // names: the only lead a passing verdict can resolve to) and the move a new-home estimate stands on (estimate_data.move.moveId).
+// These paths read nothing from estimate_data stored as a JSON string, so the facts loader states nothing for a linked estimate stored
+// that way (sms-staff-facts estimateOnCustomerSurface): every linked estimate that reaches a sentence has its rows in the hash.
 const LINKED_CALL_IDS = `SELECT ${uuidOf("t.estimate_data #>> '{estimatorEngine,callLogId}'")} ${OPEN_ESTIMATES}`;
 // The live plan of a customer with an open estimate: the recurring visits not yet finished. The estimate sentences stand on it: member
 // pricing reads those rows (the strict member reconcile, waveguard-existing-services), and the pay-for-the-year total is stated only to a

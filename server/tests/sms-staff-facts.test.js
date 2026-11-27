@@ -350,6 +350,29 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
     [PREPAY, TOTAL, 'How much to prepay through March?'],
     [PREPAY, TOTAL, 'How much to prepay the next 2?'],
     [PREPAY, FEE_PREPAY, 'Is the setup fee waived if I prepay six months?'],
+    // the setup fee and the total belong to the recurring plan: a one-time service is not theirs to answer
+    [LISTED, FEE, 'Is there a setup fee for one-time pest control?'],
+    [LISTED, FEE, 'Is there a setup fee if I just want a one-time?'],
+    [LISTED, FEE, 'Is there a setup fee if you only come out once?'],
+    [LISTED, FEE, 'Is there a setup fee for one treatment?'],
+    [LISTED, FEE, 'Is there a setup fee without a contract?'],
+    [ON_RECORD, WAIVED, 'Is the setup fee waived for a one-off?'],
+    // what paying for the year costs is answered by the total: the prepay waiver alone would lend its own figure to that question
+    [PREPAY, FEE_PREPAY, 'How much if I prepay for the year?'],
+    [PREPAY, FEE_PREPAY, 'What is the cost to pay annually?'],
+    [PREPAY, FEE_PREPAY, 'Can I prepay?'],
+    // a question that names the fee or the prepayment but asks something else: a receipt or a charge, a refund, when, why, a request
+    [PREPAY, TOTAL, 'Did my prepayment go through?'],
+    [PREPAY, TOTAL, 'Has my prepayment posted?'],
+    [PREPAY, TOTAL, 'Is my prepayment refundable?'],
+    [LISTED, FEE, 'Did the setup fee go through?'],
+    [LISTED, FEE, 'Did you charge me the setup fee?'],
+    [LISTED, FEE, 'Is the setup fee refundable?'],
+    [LISTED, FEE, 'When do I pay the setup fee?'],
+    [LISTED, FEE, 'Is the setup fee due at the first visit?'],
+    [LISTED, FEE, 'Why is there a setup fee?'],
+    [LISTED, FEE, 'What is the setup fee for?'],
+    [LISTED, FEE, 'Can you waive the setup fee?'],
   ])('off target: %#', (terms, reply, inboundText) => {
     expect({ reply, inboundText, ok: checker(terms)(reply, inboundText) }).toEqual({ reply, inboundText, ok: false });
   });
@@ -364,6 +387,23 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
       expect({ q, ok: prepay(TOTAL, q) }).toEqual({ q, ok: true });
     }
     for (const q of ['Can you check my estimate? How much is the pest control?', 'How much is the fee per application?']) expect({ q, ok: prepay(PRICE, q) }).toEqual({ q, ok: true });
+  });
+  test('"one-time" or "once" said of the fee, paying once for the year, the waiver beside the total and a past-tense question about a waiver or the estimate keep their answer', () => {
+    const listed = checker(LISTED);
+    const prepay = checker(PREPAY);
+    for (const q of ['Is the setup fee one-time?', 'Is the setup fee one time or every year?', 'Do I pay the setup fee once?', 'Is there a one-time fee?', 'Did you quote me a setup fee?',
+      'Was there a setup fee on my estimate?', 'Is there a setup fee when I sign up?', 'Is there a setup fee once I sign up?', 'What is the setup fee for pest control?',
+      'Does the price include a setup fee?']) {
+      expect({ q, ok: listed(FEE, q) }).toEqual({ q, ok: true });
+    }
+    expect(checker(ON_RECORD)(WAIVED, 'Has the setup fee been waived?')).toBe(true);
+    for (const q of ['How much if I pay once a year?', 'How much if I pay for the year all at once?', 'Can I just pay once for the year? How much is that?', 'How much is due if I pay for the year up front?']) {
+      expect({ q, ok: prepay(TOTAL, q) }).toEqual({ q, ok: true });
+    }
+    expect(prepay(`${TOTAL} ${FEE_PREPAY}`, 'How much if I prepay for the year?')).toBe(true);
+    for (const q of ['Is the setup fee waived if I prepay?', 'Do you waive anything if I pay for the year up front?', 'Is there a setup fee if I pay for the year up front?']) {
+      expect({ q, ok: prepay(FEE_PREPAY, q) }).toEqual({ q, ok: true });
+    }
   });
 
   // A question that names the setup fee or paying for the year is answered by one of those sentences. Another true billing sentence alone
@@ -484,11 +524,19 @@ describe('loadEstimateFacts', () => {
   // runs still passes. Its call, lead and move rows are in the send fingerprint (billing-fingerprint.test.js).
   test('a call-drafted or new-home estimate is read under the public routes\' own call-side verdict: a block is nothing, an unread verdict is a failed read', async () => {
     const called = { ...est, estimate_data: { estimatorEngine: { callLogId: 'call-1' }, lead_id: 'lead-1', lead_linkage: 'sid' } };
-    const moved = { ...est, status: 'viewed', estimate_data: JSON.stringify({ move: { moveId: 'move-1' } }) };
+    const moved = { ...est, status: 'viewed', estimate_data: { move: { moveId: 'move-1' } } };
     expect((await load(called, { average })).perApplication).toEqual(LINES);
     expect(callSideBlockForEstimateData).toHaveBeenCalledWith(oneOpen, called.estimate_data, { estimateStatus: 'sent' });
     expect((await load(moved, { average })).perApplication).toEqual(LINES);
     expect(callSideBlockForEstimateData).toHaveBeenCalledWith(oneOpen, { move: { moveId: 'move-1' } }, { estimateStatus: 'viewed' });
+    // estimate_data stored as a JSON string hides those ids from the send fingerprint's SQL, which reads them by JSON path: a linked
+    // estimate stored that way states nothing (no verdict read, no price read); one with no link is read as before (est itself is '{}')
+    for (const estimate_data of [called.estimate_data, moved.estimate_data]) {
+      callSideBlockForEstimateData.mockClear();
+      expect(await load({ ...est, estimate_data: JSON.stringify(estimate_data) }, { average })).toEqual(NOTHING);
+      expect(callSideBlockForEstimateData).not.toHaveBeenCalled();
+      expect(perApplicationAverageFor).not.toHaveBeenCalled();
+    }
     // the call is being reprocessed, its lead was repointed, the move was cancelled or now names another address: off the customer's page
     for (const callBlock of ['call_reprocessing', 'call_linkage_changed', 'call_missing', 'move_closed', 'move_address_changed']) {
       expect({ callBlock, facts: await load(called, { average, callBlock }) }).toEqual({ callBlock, facts: NOTHING });

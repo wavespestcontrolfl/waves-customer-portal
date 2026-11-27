@@ -26,14 +26,19 @@ const VERDICT_UNREAD = new Set(['call_verdict_unavailable', 'move_verdict_unavai
  * True only when the customer's own estimate page would show this estimate: not expired, not held off the customer surface (a quarantine
  * marker, an invalidated linkage, a pending reprice or an unverified address: estimateOffCustomerSurface), and passing the call-side verdict
  * every public estimate route runs (callSideBlockForEstimateData): a call-drafted estimate's call and lead, a new-home estimate's move.
- * Those rows can change with the estimate row untouched, so the send fingerprint hashes them too (billing-fingerprint.js). An estimate
- * with neither link costs no read here. False = not on the page; null = the verdict could not be read (the caller fails the read).
+ * Those rows can change with the estimate row untouched, so the send fingerprint hashes them too (billing-fingerprint.js). It finds them
+ * by the ids in estimate_data, read by JSON path, and a path reads nothing from data stored as a JSON string: a linked estimate stored
+ * that way states nothing here (its call or its move could change unseen at send). An estimate with neither link costs no read here.
+ * False = not on the page; null = the verdict could not be read (the caller fails the read).
  */
 async function estimateOnCustomerSurface(estimate, db) {
   if (estimate.expires_at && new Date(estimate.expires_at).getTime() < Date.now()) return false;
   const claims = require('../utils/estimate-claim-sql');
   if (claims.estimateOffCustomerSurface(estimate)) return false;
-  const block = await claims.callSideBlockForEstimateData(db, parsedData(estimate), { estimateStatus: estimate.status });
+  const data = parsedData(estimate);
+  // (the two links the verdict reads: callSideBlockForEstimateData)
+  if (typeof estimate.estimate_data === 'string' && (data.move?.moveId || data.estimatorEngine?.callLogId)) return false;
+  const block = await claims.callSideBlockForEstimateData(db, data, { estimateStatus: estimate.status });
   if (!block) return true;
   return VERDICT_UNREAD.has(block) ? null : false;
 }
