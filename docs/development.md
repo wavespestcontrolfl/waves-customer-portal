@@ -12,7 +12,7 @@ With nvm already installed, select the Node version and install dependencies (`~
 ```sh
 nvm install
 nvm use
-~/.claude/bin/npm-ci-serial   # owner's multi-session Mac; use `npm ci` in isolated CI/single-user machines
+~/.claude/bin/npm-ci-serial
 npm run worktree:setup
 npm run dev:doctor -- --frontend
 npm run dev:managed-client
