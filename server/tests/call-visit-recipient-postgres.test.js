@@ -589,6 +589,17 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             await db('customers').where({ id: customerId }).update({ service_preferences: JSON.stringify({ unconsented_slot_phone_keys: [BOB.slice(-10)] }) });
             expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
             await db('customers').where({ id: customerId }).update({ service_preferences: JSON.stringify({}) });
+            // a LATER call recorded the number as a tenant on a visit row (the list keeps the first call's role): no button
+            await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ role: 'Tenant ' });
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
+            await db('visit_text_recipients').where({ scheduled_service_id: visitId }).update({ role: 'spouse_partner' });
+            // the number is someone's own Waves account: it signs in as that account, so no button and no "has app access"
+            const [{ id: bobsOwn }] = await db('customers').insert({ first_name: 'Bob', last_name: 'Own', phone: BOB, active: true }).returning('id');
+            try {
+              expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false, hasAppAccess: false })]);
+            } finally {
+              await db('customers').where({ id: bobsOwn }).del();
+            }
           } finally {
             delete process.env.GATE_CONTACT_LOGIN;
           }

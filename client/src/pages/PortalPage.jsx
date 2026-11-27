@@ -5469,12 +5469,17 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, editorLo
   const [busyId, setBusyId] = useState(null);
   // Shown after "Give app access" filled the editor; a contact save clears it.
   const [accessNote, setAccessNote] = useState(false);
+  // Every read and every successful Stop / Restart takes a number: a read answered after a newer change is dropped, so a
+  // slow reload never puts back a row the holder just stopped.
+  const readSeq = useRef(0);
   useEffect(() => {
     if (!enabled || !profileId) { setList([]); return undefined; }
     let alive = true;
+    const mine = ++readSeq.current;
+    const current = () => alive && readSeq.current === mine;
     Promise.resolve(api.getReminderContacts(profileId))
-      .then((res) => { if (alive) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
-      .catch((err) => { console.error(err); if (alive) setList([]); });
+      .then((res) => { if (current()) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
+      .catch((err) => { console.error(err); if (current()) setList([]); });
     return () => { alive = false; };
   // savedContactsKey: a count of contact saves, so a save that gives someone app access re-reads hasAppAccess.
   }, [enabled, profileId, savedContactsKey]);
@@ -5488,6 +5493,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, editorLo
         ? await api.restartReminderContact(profileId, person.id)
         : await api.stopReminderContact(profileId, person.id);
       if (res?.reminderContact) {
+        readSeq.current += 1;
         setList((prev) => prev.map((x) => (x.id === person.id ? res.reminderContact : x)));
       }
     } catch (err) {

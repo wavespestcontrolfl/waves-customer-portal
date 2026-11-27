@@ -954,10 +954,21 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
   if (!rows.length) return [];
   const customer = await conn('customers').where({ id: customerId }).first();
   const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn, unconsentedSlotPhoneKeys } = require('./customer-contact');
+  const loginLive = require('../config/feature-gates').contactLoginLive();
   // Numbers waiting on their own YES reply: the holder's save keeps that hold, so it cannot give sign-in.
   const held = unconsentedSlotPhoneKeys(customer || {});
+  // A number some call recorded as a TENANT on this customer (any visit row, or the list's own first role): the contacts
+  // save stores no role, and a tenant must never reach the service reports.
+  const tenantKeys = new Set((await conn(TABLE).where({ customer_id: customerId }).whereRaw("lower(trim(coalesce(role, ''))) = 'tenant'")
+    .distinct('phone_key')).map((r) => r.phone_key));
+  for (const row of rows) if (String(row.role || '').trim().toLowerCase() === 'tenant') tenantKeys.add(row.phone_key);
+  // A number that is someone's own Waves account signs in as that account (the login's holder-first rule), never as a contact.
+  const ownAccount = new Set();
+  if (loginLive) {
+    const { holderLoginIdentity } = require('../routes/auth');
+    for (const row of rows) if (await holderLoginIdentity(row.phone_e164)) ownAccount.add(row.phone_key);
+  }
   const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
-  const loginLive = require('../config/feature-gates').contactLoginLive();
   return rows.map((row) => ({
     id: row.id,
     firstName: row.first_name || '',
@@ -971,10 +982,10 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     // a stop on this list still stops the texts this list sends.
     inContacts: slotKeys.has(row.phone_key),
     // Can actually sign in: the contact login is on and the holder attested this number (the same check the login uses).
-    hasAppAccess: loginLive && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
+    hasAppAccess: loginLive && !ownAccount.has(row.phone_key) && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
     // A contact save can give sign-in only while the contact login is on. Never for a person the call recorded as a
     // TENANT: the contacts save stores no role, and a tenant must never reach the service reports (slotWithheldFromReports).
-    canGiveAppAccess: loginLive && String(row.role || '').trim().toLowerCase() !== 'tenant' && !held.has(row.phone_key)
+    canGiveAppAccess: loginLive && !tenantKeys.has(row.phone_key) && !held.has(row.phone_key) && !ownAccount.has(row.phone_key)
       && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
   }));
 }
