@@ -40,7 +40,7 @@ function baseSvc(overrides = {}) {
 function makeDb({
   svcRow, siblings = [], countN = 0, beforeAll, othersAll, doneBefore = 0,
   atBefore = 0, enrouteBefore = 0, progressedBeyond = 0, groupFloor = null,
-  reReadFloor = null, rawFloor, rawError = null, tied = 0, countError = null,
+  reReadFloor = null, rawFloor, rawError = null, tied = 0, countError = null, targetRows = 1, siblingAdvanced = 0,
 } = {}) {
   const queries = [];
   const dbFn = jest.fn(() => {
@@ -74,6 +74,8 @@ function makeDb({
           enroute_before: enrouteBefore,
           progressed_beyond: progressedBeyond,
           tied,
+          target_rows: targetRows,
+          sibling_advanced: siblingAdvanced,
           group_floor: groupFloor,
         }],
       });
@@ -418,12 +420,21 @@ describe('peekStopsAhead', () => {
     expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toBeNull();
     expect(db.raw).not.toHaveBeenCalled();
   });
-  test('returns the clamped count and the truck phase without writing the floor', async () => {
-    const db = makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 1, atBefore: 1 });
-    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toEqual({ stopsAhead: 1, atStop: true, headingToStop: false });
+  test('returns the real count and the truck phase without writing the floor', async () => {
+    const db = makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 2, atBefore: 1 });
+    expect(await peekStopsAhead(db, 'svc-self', { today: TODAY })).toEqual({ stopsAhead: 2, atStop: true, headingToStop: false });
     expect(db.updateCalls()).toHaveLength(0);
     expect(db.reReadCalls()).toHaveLength(0);
     expect(db.countCall()[0]).toContain('AS tied');
+  });
+  test('a floor below the real count (a stop was added ahead) gives no count, never the lower number', async () => {
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 0 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, groupFloor: null }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 1 });
+  });
+  test('the count statement lost its target, or a sibling advanced in that snapshot: no "next stop" from all-zero counts', async () => {
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0, targetRows: 0 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0, siblingAdvanced: 1 }), 'svc-self', { today: TODAY })).toBeNull();
+    expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 0 }), 'svc-self', { today: TODAY })).toMatchObject({ stopsAhead: 0 });
   });
   test('a live stop tied on route position, or a target with no window, gives no count', async () => {
     expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 1, tied: 1 }), 'svc-self', { today: TODAY })).toBeNull();

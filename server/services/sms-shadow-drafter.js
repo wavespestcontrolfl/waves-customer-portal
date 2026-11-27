@@ -3685,12 +3685,14 @@ function buildLiveEtaSnapshot(context) {
     }))
     .filter((g) => g.scheduledServiceIds.length);
   // TODAY ROUTE STATUS (gap 4): the stop count sentence(s) the facts carried, re-derived at send time by
-  // sms-eta-freshness (a changed count refuses the send). Only a context that opted in has the key.
-  const routeStatus = (Array.isArray(context?.routeStatusGroups) ? context.routeStatusGroups : [])
+  // sms-eta-freshness (a changed count refuses the send). A context that opted in always persists the array,
+  // EMPTY when no sentence was given or the read failed, so route wording added later is refused at send
+  // (route_status_unbound). A context that did not opt in has no key: the snapshot is exactly as before.
+  if (!Array.isArray(context?.routeStatusGroups)) return entries.length ? { entries } : null;
+  const routeStatus = context.routeStatusGroups
     .filter((g) => g && g.scheduledServiceId != null && typeof g.sentence === 'string' && g.sentence)
     .map((g) => ({ scheduledServiceId: g.scheduledServiceId, scheduledServiceIds: (g.scheduledServiceIds || []).filter((id) => id != null), sentence: g.sentence }));
-  if (!entries.length && !routeStatus.length) return null;
-  return routeStatus.length ? { entries, routeStatus } : { entries };
+  return { entries, routeStatus };
 }
 
 // Deterministic backstop (independent review finding, PR #5334): today only

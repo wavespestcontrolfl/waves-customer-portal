@@ -284,7 +284,22 @@ async function countStopsAhead(db, serviceId, today) {
        COUNT(*) FILTER (WHERE g.has_live
                           AND (g.a_route_order, g.slot)
                               = (COALESCE(t.route_order, 999), COALESCE(t.window_start, '23:59'::time)))::int AS tied,
-       MIN(t.group_floor)::int AS group_floor
+       MIN(t.group_floor)::int AS group_floor,
+       -- The texting AI's peek (peekStopsAhead) reads these two in the SAME
+       -- snapshot as the count: an empty target (the visit was cancelled,
+       -- reassigned or advanced since the eligibility read) still yields an
+       -- all-zero aggregate row, and a sibling line that advanced since then
+       -- makes the planned count a lie. Both mean "no count" there.
+       (SELECT COUNT(*) FROM target)::int AS target_rows,
+       (SELECT COUNT(*) FROM scheduled_services sib, target_row tr
+         WHERE sib.technician_id = tr.technician_id
+           AND sib.scheduled_date = tr.scheduled_date
+           AND sib.customer_id = tr.customer_id
+           AND sib.window_start IS NOT DISTINCT FROM tr.window_start
+           AND sib.id <> tr.id
+           AND ${placedOrLegacySql('sib')}
+           AND (sib.status IN ('en_route', 'on_site', 'completed')
+                OR sib.track_state IN ('en_route', 'on_property', 'complete')))::int AS sibling_advanced
        FROM grp g, target t`,
     // Binding order mirrors the SQL order: the group_floor subquery's
     // display date, the sibling-anchor lateral (route-excluded), the
@@ -347,7 +362,10 @@ async function countStopsAhead(db, serviceId, today) {
   let clamped = raw;
   if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
   if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
-  return { svc, svcDate, groupFloor, clamped, yourStop, totalStops, currentStop, atStop, headingToStop, tied: Number(agg?.tied) };
+  return {
+    svc, svcDate, groupFloor, raw, clamped, yourStop, totalStops, currentStop, atStop, headingToStop,
+    tied: Number(agg?.tied), targetRows: Number(agg?.target_rows), siblingAdvanced: Number(agg?.sibling_advanced),
+  };
 }
 
 /**
@@ -513,11 +531,18 @@ async function computeStopsAhead(db, serviceId, opts = {}) {
 // have a real arrival window (a windowless stop sorts last by default, not
 // by plan), and no live stop may share the target's route_order + window
 // (the order between them is only created_at, so the count is not decided).
+// The count statement must also still find exactly one target row with no
+// sibling line advanced (same snapshot as the count). And the figure is the
+// REAL count: a same-day floor below it (a reorder added a stop ahead after
+// the customer saw a lower number) means the tracker shows a number that is
+// no longer true, so there is no sentence at all. When in doubt, null.
 async function peekStopsAhead(db, serviceId, { today = etDateString() } = {}) {
   if (!gateEnvValue('GATE_STOPS_AWAY')) return null;
   const counted = await countStopsAhead(db, serviceId, today);
-  if (!counted || counted.svc.window_start == null || counted.tied > 0) return null;
-  return { stopsAhead: counted.clamped, atStop: counted.atStop, headingToStop: counted.headingToStop };
+  if (!counted || counted.svc.window_start == null || counted.tied !== 0) return null;
+  if (counted.targetRows !== 1 || counted.siblingAdvanced !== 0) return null;
+  if (Number.isInteger(counted.groupFloor) && counted.groupFloor !== counted.raw) return null;
+  return { stopsAhead: counted.raw, atStop: counted.atStop, headingToStop: counted.headingToStop };
 }
 
 // True when the visit's scheduled_date is today in ET — the only day
