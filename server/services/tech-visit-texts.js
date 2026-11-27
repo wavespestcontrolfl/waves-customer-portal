@@ -20,6 +20,7 @@ const { isPaymentScopedText } = require('./payment-status-contract');
 const { findShortenerHost } = require('./comms-lint');
 const { normalizeForLinkCheck } = require('./messaging/sms-link-policy');
 const psl = require('psl');
+const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const WINDOW_DAYS = 7;
 const MAX_TEXTS = 40;
@@ -121,6 +122,11 @@ function isPushProof(row) {
   return String(row.from_phone || '').toLowerCase() === 'push' || String(parseMetadata(row.metadata).channel || '').toLowerCase() === 'push';
 }
 
+// The tech-line composer (services/tech-line-texts.js) sends 'manual' from the technician's own line with his id as the sender
+// (sms_log.admin_user_id), and leaves no metadata mark on the row. Both of those are what the row records, and an automated
+// send of type 'manual' has no technician id: so a manual text with a sender id from a registered technician line is his own.
+const isTechLineText = (row) => Boolean(row.admin_user_id) && TWILIO_NUMBERS.fieldTech.some((line) => line.number === row.from_phone);
+
 const isEnforcedSpam = (row) => parseMetadata(row.metadata).spam_verdict?.enforced === true;
 
 // Noise that is neither shown nor counted: quiet types, push records, tapbacks, screened spam, texts that never left.
@@ -129,9 +135,9 @@ function isNoise(row) {
   if (QUIET_TYPES.has(row.message_type || '') || isPushProof(row)) return true;
   if (inbound) return isSmsReaction(row.message_body) || isEnforcedSpam(row);
   if (!SENT_STATUSES.has(String(row.status || '').toLowerCase())) return true;
-  // 'manual' is also what marketing, retention and follow-up sends are stored as: it counts as office-written only with the
-  // composer's metadata.human_authored stamp (as sms-gratitude-context.js reads it); an admin_user_id alone is not enough.
-  return (row.message_type || '') === 'manual' && parseMetadata(row.metadata).human_authored !== true;
+  // 'manual' is also what marketing, retention and follow-up sends are stored as: it counts as written by a person only with the
+  // composer's metadata.human_authored stamp (as sms-gratitude-context.js reads it) or as a technician's own text from his line.
+  return (row.message_type || '') === 'manual' && parseMetadata(row.metadata).human_authored !== true && !isTechLineText(row);
 }
 
 // Held back and counted: a type off the allow-list, money, card or bank details, or a link.

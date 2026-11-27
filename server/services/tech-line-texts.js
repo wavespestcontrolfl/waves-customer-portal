@@ -155,9 +155,6 @@ async function textFromLine({ actor, ctx, target, body, metadata }) {
       metadata: {
         ...metadata,
         original_message_type: 'manual',
-        // The technician typed this body himself (a set text is fixed wording, not typed): the composer's human_authored stamp, so the
-        // Visit Brief's customer texts show his own reply.
-        humanAuthored: !metadata,
         tech_line: true,
         scheduled_service_id: target.visit.id,
         adminUserId: actor.technicianId,

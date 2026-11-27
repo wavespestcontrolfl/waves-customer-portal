@@ -131,12 +131,20 @@ describe('textVerdict', () => {
       expect(hasLink(body)).toBe(false);
     });
 
-  test('a manual text shows only with the composer\'s human_authored stamp; a staff id alone is skipped', () => {
-    expect(textVerdict(outbound({ message_body: 'We will be there Tuesday' }))).toBe('show');
-    expect(textVerdict(outbound({ admin_user_id: 'staff-1', metadata: null }))).toBe('skip');
+  test('a manual text shows with the composer stamp or as a technician\'s own text from his line; a staff id alone is skipped', () => {
+    const TECH_LINE = require('../config/twilio-numbers').fieldTech[0].number;
+    expect(textVerdict(outbound({ message_body: 'We will be there Tuesday' }))).toBe('show'); // human_authored
+    // what the tech-line composer leaves on the row today: manual, his id, his line, no metadata mark
+    expect(textVerdict(outbound({ admin_user_id: 'tech-1', from_phone: TECH_LINE, metadata: { scheduled_service_id: 'svc-1' } }))).toBe('show');
+    expect(textVerdict(outbound({ admin_user_id: 'tech-1', from_phone: TECH_LINE, metadata: null }))).toBe('show');
+    // an automated manual send from that line has no sender id; a sender id from an ordinary number is not enough
+    expect(textVerdict(outbound({ admin_user_id: null, from_phone: TECH_LINE, metadata: null }))).toBe('skip');
+    expect(textVerdict(outbound({ admin_user_id: 'staff-1', from_phone: '+19415550100', metadata: null }))).toBe('skip');
     expect(textVerdict(outbound({ admin_user_id: 'staff-1', metadata: { human_authored: 'true' } }))).toBe('skip');
     expect(textVerdict(outbound({ admin_user_id: null, metadata: JSON.stringify({ human_authored: false }), message_body: 'Spring special for you' }))).toBe('skip');
     expect(textVerdict(outbound({ message_type: 'ai_approved', admin_user_id: null, metadata: null }))).toBe('show');
+    // a tech-line text still goes through every other screen
+    expect(textVerdict(outbound({ admin_user_id: 'tech-1', from_phone: TECH_LINE, metadata: null, message_body: 'Your balance is due' }))).toBe('hidden');
   });
 
   test("a customer's handled reschedule reply (retyped by the webhook) shows", () => {
