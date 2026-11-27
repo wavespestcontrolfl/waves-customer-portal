@@ -395,6 +395,8 @@ async function confirmInTransaction(trx, { customerId, code, email, req }) {
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
   const after = { ...result.before, ...changes };
   await raiseEmailChangeAlert(trx, { customerId, before: result.before, after, requestId: request.id });
+  // Stripe's copy of the email follows (owner 11-27 "build"): a durable job in this same transaction.
+  await require('../services/stripe-email-sync').enqueue(trx, customerId, 'app_email_change');
   return { edit: { before: result.before, after, changes, emailSync: result.emailSync } };
 }
 

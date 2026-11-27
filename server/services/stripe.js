@@ -821,6 +821,15 @@ const StripeService = {
   // `database`: the caller's transaction handle when this runs under a
   // held row lock (standalone Auto Pay replacement) — the customer read
   // and the link-back write must not take a second pool connection.
+  // The one Stripe write of the email sync (services/stripe-email-sync.js), with a short per-request timeout because
+  // the caller holds the customer row lock through it. 'not_configured' when this process has no Stripe key.
+  async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000 } = {}) {
+    const stripe = getStripe();
+    if (!stripe) return 'not_configured';
+    await stripe.customers.update(stripeCustomerId, { email }, { timeout });
+    return 'updated';
+  },
+
   async ensureStripeCustomer(customerId, { database = db } = {}) {
     const customer = await database('customers').where({ id: customerId }).first();
     if (!customer) throw new Error('Customer not found');
@@ -896,6 +905,16 @@ const StripeService = {
       }
 
       logger.info(`[stripe] Customer created: ${stripeCustomerId} for ${customerId}`);
+      // The email may have changed while Stripe was creating the customer (an app email change whose sync found no link
+      // yet). Then queue the sync on this same handle; it runs under the customer lock. A failure is logged, the link stands.
+      try {
+        const now = await database('customers').where({ id: customerId }).first('email');
+        if (String(now?.email || '').trim() !== String(customer.email || '').trim()) {
+          await require('./stripe-email-sync').enqueue(database, customerId, 'stripe_link');
+        }
+      } catch (syncErr) {
+        logger.warn(`[stripe] email sync queue after create failed for ${customerId}: ${syncErr.code || syncErr.name || 'queue_failed'}`);
+      }
       return stripeCustomerId;
     } catch (err) {
       if (err && err.code === 'CUSTOMER_RETIRED') throw err;

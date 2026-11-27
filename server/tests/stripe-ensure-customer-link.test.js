@@ -8,6 +8,7 @@
 describe('StripeService.ensureStripeCustomer link-back', () => {
   let stripeClient;
   let logger;
+  let enqueue;
 
   // A one-row customers table. `beforeLink` runs after the Stripe call and before
   // the link-back write, to play the part of a concurrent merge or request.
@@ -41,6 +42,8 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
     jest.doMock('../config', () => ({}));
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
     jest.doMock('../services/logger', () => logger);
+    enqueue = jest.fn(async () => {});
+    jest.doMock('../services/stripe-email-sync', () => ({ enqueue }));
     const StripeService = require('../services/stripe');
     return { StripeService, database, state, updates };
   }
@@ -50,6 +53,24 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
     expect(state.row.stripe_customer_id).toBe('cus_new');
     expect(updates).toEqual([{ nulls: ['stripe_customer_id'], notMerged: true, patch: { stripe_customer_id: 'cus_new' } }]);
+  });
+
+  // Owner 11-27 "build": an app email change confirmed while Stripe was creating the customer (its sync found no link
+  // yet) queues a sync once the link lands, on the same handle.
+  test('an email that changed during creation queues a Stripe email sync after the link', async () => {
+    const { StripeService, database } = load({ row: { email: 'old@example.test' }, beforeLink: (st) => { st.row.email = 'new@example.test'; } });
+    await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
+    expect(enqueue).toHaveBeenCalledWith(database, 'cust-1', 'stripe_link');
+  });
+
+  test('an unchanged email queues nothing, and a failed queue keeps the link', async () => {
+    const a = load({ row: { email: 'same@example.test' } });
+    await a.StripeService.ensureStripeCustomer('cust-1', { database: a.database });
+    expect(enqueue).not.toHaveBeenCalled();
+    const b = load({ row: { email: 'old@example.test' }, beforeLink: (st) => { st.row.email = 'new@example.test'; } });
+    enqueue.mockRejectedValue(new Error('db down'));
+    await expect(b.StripeService.ensureStripeCustomer('cust-1', { database: b.database })).resolves.toBe('cus_new');
+    expect(b.state.row.stripe_customer_id).toBe('cus_new');
   });
 
   test('already linked: returns it with no Stripe call and no write (fast path unchanged)', async () => {
