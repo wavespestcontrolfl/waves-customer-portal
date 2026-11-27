@@ -2555,6 +2555,8 @@ async function standardOrderFor(productId, { dbh = db } = {}) {
 }
 
 module.exports = {
+  knownCodePattern,
+  accessCodes,
   standardOrderFor,
   jobCardEnabled,
   customerContextEnabled,

@@ -47,21 +47,21 @@ const REFRESH_MS = 50 * 60 * 1000;
 
 // `key` names the visit the texts belong to: its id, its customer and its date. A change of any of them (a merge, a reschedule
 // pushed to the open screen) clears what is shown at once and reads again.
-function useVisitTexts(serviceId, key, enabled, request) {
+function useVisitTexts(serviceId, query, key, enabled, request) {
   const [state, setState] = useState({ key: null, data: null, failed: false, at: 0 });
   const [tick, setTick] = useState(0);
   const atRef = useRef(0);
   atRef.current = state.at;
   useEffect(() => {
-    if (!enabled || !serviceId || typeof request !== 'function') return undefined;
+    if (!enabled || !query || typeof request !== 'function') return undefined;
     let live = true;
-    Promise.resolve(request(`/admin/schedule/${serviceId}/visit-texts`))
+    Promise.resolve(request(`/admin/schedule/${serviceId}/visit-texts?${query}`))
       .then((data) => { if (live) setState({ key, data, failed: false, at: Date.now() }); })
       // 404 is the gate off or a visit that is not his: show nothing. Any other failure gets one muted line.
       .catch((err) => { if (live) setState({ key, data: null, failed: err?.status !== 404, at: Date.now() }); });
     const refresh = setTimeout(() => setTick((n) => n + 1), REFRESH_MS);
     return () => { live = false; clearTimeout(refresh); };
-  }, [enabled, serviceId, key, request, tick]);
+  }, [enabled, serviceId, query, key, request, tick]);
   useEffect(() => {
     if (!enabled) return undefined;
     const onResume = () => {
@@ -84,11 +84,20 @@ function PhotosNotShown({ missing }) {
 
 // `byService` is the panel's per-visit brief map: the brief answer carries `visitTexts: true` while the gate is on, and
 // only then is the read made. The loaded answer is stored with the visit it was read for and shown only for that visit.
+// The visit this screen shows: its id, customer and date. The request names the customer and date, and the server answers only while
+// they are still the visit's. Without both there is nothing to name, so nothing is read.
+function visitIdentity(service) {
+  const customerId = String(service.customer_id || service.customerId || '');
+  const scheduledDate = String(service.scheduledDate || service.scheduled_date || '').slice(0, 10);
+  const query = customerId && scheduledDate ? `customerId=${encodeURIComponent(customerId)}&scheduledDate=${encodeURIComponent(scheduledDate)}` : '';
+  return { key: [service.id, customerId, scheduledDate].join('|'), query };
+}
+
 export default function VisitTextsSection({ service, byService, request }) {
   const serviceId = service.id;
-  const key = [serviceId, service.customer_id || service.customerId || '', String(service.scheduledDate || service.scheduled_date || '').slice(0, 10)].join('|');
-  const enabled = byService?.[serviceId]?.brief?.visitTexts === true;
-  const state = useVisitTexts(serviceId, key, enabled, request);
+  const { key, query } = visitIdentity(service);
+  const enabled = byService?.[serviceId]?.brief?.visitTexts === true && Boolean(query);
+  const state = useVisitTexts(serviceId, query, key, enabled, request);
 
   if (!enabled || state.key !== key) return null;
   if (state.failed) return <p style={{ ...mutedStyle, marginTop: 10 }}>Couldn't load texts</p>;

@@ -160,18 +160,26 @@ function isNoise(row) {
   return (row.message_type || '') === 'manual' && parseMetadata(row.metadata).human_authored !== true && !isTechLineText(row);
 }
 
-// Held back and counted: a type off the allow-list, money, card or bank details, or a link.
-function isHeldBack(row) {
+// Held back and counted: a type off the allow-list, money, card or bank details, a number, a link, or one of the customer's STORED
+// access codes (every property's, job-card.js's own matcher: case-insensitive, whole token). `codes` is that matcher as a RegExp, null
+// when there is nothing stored, or false when the stored codes could not be read: then fail closed on any digit or all-caps token.
+function mentionsStoredCode(body, codes) {
+  const text = normalizedBody(body);
+  if (codes === false) return /\d|\b[A-Z]{3,}\b/.test(text);
+  return Boolean(codes) && codes.test(text);
+}
+
+function isHeldBack(row, codes = null) {
   if (!(row.direction === 'inbound' ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(row.message_type || '')) return true;
   const body = row.message_body;
-  return hasMoneyWords(body) || hasCardCredentials(body) || hasNumberRun(body) || hasLink(body) || isPaymentScopedText(body);
+  return hasMoneyWords(body) || hasCardCredentials(body) || hasNumberRun(body) || hasLink(body) || isPaymentScopedText(body) || mentionsStoredCode(body, codes);
 }
 
 // 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
 // `withPhotos` (GATE_TECH_VISIT_TEXT_PHOTOS): a customer's photo with no words shows, as its image only.
-function textVerdict(row, { withPhotos = false } = {}) {
+function textVerdict(row, { withPhotos = false, codes = null } = {}) {
   if (isNoise(row)) return 'skip';
-  if (isHeldBack(row)) return 'hidden';
+  if (isHeldBack(row, codes)) return 'hidden';
   // No words: shown only as a customer's image, and only with the photo switch on. Words that a screen above hid keep the row hidden.
   if (!String(row.message_body || '').trim()) return withPhotos && photosOf(row).length ? 'show' : 'skip';
   return 'show';
@@ -262,6 +270,21 @@ function sequenceHeldIds(rows) {
   return held;
 }
 
+// The customer's stored access codes as job-card.js's matcher: every property's gate, garage and lockbox codes (property_preferences) and
+// every code filed in customer_access_codes (any status: a dismissed code is still a code). null = none stored; false = a read failed.
+async function storedCodePattern(db, customerId) {
+  try {
+    const jobCard = require('./job-card');
+    const prefs = await db('property_preferences').where({ customer_id: customerId })
+      .select('neighborhood_gate_code', 'property_gate_code', 'garage_code', 'lockbox_code');
+    const filed = await db('customer_access_codes').where({ customer_id: customerId }).whereNotNull('code').select('code');
+    const codes = [...prefs.flatMap((row) => jobCard.accessCodes(row)), ...filed.map((row) => ({ code: row.code }))];
+    return jobCard.knownCodePattern(codes, 'i');
+  } catch {
+    return false;
+  }
+}
+
 async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos = false } = {}) {
   const start = windowStart(svc.scheduled_date);
   if (!svc.customer_id || !start) return { texts: [], hidden: 0 };
@@ -269,9 +292,10 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   const rows = await windowRows(db, svc.customer_id, start, now);
   let hidden = 0;
   const shown = [];
+  const codes = await storedCodePattern(db, svc.customer_id);
   const sequenceRows = sequenceHeldIds(rows);
   for (const row of rows) {
-    const verdict = sequenceRows.has(row.id) ? 'hidden' : textVerdict(row, { withPhotos });
+    const verdict = sequenceRows.has(row.id) ? 'hidden' : textVerdict(row, { withPhotos, codes });
     if (verdict === 'hidden') hidden += 1;
     else if (verdict === 'show') shown.push(row);
   }

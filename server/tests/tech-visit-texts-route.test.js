@@ -43,6 +43,7 @@ const router = require('../routes/admin-schedule');
 const row = (id, at, over = {}) => ({ id, customer_id: 'cust-1', direction: 'inbound', message_type: 'inbound', status: 'received', message_body: `text ${id}`, metadata: null, created_at: new Date(at), ...over });
 
 let smsRows;
+let storedCodes = {};
 let visits;
 let onSmsRead;
 const colOf = (name) => String(name).replace(/^(scheduled_services|sl|twin)\./, '');
@@ -69,6 +70,12 @@ function scheduledServices() {
   return q;
 }
 
+// property_preferences / customer_access_codes: the stored codes the reader matches against
+function codeTable(table) {
+  const q = { where: () => q, whereNotNull: () => q, select: async () => storedCodes[table] || [] };
+  return q;
+}
+
 function smsLog() {
   let list = smsRows.slice();
   let skip = 0;
@@ -92,9 +99,15 @@ function smsLog() {
   return q;
 }
 
-db.mockImplementation((table) => (String(table).startsWith('sms_log') ? smsLog() : scheduledServices()));
+function tableFor(table) {
+  if (String(table).startsWith('sms_log')) return smsLog();
+  if (table === 'property_preferences' || table === 'customer_access_codes') return codeTable(table);
+  return scheduledServices();
+}
 
-async function get(role, path = 'visit-texts') {
+db.mockImplementation(tableFor);
+
+async function get(role, path = 'visit-texts?customerId=cust-1&scheduledDate=2026-11-26') {
   const app = express();
   app.use('/admin/schedule', router);
   app.use((err, _req, res, _next) => res.status(err.status || 500).json({ error: err.message }));
@@ -109,7 +122,7 @@ async function get(role, path = 'visit-texts') {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  db.mockImplementation((table) => (String(table).startsWith('sms_log') ? smsLog() : scheduledServices()));
+  db.mockImplementation(tableFor);
   // Only Date is frozen: the technician access window and the 7-day window are computed from "now".
   jest.useFakeTimers({
     now: new Date('2026-11-27T15:00:00Z'),
@@ -118,6 +131,7 @@ beforeEach(() => {
   mockLive.mockReturnValue(true);
   mockPhotos.mockReturnValue(true);
   onSmsRead = null;
+  storedCodes = {};
   visits = [{ id: 'svc-1', customer_id: 'cust-1', technician_id: 'tech-1', status: 'confirmed', scheduled_date: '2026-11-26' }];
   smsRows = [
     row('a', '2026-11-20T15:00:00Z', { message_body: 'please skip the back yard' }),
@@ -195,6 +209,27 @@ describe('GET /:id/visit-texts', () => {
     const { status, body } = await get('technician');
     expect(status).toBe(404);
     expect(JSON.stringify(body)).not.toMatch(/back yard|signed\.example/);
+  });
+
+  test('the request names the customer and date it shows: a different customer or date is a 404 with nothing read, a missing one a 400', async () => {
+    const readsSms = () => db.mock.calls.some((c) => String(c[0]).startsWith('sms_log'));
+    expect((await get('technician', 'visit-texts?customerId=cust-2&scheduledDate=2026-11-26')).status).toBe(404);
+    expect((await get('technician', 'visit-texts?customerId=cust-1&scheduledDate=2026-11-27')).status).toBe(404);
+    expect(readsSms()).toBe(false);
+    expect((await get('technician', 'visit-texts')).status).toBe(400);
+    expect((await get('technician', 'visit-texts?customerId=cust-1')).status).toBe(400);
+    expect(readsSms()).toBe(false);
+    expect((await get('technician')).status).toBe(200);
+  });
+
+  test('a lockbox code stored for another property of the customer hides a text that carries it', async () => {
+    storedCodes = { property_preferences: [{ lockbox_code: 'ABCD' }], customer_access_codes: [] };
+    smsRows.push(row('k', '2026-11-20T22:00:00Z', { message_body: 'the lockbox at the lake house is abcd' }));
+    const { status, body } = await get('technician');
+    expect(status).toBe(200);
+    expect(body.texts.map((t) => t.id)).not.toContain('k');
+    expect(body.hidden).toBe(4);
+    expect(JSON.stringify(body)).not.toMatch(/abcd/i);
   });
 
   test('an admin reaches any visit, whoever it is assigned to', async () => {

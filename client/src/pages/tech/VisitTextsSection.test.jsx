@@ -27,7 +27,7 @@ describe('VisitTextsSection', () => {
     }));
     renderWith(request);
     expect(await screen.findByText('Customer texts · last 7 days')).toBeInTheDocument();
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/visit-texts');
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/visit-texts?customerId=cust-1&scheduledDate=2026-11-26');
     expect(screen.getByText('Please skip the back yard')).toBeInTheDocument();
     expect(screen.getByText(/^Customer · /)).toHaveTextContent('Nov 20, 10:00 AM');
     expect(screen.getByText(/^Office · /)).toBeInTheDocument();
@@ -99,12 +99,12 @@ describe('one visit at a time', () => {
       '/admin/schedule/svc-1/visit-texts': { enabled: true, hidden: 0, texts: [{ id: 'a', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Visit one text', photos: [] }] },
       '/admin/schedule/svc-2/visit-texts': new Promise(() => {}),
     };
-    const request = vi.fn((path) => (answers[path] instanceof Promise ? answers[path] : Promise.resolve(answers[path])));
+    const request = vi.fn((path) => { const a = answers[path.split('?')[0]]; return a instanceof Promise ? a : Promise.resolve(a); });
     const { rerender } = render(<VisitTextsSection service={SVC1} byService={ON} request={request} />);
     expect(await screen.findByText('Visit one text')).toBeInTheDocument();
     rerender(<VisitTextsSection service={{ id: 'svc-2', customer_id: 'cust-1', scheduled_date: '2026-11-26' }} byService={ON} request={request} />);
     expect(screen.queryByText('Visit one text')).toBeNull();
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/visit-texts');
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/visit-texts?customerId=cust-1&scheduledDate=2026-11-26');
   });
 });
 
@@ -164,7 +164,7 @@ describe('the visit\'s customer and date', () => {
 });
 
 describe('in the Visit Brief', () => {
-  const SERVICE = { id: 'svc-1', status: 'confirmed', customerName: 'Pat Sample', address: '123 Palm Ave, Bradenton, FL 34205', serviceType: 'Quarterly Pest Control' };
+  const SERVICE = { id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2026-11-26', status: 'confirmed', customerName: 'Pat Sample', address: '123 Palm Ave, Bradenton, FL 34205', serviceType: 'Quarterly Pest Control' };
   const stop = { key: 'row:svc-1', isVisit: false, services: [SERVICE], primary: SERVICE, liveCount: 1 };
   const panel = (brief, request) => render(<VisitBriefPanel stop={stop} detail={{ status: 'ready', byService: { 'svc-1': { brief } } }} request={request} />);
   const texts = { enabled: true, hidden: 0, texts: [{ id: 't1', direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body: 'Gate code changed', photos: [] }] };
@@ -173,14 +173,21 @@ describe('in the Visit Brief', () => {
     const request = vi.fn(async () => texts);
     panel({ brief: null, visitTexts: true }, request);
     expect(await screen.findByText('Gate code changed')).toBeInTheDocument();
-    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/visit-texts');
+    expect(request).toHaveBeenCalledWith('/admin/schedule/svc-1/visit-texts?customerId=cust-1&scheduledDate=2026-11-26');
+  });
+
+  it('asks for nothing when the visit has no customer id or date to name', async () => {
+    const request = vi.fn(async () => texts);
+    render(<VisitTextsSection service={{ id: 'svc-1' }} byService={ON} request={request} />);
+    await wait();
+    expect(request).not.toHaveBeenCalled();
   });
 
   it('asks for nothing when the brief carries no flag', async () => {
     const request = vi.fn(async () => texts);
     panel({ brief: null }, request);
     await wait();
-    expect(request).not.toHaveBeenCalledWith('/admin/schedule/svc-1/visit-texts');
+    expect(request).not.toHaveBeenCalledWith(expect.stringContaining('/visit-texts'));
     expect(screen.queryByText('Customer texts · last 7 days')).toBeNull();
   });
 });

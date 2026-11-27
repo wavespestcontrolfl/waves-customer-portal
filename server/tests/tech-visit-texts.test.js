@@ -189,7 +189,7 @@ describe('windowStart', () => {
 // A tiny sms_log: applies the customer, the created_at bounds, the order, the limit and the offset the service asks for.
 // The raw-SQL pieces (provider twin, recruiting and reservation filters) are only recorded; withoutQueueParents covers the twin in JS.
 const col = (name) => String(name).replace(/^sl\./, '');
-function fakeDb(rows) {
+function fakeDb(rows, { tables = {}, failTable = null } = {}) {
   const calls = { selects: 0, tables: [], raw: 0 };
   const sub = () => {
     const b = {};
@@ -197,11 +197,18 @@ function fakeDb(rows) {
     b.modify = (cb) => { cb(b); return b; };
     return b;
   };
+  // property_preferences / customer_access_codes: the stored codes the reader matches against
+  const other = (table) => {
+    const q = { where: () => q, whereNotNull: () => q, select: async () => { if (failTable === table) throw new Error('read failed'); return tables[table] || []; } };
+    return q;
+  };
   const db = (table) => {
     calls.tables.push(table);
+    if (!String(table).startsWith('sms_log')) return other(table);
     let list = rows.slice();
     let skip = 0;
     let max = Infinity;
+    const orders = [];
     const q = {
       where(a, op, val) {
         if (typeof a === 'function') { a.call(sub(), sub()); return q; }
@@ -213,10 +220,21 @@ function fakeDb(rows) {
       },
       whereNotExists(cb) { cb.call(sub(), sub()); return q; },
       whereRaw() { calls.raw += 1; return q; },
-      orderBy(c, dir) { const k = col(c); list.sort((x, y) => (dir === 'desc' ? -1 : 1) * (x[k] < y[k] ? -1 : x[k] > y[k] ? 1 : 0)); return q; },
+      orderBy(c, dir) { orders.push([col(c), dir === 'desc' ? -1 : 1]); return q; },
       limit(n) { max = n; return q; },
       offset(n) { skip = n; return q; },
-      select() { calls.selects += 1; return Promise.resolve(list.slice(skip, skip + max)); },
+      select() {
+        calls.selects += 1;
+        // every orderBy clause as one comparator, in the order given (created_at first, id as the tie-break)
+        const sorted = list.slice().sort((x, y) => {
+          for (const [k, dir] of orders) {
+            if (x[k] < y[k]) return -dir;
+            if (x[k] > y[k]) return dir;
+          }
+          return 0;
+        });
+        return Promise.resolve(sorted.slice(skip, skip + max));
+      },
     };
     return q;
   };
@@ -244,7 +262,7 @@ describe('visitTexts', () => {
     expect(out.hidden).toBe(2);
     expect(JSON.stringify(out)).not.toMatch(/balance/);
     expect(Object.keys(out.texts[0]).sort()).toEqual(['at', 'body', 'direction', 'id', 'photoCount', 'photos']);
-    expect(db.calls.tables[0]).toBe('sms_log as sl');
+    expect(db.calls.tables).toContain('sms_log as sl');
     expect(db.calls.raw).toBeGreaterThan(0); // the provider-twin, recruiting and reservation filters were applied
   });
 
@@ -334,7 +352,7 @@ describe('visitTexts', () => {
     const ok = jest.fn(async (items) => items.map((m) => ({ ...m, url: 'https://signed.example/a?sig=1' })));
     // the real signer's failure path: url || providerUrl || null
     const failed = jest.fn(async (items) => items.map((m) => ({ ...m, url: m.url || m.providerUrl || null })));
-    const db = () => fakeDb([row('p1', '2026-11-22T15:00:00Z', { message_body: 'Brown patch', metadata: { media } })])();
+    const db = (table) => fakeDb([row('p1', '2026-11-22T15:00:00Z', { message_body: 'Brown patch', metadata: { media } })])(table);
     const good = await visitTexts(db, SVC, { now: NOW, sign: ok, withPhotos: true });
     expect(ok).toHaveBeenCalledWith([{ key: 'sms-media/inbound/a', contentType: 'image/jpeg' }]);
     expect(good.texts[0].photos).toEqual([{ url: 'https://signed.example/a?sig=1', contentType: 'image/jpeg' }]);
@@ -362,13 +380,13 @@ describe('visitTexts', () => {
     const sign = jest.fn();
     const noKey = { media: [{ providerUrl: 'https://api.twilio.com/x/Media/1', contentType: 'image/jpeg' }] };
     const rows = [
-      row('a-cap', '2026-11-22T15:00:00Z', { message_body: 'Brown patch by the gate', metadata: noKey }),
-      row('b-bare', '2026-11-22T16:00:00Z', { message_body: '', metadata: noKey }),
+      row('z-cap', '2026-11-22T15:00:00Z', { message_body: 'Brown patch by the gate', metadata: noKey }),
+      row('y-bare', '2026-11-22T16:00:00Z', { message_body: '', metadata: noKey }),
     ];
     const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
     expect(out.texts.map((t) => ({ id: t.id, photos: t.photos, photoCount: t.photoCount }))).toEqual([
-      { id: 'a-cap', photos: [], photoCount: 1 },
-      { id: 'b-bare', photos: [], photoCount: 1 },
+      { id: 'z-cap', photos: [], photoCount: 1 },
+      { id: 'y-bare', photos: [], photoCount: 1 },
     ]);
     expect(sign).not.toHaveBeenCalled();
     expect(JSON.stringify(out)).not.toMatch(/twilio/);
@@ -414,6 +432,45 @@ describe('visitTexts', () => {
     expect(out.texts.map((t) => t.id)).toEqual(['b1', 'b2', 'c1']);
     expect(out.hidden).toBe(4); // a1 (verification code), a2 + a3 (short replies after it), c2 (3 digits)
     expect(JSON.stringify(out)).not.toMatch(/481|"48"/);
+  });
+
+  test('a text with one of the customer\'s stored codes, for any property, is hidden with its photo, whatever the case', async () => {
+    const sign = jest.fn();
+    const stored = { property_preferences: [{ lockbox_code: 'ABCD' }, { neighborhood_gate_code: 'Blue' }], customer_access_codes: [{ code: 'Pelican' }] };
+    const img = { media: [{ key: 'sms-media/inbound/x', contentType: 'image/jpeg' }] };
+    const rows = [
+      row('s1', '2026-11-22T10:00:00Z', { message_body: 'the lockbox is abcd' }),
+      row('s2', '2026-11-22T11:00:00Z', { message_body: 'gate is BLUE', metadata: img }),
+      row('s3', '2026-11-22T12:00:00Z', { message_body: 'try pelican' }),
+      row('s4', '2026-11-22T13:00:00Z', { message_body: 'the dogs are friendly' }),
+    ];
+    const out = await visitTexts(fakeDb(rows, { tables: stored }), SVC, { now: NOW, sign, withPhotos: true });
+    expect(out.texts.map((t) => t.id)).toEqual(['s4']);
+    expect(out.hidden).toBe(3);
+    expect(sign).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toMatch(/abcd|blue|pelican/i);
+  });
+
+  test('a failed read of the stored codes fails closed: any digit or all-caps token hides the text', async () => {
+    const rows = [
+      row('f1', '2026-11-22T10:00:00Z', { message_body: 'the lockbox is ABCD' }),
+      row('f2', '2026-11-22T11:00:00Z', { message_body: 'gate is 12' }),
+      row('f3', '2026-11-22T12:00:00Z', { message_body: 'the dogs are friendly' }),
+    ];
+    const out = await visitTexts(fakeDb(rows, { failTable: 'customer_access_codes' }), SVC, { now: NOW, sign: async () => [] });
+    expect(out.texts.map((t) => t.id)).toEqual(['f3']);
+    expect(out.hidden).toBe(2);
+  });
+
+  test('ties and order: created_at decides first, id breaks a tie, never the id alone', async () => {
+    const rows = [
+      row('z-old', '2026-11-22T10:00:00Z', { message_body: 'first' }),
+      row('a-new', '2026-11-22T12:00:00Z', { message_body: 'last' }),
+      row('b-tie', '2026-11-22T11:00:00Z', { message_body: 'tie b' }),
+      row('c-tie', '2026-11-22T11:00:00Z', { message_body: 'tie c' }),
+    ];
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign: async () => [] });
+    expect(out.texts.map((t) => t.id)).toEqual(['z-old', 'b-tie', 'c-tie', 'a-new']);
   });
 
   test('a visit with no customer reads nothing', async () => {
