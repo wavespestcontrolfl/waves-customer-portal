@@ -109,6 +109,9 @@ const SELECTORS = [
   // deep: true — its only call site (report-ask-ai.js, TEXT_POLICIES.reportAsk)
   // goes through llm/call.js, same as NEWSLETTER above.
   { key: 'REPORT_ASK', env: 'MODEL_REPORT_ASK', description: 'Service report Ask Waves answers (owner 2026-10-05: Sonnet 5.5; dark behind GATE_REPORT_ASK_AI)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
+  // deep: true — its only call site (sms-operational-extractor.js, TEXT_POLICIES.smsOperationalActions)
+  // goes through llm/call.js.
+  { key: 'SMS_OPERATIONAL_ACTIONS', env: 'MODEL_SMS_OPERATIONAL_ACTIONS', description: 'SMS operational extraction, text channel (2026-11-27 replay test: Sonnet 5.5; before that Opus 5.5)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
   { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; dark behind GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true, cap 'vision' — same rationale as PLANT_ID_REFEREE above: its
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
@@ -180,6 +183,7 @@ const POLICY_SELECTOR = {
   routineAnswer: { primary: 'ROUTINE', fallback: 'OPENAI_REPORT_WRITER' },
   adsAdvisor: { primary: 'ADS_ADVISOR', fallback: 'OPENAI_REPORT_WRITER' },
   reportAsk: { primary: 'REPORT_ASK', fallback: 'OPENAI_REPORT_WRITER' },
+  smsOperationalActions: { primary: 'SMS_OPERATIONAL_ACTIONS', fallback: 'OPENAI_REPORT_WRITER' },
   fastStructured: { primary: 'OPENAI_FAST', fallback: 'FAST' },
   fastStructuredInteractive: { primary: 'OPENAI_FAST_INTERACTIVE', fallback: 'FAST' },
   balancedAnswer: { primary: 'OPENAI_BALANCED', fallback: 'WORKHORSE' },
@@ -389,7 +393,7 @@ const LANES = [
   L('sms-commitment-thread-close', 'SMS follow-up closed by a later text', 'sms-commitment-thread-close.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call-commitment-contact-check', 'Call promise kept-by-contact check', 'call-commitment-contact-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('call-promise-later-text-check', 'Call promise later-text check', 'call-promise-later-text-check.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
-  L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
+  L('sms-operational-actions', 'SMS operational extraction', 'sms-operational-extractor.js', 'fastText', P('smsOperationalActions', 'primary'), P('smsOperationalActions', 'fallback'), { inbound: true }),
   L('email-operational-actions', 'Email operational extraction (asks + staff promises)', 'sms-operational-extractor.js', 'fastText', P('highStakes', 'primary'), P('highStakes', 'fallback'), { inbound: true }),
   L('sms_intent', 'SMS service-intent classification', 'sms-service-intent.js', 'fastText', P('fastStructured', 'primary'), P('fastStructured', 'fallback'), { inbound: true }),
   L('visit_voice_facts', 'Fast Complete voice fill (where treated, pests named)', 'visit-voice-facts.js', 'fastText', P('fastStructuredInteractive', 'primary'), P('fastStructuredInteractive', 'fallback'), { inbound: true, note: 'GATE_FAST_COMPLETE_REPORT, dark' }),

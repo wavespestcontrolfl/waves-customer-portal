@@ -537,8 +537,9 @@ describe('model-switchboard', () => {
     // CONTENT: its default (Opus 5.5) is a requires:'deep' model; the
     // websiteContent policy and the codex remediation fix go through
     // llm/call.js, and the content agents take the model only at registration.
+    // SMS_OPERATIONAL_ACTIONS: its default (Sonnet 5.5) is a requires:'deep' model; its one site goes through llm/call.js.
     // ALERT_CLEAR: its default (Sonnet 5.5) is a requires:'deep' model; its one direct site floors max_tokens and reads the first text block.
-    expect(deepSafe).toEqual(['ADS_ADVISOR', 'ALERT_CLEAR', 'AUTO_DISPATCH_PROOFREADER', 'CONTENT', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'REPORT_ASK', 'ROUTINE', 'SMS_SCHEDULING_DECIDE']);
+    expect(deepSafe).toEqual(['ADS_ADVISOR', 'ALERT_CLEAR', 'AUTO_DISPATCH_PROOFREADER', 'CONTENT', 'DEEP', 'EXTREME', 'LAWN_ASSESSMENT_REFEREE', 'NEWSLETTER', 'PLANT_ID_REFEREE', 'REPORT_ASK', 'ROUTINE', 'SMS_OPERATIONAL_ACTIONS', 'SMS_SCHEDULING_DECIDE']);
     // Low effort rides the always-thinking default only; an Opus 4.8 rollback sends none.
     expect(MODELS.ROUTINE_EFFORT).toBe(MODELS.anthropicThinkingAlwaysOn(MODELS.ROUTINE) ? 'low' : undefined);
     const routineLeg = { provider: 'anthropic', model: MODELS.ROUTINE, ...(MODELS.ROUTINE_EFFORT ? { effort: MODELS.ROUTINE_EFFORT } : {}) };
