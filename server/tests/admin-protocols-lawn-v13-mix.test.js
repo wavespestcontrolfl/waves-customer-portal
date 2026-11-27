@@ -690,7 +690,7 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       ratePer1000: 0.147, rateSource: 'recipe_line_rate',
       backpack4Gal: { amount: 0.147, amountUnit: 'oz', metricAmount: 4.2, metricUnit: 'g', carrierGalPer1000: 4, carrierSource: 'line' },
       // The FlowZone was tested at 1.33, not the line's 4 gal: the card warns; the spot row needs no big-tank check.
-      volumeChecks: [{ sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, testedGalPer1000: 1.33 }],
+      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 }],
     });
     expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
       ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },

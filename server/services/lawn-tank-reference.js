@@ -68,12 +68,24 @@ function mixFields(row, percent) {
   return { mixWith, applyAlone: row?.gates?.applyAlone === true, surfactantNote };
 }
 
-// Each sprayer whose tested output differs from a volume the program fixes for this line (Arena at 4 gal per 1,000 sq ft on a
-// FlowZone tested at 1.33): the fill stays; the card says to change the pass so the label volume goes down.
-function volumeChecks(carriers, sprayers) {
-  return carriers.flatMap((label) => sprayers
+// Passes that put the label volume down with a sprayer that puts out less: a test output is rounded (1.33 is 4/3), so a ratio
+// within 2% of a whole number takes that number (4 / 1.33 = 3 passes). A sprayer that puts out more gets no pass count.
+const PASS_ROUNDING = 0.02;
+const passesFor = (label, tested) => (tested < label ? Math.ceil(label / tested - PASS_ROUNDING) : null);
+
+// Each sprayer whose tested output differs from a volume the program fixes (Arena at 4 gal per 1,000 sq ft on a FlowZone tested
+// at 1.33), with the use it applies to (null = the whole line): the fill stays; the card says how to reach the label volume.
+const fixedVolumes = (lineCarrier, useFills) => [
+  ...(lineCarrier ? [{ use: null, label: lineCarrier }] : []),
+  ...useFills.map((entry) => ({ use: entry.use, label: entry.carrierGalPer1000 })),
+];
+function volumeChecks(volumes, sprayers) {
+  return volumes.flatMap(({ use, label }) => sprayers
     .filter((sprayer) => rigCarrier(sprayer) > 0 && Math.abs(rigCarrier(sprayer) - label) > 1e-9)
-    .map((sprayer) => ({ sprayerName: sprayer.system_name || null, labelGalPer1000: label, testedGalPer1000: rigCarrier(sprayer) })));
+    .map((sprayer) => ({
+      use, sprayerName: sprayer.system_name || null, labelGalPer1000: label, testedGalPer1000: rigCarrier(sprayer),
+      passes: passesFor(label, rigCarrier(sprayer)),
+    })));
 }
 
 const isTwoAndHalfGallonJug = (product) => /^\s*2\.5\s*-?\s*gal/i.test(String(product?.container_size || ''));
@@ -201,7 +213,7 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     fullTank: bigTank && fullGallons > 0 ? sized(fullGallons, tankRig) : null,
     backpack4Gal,
     useFills,
-    volumeChecks: volumeChecks([...new Set([lineCarrier, ...useFills.map((use) => use.carrierGalPer1000)].filter(Boolean))], [tankFills && tankRig, backpack].filter(Boolean)),
+    volumeChecks: volumeChecks(fixedVolumes(lineCarrier, useFills), [tankFills && tankRig, backpack].filter(Boolean)),
     // The FlowZone has no sprayer test on file, so its amount cannot be sized (a rate exists, the line fixes no volume).
     backpackMissing: !backpack4Gal && rate.ratePer1000 > 0 && !(lineCarrier || percent || rigCarrier(backpack) > 0),
   };

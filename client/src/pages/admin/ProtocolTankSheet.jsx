@@ -20,13 +20,43 @@ const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g,
 // Certainty in the Celsius weed mix); the base of a mix others are added to; applied alone. With no mark, neutral wording.
 // A mix instruction is for today only: both products selected for this sheet, neither at a limit.
 const mixable = (item) => item.selected && item.tankAmounts?.planState !== "capped";
-const mixesInto = (additive, base) => Boolean(additive.tankAmounts?.mixWith) && nameKey(base.product.name).startsWith(nameKey(additive.tankAmounts.mixWith));
+// A mark may name several products ("Recognition and Fusilade II" on the Bermuda removal surfactant).
+const mixNames = (item) => String(item.tankAmounts?.mixWith || "").split(/\s*(?:,|\+|\band\b)\s*/).filter(Boolean);
+const mixesInto = (additive, base) => mixNames(additive).some((name) => nameKey(base.product.name).startsWith(nameKey(name)));
 const GRANULAR_METHOD = { hand_shaker: "Hand shaker", spreader: "Spreader" };
+
+// The mixable products the marks tie to this one, directly or through another.
+function mixGroup(item, products) {
+  const pool = products.filter(mixable);
+  const group = [item];
+  for (let i = 0; i < group.length; i += 1) {
+    group.push(...pool.filter((other) => !group.includes(other) && (mixesInto(group[i], other) || mixesInto(other, group[i]))));
+  }
+  return group;
+}
+
+// One base the others are added to (the Celsius weed mix). Otherwise (Bermuda removal: the two herbicides name each other and the
+// surfactant names both) every card names the one shared tank, in mixing order, the surfactant last.
+const isBaseMix = (group) => {
+  const bases = group.filter((member) => !mixNames(member).length);
+  return bases.length === 1 && group.every((member) => member === bases[0] || (mixNames(member).length === 1 && mixesInto(member, bases[0])));
+};
+const MIX_ORDER = [...TANK_MIX_CATEGORIES];
+const mixRank = (item) => (MIX_ORDER.includes(item.product.mixingOrderCategory) ? MIX_ORDER.indexOf(item.product.mixingOrderCategory) : MIX_ORDER.length - 1);
+function sharedTank(item, products) {
+  const group = mixGroup(item, products);
+  if (group.length < 2 || isBaseMix(group)) return null;
+  const ordered = [...group].sort((a, b) => mixRank(a) - mixRank(b) || products.indexOf(a) - products.indexOf(b));
+  return `Same tank: ${ordered.map((member) => member.product.name).join(" + ")}`;
+}
+
 function applicationMethod(item, products) {
   const amounts = item.tankAmounts || {};
   if (isSpreader(item)) return GRANULAR_METHOD[amounts.applicator] || "Spreader";
   const neutral = amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
   if (!mixable(item)) return neutral;
+  const shared = sharedTank(item, products);
+  if (shared) return shared;
   if (products.some((base) => mixable(base) && mixesInto(item, base))) return `Add to the ${amounts.mixWith} mix`;
   const partners = products.filter((other) => mixable(other) && mixesInto(other, item));
   return partners.length ? `Tank with: ${partners.map((other) => other.product.name).join(", ")}` : neutral;
@@ -41,8 +71,13 @@ function surfactantNote(item, products) {
   return products.find((other) => mixable(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
 }
 
-// A program volume the sprayer's test does not put out: change the pass, so the label volume goes down.
-const volumeText = ({ sprayerName, labelGalPer1000: label, testedGalPer1000: tested }) => `Label volume is ${num(label)} gal per 1,000. ${sprayerName || "This sprayer"} was tested at ${num(tested)}. ${tested < label ? "Slow the pass or make two passes." : "Speed up the pass."}`;
+// A program volume the sprayer's test does not put out (server: the pass count), named for the use it applies to.
+const sentenceCase = (text) => text.charAt(0).toUpperCase() + text.slice(1);
+const volumeText = ({ use, sprayerName, labelGalPer1000: label, testedGalPer1000: tested, passes }) => [
+  use ? `${sentenceCase(use)}:` : null,
+  `Label volume is ${num(label)} gal per 1,000. ${sprayerName || "This sprayer"} was tested at ${num(tested)}.`,
+  passes ? `Make ${passes} passes, or slow down to reach the label volume.` : "Speed up or use the other sprayer.",
+].filter(Boolean).join(" ");
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",

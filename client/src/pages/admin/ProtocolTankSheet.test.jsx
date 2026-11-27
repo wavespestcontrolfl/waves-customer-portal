@@ -245,11 +245,17 @@ describe("110-gallon tank reference", () => {
 
   it("a program volume the sprayer test does not put out warns on the card and keeps the amounts", () => {
     const plan = fixture();
-    plan.items[0].tankAmounts.volumeChecks = [{ sprayerName: null, labelGalPer1000: 4, testedGalPer1000: 2 }, { sprayerName: "FlowZone fixture", labelGalPer1000: 1, testedGalPer1000: 1.33 }];
+    plan.items[0].tankAmounts.volumeChecks = [
+      { use: null, sprayerName: null, labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 },
+      { use: null, sprayerName: "Fixture tank", labelGalPer1000: 1, testedGalPer1000: 2, passes: null },
+      { use: "mapped large patch", sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: 2 },
+    ];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
-      expect(within(surface).getByText("Label volume is 4 gal per 1,000. This sprayer was tested at 2. Slow the pass or make two passes.")).toBeInTheDocument();
-      expect(within(surface).getByText("Label volume is 1 gal per 1,000. FlowZone fixture was tested at 1.33. Speed up the pass.")).toBeInTheDocument();
+      expect(within(surface).getByText("Label volume is 4 gal per 1,000. This sprayer was tested at 1.33. Make 3 passes, or slow down to reach the label volume.")).toBeInTheDocument();
+      // A sprayer that puts out more is never told to make passes.
+      expect(within(surface).getByText("Label volume is 1 gal per 1,000. Fixture tank was tested at 2. Speed up or use the other sprayer.")).toBeInTheDocument();
+      expect(within(surface).getByText("Mapped large patch: Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Make 2 passes, or slow down to reach the label volume.")).toBeInTheDocument();
       expect(within(surface).getAllByText("12.5 oz / 110 gal").length).toBeGreaterThan(0);
     }
   });
@@ -267,6 +273,22 @@ describe("110-gallon tank reference", () => {
     plan.items[0].selected = false;
     const again = render(<ProtocolTankSheet plan={plan} />);
     expect(within(again.container).queryByText(rule)).not.toBeInTheDocument();
+  });
+
+  it("Bermuda removal: every card names the one shared tank, the surfactant last, never the herbicides pointing at each other", () => {
+    const plan = fixture();
+    const item = (id, name, category, mixWith) => ({ selected: true, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: category },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, mixWith } });
+    plan.items = [
+      item("nis", "Synthetic surfactant", "adjuvant_last", "Recognition and Fusilade II"),
+      item("fus", "Fusilade II", "ec_ew", "Recognition"),
+      item("rec", "Recognition", "dry_wg_wdg_wp_df", "Fusilade II"),
+    ];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Same tank: Recognition + Fusilade II + Synthetic surfactant")).toHaveLength(3);
+      expect(within(surface).queryByText(/Add to the|Tank with/)).not.toBeInTheDocument();
+    }
   });
 
   it("a hand-shaker bait says Hand shaker, on screen and in print", () => {
