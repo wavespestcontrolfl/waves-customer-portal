@@ -1910,13 +1910,14 @@ class SmartRebooker {
   }
 
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
-    // GATE_VISIT_HOLD backstop: a held visit moves only for a person who chose to (options.releaseHold), which ends the
-    // hold first; every automatic mover is refused here whatever its own selection missed.
-    const heldGuard = await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
+    // GATE_VISIT_HOLD backstop: a held visit moves only for a person who chose to (options.releaseHold). That move ends
+    // the hold in its own UPDATE (rescheduleOnce); every other write fences `held_at IS NULL`. Nothing is released here.
+    const releasing = await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
     try {
-      return await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
+      const moved = await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
+      if (releasing) await require('./visit-hold').closeHoldBell(serviceId, 'released');
+      return moved;
     } catch (err) {
-      if (heldGuard) await heldGuard.restore();
       // The single-row CAS found the row grouped AFTER the pre-read (codex
       // #3609 r13 P2): re-enter once so the fresh read routes through the
       // unit mover (whole-visit move) instead of moving the lone member.
@@ -2140,11 +2141,16 @@ class SmartRebooker {
     // Combine then has nothing to un-confirm. A live row still rewinds.
     const landedStatus = options.pendingConfirmation === true ? 'pending'
       : (options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed');
+    // GATE_VISIT_HOLD: a person's move of a held visit ends the hold in this same UPDATE; any other move fences held_at IS NULL.
+    const visitHold = require('./visit-hold');
+    const releasesHold = visitHold.rowIsHeld(service) && options.releaseHold === true;
+    const holdFence = visitHold.visitHoldLive() && !releasesHold;
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
+      ...(releasesHold ? { held_at: null, hold_released_at: new Date() } : {}),
       ...(options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
       ...(!isNightWriter(initiatedBy) ? recurringDispatchDuePatch(service, {
         scheduled_date: newDate, window_start: win.start || service.window_start,
@@ -2664,6 +2670,7 @@ class SmartRebooker {
           property_id: service.property_id ?? null,
           // the account the log row is filed under (a racing customer merge repoints it)
           customer_id: service.customer_id ?? null,
+          ...(holdFence ? { held_at: null } : {}),
         })
         // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
         // (knex renders null as IS NULL); see membershipFenced above.
@@ -2979,11 +2986,20 @@ class SmartRebooker {
   // inside the same trx, so a direct UPDATE + history INSERT keeps
   // the audit trail consistent without re-introducing racing checks
   // designed for a different access pattern.
+  // GATE_VISIT_HOLD backstop for every series caller: a held anchor is refused unless a person chose the move; when the
+  // move commits, the day-14 bell of a released hold closes.
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
+    const releasing = await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
+    const moved = await this.rescheduleSeriesCore(serviceId, newDate, newWindow, reason, initiatedBy, options);
+    if (releasing) await require('./visit-hold').closeHoldBell(serviceId, 'released');
+    return moved;
+  }
+
+  async rescheduleSeriesCore(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
-    // GATE_VISIT_HOLD backstop for a direct series caller (the single path already passed it).
-    await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
+    // GATE_VISIT_HOLD: the anchor's hold ends in this move's own UPDATE when a person chose the move (see guardHeldMove).
+    const releasesHold = require('./visit-hold').rowIsHeld(service) && options.releaseHold === true;
     // Direct series callers (customer pull-forward, explicit admin series
     // branch) reach the visit-unit choke point too (codex #3609 r1/r3): a
     // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)
@@ -3310,7 +3326,7 @@ class SmartRebooker {
           // sibling can still carry stale tracker stamps (or SMS guards)
           // from an aborted attempt that a partial reset left behind.
           'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
-          'track_sms_sent_at', 'arrival_sms_sent_at', 'held_at',
+          'track_sms_sent_at', 'arrival_sms_sent_at', ...require('./visit-hold').heldColumn(),
         );
       // GATE_VISIT_HOLD: a held sibling other than the anchor is counted for cadence but never moved.
       const readSiblings = async () => require('./visit-hold').markHeldSiblings(await readSiblingsRaw(), serviceId);
@@ -4277,6 +4293,7 @@ class SmartRebooker {
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
+          ...(isAnchor && releasesHold ? { held_at: null, hold_released_at: new Date() } : {}),
           window_end: occurrenceWindow.end,
           status: isAnchor ? (options.pendingConfirmation === true ? 'pending' : (options.keepStatus === true && !sibRewound ? sib.status : 'confirmed')) : sib.status,
           ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
@@ -4595,6 +4612,8 @@ class SmartRebooker {
               status: sib.status,
               scheduled_date: sib.scheduled_date,
               window_start: sib.window_start,
+              // GATE_VISIT_HOLD: no occurrence moves once held, except the anchor a person is releasing.
+              ...(require('./visit-hold').visitHoldLive() && !(isAnchor && releasesHold) ? { held_at: null } : {}),
               // window_end and technician_id are overwritten by this sweep
               // (duration + the conflict-unassign decision were computed from
               // the values read above) — a concurrent resize/reassignment

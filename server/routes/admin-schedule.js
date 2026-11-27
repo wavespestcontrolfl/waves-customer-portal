@@ -6736,11 +6736,9 @@ router.get('/on-hold', requireAdmin, async (req, res, next) => {
 router.post('/:id/hold', async (req, res, next) => {
   try {
     if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
-    if (!(await technicianOwnsScheduledService(req, req.params.id, { forMutation: true }))) {
-      return res.status(404).json({ error: 'Scheduled service not found' });
-    }
+    // Ownership is checked inside the writer, on the locked row (scopeReq), so a reassignment cannot slip past it.
     const result = await visitHoldService.putVisitOnHold({
-      visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, conn: db,
+      visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, scopeReq: req, conn: db,
     });
     return res.json({ success: true, changed: result.changed, heldAt: result.heldAt });
   } catch (err) {

@@ -2629,7 +2629,7 @@ export default function DispatchPageV2({
           newCallerBooking={safeData.newCallerBooking === true}
           // GATE_VISIT_HOLD: the hold action (and Release hold for the office); a hold or release refetches the day.
           visitHold={safeData.visitHold === true}
-          onHoldChanged={() => { closeFastSheetsBehindDetails(); fetchSchedule(date, { silent: true }); }}
+          onHoldChanged={() => { closeFastSheetsBehindDetails(); fetchSchedule(date, { silent: true }); setScheduleRefreshKey((k) => k + 1); }}
           // A gate code was reported or added from
           // Details. Refetch the day (the list row shows it too) and hand the
           // sheet's Access section this visit's fresh row; the sheet keeps its

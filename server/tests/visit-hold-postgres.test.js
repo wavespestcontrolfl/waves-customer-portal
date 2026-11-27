@@ -19,7 +19,10 @@ const { randomUUID } = require('node:crypto');
 
 jest.setTimeout(120000);
 
-const ymdOffset = (days) => new Date(Date.now() + days * 24 * 3600 * 1000).toISOString().slice(0, 10);
+const { etDateString, addETDays } = require('../utils/datetime-et');
+
+// Fixture dates come from the Eastern calendar, the zone the sweep and the release check compare in.
+const ymdOffset = (days) => etDateString(addETDays(new Date(), days));
 
 postgres('visit on hold on PostgreSQL', () => {
   let database;
@@ -113,6 +116,37 @@ postgres('visit on hold on PostgreSQL', () => {
       expect((await hold.releaseVisitHold({ visitId: id })).changed).toBe(false);
     });
 
+    test('a technician hold re-checks ownership on the locked row: another technician is refused, the owner is let in', async () => {
+      const techA = randomUUID();
+      const techB = randomUUID();
+      await trx('technicians').insert([{ id: techA, name: 'Tech A' }, { id: techB, name: 'Tech B' }]);
+      const id = await visit({ technician_id: techB });
+      const asTech = (technicianId) => ({ techRole: 'technician', technicianId });
+      await expect(hold.putVisitOnHold({ visitId: id, scopeReq: asTech(techA) })).rejects.toMatchObject({ status: 404 });
+      expect((await row(id)).held_at).toBeNull();
+      expect((await hold.putVisitOnHold({ visitId: id, scopeReq: asTech(techB) })).changed).toBe(true);
+      const other = await visit({ technician_id: techB });
+      expect((await hold.putVisitOnHold({ visitId: other, scopeReq: { techRole: 'admin' } })).changed).toBe(true);
+    });
+
+    test('release refuses a slot booked while the visit was held, and keeps it held; a free slot releases', async () => {
+      const date = ymdOffset(8);
+      const id = await visit({ scheduled_date: date, window_start: '09:00', window_end: '11:00' });
+      await hold.putVisitOnHold({ visitId: id });
+      const other = await visit({ scheduled_date: date, window_start: '10:00', window_end: '12:00' });
+      await expect(hold.releaseVisitHold({ visitId: id })).rejects.toMatchObject({ status: 409, code: 'SLOT_TAKEN' });
+      expect((await row(id)).held_at).not.toBeNull();
+      await trx('scheduled_services').where({ id: other }).update({ status: 'cancelled' });
+      expect((await hold.releaseVisitHold({ visitId: id })).changed).toBe(true);
+    });
+
+    test('the projection helper names held_at only while the gate is live', () => {
+      expect(hold.heldColumn()).toEqual(['held_at']);
+      expect(hold.heldColumn('ss.')).toEqual(['ss.held_at']);
+      process.env.GATE_VISIT_HOLD = 'false';
+      expect(hold.heldColumn()).toEqual([]);
+    });
+
     test('the office list reads held visits oldest first', async () => {
       const a = await visit();
       const b = await visit();
@@ -138,6 +172,17 @@ postgres('visit on hold on PostgreSQL', () => {
       expect((await probe()).map((r) => r.id)).toContain(id);
     });
 
+    test('the estimate slot picker offers the hour of a held visit', async () => {
+      const { filterCollidingSlots } = require('../services/estimate-slot-availability');
+      const date = ymdOffset(9);
+      const id = await visit({ scheduled_date: date, window_start: '09:00', window_end: '11:00' });
+      const slot = { date, windowStart: '09:00', windowEnd: '11:00', techId: null };
+      const offered = async () => (await filterCollidingSlots([slot], { dateFrom: date, dateTo: date, conn: trx })).length;
+      expect(await offered()).toBe(0);
+      await hold.putVisitOnHold({ visitId: id });
+      expect(await offered()).toBe(1);
+    });
+
     test('the day-stops scaffold used by route views and the optimizer skips a held visit', async () => {
       const { dayStopsQuery } = require('../services/scheduling/day-stops');
       const date = ymdOffset(7);
@@ -150,27 +195,65 @@ postgres('visit on hold on PostgreSQL', () => {
   });
 
   describe('the mover backstop', () => {
-    test('an automatic move of a held visit is refused; a person who chose to move it releases the hold', async () => {
+    test('the guard refuses an automatic move and writes nothing; a person\'s move is let through still held', async () => {
       const id = await visit();
       await hold.putVisitOnHold({ visitId: id, note: 'keep' });
       await expect(hold.guardHeldMove(id, { releaseHold: false })).rejects.toMatchObject({ status: 409, code: 'VISIT_ON_HOLD' });
+      expect(await hold.guardHeldMove(id, { releaseHold: true })).toBe(true);
       expect((await row(id)).held_at).not.toBeNull();
-      const guard = await hold.guardHeldMove(id, { releaseHold: true });
-      expect((await row(id)).held_at).toBeNull();
-      // a failed move puts the hold back, note and all
-      await guard.restore();
-      const restored = await row(id);
-      expect(restored.held_at).not.toBeNull();
-      expect(restored.hold_note).toBe('keep');
+      expect(await hold.guardHeldMove(await visit(), { releaseHold: true })).toBe(false);
     });
 
-    test('SmartRebooker.reschedule refuses a held visit unless the caller passes releaseHold', async () => {
+    test('a person\'s reschedule releases the hold in the same write; a refused one leaves it held', async () => {
       const SmartRebooker = require('../services/rebooker');
       const id = await visit();
-      await hold.putVisitOnHold({ visitId: id });
-      await expect(SmartRebooker.reschedule(id, ymdOffset(9), { start: '09:00', end: '11:00' }, 'auto_dispatch', 'auto_dispatch', {}))
-        .rejects.toMatchObject({ code: 'VISIT_ON_HOLD', statusCode: 409 });
+      await hold.putVisitOnHold({ visitId: id, note: 'keep' });
+      await expect(SmartRebooker.reschedule(id, ymdOffset(-3), { start: '09:00', end: '11:00' }, 'admin', 'admin', { releaseHold: true }))
+        .rejects.toMatchObject({ code: 'INVALID_DATE' });
       expect((await row(id)).held_at).not.toBeNull();
+      const target = ymdOffset(12);
+      await SmartRebooker.reschedule(id, target, { start: '13:00', end: '15:00' }, 'admin', 'admin', { releaseHold: true, seriesPolicy: 'single' });
+      const moved = await row(id);
+      expect(moved.held_at).toBeNull();
+      expect(moved.hold_released_at).not.toBeNull();
+      expect(String(moved.scheduled_date.toISOString?.().slice(0, 10) || moved.scheduled_date).slice(0, 10)).toBe(target);
+    });
+
+    test('the move write fences held_at: a hold that commits after the guard read stops an automatic move', async () => {
+      const SmartRebooker = require('../services/rebooker');
+      const id = await visit();
+      const realGuard = hold.guardHeldMove;
+      // the guard reads "not held", then the technician's hold commits before the move's own UPDATE
+      jest.spyOn(hold, 'guardHeldMove').mockImplementation(async (...args) => {
+        const out = await realGuard(...args);
+        await hold.putVisitOnHold({ visitId: id });
+        return out;
+      });
+      try {
+        await expect(SmartRebooker.reschedule(id, ymdOffset(12), { start: '13:00', end: '15:00' }, 'auto_dispatch', 'auto_dispatch', { seriesPolicy: 'single' }))
+          .rejects.toBeTruthy();
+      } finally { hold.guardHeldMove.mockRestore(); }
+      const after = await row(id);
+      expect(after.held_at).not.toBeNull();
+      expect(String(after.scheduled_date.toISOString?.().slice(0, 10) || after.scheduled_date).slice(0, 10)).toBe(ymdOffset(5));
+    });
+
+    test('an office move through the Intelligence Bar ends the hold, and stamps the release only on a held visit', async () => {
+      const { writeMovedStop } = require('../services/intelligence-bar/schedule-tools')._private;
+      const move = async (id, dateStr) => {
+        const s = await row(id);
+        const c = { s, observedDate: ymdOffset(5), oldDate: ymdOffset(5), wasLive: false, liveReset: {} };
+        await writeMovedStop(trx, c, dateStr, null, undefined);
+      };
+      const heldId = await visit();
+      await hold.putVisitOnHold({ visitId: heldId });
+      await move(heldId, ymdOffset(11));
+      const freed = await row(heldId);
+      expect(freed.held_at).toBeNull();
+      expect(freed.hold_released_at).not.toBeNull();
+      const plainId = await visit();
+      await move(plainId, ymdOffset(11));
+      expect((await row(plainId)).hold_released_at).toBeNull();
     });
 
     test('a held non-anchor sibling is counted but never moved by a series sweep', () => {
@@ -261,6 +344,36 @@ postgres('visit on hold on PostgreSQL', () => {
       expect((await row(waiting.held)).held_at).not.toBeNull();
       expect((await row(oneTime)).held_at).not.toBeNull();
       expect((await row(oneTime)).status).toBe('confirmed');
+    });
+
+    test('a booster month is no series visit: a held booster never closes, and a due booster never closes a held plan visit', async () => {
+      const { held, next } = await seriesOf(ymdOffset(-20), ymdOffset(60));
+      await trx('scheduled_services').where({ id: held }).update({ held_at: new Date(Date.now() - 2 * 86400000) });
+      const booster = await visit({ scheduled_date: ymdOffset(-1), status: 'confirmed', is_recurring: false, recurring_parent_id: held });
+      await hold.runVisitHoldSweep({ conn: trx });
+      expect((await row(held)).held_at).not.toBeNull();
+      expect((await row(booster)).status).toBe('confirmed');
+      expect((await row(next)).status).toBe('confirmed');
+      await trx('scheduled_services').where({ id: booster }).update({ held_at: new Date(), scheduled_date: ymdOffset(-30) });
+      await hold.runVisitHoldSweep({ conn: trx });
+      expect((await row(booster)).held_at).not.toBeNull();
+      expect((await row(booster)).status).toBe('confirmed');
+    });
+
+    test('the close re-checks under the row locks: a re-placed hold, a moved or held successor ends it', async () => {
+      const { held, next } = await seriesOf(ymdOffset(-20), ymdOffset(0));
+      const heldAt = new Date(Date.now() - 3 * 86400000);
+      await trx('scheduled_services').where({ id: held }).update({ held_at: heldAt });
+      const stale = { id: held, held_at: new Date(heldAt.getTime() - 5000) };
+      expect(await hold._private.closeHeldVisitAsSkipped(stale, ymdOffset(0), { conn: trx })).toBeNull();
+      await trx('scheduled_services').where({ id: next }).update({ scheduled_date: ymdOffset(30) });
+      expect(await hold._private.closeHeldVisitAsSkipped({ id: held, held_at: heldAt }, ymdOffset(0), { conn: trx })).toBeNull();
+      await trx('scheduled_services').where({ id: next }).update({ scheduled_date: ymdOffset(0), held_at: new Date() });
+      expect(await hold._private.closeHeldVisitAsSkipped({ id: held, held_at: heldAt }, ymdOffset(0), { conn: trx })).toBeNull();
+      expect((await row(held)).status).toBe('confirmed');
+      await trx('scheduled_services').where({ id: next }).update({ held_at: null });
+      expect(await hold._private.closeHeldVisitAsSkipped({ id: held, held_at: heldAt }, ymdOffset(0), { conn: trx })).toMatchObject({ id: next });
+      expect((await row(held)).status).toBe('skipped');
     });
 
     test('day 14 rings ONE bell, never again, and the bell closes when the hold ends', async () => {

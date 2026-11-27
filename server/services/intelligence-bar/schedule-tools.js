@@ -2540,4 +2540,4 @@ async function cancelAndRescheduleFarOut(input) {
 }
 
 
-module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { allSkippedRefusal } };
+module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { allSkippedRefusal, writeMovedStop } };

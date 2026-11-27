@@ -22,6 +22,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { etDateString, etCalendarDaysUntil } = require('../utils/datetime-et');
+const { dateOnlyString } = require('../utils/date-only');
 
 // A visit can only be put on hold while it is plain scheduled work: not underway, not finished, not dead.
 const HOLDABLE_STATUSES = Object.freeze(['pending', 'confirmed']);
@@ -51,6 +52,12 @@ function heldSqlGuard(alias = 'ss') {
 // held_at reads as not held, so a caller that filters in memory must select the column).
 function rowIsHeld(row) {
   return visitHoldLive() && !!row && !!row.held_at;
+}
+
+// The projection twin: ['held_at'] only while the gate is live, so a gate-off server never names the column (a
+// pre-migration schema must keep working). Spread it into a select / first list.
+function heldColumn(prefix = '') {
+  return visitHoldLive() ? [`${prefix}held_at`] : [];
 }
 
 // Is this one visit held right now? A lookup error answers "held" so a sender stays quiet on a blip (the street-level
@@ -91,16 +98,24 @@ function cleanNote(note) {
 }
 
 /**
- * Put one visit on hold. The caller has already checked who may (admin any visit; a technician only his own).
- * Idempotent: a visit already held answers { changed: false }. Refuses a visit that is not pending / confirmed.
+ * Put one visit on hold. Idempotent: a visit already held answers { changed: false }. Refuses a visit that is not
+ * pending / confirmed. `scopeReq` is the request: for a technician the ownership predicate (his own live visit) is
+ * re-checked here on the LOCKED row, so a reassignment between the route's pre-check and this write cannot let the
+ * former technician hold the visit (404, like every other per-visit miss). An admin request is unscoped.
  */
-async function putVisitOnHold({ visitId, note, heldBy = null, now = new Date(), conn = db } = {}) {
+async function putVisitOnHold({ visitId, note, heldBy = null, scopeReq = null, now = new Date(), conn = db } = {}) {
   if (!visitHoldLive()) throw holdError(404, 'visit_hold_off', 'Visit hold is not enabled');
   const cleaned = cleanNote(note);
   return conn.transaction(async (trx) => {
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate()
       .first('id', 'status', 'held_at', 'customer_id', 'scheduled_date');
     if (!row) throw holdError(404, 'not_found', 'Scheduled service not found');
+    if (scopeReq) {
+      const { technicianLiveVisitFilter } = require('./technician-visit-scope');
+      const owned = await technicianLiveVisitFilter(scopeReq, trx('scheduled_services').where({ 'scheduled_services.id': visitId }))
+        .first('scheduled_services.id');
+      if (!owned) throw holdError(404, 'not_found', 'Scheduled service not found');
+    }
     if (row.held_at) return { changed: false, visitId: row.id, heldAt: row.held_at };
     if (!HOLDABLE_STATUSES.includes(String(row.status || '').toLowerCase())) {
       throw holdError(409, 'not_holdable', `A ${row.status || 'unknown'} visit cannot be put on hold`);
@@ -129,15 +144,31 @@ async function closeHoldBell(visitId, reason, { now = new Date(), conn = db } = 
 }
 
 /**
- * Take one visit off hold (office release). Idempotent. The visit keeps its date and window; the reminder rows it
- * kept armed resume on the next sweep.
+ * Take one visit off hold (office release). Idempotent. The visit keeps its date and window, and the reminder rows it
+ * kept armed resume on the next sweep. While it was held its hour counted as free, so a booking may have taken the
+ * hour: the release re-checks the original slot under the booking day lock and refuses (409 SLOT_TAKEN) when it is
+ * taken. The office then reschedules the visit, which releases the hold in the same write.
  */
 async function releaseVisitHold({ visitId, now = new Date(), reason = 'released', conn = db } = {}) {
   if (!visitHoldLive()) throw holdError(404, 'visit_hold_off', 'Visit hold is not enabled');
+  const pre = await conn('scheduled_services').where({ id: visitId })
+    .first('id', 'held_at', 'scheduled_date', 'window_start', 'window_end');
+  if (!pre) throw holdError(404, 'not_found', 'Scheduled service not found');
+  if (!pre.held_at) return { changed: false, visitId: pre.id };
+  const dateStr = dateOnlyString(pre.scheduled_date);
+  const checksSlot = !!(dateStr && dateStr >= etDateString(now) && pre.window_start && pre.window_end);
   const result = await conn.transaction(async (trx) => {
+    const occupancy = checksSlot ? require('./scheduling/occupancy') : null;
+    // Rung 1 (the booking day lock) before the row lock, the order every booking writer takes.
+    if (checksSlot) await occupancy.acquireOccupancyLock(trx, dateStr);
     const row = await trx('scheduled_services').where({ id: visitId }).forUpdate().first('id', 'held_at');
-    if (!row) throw holdError(404, 'not_found', 'Scheduled service not found');
-    if (!row.held_at) return { changed: false, visitId: row.id };
+    if (!row || !row.held_at) return { changed: false, visitId };
+    if (checksSlot) {
+      const clash = await occupancy.findConflictingVisits({
+        db: trx, date: dateStr, windowStart: pre.window_start, windowEnd: pre.window_end, excludeServiceIds: [visitId],
+      });
+      if (clash.length) throw holdError(409, 'SLOT_TAKEN', 'That time was booked while the visit was on hold. Reschedule the visit to release the hold.');
+    }
     await trx('scheduled_services').where({ id: visitId }).update({ held_at: null, hold_released_at: now, updated_at: now });
     return { changed: true, visitId: row.id };
   });
@@ -145,29 +176,20 @@ async function releaseVisitHold({ visitId, now = new Date(), reason = 'released'
   return result;
 }
 
-// The one backstop every mover passes (services/rebooker.js reschedule + rescheduleSeries). A held visit is refused with
+// The backstop every mover passes (services/rebooker.js reschedule and rescheduleSeries). A held visit is refused with
 // 409 VISIT_ON_HOLD unless the caller is a person who chose to move it (options.releaseHold === true: the office
-// reschedule routes and the customer's own reschedule link). That person's move releases the hold first; the returned
-// restore() puts the hold back if the move then fails. Returns null when the visit is not held (the usual case: one
-// indexed read while the gate is on, nothing while it is off).
+// reschedule routes and the customer's own reschedule link). It writes nothing: a person's move releases the hold in
+// the SAME UPDATE that moves the visit (the rebooker adds the columns to its own write), and every other write carries
+// `held_at IS NULL`, so a hold that commits after this read still stops the move. Returns true when the visit is held
+// and this caller releases it (the caller closes the bell after the move commits), else false.
 async function guardHeldMove(visitId, { releaseHold = false, conn = db } = {}) {
-  if (!visitId || !visitHoldLive()) return null;
-  const row = await conn('scheduled_services').where({ id: visitId }).first('id', 'held_at', 'held_by', 'hold_note');
-  if (!row || !row.held_at) return null;
+  if (!visitId || !visitHoldLive()) return false;
+  const row = await conn('scheduled_services').where({ id: visitId }).first('id', 'held_at');
+  if (!row || !row.held_at) return false;
   if (releaseHold !== true) {
     throw holdError(409, 'VISIT_ON_HOLD', 'That visit is on hold: the customer will call. Release the hold first.');
   }
-  await releaseVisitHold({ visitId, conn });
-  return {
-    restore: async () => {
-      try {
-        await conn('scheduled_services').where({ id: visitId }).whereNull('held_at')
-          .update({ held_at: row.held_at, held_by: row.held_by, hold_note: row.hold_note, hold_released_at: null });
-      } catch (err) {
-        logger.warn(`[visit-hold] could not restore the hold on ${visitId} after a failed move: ${err.code || err.name || 'error'}`);
-      }
-    },
-  };
+  return true;
 }
 
 // Series sweeps count a held NON-anchor sibling but never move it: its status reads as the sentinel below, which no
@@ -230,13 +252,17 @@ function daysBetweenET(heldAt, now = new Date()) {
 // Series close (owner: "if the next plan visit comes first, the held visit closes, and the plan goes on").
 // ---------------------------------------------------------------------------------------------------------------
 
-// A visit of the same plan series AFTER the held visit's date that is either completed, or live and already due
-// (its date is today or earlier). One-time visits (no series) never close. Returns the next visit row or null.
-async function nextSeriesVisitReached(held, todayEt, conn = db) {
-  const parentId = held.recurring_parent_id || (held.is_recurring ? held.id : null);
-  if (!parentId) return null;
-  return conn('scheduled_services as n')
+// A recurring visit of the same plan series AFTER the held visit's date that is either completed, or live and already
+// due (its date is today or earlier). Only a recurring plan visit counts, on both sides: a booster month
+// (recurring_parent_id set, is_recurring false) and a one-time visit are never a series visit, so a held booster never
+// expires and a due booster never expires a held plan visit. `lock` takes the successor's row lock (inside the close
+// transaction). Returns the next visit row or null.
+async function nextSeriesVisitReached(held, todayEt, conn = db, { lock = false } = {}) {
+  if (held.is_recurring !== true) return null;
+  const parentId = held.recurring_parent_id || held.id;
+  const query = conn('scheduled_services as n')
     .where(function () { this.where('n.recurring_parent_id', parentId).orWhere('n.id', parentId); })
+    .where('n.is_recurring', true)
     .whereNot('n.id', held.id)
     .where('n.scheduled_date', '>', held.scheduled_date)
     .whereNull('n.held_at')
@@ -246,26 +272,37 @@ async function nextSeriesVisitReached(held, todayEt, conn = db) {
           this.whereIn('n.status', ['pending', 'confirmed', 'en_route', 'on_site']).where('n.scheduled_date', '<=', todayEt);
         });
     })
-    .orderBy('n.scheduled_date', 'asc')
-    .first('n.id', 'n.status', 'n.scheduled_date');
+    .orderBy('n.scheduled_date', 'asc');
+  if (lock) query.forUpdate();
+  return query.first('n.id', 'n.status', 'n.scheduled_date');
 }
 
 // Close one held visit as skipped: no customer text, no make-up visit. transitionJobStatus is the plan-hold
 // lifecycle's own skip writer (cancellation-resolution/holds.js); reseedRecurringSeriesAfterCancel runs only from the
-// cancel routes, so a skip adds no visit. The hold columns end in the same transaction.
-async function closeHeldVisitAsSkipped(held, next, { now = new Date(), conn = db } = {}) {
+// cancel routes, so a skip adds no visit. The sweep's earlier read is only a prefilter: under the held visit's row lock
+// this re-reads the visit (same hold timestamp, still pending / confirmed) and locks and re-reads its successor, so a
+// dispatch move, cancel or hold of either one in between ends the close. The hold columns end in the same transaction.
+// Returns the successor row when the visit closed, else null.
+async function closeHeldVisitAsSkipped(held, todayEt, { now = new Date(), conn = db } = {}) {
   const { transitionJobStatus } = require('./job-status');
-  await conn.transaction(async (trx) => {
-    const fresh = await trx('scheduled_services').where({ id: held.id }).forUpdate().first('id', 'status', 'held_at');
-    if (!fresh || !fresh.held_at || !HOLDABLE_STATUSES.includes(String(fresh.status))) return;
+  const next = await conn.transaction(async (trx) => {
+    const fresh = await trx('scheduled_services').where({ id: held.id }).forUpdate()
+      .first('id', 'status', 'held_at', 'scheduled_date', 'is_recurring', 'recurring_parent_id');
+    if (!fresh || !fresh.held_at || !HOLDABLE_STATUSES.includes(String(fresh.status))) return null;
+    if (held.held_at && new Date(fresh.held_at).getTime() !== new Date(held.held_at).getTime()) return null;
+    const successor = await nextSeriesVisitReached(fresh, todayEt, trx, { lock: true });
+    if (!successor) return null;
     await trx('scheduled_services').where({ id: held.id }).update({ held_at: null, hold_released_at: now, updated_at: now });
     await transitionJobStatus({
       jobId: held.id, fromStatus: fresh.status, toStatus: 'skipped', transitionedBy: null,
       notes: HOLD_EXPIRED_NOTE, notifyCustomer: false, suppressTechNotice: true, trx,
     });
+    return successor;
   });
+  if (!next) return null;
   await closeHoldBell(held.id, 'hold_expired', { now, conn });
   logger.info(`[visit-hold] closed held visit ${held.id} as skipped: plan visit ${next.id} (${next.status}) came first`);
+  return next;
 }
 
 async function closeExpiredSeriesHolds({ now = new Date(), conn = db } = {}) {
@@ -273,14 +310,12 @@ async function closeExpiredSeriesHolds({ now = new Date(), conn = db } = {}) {
   const held = await conn('scheduled_services')
     .whereNotNull('held_at')
     .whereIn('status', HOLDABLE_STATUSES)
-    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id');
+    .where('is_recurring', true)
+    .select('id', 'status', 'scheduled_date', 'is_recurring', 'recurring_parent_id', 'held_at');
   const closed = [];
   for (const row of held) {
     try {
-      const next = await nextSeriesVisitReached(row, todayEt, conn);
-      if (!next) continue;
-      await closeHeldVisitAsSkipped(row, next, { now, conn });
-      closed.push(row.id);
+      if (await nextSeriesVisitReached(row, todayEt, conn) && await closeHeldVisitAsSkipped(row, todayEt, { now, conn })) closed.push(row.id);
     } catch (err) {
       logger.error(`[visit-hold] series close failed for ${row.id}: ${err.message}`);
     }
@@ -375,6 +410,8 @@ module.exports = {
   rowIsHeld,
   isVisitHeld,
   heldVisitIds,
+  heldColumn,
+  closeHoldBell,
   putVisitOnHold,
   releaseVisitHold,
   releasePatchFor,
