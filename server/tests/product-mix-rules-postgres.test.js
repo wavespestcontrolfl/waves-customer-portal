@@ -47,7 +47,8 @@ const mix = require('../services/product-mix-rules');
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(150) NOT NULL, category varchar(30),
         subcategory varchar(100), active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
         application_method varchar(50), mixing_order_category varchar(50), requires_surfactant boolean, allows_surfactant boolean,
-        do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true, updated_at timestamptz DEFAULT now()
+        do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true, updated_at timestamptz DEFAULT now(),
+        analysis_n numeric(5,2), analysis_p numeric(5,2), analysis_k numeric(5,2)
       );
     `);
     const products = [
@@ -245,29 +246,41 @@ const mix = require('../services/product-mix-rules');
     expect(await mockTrx('product_mix_rules').where({ product_a_id: reliant.id, group_b: 'fertilizer' })).toHaveLength(0);
   });
 
-  test('migration 20261127210000 adds the TriTek card prohibitions once; down() keeps removed rules and refuses active ones', async () => {
+  test('migrations 20261127210000 + 20261127220000 add the TriTek card prohibitions once, NPK only; the three downs roll back in a chain, archiving removed rules', async () => {
     const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
     const tritekFix = require('../models/migrations/20261127210000_tritek_mix_limits');
+    const npkFix = require('../models/migrations/20261127220000_tritek_npk_scope');
     await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
     await groupsFix.up(mockTrx);
     mockAudit.events = [];
     const [sulfur] = await mockTrx('products_catalog').insert({ name: 'Micro Sulf', category: 'fungicide', active_ingredient: 'Sulfur' }).returning('id');
-    await tritekFix.up(mockTrx);
-    await tritekFix.up(mockTrx);
-    const tritekRows = await mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', ['spray_fertilizer', 'sulfur', 'captan', 'carbaryl', 'dimethoate']);
-    expect(tritekRows.map((r) => r.group_b).sort()).toEqual(['captan', 'carbaryl', 'dimethoate', 'spray_fertilizer', 'sulfur']);
-    expect(mockAudit.events).toHaveLength(5);
+    const [iron] = await mockTrx('products_catalog').insert({ name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient', category: 'Micronutrient Fertilizer', formulation: 'soluble granule' }).returning('id');
+    for (const fix of [tritekFix, tritekFix, npkFix, npkFix]) await fix.up(mockTrx);
+    const tritekRows = await mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', [...tritekFix._RULES.map((r) => r.group_b), 'npk_spray_fertilizer']);
+    expect(tritekRows.map((r) => r.group_b).sort()).toEqual(['captan', 'carbaryl', 'dimethoate', 'npk_spray_fertilizer', 'sulfur']);
+    expect(mockAudit.events.map((e) => e.action.split(':').slice(1).join(':'))).toEqual([
+      ...Array(5).fill('20261127210000_tritek_mix_limits:up'), '20261127220000_tritek_npk_scope:up:tritek',
+    ]);
     expect((await mix.checkMix([ids.fert, ids.oil])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not mix TriTek with NPK foliar fertilizer.' });
     expect((await mix.checkMix([sulfur.id, ids.oil])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not mix TriTek with sulfur.' });
-    // An admin's active rule on a new group blocks down(); once removed (soft), down() runs and the removed row stays.
+    // An iron-only micronutrient (no N, P or K on file) is not the card's NPK foliar fertilizer.
+    expect((await mix.checkMix([iron.id, ids.oil])).pairs[0].reason).not.toBe('Do not mix TriTek with NPK foliar fertilizer.');
+    // An admin's ACTIVE rule on a new group stops the chain; once removed (soft), the chain runs and the row is archived.
     const owner = await mix.upsertRule({ productAId: ids.copper, groupB: 'captan', verdict: 'caution', reason: 'Owner rule.' });
     await mockTrx.raw('SAVEPOINT refuse');
+    await npkFix.down(mockTrx);
     await expect(tritekFix.down(mockTrx)).rejects.toThrow(/active rule\(s\) still use/);
     await mockTrx.raw('ROLLBACK TO SAVEPOINT refuse');
     await mix.deactivateRule(owner.id, { version: owner.version });
+    mockAudit.events = [];
+    await npkFix.down(mockTrx);
     await tritekFix.down(mockTrx);
-    expect(await mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', ['sulfur', 'captan'])).toHaveLength(0);
-    expect(await mockTrx('product_mix_rules').where({ id: owner.id }).first()).toMatchObject({ group_b: 'captan', active: false });
+    await expect(groupsFix.down(mockTrx)).resolves.toBeUndefined();
+    expect(await mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', ['sulfur', 'captan', 'spray_fertilizer'])).toHaveLength(0);
+    // The removed rule's whole row is in audit_log, then the row leaves the constrained table.
+    expect(await mockTrx('product_mix_rules').where({ id: owner.id }).first()).toBeUndefined();
+    const archived = mockAudit.events.find((e) => e.action === 'migration:20261127220000_tritek_npk_scope:down:archive');
+    expect(archived).toMatchObject({ critical: true, resource_id: owner.id, metadata: { archived_row: expect.objectContaining({ group_b: 'captan', reason: 'Owner rule.', active: false }) } });
     await mockTrx.raw('SAVEPOINT old_check');
     await expect(mockTrx('product_mix_rules').insert({ product_a_id: ids.tetrino, group_b: 'captan', verdict: 'ok', reason: 'x' })).rejects.toMatchObject({ constraint: 'product_mix_rules_group_check' });
     await mockTrx.raw('ROLLBACK TO SAVEPOINT old_check');

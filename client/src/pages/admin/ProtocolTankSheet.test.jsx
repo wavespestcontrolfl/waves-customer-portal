@@ -346,6 +346,17 @@ describe("110-gallon tank reference", () => {
     expect(within(container).queryByText(/^Do not mix: /)).not.toBeInTheDocument();
   });
 
+  it("a pair that asks for a jar test says so on screen and in print, a Yes pair included", () => {
+    for (const verdict of ["ok", "caution"]) {
+      const { container, unmount } = render(<ProtocolTankSheet plan={weedMixPlan([{ ...pair(verdict, "Owner checked."), jarTestRequired: true }])} />);
+      for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+        expect(within(surface).getAllByText("Jar test first")).toHaveLength(2);
+      }
+      expect(within(container).queryAllByText("Caution: Owner checked.")).toHaveLength(verdict === "caution" ? 2 : 0);
+      unmount();
+    }
+  });
+
   it("a shared tank of three names each pair; only pairs inside the tank show", () => {
     const plan = bermudaPlan();
     plan.mixCheck = { pairs: [

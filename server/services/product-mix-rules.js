@@ -51,6 +51,13 @@ function isFertilizer(p) {
   return /fertili[sz]er/.test(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' || /fertili[sz]er/.test(lower(p.subcategory));
 }
 
+// N, P or K on file: a positive catalog analysis, or a grade in the name ("12-0-0", "0-0-25") with a non-zero part.
+function hasNpk(p) {
+  if (['analysis_n', 'analysis_p', 'analysis_k'].some((key) => Number(p[key]) > 0)) return true;
+  const grade = String(p.name || '').match(/\b(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)-(\d+(?:\.\d+)?)\b/);
+  return Boolean(grade && grade.slice(1).some((part) => Number(part) > 0));
+}
+
 // Product groups a rule may name, with the catalog fields that place a product in each. Mirrors the migration's
 // group check list (a test keeps them equal). A product can sit in more than one group.
 const GROUPS = [
@@ -73,13 +80,16 @@ const GROUPS = [
   ...['sulfur', 'captan', 'carbaryl', 'dimethoate'].map((key) => ({
     key, label: `${key.charAt(0).toUpperCase()}${key.slice(1)} (active ingredient)`, test: (p) => new RegExp(`\\b${key}\\b`).test(words(p.active_ingredient)),
   })),
+  // Migration 20261127220000. A sprayed fertilizer with N, P or K on file (catalog analysis, or an N-P-K name such as
+  // "12-0-0"): the TriTek card's "NPK foliar fertilizer". An iron-only micronutrient (no analysis) is not in it.
+  { key: 'npk_spray_fertilizer', label: 'Sprayed NPK fertilizer', test: (p) => isFertilizer(p) && !isSpreaderGranule(p) && hasNpk(p) },
 ];
 const GROUP_KEYS = GROUPS.map((g) => g.key);
 const GROUP_BY_KEY = new Map(GROUPS.map((g) => [g.key, g]));
 // The one precedence for a pair's headline, whatever the source: never > caution > unknown > ok.
 const SEVERITY = { never: 4, caution: 3, unknown: 2, ok: 1 };
 
-const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'application_method', 'mixing_order_category', 'requires_surfactant', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes', 'updated_at'];
+const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'application_method', 'mixing_order_category', 'requires_surfactant', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes', 'updated_at', 'analysis_n', 'analysis_p', 'analysis_k'];
 
 function validationError(message) {
   const err = new Error(message);

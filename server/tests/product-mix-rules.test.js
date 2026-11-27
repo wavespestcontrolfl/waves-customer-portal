@@ -325,7 +325,9 @@ test('the service groups and verdicts match the migration check lists', () => {
   expect(widened._GROUPS_BEFORE).toEqual(migration._GROUPS);
   const tritek = require('../models/migrations/20261127210000_tritek_mix_limits');
   expect(tritek._GROUPS_BEFORE).toEqual(widened._GROUPS);
-  expect(mix.GROUP_KEYS).toEqual(tritek._GROUPS);
+  const npk = require('../models/migrations/20261127220000_tritek_npk_scope');
+  expect(npk._GROUPS_BEFORE).toEqual(tritek._GROUPS);
+  expect(mix.GROUP_KEYS).toEqual(npk._GROUPS);
   expect(mix.VERDICTS).toEqual(migration._VERDICTS);
 });
 
@@ -424,6 +426,12 @@ describe('groups for combination, sprayed and miticide products', () => {
     [{ name: 'Micro Sulf', category: 'fungicide', active_ingredient: 'Sulfur' }, { sulfur: true, captan: false }],
     [{ name: 'Polyon sulfur coated urea', category: 'fertilizer', active_ingredient: null }, { sulfur: false }],
     [{ name: 'Captan 50WP', category: 'fungicide', active_ingredient: 'Captan' }, { captan: true }],
+    // The TriTek card's "NPK foliar fertilizer": sprayed, with N, P or K on file (analysis or an N-P-K grade in the name).
+    [LIQUID_FERT, { npk_spray_fertilizer: true }],
+    [{ name: 'Foliar feed', category: 'fertilizer', mixing_order_category: 'liquid_fertilizer', analysis_k: 5 }, { npk_spray_fertilizer: true }],
+    [SOLUBLE, { spray_fertilizer: true, npk_spray_fertilizer: false }],
+    [{ name: 'LESCO 0-0-0 Iron', category: 'fertilizer', mixing_order_category: 'liquid_fertilizer' }, { npk_spray_fertilizer: false }],
+    [STONEWALL_G, { npk_spray_fertilizer: false }],
     [{ name: 'Sevin SL', category: 'insecticide', active_ingredient: 'Carbaryl' }, { carbaryl: true }],
     [{ name: 'Dimethoate 4E', category: 'insecticide', active_ingredient: 'Dimethoate' }, { dimethoate: true }],
     [{ name: 'Celsius WG', category: 'herbicide' }, { herbicide: true, miticide: false, fertilizer: false }],

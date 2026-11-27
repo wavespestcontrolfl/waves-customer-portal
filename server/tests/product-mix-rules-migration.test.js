@@ -284,3 +284,27 @@ describe('20261127210000_tritek_mix_limits', () => {
     expect(knex.raw).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127220000_tritek_npk_scope', () => {
+  const fix = require('../models/migrations/20261127220000_tritek_npk_scope');
+  const before = require('../models/migrations/20261127210000_tritek_mix_limits');
+
+  test('adds npk_spray_fertilizer and moves exactly the 20261127210000 TriTek fertilizer row', () => {
+    expect(fix._GROUPS_BEFORE).toEqual(before._GROUPS);
+    expect(fix._GROUPS).toEqual([...before._GROUPS, 'npk_spray_fertilizer']);
+    const { group_b: _group, ...values } = before._RULES.find((r) => r.group_b === 'spray_fertilizer');
+    expect(fix._TRITEK_RULE).toEqual(values);
+    expect(fix._CARD_LINE).toBe(before._CARD_LINE);
+    expect(`migration:${fix._MIGRATION}:down:archive`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    knex.raw = jest.fn();
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+});

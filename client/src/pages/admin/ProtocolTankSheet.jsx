@@ -56,16 +56,24 @@ function applicationMethod(item, products, order) {
   return partners.length ? line(`Tank with: ${partners.map((other) => other.product.name).join(", ")}`, baseTank(item, products)) : neutral;
 }
 
-// The mix safety table's answer (server: /lawn-mix mixCheck) for each pair in one shared tank. Nothing for Yes; a warning
+// The mix safety table's answer (server: /lawn-mix mixCheck) for each pair in one shared tank: nothing for Yes, and
+// "Jar test first" whenever the pair's rule asks for one. A warning
 // only, never in place of a product or an amount (owner 2026-11-26). No check on the sheet (a failed check): nothing.
 const MIX_CHECK_TEXT = { caution: (pair) => `Caution: ${pair.reason}`, never: (pair) => `Do not mix: ${pair.reason}`, unknown: () => "No rule on file" };
 function tankMixWarnings(tankIds, mixCheck) {
   if (!tankIds || tankIds.length < 2 || !Array.isArray(mixCheck?.pairs)) return [];
   const inTank = new Set(tankIds.map((id) => id.toLowerCase()));
   const lines = mixCheck.pairs
-    .filter((pair) => inTank.has(String(pair.productAId).toLowerCase()) && inTank.has(String(pair.productBId).toLowerCase()) && MIX_CHECK_TEXT[pair.verdict])
-    // In a tank of three or more, each line names its pair.
-    .map((pair) => ({ verdict: pair.verdict, text: `${MIX_CHECK_TEXT[pair.verdict](pair)}${inTank.size > 2 ? ` (${pair.productAName} + ${pair.productBName})` : ""}` }));
+    .filter((pair) => inTank.has(String(pair.productAId).toLowerCase()) && inTank.has(String(pair.productBId).toLowerCase()))
+    .flatMap((pair) => {
+      // In a tank of three or more, each line names its pair.
+      const names = inTank.size > 2 ? ` (${pair.productAName} + ${pair.productBName})` : "";
+      return [
+        MIX_CHECK_TEXT[pair.verdict] && { verdict: pair.verdict, text: `${MIX_CHECK_TEXT[pair.verdict](pair)}${names}` },
+        // A rule can ask for a jar test whatever its verdict, a Yes included.
+        pair.jarTestRequired && { verdict: "caution", text: `Jar test first${names}` },
+      ].filter(Boolean);
+    });
   return lines.filter((entry, index) => lines.findIndex((other) => other.text === entry.text) === index);
 }
 
