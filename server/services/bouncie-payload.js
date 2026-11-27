@@ -107,16 +107,10 @@ function explicitTripEndTime(payload = {}) {
   return firstPresent(timeFromSource(payload.end), timeFromSource(payload.disconnect)) ?? null;
 }
 
-// The time a trip-end happened, read apart from which block gave the coordinates.
+// The time a trip-end happened: its own block's time, else the event's own time. Never the
+// time of an envelope GPS sample (gps / location / position), which can be older than the stop.
 function tripEndTime(payload = {}) {
-  return firstPresent(
-    explicitTripEndTime(payload),
-    payload.timestamp,
-    payload.ts,
-    timeFromSource(payload.gps),
-    timeFromSource(payload.location),
-    timeFromSource(payload.position)
-  ) ?? null;
+  return firstPresent(explicitTripEndTime(payload), payload.timestamp, payload.ts) ?? null;
 }
 
 function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayload(payload)) {

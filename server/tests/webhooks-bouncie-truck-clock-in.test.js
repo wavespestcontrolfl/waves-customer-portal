@@ -263,14 +263,15 @@ describe('Bouncie tracking webhook, engine-off arrival', () => {
     expect(point.lat).toBeUndefined();
   });
 
-  test('a trip-end with end GPS but no end time takes the time from the envelope location', async () => {
+  test('a trip-end with end GPS but no time of its own never borrows a location sample time (no engine-off)', async () => {
     installDb({ lastLocation: null });
     const payload = { eventType: 'tripEnd', imei: 'imei-1', transactionId: 't-3', end: { gps: { lat: 27.51, lon: -82.52 } }, location: { lat: 26.9, lon: -82.0, timestamp: ENDED_AT } };
 
     await router._test.processTrackingEvent({ logId: 24, eventType: 'tripEnd', payload });
 
     const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
-    expect(point).toMatchObject({ lat: 27.51, lng: -82.52, reported_at: ENDED_AT, engine_off: true, position_source: 'trip_end_gps' });
+    expect(point).toMatchObject({ lat: 27.51, lng: -82.52, reported_at: null });
+    expect(point.engine_off).toBeUndefined();
   });
 
   test('a trip-end with its own GPS uses it as the engine-off position', async () => {
