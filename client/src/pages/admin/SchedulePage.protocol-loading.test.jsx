@@ -504,6 +504,11 @@ describe("Job card Tank search warnings (owner 2026-11-26: warned, never blocked
     expect(screen.getByText("Booked rate: 0.147 oz per 1,000 sq ft in 4 gal of water per 1,000 sq ft.")).toBeVisible();
   });
 
+  it("lists each booked area add-on's rate under its service name beside a tank amount", async () => {
+    await searchAndPick({ amount: 0.5, unit: "fl_oz", gallons: 1, governedRates: [{ service: "Bed Pre-Emergent Treatment", ratePer1000: 3.45, rateUnit: "lb", text: "3.45 lb per 1,000 sq ft of bed." }] });
+    expect(await screen.findByText(/^Bed Pre-Emergent Treatment: .* per 1,000 sq ft · 3\.45 lb per 1,000 sq ft of bed\./)).toBeVisible();
+  });
+
   it("keeps the picked rig's coverage and the card volume's coverage as two separate figures", async () => {
     await searchAndPick({ amount: 220, unit: "fl_oz", gallons: 110, coversSqft: 55000, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1, rigSprayGalPer1000: 2, rig: { name: "Tank #1" }, warnings: ["The card's rate is for 1 gal per 1,000 sq ft."] });
     expect(await screen.findByText(/covers 55,000 sq ft/)).toBeVisible();

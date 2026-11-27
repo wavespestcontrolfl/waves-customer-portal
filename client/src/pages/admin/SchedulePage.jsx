@@ -7440,6 +7440,11 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
               </div>
             )}
             {mix?.rateText && <div style={{ fontSize: 12, color: D.muted }}>Booked rate: {mix.rateText}</div>}
+            {mix?.governedRates?.length > 0 && (
+              <div style={{ fontSize: 12, color: D.muted, display: "grid", gap: 2 }}>
+                {mix.governedRates.map((row) => <div key={row.service}>{row.service}: {fmtAmount(row.ratePer1000, row.rateUnit)} per 1,000 sq ft{row.text ? ` · ${row.text}` : ""}</div>)}
+              </div>
+            )}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}

@@ -281,7 +281,7 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     tables.scheduled_services = [{ ...visit, service_type: 'Flea Treatment', service_key: 'flea_tick' }];
     tables.scheduled_service_addons = [{ service_name: 'Mosquito Barrier Treatment', category: 'mosquito', service_key: 'mosquito_barrier' }];
     const fleaFirst = await mix();
-    expect(fleaFirst.amount).not.toBeNull();
+    expect(fleaFirst.serviceAmounts).toHaveLength(2);
     expect(fleaFirst.warnings.join(' ')).toContain('53883-335');
     // The card's registration on the same two visits: no warning from the flea line.
     tables.products_catalog = [{ ...TEKKO, category: 'insecticide', label_verified_at: '2026-11-01' }];

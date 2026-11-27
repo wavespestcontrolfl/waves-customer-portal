@@ -758,7 +758,7 @@ describe('mixForProduct', () => {
     const evaluateApprovals = approve();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at });
     expect(out).toMatchObject({ amount: 6.215, planBlocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] });
-    expect(out.warnings).toContain('Lawn plan blocked — check the plan blocks');
+    expect(out.warnings).toContain(out.planBlocks[0].message);
     // A plan that fails to build is a block too.
     buildPlan.mockRejectedValue(new Error('boom'));
     expect((await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals }, ...at })).planBlocks[0].code).toBe('plan_unavailable');
@@ -776,7 +776,7 @@ describe('mixForProduct', () => {
     const buildPlan = jest.fn();
     const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan, evaluateApprovals: approve() }, ...at });
     expect(out).toMatchObject({ amount: 6.215, planBlocks: [{ code: 'alternate_address' }] });
-    expect(out.warnings).toContain('Lawn plan blocked — check the plan blocks');
+    expect(out.warnings).toContain(out.planBlocks[0].message);
     expect(buildPlan).not.toHaveBeenCalled();
   });
 
@@ -2390,6 +2390,47 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(out.warnings.join(' ')).toMatch(/different rate on each service/);
   });
 
+  // Owner 2026-11-26: an "if needed" line keeps its card's exact rate; the selection warning rides beside it.
+  test('an "if needed" Antapex line shows the card rate, not the whole catalog band', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Bed Bug Treatment Service', service_category: 'specialty', service_key: 'bed_bug_treatment', followup_source_service_id: 'first' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 40, amountMax: null, unit: 'g', ratePerGallon: { lo: 20, hi: 20 }, rateSource: 'protocol', context: { conditional: true } });
+    expect(out.warnings.join(' ')).toMatch(/Listed as "if needed"/);
+  });
+
+  // Owner 2026-11-26: a tank line that names the product keeps its tank amount; each booked area add-on's rate rides under its name.
+  test('a Tree & Shrub visit with a Bed Pre-Emergent add-on keeps the booked add-on rate under its service name', async () => {
+    const protocols = { tree_shrub: { visits: [{ visit: 1, month: 'Any', primary: 'Snapshot 2.5TG 3 lb per 1,000 sq ft broadcast', secondary: '' }] }, area_addon: require('../config/protocols.json').area_addon };
+    const snapshot = { id: 'sn', name: 'Snapshot 2.5TG', default_rate_per_1000: 9, rate_unit: 'oz', application_method: 'granular', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-01-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [snapshot], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Bed Pre-Emergent Treatment', category: 'lawn_care', service_key: 'area_addon_bed_pre_emergent' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('sn', 1, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-01-14T14:00:00Z') });
+    expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Bed Pre-Emergent Treatment', ratePer1000: 3.45, rateUnit: 'lb' })]);
+    expect(out.warnings.join(' ')).toContain('Bed Pre-Emergent Treatment: Booked rate: 3.45 lb per 1,000 sq ft');
+  });
+
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },
@@ -2941,7 +2982,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // The line is Headway G's, not Headway's: the lawn plan governs the search and its block warns beside the dose (owner 2026-11-26).
     expect(out.context).toEqual({ line: null });
     expect(buildPlan).toHaveBeenCalled();
-    expect(out).toMatchObject({ amount: 0.5, planBlocks: [{ code: 'nitrogen_blackout' }], warnings: ['Lawn plan blocked — check the plan blocks'] });
+    expect(out).toMatchObject({ amount: 0.5, planBlocks: [{ code: 'nitrogen_blackout' }], warnings: ['Nitrogen blackout is active.'] });
   });
 
   test('the lawn plan governs a product it names even when a non-lawn add-on\'s line names it too (hook P1)', async () => {
@@ -2973,13 +3014,13 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(evaluateApprovals).toHaveBeenCalled();
     // The plan's block warns beside it too, add-on line or not (owner 2026-11-26).
     buildPlan.mockResolvedValue({ propertyGate: { blocks: [{ code: 'nitrogen_blackout', message: 'Nitrogen blackout is active.' }] }, mixCalculator: mix });
-    expect(await jobCard.mixForProduct('fe', 110, opts)).toMatchObject({ amount: 27.5, planBlocks: [{ code: 'nitrogen_blackout' }], warnings: ['Lawn plan blocked — check the plan blocks'] });
+    expect(await jobCard.mixForProduct('fe', 110, opts)).toMatchObject({ amount: 27.5, planBlocks: [{ code: 'nitrogen_blackout' }], warnings: ['Nitrogen blackout is active.'] });
     // A product the plan does not name stays under the add-on's line, and the plan's blackout says nothing about that mix.
     rows.products_catalog = [{ id: 'mn', name: 'Mn Combo', default_rate: '1-2', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' }];
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
-    // A plan that failed to load names nothing knowably: it keeps governing, add-on line or not (hook P1).
+    // A plan that failed to load: the add-on's own known rate stays under its service name, and the outage warns beside it (owner 2026-11-26).
     buildPlan.mockRejectedValue(new Error('turf profile read failed'));
-    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 110, amountMax: 220, context: { line: null }, planBlocks: [{ code: 'plan_unavailable' }], warnings: ['Lawn plan blocked — check the plan blocks'] });
+    expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, rateSource: 'protocol', context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [{ code: 'plan_unavailable' }], warnings: ['Lawn plan unavailable right now.'] });
     // An alternate-address visit is not an outage: the add-on line governs there.
     rows.scheduled_services = [{ ...rows.scheduled_services[0], address_diverges: true }];
     expect(await jobCard.mixForProduct('mn', 110, opts)).toMatchObject({ amount: 165, context: { line: 'Tree & Shrub Care', conditional: false }, planBlocks: [] });
