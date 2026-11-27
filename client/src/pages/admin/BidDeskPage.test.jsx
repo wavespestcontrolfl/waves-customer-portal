@@ -551,3 +551,25 @@ it("shows both server and draft values when a 409 conflict changes the same deci
   expect(await screen.findByText(/Decision is now "Bid" on the server \(your draft: "No bid"\)/)).toBeInTheDocument();
   expect(screen.getByLabelText("Decision")).toHaveValue("no_bid");
 });
+
+it("keeps a typed due date after a 409 save conflict and shows the stored server deadline", async () => {
+  let reads = 0;
+  const latest = bid({ due_at: "2026-10-25T16:00:00.000Z", updated_at: "2026-10-02T16:00:00.000Z" });
+  const patch = vi.fn()
+    .mockImplementationOnce(() => reply({ error: "The due date changed since you opened this bid. Reload and check it again." }, { ok: false, status: 409 }))
+    .mockImplementationOnce(() => reply({ ok: true, bid: { ...latest, due_at: "2026-10-30T13:00:00.000Z", due_confirmed: true } }));
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: reads++ === 0 ? bid() : latest, emails: [] }),
+    "PATCH /admin/bid-desk/b1": patch,
+  });
+  renderPage("/?bid=b1");
+  fireEvent.change(await screen.findByLabelText("Due date (Eastern time)"), { target: { value: "2026-10-30T09:00" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  expect(await screen.findByText(/Stored due date is now.*your typed date is kept below/i)).toBeInTheDocument();
+  expect(screen.getByLabelText("Due date (Eastern time)")).toHaveValue("2026-10-30T09:00");
+
+  fireEvent.click(screen.getByRole("button", { name: "Save as confirmed" }));
+  await waitFor(() => expect(patch).toHaveBeenCalledTimes(2));
+  expect(patch.mock.calls[1][0].body).toEqual({ due_at: "2026-10-30T09:00", expected_updated_at: "2026-10-02T16:00:00.000Z" });
+});

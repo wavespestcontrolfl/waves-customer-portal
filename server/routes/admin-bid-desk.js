@@ -362,7 +362,11 @@ router.post('/:id/checklist/start', async (req, res, next) => {
       const bid = await bidExists(trx, req.params.id, true);
       if (!bid) return null;
       const type = value.type || bid.solicitation_type || null;
-      if (value.type && value.type !== bid.solicitation_type) await trx('bid_opportunities').where({ id: bid.id }).update({ solicitation_type: value.type });
+      if (value.type && value.type !== bid.solicitation_type) {
+        await trx('bid_opportunities')
+          .where({ id: bid.id })
+          .update({ solicitation_type: value.type, updated_at: trx.raw('clock_timestamp()') });
+      }
       const result = await checklist.startChecklist(trx, bid.id, type, { addMissing: req.query.add === 'missing' });
       const items = await checklist.listItems(trx, bid.id);
       return { ...result, type, checklist: items, checklist_progress: checklist.progressOf(items), checklist_missing: await checklist.missingCount(trx, bid.id, type) };

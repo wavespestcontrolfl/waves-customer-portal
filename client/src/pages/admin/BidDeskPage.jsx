@@ -295,26 +295,35 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
 
   // keepDrafts: the reload after a 409 or lost reply refreshes the bid as the server has it, refreshes untouched
   // fields so a retry cannot revert another operator's change, and preserves only fields the operator edited.
-  const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false } = {}) => {
+  const load = useCallback(async ({ keepDrafts = false, resetDueDraft = false, preserveDueOnConflict = false } = {}) => {
     setState((s) => ({ ...s, loading: true, error: "" }));
     try {
       const data = await api(`/${bidId}`);
       const extras = { checklist: data.checklist || [], progress: data.checklist_progress || { checked: 0, required: 0, total: 0 }, missing: data.checklist_missing ?? 0, estimate: data.estimate || null, documents: data.documents || [] };
       setState({ loading: false, error: "", bid: data.bid, emails: data.emails, extras });
-      if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
+      let dueConflictNote = "";
+      if (preserveDueOnConflict && dueEditedAtNow.current) {
+        // Keep the operator's typed deadline after a 409, advance the fence to the freshly
+        // reloaded version so they can review the stored date and explicitly save again.
+        setDueEditedAt(data.bid.updated_at);
+        const storedLabel = data.bid.due_at
+          ? `${formatETDate(data.bid.due_at)} ${formatETTime(data.bid.due_at)}`
+          : "(none)";
+        dueConflictNote = `Stored due date is now "${storedLabel}" on the server (your typed date is kept below).`;
+      } else if (!keepDrafts || resetDueDraft || !dueEditedAtNow.current) {
         setDueInput(etDatetimeLocalValue(data.bid.due_at));
         setDueEditedAt(null);
       }
       if (!keepDrafts) {
         setStatus(data.bid.status);
         setNote(data.bid.decision_note || "");
-        return "";
+        return dueConflictNote;
       }
       const prev = decisionDraftRef.current;
       const merged = reconcileDecisionAfterReload(prev.bid, data.bid, prev.status, prev.note);
       setStatus(merged.status);
       setNote(merged.note);
-      return merged.conflictNote;
+      return [dueConflictNote, merged.conflictNote].filter(Boolean).join(" ");
     } catch (err) {
       // A recovery read that fails too keeps the bid and every field on screen as they are, unsaved typing included,
       // instead of replacing the detail with an error (whose Retry would reload without the drafts).
@@ -366,7 +375,11 @@ function BidDetail({ bidId, onChanged, onClose, onProgress }) {
         setMessage(`Not saved: ${err.message}`);
         if (err.status === 409) {
           onChanged();
-          const conflictNote = await load({ keepDrafts: true, resetDueDraft: "due_at" in body || body.confirm_due === true });
+          const conflictNote = await load({
+            keepDrafts: true,
+            resetDueDraft: body.confirm_due === true,
+            preserveDueOnConflict: "due_at" in body,
+          });
           if (conflictNote) setMessage(`Not saved: ${err.message} ${conflictNote}`);
         }
       } else {

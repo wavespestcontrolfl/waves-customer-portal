@@ -36,14 +36,33 @@ const Section = ({ title, children }) => (
   </section>
 );
 
+function detailsSnapshot(bid) {
+  return {
+    type: bid.solicitation_type || "",
+    scored: scoredOf(bid.scored),
+    questions: etDatetimeLocalValue(bid.questions_due_at),
+    walk: etDatetimeLocalValue(bid.job_walk_at),
+    mandatory: !!bid.job_walk_mandatory,
+  };
+}
+
+function mergeUntouchedFields(current, prevServer, nextServer) {
+  const merged = {};
+  for (const key of Object.keys(nextServer)) {
+    merged[key] = !prevServer || current[key] === prevServer[key] ? nextServer[key] : current[key];
+  }
+  return merged;
+}
+
 function Details({ bid, busy, save }) {
-  const [form, setForm] = useState({});
+  const [form, setForm] = useState(() => detailsSnapshot(bid));
   const [unchanged, setUnchanged] = useState(false);
+  const prevServerRef = useRef(detailsSnapshot(bid));
   useEffect(() => {
-    setForm({
-      type: bid.solicitation_type || "", scored: scoredOf(bid.scored), questions: etDatetimeLocalValue(bid.questions_due_at),
-      walk: etDatetimeLocalValue(bid.job_walk_at), mandatory: !!bid.job_walk_mandatory,
-    });
+    const nextServer = detailsSnapshot(bid);
+    const prevServer = prevServerRef.current;
+    prevServerRef.current = nextServer;
+    setForm((current) => mergeUntouchedFields(current, prevServer, nextServer));
   }, [bid.solicitation_type, bid.scored, bid.questions_due_at, bid.job_walk_at, bid.job_walk_mandatory]);
   const set = (key) => (event) => {
     setUnchanged(false);
@@ -374,11 +393,16 @@ function Checklist({ bidId, bid, items, progress, missing, busy, run, invite, ki
 }
 
 function Submission({ bid, busy, save, invite }) {
-  const [at, setAt] = useState("");
-  const [confirmation, setConfirmation] = useState("");
+  const [at, setAt] = useState(() => etDatetimeLocalValue(bid.submitted_at));
+  const [confirmation, setConfirmation] = useState(() => bid.submission_confirmation || "");
+  const prevServerRef = useRef({ at: etDatetimeLocalValue(bid.submitted_at), confirmation: bid.submission_confirmation || "" });
   useEffect(() => {
-    setAt(etDatetimeLocalValue(bid.submitted_at));
-    setConfirmation(bid.submission_confirmation || "");
+    const nextAt = etDatetimeLocalValue(bid.submitted_at);
+    const nextConfirmation = bid.submission_confirmation || "";
+    const prev = prevServerRef.current;
+    prevServerRef.current = { at: nextAt, confirmation: nextConfirmation };
+    setAt((current) => (current === prev.at ? nextAt : current));
+    setConfirmation((current) => (current === prev.confirmation ? nextConfirmation : current));
   }, [bid.submitted_at, bid.submission_confirmation]);
   return (
     <>

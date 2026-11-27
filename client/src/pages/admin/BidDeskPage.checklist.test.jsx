@@ -371,3 +371,31 @@ it("shows a plain error when the checklist cannot be reloaded, and clears it on 
   await waitFor(() => expect(tick).toHaveBeenCalledTimes(3));
   await waitFor(() => expect(screen.queryByText(/Could not reload the checklist/)).toBeNull());
 });
+
+it("preserves pending bid-detail and submission drafts when a 409 reload updates other server fields", async () => {
+  let reads = 0;
+  const firstBid = detail({ bid: { solicitation_type: "rfp", submitted_at: null, submission_confirmation: null } });
+  const reloadedBid = detail({
+    bid: {
+      solicitation_type: "itb",
+      submitted_at: "2026-10-19T18:00:00.000Z",
+      submission_confirmation: null,
+      updated_at: "2026-10-02T15:00:00.000Z",
+    },
+  });
+  route({
+    "GET /admin/bid-desk/": LIST_ON,
+    "GET /admin/bid-desk/b1": () => reply(reads++ === 0 ? firstBid : reloadedBid),
+    "PATCH /admin/bid-desk/b1": () => reply({ error: "This bid changed since you opened it." }, { ok: false, status: 409 }),
+  });
+  renderPage();
+  const walk = await screen.findByLabelText("Site visit or job walk (Eastern time)");
+  fireEvent.change(walk, { target: { value: "2026-10-18T10:30" } });
+  fireEvent.change(screen.getByLabelText("Confirmation number or receipt"), { target: { value: "RCPT-77" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save bid details" }));
+  expect(await screen.findByText(/Not saved: This bid changed/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByLabelText("Solicitation type")).toHaveValue("itb"));
+  expect(screen.getByLabelText("Site visit or job walk (Eastern time)")).toHaveValue("2026-10-18T10:30");
+  expect(screen.getByLabelText("Submitted (Eastern time)")).toHaveValue("2026-10-19T14:00");
+  expect(screen.getByLabelText("Confirmation number or receipt")).toHaveValue("RCPT-77");
+});

@@ -149,4 +149,68 @@ describe('saveBidUpdate and checklist reorder hardening', () => {
     expect(rawCalls[0].sql).toContain('FROM (VALUES (?::uuid, ?::int), (?::uuid, ?::int)) AS v(id, pos)');
     expect(rawCalls[0].bindings).toEqual([id2, 1, id1, 2, ID]);
   });
+
+  test('checklist start advances bid updated_at when changing solicitation_type so stale PATCH returns 409', async () => {
+    let bidRow = { id: ID, status: 'new', solicitation_type: null, updated_at: new Date('2026-10-02T12:00:00.000Z') };
+    const updates = [];
+    mockDb.mockReset();
+    mockDb.mockImplementation((fn) => {
+      if (typeof fn === 'function') {
+        const trx = (table) => {
+          const q = {
+            where: () => q,
+            whereNull: () => q,
+            whereNotNull: () => q,
+            forUpdate: () => q,
+            orderBy: () => q,
+            max: () => q,
+            modify: (cb) => { cb(q); return q; },
+            whereRaw: () => q,
+            first: async () => (table === 'bid_opportunities' ? bidRow : { top: 0 }),
+            select: async () => [],
+            insert: async () => [],
+            update: async (patch) => {
+              updates.push({ table, patch });
+              if (table === 'bid_opportunities' && patch.updated_at) {
+                bidRow = { ...bidRow, ...patch, updated_at: new Date('2026-10-02T13:00:00.000Z') };
+              }
+              return 1;
+            },
+          };
+          return q;
+        };
+        trx.raw = (sql) => sql;
+        return fn(trx);
+      }
+      return {};
+    });
+
+    const started = await call('POST', `/api/admin/bid-desk/${ID}/checklist/start`, { type: 'rfp' });
+    expect(started.status).toBe(201);
+    expect(updates).toContainEqual({
+      table: 'bid_opportunities',
+      patch: { solicitation_type: 'rfp', updated_at: 'clock_timestamp()' },
+    });
+
+    const stalePatch = await saveBidUpdate(
+      (() => {
+        const t = () => {
+          const q = {
+            where: () => q,
+            forUpdate: () => q,
+            first: async () => bidRow,
+            modify: (cb) => { cb(q); return q; },
+            whereRaw: (_sql, [expected]) => { q._matched = new Date(expected).getTime() === bidRow.updated_at.getTime(); return q; },
+            update: async () => (q._matched ? 1 : 0),
+          };
+          return q;
+        };
+        t.raw = (sql) => sql;
+        return t;
+      })(),
+      ID,
+      { status: 'bid', expected_updated_at: '2026-10-02T12:00:00.000Z' },
+    );
+    expect(stalePatch.status).toBe(409);
+  });
 });
