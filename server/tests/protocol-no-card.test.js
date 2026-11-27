@@ -170,7 +170,7 @@ describe('the Waves Assessment card', () => {
 
   test('the card states the owner\'s rules: the price is the estimate\'s, and a sale is treated on the sold service\'s own visit', () => {
     const text = `${visit.primary}\n${visit.secondary}\n${protocols.assessment.notes.join('\n')}`;
-    expect(text).toMatch(/Never write or say a price that is not on the estimate/);
+    expect(text).toMatch(/Never write or say a price not on the estimate/);
     expect(text).toMatch(/book the sold service on this visit, then treat from that service's card/);
     expect(text).toMatch(/No product is applied or logged on an assessment/);
     // No amount in mL anywhere (owner rule 2026-09-27), and no fixed re-entry claim.
