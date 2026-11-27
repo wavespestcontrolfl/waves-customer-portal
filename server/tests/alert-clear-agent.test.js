@@ -599,6 +599,9 @@ describe('the booking requirement holds on every path', () => {
     expect(cut.row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
     const unpaired = await run([], { reply: { lastBody: 'OK', prevOutbound: '', prevAt: null, whole: false } }, bill());
     expect(unpaired.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+    // A message with no words (a picture text, an email whose body was never read) was never shown: "whole" alone is not enough.
+    const empty = await run([], { reply: { lastBody: 'OK', prevOutbound: '  ', prevAt: after(-30), whole: true } }, bill());
+    expect(empty.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
   });
 
   // What a bare yes answers is language, so the model judges it, shown the message: a staff reply never closes the yes by rule.
@@ -644,6 +647,15 @@ describe('a visit waiting for the customer to pick a time books nothing', () => 
     // A one-hour job at 10 is the 10-to-12 arrival window the customer was offered (window_start + 2 hours), never 10-11.
     const placed = agent.visitEvent({ ...row, window_start: '10:00:00', window_end: '11:00:00' });
     expect(placed).toMatchObject({ proof: 'booking', line: 'VISIT created after the alert, for Monday 2026-11-30, arrival 10:00-12:00 (pending)' });
+  });
+
+  // A day-only visit's stored start is the planner's, not a time the customer was given: a yes to "Monday at 10" must not read a
+  // planned 10:00 as that time booked.
+  test('a day-only booking states the day alone and says no time was given', () => {
+    const row = { id: 'v10', created_at: after(40), scheduled_date: new Date('2026-11-30T00:00:00Z'), window_start: '10:00:00', window_end: '11:00:00', customer_pick_by: null, status: 'pending' };
+    const e = agent.visitEvent(row, true);
+    expect(e).toMatchObject({ proof: 'booking', line: 'VISIT created after the alert, for Monday 2026-11-30; the customer is told the day, not a time (pending)' });
+    expect(agent.SYSTEM_PROMPT).toMatch(/a visit whose line says the customer is told the day, not a time, when a time was offered/);
   });
 });
 
@@ -956,6 +968,15 @@ describe('a visit move answers only when Waves staff made it and the visit still
     const e = agent.rescheduleEvent(move({ reason_code: 'admin_edit', original_window: null, new_window: null }));
     expect(e.proof).toBe('date_change');
     expect(e.line).toMatch(/to Friday 2026-11-27; the visit is still on that day; this move set no time$/);
+  });
+
+  test('a move on a day-only visit states days alone: the planner\'s times are never shown as told ones', () => {
+    const e = agent.rescheduleEvent(move(), true);
+    expect(e.proof).toBe('date_change');
+    expect(e.line).toBe('VISIT MOVED by Waves staff after the alert (admin_series), from Monday 2026-11-23 to Friday 2026-11-27; the visit is still on that day; the customer is told the day, not a time');
+    const since = agent.rescheduleEvent(move({ visit_date: day('2026-12-02'), window_start: '11:00:00' }), true);
+    expect(since.proof).toBeNull();
+    expect(since.line).toMatch(/; not an answer now, as the visit has moved since, to Wednesday 2026-12-02$/);
   });
 
   test.each([

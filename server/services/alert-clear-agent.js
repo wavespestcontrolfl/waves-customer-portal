@@ -99,7 +99,10 @@ const OWED_TITLE_RE = /we still owe/i;
 const BARE_YES_RE = /^\s*(ok(ay)?|yes|yep|yeah|sure|y|k|sounds good|that works)\W*$/i;
 // The message a bare yes answers is shown up to this many characters (a text is at most 1,600); a longer one is marked cut.
 const OFFER_CHARS = 2000;
-const QUOTED_RE = /On .{5,60} wrote:/;
+// A Waves email that may hold the offer is read up to this many characters (its text body and its HTML each); a longer one is cut.
+const EMAIL_READ_CHARS = 100000;
+// The Waves emails in the thread looked through, newest first, for the one sent to the address the reply came from.
+const OFFER_SCAN = 10;
 // Rows a reservation or an error left behind are looked at again after an hour.
 const RETRY_RULES = new Set(['ai_error', 'ai_reserved']);
 // Part of every fingerprint. Bumped when a rule or a proof definition changes, so each open alert gets one fresh look under it.
@@ -122,7 +125,7 @@ Rules:
 - "proof" is the id (E1, E2...) of the one AFTER event that answers the alert. It is required for "answered". It must be a delivered staff text, a sent staff email, a call a person answered, a booking, a visit move by Waves staff that the visit still holds, or a sent estimate. An automated text (reminder, en route, receipt, link), an unsent Waves DRAFT, a customer message, an expired link, or a visit move by the customer or an automatic job never answers anything.
 - A staff visit move answers a request to move the visit only when its new day and time fit what the customer asked.
 - When the customer's message is a bare "ok" or "yes", the item shows the last Waves message, when it was sent, and the reply. Set "yes_to_offer" to true when that yes accepts a new day or time Waves offered or asked about, and false when it accepts nothing new (a reminder of a visit already booked, a note, a bill). When unsure, set true.
-- "Ok" or "yes" to an offered time (visit lines give each day with its weekday and the arrival window the customer is told) is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
+- "Ok" or "yes" to an offered time (visit lines give each day with its weekday and the arrival window the customer is told) is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, a visit whose line says the customer is told the day, not a time, when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
 - Never return nothing_to_answer for a question, a request, or a promise Waves made.
 Reply with ONLY this JSON object, no code fence: {"outcome": "answered" | "nothing_to_answer" | "still_owed", "why": "<${MAX_WHY_WORDS} words or fewer>", "proof": "<event id or null>", "yes_to_offer": true | false}`;
 
@@ -215,15 +218,18 @@ const customerEmailEvent = (row) => ({
 });
 // A booking's line states the day and time the visit holds now, so the model can judge a yes to an offered time. A visit handed to the
 // customer and not yet given a time (self-serve-notice.js awaitingCustomerPick: its date is a placeholder) books nothing: no proof.
-function visitEvent(row) {
+// A day-only visit (the customer is told only its day: day-only-ai-context.js loadDayOnlyCheck) states the day alone: its stored start
+// is the planner's, not a time the customer was given, so it proves the day only.
+function visitEvent(row, dayOnly = false) {
   const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
   const waiting = awaitingCustomerPick(row);
+  const slot = dayOnly ? `${dayText(row.scheduled_date)}; ${DAY_ONLY_NOTE}` : slotText(row.scheduled_date, row.window_start);
   return {
     type: 'visit', id: String(row.id), key: `visit:${row.id}:booked:${row.status}`, at: toDate(row.created_at), inbound: false,
     proof: waiting ? null : 'booking', draft: false,
     line: waiting
       ? `VISIT created after the alert, now waiting for the customer to pick a time (placeholder day ${dateText(row.scheduled_date)}); no time is booked, so this is no answer`
-      : `VISIT created after the alert, for ${slotText(row.scheduled_date, row.window_start)} (${row.status})`,
+      : `VISIT created after the alert, for ${slot} (${row.status})`,
   };
 }
 // A visit that finished after the alert is context only: a finished visit does not answer a question about its result.
@@ -248,6 +254,7 @@ const slotText = (date, start) => {
   const arrival = hhmm(start) ? arrivalWindowRange(hhmm(start)) : null;
   return arrival ? `${dayText(date)}, arrival ${arrival}` : dayText(date);
 };
+const DAY_ONLY_NOTE = 'the customer is told the day, not a time';
 const isStaffMove = (row) => STAFF_MOVE_INITIATORS.has(String(row.initiated_by || ''));
 function moverText(row) {
   const who = String(row.initiated_by || '');
@@ -273,20 +280,23 @@ const realMove = (row) => dateOnlyString(row.new_date) !== dateOnlyString(row.or
 // A move on a visit that now waits for the customer to pick a time (a later hand-off parked it, maybe on that same day) books
 // nothing either: self-serve-notice.js awaitingCustomerPick, read on the visit as it stands now.
 // The reason and the mover come from the request that logged the move: they pass the one redaction step before they join the line.
-function rescheduleEvent(row) {
+// On a day-only visit (visitEvent) every slot in the line is its day alone: the move proves the day only.
+function rescheduleEvent(row, dayOnly = false) {
   const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
   const waiting = awaitingCustomerPick({ customer_pick_by: row.visit_pick_by, scheduled_date: row.visit_date, window_start: row.window_start });
   const answers = !row.pick_handoff && !waiting && isStaffMove(row) && moveStillHolds(row);
+  const slot = (date, start) => (dayOnly ? dayText(date) : slotText(date, start));
   const timed = !!startOfWindow(row.new_window);
-  const from = slotText(row.original_date, startOfWindow(row.original_window));
+  const from = slot(row.original_date, startOfWindow(row.original_window));
   const reason = clean(row.reason_code, 60) || 'moved';
   let note = timed ? 'the visit still holds that time' : 'the visit is still on that day; this move set no time';
+  if (dayOnly) note = `the visit is still on that day; ${DAY_ONLY_NOTE}`;
   if (!isStaffMove(row)) note = 'not an answer from Waves';
   else if (waiting) note = 'not an answer now, as the visit waits for the customer to pick a time';
-  else if (!answers) note = `not an answer now, as the visit has moved since, to ${slotText(row.visit_date, row.window_start)}`;
+  else if (!answers) note = `not an answer now, as the visit has moved since, to ${slot(row.visit_date, row.window_start)}`;
   const line = row.pick_handoff
     ? `VISIT HANDED TO THE CUSTOMER TO PICK A TIME by ${moverText(row)} after the alert (${reason}), from ${from}; no time is booked, so this is no answer`
-    : `VISIT MOVED by ${moverText(row)} after the alert (${reason}), from ${from} to ${slotText(row.new_date, startOfWindow(row.new_window))}; ${note}`;
+    : `VISIT MOVED by ${moverText(row)} after the alert (${reason}), from ${from} to ${slot(row.new_date, startOfWindow(row.new_window))}; ${note}`;
   return {
     type: 'reschedule', id: String(row.id), key: `reschedule:${row.id}`, at: toDate(row.created_at), inbound: false,
     proof: answers ? 'date_change' : null, draft: false, line,
@@ -297,7 +307,7 @@ function rescheduleEvent(row) {
 // Readers. Every read is wrapped: a failed read marks the timeline incomplete, so the alert is skipped rather than judged on
 // a partial picture. Nothing but the error class is logged.
 
-function makeReader(conn) {
+function makeReader(conn, now = new Date()) {
   const state = { complete: true };
   const read = async (label, fn) => {
     try {
@@ -314,7 +324,7 @@ function makeReader(conn) {
       return [];
     }
   };
-  return { conn, state, read };
+  return { conn, state, read, now };
 }
 
 
@@ -443,11 +453,16 @@ async function customerRecordsAfter(r, anchor, customerId) {
       .whereRaw('COALESCE(s.status, \'\') NOT IN (' + VISIT_NEVER_RAN_STATUSES.map(() => '?').join(', ') + ')', VISIT_NEVER_RAN_STATUSES)
       .orderBy('rl.created_at', 'asc').limit(ROW_CAP)
       .select('rl.id', 'rl.created_at', 'rl.reason_code', 'rl.initiated_by', 'rl.original_date', 'rl.new_date', 'rl.original_window', 'rl.new_window',
-        's.scheduled_date as visit_date', 's.window_start', 's.customer_pick_by as visit_pick_by',
+        's.id as visit_id', 's.scheduled_date as visit_date', 's.window_start', 's.customer_pick_by as visit_pick_by',
         conn.raw('COALESCE(rl.notes = ?, false) AS pick_handoff', [require('./rain-out').PICK_LOG_MARKER]))),
   ]);
   const handed = estimates.map((row) => ({ row, at: witnessAt(row, anchor) })).filter((x) => x.at).map((x) => estimateEvent(x.row, x.at));
-  return [...booked.map(visitEvent), ...done.map(doneVisitEvent), ...handed, ...moves.filter(realMove).map(rescheduleEvent)];
+  // Which of these visits the customer is told only the day of, as each stands now: one read (never throws; a failed one says day-only).
+  const moved = moves.filter(realMove);
+  const asVisit = (m) => ({ id: m.visit_id, scheduled_date: m.visit_date, window_start: m.window_start });
+  const dayOnly = await require('./day-only-ai-context').loadDayOnlyCheck(conn, [...booked, ...moved.map(asVisit)], r.now);
+  return [...booked.map((row) => visitEvent(row, dayOnly(row))), ...done.map(doneVisitEvent), ...handed,
+    ...moved.map((row) => rescheduleEvent(row, dayOnly(asVisit(row))))];
 }
 
 // Every record after the anchor for this contact, to a safety cap. Texts, calls and staff email for the customer or the number.
@@ -524,12 +539,36 @@ async function lastDeliveredText(r, before, key, senderPhone) {
   return { body: String(rows[0].message_body || ''), at: toDate(rows[0].created_at), whole: Number(rows[0].body_len) <= OFFER_CHARS };
 }
 
-// A Waves email's own words, before the quoted thread. Whole when they end inside what was read and fit what the model is shown.
+// A Waves email's own words: its text body, or its HTML converted when the send stored no text (portal sends are HTML only), cut at
+// quoted history and signatures (email-strip.js emailPlainText + stripQuotedAndSignature). Whole only when the body used was read to
+// its end and the words fit what the model is shown.
 function ownEmailText(row) {
-  const read = String(row.b || '');
-  const own = read.split(QUOTED_RE)[0];
-  const ended = own.length < read.length || Number(row.body_len) <= read.length;
-  return { body: own.slice(0, OFFER_CHARS), whole: ended && own.length <= OFFER_CHARS };
+  const { emailPlainText, stripQuotedAndSignature } = require('./email/email-strip');
+  const text = String(row.b || '');
+  const fromText = text.trim() !== '';
+  const own = stripQuotedAndSignature(emailPlainText({ body_text: text, body_html: row.h }));
+  const readAll = fromText ? Number(row.body_len) <= text.length : Number(row.html_len) <= String(row.h || '').length;
+  return { body: own.slice(0, OFFER_CHARS), whole: readAll && own.length <= OFFER_CHARS };
+}
+
+// The last email Waves sent in the thread before the reply, TO THE ADDRESS THE REPLY CAME FROM: a forward to staff is not what the
+// customer answered. Found by its own query, not the four context lines. A send whose Cc or Bcc was never captured cannot be placed
+// (capturedRecipients is null), so the look stops there: no pair, and the booking requirement stays (guardBareYes).
+async function lastEmailTo(r, threadId, before, replyTo) {
+  if (!replyTo) return null;
+  const sends = await r.read('thread-sends', () => r.conn('emails as er').where('er.gmail_thread_id', threadId).whereRaw(personSentFilter('er'))
+    .where('er.received_at', '<', before).orderBy('er.received_at', 'desc').limit(OFFER_SCAN)
+    .select('er.id', 'er.gmail_thread_id', 'er.to_address', 'er.cc_address', 'er.bcc_address', 'er.received_at'));
+  for (const send of sends) {
+    const to = capturedRecipients(send);
+    if (!to) return null;
+    if (!to.includes(replyTo)) continue;
+    const body = await r.read('thread-offer', () => r.conn('emails').where('id', send.id)
+      .select(r.conn.raw(`left(body_text, ${EMAIL_READ_CHARS}) as b`), r.conn.raw('length(body_text) as body_len'),
+        r.conn.raw(`left(body_html, ${EMAIL_READ_CHARS}) as h`), r.conn.raw('length(body_html) as html_len')));
+    return body[0] ? { at: toDate(send.received_at), ...ownEmailText(body[0]) } : null;
+  }
+  return null;
 }
 
 // The contact to read for: the customer, plus the resolved phone ONLY when no other customer is tied to that number (the contact
@@ -569,7 +608,7 @@ async function emailTimeline(r, alert, bellAt) {
   const meta = parseMeta(alert.metadata);
   const emailId = uuidOrNull(parseMeta(meta.payload).emailId || linkParam(alert.link, 'id'));
   const mail = emailId ? (await r.read('email', () => r.conn('emails').where('id', emailId)
-    .select('gmail_thread_id', 'customer_id', 'received_at', 'subject', 'from_address', 'body_text')))[0] : null;
+    .select('gmail_thread_id', 'customer_id', 'received_at', 'subject', 'from_address', 'body_text', 'body_html')))[0] : null;
   if (!mail) return unreadable(bellAt, bellAt);
   const anchor = toDate(mail.received_at);
   const before = await r.read('thread-before', () => r.conn('emails as er').where('er.gmail_thread_id', mail.gmail_thread_id)
@@ -582,14 +621,12 @@ async function emailTimeline(r, alert, bellAt) {
   const person = customerId ? await r.read('customer-phone', () => r.conn('customers').where('id', customerId).whereNull('deleted_at').select('phone')) : [];
   const contact = await trustedContact(r, customerId, person[0]?.phone || null, anchor);
   const events = await eventsAfter(r, anchor, contact, { threadId: mail.gmail_thread_id, replyTo });
-  // The last email Waves actually sent in the thread before the reply, by its own query (not the four context lines).
-  const offer = await r.read('thread-offer', () => r.conn('emails as er').where('er.gmail_thread_id', mail.gmail_thread_id).whereRaw(personSentFilter('er'))
-    .where('er.received_at', '<', anchor).orderBy('er.received_at', 'desc').limit(1)
-    .select('er.received_at', r.conn.raw(`left(er.body_text, ${OFFER_CHARS * 2}) as b`), r.conn.raw('length(er.body_text) as body_len')));
-  const sent = offer[0] ? ownEmailText(offer[0]) : { body: '', whole: false };
+  const offer = await lastEmailTo(r, mail.gmail_thread_id, anchor, replyTo);
+  // The reply's own words, cut at quoted history and signatures ("Sent from my iPhone", an Outlook header), so a bare yes reads as one.
+  const { emailPlainText, stripQuotedAndSignature } = require('./email/email-strip');
   const reply = {
-    lastBody: String(mail.body_text || '').split(QUOTED_RE)[0].slice(0, 600),
-    prevOutbound: sent.body, prevAt: offer[0] ? toDate(offer[0].received_at) : null, whole: sent.whole,
+    lastBody: stripQuotedAndSignature(emailPlainText(mail)).slice(0, 600),
+    prevOutbound: offer ? offer.body : '', prevAt: offer ? offer.at : null, whole: offer ? offer.whole : false,
   };
   return timelineOf(anchor, bellAt, `email:${emailId}`, { customerKnown: !!customerId, ctx, events, reply });
 }
@@ -689,8 +726,8 @@ async function callTimeline(r, alert, bellAt) {
 }
 
 // The timeline of one alert (everything after it, with the proof kind of every event set in code).
-async function buildTimeline(alert, { conn = db } = {}) {
-  const r = makeReader(conn);
+async function buildTimeline(alert, { conn = db, now = new Date() } = {}) {
+  const r = makeReader(conn, now);
   const { bellEventAt } = require('./admin-alert-relevance');
   const bellAt = bellEventAt(alert) || toDate(alert.created_at);
   let timeline;
@@ -777,11 +814,12 @@ function ruleVerdict(alert, timeline, owed, now) {
 // a "nothing to answer" never does. No plain rule closes any bare yes (ruleVerdict). Code checks only what records prove (a real
 // booking, never a visit waiting for the customer to pick a time; a staff move the visit still holds) and holds the model to its
 // own reading. The model's "accepts no offer" counts only when it saw the whole message the yes answers (`whole`: paired with the
-// number the yes came from, and not cut).
+// number or address the yes came from, and not cut) and that message has words (an empty one, a picture text, was never shown).
 const ANSWERS_A_YES = ['booking', 'date_change'];
 const bareYes = (timeline) => !!timeline.reply && BARE_YES_RE.test(timeline.reply.lastBody);
+const sawWholeOffer = (reply) => reply.whole === true && String(reply.prevOutbound || '').trim() !== '';
 function guardBareYes(v, timeline) {
-  if (v.outcome === 'still_owed' || !bareYes(timeline) || (v.yesToOffer === false && timeline.reply.whole === true)) return v;
+  if (v.outcome === 'still_owed' || !bareYes(timeline) || (v.yesToOffer === false && sawWholeOffer(timeline.reply))) return v;
   const named = v.outcome === 'answered' && v.proofId ? timeline.events.find((e) => e.type === v.proofType && e.id === v.proofId) : null;
   if (named && ANSWERS_A_YES.includes(named.proof)) return v;
   return verdict('still_owed', v.source, 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move named as the answer', { model: v.model });
@@ -943,7 +981,7 @@ function defaultDeps() {
         .where('created_at', '>=', parseETDateTime(`${etDateString(now)}T00:00`)).count({ n: '*' }).first();
       return Number(row?.n) || 0;
     },
-    timeline: (alert) => buildTimeline(alert),
+    timeline: (alert, now) => buildTimeline(alert, { now }),
     judge: callModel,
     canCall: hasKey,
     save: (row) => db('alert_clear_verdicts').insert(row),

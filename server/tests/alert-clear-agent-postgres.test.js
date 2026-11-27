@@ -125,6 +125,18 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     // ...as the customer is told it: the weekday and the arrival window (start + 2 hours), not the job's 09:00-10:00.
     expect(timeline.events.find((e) => e.id === String(live)).line).toBe('VISIT created after the alert, for Sunday 2027-01-10, arrival 09:00-11:00 (pending)');
     expect(timeline.events.find((e) => e.id === String(waiting))).toMatchObject({ proof: null, line: expect.stringMatching(/waiting for the customer to pick a time/) });
+
+    // A visit the customer is told only the day of (time-promise.js loadTimeDisplay: showHour false) states the day alone: its 09:00
+    // is the planner's, not a time the customer was given.
+    const promise = require('../services/time-promise');
+    const spy = jest.spyOn(promise, 'loadTimeDisplay').mockImplementation(async (_conn, rows) => new Map(rows.map((x) => [x.id, { showHour: false, level: 'none', eligible: true }])));
+    try {
+      const dayOnly = await agent.buildTimeline(row);
+      expect(spy).toHaveBeenCalled();
+      expect(dayOnly.events.find((e) => e.id === String(live))).toMatchObject({ proof: 'booking', line: 'VISIT created after the alert, for Sunday 2027-01-10; the customer is told the day, not a time (pending)' });
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   test('a sent staff email counts only when it provably reached this customer; a draft never does; SMS alerts see it too', async () => {
@@ -218,7 +230,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const thread = `th-${tag}-y`;
     await mailRow({ gmail_thread_id: thread, from_address: 'contact@wavespestcontrol.com', to_address: address, subject: 'Friday', body_text: 'Can we come Friday at 10 am?', received_at: at(-60), label_ids: JSON.stringify(['SENT']) });
     await mailRow({ gmail_thread_id: thread, from_address: 'contact@wavespestcontrol.com', to_address: address, subject: 'Friday', body_text: 'draft that was never sent', received_at: at(-30), label_ids: JSON.stringify(['DRAFT']) });
-    const yes = await mailRow({ gmail_thread_id: thread, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Re: Friday', body_text: 'Yes\n\nOn Tue someone wrote:\n> Can we come', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid });
+    const yes = await mailRow({ gmail_thread_id: thread, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Re: Friday', body_text: 'Yes\n\nOn Tue, Nov 24, 2026 at 3:21 PM Waves <contact@wavespestcontrol.com> wrote:\n> Can we come', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid });
     const row = await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: yes } });
     const timeline = await agent.buildTimeline(row);
     expect(timeline.reply.lastBody.trim()).toBe('Yes');
@@ -233,6 +245,35 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const cut = await agent.buildTimeline(await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: longYes } }));
     expect(cut.reply.whole).toBe(false);
     expect(cut.reply.prevOutbound).not.toMatch(/Can we come Friday/);
+  });
+
+  test('an email yes: an HTML-only offer is read, a forward to staff is not the offer, a phone signature keeps the yes bare, an uncaptured send stops the pairing', async () => {
+    const address = `h${tag}@example.test`;
+    const cid = await customer({ email: address });
+    const mailRow = async (row) => {
+      const [r] = await db('emails').insert({ gmail_id: `g-${randomUUID()}`, cc_address: '', bcc_address: '', ...row }).returning('id');
+      made.emails.push(r.id);
+      return r.id;
+    };
+    const sent = { from_address: 'contact@wavespestcontrol.com', subject: 'Friday', label_ids: JSON.stringify(['SENT']) };
+    const thread = `th-${tag}-h`;
+    // A portal send stores HTML only (body_text empty); then staff forward the thread inside Waves; then the customer says yes.
+    await mailRow({ ...sent, gmail_thread_id: thread, to_address: address, body_text: '', received_at: at(-60),
+      body_html: '<div dir="ltr">Can we come Friday at 10 am?</div><div class="gmail_quote">On Mon, Nov 23, 2026 at 9:00 AM Waves wrote: an older note</div>' });
+    await mailRow({ ...sent, gmail_thread_id: thread, to_address: 'office@wavespestcontrol.com', body_text: 'FYI, see below', received_at: at(-30) });
+    const yes = await mailRow({ gmail_thread_id: thread, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Re: Friday',
+      body_text: 'Yes\n\nSent from my iPhone', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid });
+    const timeline = await agent.buildTimeline(await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: yes } }));
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Can we come Friday at 10 am?', prevAt: at(-60), whole: true });
+
+    // A newer send whose Cc was never captured may have reached the customer: the pairing stops there, so nothing is whole.
+    const unsure = `th-${tag}-u`;
+    await mailRow({ ...sent, gmail_thread_id: unsure, to_address: address, body_text: 'Can we come Friday at 10 am?', received_at: at(-60) });
+    await mailRow({ ...sent, gmail_thread_id: unsure, to_address: address, cc_address: null, body_text: 'Or Monday at 2 pm?', received_at: at(-30) });
+    const unsureYes = await mailRow({ gmail_thread_id: unsure, from_address: address, to_address: 'contact@wavespestcontrol.com', subject: 'Re: Friday',
+      body_text: 'Yes', received_at: T0, label_ids: JSON.stringify(['INBOX']), customer_id: cid });
+    const stopped = await agent.buildTimeline(await alert('inbound_email', 'Email from Test', '/admin/communications#tab=email', { payload: { emailId: unsureYes } }));
+    expect(stopped.reply).toEqual({ lastBody: 'Yes', prevOutbound: '', prevAt: null, whole: false });
   });
 
   test('a hold voicemail bell: top-level call id, fragment link, judged from the bell\'s own time (a call during the hold answers nothing)', async () => {
