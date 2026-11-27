@@ -154,6 +154,45 @@ describe('checkMove', () => {
       .toMatchObject({ allowed: false, reason_code: 'PROOFREADER_PERSON_HELD' });
   });
 
+  test('a complete record with only system entries fast-allows with 0 model calls; any customer/staff/call entry still asks the model', async () => {
+    const systemOnly = {
+      entries: [
+        { id: 'E1', channel: 'text', from: 'system', at: '2026-10-01T08:00:00-04:00', text: 'Reminder: your pest visit is tomorrow.' },
+        { id: 'E2', channel: 'portal_chat', from: 'system', at: '2026-10-02T09:00:00-04:00', text: 'Receipt sent.' },
+      ],
+      unread: [],
+      serviceTypes: ['Quarterly Pest Control'],
+      tooLong: false,
+    };
+    const run = runOf();
+    const pr = proofreaderOf({ verdict: 'hold', why: 'quoted_statement' }, systemOnly);
+    const got = await check(run, pr);
+    expect(got).toEqual({
+      allowed: true,
+      recordPrint: expect.any(String),
+      audit: { verdict: 'allow', why: 'system_only_record', entry_id: null, model: null, prompt_version: 'move-proofreader-v1' },
+    });
+    expect(pr.proofreadMove).not.toHaveBeenCalled();
+    expect(run.proofreader).toMatchObject({ calls: 0, allowed: 1, answered: 0, broke: 0 });
+
+    // Any human/call entry (customer, staff, both) still calls the model.
+    for (const from of ['customer', 'staff', 'both']) {
+      const mixed = { ...systemOnly, entries: [...systemOnly.entries, { id: 'E3', channel: 'text', from, at: '2026-10-03T10:00:00-04:00', text: 'Call me first.' }] };
+      const mPr = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' }, mixed);
+      expect(await check(runOf(), mPr)).toMatchObject({ allowed: true, audit: { why: 'nothing_breaks' } });
+      expect(mPr.proofreadMove).toHaveBeenCalledTimes(1);
+    }
+
+    // System-only with unread parts or tooLong does NOT fast-allow.
+    const withUnread = proofreaderOf({ verdict: 'unknown', why: 'record_incomplete' }, { ...systemOnly, unread: [{ channel: 'call', reason: 'not_transcribed' }] });
+    expect(await check(runOf(), withUnread)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE' });
+    expect(withUnread.proofreadMove).toHaveBeenCalledTimes(1);
+
+    const tooLong = proofreaderOf({ verdict: 'unknown', why: 'record_too_long' }, { ...systemOnly, tooLong: true });
+    expect(await check(runOf(), tooLong)).toMatchObject({ allowed: false, reason_code: 'PROOFREADER_UNSURE' });
+    expect(tooLong.proofreadMove).toHaveBeenCalledTimes(1);
+  });
+
   test('an allow stands only when the record read again after the answer is the one the model saw', async () => {
     const run = runOf();
     const proofreader = proofreaderOf({ verdict: 'allow', why: 'nothing_breaks' });

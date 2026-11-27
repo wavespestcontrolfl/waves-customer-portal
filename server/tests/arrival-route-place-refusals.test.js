@@ -116,14 +116,28 @@ describe('each refusal that the time fallback does not number is one info line a
 });
 
 describe('what stays as it was', () => {
-  test('a placed visit logs no refusal and writes its number and one audit row, as before', async () => {
-    const trx = fakeTrx();
-    await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toEqual([SERVICE]);
+  test('a lone stop on a day stays unnumbered and drops any leftover route_order', async () => {
+    const clean = fakeTrx();
+    await expect(placeMovedVisit(clean, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toBeNull();
     expect(refusalLines()).toEqual([]);
-    expect(trx.writes).toEqual([{ route_order: 1 }]);
+    expect(clean.writes).toEqual([]);
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+
+    const leftover = fakeTrx({ stored: storedRow({ route_order: 1 }), current: { [SERVICE]: 1 } });
+    await expect(placeMovedVisit(leftover, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toBeNull();
+    expect(leftover.writeLog).toEqual([{ id: SERVICE, route_order: null, fence: { scheduled_date: DATE, technician_id: 'tech-1' } }]);
+    expect(audit.recordAuditEvent).not.toHaveBeenCalled();
+  });
+
+  test('a placed visit on a multi-stop day logs no refusal and writes its numbers and one audit row', async () => {
+    mockDayRows = [storedRow({ id: 'other-1', customer_id: 'c2', window_start: '11:00:00', window_end: '12:00:00' })];
+    const trx = fakeTrx();
+    await expect(placeMovedVisit(trx, { serviceId: SERVICE, source: 'estimate_accept' })).resolves.toEqual([SERVICE, 'other-1']);
+    expect(refusalLines()).toEqual([]);
+    expect(trx.writeLog.map(w => [w.id, w.route_order])).toEqual([[SERVICE, 1], ['other-1', 2]]);
     expect(audit.recordAuditEvent).toHaveBeenCalledTimes(1);
     expect(audit.recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
-      action: 'schedule.route_order_placed', resource_id: SERVICE, metadata: expect.objectContaining({ source: 'estimate_accept', route_order: [SERVICE] }),
+      action: 'schedule.route_order_placed', resource_id: SERVICE, metadata: expect.objectContaining({ source: 'estimate_accept', route_order: [SERVICE, 'other-1'] }),
     }));
   });
 
@@ -282,8 +296,9 @@ describe('route order time fallback', () => {
   });
 
   test('a placed visit (the check passed) is written by the check, not by the fallback', async () => {
+    mockDayRows = [storedRow({ id: 'other-1', customer_id: 'c2', window_start: '11:00:00', window_end: '12:00:00' })];
     const trx = fakeTrx();
-    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toEqual([SERVICE]);
+    await expect(placeMovedVisit(trx, { serviceId: SERVICE })).resolves.toEqual([SERVICE, 'other-1']);
     expect(placedLines()).toEqual([]);
     expect(audit.recordAuditEvent).toHaveBeenCalledWith(expect.objectContaining({
       metadata: expect.objectContaining({ policy: 'staff_route_insertion_2026_10_25' }) }));
