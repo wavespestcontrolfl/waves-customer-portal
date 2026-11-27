@@ -10893,8 +10893,11 @@ async function extractCallDataV2(transcription, callerPhone, opts = {}) {
     callId: opts.callId || null,
     extractionModel: res.model || CALL_EXTRACTION_ROUTE.primary.model,
     // The catalog block is part of the rendered prompt, so the stamped
-    // version must carry its hash or cohorts mix under one version.
-    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout }),
+    // version must carry its hash or cohorts mix under one version. Keyed on
+    // the route's primary provider so OpenAI/Anthropic cohorts stay unchanged
+    // while every row of a Gemini-primary cohort (including post-cutover
+    // fallback legs) shares one consistent systemInstruction version.
+    promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider }),
   });
 }
 
@@ -13105,7 +13108,7 @@ const CallRecordingProcessor = {
     // GATE_CALL_EXTRACTION_SYSTEM_PROMPT, read ONCE for this pass for the same reason: the
     // request layout and every prompt-version stamp for this call use this one value.
     const systemPromptLayout = require('../config/feature-gates').callExtractionSystemPromptLive() === true;
-    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout });
+    const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider });
 
     if (relayPending) {
       // The registered set is sealed before transcription. Refresh the
