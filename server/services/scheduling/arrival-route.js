@@ -1386,13 +1386,25 @@ function routeOrderChangedError(detail = 'Committed route neighbors differ from 
 // scored and road-checked. Collapses grouped siblings by visit_id so flat and
 // grouped representations match. Throws ROUTE_ORDER_CHANGED to roll back and
 // let apply.js re-evaluate/retry when the neighbors shifted.
+function completedIdSet(context) {
+  const rows = (context && context.rows) || [];
+  return new Set(rows.filter(r => r && r.status === 'completed' && r.id != null).map(r => String(r.id)));
+}
+
+function visitKeyMap(context) {
+  const rows = (context && context.rows) || [];
+  return new Map(rows.filter(r => r && r.id != null && r.visit_id != null).map(r => [String(r.id), `v:${r.visit_id}`]));
+}
+
 function verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours }) {
   if (!expectedNeighbours) return;
   const self = String(serviceId);
-  const visitById = new Map((context?.rows || []).filter(r => r && r.id != null && r.visit_id != null).map(r => [String(r.id), `v:${r.visit_id}`]));
+  const completedIds = completedIdSet(context);
+  const visitById = visitKeyMap(context);
   const keyOf = (id) => (id == null ? null : (String(id) === self ? '__self__' : (visitById.get(String(id)) || String(id))));
   const keys = [];
   for (const id of (order || [self])) {
+    if (String(id) !== self && completedIds.has(String(id))) continue;
     const k = keyOf(id);
     if (k && keys[keys.length - 1] !== k) keys.push(k);
   }

@@ -336,9 +336,11 @@ async function preloadCandidateTravel(candidates, travel, opts) {
   }
 }
 
-function candidateRouteOrderIds(opts, fit, targetId, options) {
+function candidateRouteOrderIds(opts, fit, targetId, options, context) {
   if (!(opts.arrivalSearch === true && opts.arrivalInsert === true && options && options.allowInsertion === true) || !Array.isArray(fit.routeOrder)) return {};
-  return { route_order_ids: fit.routeOrder.map((id) => (id === targetId ? '__candidate__' : String(id))) };
+  const completed = new Set((context && context.rows || []).filter((r) => r && r.status === 'completed').map((r) => String(r.id)));
+  const active = fit.routeOrder.filter((id) => id === targetId || !completed.has(String(id)));
+  return { route_order_ids: active.map((id) => (id === targetId ? '__candidate__' : String(id))) };
 }
 
 async function findCapacitySlots(opts) {
@@ -519,7 +521,7 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
-      ...candidateRouteOrderIds(opts, fit, context.target.id, options),
+      ...candidateRouteOrderIds(opts, fit, context.target.id, options, context),
       // The simulation's own arrival delay past THIS slot's start (same field
       // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
       // arrival grace (owner ruling 2026-09-28) reads it to decide whether a

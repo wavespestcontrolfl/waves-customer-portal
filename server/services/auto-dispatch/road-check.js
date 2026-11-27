@@ -124,23 +124,49 @@ function needsConfirmedRoad(row) {
   return Boolean(row && row.byMinutes && !(row.gain > 0));
 }
 
+function dropNormalBest(ranked) {
+  const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
+  return rest;
+}
+
+function projectionRows(ranked) {
+  if (Array.isArray(ranked.normalRankedRows) && ranked.normalRankedRows.length) return ranked.normalRankedRows;
+  return [{
+    cand: ranked.normalBest,
+    sc: ranked.normalBestScore,
+    gain: ranked.normalBestNeedsRoad ? 0 : 1,
+    byMinutes: Boolean(ranked.normalBestMinutesFloor || ranked.normalBestNeedsRoad),
+  }];
+}
+
+function projectionFloor(row, floor, ranked, ctx) {
+  if (!row.byMinutes) return floor;
+  const moveRules = require('./move-rules');
+  return Math.max(floor, ranked.normalBestMinutesFloor || 0, moveRules.minutesRuleFloor(ctx.service, ctx.config));
+}
+
 async function withProjectionChecked(ranked, ctx) {
   if (!ranked.normalBest) return ranked;
+  const moveRules = require('./move-rules');
+  const floor = ctx.config.minDayMoveDriveSavingMinutes || 0;
+  const toCheck = slotsToMeasure(projectionRows(ranked), moveRules.isSundayDate);
   try {
-    const road = await roadSaving(ctx.current, ranked.normalBest, ctx.travel);
-    const floor = Math.max(ctx.config.minDayMoveDriveSavingMinutes || 0, ranked.normalBestMinutesFloor || 0);
-    if ((ranked.normalBestNeedsRoad && !road) || (road && road.saving_minutes < floor)) {
-      const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
-      return rest;
+    for (const row of toCheck) {
+      const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
+      const requireRoad = needsConfirmedRoad(row);
+      const rowFloor = projectionFloor(row, floor, ranked, ctx);
+      if ((!road && !requireRoad) || (road && road.saving_minutes >= rowFloor)) {
+        return {
+          ...ranked,
+          normalBest: { ...row.cand, [ROAD_RESULT]: road || { source: 'estimate' } },
+          normalBestScore: row.sc,
+        };
+      }
     }
-    return { ...ranked, normalBest: { ...ranked.normalBest, [ROAD_RESULT]: road || { source: 'estimate' } } };
+    return dropNormalBest(ranked);
   } catch (err) {
     logger.warn(`[auto-dispatch] road check failed (model kept): ${err.message}`);
-    if (ranked.normalBestNeedsRoad) {
-      const { normalBest: _slot, normalBestScore: _score, ...rest } = ranked;
-      return rest;
-    }
-    return ranked;
+    return ranked.normalBestNeedsRoad ? dropNormalBest(ranked) : ranked;
   }
 }
 

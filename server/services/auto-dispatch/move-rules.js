@@ -254,13 +254,15 @@ function normalBestOf(conflict, rows, service, config) {
   if (!conflict) return {};
   // A past_cap slot is in the list only for the conflict repair (legacyCap).
   // Ranked like an ordinary move: Sunday last, bigger drive saving first.
-  const top = rows.filter((r) => r.normalOk && !r.cand.past_cap)
-    .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index))[0];
+  const sorted = rows.filter((r) => r.normalOk && !r.cand.past_cap)
+    .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index));
+  const top = sorted[0];
   if (!top) return {};
   // The road floor the projected move must keep (road-check.js withProjectionChecked).
   return {
     normalBest: top.cand,
     normalBestScore: top.sc,
+    normalRankedRows: sorted.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain, byMinutes: r.minutesOk })),
     ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}),
     ...(top.minutesOk && !(top.gain > 0) ? { normalBestNeedsRoad: true } : {}),
   };
