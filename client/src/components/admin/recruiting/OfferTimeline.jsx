@@ -81,8 +81,10 @@ export function SignedCopyView({ copy, onClose }) {
               </div>
             </div>
             <div className="text-14 text-[#475569] mb-4 p-3 rounded-md bg-[#F1F7FA] border border-[#D5DEE5] break-words">
-              <strong className="text-[#04395E]">Signed by {copy.signedName}</strong> · {formatTimelineTime(copy.signedAt)} ET
-              {copy.signedIp ? ` · IP ${copy.signedIp}` : ""}
+              <div className="font-semibold text-[#04395E]">
+                Signed by {copy.signedName} · {formatTimelineTime(copy.signedAt)} ET
+                {copy.signedIp ? ` · IP ${copy.signedIp}` : ""}
+              </div>
               <div className="text-[#475569] break-all mt-1">Signature hash {copy.signatureHash}</div>
             </div>
             <SafeMarkdown markdown={copy.markdown} />
