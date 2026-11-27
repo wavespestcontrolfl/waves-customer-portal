@@ -36,6 +36,9 @@ describe('the spreader number for a rate', () => {
     expect([settingText(9.5), settingText(11), settingText(16)]).toEqual(['9½', '11', '16']);
     expect(lineLbPer1000('LESCO 24-0-11 with PolyPlus OPTI — 3.1 lb per 1,000 sq ft (0.75 lb N), spreader')).toBe(3.1);
     expect(lineLbPer1000('Bag — 2 to 3 lb per 1,000 sq ft')).toBeNull();
+    // The compact form protocols.json uses: no space between the unit and the slash.
+    expect(lineLbPer1000('Bag — 2 lb/1,000 sq ft')).toBe(2);
+    expect(lineLbRate('Bag — 1–2 lb/1,000 sq ft')).toEqual({ range: true });
   });
   test('the 13-0-13 bed line reads its bed rate (0.75 lb per 100 sq ft = 7.5 per 1,000), not its nitrogen cap: #16', () => {
     const protocols = JSON.stringify(require('../config/protocols.json'));

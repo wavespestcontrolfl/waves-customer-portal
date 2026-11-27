@@ -1156,6 +1156,12 @@ describe('PR review r5', () => {
     // A ranged line with no plan rate never takes the catalog rate's number.
     const [ranged] = await build({ isLawn: true }, { raw: 'Topchoice Granular Insecticide — 1-2 lb per 1,000 sq ft', role: 'base', selected: true, product: { id: 't', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 2, label_verified_at: '2026-08-01' } });
     expect(ranged.spreader).toMatchObject({ setting: null });
+    // The compact range ("1–2 lb/1,000 sq ft") is a range too: never the catalog rate's number.
+    const [compactRange] = await build({ isLawn: true }, { raw: 'Topchoice Granular Insecticide — 1–2 lb/1,000 sq ft', role: 'base', selected: true, product: { id: 't2', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 2, label_verified_at: '2026-08-01' } });
+    expect(compactRange.spreader).toMatchObject({ setting: null });
+    // A catalog row with no unit still gets its number when the line states the lb rate.
+    const [noUnit] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: { ...bag, id: 'f2', rate_unit: null, default_rate_per_1000: null } });
+    expect(noUnit.spreader).toMatchObject({ setting: 12 });
     // An approved swap: the swapped-in bag's identity only.
     const [swapped] = await build({ isLawn: true }, { raw, role: 'base', selected: true, substitutedFor: bag.name, product: { id: 's', name: 'Synthetic swap bag', rate_unit: 'lb', default_rate_per_1000: 4.5, label_verified_at: '2026-08-01' } });
     expect(swapped.spreader).toMatchObject({ setting: null, text: 'No spreader number for this product: weigh test.' });

@@ -1278,11 +1278,15 @@ function cardRate(line, product, governed, substituted) {
 }
 function spreaderForCard(facts, line, product, { governed }) {
   if (line.planUnavailable || isTankMixable(product)) return null;
-  if (!/^lb/i.test(String(product.rate_unit || '')) || NOT_SPREAD.test(String(product.application_method || ''))) return null;
+  if (NOT_SPREAD.test(String(product.application_method || ''))) return null;
   const substituted = Boolean(line.substitutedFor);
+  const rate = cardRate(line, product, governed, substituted);
+  // The unit of the rate the card applies: the plan's or the governed row's, else lb when the line itself states an lb rate
+  // (a catalog row with no unit still gets its number), else the catalog's.
+  const unit = rate?.rateUnit || (spreaderSettings.lineLbRate(line.raw) ? 'lb' : product.rate_unit);
+  if (!/^lb/i.test(String(unit || ''))) return null;
   const names = substituted ? [product.name] : [product.name, String(line.raw || '').split(' \u2014 ')[0]];
   if (!facts.isLawn && !spreaderSettings.rowsFor(names).length) return null;
-  const rate = cardRate(line, product, governed, substituted);
   return rate && spreaderSettings.spreaderForLine({ productName: product.name, raw: line.raw, substituted, ...rate });
 }
 

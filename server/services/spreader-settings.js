@@ -19,7 +19,7 @@ function rowsFor(names, list = config.rows) {
 // The lb per 1,000 sq ft a line states, from its first lb rate: { rate } for one rate ("3.1 lb per 1,000 sq ft"; a bed rate
 // per 100 sq ft is x 10: the 13-0-13 bed line's "0.75 lb per 100 sq ft" is 7.5, read before its later nitrogen cap of
 // "1 lb per 1,000 sq ft"), { range: true } for a range ("1 to 2 lb", "1-2 lb", "1–2 lb": no one rate, so no number), else null.
-const LINE_LB = /(\d+(?:\.\d+)?)(\s*(?:to|-|\u2013)\s*\d+(?:\.\d+)?)?\s*lbs?\s+(?:per|\/)\s*(1,?000|100)\s*sq\.?\s*ft/i;
+const LINE_LB = /(\d+(?:\.\d+)?)(\s*(?:to|-|\u2013)\s*\d+(?:\.\d+)?)?\s*lbs?\s*(?:per|\/)\s*(1,?000|100)\s*sq\.?\s*ft/i;
 function lineLbRate(raw) {
   const found = LINE_LB.exec(String(raw || ''));
   if (!found) return null;
