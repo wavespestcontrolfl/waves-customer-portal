@@ -135,7 +135,7 @@ const PAST_VISITS_LIMIT = 5;
 // One currency marker may cover a range ("$125-150", "USD 125 to 150"): both ends go.
 const NOTE_MONEY_RE = /(?:\$|\busd\s?)\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\$?\d[\d,]*(?:\.\d+)?)?|\b\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\d[\d,]*(?:\.\d+)?)?\s?(?:dollars|bucks|usd)\b/gi;
 // A money word followed by a bare number ("Repair fee: 125.00"). Treatment quantities carry no money word.
-const NOTE_FEE_CUE_RE = /\b(fees?|prices?|costs?|charges?|totals?|quoted?|estimates?|balance)(\s*(?:is|of|was|at|:|=|-)?\s*)\d[\d,]*(?:\.\d+)?/gi;
+const NOTE_FEE_CUE_RE = /\b(fees?|prices?|costs?|charges?|quoted?|estimates?|balance)(\s*(?:is|of|was|at|:|=|-)?\s*)\d[\d,]*(?:\.\d+)?(?:\s?(?:-|–|—|to)\s?\d[\d,]*(?:\.\d+)?)?(?!\s?(?:oz|ounces?|gal|gallons?|lbs?|pounds?|ml|g|grams?|sq|ft|feet|beds?|traps?|stations?|rooms?|%))/gi;
 function pastVisitNoteText(safeNotes) {
   if (!safeNotes) return null;
   return redactAccessCodes(String(safeNotes).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]').replace(NOTE_FEE_CUE_RE, '$1$2[amount]');

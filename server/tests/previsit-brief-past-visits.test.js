@@ -153,7 +153,7 @@ describe('deterministicVisitFacts past_visits', () => {
       visit('b', '2026-11-13', 'Pest Control Service', { notes: 'Treated the lanai for ants. Gate code 4471, lockbox 9902.' }),
       visit('c', '2026-11-12', 'Pest Control Service', { notes: 'Quoted $125–150 for repair. Inspection fee: USD 250. Fed both palms.' }),
       visit('d', '2026-11-11', 'Pest Control Service', { notes: null }),
-      visit('e', '2026-11-10', 'Pest Control Service', { notes: 'Repair fee: 125.00 per application. Applied 12 oz to 2 beds.' }),
+      visit('e', '2026-11-10', 'Pest Control Service', { notes: 'Repair fee: 125-150 per application. Applied a total of 12 oz to 2 beds.' }),
     ];
     const { past_visits: list } = await facts(SVC, { visits });
     expect(list[0].notes).toContain('Treated the garage.');
@@ -163,8 +163,8 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(list[2].notes).toContain('Fed both palms.');
     expect(list[2].notes).not.toMatch(/125|150|250|\$/);
     expect(list[3].notes).toBeNull();
-    expect(list[4].notes).not.toContain('125');
-    expect(list[4].notes).toContain('Applied 12 oz to 2 beds.');
+    expect(list[4].notes).not.toMatch(/125|150/);
+    expect(list[4].notes).toContain('Applied a total of 12 oz to 2 beds.');
   });
 
   test('a long note gets the day payload\'s word-boundary preview', async () => {
