@@ -134,7 +134,21 @@ describe("110-gallon tank reference", () => {
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Spreader")).toBeInTheDocument();
       expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
-      expect(within(surface).queryByText(/requires a separate single-product tank/)).not.toBeInTheDocument();
+      expect(within(surface).queryByText(/needs its own tank/)).not.toBeInTheDocument();
+    }
+  });
+
+  it("a product the program adds to another mix is an additive card, on screen and in print, never its own tank", () => {
+    const plan = fixture();
+    plan.items = [{ selected: true, conditional: true, product: { id: "nis", name: "Synthetic surfactant", labelVerifiedAt: "2026-01-01", mixingOrderCategory: "adjuvant_last" },
+      tankAmounts: { application: "spray", concentrationPercent: 0.25, mixWith: "Celsius WG", per100Gal: null, fullTank: null,
+        backpack4Gal: { gallons: 4, amount: 1.28, amountUnit: "fl oz", carrierSource: "concentration" } } }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
+      expect(within(surface).queryByText(/needs its own tank/)).not.toBeInTheDocument();
+      expect(within(surface).getByText("0.25% of the spray volume")).toBeInTheDocument();
     }
   });
 
@@ -181,7 +195,7 @@ describe("110-gallon tank reference", () => {
     plan.items[0].tankAmounts = { application: "spray", ratePer1000: 0.227, rateUnit: "oz", per100Gal: null, fullTank: null, backpack4Gal: null };
     plan.warnings = [{ code: "missing_calibration", message: "No sprayer test on file for the selected tank, so tank amounts are not shown. Test the sprayer." }];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
-    expect(within(container).getByText(/Each sprayed product below requires a separate single-product tank. Do not combine the listed products in one tank/)).toBeInTheDocument();
+    expect(within(container).getByText(/needs its own tank. Do not combine those products in one tank/)).toBeInTheDocument();
     expect(within(container).getByText("No amount")).toBeInTheDocument();
     expect(within(container).getByText(/No sprayer test on file for the selected tank/)).toBeInTheDocument();
   });

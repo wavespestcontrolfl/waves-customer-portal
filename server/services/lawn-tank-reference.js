@@ -81,15 +81,23 @@ const rigCarrier = (calibration) => Number(calibration?.carrier_gal_per_1000 || 
 
 // The spray volume a line's amount is stated over, read as the job calculation reads it, so the sheet and the job card agree:
 //   'row'   the staged row's own carrier: the spring catch-up's hose pass (roundsCatchUp.carrierFor, as the plan sizes it), or a spot
-//           row that states its own rate (job-card.js sizes that dose on the row's carrier, never the rig's);
+//           row that states its own rate (job-card.js sizes that dose on the row's carrier, never the rig's). Read from the row's
+//           mode, not the plan's state, so a limit or a hold changes only the warning, never the dose;
 //   'line'  the volume the protocol line's text states ("in 4 gal per 1,000 sq ft");
 // else [null, null]: each sprayer's own calibration.
-function fixedCarrier(item, row, planState) {
+function fixedCarrier(item, row) {
   const rowCarrier = roundsCatchUp.carrierFor(item, row, null)
-    || (planState === 'spot' && Number(row?.ratePer1000) > 0 && Number(row?.carrierGalPer1000) > 0 ? Number(row.carrierGalPer1000) : null);
+    || (row?.applicationMode === 'spot' && Number(row?.ratePer1000) > 0 && Number(row?.carrierGalPer1000) > 0 ? Number(row.carrierGalPer1000) : null);
   if (rowCarrier) return [rowCarrier, 'row'];
   const stated = lineCarrierGalPer1000(item.raw);
   return stated ? [stated, 'line'] : [null, null];
+}
+
+// The selected rig's full tank as its own line: its gallons when it is a tank of another size than 100 gal (the 100 gal line covers
+// that one), else 0.
+function fullTankGallons(rig) {
+  const gallons = Number(rig?.tank_capacity_gal || 0);
+  return rig?.system_type === 'backpack' || gallons === BIG_TANK_GAL ? 0 : gallons;
 }
 
 // The big tank: a 2.5 gal jug, or a whole-lawn line (a staged row that is not a spot row; with no staged row, a base line).
@@ -99,7 +107,8 @@ function goesInBigTank(product, item, row) {
 }
 
 /**
- * The reference amounts of one matched line. `rig` is the selected calibration (the big tank), `backpack` the FlowZone's;
+ * The reference amounts of one matched line. `rig` is the selected calibration (the big tank; a backpack picked as the rig gives
+ * no 100 gal or full-tank fill), `backpack` the FlowZone's;
  * `v13Line` the plan's own decision for the line (v13LineState: its staged row and state), absent with the gate off.
  */
 function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack }) {
@@ -110,15 +119,18 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   const percent = concentrationPercent(row, item.raw);
   const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false };
   const base = { ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: rate.rateSource, concentrationPercent: percent, planState: planState || null, ...none };
+  // A product the program adds to another product's mix (the surfactant and Certainty in the Celsius weed mix): no tank of its own.
+  base.mixWith = row?.gates?.tankMixWith || null;
   if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader' };
-  const [lineCarrier, lineSource] = fixedCarrier(item, row, planState);
-  // A backpack picked as the rig is not the big tank.
+  const [lineCarrier, lineSource] = fixedCarrier(item, row);
+  // A backpack picked as the rig is not the big tank: no 100 gal or full-tank fill, whatever sets the carrier.
   const tankRig = rig?.system_type === 'backpack' ? null : rig;
+  const bigTank = goesInBigTank(product, item, row);
+  const tankFills = bigTank && rig?.system_type !== 'backpack';
   const sized = (gallons, calibration) => fill({
     gallons, carrier: lineCarrier || rigCarrier(calibration), carrierSource: lineSource || 'calibration', rateArgs, percent,
   });
-  const bigTank = goesInBigTank(product, item, row);
-  const fullGallons = Number(tankRig?.tank_capacity_gal || 0);
+  const fullGallons = fullTankGallons(rig);
   const backpack4Gal = sized(BACKPACK_GAL, backpack);
   return {
     ...base,
@@ -126,8 +138,8 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     bigTank,
     fixedCarrierGalPer1000: lineCarrier,
     fixedCarrierSource: lineSource,
-    per100Gal: bigTank ? sized(BIG_TANK_GAL, tankRig) : null,
-    fullTank: bigTank && fullGallons > 0 && fullGallons !== BIG_TANK_GAL ? sized(fullGallons, tankRig) : null,
+    per100Gal: tankFills ? sized(BIG_TANK_GAL, tankRig) : null,
+    fullTank: bigTank && fullGallons > 0 ? sized(fullGallons, tankRig) : null,
     backpack4Gal,
     // The FlowZone has no sprayer test on file, so its amount cannot be sized (a rate exists, the line fixes no volume).
     backpackMissing: !backpack4Gal && rate.ratePer1000 > 0 && !(lineCarrier || percent || rigCarrier(backpack) > 0),

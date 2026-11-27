@@ -15,6 +15,14 @@ const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDi
 const fillText = (fill) => `${num(fill.amount)} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
 const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
 const isSpreader = (item) => item.tankAmounts?.application === "spreader";
+// How a product goes on: a spreader, an addition to another product's mix (the program names it: the surfactant in the Celsius
+// weed mix), or its own single-product tank.
+const OWN_TANK = "Separate single-product tank";
+function applicationMethod(item) {
+  if (isSpreader(item)) return "Spreader";
+  const mixWith = item.tankAmounts?.mixWith;
+  return mixWith ? `Add to the ${mixWith} mix` : OWN_TANK;
+}
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",
@@ -58,7 +66,7 @@ function productCautions(item, exclusions) {
 export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
   const products = (plan.items || []).filter((item) => item.product);
-  const sprayed = products.some((item) => !isSpreader(item));
+  const ownTank = products.some((item) => applicationMethod(item) === OWN_TANK);
   const sheet = (
     <>
       <FieldMasthead variant="staff" />
@@ -74,7 +82,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             Reference sheet, not a pesticide container label or approval to combine every product.
             Follow each product label for mixing, PPE, application restrictions and re-entry.
           </p>
-          {sprayed && <p className="mt-2">Each sprayed product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>}
+          {ownTank && <p className="mt-2">Each product marked &ldquo;{OWN_TANK}&rdquo; needs its own tank. Do not combine those products in one tank.</p>}
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
         {equipment?.carrierGalPer1000 > 0 && (
@@ -114,7 +122,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
               <h3>{product.name}</h3>
               <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            <p className="mt-2 font-medium">{isSpreader(item) ? "Spreader" : "Separate single-product tank"}</p>
+            <p className="mt-2 font-medium">{applicationMethod(item)}</p>
             <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}

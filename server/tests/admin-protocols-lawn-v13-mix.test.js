@@ -692,7 +692,7 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
     });
     expect(itemFor(body, 'LESCO 90/10 Nonionic Surfactant').tankAmounts).toMatchObject({
-      concentrationPercent: 0.25, backpack4Gal: { amount: 1.28, amountUnit: 'fl oz', carrierSource: 'concentration' },
+      concentrationPercent: 0.25, mixWith: 'Celsius WG', backpack4Gal: { amount: 1.28, amountUnit: 'fl oz', carrierSource: 'concentration' },
     });
     expect(body.warnings).toContainEqual(expect.objectContaining({
       code: 'backpack_calibration_overdue_or_estimated',

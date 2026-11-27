@@ -70,6 +70,23 @@ describe('the carrier the job calculation already uses', () => {
     const labelRate = tankReference({ product: talak, item, v13Line: { row: { applicationMode: 'spot', ratePer1000: null, rateUnit: 'label_rate', carrierGalPer1000: 4 }, state: 'spot' }, rig: TANK, backpack: BACKPACK });
     expect(labelRate).toMatchObject({ fixedCarrierSource: null, backpack4Gal: { amount: 1.504, carrierGalPer1000: 1.33, carrierSource: 'calibration' } });
   });
+
+  test('a limit or a hold on that spot row changes only the plan state, never its carrier or dose', () => {
+    const talak = { name: 'Talak', default_rate_per_1000: 0.5, rate_unit: 'fl oz', mixing_order_category: 'liquid_flowable_sc' };
+    const row = { applicationMode: 'spot', ratePer1000: 1, rateUnit: 'fl oz', carrierGalPer1000: 4 };
+    const fills = ['spot', 'capped', 'held'].map((state) => tankReference({ product: talak, item: conditional('Talak — chinch'), v13Line: { row, state }, rig: TANK, backpack: BACKPACK }));
+    for (const ref of fills) expect(ref).toMatchObject({ fixedCarrierSource: 'row', backpack4Gal: { amount: 1, carrierGalPer1000: 4 } });
+    expect(fills.map((ref) => ref.planState)).toEqual(['spot', 'capped', 'held']);
+  });
+
+  test('a backpack picked as the rig gives no 100 gal fill even when the line fixes the volume or is a percent of the spray', () => {
+    const product = { name: 'Jug fungicide', container_size: '2.5 gal', default_rate_per_1000: 3, rate_unit: 'fl oz', mixing_order_category: 'liquid_flowable_sc' };
+    const fixed = tankReference({ product, item: conditional('Jug fungicide — 3 fl oz per 1,000 sq ft in 5 gal of water'), rig: BACKPACK, backpack: BACKPACK });
+    expect(fixed).toMatchObject({ bigTank: true, per100Gal: null, fullTank: null, backpack4Gal: { amount: 2.4, carrierSource: 'line' } });
+    const nis = { name: 'Surfactant', default_rate_per_1000: 0.25, rate_unit: 'fl oz', mixing_order_category: 'adjuvant_last', container_size: '2.5 gal' };
+    const percent = tankReference({ product: nis, item: conditional('Surfactant — 0.25% of the spray volume'), rig: BACKPACK, backpack: BACKPACK });
+    expect(percent).toMatchObject({ per100Gal: null, fullTank: null, backpack4Gal: { amount: 1.28, carrierSource: 'concentration' } });
+  });
 });
 
 describe('the sprayer test warning', () => {

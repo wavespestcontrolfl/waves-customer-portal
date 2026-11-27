@@ -238,6 +238,20 @@ describe('lawn-mix response for optional products', () => {
     expect(body.warnings).toContainEqual(expect.objectContaining({ code: 'backpack_calibration_overdue_or_estimated', message: expect.stringContaining('FlowZone Typhoon Backpack #2') }));
   });
 
+  test('a FlowZone picked as the rig sizes its own 4 gal fill, not the FlowZone ranked first', async () => {
+    const flowZone = (id, carrier, status) => ({
+      id, equipment_system_id: `${id}-system`, system_name: `FlowZone Typhoon Backpack ${id}`, system_type: 'backpack', tank_capacity_gal: 4,
+      carrier_gal_per_1000: carrier, calibration_status: status, calibrated_at: '2030-07-01T12:00:00Z', expires_at: '2030-08-01T00:00:00Z',
+    });
+    calibration = flowZone('picked', 1.1, 'estimated');
+    backpackCalibration = [flowZone('ranked-first', 1.6, 'field_verified')];
+    const body = await lawnMix({ equipmentSystemId: 'picked-system' });
+    const kflow = body.items.find((item) => item.product?.id === 'kflow').tankAmounts;
+    expect(kflow).toMatchObject({ per100Gal: null, fullTank: null, backpack4Gal: { carrierGalPer1000: 1.1 } });
+    // One warning for the one sprayer in use, naming it.
+    expect(body.warnings.filter((w) => /Sprayer/.test(w.message))).toEqual([expect.objectContaining({ message: expect.stringContaining('FlowZone Typhoon Backpack picked') })]);
+  });
+
   test('a sprayer with no test status on file warns that its field test is not on file, and keeps its amounts', async () => {
     calibration.calibration_status = null;
     const body = await lawnMix();

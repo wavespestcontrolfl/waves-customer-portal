@@ -749,11 +749,12 @@ async function getActiveCalibration(equipmentSystemId) {
 
 // The 4 gal FlowZone backpack's active calibration, for the tank sheet's "FlowZone 4 gal" amounts (lawn-tank-reference.js): the
 // sprayer is found by what it is (an active backpack system, 4 gal, named FlowZone), never by name order. With more than one, a field
-// verified test first, then the newest test. null when none is on file.
+// verified test first, then the newest test. A FlowZone picked as the rig (`selected`) sizes its own fill. null when none is on file.
 const isFlowZone4Gal = (row) => row.system_type === 'backpack' && Number(row.tank_capacity_gal) === 4 && /flow\s*zone/i.test(row.system_name || '');
 const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - (a.calibration_status === 'field_verified')
   || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
-async function getBackpackCalibration() {
+async function getBackpackCalibration(selected) {
+  if (selected && isFlowZone4Gal(selected)) return selected;
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
@@ -1130,7 +1131,7 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
-    const backpack = await getBackpackCalibration();
+    const backpack = await getBackpackCalibration(calibration);
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
