@@ -325,7 +325,7 @@ function toolsFor(actor) {
           result = await ActionRegistry.execute(name, args, {
             role: 'admin',
             context: 'platform',
-            actionContext: { isAdmin: true, technicianId: actor.id, actorId: actor.id, readCustomerIds: [], fullAccess: false },
+            actionContext: { isAdmin: true, technicianId: actor.id, actorId: actor.id, readCustomerIds: [], fullAccess: false, ownerAccess: true },
           });
         } catch (err) {
           recordToolEvent({ source: 'mcp-admin', context: 'mcp', toolName: name, success: false, durationMs: Date.now() - startedAt });

@@ -3519,7 +3519,7 @@ function executeToolByName(toolName, input, techContext, actionContext = {}) {
     return executeJobHealthTool(toolName, input);
   }
   if (NEEDS_ME_TOOL_NAMES.has(toolName)) {
-    return executeNeedsMeTool(toolName, input);
+    return executeNeedsMeTool(toolName, input, actionContext);
   }
   if (toolName === OFFER_CHOICES_TOOL_NAME) {
     return executeChoiceTool(toolName, input);
@@ -3702,6 +3702,10 @@ RULES:
 function isValidConversationHistory(history) {
   return Array.isArray(history)
     && history.every(turn => turn && ['user', 'assistant'].includes(turn.role) && typeof turn.content === 'string');
+}
+
+function canReadOwnerAlerts(req, context) {
+  return req.techRole === 'admin' && context !== 'agent_estimate' && context !== 'tech' && ibFullAccess(req);
 }
 
 async function runQuery(req, res, next) {
@@ -4292,7 +4296,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // its loopback GET and it is persisted nowhere. Only the platform
               // contexts carry full access, so the tech and agent_estimate rails
               // refuse these reads even for a forced call.
-              fullAccess: platformEnabled && ibFullAccess(req), staffAuthorization: req.headers.authorization,
+              fullAccess: platformEnabled && ibFullAccess(req), ownerAccess: canReadOwnerAlerts(req, context), staffAuthorization: req.headers.authorization,
             });
             // Breaker: faults only. A coded refusal is a decision, not an outage;
             // `failed` below is unchanged (activity line, ledger, model view).

@@ -45,6 +45,25 @@ describe('markReadAdmin', () => {
   });
 });
 
+describe('markAllReadAdmin', () => {
+  beforeEach(() => {
+    db.mockClear();
+    db.__q.where.mockClear();
+    db.__q.whereNull.mockClear();
+    db.__q.whereRaw.mockClear();
+    db.__q.update.mockClear();
+    db.__q.update.mockResolvedValue(1);
+  });
+
+  test('marks only open (done_at IS NULL) and unread (read_at IS NULL) admin rows read', async () => {
+    await NotificationService.markAllReadAdmin({ role: 'admin', fullAccess: true });
+    expect(db.__q.where).toHaveBeenCalledWith({ recipient_type: 'admin' });
+    expect(db.__q.whereNull).toHaveBeenCalledWith('done_at');
+    expect(db.__q.whereNull).toHaveBeenCalledWith('read_at');
+    expect(db.__q.update).toHaveBeenCalledWith(expect.objectContaining({ read_at: expect.any(Date) }));
+  });
+});
+
 describe('markAdminDone', () => {
   beforeEach(() => {
     db.__q.update.mockClear();

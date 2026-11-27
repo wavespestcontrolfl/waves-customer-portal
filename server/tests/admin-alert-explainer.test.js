@@ -118,6 +118,15 @@ describe('explainAdminAlert', () => {
     expect(dispatchWithFallback).not.toHaveBeenCalled();
   });
 
+  test('an ownerOnly row answers 404 without calling a model unless fullAccess is true', async () => {
+    NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row({ metadata: { ownerOnly: true } }));
+    expect(await explainer.explainAdminAlert(ID, { role: 'admin', fullAccess: false })).toEqual({ status: 404, body: { error: 'not_found' } });
+    expect(dispatchWithFallback).not.toHaveBeenCalled();
+    const ok = await explainer.explainAdminAlert(ID, { role: 'admin', fullAccess: true });
+    expect(ok.status).toBe(200);
+    expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
+  });
+
   test('a summary saved for this text is served again without a model call', async () => {
     NotificationService.getAdminNotificationForExplainer.mockResolvedValue(row({ explainer: { v: 1, version: VERSION, ...answer } }));
     expect(await explainer.explainAdminAlert(ID, { role: 'admin', technicianId: 'admin-1' })).toEqual({

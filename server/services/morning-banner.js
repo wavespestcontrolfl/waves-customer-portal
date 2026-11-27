@@ -28,11 +28,40 @@
 // Sends nothing to a customer and calls no paid API.
 
 const logger = require('./logger');
-const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
+const db = require('../models/db');
+const { takeSendClaim, releaseSendClaim, claimScopedDay } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { AREAS } = require('./admin-alert-compose');
+const { isFullAccessEmail } = require('./intelligence-bar/ib-access');
 
 const CLAIM_PREFIX = 'morning_banner:';
+// Mirrors estimate-call-today-push.js: pre-handoff throws and unconfigured
+// push providers never reached a device, so the audience claim is released;
+// ambiguous device failures (push.failed > 0 / retryable > 0 / push_dispatch)
+// may have reached a phone, so the claim stays and the outcome is uncertain.
+const PRE_HANDOFF_FAILURES = new Set(['recipient_lookup', 'before_handoff']);
+const PROVIDER_NOT_CONFIGURED = new Set(['apns_not_configured', 'fcm_not_configured', 'push_not_configured']);
+const PRE_SEND_SKIPS = new Set(['claude_queue', 'bell_policy', 'superseded_before_push']);
+
+function providerNotConfigured(push) {
+  return Array.isArray(push?.results) && push.results.some((r) => r?.skipped && PROVIDER_NOT_CONFIGURED.has(r.reason));
+}
+
+function isRecognizedNoDelivery(push) {
+  if (push === null) return true;
+  if (!push || typeof push !== 'object' || push.sent !== 0) return false;
+  if (Number(push.retryable) > 0 || (push.failed !== undefined && push.failed !== 0)) return false;
+  if (typeof push.skipped === 'string') return PRE_SEND_SKIPS.has(push.skipped);
+  return push.failed === 0;
+}
+
+function isOwnerOnlyRow(row) {
+  let meta = row?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return false; }
+  }
+  return Boolean(meta && typeof meta === 'object' && (meta.ownerOnly === true || meta.ownerOnly === 'true'));
+}
 
 // Open alert rows that wait for a person, as the bell's list judges them.
 function waitsForPerson(item) {
@@ -60,48 +89,172 @@ function summarize(items) {
 
 async function countWaiting() {
   const { openAlertRows, mapAlertRow } = require('./needs-me');
-  const rows = await openAlertRows('admin');
-  return summarize(rows.map(mapAlertRow));
+  const rows = await openAlertRows('admin', null, true);
+  const owner = summarize(rows.map(mapAlertRow));
+  const sharedRows = rows.filter((r) => !isOwnerOnlyRow(r));
+  const shared = sharedRows.length === rows.length ? owner : summarize(sharedRows.map(mapAlertRow));
+  return { ...owner, shared };
 }
 
-async function claimDay(day) {
-  return takeSendClaim(`${CLAIM_PREFIX}${day}`);
+async function claimKey(key) {
+  return takeSendClaim(key);
 }
 
-async function releaseDay(day) {
+async function releaseKey(key) {
   try {
-    await releaseSendClaim(`${CLAIM_PREFIX}${day}`);
+    await releaseSendClaim(key);
+    return true;
   } catch (err) {
-    logger.error(`[morning-banner] claim release failed for ${day}: ${err?.code || err?.message || 'error'}`);
+    logger.error(`[morning-banner] claim release failed for ${key}: ${err?.code || err?.message || 'error'}`);
+    return false;
   }
 }
 
-// The send for a day that has something waiting: claim the day, then the pushOnly banner. Never throws.
-async function claimAndSend(day, { count, total, areas }) {
+async function splitAdminIdsByOwnerAccess() {
+  const admins = await db('technicians')
+    .where({ active: true, role: 'admin' })
+    .select('id', 'email');
+  const ownerIds = [];
+  const otherAdminIds = [];
+  for (const admin of admins || []) {
+    if (isFullAccessEmail(admin.email)) ownerIds.push(admin.id);
+    else otherAdminIds.push(admin.id);
+  }
+  return { ownerIds, otherAdminIds };
+}
+
+function classifyDelivery(result) {
+  if (!result || typeof result !== 'object') {
+    return { status: 'uncertain', release: false, reason: 'no dispatch result' };
+  }
+  if (PRE_HANDOFF_FAILURES.has(result.pushFailed)) {
+    return { status: 'dispatch_failed', release: true, reason: result.pushFailed };
+  }
+  if (result.pushFailed) {
+    return { status: 'uncertain', release: false, reason: String(result.pushFailed) };
+  }
+  if (result.error || result.prefsUnavailable) {
+    return { status: 'dispatch_failed', release: true, reason: result.error ? 'dispatch error' : 'preferences unavailable' };
+  }
+  if (Number(result.push?.sent) > 0) {
+    return { status: 'sent', release: false, reason: null };
+  }
+  if (isRecognizedNoDelivery(result.push)) {
+    if (providerNotConfigured(result.push)) {
+      return { status: 'dispatch_failed', release: true, reason: 'push_not_configured' };
+    }
+    return { status: 'skipped', release: true, reason: 'no_push_delivered' };
+  }
+  return { status: 'uncertain', release: false, reason: 'delivery_uncertain' };
+}
+
+async function sendClaimedAudience({ key, payload, triggerOptions }) {
   let claimed;
   try {
-    claimed = await claimDay(day);
+    claimed = await claimKey(key);
   } catch (err) {
-    logger.error(`[morning-banner] claim failed for ${day}: ${err?.code || err?.message || 'error'}`);
-    return { count, sent: false, error: 'claim_failed' };
+    logger.error(`[morning-banner] claim failed for ${key}: ${err?.code || err?.message || 'error'}`);
+    return { status: 'claim_failed' };
   }
-  if (!claimed) {
-    logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
-    return { count, sent: false, skipped: 'already_claimed' };
-  }
+  if (!claimed) return { status: 'already_claimed' };
   try {
     const { triggerNotification } = require('./notification-triggers');
-    const result = await triggerNotification('waiting_summary', { count, total, areas, day }, { pushOnly: true });
-    if (!result || result.error || result.prefsUnavailable) {
-      await releaseDay(day);
-      logger.error(`[morning-banner] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})`);
-      return { count, sent: false, error: 'dispatch_failed' };
+    const result = await triggerNotification('waiting_summary', payload, triggerOptions);
+    const outcome = classifyDelivery(result);
+    const released = outcome.release ? await releaseKey(key) : true;
+    if (outcome.release && !released) {
+      logger.error(`[morning-banner] ${key}: banner ${outcome.status} (${outcome.reason}) and claim release failed; claim kept`);
+      return { status: 'dispatch_failed', errorCode: 'claim_release_failed' };
     }
-    logger.info(`[morning-banner] ${day}: ${count} unread of ${total} waiting, banner sent`);
-    return { count, sent: true, result };
+    if (outcome.status === 'dispatch_failed') {
+      logger.error(`[morning-banner] ${key}: banner not sent (${outcome.reason})`);
+      return { status: 'dispatch_failed', errorCode: outcome.reason === 'push_not_configured' ? 'push_not_configured' : 'dispatch_failed' };
+    }
+    if (outcome.status === 'uncertain') {
+      logger.warn(`[morning-banner] ${key}: banner delivery uncertain (${outcome.reason}); keeping claim to avoid duplicates`);
+    } else if (outcome.status === 'skipped') {
+      logger.info(`[morning-banner] ${key}: no device accepted banner (opted out or no active subscription); claim released`);
+    }
+    return { status: outcome.status, result };
   } catch (err) {
-    await releaseDay(day);
-    logger.error(`[morning-banner] ${day}: banner failed: ${err?.message || 'error'}`);
+    const released = await releaseKey(key);
+    logger.error(`[morning-banner] ${key}: banner failed: ${err?.message || 'error'}${released ? '' : '; claim release failed'}`);
+    return { status: 'dispatch_failed', errorCode: released ? 'dispatch_failed' : 'claim_release_failed' };
+  }
+}
+
+function buildAudiences(day, ownerSummary, sharedSummary, { ownerIds, otherAdminIds }) {
+  const audiences = [];
+  if (ownerSummary.count > 0 && ownerIds.length > 0) {
+    audiences.push({
+      key: `${CLAIM_PREFIX}${day}:owner`,
+      payload: { count: ownerSummary.count, total: ownerSummary.total, areas: ownerSummary.areas, day },
+      triggerOptions: { pushOnly: true, onlyUserIds: ownerIds },
+    });
+  }
+  if (sharedSummary.count > 0 && otherAdminIds.length > 0) {
+    audiences.push({
+      key: `${CLAIM_PREFIX}${day}:shared`,
+      payload: { count: sharedSummary.count, total: sharedSummary.total, areas: sharedSummary.areas, day },
+      triggerOptions: { pushOnly: true, onlyUserIds: otherAdminIds },
+    });
+  }
+  return audiences;
+}
+
+function summarizeOutcomes(day, ownerSummary, outcomes) {
+  const byStatus = (s) => outcomes.find((o) => o.status === s);
+  if (byStatus('claim_failed')) return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
+  const failed = byStatus('dispatch_failed');
+  if (failed) return { count: ownerSummary.count, sent: false, error: failed.errorCode || 'dispatch_failed' };
+  const uncertain = byStatus('uncertain');
+  if (uncertain) return { count: ownerSummary.count, sent: false, uncertain: true, result: uncertain.result };
+  const sent = byStatus('sent');
+  if (sent) {
+    logger.info(`[morning-banner] ${day}: ${ownerSummary.count} unread of ${ownerSummary.total} waiting, banner sent`);
+    return { count: ownerSummary.count, sent: true, result: sent.result };
+  }
+  const skipped = byStatus('skipped');
+  if (skipped) return { count: ownerSummary.count, sent: false, skipped: 'no_delivery', result: skipped.result };
+  logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
+  return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
+}
+
+// Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
+// alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
+// re-notify an audience that already received today's banner. Reserve AND
+// retain the legacy bare-date key alongside `:scoped` in one transaction BEFORE
+// recipient lookup so an older instance during rollout can never grab the
+// legacy key and broadcast ownerOnly alert counts to office admins even if
+// recipient lookup fails, while new-release retries always resume via `:scoped`.
+async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
+  const legacyKey = `${CLAIM_PREFIX}${day}`;
+  const markerKey = `${CLAIM_PREFIX}${day}:scoped`;
+  let gate;
+  try {
+    gate = await claimScopedDay(legacyKey, markerKey);
+  } catch (err) {
+    logger.error(`[morning-banner] legacy claim gate failed for ${day}: ${err?.code || err?.message || 'error'}`);
+    return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
+  }
+  if (!gate.allowed) {
+    logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
+    return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
+  }
+  const audiences = buildAudiences(day, ownerSummary, sharedSummary, await splitAdminIdsByOwnerAccess());
+  if (audiences.length === 0) return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
+
+  const outcomes = await Promise.all(audiences.map(sendClaimedAudience));
+  return summarizeOutcomes(day, ownerSummary, outcomes);
+}
+
+// The send for a day that has something waiting: claim per audience, then send pushOnly banners. Never throws.
+async function claimAndSend(day, { count, total, areas, shared }) {
+  const sharedSummary = shared || { count, total, areas };
+  try {
+    return await dispatchScopedBanners(day, { count, total, areas }, sharedSummary);
+  } catch (err) {
+    logger.error(`[morning-banner] ${day}: scoped banner failed: ${err?.message || 'error'}`);
     return { count, sent: false, error: 'dispatch_failed' };
   }
 }
