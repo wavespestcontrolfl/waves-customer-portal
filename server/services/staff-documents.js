@@ -71,13 +71,38 @@ async function issueVersion(trx, document, version, policy, at, actor) {
     published_at: trx.fn.now(), approved_by: actor.id, policy_values_id: rendered.used_variables.length ? policy.id : null,
   }).returning('*');
   if (!issued) reject('This version has already been issued.', 409);
-  await trx('document_templates').where({ id: document.id }).update({ status: 'active', updated_at: trx.fn.now(), updated_by: actor.id });
+  await trx('document_templates').where({ id: document.id }).update({
+    name: rendered.title, status: 'active', updated_at: trx.fn.now(), updated_by: actor.id,
+  });
   await audit(trx, actor, 'issued', document.id, { version_id: issued.id, hash: issued.content_hash, policy_values_id: issued.policy_values_id });
   return issued;
 }
 
+function normalizeSourceInput(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const trimStr = v => (typeof v === 'string' ? v.trim() : v);
+  const meta = raw.metadata && typeof raw.metadata === 'object' ? {
+    ...raw.metadata,
+    owner_role: trimStr(raw.metadata.owner_role),
+  } : raw.metadata;
+  return { ...raw, title: trimStr(raw.title), metadata: meta };
+}
+
+function normalizePolicyInput(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const trimStr = v => (typeof v === 'string' ? v.trim() : v);
+  const trimList = list => (Array.isArray(list) ? list.map(trimStr) : list);
+  return {
+    ...raw,
+    pay_schedule: trimStr(raw.pay_schedule),
+    paid_holidays: trimList(raw.paid_holidays),
+    unpaid_holidays: trimList(raw.unpaid_holidays),
+    equipment_deduction_terms: trimStr(raw.equipment_deduction_terms),
+  };
+}
+
 async function saveDraft(input, actor) {
-  const source = validate(sourceSchema, input.source);
+  const source = validate(sourceSchema, normalizeSourceInput(input.source));
   renderSource(source, null);
   return db.transaction(async trx => {
     await lockLibrary(trx);
@@ -86,6 +111,7 @@ async function saveDraft(input, actor) {
       document = await loadDocument(trx, input.id, actor);
       const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('id');
       if (latest.id !== input.base_version_id) reject('The document changed. Reload before saving.', 409);
+      await trx('document_templates').where({ id: document.id }).update({ updated_at: trx.fn.now(), updated_by: actor.id });
     } else {
       if (!['policy', 'procedure', 'form'].includes(input.kind) || !['staff', 'admin'].includes(input.access)) reject('Choose a document type and access scope.');
       if (!/^[a-z][a-z0-9-]{2,79}$/.test(input.key || '')) reject('Use a stable lowercase document key.');
@@ -137,7 +163,7 @@ async function setOnboardingRequired(id, required, actor) {
 }
 
 async function updatePolicy(input, at, actor) {
-  const values = validate(policySchema, input.values);
+  const values = validate(policySchema, normalizePolicyInput(input.values));
   if (values.paid_holidays.some(name => values.unpaid_holidays.includes(name))) reject('A holiday cannot be both paid and unpaid.');
   return db.transaction(async trx => {
     await lockLibrary(trx);
@@ -159,7 +185,12 @@ async function updatePolicy(input, at, actor) {
       const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('published_at');
       if (!latest.published_at) reject(`Issue the pending draft of ${document.name} before changing shared policy values.`, 409);
       const draft = await insertVersion(trx, document, sourceOf(version), actor);
-      revised.push(await issueVersion(trx, document, draft, policy, at, actor));
+      try {
+        revised.push(await issueVersion(trx, document, draft, policy, at, actor));
+      } catch (err) {
+        if (err.status) reject(`${document.name}: ${err.message}`, err.status);
+        throw err;
+      }
     }
     await audit(trx, actor, 'policy_values_issued', policy.id, { previous_id: previous?.id || null, hash: policy.content_hash, versions: revised.map(v => v.id) });
     return { policy, revised_version_ids: revised.map(v => v.id) };
@@ -200,8 +231,13 @@ async function detail(id, actor, versionId = null, at = null) {
   if (!version) reject('Version not found', 404);
   const policy = await policyAt(db, version.effective_at || new Date());
   const rendered = version.content_snapshot || renderSource(sourceOf(version), policy?.values);
-  const acknowledgments = await db('staff_document_acknowledgments').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('technician_id', actor.id); });
-  const records = await db('staff_document_records').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('owner_id', actor.id); }).orderBy('created_at', 'desc');
+  const rawAcks = await db('staff_document_acknowledgments').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('technician_id', actor.id); });
+  const rawRecords = await db('staff_document_records').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('owner_id', actor.id); }).orderBy('created_at', 'desc');
+  const staffIds = [...new Set([...rawAcks.map(a => a.technician_id), ...rawRecords.map(r => r.owner_id)].filter(Boolean))];
+  const staffRows = staffIds.length ? await db('technicians').whereIn('id', staffIds).select('id', 'name') : [];
+  const staffNames = new Map(staffRows.map(row => [row.id, row.name]));
+  const acknowledgments = rawAcks.map(a => ({ ...a, staff_name: staffNames.get(a.technician_id) || null }));
+  const records = rawRecords.map(r => ({ ...r, owner_name: staffNames.get(r.owner_id) || null }));
   const currentVersion = versions.find(v => v.published_at && new Date(v.effective_at) <= new Date());
   return { document, version, rendered, current_version_id: currentVersion?.id || null,
     versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })), acknowledgments, records };
@@ -239,12 +275,21 @@ function recordAnswers(version, input) {
   const types = { text: Joi.string().max(8000).allow(''), textarea: Joi.string().max(8000).allow(''),
     date: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(''), checkbox: Joi.boolean() };
   const shape = {};
+  const fieldById = new Map();
   for (const field of fields) {
+    fieldById.set(field.id, field);
     let rule = types[field.type].label(field.label);
-    if (input.complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').trim().required();
+    if (input.complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').required();
     shape[field.id] = rule;
   }
-  const answers = validate(Joi.object(shape).required(), input.answers);
+  const normalizedAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers)
+    ? Object.fromEntries(Object.entries(input.answers).map(([key, val]) => {
+      const f = fieldById.get(key);
+      if (typeof val === 'string' && f && (f.type === 'text' || f.type === 'textarea' || f.type === 'date')) return [key, val.trim()];
+      return [key, val];
+    }))
+    : input.answers;
+  const answers = validate(Joi.object(shape).required(), normalizedAnswers);
   const ids = version.content_snapshot.sections.map(section => section.id);
   const steps = validate(Joi.array().items(Joi.string().valid(...ids)).unique().required(), input.completed_steps);
   if (input.complete && version.content_snapshot.kind === 'procedure' && steps.length !== ids.length) reject('Complete every procedure step.');

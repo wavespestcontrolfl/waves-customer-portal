@@ -6,7 +6,7 @@ import { box, row, inputStyle, primaryStyle, buttonStyle, Field, request, dateLa
 // fields that are still empty, or that still hold the value the last prefill put there (owner change).
 // A typed value always wins. A failed prefill is silent: the form just stays empty.
 function usePrefill({ detail, canWrite, record, owner, setAnswers }) {
-  const enabled = Boolean(detail.prefill && canWrite && !record); const versionId = detail.version.id;
+  const enabled = Boolean(detail.prefill && detail.rendered?.kind === 'form' && canWrite && !record); const versionId = detail.version.id;
   const [prefilled, setPrefilled] = useState({});
   const applied = useRef({});
   useEffect(() => {
@@ -81,6 +81,8 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
   const prefilled = usePrefill({ detail, canWrite, record, owner, setAnswers });
   const locked = !canWrite || !!record?.completed_at;
   const selectableRecords = [...new Map([...records, ...(record ? [record] : [])].map(item => [item.id, item])).values()];
+  const selectablePeople = people.filter(person => (manage || person.id === selfId) && (detail.document.staff_access !== 'admin' || person.role === 'admin'));
+  const missingRecordOwner = record?.owner_id && !selectablePeople.some(person => person.id === record.owner_id);
   return <section style={{ ...box, marginTop: 24 }}>
     <h2 style={{ marginTop: 0, fontSize: 20 }}>{!canWrite ? 'Historical records' : rendered.kind === 'procedure' ? 'Checklist mode' : 'Create a record'}</h2>
     {!canWrite && <p>This version is historical. Open the current version to record new work.</p>}
@@ -89,7 +91,10 @@ export default function DocumentRecord({ detail, people, selfId, manage, canWrit
     {error && <p role="alert">{error}</p>}
     <fieldset disabled={busy || locked} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <div style={row}>
-        <Field label="Record owner"><select required style={inputStyle} value={owner} onChange={e => setOwner(e.target.value)}>{people.filter(person => (manage || person.id === selfId) && (detail.document.staff_access !== 'admin' || person.role === 'admin')).map(person => <option key={person.id} value={person.id}>{person.name}</option>)}</select></Field>
+        <Field label="Record owner"><select required style={inputStyle} value={owner} onChange={e => setOwner(e.target.value)}>
+          {missingRecordOwner && <option value={record.owner_id}>{record.owner_name || `Former staff (${record.owner_id.slice(0, 8)})`}</option>}
+          {selectablePeople.map(person => <option key={person.id} value={person.id}>{person.name}</option>)}
+        </select></Field>
         <Field label="Next action due (Eastern)"><input required type="datetime-local" style={inputStyle} value={due} onChange={e => setDue(e.target.value)} /></Field>
       </div>
       {rendered.kind === 'procedure' && rendered.sections.map(section => <label key={section.id} style={{ display: 'flex', gap: 12, padding: '14px 0', alignItems: 'start' }}><input type="checkbox" checked={steps.includes(section.id)} onChange={e => setSteps(e.target.checked ? [...steps, section.id] : steps.filter(id => id !== section.id))} style={{ marginTop: 4, width: 20, height: 20, flexShrink: 0 }} /><span>{section.number}. {section.title}</span></label>)}

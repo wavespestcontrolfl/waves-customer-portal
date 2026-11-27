@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from '../FieldDocument';
 import { etDatetimeLocalValue } from '../../lib/timezone';
 import DocumentRecord from './DocumentRecord';
@@ -12,6 +12,7 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
   const [name, setName] = useState('');
   const [accepted, setAccepted] = useState(false);
   const [effective, setEffective] = useState(etDatetimeLocalValue(new Date(Date.now() + 5 * 60000)));
+  const effectiveTouched = useRef(false);
   const [issueAccepted, setIssueAccepted] = useState(false);
   const [preview, setPreview] = useState(null);
   const [previewError, setPreviewError] = useState('');
@@ -36,7 +37,11 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
   }, [document.id, version.id, needsPreview, effective, refreshPreview]);
   useEffect(() => {
     const reveal = () => {
-      const element = globalThis.document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+      const rawHash = window.location.hash.slice(1);
+      if (!rawHash) return;
+      let targetId = rawHash;
+      try { targetId = decodeURIComponent(rawHash); } catch { /* malformed URI hash */ }
+      const element = globalThis.document.getElementById(targetId);
       if (element?.tagName === 'DETAILS') element.open = true;
       element?.scrollIntoView({ block: 'start' });
     };
@@ -94,8 +99,12 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
     <div className="staff-document-reader-actions waves-field-no-print">
       {needsPreview && <form onSubmit={event => { event.preventDefault(); if (!previewReady) return; act(async () => { await request(`/${document.id}/issue`, { version_id: version.id, effective_at: effective, preview_hash: preview.preview_hash }); onSaved('Document issued.'); }); }} style={{ ...box, background: D.bg }}>
         <h2 style={{ fontSize: 20 }}>Issue this version</h2>
-        <Field label="Effective date and time (Eastern)"><input type="datetime-local" required disabled={busy} style={inputStyle} value={effective} onChange={e => { setIssueAccepted(false); setEffective(e.target.value); }} /></Field>
-        <button type="button" style={{ ...buttonStyle, marginBottom: 16 }} disabled={busy} onClick={() => { setIssueAccepted(false); setRefreshPreview(value => value + 1); }}>Refresh wording</button>
+        <Field label="Effective date and time (Eastern)"><input type="datetime-local" required disabled={busy} style={inputStyle} value={effective} onChange={e => { effectiveTouched.current = true; setIssueAccepted(false); setEffective(e.target.value); }} /></Field>
+        <button type="button" style={{ ...buttonStyle, marginBottom: 16 }} disabled={busy} onClick={() => {
+          setIssueAccepted(false);
+          if (!effectiveTouched.current) setEffective(etDatetimeLocalValue(new Date(Date.now() + 5 * 60000)));
+          setRefreshPreview(value => value + 1);
+        }}>Refresh wording</button>
         <label style={{ ...row, marginBottom: 16 }}><input type="checkbox" required disabled={!previewReady || busy} checked={issueAccepted} onChange={e => setIssueAccepted(e.target.checked)} />I reviewed the wording, authority, owner, citations and next-review date.</label>
         <button type="submit" disabled={busy || !previewReady || !issueAccepted || rendered.unresolved.length > 0} style={primaryStyle}>Issue version {version.version_number}</button>
       </form>}

@@ -311,6 +311,7 @@ export default function TimeTrackingPage() {
     TIMETRACKING_TAB_GROUPS[0];
   useRenderedTabBeacon("/admin/timetracking", tab, [searchParams]);
   const [toast, setToast] = useState(null);
+  const [legacyDocsOpened, setLegacyDocsOpened] = useState(false);
   const toastTimerRef = useRef(null);
   const showToast = useCallback((m, opts = {}) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -373,11 +374,16 @@ export default function TimeTrackingPage() {
       )}
       {tab === "analytics" && <AnalyticsTab />}
       {tab === "team" && <TeamTab showToast={showToast} staffProfile={staffProfile} />}
-      {tab === "documents" && (controlledDocumentsAvailable ? <>
+      {tab === "documents" && (controlledDocumentsAvailable === null ? (
+        <p role="status" style={{ color: D.muted }}>Checking document library…</p>
+      ) : controlledDocumentsAvailable ? <>
         <StaffDocumentLibrary manage />
-        <details style={{ marginTop: 24 }}>
+        <details
+          style={{ marginTop: 24 }}
+          onToggle={(e) => { if (e.currentTarget.open) setLegacyDocsOpened(true); }}
+        >
           <summary style={{ fontSize: 16, fontWeight: 700, padding: "16px 0", cursor: "pointer" }}>Uploaded files and historical attachments</summary>
-          <DocumentsTab showToast={showToast} />
+          {legacyDocsOpened && <DocumentsTab showToast={showToast} />}
         </details>
       </> : <DocumentsTab showToast={showToast} />)}
       {tab === "protocol-audit" && <ProtocolAudit />}

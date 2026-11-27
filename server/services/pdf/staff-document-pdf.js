@@ -37,18 +37,46 @@ function checklistHtml(record, rendered) {
   return `<div class="checklist"><b class="label">Clause checklist</b>${rows}</div>`;
 }
 
+const PDF_RENDER_TIMEOUT_MS = 30000;
+const ISSUED_PDF_CACHE_MAX = 40;
+const SHA256_HEX_RE = /^[0-9a-f]{64}$/i;
+const issuedPdfCache = new Map();
+
+function issuedPdfCacheKey(detail, { acknowledgment, record }) {
+  if (acknowledgment || record) return null;
+  const hashVal = detail?.version?.content_hash;
+  if (typeof hashVal !== 'string' || !SHA256_HEX_RE.test(hashVal)) return null;
+  return `${detail.version.id || ''}:${hashVal}:${detail.version.effective_at || ''}`;
+}
+
+function cacheIssuedPdf(key, buffer) {
+  if (!key || !buffer) return;
+  if (issuedPdfCache.has(key)) issuedPdfCache.delete(key);
+  issuedPdfCache.set(key, buffer);
+  while (issuedPdfCache.size > ISSUED_PDF_CACHE_MAX) {
+    const oldest = issuedPdfCache.keys().next().value;
+    issuedPdfCache.delete(oldest);
+  }
+}
+
 function recordEvidenceHtml(record, rendered) {
   if (!record) return '';
   const status = record.completed_at ? 'Completed record' : 'Open record — incomplete';
   const completed = record.completed_at ? escapeHtml(evidenceTime(record.completed_at)) : 'Not completed';
   const recordHash = escapeHtml(record.content_hash || 'Not recorded');
-  return `<section class="evidence"><h2>${status}</h2><div class="grid"><div><b>Record ID</b>${escapeHtml(record.id)}</div><div><b>Owner ID</b>${escapeHtml(record.owner_id)}</div><div><b>Due</b>${escapeHtml(evidenceTime(record.due_at))}</div><div><b>Completed</b>${completed}</div><div class="wide mono"><b>Recorded content SHA-256</b>${recordHash}</div></div>${checklistHtml(record, rendered)}</section>`;
+  const ownerDisplay = record.owner_name ? `${record.owner_name} (${record.owner_id})` : record.owner_id;
+  return `<section class="evidence"><h2>${status}</h2><div class="grid"><div><b>Record ID</b>${escapeHtml(record.id)}</div><div><b>Owner</b>${escapeHtml(ownerDisplay)}</div><div><b>Due</b>${escapeHtml(evidenceTime(record.due_at))}</div><div><b>Completed</b>${completed}</div><div class="wide mono"><b>Recorded content SHA-256</b>${recordHash}</div></div>${checklistHtml(record, rendered)}</section>`;
 }
 
 function fieldsHtml(rendered, record) {
   if (!rendered.metadata.fields.length) return '';
   const fields = rendered.metadata.fields.map(field => {
     const answer = record?.answers?.[field.id];
+    if (field.type === 'checkbox') {
+      const checked = answer === true;
+      const display = record ? (checked ? 'Yes' : 'No') : '&nbsp;';
+      return `<div class="field"><b>${escapeHtml(field.label)}${field.required ? '<small>Required</small>' : ''}</b><div class="answer${record ? '' : ' blank'}">${display}</div></div>`;
+    }
     const blank = answer == null || answer === '';
     return `<div class="field"><b>${escapeHtml(field.label)}${field.required ? '<small>Required</small>' : ''}</b><div class="answer${blank ? ' blank' : ''}">${blank ? '&nbsp;' : escapeHtml(answer)}</div></div>`;
   }).join('');
@@ -58,7 +86,8 @@ function fieldsHtml(rendered, record) {
 function signatureHtml(acknowledgment) {
   if (!acknowledgment) return '';
   const acknowledgedHash = escapeHtml(acknowledgment.content_hash || 'Not recorded');
-  return `<section class="evidence signature"><h2>Signed acknowledgment</h2><p>${escapeHtml(acknowledgment.statement)}</p><div class="sign"><div><b>Signed by</b><strong>${escapeHtml(acknowledgment.signed_name)}</strong></div><div><b>Signed</b><strong>${escapeHtml(evidenceTime(acknowledgment.acknowledged_at))}</strong></div></div><div class="grid"><div><b>Staff ID</b>${escapeHtml(acknowledgment.technician_id)}</div><div><b>Acknowledgment ID</b>${escapeHtml(acknowledgment.id)}</div><div class="wide mono"><b>Acknowledged content SHA-256</b>${acknowledgedHash}</div></div></section>`;
+  const staffDisplay = acknowledgment.staff_name ? `${acknowledgment.staff_name} (${acknowledgment.technician_id})` : acknowledgment.technician_id;
+  return `<section class="evidence signature"><h2>Signed acknowledgment</h2><p>${escapeHtml(acknowledgment.statement)}</p><div class="sign"><div><b>Signed by</b><strong>${escapeHtml(acknowledgment.signed_name)}</strong></div><div><b>Signed</b><strong>${escapeHtml(evidenceTime(acknowledgment.acknowledged_at))}</strong></div></div><div class="grid"><div><b>Staff</b>${escapeHtml(staffDisplay)}</div><div><b>Acknowledgment ID</b>${escapeHtml(acknowledgment.id)}</div><div class="wide mono"><b>Acknowledged content SHA-256</b>${acknowledgedHash}</div></div></section>`;
 }
 
 function documentTiming(detail, issued) {
@@ -68,15 +97,25 @@ function documentTiming(detail, issued) {
 }
 
 async function renderStaffDocumentPdf(detail, { acknowledgment = null, record = null } = {}) {
-  return withDocumentPdfCapacity(() => renderStaffDocument(detail, { acknowledgment, record }));
+  const cacheKey = issuedPdfCacheKey(detail, { acknowledgment, record });
+  if (cacheKey && issuedPdfCache.has(cacheKey)) {
+    const cached = issuedPdfCache.get(cacheKey);
+    issuedPdfCache.delete(cacheKey);
+    issuedPdfCache.set(cacheKey, cached);
+    return cached;
+  }
+  const pdf = await withDocumentPdfCapacity(() => renderStaffDocument(detail, { acknowledgment, record }));
+  cacheIssuedPdf(cacheKey, pdf);
+  return pdf;
 }
 
 async function renderStaffDocument(detail, { acknowledgment, record }) {
   const { version, rendered } = detail;
   if (version.content_snapshot && hash(version.content_snapshot) !== version.content_hash) reject('Document integrity check failed.', 409);
   const browser = await launchBrowser();
+  let page = null;
   try {
-    const page = await browser.newPage();
+    page = await browser.newPage();
     // References are print evidence, not resources. No document content may
     // cause a request during a server-side render.
     await page.route('**/*', route => route.abort());
@@ -100,14 +139,19 @@ async function renderStaffDocument(detail, { acknowledgment, record }) {
 .evidence{margin-top:${S.xl}px;break-inside:auto}.evidence h2{border-left:3px solid ${C.gold}}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));border:1px solid ${C.rule};border-radius:3px;overflow:hidden;font-size:${T.caption}pt;break-inside:avoid-page}.grid>div{min-height:48px;padding:${S.xs}px ${S.sm}px;border-right:1px solid ${C.rule};border-bottom:1px solid ${C.rule};overflow-wrap:anywhere}.grid>div:nth-child(2n){border-right:0}.grid .wide{grid-column:1/-1;border:0}.mono{font-family:"Courier New",monospace}.mono b{font-family:Arial,sans-serif}
 .checklist{margin-top:${S.sm}px}.checklist>div{padding:6px ${S.xs}px;border-bottom:1px solid ${C.rule};font-size:${T.caption}pt;break-inside:avoid-page}.checklist code{color:${C.navy};font-weight:700}.fields{border:1px solid ${C.rule};border-radius:3px}.fields h2{margin:0}.field{padding:${S.sm}px;border-bottom:1px solid ${C.rule};break-inside:auto}.field:last-child{border:0}.field>b{display:block;color:${C.navy};font-size:${T.caption}pt;break-after:avoid-page}.field small{margin-left:5px;color:${C.muted};font-size:${T.micro}pt;font-weight:400;letter-spacing:.4px;text-transform:uppercase}.answer{min-height:24px;padding:5px 0;border-bottom:1px solid ${C.rule};font-size:${T.body}pt;line-height:1.45;overflow-wrap:anywhere;white-space:pre-wrap;orphans:3;widows:3}.answer.blank{min-height:30px}
 .signature p{margin:0 0 ${S.md}px;color:${C.navy};orphans:3;widows:3}.sign{display:grid;grid-template-columns:1fr 1fr;gap:${S.lg}px;margin-bottom:${S.sm}px;break-inside:avoid-page}.sign>div{min-height:48px;padding:${S.xs}px 0;border-bottom:1px solid ${C.navy}}.sign strong{display:block;color:${C.navy};font-size:${T.caption}pt;line-height:1.35}
-</style></head><body><div class="accent"></div><header class="mast"><div class="brand"><strong>Waves Pest Control</strong><span>Controlled staff document</span></div><div class="title"><div><div class="eyebrow">${escapeHtml(kind)}</div><h1>${escapeHtml(rendered.title)}</h1></div><div class="status"><b>Document status</b><strong>${issued ? 'Issued controlled copy' : 'Draft — not issued'}</strong></div></div>${!issued ? `<div class="preview">${escapeHtml(timing)}</div>` : ''}<div class="meta"><div><b>Version</b><strong>${escapeHtml(version.version_number)}</strong></div><div><b>${issued ? 'Effective' : 'Preview'}</b><strong>${escapeHtml(timing)}</strong></div><div><b>Next review</b><strong>${escapeHtml(rendered.metadata.review_on || 'Unscheduled')}</strong></div><div><b>Document owner</b><strong>${escapeHtml(rendered.metadata.owner_role || 'Unassigned')}</strong></div><div><b>Document type</b><strong>${escapeHtml(kind)}</strong></div>${documentKey}<div class="hash"><b>Content SHA-256</b><strong>${escapeHtml(version.content_hash || 'DRAFT — no issued hash')}</strong></div></div></header><main>${clauses}${recordEvidence}${fields}${signature}</main></body></html>`);
+</style></head><body><div class="accent"></div><header class="mast"><div class="brand"><strong>Waves Pest Control</strong><span>Controlled staff document</span></div><div class="title"><div><div class="eyebrow">${escapeHtml(kind)}</div><h1>${escapeHtml(rendered.title)}</h1></div><div class="status"><b>Document status</b><strong>${issued ? 'Issued controlled copy' : 'Draft — not issued'}</strong></div></div>${!issued ? `<div class="preview">${escapeHtml(timing)}</div>` : ''}<div class="meta"><div><b>Version</b><strong>${escapeHtml(version.version_number)}</strong></div><div><b>${issued ? 'Effective' : 'Preview'}</b><strong>${escapeHtml(timing)}</strong></div><div><b>Next review</b><strong>${escapeHtml(rendered.metadata.review_on || 'Unscheduled')}</strong></div><div><b>Document owner</b><strong>${escapeHtml(rendered.metadata.owner_role || 'Unassigned')}</strong></div><div><b>Document type</b><strong>${escapeHtml(kind)}</strong></div>${documentKey}<div class="hash"><b>Content SHA-256</b><strong>${escapeHtml(version.content_hash || 'DRAFT — no issued hash')}</strong></div></div></header><main>${clauses}${recordEvidence}${fields}${signature}</main></body></html>`, { timeout: PDF_RENDER_TIMEOUT_MS });
     return await page.pdf({
-      format: 'Letter', printBackground: true,
+      format: 'Letter', printBackground: true, timeout: PDF_RENDER_TIMEOUT_MS,
       margin: { top: '0.78in', right: '0.62in', bottom: '0.78in', left: '0.62in' }, displayHeaderFooter: true,
       headerTemplate: headerTemplate(rendered.title), footerTemplate: footerTemplate(version),
     });
   } finally {
-    await browser.close();
+    if (typeof page?.close === 'function') {
+      try { await page.close(); } catch { /* ignore close error */ }
+    }
+    if (typeof browser?.close === 'function') {
+      try { await browser.close(); } catch { /* ignore close error */ }
+    }
   }
 }
 
