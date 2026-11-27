@@ -48,6 +48,7 @@ describe('stripe-email-sync processJob', () => {
       return q;
     };
     const trx = Object.assign((t) => builder(t), { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
+    trx.transaction = async (fn) => fn(trx);
     const db = Object.assign((t) => builder(t), { transaction: async (fn) => fn(trx), fn: trx.fn, raw: trx.raw });
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -212,6 +213,20 @@ describe('stripe-email-sync processJob', () => {
     await expect(sync.processJob('job-1')).resolves.toBe('gave_up');
     expect(state.jobs[0]).toMatchObject({ status: 'failed', result: 'gave_up', attempts: 6 });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a give-up alert that cannot be written keeps the job pending; the next try retries only the alert, never Stripe', async () => {
+    let sync = load({ job: { attempts: 5 }, customers: [cust()], stripeResult: new Error('x') });
+    raiseAdminAlert.mockRejectedValueOnce(new Error('bell down'));
+    await expect(sync.processJob('job-1')).resolves.toBe('alert_retry');
+    expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 6 });
+    expect(updateEmail).toHaveBeenCalledTimes(1);
+    const after = state.jobs[0];
+    sync = load({ job: { ...after, due: true }, customers: [cust()] });
+    await expect(sync.processJob('job-1')).resolves.toBe('gave_up');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+    expect(state.jobs[0]).toMatchObject({ status: 'failed', result: 'gave_up' });
   });
 
   test('no Stripe key on this process leaves the job untouched (no attempt, same schedule), and drainDue claims nothing', async () => {

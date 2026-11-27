@@ -83,6 +83,18 @@ async function alertOffice(trx, job, customer, result) {
   });
 }
 
+async function giveUp(trx, job, customer) {
+  try {
+    await trx.transaction((sp) => alertOffice(sp, job, customer, 'gave_up'));
+  } catch (err) {
+    logger.warn(`[stripe-email-sync] give-up alert for job ${job.id} not written; retrying the alert only: ${err.code || err.name || 'error'}`);
+    await trx(TABLE).where({ id: job.id }).update({ next_attempt_at: trx.raw("now() + interval '15 minutes'"), updated_at: trx.fn.now() });
+    return 'alert_retry';
+  }
+  await finish(trx, job, 'failed', 'gave_up');
+  return 'gave_up';
+}
+
 async function processJob(jobId) {
   return db.transaction(async (trx) => {
     // Customer first, then the job (the confirm's order). A peek finds the customer; the claim re-checks everything.
@@ -107,6 +119,8 @@ async function processJob(jobId) {
       await finish(trx, job, 'done', 'superseded');
       return 'superseded';
     }
+    // A job whose Stripe tries ran out earlier but whose office alert could not be written: retry only the alert.
+    if (job.attempts >= MAX_ATTEMPTS) return giveUp(trx, job, customer);
     // The record's own saved cards must agree with its link: a card on a different Stripe profile (or cards on a
     // profile the record does not link) means ownership is unclear, and the office decides.
     const ownCardIds = [...new Set((await trx('payment_methods').where({ customer_id: customer.id })
@@ -158,9 +172,10 @@ async function processJob(jobId) {
       const attempts = job.attempts + 1;
       const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
       if (attempts >= MAX_ATTEMPTS) {
-        await trx(TABLE).where({ id: job.id }).update({ attempts, last_error: code, status: 'failed', result: 'gave_up', finished_at: trx.fn.now(), updated_at: trx.fn.now() });
-        await alertOffice(trx, job, customer, 'gave_up');
-        return 'gave_up';
+        // Out of tries: the spent budget commits on its own; the alert runs in a savepoint. When the alert cannot be
+        // written, the job stays pending with its budget spent, and the next tick retries only the alert (below).
+        await trx(TABLE).where({ id: job.id }).update({ attempts, last_error: code, updated_at: trx.fn.now() });
+        return giveUp(trx, job, customer);
       }
       await trx(TABLE).where({ id: job.id }).update({
         attempts, last_error: code, updated_at: trx.fn.now(),
