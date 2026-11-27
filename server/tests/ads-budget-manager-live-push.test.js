@@ -775,10 +775,45 @@ describe('in-lock rechecks (requireLivePush)', () => {
     mockIsConfigured.mockReturnValue(true);
 
     await expect(BudgetManager.setBudget('c-1', BudgetManager.MAX_DAILY_BUDGET + 1, 'test', { requireLivePush: true }))
-      .rejects.toThrow(/exceeds the maximum/);
+      .rejects.toMatchObject({ code: 'budget_cap_exceeded' });
 
     expect(mockUpdateBudget).not.toHaveBeenCalled();
     expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('setBudget requireDirection checks BOTH base and current under the row lock (P0-2)', async () => {
+    // base $40, live current $20: a decrease_budget to $30 is < base but > current (would increase live spend).
+    campaignFirstRow = { ...baseCampaign(), daily_budget_base: '40', daily_budget_current: '20' };
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setBudget('c-1', 30, 'test', { requireLivePush: true, requireDirection: 'decrease' }))
+      .rejects.toMatchObject({ code: 'budget_direction_invalid' });
+
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
+  test('setMode and adjustBudgets refuse pushing a stored base above MAX_DAILY_BUDGET (P0-3)', async () => {
+    const overCap = { ...baseCampaign(), budget_mode: 'stop', daily_budget_base: String(BudgetManager.MAX_DAILY_BUDGET + 500), daily_budget_current: '10' };
+    campaignFirstRow = overCap;
+    mockIsConfigured.mockReturnValue(true);
+
+    await expect(BudgetManager.setMode('c-1', 'base', 'test', { requireLivePush: true }))
+      .rejects.toMatchObject({ code: 'budget_cap_exceeded' });
+    await expect(BudgetManager.setMode('c-1', 'base', 'test'))
+      .rejects.toMatchObject({ code: 'budget_cap_exceeded' });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+
+    // adjustBudgets transition to base must also refuse over-cap base and count as failed without pushing.
+    campaignRows = [overCap];
+    mockIsEnabled.mockReturnValue(true);
+    jest.spyOn(BudgetManager, 'getCapacityForArea').mockResolvedValue({ utilizationPct: 40, booked: 3, slots: 8, techs: 1 });
+    const result = await BudgetManager.adjustBudgets();
+    expect(result).toEqual({ evaluated: 1, changed: 0, failed: 1 });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+    jest.restoreAllMocks();
   });
 
   test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {

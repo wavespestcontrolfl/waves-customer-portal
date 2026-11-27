@@ -343,4 +343,17 @@ describe('storm-watch sweep', () => {
     expect(fawnInsert.mock.calls[0][0].message).toContain('North Port');
     expect(fawnInsert.mock.calls[0][0].message).toContain('no schedule move');
   });
+
+  test('P1-8: thunder with null rainChance does not trigger a storm_watch_alert without an active severe NWS alert', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{
+      startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(),
+      rainChance: null, hasThunder: true, shortForecast: 'Thunderstorms',
+    }]);
+    getNwsActiveAlerts.mockResolvedValue([]);
+
+    const res = await StormWatch.sweep(NOON_ET);
+    expect(res).toEqual({ checked: 1, alerted: 0 });
+    expect(notifInsert).not.toHaveBeenCalled();
+  });
 });

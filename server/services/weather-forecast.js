@@ -528,7 +528,7 @@ function summarizeHazardHours(matchingHours, thunderPct) {
     peakWind = maxFinite(peakWind, h.windMph);
     peakHeatIndex = maxFinite(peakHeatIndex, heatIndexF(h.temperatureF, h.relativeHumidity));
     const isThunder = h.hasThunder === true || parseHasThunder(h.shortForecast);
-    if (isThunder && (h.rainChance == null || h.rainChance >= thunderPct)) hasThunder = true;
+    if (isThunder && Number.isFinite(h.rainChance) && h.rainChance >= thunderPct) hasThunder = true;
   }
   return { peakRain, hasThunder, peakWindGust, peakWind, peakHeatIndex };
 }

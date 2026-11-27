@@ -115,7 +115,7 @@ test('increase_budget resolves the campaign by name and applies', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireDirection: 'increase', requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
   expect(mockIncrement).toHaveBeenCalledTimes(1);
 });
 
@@ -131,7 +131,7 @@ test('campaignId is preferred over the name lookup', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith(UUID_A, 25, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireDirection: 'increase', requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('a malformed (non-UUID) campaign_id falls back to the name lookup instead of a 500', async () => {
@@ -143,7 +143,7 @@ test('a malformed (non-UUID) campaign_id falls back to the name lookup instead o
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireDirection: 'increase', requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('change_mode applies via setMode', async () => {
@@ -234,7 +234,7 @@ test('a sane budget within 3× of the base still applies', async () => {
 
   expect(res.status).toBe(200);
   expect(res.body.applied).toBe(true);
-  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
+  expect(mockSetBudget).toHaveBeenCalledWith('c-1', 30, expect.any(String), { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireDirection: 'increase', requireNoChangeSince: expect.any(Date), trigger: 'advisor' });
 });
 
 test('budget bound falls back to the current daily budget when no base exists', async () => {
@@ -592,5 +592,30 @@ describe('normalize/fallback r9 — client availability and tiny-budget bound', 
     expect(badDown.body.applied).toBe(false);
     expect(badDown.body.error).toMatch(/does not decrease/i);
     expect(mockSetBudget).not.toHaveBeenCalled();
+  });
+
+  test('P0-2: decrease_budget above live current (current < target < base) is stripped and rejected with 422', async () => {
+    const camp = {
+      id: 'c-1', campaign_name: 'Pest Bradenton', platform: 'google_ads', status: 'active',
+      budget_mode: 'base', daily_budget_base: 40, daily_budget_current: 20,
+    };
+    const stripped = advisor.normalizeRecommendations({ recommendations: [
+      { campaign: 'Pest Bradenton', apply_action: 'decrease_budget', apply_value: 30 },
+    ] }, [camp]).recommendations[0];
+    expect(stripped.apply_action).toBeUndefined();
+
+    mockNameMatches = [camp];
+    const res = await apply({ action: 'decrease_budget', campaignName: 'Pest Bradenton', value: 30 });
+    expect(res.status).toBe(422);
+    expect(res.body.applied).toBe(false);
+    expect(res.body.error).toMatch(/does not decrease/i);
+    expect(mockSetBudget).not.toHaveBeenCalled();
+
+    // Manager-thrown budget_direction_invalid and budget_cap_exceeded also map to 422.
+    mockNameMatches = [{ ...camp, daily_budget_current: 40 }];
+    mockSetBudget.mockRejectedValueOnce(Object.assign(new Error('direction mismatch'), { code: 'budget_direction_invalid' }));
+    expect((await apply({ action: 'decrease_budget', campaignName: 'Pest Bradenton', value: 25 })).status).toBe(422);
+    mockSetBudget.mockRejectedValueOnce(Object.assign(new Error('over cap'), { code: 'budget_cap_exceeded' }));
+    expect((await apply({ action: 'increase_budget', campaignName: 'Pest Bradenton', value: 50 })).status).toBe(422);
   });
 });

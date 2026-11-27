@@ -559,11 +559,12 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   // spray is in the history the cap counts. Fusilade II alone on a visit that does not carry
   // the step is bed or border work and consumes nothing.
   const stepVisit = await stepVisitOf(trx, serviceId, { strict: true });
-  // The visit carries the step as of NOW (a switch turned on after the preflight): the pair
-  // rule holds here too, on the same strict reads and transaction, before any cap.
+  // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+  // Return missing-pair, unconfigured-limits, and cap findings as non-blocking warnings inside the
+  // locked transaction rather than rolling back completion.
   const inconsistent = !!stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit));
   const pairProblem = stepVisit ? (inconsistent ? NOT_CONFIGURED_MESSAGE : pairMessage({ recognition, fusilade, unconfigured })) : null;
-  if (pairProblem) throw Object.assign(new Error(pairProblem), { code: inconsistent ? 'lawn_bermuda_limit_reached' : 'lawn_bermuda_pair_required' });
+  if (pairProblem) return pairProblem;
   const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
   if (!sprayed.length) return;
   const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
@@ -571,7 +572,6 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
   const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
-  if (message === NOT_CONFIGURED_MESSAGE) throw Object.assign(new Error(message), { code: 'lawn_bermuda_limit_reached' });
   return message || undefined;
 }
 

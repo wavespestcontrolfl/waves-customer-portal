@@ -160,6 +160,22 @@ describe('forecast read', () => {
     }]);
     expect(tropical).toEqual({ wetness: 1, complete: true });
   });
+
+  test('P1-9: active severe NWS alert still populates day wetness when hourly forecast is unavailable', async () => {
+    process.env[ENV] = 'shadow';
+    const tsAlert = {
+      event: 'Tropical Storm Warning', category: 'tropical_storm', moveTrigger: true,
+      onset: `${VISIT_DATE}T07:00:00-05:00`, expires: `${VISIT_DATE}T19:00:00-05:00`,
+    };
+    const state = await rainTerm.start(run, {
+      read: jest.fn(async () => null),
+      readBackup: jest.fn(async () => null),
+      readAlerts: jest.fn(async () => [tsAlert]),
+    });
+    expect(state.unread).toEqual([]);
+    expect(state.forecast.get('sarasota').get(VISIT_DATE)).toBe(1);
+    expect(state.forecast.get('sarasota').get('2026-11-30')).toBeNull();
+  });
 });
 
 describe('per-visit verdict', () => {

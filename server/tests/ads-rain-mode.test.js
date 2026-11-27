@@ -423,6 +423,14 @@ describe('recordRun', () => {
     });
     expect(heatOut.call).toBe('dry');
     expect(heatOut.advisories).toEqual(['Heat Advisory']);
+
+    // P1-8: thunder with null rainChance counts as missing, never as a wet hour.
+    const nullThunder = Array.from({ length: 9 }, (_, i) => ({
+      startTime: `2026-11-25T${String(8 + i).padStart(2, '0')}:00:00-05:00`,
+      rainChance: i < 4 ? null : 10,
+      hasThunder: i < 4,
+    }));
+    expect(rainMode.countWetHours(nullThunder, '2026-11-25')).toEqual({ wet: 0, missing: 4 });
   });
 });
 

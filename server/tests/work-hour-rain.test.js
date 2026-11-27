@@ -213,5 +213,13 @@ describe('ASOS wxcodes thunderstorm grading', () => {
     expect(obs._thunder.SRQ).toEqual({ 13: true, 14: true });
     expect(w.tallyHours(obs, ['SRQ'], [13, 14, 15])).toEqual({ wet_hours: 2, inches: 0, missing: 0 });
     expect(w.spanWetAt(obs, ['SRQ'], 13 * 60, 14 * 60, 1)).toMatchObject({ wet: true, missing: 0 });
+
+    // P1-10: observed thunder with missing p01i counts as wet without fabricating 0 inches.
+    const noPrecipCsv = [
+      'station,valid,p01i,wxcodes',
+      'SRQ,2026-11-25 13:53,M,TS',
+    ].join('\n');
+    const noPrecipObs = w.parseObs(noPrecipCsv, '2026-11-25');
+    expect(w.tallyHours(noPrecipObs, ['SRQ'], [13])).toEqual({ wet_hours: 1, inches: null, missing: 0 });
   });
 });

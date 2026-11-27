@@ -810,7 +810,8 @@ function reminderFreezeHours(guardMode) {
 // reminder (`anyPromise: false`) — only explicit time-window promises lock the slot.
 function freezeReadArgs(guardMode) {
   const hours = reminderFreezeHours(guardMode);
-  return [hours, { lock24h: true, toldLock: true, anyPromise: false }];
+  const { NIGHT_FREEZE_ANY_PROMISE } = require('./told-visits');
+  return [hours, { lock24h: true, toldLock: true, anyPromise: NIGHT_FREEZE_ANY_PROMISE === true }];
 }
 
 // How the skip text names the reminder that froze a visit: the 24-hour reminder, or a time the customer was told.

@@ -484,5 +484,14 @@ describe('auto-dispatch rain pass', () => {
       expect(rows.every((r) => r.wet === true && r.reason === 'storm' && r.hasThunder === true)).toBe(true);
       expect(hourlyBackup).toHaveBeenCalledTimes(3);
     });
+
+    test('P1-8: thunder with null rainChance does not satisfy the >= 50% thunder move threshold', async () => {
+      const hourly = hourlyFor([]).map((h) => (
+        h.startTime.startsWith(`${D1}T14`) ? { ...h, rainChance: null, hasThunder: true } : h
+      ));
+      const d = deps([stop()], { hourlyRain: jest.fn(async () => hourly), activeAlerts: jest.fn(async () => []) });
+      const [row] = await planRainPass({ now: NOW, db: {}, deps: d });
+      expect(row.wet).toBe(false);
+    });
   });
 });

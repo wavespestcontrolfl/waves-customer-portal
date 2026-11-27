@@ -3207,6 +3207,10 @@ function shouldAutoInvoiceCompletion({
   // the route parks a manual-billing alert instructing the office to bill
   // setup + first application together.
   unmintedSetupFeeHold = false,
+  // Chemical area add-on completed without a recorded application (non-blocking
+  // closeout warning per owner 2026-11-26): hold automatic invoicing/collection
+  // for office billing review so unverified chemical add-ons are never auto-billed.
+  unrecordedChemicalAddOnHold = false,
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
@@ -3264,6 +3268,9 @@ function shouldAutoInvoiceCompletion({
   // when the one-time setup fee would ride along un-billed; the route
   // parks the manual-billing alert instead.
   if (unmintedSetupFeeHold) return false;
+  // Unverified chemical add-on: closeout stays non-blocking, but automatic
+  // invoicing is held for office review before charging the customer.
+  if (unrecordedChemicalAddOnHold) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every
@@ -11697,6 +11704,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // invoice minted between the two reads appears only in
       // preMintedInvoice, and the hold and beside-branch must agree.
       unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !terminalCompletionInvoice && !existingCompletionInvoice && !preMintedInvoice,
+      unrecordedChemicalAddOnHold: (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))
+        .some((f) => f && f.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE),
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -11731,6 +11740,30 @@ async function completeScheduledService(completionInput, packetContext = null) {
       annualPrepayCovered,
     };
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
+    if (!packetEffects && completionInvoiceGateInput.unrecordedChemicalAddOnHold && !shouldInvoice
+      && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })) {
+      logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — invoice held for office billing review`);
+      try {
+        const { raiseAdminAlert } = require('../services/admin-alert-compose');
+        await raiseAdminAlert('billing', {
+          area: 'Billing',
+          action: 'review held invoice for unverified chemical add-on',
+          why: 'A chemical area add-on was completed without a recorded product application, so automatic invoicing was held.',
+          severity: 'needs-you',
+          who: 'person',
+          link: `/admin/customers?customerId=${svc.customer_id}`,
+          subject: { type: 'visit', id: String(svc.id) },
+          doneWhen: 'invoice_reviewed',
+        }, {
+          bell: true,
+          dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`,
+          detail: `Visit ${svc.id} (${svc.service_type || 'service'}) completed with a chemical add-on warning (no product application recorded). Confirm with the technician whether the add-on was applied before issuing or collecting the invoice.`,
+          metadata: { scheduledServiceId: svc.id, serviceRecordId: record?.id || null, customerId: svc.customer_id, reason: areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE },
+        });
+      } catch (holdAlertErr) {
+        logger.error(`[dispatch] unrecorded chemical add-on billing alert failed (non-blocking): ${holdAlertErr.message}`);
+      }
+    }
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
     // not already paid) that the gate ALSO declined to bill (an explicitly
     // priced add-on invoices normally — Codex round-11) means the term

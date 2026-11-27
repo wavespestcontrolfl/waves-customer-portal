@@ -9,7 +9,7 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
   ...jest.requireActual('../services/auto-dispatch/route-tiers'),
   loadReminderFreeze: jest.fn(),
 }));
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(), loadPromiseLevels: jest.fn() }));
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(), loadPromiseLevels: jest.fn(), NIGHT_FREEZE_ANY_PROMISE: false }));
 
 const fs = require('fs');
 const path = require('path');
@@ -35,30 +35,30 @@ describe('config', () => {
 });
 
 describe('checkTiersSiblingBounds / checkFlexSiblingBounds', () => {
-  test('tiers: the freeze read passes anyPromise with the told-lock options', async () => {
+  test('tiers: the freeze read shares W20 NIGHT_FREEZE_ANY_PROMISE (false) with the planner', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
     await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true))
       .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('already told its time') });
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: true });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: false });
   });
 
-  test('flex: 25 h band with anyPromise', async () => {
+  test('flex: 25 h band shares W20 NIGHT_FREEZE_ANY_PROMISE (false)', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
     await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [], true)).rejects.toMatchObject({ id: 's2' });
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: true });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: false });
   });
 });
 
 describe('assertNotToldOnMove (the moving visit, on its own transaction)', () => {
   const row = { id: 'v1' };
 
-  test('reads with anyPromise, and a day-only or unknown promise refuses the move', async () => {
+  test('shares W20 NIGHT_FREEZE_ANY_PROMISE (false) so day-only promises are movable and told-time promises still refuse', async () => {
     toldVisits.loadToldVisitIds.mockResolvedValue(new Set(['v1']));
     const trx = jest.fn();
     await expect(assertNotToldOnMove(trx, row, refuse)).rejects.toMatchObject({ id: 'v1', why: 'has a time the customer was already told (frozen)' });
-    expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date), { anyPromise: true });
+    expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date), { anyPromise: false });
   });
 
   test('no promise at all lets the move go on; a failed read throws (fail closed)', async () => {
@@ -114,8 +114,9 @@ describe('who does NOT pass anyPromise', () => {
     expect(read('../services/day-replan/index.js')).not.toMatch(/anyPromise/);
   });
 
-  test('auto-dispatch index sets anyPromise: false (W20) while apply guards keep their explicit option', () => {
-    expect(read('../services/auto-dispatch/index.js')).toMatch(/anyPromise: false/);
-    expect(read('../services/auto-dispatch/apply.js')).toMatch(/anyPromise: true/);
+  test('auto-dispatch index and apply share NIGHT_FREEZE_ANY_PROMISE (W20, false) so planner and apply never split-brain (P1-2)', () => {
+    expect(read('../services/auto-dispatch/told-visits.js')).toMatch(/NIGHT_FREEZE_ANY_PROMISE = false/);
+    expect(read('../services/auto-dispatch/index.js')).toMatch(/anyPromise: NIGHT_FREEZE_ANY_PROMISE === true/);
+    expect(read('../services/auto-dispatch/apply.js')).toMatch(/anyPromise: NIGHT_FREEZE_ANY_PROMISE === true/);
   });
 });

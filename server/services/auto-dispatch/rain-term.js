@@ -182,8 +182,11 @@ async function start(run, deps = {}) {
         readArea(zone, read),
         readAlertsFn ? Promise.resolve().then(() => readAlertsFn(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng)).catch(() => null) : Promise.resolve(null),
       ]);
-      if (!hours) { state.unread.push(zone); return; }
+      const hasSevereAlerts = Array.isArray(alerts) && alerts.some((a) => a.moveTrigger === true);
+      if (!hours && !hasSevereAlerts) { state.unread.push(zone); return; }
       const readings = dates.map((d) => [d, dayReading(hours, d, alerts)]);
+      // If hourly failed and no date in the 3-6 day band was covered by an alert, the zone stays unread.
+      if (!hours && readings.every(([, r]) => r.wetness == null)) { state.unread.push(zone); return; }
       state.forecast.set(zone, new Map(readings.map(([d, r]) => [d, r.wetness])));
       // A day with some hours missing is read, but never vouched for as complete.
       readings.filter(([, r]) => !r.complete).forEach(([d]) => state.partial.add(`${zone}|${d}`));

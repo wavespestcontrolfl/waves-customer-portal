@@ -69,9 +69,19 @@ const mockDb = jest.fn((table) => {
     };
     return b;
   }
+  if (table === 'schedule_blackout_dates') {
+    const b = {
+      whereBetween: jest.fn(() => b),
+      select: jest.fn(() => Promise.resolve([])),
+    };
+    return b;
+  }
   if (table === 'system_settings') {
     return {
-      where: jest.fn(({ key }) => ({ first: () => Promise.resolve(key in settingsStore ? { key, value: settingsStore[key] } : null) })),
+      where: jest.fn((colOrObj, val) => {
+        const key = typeof colOrObj === 'string' ? val : colOrObj?.key;
+        return { first: () => Promise.resolve(key in settingsStore ? { key, value: settingsStore[key] } : null) };
+      }),
       insert: jest.fn((row) => ({
         onConflict: () => ({
           merge: () => { settingsStore[row.key] = row.value; settingsUpserts.push(row); return Promise.resolve(); },
@@ -535,6 +545,16 @@ describe('adjustBudgets: live', () => {
     BudgetManager.getTechCountForArea.mockRejectedValue(new Error('tech query down'));
     const out = await BudgetManager.adjustBudgets();
     expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(out).toEqual({ evaluated: 1, changed: 0, failed: 1 });
+  });
+
+  test('unreadable blackout calendar in live mode fails closed with zero budget changes (P1-6)', async () => {
+    campaignRows = [campaign()];
+    stopRows = stopsEveryDay(0);
+    jest.spyOn(BudgetManager, 'getBlackoutDatesForWindow').mockRejectedValue(new Error('blackout read down'));
+    const out = await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
     expect(out).toEqual({ evaluated: 1, changed: 0, failed: 1 });
   });
 });

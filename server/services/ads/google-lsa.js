@@ -307,7 +307,7 @@ async function readDays(customer, { since, until }) {
     WHERE local_services_lead.creation_date_time >= '${since} 00:00:00'
       AND local_services_lead.creation_date_time <= '${until} 23:59:59'
   `);
-  return { metricsByDay: sumMetricsByDay(metricRows), leadsByDay: tallyLeadsByDay(leadRows) };
+  return { metricsByDay: sumMetricsByDay(metricRows), leadsByDay: tallyLeadsByDay(leadRows), performanceMaxPresent: performanceMaxDays.length > 0 };
 }
 
 // The row this sync owns for the account: found by the mark only, never by a
@@ -322,13 +322,26 @@ function accountRow(account) {
 
 // The account row and its days, in one transaction. Returns the number of day
 // rows written.
-async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDay }, { since, until }) {
+async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDay, performanceMaxPresent: daysPMax = false }, { since, until }) {
   // Google owns the status and the budget, and the sync owns the type (the Ads
   // page puts the row on the "Local Service Ads" card by it; a row edited
   // while another account was being read gets it back here). The name is
   // written once, at insert: PUT /campaigns/:id lets the office rename the row,
   // and a nightly overwrite would undo that.
-  const state = { ...accountState(campaigns), campaign_type: CAMPAIGN_TYPE, updated_at: new Date() };
+  const pmaxPresent = Boolean(campaigns.performanceMaxPresent || daysPMax);
+  const existingMeta = existing?.metadata && typeof existing.metadata === 'object'
+    ? existing.metadata
+    : (typeof existing?.metadata === 'string' ? (() => { try { return JSON.parse(existing.metadata); } catch { return {}; } })() : {});
+  const nextMeta = { ...existingMeta, [ACCOUNT_KEY]: account };
+  if (pmaxPresent) nextMeta.performance_max_present = true;
+  else delete nextMeta.performance_max_present;
+  const metaChanged = Boolean(existingMeta.performance_max_present) !== pmaxPresent;
+  const state = {
+    ...accountState(campaigns),
+    campaign_type: CAMPAIGN_TYPE,
+    ...(existing ? (metaChanged ? { metadata: JSON.stringify(nextMeta) } : {}) : { metadata: JSON.stringify(nextMeta) }),
+    updated_at: new Date(),
+  };
   let written = 0;
   await db.transaction(async (trx) => {
     let campaignId = existing?.id;
@@ -342,7 +355,6 @@ async function writeRows(account, existing, campaigns, { metricsByDay, leadsByDa
         platform_campaign_id: account,
         campaign_name: DISPLAY_NAME,
         ...state,
-        metadata: JSON.stringify({ [ACCOUNT_KEY]: account }),
         created_at: new Date(),
       });
     }

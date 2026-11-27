@@ -79,6 +79,16 @@ async function wonCounts(since, until, excludeRows) {
   return { booked: toInt(row?.booked), recurring: toInt(row?.recurring) };
 }
 
+function parseMeta(v) {
+  if (v && typeof v === 'object') return v;
+  if (typeof v !== 'string') return {};
+  try { return JSON.parse(v) || {}; } catch { return {}; }
+}
+
+function lsaPerformanceMaxPresent(campaigns) {
+  return (campaigns || []).some((c) => c.campaign_type === 'google_lsa' && parseMeta(c.metadata).performance_max_present === true);
+}
+
 /**
  * lsaSummary(campaigns, { since, until }) -> object | null
  * `since` and `until` are the Eastern dates (YYYY-MM-DD) /campaigns uses:
@@ -93,7 +103,14 @@ async function lsaSummary(campaigns, { since, until, excludeRows = (qb) => qb })
     if (!(await db.schema.hasTable('lsa_leads'))) return null;
     const [leads, won] = await Promise.all([leadCounts(start, end), wonCounts(since, until, excludeRows)]);
     const spend = lsaSpend(campaigns);
-    return { ...leads, ...won, spend, costPerWon: costPerWon(spend, won.booked) };
+    const performanceMaxPresent = lsaPerformanceMaxPresent(campaigns);
+    return {
+      ...leads,
+      ...won,
+      spend,
+      costPerWon: performanceMaxPresent ? null : costPerWon(spend, won.booked),
+      ...(performanceMaxPresent ? { performanceMaxPresent: true, cplUnavailableReason: 'Performance Max ran alongside Local Services — standalone CPL is unavailable' } : {}),
+    };
   } catch (err) {
     // Code and table only: a database error can echo a row.
     logger.warn(`[lsa-summary] not available (${err?.code || 'error'}${err?.table ? `, table ${err.table}` : ''})`);
@@ -101,4 +118,4 @@ async function lsaSummary(campaigns, { since, until, excludeRows = (qb) => qb })
   }
 }
 
-module.exports = { lsaSummary, lsaSpend, costPerWon };
+module.exports = { lsaSummary, lsaSpend, costPerWon, lsaPerformanceMaxPresent };

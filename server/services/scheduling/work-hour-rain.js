@@ -164,17 +164,19 @@ function hasThunderObs(obs, stations, hour) {
 function tallyHours(obs, stations, hours) {
   let wet = 0;
   let missing = 0;
+  let rainMeasured = 0;
   let inches = 0;
   for (const h of hours) {
     const v = readHour(obs, stations, h);
     const thunder = hasThunderObs(obs, stations, h);
-    if (v == null && !thunder) missing += 1;
-    else {
-      if (v != null) inches += v;
-      if ((v != null && v >= MEASURABLE_IN) || thunder) wet += 1;
+    if (v != null) {
+      rainMeasured += 1;
+      inches += v;
     }
+    if (v == null && !thunder) missing += 1;
+    else if ((v != null && v >= MEASURABLE_IN) || thunder) wet += 1;
   }
-  return { wet_hours: wet, inches: missing === hours.length ? null : Math.round(inches * 100) / 100, missing };
+  return { wet_hours: wet, inches: rainMeasured === 0 ? null : Math.round(inches * 100) / 100, missing };
 }
 
 /** Per forecast area: { wet_hours, inches, missing, wet } for the work hours. wet = rainHours or more wet hours; false when

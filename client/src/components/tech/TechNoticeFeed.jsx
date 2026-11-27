@@ -99,7 +99,7 @@ const WATERING_NOTE_TYPES = new Set(['lawn_watering_tech_note']);
 // card: it is never shown, so it can never be seen. It keeps the pre-seen
 // behaviour (marked read on the 5-minute clock) so it cannot sit unread
 // and eat the 20-row feed. Only rendered cards wait to be seen.
-const TIMED_RENDERED_TYPES = new Set(['storm_watch_alert']);
+const TIMED_RENDERED_TYPES = new Set(['storm_watch_alert', 'weather_safety_advisory']);
 const KEPT_TYPES = new Set([...VISIT_TYPES, ...TEXT_TYPES, ...TRACKING_TYPES, ...NUDGE_TYPES, ...PHOTO_TYPES, ...WATERING_NOTE_TYPES]);
 // Waves Admin look: ink and stone, amber for a warning, red only where the
 // notice is a genuine alert (a cancelled visit, a late arrival check).
@@ -239,8 +239,8 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
       // Shown in the page instead (TechScheduleChanges), not floated here.
       if (inlineScheduleChanges && VISIT_TYPES.has(n.type)) continue;
       if (KEPT_TYPES.has(n.type)) { visitCards.push(n); continue; }
-      if (n.type !== 'storm_watch_alert') { otherCards.push(n); continue; }
-      const jobKey = n.payload?.job_id || n.id;
+      if (!TIMED_RENDERED_TYPES.has(n.type)) { otherCards.push(n); continue; }
+      const jobKey = `${n.type}:${n.payload?.job_id || n.id}`;
       const prev = stormByJob.get(jobKey);
       if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
         stormByJob.set(jobKey, n);
@@ -293,16 +293,16 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
   useEffect(() => {
     const newestByJob = new Map();
     for (const n of active) {
-      if (n.type !== 'storm_watch_alert') continue;
-      const jobKey = n.payload?.job_id || n.id;
+      if (!TIMED_RENDERED_TYPES.has(n.type)) continue;
+      const jobKey = `${n.type}:${n.payload?.job_id || n.id}`;
       const prev = newestByJob.get(jobKey);
       if (!prev || new Date(n.created_at || 0) > new Date(prev.created_at || 0)) {
         newestByJob.set(jobKey, n);
       }
     }
     for (const n of active) {
-      if (n.type !== 'storm_watch_alert') continue;
-      const jobKey = n.payload?.job_id || n.id;
+      if (!TIMED_RENDERED_TYPES.has(n.type)) continue;
+      const jobKey = `${n.type}:${n.payload?.job_id || n.id}`;
       if (newestByJob.get(jobKey)?.id !== n.id) removeCard(n.id, { silent: true });
     }
   }, [active]);
@@ -382,6 +382,12 @@ export default function TechNoticeFeed({ onStormReview, inlineScheduleChanges = 
                 onStormReview?.(n.payload || {});
                 removeCard(n.id, { silent: true });
               }}
+              onDismiss={() => removeCard(n.id)}
+            />
+          )}
+          {n.type === 'weather_safety_advisory' && (
+            <WeatherAdvisoryCard
+              n={n}
               onDismiss={() => removeCard(n.id)}
             />
           )}
@@ -529,6 +535,21 @@ function StormCard({ n, onReview, onDismiss }) {
         <button onClick={onReview} style={btnPrimary}>Review options</button>
         <button onClick={onDismiss} style={btnSecondary}>Working through it</button>
       </div>
+    </div>
+  );
+}
+
+// Alert-only heat / wind safety advisory (owner 2026-11-26): informational only,
+// timed auto-dismiss once seen, and NEVER offers a rain-out reschedule action.
+function WeatherAdvisoryCard({ n, onDismiss }) {
+  const p = n.payload || {};
+  return (
+    <div style={cardStyle(COLORS.amber)} data-testid="weather-advisory-notice">
+      <div style={{ fontSize: 14, color: COLORS.muted, marginBottom: 4 }}>⚠️ Weather safety advisory</div>
+      <div style={{ fontSize: 15, fontWeight: 500, color: COLORS.text, marginBottom: 12 }}>
+        {n.message || `Heat or wind safety advisory near an upcoming stop${p.city ? ` in ${p.city}` : ''}.`}
+      </div>
+      <button onClick={onDismiss} style={{ ...btnSecondary, width: '100%' }}>Got it</button>
     </div>
   );
 }

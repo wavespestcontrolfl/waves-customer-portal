@@ -426,11 +426,11 @@ async function keepPlanTechnician(trx, rows, receiving) {
   }
 }
 
-// Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
-// transaction (makeMemberGuard covers the siblings, never the primary).
+// Night told-lock (owner 2026-11-05, "D1 a"; W20 owner 2026-11-26), the moving visit's own
+// told-time check inside its move transaction (makeMemberGuard covers the siblings, never the primary).
 async function assertNotToldOnMove(trx, row, refuse) {
-  const { loadToldVisitIds } = require('./told-visits');
-  const told = await loadToldVisitIds(trx, [row.id], new Date(), { anyPromise: true });
+  const { loadToldVisitIds, NIGHT_FREEZE_ANY_PROMISE } = require('./told-visits');
+  const told = await loadToldVisitIds(trx, [row.id], new Date(), { anyPromise: NIGHT_FREEZE_ANY_PROMISE === true });
   if (told.has(String(row.id)) || told.has(row.id)) throw refuse(row.id, 'has a time the customer was already told (frozen)');
 }
 
@@ -484,10 +484,10 @@ async function checkMemberEligibility(rows, best, eligCtx, trx, refuse) {
   }
 }
 
-// loadReminderFreeze's option object for a night run: lock24h, toldLock and anyPromise. A day-only (or unknown-window)
-// promise freezes a visit too, because the dispatcher moves DATES and a customer told only the day was still told that day.
+// Shared with index.js freezeReadArgs (W20 owner 2026-11-26: day-only confirmations are not frozen).
 function freezeOpts() {
-  return { lock24h: true, toldLock: true, anyPromise: true };
+  const { NIGHT_FREEZE_ANY_PROMISE } = require('./told-visits');
+  return { lock24h: true, toldLock: true, anyPromise: NIGHT_FREEZE_ANY_PROMISE === true };
 }
 
 function reminderWindowText(lock24h) {

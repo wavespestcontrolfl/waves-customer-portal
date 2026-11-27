@@ -141,7 +141,7 @@ function spanStorm(hourly, date, startMin, endMin, alerts = null, { thunderMinPc
       const hour = hourly.find((h) => String(h.startTime).slice(0, 13) === key);
       if (!hour) continue;
       const isThunder = hour.hasThunder === true || parseThunder(hour.shortForecast);
-      if (isThunder && (hour.rainChance == null || hour.rainChance >= thunderMinPct)) {
+      if (isThunder && Number.isFinite(hour.rainChance) && hour.rainChance >= thunderMinPct) {
         hasThunder = true;
         break;
       }

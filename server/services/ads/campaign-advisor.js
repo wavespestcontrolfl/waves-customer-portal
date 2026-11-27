@@ -561,6 +561,16 @@ class CampaignAdvisor {
     return campaigns.map(c => {
       const perf7d = last7days.filter(p => p.campaign_id === c.id);
       const perf30d = last30days.filter(p => p.campaign_id === c.id);
+      const meta = typeof c.metadata === 'string'
+        ? (() => { try { return JSON.parse(c.metadata); } catch { return {}; } })()
+        : (c.metadata && typeof c.metadata === 'object' ? c.metadata : {});
+      const pmaxDistortedLsa = c.platform === 'google_lsa' && meta?.performance_max_present === true;
+      const last7d = this.aggregatePerformance(perf7d);
+      const last30d = this.aggregatePerformance(perf30d);
+      if (pmaxDistortedLsa) {
+        last7d.cpa = null;
+        last30d.cpa = null;
+      }
 
       return {
         id: c.id,
@@ -575,9 +585,10 @@ class CampaignAdvisor {
         budgetMode: c.budget_mode,
         dailyBudgetBase: c.daily_budget_base,
         dailyBudgetCurrent: c.daily_budget_current,
-        last7d: this.aggregatePerformance(perf7d),
-        last30d: this.aggregatePerformance(perf30d),
+        last7d,
+        last30d,
         trending: this.getTrend(perf7d, perf30d),
+        ...(pmaxDistortedLsa ? { performanceMaxPresent: true, cpaNote: 'Performance Max ran alongside Local Services — standalone CPL/CPA is unavailable' } : {}),
       };
     });
   }
@@ -710,11 +721,12 @@ Analyze BOTH paid ads and organic SEO performance. Recommend only what is real, 
         const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : currentBudget;
         const throttled = Boolean(campaign.budget_mode) && campaign.budget_mode !== 'base';
         const noop = amount === baseBudget && amount === currentBudget;
-        // W16: direction check — increase_budget must increase above boundRef (or reconcile
-        // a lower drifted current back to base), and decrease_budget must lower below boundRef.
-        const isReconcileUp = amount === baseBudget && Number.isFinite(currentBudget) && currentBudget < amount;
-        const wrongDirection = (rec.apply_action === 'increase_budget' && amount <= boundRef && !isReconcileUp)
-          || (rec.apply_action === 'decrease_budget' && amount >= boundRef);
+        // W16: direction check against BOTH base and live current budget so decrease_budget
+        // can never raise a manually lowered live budget and increase_budget can never lower it.
+        const liveRef = Number.isFinite(currentBudget) && currentBudget > 0 ? currentBudget : boundRef;
+        const isReconcileUp = Number.isFinite(baseBudget) && amount === baseBudget && liveRef < amount;
+        const wrongDirection = (rec.apply_action === 'increase_budget' && ((amount <= boundRef && !isReconcileUp) || amount <= liveRef))
+          || (rec.apply_action === 'decrease_budget' && (amount >= boundRef || amount >= liveRef));
         if (!Number.isFinite(amount) || amount <= 0 || throttled || !(boundRef > 0)
           || amount > boundRef * 3 || amount < boundRef / 3 || noop || wrongDirection) { strip(); continue; }
       }

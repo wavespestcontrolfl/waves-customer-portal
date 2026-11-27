@@ -87,6 +87,7 @@ const RESERVED_METADATA_KEYS = new Map([
   ['budget_hold', HOLD_SWITCH],
   ['budget_hold_cleared', HOLD_SWITCH],
   ['lsa_customer_id', 'the daily Local Services sync writes it'],
+  ['performance_max_present', 'the daily Local Services sync writes it'],
 ]);
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
@@ -588,10 +589,19 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/admin/ads/campaigns/:id/hold — the next 2-hour run decides
+// DELETE /api/admin/ads/campaigns/:id/hold — the next 2-hour run decides.
+// If the gap rule gate is off, still allow clearing an ACTIVE stored hold so an
+// operator is never trapped by a hold the cron still honors; otherwise 404 gap_rule_off.
 router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   try {
-    if (!requireGapRule(res)) return undefined;
+    const mode = gapRuleMode();
+    if (mode === 'off') {
+      const existing = UUID_RE.test(req.params.id)
+        ? await db('ad_campaigns').where({ id: req.params.id }).first()
+        : null;
+      const activeHold = existing && getBudgetManager().activeBudgetHold(existing.metadata, etDateString(new Date()));
+      if (!activeHold) return res.status(404).json({ error: 'gap_rule_off' });
+    }
     // When a hold existed, the same metadata write leaves a release record
     // (budget_hold_cleared) so "who lifted it and when" survives. No ad_budget_log
     // row: a no-change row would trip assertNoChangeSince and the advisor's
@@ -1066,7 +1076,7 @@ async function applyLive(fn, res) {
       res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
-    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded'].includes(err.code)) {
+    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded', 'budget_direction_invalid', 'budget_cap_exceeded'].includes(err.code)) {
       res.status(422).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
@@ -1183,16 +1193,18 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       if (amount === baseBudget && amount === currentNum) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      // Direction sanity check (W16): an increase_budget rec must raise the budget
-      // (or reconcile a drifted-down live budget back to base), and decrease_budget must lower it.
-      const isReconcileUp = amount === baseBudget && Number.isFinite(currentNum) && currentNum < amount;
-      if (action === 'increase_budget' && amount <= boundRef && !isReconcileUp) {
-        return res.status(422).json({ applied: false, error: `Refusing increase_budget to $${amount}/day because it does not increase the current $${boundRef}/day base.` });
+      // Direction sanity check (W16): verify against BOTH base and current live budget so
+      // decrease_budget can never raise a manually lowered live budget and increase_budget can never lower it.
+      const liveRef = Number.isFinite(currentNum) && currentNum > 0 ? currentNum : boundRef;
+      const isReconcileUp = Number.isFinite(baseBudget) && amount === baseBudget && liveRef < amount;
+      if (action === 'increase_budget' && ((amount <= boundRef && !isReconcileUp) || amount <= liveRef)) {
+        return res.status(422).json({ applied: false, error: `Refusing increase_budget to $${amount}/day because it does not increase the current $${liveRef}/day live budget (base $${boundRef}/day).` });
       }
-      if (action === 'decrease_budget' && amount >= boundRef) {
-        return res.status(422).json({ applied: false, error: `Refusing decrease_budget to $${amount}/day because it does not decrease the current $${boundRef}/day base.` });
+      if (action === 'decrease_budget' && (amount >= boundRef || amount >= liveRef)) {
+        return res.status(422).json({ applied: false, error: `Refusing decrease_budget to $${amount}/day because it does not decrease the current $${liveRef}/day live budget (base $${boundRef}/day).` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince, trigger: 'advisor' }), res);
+      const requireDirection = action === 'increase_budget' ? 'increase' : 'decrease';
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireDirection, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {

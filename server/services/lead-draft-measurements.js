@@ -35,7 +35,7 @@ const logger = require('./logger');
 const { leadDraftPropertyLookupLive, isEnabled } = require('../config/feature-gates');
 const { lookupOptionsFor } = require('./property-lookup/lookup-callers');
 const { resolvePropertyFacts, SQFT_SOURCES } = require('./estimator-engine/source-arbitration');
-const { hasWrongPremiseFlag, lookupDimensionIsTrustworthy } = require('./lookup-confidence');
+const { hasWrongPremiseFlag, lookupDimensionIsTrustworthy, recordPropertyTypeIsTrustworthy, lookupPropertyTypeIsTrustworthy } = require('./lookup-confidence');
 const { unitAnywhereOnLine } = require('../utils/address-normalizer');
 
 const MEASUREMENTS_SOURCE = 'county_assessed';
@@ -61,6 +61,28 @@ const PENDING_WAIT_MS = 3 * 60 * 1000;
 const pendingMeasurements = new Map();
 
 const inRange = (value, [low, high]) => Number.isFinite(value) && value >= low && value <= high;
+
+// Only carry propertyType into lead drafts when the field itself has authoritative county/assessor/cadastral/verified
+// provenance and no propertyType verify flag on the lookup (satellite/listing-only guesses stay unverified).
+const TRUSTED_PROPERTY_TYPE_SOURCES = new Set(['county', 'assessor', 'cadastral', 'verified']);
+function trustedCountyPropertyType(propertyRecord, enriched) {
+  const raw = String(propertyRecord?.propertyType || '').trim();
+  if (!SINGLE_FAMILY_LABEL.test(raw)) return null;
+  if (!recordPropertyTypeIsTrustworthy(propertyRecord)) return null;
+  if (enriched && !lookupPropertyTypeIsTrustworthy({ ...enriched, propertyType: raw })) return null;
+  const ev = propertyRecord._fieldEvidence?.propertyType;
+  if (ev) {
+    const src = String(ev.sourceType || '').trim().toLowerCase();
+    if (!TRUSTED_PROPERTY_TYPE_SOURCES.has(src) || ev.fieldVerify === true) return null;
+    return raw;
+  }
+  if (propertyRecord._propertyTypeSource != null) {
+    const directSource = String(propertyRecord._propertyTypeSource).trim().toLowerCase();
+    return TRUSTED_PROPERTY_TYPE_SOURCES.has(directSource) ? raw : null;
+  }
+  const recordSource = String(propertyRecord._source || '').trim().toLowerCase();
+  return TRUSTED_PROPERTY_TYPE_SOURCES.has(recordSource) ? raw : null;
+}
 
 // An address the lookup can describe as one house: a street number and no
 // unit in any position ("Apt 4", "#4", "Unit B", "Bldg 9", unit-first).
@@ -102,7 +124,7 @@ function countyMeasurements(lookup) {
   const storiesKnown = (storiesVerified || (storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)))
     && lookupDimensionIsTrustworthy(lookup.enriched, 'stories');
   const stories = storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
-  const propertyType = String(propertyRecord.propertyType || '').trim();
+  const propertyType = trustedCountyPropertyType(propertyRecord, lookup.enriched);
   return { homeSqFt, lotSqFt, ...(propertyType ? { propertyType } : {}), ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
 }
 

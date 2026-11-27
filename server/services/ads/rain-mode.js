@@ -97,8 +97,8 @@ function countWetHours(hours, day) {
     const hour = hours.find((h) => String(h?.startTime || '').slice(0, 13) === key);
     const chance = hour && Number.isFinite(hour.rainChance) ? hour.rainChance : null;
     const isThunder = hour && (hour.hasThunder === true || parseThunder(hour.shortForecast));
-    if (chance == null && !isThunder) missing += 1;
-    else if ((chance != null && chance >= RAIN_PCT) || (isThunder && (chance == null || chance >= THUNDER_WET_PCT))) wet += 1;
+    if (chance == null) missing += 1;
+    else if (chance >= RAIN_PCT || (isThunder && chance >= THUNDER_WET_PCT)) wet += 1;
   }
   return { wet, missing };
 }

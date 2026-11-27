@@ -140,7 +140,7 @@ function stormSignal(hours, alerts, now = new Date(), fawn = null) {
     for (const hour of hours) {
       const start = new Date(hour.startTime).getTime();
       if (!Number.isFinite(start) || start + 3600_000 <= now.getTime() || start >= horizonEnd) continue;
-      if (hour.hasThunder === true && (hour.rainChance == null || hour.rainChance >= THUNDER_CHANCE_THRESHOLD)) {
+      if (hour.hasThunder === true && Number.isFinite(hour.rainChance) && hour.rainChance >= THUNDER_CHANCE_THRESHOLD) {
         hasThunder = true;
       }
     }

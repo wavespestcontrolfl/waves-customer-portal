@@ -25,6 +25,35 @@ const MAX_DAILY_BUDGET = Number.isFinite(ENV_MAX_DAILY_BUDGET) && ENV_MAX_DAILY_
   ? Math.min(ENV_MAX_DAILY_BUDGET, 99999999.99)
   : 1000;
 
+// Shared cap guard enforced before EVERY forward Google Ads push (setBudget, setMode,
+// and automated adjustBudgets transitions/reconciles).
+function assertBudgetWithinCap(amount, campaignName = null) {
+  if (Number.isFinite(amount) && amount > MAX_DAILY_BUDGET) {
+    const label = campaignName ? ` for "${campaignName}"` : '';
+    const err = new Error(`Budget ${amount}${label} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+    err.code = 'budget_cap_exceeded';
+    throw err;
+  }
+}
+
+// Shared W16 direction check against BOTH the recorded base/boundRef and the live current budget,
+// so a decrease_budget can never raise live spend when current < base and an increase_budget can never lower it.
+function checkBudgetDirection(direction, amount, { baseBudget, currentBudget }) {
+  const boundRef = Number.isFinite(baseBudget) && baseBudget > 0 ? baseBudget : currentBudget;
+  const liveRef = Number.isFinite(currentBudget) && currentBudget > 0 ? currentBudget : boundRef;
+  if (direction === 'increase') {
+    const isReconcileUp = Number.isFinite(baseBudget) && amount === baseBudget && liveRef < amount;
+    if ((amount <= boundRef && !isReconcileUp) || amount <= liveRef) {
+      return `Refusing increase_budget to $${amount}/day because it does not increase the current $${liveRef}/day live budget (base $${boundRef}/day).`;
+    }
+  } else if (direction === 'decrease') {
+    if (amount >= boundRef || amount >= liveRef) {
+      return `Refusing decrease_budget to $${amount}/day because it does not decrease the current $${liveRef}/day live budget (base $${boundRef}/day).`;
+    }
+  }
+  return null;
+}
+
 // ad_budget_log.reason is a varchar(255). A caller-supplied reason longer than
 // that would make the ad_budget_log insert fail AFTER the live Google push (and,
 // in setBudget, after the campaign write) — losing the audit row and 500-ing an
@@ -271,7 +300,7 @@ class BudgetManager {
     const gapCampaigns = [];
     if (gapMode === 'live') {
       try {
-        gap = await this.evaluateGapRule(now, targets);
+        gap = await this.evaluateGapRule(now, targets, { strictBlackouts: true });
       } catch (err) {
         // No window, no decision: leave every budget as it is (the old rule is
         // not a fallback) and let the cron record the failed tick.
@@ -362,6 +391,11 @@ class BudgetManager {
           // reconcile branch below converges Google onto the recorded mode.
           let pushedLive = false;
           if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+            if (newBudget > MAX_DAILY_BUDGET) {
+              logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} ($${newBudget}/day) refused — exceeds daily safety cap of $${MAX_DAILY_BUDGET}`);
+              outcome = 'failed';
+              return;
+            }
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, newBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} ${campaign.budget_mode}→${newMode} NOT applied — Google Ads push failed; will retry next run`);
@@ -429,6 +463,11 @@ class BudgetManager {
           if (isManualLowerInBase) {
             logger.info(`Budget: ${campaign.campaign_name} live Google budget ($${(currentCents / 100).toFixed(2)}) is below base ($${expectedBudget.toFixed(2)}) in base mode — respecting lower live budget`);
           } else if (Number.isFinite(currentCents) && currentCents !== expectedCents) {
+            if (expectedBudget > MAX_DAILY_BUDGET) {
+              logger.error(`Budget: ${campaign.campaign_name} reconcile ($${expectedBudget}/day) refused — exceeds daily safety cap of $${MAX_DAILY_BUDGET}`);
+              outcome = 'failed';
+              return;
+            }
             const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, expectedBudget);
             if (!pushed) {
               logger.error(`Budget: ${campaign.campaign_name} reconcile of ${campaign.budget_mode} budget NOT applied — Google Ads push failed; will retry next run`);
@@ -525,18 +564,19 @@ class BudgetManager {
    * money on leads the crew cannot take. A customer's windowless rows on one day
    * count as one stop.
    */
-  /** Company blackout / holiday closure dates in [start, end] (fail-open empty set). */
-  async getBlackoutDatesForWindow(start, end) {
+  /** Company blackout / holiday closure dates in [start, end]. In strict mode (live gap rule), propagate read errors so holidays never look open. */
+  async getBlackoutDatesForWindow(start, end, { strict = false } = {}) {
     try {
       const { getBlackoutDates } = require('../scheduling/blackout-dates');
-      const dates = await getBlackoutDates(start, end, db);
+      const dates = await getBlackoutDates(start, end, db, { strict });
       return dates instanceof Set ? dates : new Set(dates || []);
-    } catch {
+    } catch (err) {
+      if (strict) throw err;
       return new Set();
     }
   }
 
-  async getGapWindow(now, settings) {
+  async getGapWindow(now, settings, { strictBlackouts = false } = {}) {
     const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
     const dates = [];
     for (let i = 1; i <= settings.window_days; i += 1) dates.push(etDateString(addETDays(now, i)));
@@ -556,7 +596,7 @@ class BudgetManager {
         .groupBy('scheduled_date')
         .select(db.raw('scheduled_date::text AS day'))
         .select(db.raw(GAP_STOPS_SQL)),
-      this.getBlackoutDatesForWindow(start, end),
+      this.getBlackoutDatesForWindow(start, end, { strict: strictBlackouts }),
     ]);
     const stopsByDay = new Map(rows.map((r) => [String(r.day).slice(0, 10), parseInt(r.stops, 10) || 0]));
 
@@ -575,9 +615,9 @@ class BudgetManager {
   }
 
   /** Window + thresholds + the log reason, for the cron and the admin GET route. */
-  async evaluateGapRule(now, targets) {
+  async evaluateGapRule(now, targets, { strictBlackouts = false } = {}) {
     const settings = normalizeGapSettings(targets?.metadata);
-    const win = await this.getGapWindow(now, settings);
+    const win = await this.getGapWindow(now, settings, { strictBlackouts });
     return {
       settings,
       ...win,
@@ -871,6 +911,7 @@ class BudgetManager {
           }
 
           const newBudget = this.calculateBudget(campaign, mode);
+          assertBudgetWithinCap(newBudget, campaign.campaign_name);
           const linked = Boolean(campaign.platform_campaign_id);
           let googleAdsUpdated = false;
           if (linked) {
@@ -971,6 +1012,7 @@ class BudgetManager {
       }
 
       const newBudget = this.calculateBudget(campaign, mode);
+      assertBudgetWithinCap(newBudget, campaign.campaign_name);
 
       await trx('ad_campaigns').where({ id: campaignId }).update({
         budget_mode: mode,
@@ -1243,7 +1285,7 @@ class BudgetManager {
    * row lock (the advisor's 7-day no-repeat/no-reversal rule).
    * opts.trigger: ad_budget_log.trigger attribution (default 'manual').
    */
-  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, requireNoChangeSince = null, trigger = 'manual' } = {}) {
+  async setBudget(campaignId, newBaseBudget, reason = 'manual', { requireLivePush = false, requireBaseMode = false, requireActive = false, requireBoundFactor = null, requireDirection = null, requireNoChangeSince = null, trigger = 'manual' } = {}) {
     reason = boundReason(reason);
     const opId = randomUUID(); // audit-row identity; supersession anchor is taken in-lock
     // Validate the amount up front — a non-positive / NaN / non-finite base would
@@ -1260,7 +1302,7 @@ class BudgetManager {
     // Cap at the storable maximum BEFORE the Google push, so an over-large value
     // can't change the live campaign and then fail the decimal(10,2) DB write.
     if (base > MAX_DAILY_BUDGET) {
-      throw new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`);
+      throw Object.assign(new Error(`Budget ${base} exceeds the maximum of ${MAX_DAILY_BUDGET}`), { code: 'budget_cap_exceeded' });
     }
     // Round to cents so Google receives EXACTLY what the decimal(10,2) columns
     // store — a value like 50.001 would otherwise push exact micros to Google
@@ -1325,6 +1367,17 @@ class BudgetManager {
             if (base === lockedBase && base === Number(campaign.daily_budget_current)) {
               const err = new Error(`"${campaign.campaign_name}" is already at $${base}/day — nothing to apply.`);
               err.code = 'budget_noop';
+              throw err;
+            }
+          }
+          if (requireDirection) {
+            const dirErr = checkBudgetDirection(requireDirection, base, {
+              baseBudget: Number(campaign.daily_budget_base),
+              currentBudget: Number(campaign.daily_budget_current),
+            });
+            if (dirErr) {
+              const err = new Error(dirErr);
+              err.code = 'budget_direction_invalid';
               throw err;
             }
           }

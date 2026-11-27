@@ -373,4 +373,19 @@ describe('notices stay until seen', () => {
     await advance(10_000);
     expect(reads()).toBe(4);
   });
+
+  it('P1-3: weather_safety_advisory renders an alert-only card with Got it (no Rain Out button) and obeys seen-dwell auto-dismiss', async () => {
+    const advisory = n('n-adv', 'weather_safety_advisory', { job_id: 'job-9', city: 'Venice' }, 'Weather safety advisory (Heat Advisory) — no schedule move.');
+    const calls = stubFeed([advisory]);
+    mount();
+    const card = await findCard(/Heat Advisory/);
+    expect(screen.getByTestId('weather-advisory-notice')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Got it' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Review options' })).not.toBeInTheDocument();
+    setView(card, 1);
+    await advance(1500);
+    await advance(5 * MIN + 1000);
+    expect(screen.queryByTestId('weather-advisory-notice')).not.toBeInTheDocument();
+    expect(posts(calls, '/n-adv/read')).toHaveLength(1);
+  });
 });
