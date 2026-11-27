@@ -164,7 +164,7 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
       }),
     );
 
-    // Confirmed preferences-unreadable hold keeps the manual no-show text instruction.
+    // Confirmed preferences-unreadable hold asks staff to verify recipient & SMS permissions first.
     spy.mockClear();
     await AppointmentReminders._alertHeldNoShowSms({
       customer,
@@ -174,8 +174,8 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     });
     expect(spy).toHaveBeenCalledWith(
       'appointment',
-      expect.stringContaining('no-show'),
-      'Notification preferences could not be read, so the no-show text was not sent.',
+      expect.stringContaining('settings'),
+      'Preferences could not be read, so the no-show text was held; verify the number and SMS permissions first.',
       expect.objectContaining({
         bell: true,
         refreshOnDedupe: true,
@@ -233,8 +233,8 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     });
     expect(spy).toHaveBeenCalledWith(
       'appointment',
-      expect.stringContaining('no-show'),
-      'Notification preferences could not be read, so the no-show email was not sent.',
+      expect.stringContaining('settings'),
+      'Preferences could not be read, so the no-show email was held; verify the email and permissions first.',
       expect.objectContaining({
         bell: true,
         dedupeKey: 'no-show-email-held:visit-pref',

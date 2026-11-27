@@ -7669,13 +7669,13 @@ function describeHeldNoShowSms(outcome, name, scheduledServiceId) {
       reason: 'preferences_unavailable',
       logReason: 'notification preferences unreadable',
       action: fitAction('Schedule', name, [
-        (w) => `send ${w}'s no-show text`,
-        (w) => `contact ${w} about a no-show`,
-        () => 'send a no-show text manually',
+        (w) => `check ${w}'s no-show text settings`,
+        (w) => `check ${w}'s settings for no-show`,
+        () => 'check settings before no-show text',
       ]),
-      why: 'Notification preferences could not be read, so the no-show text was not sent.',
-      doneWhen: 'customer_contacted',
-      detail: `The no-show text for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+      why: 'Preferences could not be read, so the no-show text was held; verify the number and SMS permissions first.',
+      doneWhen: 'preferences_verified',
+      detail: `The no-show text for ${name} (visit ${scheduledServiceId}) was held because notification preferences were unreadable. Verify the customer's phone number and channel permissions before sending a no-show text.`,
     };
   }
   return {
@@ -7743,20 +7743,20 @@ async function alertHeldNoShowEmail({ customer, scheduledServiceId, customerId, 
     await raiseAdminAlert('appointment', {
       area: 'Schedule',
       action: fitAction('Schedule', name, [
-        (w) => `send ${w}'s no-show email`,
-        (w) => `contact ${w} about a no-show`,
-        () => 'send a no-show email manually',
+        (w) => `check ${w}'s no-show email settings`,
+        (w) => `check ${w}'s settings for no-show`,
+        () => 'check settings before no-show email',
       ]),
-      why: 'Notification preferences could not be read, so the no-show email was not sent.',
+      why: 'Preferences could not be read, so the no-show email was held; verify the email and permissions first.',
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'visit', id: String(scheduledServiceId) },
-      doneWhen: 'customer_contacted',
+      doneWhen: 'preferences_verified',
       who: 'person',
     }, {
       bell: true,
       dedupeKey: `no-show-email-held:${scheduledServiceId}`,
-      detail: `The no-show email for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+      detail: `The no-show email for ${name} (visit ${scheduledServiceId}) was held because notification preferences were unreadable. Verify the customer's email address and channel permissions before sending a no-show email.`,
       metadata: { scheduledServiceId, customerId },
     });
   } catch (bellErr) {
