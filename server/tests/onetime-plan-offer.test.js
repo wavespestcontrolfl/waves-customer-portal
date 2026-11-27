@@ -2488,11 +2488,9 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(notifyAdmin).toHaveBeenCalledTimes(1);
       const [, , why, options] = notifyAdmin.mock.calls[0];
       expect(why).toBe('Their Waves assessment was done Tue, Mar 5 and qualifies for a plan offer.');
-      expect(options.link).toBe(
-        '/admin/estimates?tab=new&customerId=cust-1&customerName=Jordan+Example&customerPhone=%2B19415550100&customerEmail=jordan%40example.test&address=12+Example+Test+Ln&serviceInterest=Lawn+Care',
-      );
+      expect(options.link).toBe('/admin/customers?customerId=cust-1');
       expect(options.metadata).toMatchObject({
-        estimateUrl: options.link,
+        estimateUrl: '/admin/estimates?tab=new&customerId=cust-1&serviceInterest=Lawn+Care',
         offerEndDate: '2030-04-04',
         serviceKey: 'lawn_inspection',
         reason: 'expanded_service_review',
@@ -2509,7 +2507,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       });
       const [, , , pestOpts] = notifyAdmin.mock.calls[0];
       expect(pestOpts.link).toBe('/admin/customers?customerId=cust-1');
-      expect(pestOpts.metadata.estimateUrl).toContain('tab=new&customerId=cust-1&customerName=Jordan+Example');
+      expect(pestOpts.metadata.estimateUrl).toBe('/admin/estimates?tab=new&customerId=cust-1&serviceInterest=Pest+Control');
       expect(pestOpts.detail).toContain('Quarterly Pest Control Service');
     });
 

@@ -1225,18 +1225,13 @@ const OFFICE_REASON_WORDS = Object.freeze({
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;
 
 function officeEstimateUrl(customer, job) {
-  const params = new URLSearchParams({ tab: 'new', customerId: String(customer.id) });
-  const fullName = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
-  if (fullName) params.set('customerName', fullName);
-  if (String(customer.phone || '').trim()) params.set('customerPhone', String(customer.phone).trim());
-  if (String(customer.email || '').trim()) params.set('customerEmail', String(customer.email).trim());
-  const address = [
-    customer.address_line1,
-    customer.city,
-    [customer.state, customer.zip].filter(Boolean).join(' '),
-  ].filter(Boolean).join(', ').trim();
-  if (address) params.set('address', address);
-  params.set('serviceInterest', EXPANDED_SERVICE_INTEREST_LABELS[job?.service_key] || 'Pest Control');
+  // Keep URLs opaque & fixed-length (no customer PII in query strings, well under
+  // notifications.link's 300-char limit); Customer 360 hydrates contact + property details.
+  const params = new URLSearchParams({
+    tab: 'new',
+    customerId: String(customer.id),
+    serviceInterest: EXPANDED_SERVICE_INTEREST_LABELS[job?.service_key] || 'Pest Control',
+  });
   return `/admin/estimates?${params.toString()}`;
 }
 
@@ -1250,7 +1245,7 @@ function officeItemWhy(job, shortOfferDay) {
 
 function officeOfferGuidance(job, shortLastDay) {
   if (isExpandedServiceKey(job?.service_key)) {
-    return `Open the Estimate Tool to quote the right Pest or Lawn plan with the setup fee waived, good through ${shortLastDay}.`;
+    return `Open the customer profile to quote the right Pest or Lawn plan with the setup fee waived, good through ${shortLastDay}.`;
   }
   return `The plan offer is a Quarterly Pest Control Service estimate with the setup fee waived, good through ${shortLastDay}.`;
 }
@@ -1261,8 +1256,7 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
   const { lastDay } = offerTerms(offerDay);
   const shortDay = (ymd) => formatDateOnly(ymd, { year: undefined, month: 'short', weekday: 'short' });
   const estimateUrl = officeEstimateUrl(customer, job);
-  const customerProfileUrl = `/admin/customers?customerId=${encodeURIComponent(customer.id)}`;
-  const link = isExpandedServiceKey(job?.service_key) ? estimateUrl : customerProfileUrl;
+  const link = `/admin/customers?customerId=${encodeURIComponent(customer.id)}`;
   const notif = await require('./admin-alert-compose').raiseAdminAlert('estimate', {
     area: 'Estimates',
     action: fitAction('Estimates', name, [(who) => `quote ${who} the plan by hand`]),
