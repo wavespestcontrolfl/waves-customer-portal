@@ -23,8 +23,8 @@ function scale(largest, unit) {
   return { divide: 1, unit };
 }
 
-// "0.625 fl oz (18 mL)": under 1 fl oz a tech measures in mL. The mL figure rounds DOWN to the half mL, so a measured
-// amount is never above the rate (0.66 fl oz = 19.5 mL, not 20).
+// "0.625 fl oz (18.5 mL)": under 1 fl oz a tech measures in mL. The mL figure is the same amount to the nearest
+// tenth of a mL, so it is neither above a maximum rate nor below a minimum one by more than 0.05 mL.
 export function formatMixAmount(amount, unit, amountMax) {
   if (!(amount > 0) || !unit) return "";
   const hasBand = amountMax > amount;
@@ -32,7 +32,7 @@ export function formatMixAmount(amount, unit, amountMax) {
   const text = hasBand
     ? `${trim(amount / shown.divide)} to ${trim(amountMax / shown.divide)} ${shown.unit}`
     : `${trim(amount / shown.divide)} ${shown.unit}`;
-  if (unit === "fl oz" && !hasBand && amount < 1) return `${text} (${Math.floor(amount * ML_PER_FL_OZ * 2) / 2} mL)`;
+  if (unit === "fl oz" && !hasBand && amount < 1) return `${text} (${Number((amount * ML_PER_FL_OZ).toFixed(1))} mL)`;
   return text;
 }
 

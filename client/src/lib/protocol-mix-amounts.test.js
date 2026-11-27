@@ -8,7 +8,7 @@ describe("protocol mix amounts", () => {
       { product: "LESCO Crosscheck Plus", where: "Outside", perGallon: { amount: 0.625, unit: "fl oz" }, sprayers: ["bg_1_gal", "flowzone_4_gal"] },
     ]);
     expect(columns.map((c) => c.key)).toEqual(["bg_1_gal", "flowzone_4_gal"]);
-    expect(rows[0].amounts.bg_1_gal).toBe("0.625 fl oz (18 mL)");
+    expect(rows[0].amounts.bg_1_gal).toBe("0.625 fl oz (18.5 mL)");
     expect(rows[0].amounts.flowzone_4_gal).toBe("2.5 fl oz");
   });
 
@@ -40,5 +40,6 @@ describe("protocol mix amounts", () => {
     expect(amounts("mosquito", 1, "Suspend Polyzone").bg_1_gal).toBeUndefined();
     expect(amounts("flea", 1, "Tekko Pro IGR").bg_1_gal).toBe("0.66 fl oz (19.5 mL)");
     expect(amounts("termite", 3, "Termidor SC").rig_100_gal).toBe("80 fl oz");
+    expect(amounts("termite", 3, "Termidor SC").bg_1_gal).toBe("0.8 fl oz (23.7 mL)");
   });
 });

@@ -1898,7 +1898,7 @@
         "mixRates": [
           {
             "product": "LESCO Crosscheck Plus",
-            "where": "Outside: perimeter band, 1-in pin stream at openings",
+            "where": "Outside: perimeter band",
             "perGallon": {
               "amount": 0.625,
               "unit": "fl oz"
@@ -1913,7 +1913,7 @@
           },
           {
             "product": "Taurus SC",
-            "where": "Outside: foundation band, 1 ft up and 1 ft out",
+            "where": "Outside: foundation band, 1 ft up and 1 ft out; 1-in pin stream at openings",
             "perGallon": {
               "amount": 0.4,
               "unit": "fl oz"
@@ -1928,7 +1928,7 @@
           },
           {
             "product": "Atticus Antapex WSG",
-            "where": "Inside: cracks and crevices, only where pests are active",
+            "where": "Inside: cracks and crevices where ants are active",
             "perGallon": {
               "amount": 10,
               "unit": "g"
@@ -1938,7 +1938,7 @@
               "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,000 sq ft",
-            "limit": "3 days between applications",
+            "limit": "Roaches: use the roach card rate. Not for Pharaoh ants. 3 days between applications",
             "epa": "91234-401"
           }
         ]
@@ -1990,7 +1990,7 @@
               "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,000 sq ft",
-            "limit": "Not for Pharaoh ants outside",
+            "limit": "Not for Pharaoh ants, inside or outside",
             "epa": "91234-401"
           },
           {
