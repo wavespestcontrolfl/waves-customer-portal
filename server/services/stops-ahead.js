@@ -306,6 +306,8 @@ async function countStopsAhead(db, serviceId, today) {
        -- tracker rule (track-transitions customerTrackState + context-aggregator liveServicesQuery): a
        -- terminal status wins, a terminal track_state (a completed visit left 'confirmed') is closed, and a
        -- 'rescheduled' row is open only while its tracker is live. Expired estimate-slot holds never count.
+       -- track_state is a Postgres ENUM (scheduled, en_route, on_property, complete, cancelled): only those
+       -- values may appear beside it, or the whole statement fails (no_show is an operational status only).
        (SELECT technician_id::text FROM target_row) AS t_technician_id,
        (SELECT customer_id::text FROM target_row) AS t_customer_id,
        (SELECT scheduled_date::text FROM target_row) AS t_scheduled_date,
@@ -316,13 +318,13 @@ async function countStopsAhead(db, serviceId, today) {
            AND m.customer_id = tr.customer_id
            AND m.window_start IS NOT DISTINCT FROM tr.window_start
            AND m.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')
-           AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled', 'no_show'))) AS member_ids,
+           AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled'))) AS member_ids,
        (SELECT COUNT(DISTINCT (COALESCE(o.technician_id::text, ''), COALESCE(o.window_start::text, '')))
           FROM scheduled_services o, target_row tr
          WHERE o.customer_id = tr.customer_id
            AND o.scheduled_date = tr.scheduled_date
            AND o.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show')
-           AND COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled', 'no_show')
+           AND COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled')
            AND (o.status <> 'rescheduled' OR o.track_state IN ('en_route', 'on_property'))
            AND (o.reservation_expires_at IS NULL OR o.reservation_expires_at > NOW()))::int AS open_stops_today
        FROM grp g, target t`,

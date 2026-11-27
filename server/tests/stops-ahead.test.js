@@ -436,12 +436,18 @@ describe('peekStopsAhead', () => {
     const [countSql] = db.countCall();
     for (const col of ['AS tied', 'AS target_rows', 'AS sibling_advanced', 'AS member_ids', 'AS open_stops_today']) expect(countSql).toContain(col);
     // the open-stop count uses the customer-facing tracker rule, not raw status alone
-    expect(countSql).toContain("COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled', 'no_show')");
+    expect(countSql).toContain("COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled')");
     expect(countSql).toContain("(o.status <> 'rescheduled' OR o.track_state IN ('en_route', 'on_property'))");
     // a sibling the tracker cancelled is not an open line, and counts as moved on
-    expect(countSql).toContain("AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled', 'no_show'))");
+    expect(countSql).toContain("AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled'))");
     expect(countSql).toContain("sib.track_state IN ('en_route', 'on_property', 'complete', 'cancelled')");
     expect(db.raw).toHaveBeenCalledTimes(2); // the eligibility read + the one count statement
+    // track_state is a Postgres ENUM: a literal outside it fails the whole statement (tracker included)
+    const TRACK_ENUM = new Set(['scheduled', 'en_route', 'on_property', 'complete', 'cancelled']);
+    for (const m of countSql.matchAll(/track_state(?:,\s*'scheduled'\))?\s*(?:NOT\s+)?(?:IN\s*\(([^)]*)\)|<>\s*('[a-z_]+')|=\s*('[a-z_]+'))/g)) {
+      const literals = (m[1] || m[2] || m[3]).match(/'([a-z_]+)'/g).map((x) => x.slice(1, -1));
+      for (const v of literals) expect(TRACK_ENUM.has(v)).toBe(true);
+    }
   });
   test('a floor below the real count (a stop was added ahead) gives no count, never the lower number', async () => {
     expect(await peekStopsAhead(makeDb({ svcRow: baseSvc(), countN: 2, groupFloor: 0 }), 'svc-self', { today: TODAY })).toBeNull();
