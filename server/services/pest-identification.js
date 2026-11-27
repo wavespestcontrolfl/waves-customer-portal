@@ -31,7 +31,7 @@
 
 const logger = require('./logger');
 const MODELS = require('../config/models');
-const { dispatch, rejectCall, geminiText } = require('./llm/call');
+const { dispatch, rejectCall, geminiText, geminiVerdict } = require('./llm/call');
 const { ledgerCall, ledgerCallRejected } = require('./llm-dispatch-metrics');
 const {
   safePublicFirstName,
@@ -479,6 +479,7 @@ async function geminiVisionAttempt(model, base64Image, mimeType) {
     }
     throw err;
   }
+  if (geminiVerdict(data, data?.candidates?.[0] || {}, 2048)) return null;
   const text = geminiText(data);
   if (!text) {
     ledgerCallRejected(data, 'empty_text');

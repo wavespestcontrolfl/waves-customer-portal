@@ -236,6 +236,9 @@ describe('customer_visible direct_sdk ledger closure', () => {
     const origAnth = process.env.ANTHROPIC_API_KEY;
     const origFetch = global.fetch;
     const origGate = process.env.GATE_LLM_CALL_LEDGER;
+    const origGemModel = process.env.GEMINI_VISION_MODEL;
+    const origModelGem = process.env.MODEL_GEMINI_VISION;
+    const origModelGemFallback = process.env.MODEL_GEMINI_VISION_FALLBACK;
 
     afterEach(() => {
       if (origGem === undefined) delete process.env.GEMINI_API_KEY;
@@ -244,6 +247,12 @@ describe('customer_visible direct_sdk ledger closure', () => {
       else process.env.ANTHROPIC_API_KEY = origAnth;
       if (origGate === undefined) delete process.env.GATE_LLM_CALL_LEDGER;
       else process.env.GATE_LLM_CALL_LEDGER = origGate;
+      if (origGemModel === undefined) delete process.env.GEMINI_VISION_MODEL;
+      else process.env.GEMINI_VISION_MODEL = origGemModel;
+      if (origModelGem === undefined) delete process.env.MODEL_GEMINI_VISION;
+      else process.env.MODEL_GEMINI_VISION = origModelGem;
+      if (origModelGemFallback === undefined) delete process.env.MODEL_GEMINI_VISION_FALLBACK;
+      else process.env.MODEL_GEMINI_VISION_FALLBACK = origModelGemFallback;
       global.fetch = origFetch;
       jest.dontMock('@anthropic-ai/sdk');
       jest.dontMock('../services/llm-dispatch-metrics');
@@ -256,6 +265,9 @@ describe('customer_visible direct_sdk ledger closure', () => {
     test('lawn_assess records JSON null replies as schema_invalid on both Gemini and Claude', async () => {
       process.env.GEMINI_API_KEY = 'test-gemini';
       process.env.ANTHROPIC_API_KEY = 'test-anth';
+      delete process.env.GEMINI_VISION_MODEL;
+      delete process.env.MODEL_GEMINI_VISION;
+      delete process.env.MODEL_GEMINI_VISION_FALLBACK;
       jest.resetModules();
       const mockLedgerCall = jest.fn((p, m, fn) => fn());
       const mockLedgerCallRejected = jest.fn();
@@ -280,7 +292,74 @@ describe('customer_visible direct_sdk ledger closure', () => {
       expect(mockLedgerCallRejected).toHaveBeenNthCalledWith(2, expect.anything(), 'schema_invalid');
     });
 
-    test('real ledgerCall preserves gemini_refusal, gemini_incomplete, openai_incomplete, and openai_refusal without overwriting on ledgerCallRejected', async () => {
+    test('Gemini MAX_TOKENS is treated as a miss in pest_id, lawn_assess, and tree_shrub even with schema-valid JSON', async () => {
+      process.env.GEMINI_API_KEY = 'test-gemini';
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.GEMINI_VISION_MODEL;
+      delete process.env.MODEL_GEMINI_VISION;
+      delete process.env.MODEL_GEMINI_VISION_FALLBACK;
+      jest.resetModules();
+      const mockLedgerCall = jest.fn((p, m, fn) => fn());
+      const mockLedgerCallRejected = jest.fn();
+      jest.doMock('../services/llm-dispatch-metrics', () => ({
+        ledgerCall: mockLedgerCall,
+        ledgerCallRejected: mockLedgerCallRejected,
+        recordCall: jest.fn(() => null),
+        failCall: jest.fn(),
+        recordDispatch: jest.fn(),
+        recordedPolicyLabel: jest.fn(() => 'photoIdVision'),
+      }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+      global.fetch = jest.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          responseId: 'gem_trunc_1',
+          candidates: [{
+            finishReason: 'MAX_TOKENS',
+            content: {
+              parts: [{
+                text: JSON.stringify({
+                  pest_key: 'fire_ant',
+                  category: 'ants',
+                  confidence: 'high',
+                  confidence_score: 0.92,
+                  visual_notes: 'Red ants visible.',
+                  turf_density: 82,
+                  weed_coverage: 6,
+                  color_health: 8,
+                  fungal_activity: 'none',
+                  insect_damage: 'none',
+                  drought_stress: 'none',
+                  mechanical_damage: 'none',
+                  thatch_visibility: 'low',
+                  grass_type: 'st_augustine',
+                  overwatering_signal: false,
+                  foliage_fullness: 85,
+                  leaf_color_vigor: 80,
+                  pest_signals: 'none',
+                  disease_signals: 'none',
+                  water_heat_stress: 'none',
+                  pruning_mechanical: 'none',
+                  observations: 'Healthy lawn with no visible stress.',
+                }),
+              }],
+            },
+          }],
+        }),
+      }));
+
+      const pest = require('../services/pest-identification');
+      const lawn = require('../services/lawn-assessment');
+      const ts = require('../services/tree-shrub-assessment');
+      expect((await pest.analyzePhoto('AA==', 'image/jpeg')).gemini).toBeNull();
+      expect(await lawn.analyzePhoto('AA==', 'image/jpeg')).toBeNull();
+      expect(await ts.analyzePhoto('AA==', 'image/jpeg')).toBeNull();
+      expect(mockLedgerCallRejected).not.toHaveBeenCalled();
+    });
+
+    test('real ledgerCall preserves gemini_refusal, gemini_incomplete, openai_incomplete, openai_refusal, and Gemini responseId without overwriting on ledgerCallRejected', async () => {
       process.env.GATE_LLM_CALL_LEDGER = 'true';
       jest.resetModules();
       const inserted = [];
@@ -303,11 +382,13 @@ describe('customer_visible direct_sdk ledger closure', () => {
       const { ledgerCall, ledgerCallRejected } = require('../services/llm-dispatch-metrics');
 
       const blocked = await ledgerCall('gemini', 'gemini-3.8-flash', async () => ({
+        responseId: 'gem_resp_blocked',
         candidates: [{ finishReason: 'SAFETY' }],
       }), { laneId: 'pest_id' });
       ledgerCallRejected(blocked, 'empty_text');
 
       const truncated = await ledgerCall('gemini', 'gemini-3.8-flash', async () => ({
+        responseId: 'gem_resp_trunc',
         candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: '{"best_match":' }] } }],
       }), { laneId: 'pest_id' });
       ledgerCallRejected(truncated, 'invalid_json');
@@ -328,11 +409,11 @@ describe('customer_visible direct_sdk ledger closure', () => {
       ledgerCallRejected(oaiRefusal, 'invalid_json');
 
       await new Promise((r) => setImmediate(r));
-      expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code }))).toEqual([
-        { ok: false, error_code: 'gemini_refusal' },
-        { ok: false, error_code: 'gemini_incomplete' },
-        { ok: false, error_code: 'openai_incomplete' },
-        { ok: false, error_code: 'openai_refusal' },
+      expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code, provider_ref: r.provider_ref }))).toEqual([
+        { ok: false, error_code: 'gemini_refusal', provider_ref: 'gem_resp_blocked' },
+        { ok: false, error_code: 'gemini_incomplete', provider_ref: 'gem_resp_trunc' },
+        { ok: false, error_code: 'openai_incomplete', provider_ref: 'resp_inc' },
+        { ok: false, error_code: 'openai_refusal', provider_ref: 'resp_ref' },
       ]);
       // None of the already-classified provider failures should be overwritten by ledgerCallRejected.
       expect(updated).toEqual([]);
