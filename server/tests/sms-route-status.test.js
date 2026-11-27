@@ -80,9 +80,17 @@ describe('routeStatusDraftViolation', () => {
     'Sam has one house ahead of yours.',
     'Two homes until yours.',
     'He is on his last stop before you.',
+    'He has one appointment before your visit.',
+    'There are two appointments before your visit.',
+    'Sam has a couple more jobs ahead of your appointment.',
+    'He has three houses before your service.',
+    "Two more visits and then it's your turn.",
   ];
   test.each(ROUTE_VARIANTS)('route wording at draft time: %p', (reply) => {
     expect(routeStatus.routeStatusDraftViolation(reply, facts)).toMatch(/ROUTE STATUS/);
+  });
+  test.each(ROUTE_VARIANTS)('route wording at send time with no route fact: %p', async (reply) => {
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: [] }, outgoingBody: reply, dbh: 'db' })).toBe('route_status_unbound');
   });
   test('ordinary scheduling copy is not route wording', () => {
     for (const reply of ['Please call before your appointment.', 'Call before your visit if the gate is locked.', 'Your next visit is Tuesday.', 'See you next week!', 'We will call you first thing.', 'Your visit is after lunch.', 'Are you available next Tuesday?', 'You have 2 visits left this year.', 'You have 3 visits to go on your plan.', 'Your first visit is on Monday, then the next one in March.', 'We treat the house, then the yard.', 'Your next service is due in March.']) {

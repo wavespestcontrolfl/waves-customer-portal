@@ -27,7 +27,8 @@ const logger = require('./logger');
 //   (a) a COUNT or an ORDER word (a digit, a number word, a few / a couple / several / more, next / first /
 //       last / second / third) with "stop(s)" — "stop" is route vocabulary on its own; or
 //   (b) a COUNT or ORDER word with another ROUTE NOUN (visit, house, home, job, customer, appointment) AND a
-//       POSITION link (before / ahead of / in front of / until / then / and then / after that) to you / yours;
+//       POSITION link (before / ahead of / in front of / until / then / and then / after that) to you / yours /
+//       your visit (appointment, service, house, home, stop) / your turn;
 //   (c) any ROUTE NOUN or COUNT followed by "then (it's) you(rs)" / "and then you"; or
 //   (d) the customer's own position: "you're next / first / last", "next on the route / list / line".
 // Every such reply must carry its claim as a verbatim ROUTE STATUS sentence (draft check and send check).
@@ -37,7 +38,8 @@ const logger = require('./logger');
 const COUNT = "(?:\\d+(?:st|nd|rd|th)?|one|two|three|four|five|six|seven|eight|nine|ten|a\\s+few|a\\s+couple(?:\\s+of)?|couple(?:\\s+of)?|several|some|more|next|first|last|second|third)";
 const ROUTE_NOUN = '(?:visits?|houses?|homes?|jobs?|customers?|appointments?|stops?)';
 const GAP = '(?:[\\w\']+[\\s,]+){0,3}?'; // up to three words between, the "short span"
-const TO_YOU = "(?:it's\\s+|it\\s+is\\s+|comes?\\s+|will\\s+be\\s+)?(?:you|yours)\\b";
+// the position target: you / yours / your <visit|appointment|service|house|home|stop> / your turn
+const TO_YOU = "(?:it's\\s+|it\\s+is\\s+|comes?\\s+|will\\s+be\\s+)?(?:you|yours|your\\s+(?:visits?|appointments?|services?|houses?|homes?|stops?|turn))\\b";
 const POSITION = `(?:before|ahead\\s+of|in\\s+front\\s+of|until|prior\\s+to|then|and\\s+then|after\\s+that|after\\s+which)\\s+${TO_YOU}`;
 const STOP_COUNT_WORDING_RE = new RegExp([
   `${COUNT}[\\s,]+${GAP}stops?\\b`,
