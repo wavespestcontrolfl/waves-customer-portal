@@ -494,6 +494,16 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
 
     describe('every visit (customer_reminder_contacts; owner 2026-11-26 "simpler")', () => {
       const listed = () => db('customer_reminder_contacts').where({ customer_id: customerId });
+      // What a merge leaves behind: the entry belongs to another account, the copy stays on this visit (now dead).
+      let strandedOwner = null;
+      const strandEntry = async () => {
+        [{ id: strandedOwner }] = await db('customers').insert({ first_name: 'Old', last_name: 'Record', phone: phone(48) }).returning('id');
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ customer_id: strandedOwner });
+      };
+      afterEach(async () => {
+        if (strandedOwner) await db('customers').where({ id: strandedOwner }).del();
+        strandedOwner = null;
+      });
       const otherRows = () => db('visit_text_recipients').where({ scheduled_service_id: otherVisitId });
 
       test('a recorded person goes on the customer\'s list once; a retry and a second call change nothing', async () => {
@@ -616,7 +626,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await VisitRecipient.materializeForVisit(otherVisitId);
         expect(await otherRows()).toHaveLength(1);
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await strandEntry();
+        expect(await otherRows()).toHaveLength(1);
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
         // a row the call recorded directly does not need the list
@@ -637,7 +648,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [copy] = await otherRows();
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'b'.repeat(48)}` });
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await strandEntry();
         await db('customer_reminder_contacts').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Robert', consent_version: 'x' });
         // before the next copy: the old copy names a gone entry, so it grants nothing and its token resolves nowhere
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
@@ -651,7 +662,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       test('a fresh call replaces a list copy the customer no longer lists (new id, call-recorded), and keeps one that is listed', async () => {
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [copy] = await otherRows();
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await strandEntry();
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'c'.repeat(48)}`, deliveries: { [`confirmation:${OTHER_DATE}T09:00`]: 'sent' } });
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
         // an unspecified scope: the call takes the copy over for this visit, and lists nobody (it created no row)
@@ -670,10 +681,19 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const [contact] = await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation');
         const meta = { scheduled_service_id: otherVisitId, kind: 'confirmation', visit_recipient_id: contact.visitRecipientId, claim_key: contact.claimKey, recipient_customer_id: customerId, reminder_contact_id: contact.reminderContactId };
         expect(await VisitRecipient.recipientStillOwed(meta)).toEqual({ ok: true });
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await strandEntry();
         await db('customer_reminder_contacts').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x' });
         await VisitRecipient.materializeForVisit(otherVisitId);
         expect(await VisitRecipient.recipientStillOwed(meta)).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
+      });
+
+      test('a deleted list entry takes its copies with it (row, claims and link), so no reader can honor them', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        expect(await otherRows()).toHaveLength(1);
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        expect(await otherRows()).toHaveLength(0);
+        // the call-recorded row on the booked visit stays
+        expect(await rows()).toHaveLength(1);
       });
 
       test('a customer merge never moves the list: the loser\'s entries stay on the loser', async () => {
