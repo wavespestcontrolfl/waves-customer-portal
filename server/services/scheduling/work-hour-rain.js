@@ -63,20 +63,28 @@ function bucketOf(valid) {
   return minutes < 0 ? { date: dayBefore(date), hour: 23 } : { date, hour: Math.floor(minutes / 60) };
 }
 
-/** { SRQ: { 7: 0.08, ... }, ... } for `day`, from the CSV, or null when it is not the CSV. */
+const THUNDER_WX_RE = /(?:^|\s)[+-]?(?:VC)?TS/i;
+
+/** { SRQ: { 7: 0.08, ... }, ..., _thunder?: { SRQ: { 14: true } } } for `day`, from the CSV, or null when it is not the CSV. */
 function parseObs(csv, day) {
   // CRLF or LF; every field trimmed, so a stray carriage return or space never turns 'T' or a station name into a miss.
   const lines = String(csv || '').trim().split(/\r?\n/);
   if (!lines[0].trim().startsWith('station,valid,p01i')) return null;
   const obs = Object.fromEntries(Object.keys(STATIONS).map((s) => [s, {}]));
+  const thunder = {};
   for (const line of lines.slice(1)) {
-    const [station, valid, raw] = line.split(',').map((f) => f.trim());
+    const [station, valid, raw, wxcodes] = line.split(',').map((f) => f.trim());
     const bucket = obs[station] && bucketOf(String(valid || ''));
     if (!bucket || bucket.date !== day) continue;
+    if (wxcodes && wxcodes !== 'M' && THUNDER_WX_RE.test(wxcodes)) {
+      if (!thunder[station]) thunder[station] = {};
+      thunder[station][bucket.hour] = true;
+    }
     const inches = raw === 'T' ? 0 : raw === 'M' || raw === '' || raw == null ? null : Number(raw);
     if (!Number.isFinite(inches)) continue;
     obs[station][bucket.hour] = Math.max(inches, obs[station][bucket.hour] ?? 0);
   }
+  if (Object.keys(thunder).length > 0) obs._thunder = thunder;
   return obs;
 }
 
@@ -109,7 +117,7 @@ function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date
   const [y1, m1, d1] = day.split('-');
   const [y2, m2, d2] = dayAfter(day).split('-');
   const stations = Object.keys(STATIONS).map((s) => `station=${s}`).join('&');
-  const url = `${ASOS_URL}?${stations}&data=p01i&year1=${y1}&month1=${Number(m1)}&day1=${Number(d1)}`
+  const url = `${ASOS_URL}?${stations}&data=p01i&data=wxcodes&year1=${y1}&month1=${Number(m1)}&day1=${Number(d1)}`
     + `&year2=${y2}&month2=${Number(m2)}&day2=${Number(d2)}&hour2=0&minute2=30&tz=America%2FNew_York&format=onlycomma&latlon=no&missing=M&trace=T&report_type=3`;
   const promise = paced(async () => {
     const controller = new AbortController();
@@ -142,10 +150,16 @@ function readHour(obs, stations, hour) {
   return null;
 }
 
+/** True when any of `stations` reported observed thunderstorm weather codes (TS / VCTS) during `hour`. */
+function hasThunderObs(obs, stations, hour) {
+  if (!obs?._thunder) return false;
+  return stations.some((s) => obs._thunder[s]?.[hour] === true);
+}
+
 /**
- * { wet_hours, inches, missing } over `hours`: wet = MEASURABLE_IN or more; a missing hour is null, never dry. `inches` is the
- * total of the hours READ, null when none was read (never 0 for a span nobody measured); with `missing` above 0 it is a
- * partial total, and `missing` is its coverage gap.
+ * { wet_hours, inches, missing } over `hours`: wet = MEASURABLE_IN or more (or observed ASOS TS/VCTS thunder);
+ * a missing hour is null, never dry. `inches` is the total of the hours READ, null when none was read (never 0
+ * for a span nobody measured); with `missing` above 0 it is a partial total, and `missing` is its coverage gap.
  */
 function tallyHours(obs, stations, hours) {
   let wet = 0;
@@ -153,10 +167,11 @@ function tallyHours(obs, stations, hours) {
   let inches = 0;
   for (const h of hours) {
     const v = readHour(obs, stations, h);
-    if (v == null) missing += 1;
+    const thunder = hasThunderObs(obs, stations, h);
+    if (v == null && !thunder) missing += 1;
     else {
-      inches += v;
-      if (v >= MEASURABLE_IN) wet += 1;
+      if (v != null) inches += v;
+      if ((v != null && v >= MEASURABLE_IN) || thunder) wet += 1;
     }
   }
   return { wet_hours: wet, inches: missing === hours.length ? null : Math.round(inches * 100) / 100, missing };

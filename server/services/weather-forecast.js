@@ -102,6 +102,12 @@ const FORECAST_BACKUP_MAX_MS = 3500;
 // before the shared client's cache is warm.
 const _backupInFlight = new Map();
 
+// WMO weather interpretation codes for thunderstorm (95 = slight/moderate, 96 = slight hail, 99 = heavy hail).
+const THUNDER_WMO_CODES = new Set([95, 96, 99]);
+function isThunderWmoCode(code) {
+  return Number.isFinite(code) && THUNDER_WMO_CODES.has(code);
+}
+
 async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor(Date.now() / 3600000) * 3600000) {
   const { fetchPropertyForecast } = require('./service-report/application-conditions');
   const forecast = await fetchPropertyForecast({
@@ -121,17 +127,28 @@ async function readOpenMeteoHours(latNum, lngNum, timeoutMs, fromMs = Math.floor
       startTime,
       rainChance: Number.isFinite(row.precipitation_probability_pct) ? row.precipitation_probability_pct : null,
       shortForecast: null,
-      hasThunder: false,
+      hasThunder: isThunderWmoCode(row.weather_code),
       temperatureF: Number.isFinite(row.temperature_f_exact) ? row.temperature_f_exact : null,
       windMph: Number.isFinite(row.wind_mph_exact) ? row.wind_mph_exact : null,
-      windGustMph: null,
+      windGustMph: Number.isFinite(row.wind_gust_mph) ? row.wind_gust_mph : null,
       // The shared forecast module's ready 16-point label ("N" .. "NNW"); null until a row carries it.
       windDirection: typeof row.wind_dir === 'string' && row.wind_dir ? row.wind_dir : null,
       relativeHumidity: Number.isFinite(row.humidity_pct) ? row.humidity_pct : null,
+      ...(Number.isFinite(row.precipitation_in) ? { precipitationIn: row.precipitation_in } : {}),
       source: 'open-meteo',
     });
   }
   return hours.length ? hours : null;
+}
+
+// Standalone Open-Meteo hourly backup (already-paid flat Standard plan when OPEN_METEO_API_KEY is set).
+// Validates coordinates, shares in-flight dedupe and the property-forecast cache; never throws.
+async function getOpenMeteoHourlyBackup(lat, lng, { timeoutMs = FORECAST_BACKUP_MAX_MS } = {}) {
+  if (lat == null || lng == null || lat === '' || lng === '') return null;
+  const latNum = Number(lat);
+  const lngNum = Number(lng);
+  if (!Number.isFinite(latNum) || !Number.isFinite(lngNum)) return null;
+  return fetchOpenMeteoHours(latNum, lngNum, Date.now(), Math.max(BACKUP_MIN_MS, Number(timeoutMs) || FORECAST_BACKUP_MAX_MS));
 }
 
 function raceDeadline(promise, ms) {
@@ -680,15 +697,20 @@ async function nwsHourly(latNum, lngNum, deadlineAt, fetchTimeoutMs = FETCH_TIME
   return hours.length === 0 ? null : hours;
 }
 
-// The patient NWS read for crons no one waits on (the ads rain record, the schedule rain record, the hourly rain
-// pass): each NWS fetch may run NWS_PATIENT_WAIT_MS, and a read that fails or answers nothing is asked once more.
-// Still NWS only: null when both tries fail, never the paid backup. `read` stands in for getNwsHourlyRain in tests.
+// Patient hourly read for background rain jobs (rain-pass, schedule rain record, rain-term, ads rain-mode):
+// NWS stays primary (10 s timeout + one retry). When NWS fails both attempts, falls back to the already-paid
+// Open-Meteo Standard backup (getOpenMeteoHourlyBackup) so an NWS outage does not blind rain automation.
+// Callers injecting a custom `read` in unit tests stay isolated unless they also pass `backup`.
 const NWS_PATIENT_WAIT_MS = 10000;
-async function getNwsHourlyRainPatient(lat, lng, { read = getNwsHourlyRain } = {}) {
+async function getNwsHourlyRainPatient(lat, lng, { read = getNwsHourlyRain, backup } = {}) {
   const once = () => Promise.resolve()
     .then(() => read(lat, lng, { fetchTimeoutMs: NWS_PATIENT_WAIT_MS }))
     .catch(() => null);
-  return (await once()) || (await once()) || null;
+  const nws = (await once()) || (await once());
+  if (nws) return nws;
+  const backupFn = backup !== undefined ? backup : (read === getNwsHourlyRain ? getOpenMeteoHourlyBackup : null);
+  if (!backupFn) return null;
+  return Promise.resolve().then(() => backupFn(lat, lng)).catch(() => null).then((h) => h || null);
 }
 
 /**
@@ -706,15 +728,17 @@ module.exports = {
   getHourlyRainOutlook,
   getNwsHourlyRain,
   getNwsHourlyRainPatient,
+  getOpenMeteoHourlyBackup,
   getNwsActiveAlerts,
   classifyNwsAlertEvent,
   classifyWeatherHazard,
   alertOverlapsWindow,
   parseHasThunder,
+  isThunderWmoCode,
   parseWindGustMph,
   THUNDER_MOVE_PCT,
   NWS_PATIENT_WAIT_MS,
   getOpenMeteoDaytime,
   forecastLinkForZip,
-  _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, _nwsAlertsInFlight, cacheKey, _cache, _hourlyCache, _alertsCache, _dailyFailCooldown, parseWindMph, parseHasThunder, parseWindGustMph, heatIndexF },
+  _test: { cachePut, CACHE_MAX_ENTRIES, dailyFromHours, daytimeFromHours, _backupInFlight, _nwsHourlyInFlight, _nwsAlertsInFlight, cacheKey, _cache, _hourlyCache, _alertsCache, _dailyFailCooldown, parseWindMph, parseHasThunder, isThunderWmoCode, parseWindGustMph, heatIndexF },
 };

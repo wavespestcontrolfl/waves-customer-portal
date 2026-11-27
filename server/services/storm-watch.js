@@ -79,9 +79,60 @@ function peakRainChance(hours, now = new Date()) {
   return peak;
 }
 
+const { heatIndexF } = require('./heat-index');
+
+const HEAT_ADVISORY_INDEX_F = 105;
+const WIND_ADVISORY_MPH = 25;
+const WIND_GUST_ADVISORY_MPH = 30;
+const FAWN_TIMEOUT_MS = 2500;
+
+const maxNum = (cur, val) => (Number.isFinite(val) && (cur == null || val > cur) ? val : cur);
+
+function hourlySafetyAdvisories(hours, now, existing) {
+  const out = [...existing];
+  const cats = new Set(out.map((a) => a.category));
+  const horizonEnd = now.getTime() + FORECAST_HORIZON_MS;
+  const inWindow = (Array.isArray(hours) ? hours : []).filter((h) => {
+    const start = new Date(h?.startTime).getTime();
+    return Number.isFinite(start) && start + 3600_000 > now.getTime() && start < horizonEnd;
+  });
+  let peakHi = null;
+  let peakGust = null;
+  let peakWind = null;
+  for (const h of inWindow) {
+    peakHi = maxNum(peakHi, heatIndexF(h.temperatureF, h.relativeHumidity));
+    peakGust = maxNum(peakGust, h.windGustMph);
+    peakWind = maxNum(peakWind, h.windMph);
+  }
+  const sawReadings = inWindow.some((h) => [h.temperatureF, h.windMph, h.windGustMph].some(Number.isFinite));
+  if (!cats.has('heat_advisory') && peakHi >= HEAT_ADVISORY_INDEX_F) {
+    out.push({ event: `High Heat (${Math.round(peakHi)}°F heat index)`, category: 'heat_advisory', moveTrigger: false });
+  }
+  if (!cats.has('wind_advisory') && (peakGust >= WIND_GUST_ADVISORY_MPH || peakWind >= WIND_ADVISORY_MPH)) {
+    const label = peakGust >= WIND_GUST_ADVISORY_MPH ? `${Math.round(peakGust)} mph gusts` : `${Math.round(peakWind)} mph wind`;
+    out.push({ event: `High Wind (${label})`, category: 'wind_advisory', moveTrigger: false });
+  }
+  return { advisories: out, sawReadings };
+}
+
+function fawnSafetyAdvisories(fawn, existing) {
+  if (!fawn || fawn.station === 'unavailable') return existing;
+  const out = [...existing];
+  const cats = new Set(out.map((a) => a.category));
+  const where = fawn.station ? ` at ${fawn.station}` : '';
+  const hi = heatIndexF(fawn.temp_f, fawn.humidity_pct);
+  if (!cats.has('heat_advisory') && hi != null && Math.round(hi) >= HEAT_ADVISORY_INDEX_F) {
+    out.push({ event: `High Heat (${Math.round(hi)}°F heat index${where})`, category: 'heat_advisory', moveTrigger: false, source: 'fawn' });
+  }
+  if (!cats.has('wind_advisory') && Number.isFinite(fawn.wind_mph) && fawn.wind_mph >= WIND_ADVISORY_MPH) {
+    out.push({ event: `High Wind (${Math.round(fawn.wind_mph)} mph${where})`, category: 'wind_advisory', moveTrigger: false, source: 'fawn' });
+  }
+  return out;
+}
+
 // Evaluate move triggers (rain >= 60%, thunder >= 50%, or active NWS severe/tropical/thunderstorm
-// warning) vs alert-only advisories (heat/wind) inside the next 2h horizon.
-function stormSignal(hours, alerts, now = new Date()) {
+// warning) vs alert-only advisories (heat/wind from NWS alerts, hourly metrics, or FAWN ground fallback).
+function stormSignal(hours, alerts, now = new Date(), fawn = null) {
   const peak = peakRainChance(hours, now);
   const horizonEnd = now.getTime() + FORECAST_HORIZON_MS;
   let hasThunder = false;
@@ -99,7 +150,9 @@ function stormSignal(hours, alerts, now = new Date()) {
     : () => true;
   const active = (Array.isArray(alerts) ? alerts : []).filter(overlaps);
   const severeAlerts = active.filter((a) => a.moveTrigger === true);
-  const advisories = active.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
+  const nwsAdvisories = active.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
+  const { advisories: withHourly, sawReadings } = hourlySafetyAdvisories(hours, now, nwsAdvisories);
+  const advisories = sawReadings ? withHourly : fawnSafetyAdvisories(fawn, withHourly);
   const shouldNudge = severeAlerts.length > 0 || hasThunder || (peak != null && peak >= RAIN_CHANCE_THRESHOLD);
   return { peak, hasThunder, severeAlerts, advisories, shouldNudge };
 }
@@ -176,7 +229,21 @@ async function readActiveAlertsSafe(lat, lng, cache) {
   return cache.get(key);
 }
 
-async function sweep(now = new Date()) {
+async function readFawnSafe(lat, lng, cache, readFawn) {
+  const key = `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
+  if (!cache.has(key)) {
+    const loader = readFawn || ((coords) => require('./fawn-weather').getCurrent(coords));
+    let timer;
+    const bounded = Promise.race([
+      Promise.resolve().then(() => loader({ latitude: lat, longitude: lng })).catch(() => null),
+      new Promise((resolve) => { timer = setTimeout(() => resolve(null), FAWN_TIMEOUT_MS); }),
+    ]).finally(() => clearTimeout(timer));
+    cache.set(key, bounded);
+  }
+  return cache.get(key);
+}
+
+async function sweep(now = new Date(), { readFawn } = {}) {
   const parts = etParts(now);
   if (parts.hour < SERVICE_HOURS_ET.start || parts.hour >= SERVICE_HOURS_ET.end) {
     return { skipped: true, reason: 'outside_service_hours' };
@@ -188,6 +255,7 @@ async function sweep(now = new Date()) {
   if (stops.length === 0) return { checked: 0, alerted: 0 };
 
   const alertsCache = new Map();
+  const fawnCache = new Map();
   let alerted = 0;
   let advisoriesSent = 0;
   for (const job of stops) {
@@ -202,7 +270,11 @@ async function sweep(now = new Date()) {
       logger.info(`[storm-watch] hourly outlook failed for job ${job.id}: ${err.message}`);
     }
     const alerts = await readActiveAlertsSafe(job.customer_latitude, job.customer_longitude, alertsCache);
-    const signal = stormSignal(hours, alerts, now);
+    // FAWN ground-truth fallback only when hourly forecast is unavailable (avoids redundant calls).
+    const fawn = (!Array.isArray(hours) || hours.length === 0)
+      ? await readFawnSafe(job.customer_latitude, job.customer_longitude, fawnCache, readFawn)
+      : null;
+    const signal = stormSignal(hours, alerts, now, fawn);
     const timeLabel = displayTime(job.window_start);
     const where = job.customer_city ? `${job.customer_city} stop` : 'next stop';
 

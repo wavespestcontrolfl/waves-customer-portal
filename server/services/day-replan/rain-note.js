@@ -13,7 +13,8 @@
  * (rain-fit.js isWetWindow, Codex #6102 r3). An area NWS does not answer is named as unread; an area whose answer has
  * no reading for an hour of a day is named under that day (`gaps`).
  */
-const { getNwsHourlyRain } = require('../weather-forecast');
+const weatherForecast = require('../weather-forecast');
+const { getNwsHourlyRain } = weatherForecast;
 const { ZONE_COORDS } = require('../scheduling/forecast-zones');
 const { RAIN_PCT, RAIN_DAYS } = require('../scheduling/rain-fit');
 const { DAY_OPEN, DAY_CLOSE } = require('../auto-dispatch/candidate-slots');
@@ -54,10 +55,19 @@ function readDay(hours, day, from = DAY_OPEN) {
  * the areas whose answer lacks a reading for an hour of it, in the board's area order. `read` is the hourly reader (the
  * NWS-only one); a read that fails or throws leaves its area unread.
  */
-async function rainNote(now, { read = getNwsHourlyRain } = {}) {
+async function rainNote(now, { read = getNwsHourlyRain, backup } = {}) {
   const zones = Object.keys(ZONE_COORDS);
+  const backupFn = backup !== undefined
+    ? backup
+    : (read === getNwsHourlyRain && typeof weatherForecast.getOpenMeteoHourlyBackup === 'function'
+      ? (lat, lng) => weatherForecast.getOpenMeteoHourlyBackup(lat, lng)
+      : null);
   const outlooks = Object.fromEntries(await Promise.all(zones.map(async (zone) => {
-    const hours = await Promise.resolve().then(() => read(ZONE_COORDS[zone].lat, ZONE_COORDS[zone].lng)).catch(() => null);
+    const { lat, lng } = ZONE_COORDS[zone];
+    let hours = await Promise.resolve().then(() => read(lat, lng)).catch(() => null);
+    if (!Array.isArray(hours) && backupFn) {
+      hours = await Promise.resolve().then(() => backupFn(lat, lng)).catch(() => null);
+    }
     return [zone, Array.isArray(hours) ? hours : null];
   })));
   const today = etDateString(now);

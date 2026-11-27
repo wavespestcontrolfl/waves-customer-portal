@@ -283,4 +283,55 @@ describe('weather-forecast Open-Meteo backup', () => {
     expect(await getHourlyRainOutlook(27.43, -82.43)).toBeNull();
     expect(await getDailyRainOutlook(27.43, -82.43)).toBeNull();
   });
+
+  test('Open-Meteo hourly maps WMO 95/96/99 to hasThunder, preserves windGustMph and precipitationIn', async () => {
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    global.fetch
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          hourly: {
+            time: [BASE, BASE + 3600, BASE + 7200],
+            precipitation_probability: [20, 55, 80],
+            precipitation: [0, 0.15, 0.42],
+            temperature_2m: [82, 86, 84],
+            wind_speed_10m: [8, 15, 22],
+            wind_gusts_10m: [12, 28, 36],
+            weather_code: [3, 95, 99],
+          },
+        }),
+      });
+    const hours = await getHourlyRainOutlook(27.51, -82.51);
+    expect(hours.map((h) => ({ hasThunder: h.hasThunder, windGustMph: h.windGustMph, precipitationIn: h.precipitationIn }))).toEqual([
+      { hasThunder: false, windGustMph: 12, precipitationIn: 0 },
+      { hasThunder: true, windGustMph: 28, precipitationIn: 0.15 },
+      { hasThunder: true, windGustMph: 36, precipitationIn: 0.42 },
+    ]);
+  });
+
+  test('getNwsHourlyRainPatient tries NWS twice, then falls back to Open-Meteo when NWS fails both', async () => {
+    const { getNwsHourlyRainPatient } = require('../services/weather-forecast');
+    process.env.OPEN_METEO_API_KEY = 'test-key';
+    global.fetch
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({ ok: false })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          hourly: {
+            time: [BASE],
+            precipitation_probability: [75],
+            temperature_2m: [85],
+            wind_speed_10m: [12],
+            wind_gusts_10m: [24],
+            weather_code: [95],
+          },
+        }),
+      });
+    const hours = await getNwsHourlyRainPatient(27.52, -82.52);
+    expect(hours).toHaveLength(1);
+    expect(hours[0]).toMatchObject({ rainChance: 75, hasThunder: true, windGustMph: 24, source: 'open-meteo' });
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
 });

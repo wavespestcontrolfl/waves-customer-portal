@@ -1,5 +1,6 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+jest.mock('../services/fawn-weather', () => ({ getCurrent: jest.fn().mockResolvedValue({ station: 'unavailable' }) }));
 jest.mock('../services/weather-forecast', () => {
   const actual = jest.requireActual('../services/weather-forecast');
   return {
@@ -313,5 +314,33 @@ describe('storm-watch sweep', () => {
     expect(notifInsert.mock.calls[0][0].type).toBe('weather_safety_advisory');
     expect(notifInsert.mock.calls[0][0].message).toContain('Heat Advisory');
     expect(notifInsert.mock.calls[0][0].message).toContain('no schedule move');
+  });
+
+  test('hourly wind gusts >= 30 mph and FAWN ground-truth fallback emit alert-only weather_safety_advisory', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue([{
+      startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(),
+      rainChance: 15, hasThunder: false, windMph: 18, windGustMph: 34,
+    }]);
+    getNwsActiveAlerts.mockResolvedValue([]);
+
+    const gustRes = await StormWatch.sweep(NOON_ET);
+    expect(gustRes).toEqual({ checked: 1, alerted: 0, advisories: 1 });
+    expect(notifInsert.mock.calls[0][0].type).toBe('weather_safety_advisory');
+    expect(notifInsert.mock.calls[0][0].message).toContain('34 mph gusts');
+
+    // When hourly forecast is unavailable, FAWN live station provides ground-truth heat/wind safety backup.
+    jest.clearAllMocks();
+    const { notifInsert: fawnInsert } = wireDb({ stops: [stop()] });
+    getHourlyRainOutlook.mockResolvedValue(null);
+    getNwsActiveAlerts.mockResolvedValue([]);
+    const readFawn = jest.fn().mockResolvedValue({ station: 'North Port', temp_f: 96, humidity_pct: 65, wind_mph: 10 });
+
+    const fawnRes = await StormWatch.sweep(NOON_ET, { readFawn });
+    expect(readFawn).toHaveBeenCalledTimes(1);
+    expect(fawnRes).toEqual({ checked: 1, alerted: 0, advisories: 1 });
+    expect(fawnInsert.mock.calls[0][0].type).toBe('weather_safety_advisory');
+    expect(fawnInsert.mock.calls[0][0].message).toContain('North Port');
+    expect(fawnInsert.mock.calls[0][0].message).toContain('no schedule move');
   });
 });

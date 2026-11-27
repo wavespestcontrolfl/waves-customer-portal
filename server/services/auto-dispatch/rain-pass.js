@@ -75,20 +75,30 @@ const toHHMM = (min) => `${String(Math.floor(min / 60)).padStart(2, '0')}:${Stri
 const NWS_MAX_FAILED_AREAS = 2;
 const areaKey = (lat, lng) => `${Number(lat).toFixed(2)},${Number(lng).toFixed(2)}`;
 
-function nwsOnlyReader(read) {
+// Primary: patient NWS (10 s wait, one retry). Fallback: Open-Meteo Standard backup when NWS fails both tries.
+// After NWS_MAX_FAILED_AREAS areas fail NWS in a single run, remaining areas check cached NWS first and then
+// go straight to Open-Meteo backup so an NWS outage neither stalls nor blinds the hourly run.
+function nwsOnlyReader(read, backup) {
   const reads = new Map();
   let failed = 0;
-  const { getNwsHourlyRainPatient } = require('../weather-forecast');
-  const twice = (lat, lng) => getNwsHourlyRainPatient(lat, lng, { read })
+  const wf = require('../weather-forecast');
+  const backupFn = backup !== undefined
+    ? backup
+    : (typeof wf.getOpenMeteoHourlyBackup === 'function' ? (lat, lng) => wf.getOpenMeteoHourlyBackup(lat, lng) : null);
+  const runBackup = (lat, lng) => (backupFn
+    ? Promise.resolve().then(() => backupFn(lat, lng)).catch(() => null).then((h) => h || null)
+    : Promise.resolve(null));
+  const twice = (lat, lng) => wf.getNwsHourlyRainPatient(lat, lng, { read, backup: null })
     .then((hours) => {
-      if (!hours) failed += 1;
-      return hours;
+      if (hours) return hours;
+      failed += 1;
+      return runBackup(lat, lng);
     });
   return (lat, lng) => {
     const key = areaKey(lat, lng);
     if (!reads.has(key)) {
       reads.set(key, failed >= NWS_MAX_FAILED_AREAS
-        ? Promise.resolve().then(() => read(lat, lng, { cacheOnly: true })).catch(() => null).then((hours) => hours || null)
+        ? Promise.resolve().then(() => read(lat, lng, { cacheOnly: true })).catch(() => null).then((hours) => hours || runBackup(lat, lng))
         : twice(lat, lng));
     }
     return reads.get(key);
@@ -390,10 +400,10 @@ async function planRainPass({ now = new Date(), db, deps = {} } = {}) {
     : null;
   const ctx = {
     db, deps: deps, today, nowMin: parts.hour * 60 + parts.minute,
-    // A caller's own reader (the schedule rain record) is asked as before; the default is NWS only.
+    // A caller's own reader (the schedule rain record) is asked as before; default is NWS primary + Open-Meteo backup.
     readHourly: deps.hourlyRain
       ? (lat, lng) => deps.hourlyRain(lat, lng, true)
-      : nwsOnlyReader(deps.nwsHourlyRain || ((...args) => require('../weather-forecast').getNwsHourlyRain(...args))),
+      : nwsOnlyReader(deps.nwsHourlyRain || ((...args) => require('../weather-forecast').getNwsHourlyRain(...args)), deps.hourlyBackup),
     readAlerts: deps.activeAlerts
       ? nwsAlertsReader(deps.activeAlerts)
       : (defaultAlertRead ? nwsAlertsReader(defaultAlertRead) : async () => []),

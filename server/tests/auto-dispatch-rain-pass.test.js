@@ -13,6 +13,7 @@ jest.mock('../services/weather-forecast', () => {
   return {
     getNwsHourlyRain: jest.fn(),
     getHourlyRainOutlook: jest.fn(),
+    getOpenMeteoHourlyBackup: jest.fn(async () => null),
     getNwsActiveAlerts: jest.fn(async () => []),
     getNwsHourlyRainPatient: (...args) => actual.getNwsHourlyRainPatient(...args),
     parseHasThunder: (...args) => actual.parseHasThunder(...args),
@@ -463,6 +464,25 @@ describe('auto-dispatch rain pass', () => {
       expect(row.advisories).toHaveLength(2);
       expect(await runRainPass({ now: NOW, db: {}, deps: d })).toMatchObject({ wet: 0, noticed: 0 });
       expect(d.raiseAdminAlert).not.toHaveBeenCalled();
+    });
+
+    test('NWS outage falls back to Open-Meteo backup (including after the 2-area NWS cutoff) and detects WMO thunder', async () => {
+      weather.getNwsHourlyRain.mockResolvedValue(null);
+      const omThunder = hourlyFor([]).map((h) => (
+        h.startTime.startsWith(`${D1}T14`) ? { ...h, rainChance: 55, hasThunder: true, source: 'open-meteo' } : { ...h, source: 'open-meteo' }
+      ));
+      const hourlyBackup = jest.fn(async () => omThunder);
+      const rows = await planRainPass({
+        now: NOW, db: {},
+        deps: deps([
+          stop(),
+          stop({ id: 'v2', point: { lat: 27.5, lng: -82.4 } }),
+          stop({ id: 'v3', point: { lat: 27.6, lng: -82.4 } }),
+        ], { nwsOnly: true, hourlyBackup, activeAlerts: jest.fn(async () => []) }),
+      });
+      expect(rows).toHaveLength(3);
+      expect(rows.every((r) => r.wet === true && r.reason === 'storm' && r.hasThunder === true)).toBe(true);
+      expect(hourlyBackup).toHaveBeenCalledTimes(3);
     });
   });
 });
