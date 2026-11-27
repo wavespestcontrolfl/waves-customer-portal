@@ -620,45 +620,57 @@ function mistingRowMatchesInput(row, inputOpt) {
   if (!row || !inputOpt || typeof inputOpt !== 'object') return false;
   const knobs = plainRecord(row.pricingKnobs);
   const refill = plainRecord(row.refill);
+  const storedNozzles = positiveOrNull(row.nozzles);
+  // Require explicit layout facts on the row (mapped installation rows omit nozzles/risers).
+  if (storedNozzles === null) return false;
   const storedTier = lowerToken(row.tier || knobs.tier);
   const storedSol = lowerToken(row.solution || refill.solution || knobs.refillSolution);
-  const storedNozzles = positiveOrNull(row.nozzles);
   const storedRisers = storedFigure(row.risers);
   const storedRefills = storedFigure(firstFiniteVal(refill.refillsPerYear, row.refillsPerYear));
   return matchesOptionalToken(storedTier, lowerToken(inputOpt.tier))
     && matchesOptionalToken(storedSol, lowerToken(inputOpt.solution))
-    && (storedNozzles === null || inputOpt.nozzles == null || positiveOrNull(inputOpt.nozzles) === storedNozzles)
+    && (inputOpt.nozzles == null || positiveOrNull(inputOpt.nozzles) === storedNozzles)
     && matchesOptionalNumber(storedRisers, inputOpt.risers == null ? storedRisers : storedFigure(inputOpt.risers))
     && matchesOptionalNumber(storedRefills, inputOpt.refillsPerYear == null ? storedRefills : storedFigure(inputOpt.refillsPerYear));
 }
 
-function boraCareScopeMatchesInput(row, v1Input, storedEstimateData) {
+function boraCareScopeMatchesInput(row, v1Input, boraCareInput, storedEstimateData) {
   const prior = boraCareStoredScope(row, storedEstimateData);
   if (prior.pinnedAtticSqFt === undefined && prior.pinnedSurfaceSqFt === undefined) return false;
-  const next = boraCareScopeFromInputs(v1Input, plainRecord(v1Input.services?.boraCare));
+  const next = boraCareScopeFromInputs(v1Input, plainRecord(boraCareInput));
   return prior.pinnedAtticSqFt === next.pinnedAtticSqFt && prior.pinnedSurfaceSqFt === next.pinnedSurfaceSqFt;
+}
+
+function storedRowTrustedForRevisionReuse(storedRow) {
+  if (!storedRow || typeof storedRow !== 'object') return true;
+  if (String(storedRow.pricing_authority || '').toUpperCase() === 'CLIENT_FALLBACK') {
+    return Boolean(storedRow.sent_at || ['sent', 'viewed', 'accepted'].includes(String(storedRow.status || '').toLowerCase()));
+  }
+  return true;
 }
 
 // Staff revisions reprice changed services on live config, but MUST preserve
 // unchanged Bora-Care, mosquito misting, and termite trenching lines from the
 // trusted stored estimate on both revision preview and save.
-function applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData) {
+function applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData, storedEstimateRow = null) {
   if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return v1Input;
+  if (!storedRowTrustedForRevisionReuse(storedEstimateRow)) return v1Input;
   const services = v1Input.services || {};
   const { storedMistingRows, storedBoraCareRows } = require('./estimate-result-container');
-  if (services.mosquitoMisting && !v1Input.mistingPricingKnobs) {
-    const mRows = storedMistingRows(storedEstimateData).filter(
-      (r) => r.service === 'mosquito_misting' || r.service === 'mosquito_misting_installation',
-    );
+  const mistingInput = services.mosquitoMisting || services.mosquito_misting;
+  if (mistingInput && !v1Input.mistingPricingKnobs) {
+    // Compare layout ONLY against misting plan rows carrying structured nozzles/risers.
+    const mRows = storedMistingRows(storedEstimateData).filter((r) => r.service === 'mosquito_misting');
     const mKnobs = mistingKnobSignalForReplay(storedEstimateData);
-    if (mKnobs && mRows.some((row) => mistingRowMatchesInput(row, services.mosquitoMisting))) {
+    if (mKnobs && mRows.some((row) => mistingRowMatchesInput(row, mistingInput))) {
       v1Input.mistingPricingKnobs = mKnobs;
     }
   }
-  if (services.boraCare && !v1Input.boraCarePricingKnobs) {
+  const boraCareInput = services.boraCare || services.bora_care;
+  if (boraCareInput && !v1Input.boraCarePricingKnobs) {
     const bcRows = storedBoraCareRows(storedEstimateData);
     const bcKnobs = boraCareKnobSignalForReplay(storedEstimateData);
-    if (bcKnobs && bcRows.some((row) => boraCareScopeMatchesInput(row, v1Input, storedEstimateData))) {
+    if (bcKnobs && bcRows.some((row) => boraCareScopeMatchesInput(row, v1Input, boraCareInput, storedEstimateData))) {
       v1Input.boraCarePricingKnobs = bcKnobs;
     }
   }

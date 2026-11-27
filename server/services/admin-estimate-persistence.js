@@ -1261,7 +1261,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   // (activeServiceKeys), so a bundle that itself buys a recurring service still
   // legitimately earns the perk while a one-time-only lead cannot forge it.
   v1Input = sanitizeClientIdentityFields({ ...v1Input });
-  applyStoredYear1PrepaySignal(v1Input, deps.storedEstimateData, deps.replaySavedPricingKnobs);
+  applyStoredYear1PrepaySignal(v1Input, deps.storedEstimateData, deps.replaySavedPricingKnobs, deps.storedEstimateRow);
   // The replay exemption of the lawn pricer's v13 bahia review is server-declared (the replay branch
   // below): a browser-posted copy of either field is never honored.
   delete v1Input.savedEstimateReplay;
@@ -1495,7 +1495,7 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null, storedEstimateRow }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1514,7 +1514,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
 
   let result;
   try {
-    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord, storedEstimateData });
+    result = await recomputeFn(estimateData, { now, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, fleaRecord, storedEstimateData, storedEstimateRow });
   } catch (error) {
     // Fail-open is for BROKEN engines only. A failClosed policy rejection
     // (gated/invalid add-on in the replay) must block the save outright —
@@ -2277,11 +2277,11 @@ function stripYear1PrepayStamp(estimateData) {
   }
 }
 
-function applyStoredYear1PrepaySignal(v1Input, storedEstimateData, replaySavedPricingKnobs = false) {
+function applyStoredYear1PrepaySignal(v1Input, storedEstimateData, replaySavedPricingKnobs = false, storedEstimateRow = null) {
   if (!v1Input || typeof v1Input !== 'object' || !storedEstimateData) return;
   v1Input.year1PrepayNoPercent = require('./estimate-converter').estimateHasNoYear1PrepayPercent(storedEstimateData);
   if (replaySavedPricingKnobs !== true) {
-    require('./estimate-tree-shrub-knob-replay').applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData);
+    require('./estimate-tree-shrub-knob-replay').applyUnchangedRevisionPricingKnobs(v1Input, storedEstimateData, storedEstimateRow);
   }
 }
 
@@ -2662,6 +2662,7 @@ async function resolveEstimateWritePayload({
     // Revise only: the stored estimate. A save the server cannot price keeps its rule stamps (pest above 5,500 sq ft, the specialty
     // prices), and is read at its size (pest above 5,500 sq ft).
     storedEstimateData,
+    storedEstimateRow,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   // The rule's answer, stored as the operator waiver every setup-fee reader honors, with its evidence.
