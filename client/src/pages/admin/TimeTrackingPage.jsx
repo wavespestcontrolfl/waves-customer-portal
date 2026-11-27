@@ -3201,6 +3201,9 @@ function GoogleSigninField({ enabled, tech, value, onChange }) {
   );
 }
 
+// The supply store goes in the save only when the admin changed it (absent = unchanged on the server).
+const supplyStorePatch = (value, loaded) => ((value ?? "") === (loaded ?? "") ? {} : { supplyStore: value });
+
 export function TeamTab({ showToast }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -3354,7 +3357,6 @@ export function TeamTab({ showToast }) {
     try {
       if (editingId) {
         const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
-        const storeChanged = (supplyStore ?? "") !== (storeLoaded ?? "");
         const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
@@ -3363,7 +3365,7 @@ export function TeamTab({ showToast }) {
             ...buildWorkDaysPayload(workDaysEnabled, workDays),
             ...(shiftChanged ? buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd) : {}),
             startPoint: buildStartPointPayload(form),
-            ...(storeChanged ? { supplyStore } : {}),
+            ...supplyStorePatch(supplyStore, storeLoaded),
           }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or

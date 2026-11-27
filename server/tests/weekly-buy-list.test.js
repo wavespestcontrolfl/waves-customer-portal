@@ -425,6 +425,8 @@ describe('stock, packs and cost', () => {
       expect(countPack({ shipping_estimate: '10' }).packCents).toBe(6000);
       expect(countPack({ landed_unit_price: '2.4', unit_normalized: 'lot', source_type: 'price_report' }).packCents).toBeNull();
       expect(countPack({}).packCents).toBe(5000);
+      // free delivery: a landed per-item price equal to the sticker per-item price (50 / 25) is a valid quote, not an unknown
+      expect(countPack({ landed_unit_price: '2', unit_normalized: 'each', source_type: 'price_report' }).packCents).toBe(5000);
     });
   });
 
@@ -505,6 +507,31 @@ describe('spare floor (one container\'s worth of the everyday liquids, as a volu
     expect(noteOf(256, { onHand: 0 }).items[0].packs).toBe(3); // two packs leave none: one more
     expect(noteOf(200, { onHand: 0 }).items[0]).toMatchObject({ packs: 3, reasons: ['pest_mix', 'spare_floor'] }); // 2 packs leave 56: one more
     expect(noteOf(100, { onHand: 0 }).items[0]).toMatchObject({ packs: 2, reasons: ['pest_mix', 'spare_floor'] }); // 1 pack leaves 28: one more
+  });
+
+  describe('two technicians on different pack sizes (a branch row can carry another size)', () => {
+    const NOW = new Date('2026-12-09T12:00:00Z');
+    const rowOf = (branch, quantity) => ({ product_id: 'p1', vendor_id: 'v1', vendor_name: 'SiteOne', branch_name: branch, quantity, is_best_price: branch === 'North', price: '90', price_amount: '90', shipping_cost: '0' });
+    const product = () => ({ ...toPlanProduct({ row: { id: 'p1', name: 'Synthetic Liquid', inventory_unit: 'fl_oz', inventory_on_hand: '0' }, now: NOW, floorKey: 'crosscheck_plus', pricing: [rowOf('North', '1 gal'), rowOf('South', '2.5 gal')] }), id: 'p1' });
+    const stores = new Map([['a', { name: 'Alex Sample', supplyStore: 'North' }], ['b', { name: 'Blake Sample', supplyStore: 'South' }]]);
+    const lists = (aNeed, bNeed) => run(new Map([
+      ['a', group([['p1', demand(aNeed, 'fl_oz', ['pest_mix'])]], { firstAt: '2026-12-07' })],
+      ['b', group([['p1', demand(bNeed, 'fl_oz', ['pest_mix'])]], { firstAt: '2026-12-08' })],
+    ]), [product()], stores);
+
+    test('each line\'s packs are summed in its own pack size: a 1 gal pack and a 2.5 gal pack leave exactly one pack of the first, so no spare', () => {
+      const out = lists(10, 310); // 128 + 320 bought, 320 needed: 128 left = one 1 gal pack
+      expect(out.get('a').items[0]).toMatchObject({ packs: 1, packLabel: '1 gal', reasons: ['pest_mix'] });
+      expect(out.get('b').items[0]).toMatchObject({ packs: 1, packLabel: '2.5 gal', reasons: ['pest_mix'] });
+    });
+
+    test('under one pack of the spare-taker\'s size left: it buys one more pack of ITS size', () => {
+      const out = lists(130, 300); // 256 + 320 bought, 430 needed: 146 left, over one 1 gal pack (128)
+      expect(out.get('a').items[0].reasons).toEqual(['pest_mix']);
+      const short = lists(200, 300); // 256 + 320 bought, 500 needed: 76 left, under 128
+      expect(short.get('a').items[0]).toMatchObject({ packs: 3, packLabel: '1 gal', reasons: ['pest_mix', 'spare_floor'] });
+      expect(short.get('b').items[0]).toMatchObject({ packs: 1, packLabel: '2.5 gal' });
+    });
   });
 
   test('never for the surfactant or a lawn product', () => {

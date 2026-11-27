@@ -43,7 +43,7 @@
 const db = require('../../models/db');
 const { etParts, etWeekStart, etDateString, addETDays } = require('../../utils/datetime-et');
 const { dateOnlyString } = require('../../utils/date-only');
-const { calcLandedCost } = require('../product-costing');
+const { calcLandedCost, parsePackCount } = require('../product-costing');
 const { convertInventoryQuantity, normalizeInventoryUnit } = require('../inventory-units');
 const { eligibleVendorPricing } = require('../vendor-pricing-eligibility');
 const { packFor, packReorder, pickPriceRow } = require('./reorder-limit-suggestions');
@@ -246,7 +246,10 @@ function packCostCents(row, price) {
   // pack is the row's count of items; the delivered pack cost is the delivered per-item figure times that count.
   const scored = scoreVendorRows([{ ...row, price_amount: price }], oz > 0 ? {} : { container_size: row.quantity }).ranked[0];
   const carriesDelivery = ['landed_unit_price', 'shipping_estimate', 'hazmat_fee_estimate', 'rebate_estimate'].some((c) => row[c] != null);
-  const delivered = oz > 0 ? scored.deliveredPerOz * oz : (scored.shipping != null || scored.rankPerUnit !== scored.perUnit) && scored.rankPerUnit * (price / scored.perUnit);
+  // A count row is resolved when a shipping rule or estimate was added, or it states a landed price per item (valid when its unit
+  // is a count unit; equal to the sticker is valid: free delivery). Otherwise the per-item figure is only the sticker.
+  const landedPerItem = Number(row.landed_unit_price) > 0 && parsePackCount(`1 ${row.unit_normalized || ''}`) != null;
+  const delivered = oz > 0 ? scored.deliveredPerOz * oz : (scored.shipping != null || landedPerItem) && scored.rankPerUnit * (price / scored.perUnit);
   if (delivered > 0) return { cents: Math.round(delivered * 100), plusShipping: false };
   return { cents: carriesDelivery ? null : Math.round(price * 100), plusShipping: false };
 }
@@ -309,19 +312,22 @@ function applySpareFloor({ order, lines, groups }) {
   }
   for (const entries of byProduct.values()) {
     const { product } = entries[0];
-    const size = product.pack?.pack;
     if (product.hold || product.countOrder) continue;
-    if (!(size > 0)) {
+    // Each line's packs are in ITS OWN pack size (a branch row can carry another size); the spare is one pack of the
+    // technician who gets it.
+    const sizeOf = (l) => l.product.pack?.pack;
+    const unsized = entries.filter((l) => !(sizeOf(l) > 0));
+    if (unsized.length) {
       for (const l of entries) groups.get(l.key).extra.add(`No pack size on file for ${product.name}, so the spare cannot be worked out.`);
       continue;
     }
-    const bought = entries.reduce((sum, l) => sum + (l.packs || 0) * size, 0);
+    const bought = entries.reduce((sum, l) => sum + (l.packs || 0) * sizeOf(l), 0);
     const need = entries.reduce((sum, l) => sum + l.need, 0);
     const remaining = Math.max(0, product.onHand ?? 0) + product.onOrder + bought - need;
-    if (exact(remaining / size) >= 1 - NOISE) continue;
     const first = entries[0];
+    if (exact(remaining / sizeOf(first)) >= 1 - NOISE) continue;
     first.packs = (first.packs || 0) + 1;
-    first.label = product.packLabel || null;
+    first.label = first.product.packLabel || null;
     first.reasons = [...first.reasons, 'spare_floor'];
   }
 }
