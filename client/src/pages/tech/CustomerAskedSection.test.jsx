@@ -56,6 +56,19 @@ describe('CustomerAskedSection', () => {
     expect(screen.getByText('Mow after noon')).toBeInTheDocument();
   });
 
+  it('keeps a reschedule note with its service on a grouped stop, and labels an account-wide message', () => {
+    const note = { kind: 'portal_request', at: '2026-11-24T10:00:00.000Z', text: 'Please move this to Friday', source: 'portal', appointment: true };
+    const words = { kind: 'reservice_words', at: '2026-11-22T14:00:00.000Z', text: 'Roaches at the rental', source: 'text', accountWide: true };
+    const memberBits = [
+      { service: { id: 'a', serviceType: 'Pest Control' }, facts: { customer_asked: { items: [note, words] } } },
+      { service: { id: 'b', serviceType: 'Lawn Care' }, facts: { customer_asked: { items: [{ ...note, text: 'Skip the edging' }, words] } } },
+    ];
+    render(<CustomerAskedSection memberBits={memberBits} />);
+    expect(screen.getAllByText('Portal request · Pest Control · Nov 24')).toHaveLength(1);
+    expect(screen.getAllByText('Portal request · Lawn Care · Nov 24')).toHaveLength(1);
+    expect(screen.getAllByText("Customer's words · Nov 22 · may be about another home")).toHaveLength(1);
+  });
+
   it('names no service on a single-service stop', () => {
     render(<CustomerAskedSection memberBits={[{ service: { id: 'a', serviceType: 'Pest Control' }, facts: { customer_asked: { items: [ITEMS[3]] } } }]} />);
     expect(screen.getByText('Booking note · Nov 20')).toBeInTheDocument();

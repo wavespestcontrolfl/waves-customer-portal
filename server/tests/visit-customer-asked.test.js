@@ -35,18 +35,21 @@ const SVC = {
 };
 
 // A stub dbh: service_requests resolves to `rows`, self_booked_appointments to `booking`; `fail` makes every read throw.
-function fakeDbh({ rows = [], booking, fail = false } = {}) {
+function fakeDbh({ rows = [], booking, props = [], fail = false } = {}) {
   const calls = [];
   const dbh = (table) => {
     calls.push(['table', table]);
     const q = {};
-    for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'limit']) q[m] = (...args) => { calls.push([table, m, ...args]); return q; };
+    for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit']) {
+      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; return q; };
+    }
     q.select = async () => {
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
-      return rows;
+      return table === 'customer_properties' ? props : rows;
     };
     q.first = async () => {
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
+      if (table === 'customer_properties') return props.find((p) => p.id === q.id) || undefined;
       return table === 'self_booked_appointments' ? booking : undefined;
     };
     return q;
@@ -55,6 +58,8 @@ function fakeDbh({ rows = [], booking, fail = false } = {}) {
   return dbh;
 }
 
+const HOME = { id: 'prop-1', is_primary: true, address_line1: '100 Example Ave', address_line2: null, city: 'Bradenton', zip: '34205' };
+const RENTAL = { id: 'prop-2', is_primary: false, address_line1: '200 Sample St', address_line2: null, city: 'Parrish', zip: '34219' };
 const asks = (items) => ({ ok: true, lane: 'pest', window: {}, items });
 const askItem = (over) => ({ id: 'text:1', source: 'text', at: '2026-11-22T14:00:00.000Z', text: 'Ants are back in the kitchen.', quoted: true, pests: ['Ants'], ...over });
 const formRow = (over) => ({ subject: 'Pest issue', description: 'Ants in room 3', source: null, created_at: '2026-11-23T10:00:00.000Z', ...over });
@@ -136,51 +141,78 @@ describe('customerAskedFacts: booking note', () => {
 });
 
 describe('customerAskedFacts: portal requests', () => {
-  const sqlOf = (svc, single) => _test.portalRowsQuery(knexLib({ client: 'pg' }), svc, single).toSQL();
+  const pg = () => knexLib({ client: 'pg' });
+  const sqlOf = (svc, propertyIds) => _test.portalRowsQuery(pg(), svc, propertyIds).toSQL();
 
   test('the filters run in SQL before the row limit: open, own customer, categories, writer, no pricing column', () => {
-    const { sql, bindings } = sqlOf({ ...SVC, property_id: 'prop-1' }, false);
+    const { sql, bindings } = sqlOf(SVC, ['prop-1']);
     expect(sql).toMatch(/"customer_id" = \?/);
     expect(sql).toMatch(/"status" is null or "status" not in \(\?, \?, \?\)/);
     expect(sql).toMatch(/"category" in \(\?, \?, \?, \?, \?, \?\)/);
     expect(sql).toMatch(/"source" in \(\?, \?, \?\) or \("source" is null and \(metadata->>'writer' = 'portal_form'/);
-    expect(sql).toMatch(/order by "created_at" desc limit \?/);
+    expect(sql).toMatch(/order by GREATEST\(created_at, COALESCE\(updated_at, created_at\)\) DESC limit \?/);
     expect(sql).toMatch(/select "subject", "description", "source", "created_at" from/);
     expect(sql).not.toMatch(/pricing_revision/);
     expect(bindings).toEqual(expect.arrayContaining(['cust-1', 'resolved', 'closed', 'cancelled', 'pest_issue']));
     expect(bindings).not.toContain('cancellation');
-    // The limit is the last clause: every filter above sits before it.
     expect(sql.indexOf('limit')).toBeGreaterThan(sql.lastIndexOf('where'));
   });
 
-  test('a multi-premises account: a stamped visit matches the property id the request carries', () => {
-    const { sql, bindings } = sqlOf({ ...SVC, property_id: 'prop-1' }, false);
-    expect(sql).toContain("metadata->>'propertyId' = ?");
-    expect(bindings).toContain('prop-1');
+  test('a multi-premises account matches the request property id to the visit premises ids', () => {
+    const { sql, bindings } = sqlOf(SVC, ['prop-1', 'prop-9']);
+    expect(sql).toContain("metadata->>'propertyId' IN (?, ?)");
+    expect(bindings).toEqual(expect.arrayContaining(['prop-1', 'prop-9']));
   });
 
-  test('a multi-premises account: an unstamped visit matches the primary property only', () => {
-    const { sql, bindings } = sqlOf(SVC, false);
-    expect(sql).toContain('customer_properties WHERE customer_id = ? AND is_primary = true AND active = true');
-    expect(bindings).toContain('cust-1');
+  test('premises that cannot be matched withhold the property-scoped rows', () => {
+    expect(sqlOf(SVC, []).sql).toContain('false');
   });
 
   test('a provably single-premises account has no property filter; a request naming no property shows', () => {
-    const { sql } = sqlOf(SVC, true);
-    expect(sql).not.toContain("metadata->>'propertyId' = ");
-  });
-
-  test('premises that cannot be proven are not single: the proof failing withholds by property', async () => {
-    mockSingle.mockRejectedValue(Object.assign(new Error('x'), { code: 'XX000' }));
-    const dbh = fakeDbh({ rows: [] });
-    await customerAskedFacts({ ...SVC, property_id: 'prop-1' }, dbh);
-    expect(dbh.calls.filter((c) => c[1] === 'whereRaw')).toEqual([]);
-    expect(logger.warn.mock.calls.map((c) => c[0]).join('\n')).toContain('XX000');
+    const { sql } = sqlOf(SVC, null);
+    expect(sql).not.toContain("metadata->>'propertyId' IN");
+    expect(sql).not.toMatch(/and false/);
   });
 
   test('only a null-source row the portal form wrote shows its description; the cancel flow row is excluded in SQL', () => {
-    const { sql } = sqlOf(SVC, true);
+    const { sql } = sqlOf(SVC, null);
     expect(sql).toContain("metadata->>'writer' = 'portal_form' OR metadata->>'propertyId' IS NOT NULL OR metadata->'photoIdSource' IS NOT NULL");
+  });
+
+  test('a reschedule request is matched on the anchored appointment header, not anywhere in the description', () => {
+    const { sql, bindings } = sqlOf(SVC, null);
+    expect(sql).toContain("left(COALESCE(description, ''), ?) = ?");
+    expect(sql).not.toContain('strpos');
+    expect(bindings).toEqual(expect.arrayContaining(['Appointment svc-1: '.length, 'Appointment svc-1: ', 'customer_portal_reschedule']));
+  });
+
+  describe('which properties the visit is on (not single premises)', () => {
+    beforeEach(() => mockSingle.mockResolvedValue(false));
+
+    test('a visit with no stamp, property or estimate is on the primary property', async () => {
+      expect(await _test.visitPropertyIds(SVC, fakeDbh({ props: [HOME, RENTAL] }))).toEqual(['prop-1']);
+    });
+
+    test('a stamped service address resolves to the property it matches, even with no property_id', async () => {
+      const svc = { ...SVC, service_address_line1: '200 Sample St', service_address_city: 'Parrish', service_address_zip: '34219' };
+      expect(await _test.visitPropertyIds(svc, fakeDbh({ props: [HOME, RENTAL] }))).toEqual(['prop-2']);
+    });
+
+    test("a visit's property_id resolves through that property's current address", async () => {
+      expect(await _test.visitPropertyIds({ ...SVC, property_id: 'prop-2' }, fakeDbh({ props: [HOME, { ...RENTAL, id: 'prop-2' }] }))).toEqual(['prop-2']);
+    });
+
+    test('a stamp that matches no property, or an unreadable read, withholds', async () => {
+      const stray = { ...SVC, service_address_line1: '300 Nowhere Rd', service_address_city: 'Sarasota', service_address_zip: '34236' };
+      expect(await _test.visitPropertyIds(stray, fakeDbh({ props: [HOME, RENTAL] }))).toEqual([]);
+      expect(await _test.visitPropertyIds(SVC, fakeDbh({ fail: true }))).toEqual([]);
+    });
+  });
+
+  test('a premises proof that fails is not single: the request is withheld by property', async () => {
+    mockSingle.mockRejectedValue(Object.assign(new Error('x'), { code: 'XX000' }));
+    await customerAskedFacts({ ...SVC, property_id: 'prop-1' }, fakeDbh({ rows: [], props: [HOME] }));
+    expect(logger.warn.mock.calls.map((c) => c[0]).join('\n')).toContain('XX000');
   });
 
   test('a card or chat row shows only its service, never its description', async () => {
@@ -190,22 +222,39 @@ describe('customerAskedFacts: portal requests', () => {
     expect(JSON.stringify(facts)).not.toMatch(/149/);
   });
 
-  test('a reschedule request for this appointment is read by its appointment id and shows only the typed note', async () => {
-    const description = 'Appointment svc-1: Pest Control on 2026-12-01\nPreferred date: 2026-12-03\nCustomer notes: Out of town that week.\nCustomer updated 2026-11-25:\nPreferred date: 2026-12-10\nCustomer notes: Back on the 9th, any time after.';
-    const rows = [formRow({ subject: 'Reschedule request: Pest Control', description, source: 'customer_portal_reschedule' })];
-    const dbh = fakeDbh({ rows });
-    const facts = await customerAskedFacts(SVC, dbh);
-    expect(facts.items).toEqual([{ kind: 'portal_request', at: '2026-11-23T10:00:00.000Z', text: 'Back on the 9th, any time after.', source: 'portal' }]);
-    const { sql, bindings } = _test.portalRowsQuery(knexLib({ client: 'pg' }), SVC, false).toSQL();
-    expect(sql).toContain("strpos(COALESCE(description, ''), ?) > 0");
-    expect(bindings).toContain('Appointment svc-1:');
-    expect(bindings).toContain('customer_portal_reschedule');
-    expect(JSON.stringify(facts)).not.toMatch(/Preferred|2026-12/);
-  });
+  describe('reschedule notes', () => {
+    const header = 'Appointment svc-1: Pest Control on 2026-12-01\nPreferred date: 2026-12-03\nCustomer notes: Out of town that week.';
+    const update = '\nCustomer updated 2026-11-25:\nPreferred date: 2026-12-10\nCustomer notes: Back on the 9th, any time after.';
 
-  test('a reschedule request with no typed note shows nothing', async () => {
-    const rows = [formRow({ description: 'Appointment svc-1: Pest Control on 2026-12-01\nPreferred date: 2026-12-03', source: 'customer_portal_reschedule' })];
-    expect(await customerAskedFacts(SVC, fakeDbh({ rows }))).toBeNull();
+    test('the newest note shows, dated by the update that supplied it, marked as this appointment\'s', async () => {
+      const rows = [formRow({ subject: 'Reschedule request: Pest Control', description: header + update, source: 'customer_portal_reschedule', created_at: '2026-11-20T10:00:00.000Z' })];
+      const facts = await customerAskedFacts(SVC, fakeDbh({ rows }));
+      expect(facts.items).toEqual([{ kind: 'portal_request', at: '2026-11-25T17:00:00.000Z', text: 'Back on the 9th, any time after.', source: 'portal', appointment: true }]);
+      expect(JSON.stringify(facts)).not.toMatch(/Preferred|2026-12/);
+    });
+
+    test('the first block is dated by the row; an update with no note falls back to the earlier note', () => {
+      expect(_test.rescheduleNote(header, '2026-11-20T10:00:00.000Z')).toEqual({ note: 'Out of town that week.', at: '2026-11-20T10:00:00.000Z' });
+      const quiet = `${header}\nCustomer updated 2026-11-25:\nPreferred date: 2026-12-10`;
+      expect(_test.rescheduleNote(quiet, '2026-11-20T10:00:00.000Z').note).toBe('Out of town that week.');
+    });
+
+    test('a reschedule request with no typed note shows nothing', async () => {
+      const rows = [formRow({ description: 'Appointment svc-1: Pest Control on 2026-12-01\nPreferred date: 2026-12-03', source: 'customer_portal_reschedule' })];
+      expect(await customerAskedFacts(SVC, fakeDbh({ rows }))).toBeNull();
+    });
+  });
+});
+
+describe('customerAskedFacts: account-wide re-service messages', () => {
+  test('the account-wide flag is kept, on the texts that carry it only', async () => {
+    mockGather.mockResolvedValue(asks([
+      askItem({ id: 'text:1', text: 'Roaches at the rental.', accountWide: true }),
+      askItem({ id: 'booking:svc-1', source: 'request_form', text: 'Ants in the kitchen.' }),
+    ]));
+    const facts = await customerAskedFacts(SVC, fakeDbh());
+    expect(facts.items.find((i) => i.kind === 'reservice_words').accountWide).toBe(true);
+    expect(facts.items.find((i) => i.kind === 'reservice_reason').accountWide).toBeUndefined();
   });
 });
 

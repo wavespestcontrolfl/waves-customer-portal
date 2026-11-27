@@ -31,8 +31,10 @@ function askedDate(iso) {
   return Number.isNaN(d.getTime()) ? '' : formatETDateTime(d, { month: 'short', day: 'numeric' });
 }
 
-// Return reasons and booking notes belong to one service; everything else is the customer's, the same on every member.
+// Return reasons, booking notes and a reschedule note (`appointment`) belong to one service; everything else is the
+// customer's, the same on every member.
 const OWN_KINDS = new Set(['reservice_reason', 'booking_note']);
+const belongsToService = (item) => OWN_KINDS.has(item.kind) || item.appointment === true;
 
 // Every member's list, merged: shared items once (by kind, date and text), each member's own reason or note kept with its
 // service (named only on a grouped stop). Newest first.
@@ -45,7 +47,7 @@ function mergedItems(memberBits) {
     if (!Array.isArray(list)) continue;
     const own = grouped ? (m.service?.serviceType || m.service?.service_type || null) : null;
     for (const item of list) {
-      const mine = OWN_KINDS.has(item.kind);
+      const mine = belongsToService(item);
       const key = [item.kind, item.at, item.text, mine ? m.service?.id : ''].join('|');
       if (seen.has(key)) continue;
       seen.add(key);
@@ -57,7 +59,13 @@ function mergedItems(memberBits) {
 
 function labelLine(item) {
   const pests = Array.isArray(item.pests) ? item.pests.filter(Boolean) : [];
-  return [KIND_LABELS[item.kind] || 'Customer asked', item.serviceLabel, askedDate(item.at), pests.join(', ')].filter(Boolean).join(' · ');
+  return [
+    KIND_LABELS[item.kind] || 'Customer asked',
+    item.serviceLabel,
+    askedDate(item.at),
+    pests.join(', '),
+    item.accountWide ? 'may be about another home' : '',
+  ].filter(Boolean).join(' · ');
 }
 
 export default function CustomerAskedSection({ memberBits }) {
