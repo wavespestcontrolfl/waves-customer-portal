@@ -54,28 +54,39 @@ it('inside Waves Admin, points to iPhone Settings instead of the browser push sw
   }
 });
 
-it('hides retired denylisted triggers, labels all categories, and reverts optimistic toggles on save failure without window.alert', async () => {
+it('renders server-filtered triggers, labels all categories, locks switches during save, and reloads server state on failed PUT without window.alert', async () => {
   const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
   const initial = {
     preferences: [
       { key: 'sms_reply', label: 'Customer text', group: 'Customer', push_enabled: true, bell_enabled: true, sound_enabled: true },
-      { key: 'repeat_caller', label: 'Repeat caller', group: 'Customer', push_enabled: true, bell_enabled: true, sound_enabled: true },
-      { key: 'dashboard_alert', label: 'Dashboard alert', group: 'Alerts', push_enabled: true, bell_enabled: true, sound_enabled: true },
+      { key: 'payment_refunded', label: 'Payment refunded', group: 'Billing', push_enabled: true, bell_enabled: true, sound_enabled: true },
     ],
     bellCategories: [
       { key: 'category:customer_landline_from_call', category: 'customer_landline_from_call', bell_enabled: true },
       { key: 'category:typed_decisions', category: 'typed_decisions', bell_enabled: true },
     ],
   };
-  global.fetch = vi.fn(async (_url, options) => {
-    if (options?.method === 'PUT') return { ok: false, status: 500 };
-    return { ok: true, json: async () => initial };
+  const reloadedAfterPartial = {
+    preferences: [
+      { key: 'sms_reply', label: 'Customer text', group: 'Customer', push_enabled: false, bell_enabled: true, sound_enabled: true },
+      { key: 'payment_refunded', label: 'Payment refunded', group: 'Billing', push_enabled: true, bell_enabled: true, sound_enabled: true },
+    ],
+    bellCategories: initial.bellCategories,
+  };
+  let getCount = 0;
+  let resolvePut;
+  global.fetch = vi.fn((_url, options) => {
+    if (options?.method === 'PUT') {
+      return new Promise((resolve) => { resolvePut = resolve; });
+    }
+    getCount += 1;
+    const payload = getCount === 1 ? initial : reloadedAfterPartial;
+    return Promise.resolve({ ok: true, json: async () => payload });
   });
 
   render(<PushSettingsV2 />);
   expect(await screen.findByText('Customer text')).toBeInTheDocument();
-  expect(screen.queryByText('Repeat caller')).toBeNull();
-  expect(screen.queryByText('Dashboard alert')).toBeNull();
+  expect(screen.getByText('Payment refunded')).toBeInTheDocument();
   expect(screen.getByText('Landline numbers from calls')).toBeInTheDocument();
   expect(screen.getByText('AI decision review list')).toBeInTheDocument();
 
@@ -84,8 +95,22 @@ it('hides retired denylisted triggers, labels all categories, and reverts optimi
   fireEvent.click(switches[0]);
   expect(switches[0]).toHaveAttribute('aria-checked', 'false');
 
+  // Start saving: all switches must lock until PUT + recovery complete.
   fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-  expect(await screen.findByRole('alert')).toHaveTextContent(/Couldn't save notification preferences/);
-  expect(switches[0]).toHaveAttribute('aria-checked', 'true');
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled());
+  for (const sw of screen.getAllByRole('switch')) {
+    expect(sw).toBeDisabled();
+  }
+  fireEvent.click(switches[1]);
+  expect(switches[1]).toHaveAttribute('aria-checked', 'true');
+
+  // Fail PUT: component reloads authoritative preferences from the server.
+  resolvePut({ ok: false, status: 500 });
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Reloaded saved settings from the server/);
+  expect(getCount).toBe(2);
+  // Reflects the server's reloaded state (first switch stayed persisted false, second stayed true).
+  expect(screen.getAllByRole('switch')[0]).toHaveAttribute('aria-checked', 'false');
+  expect(screen.getAllByRole('switch')[1]).toHaveAttribute('aria-checked', 'true');
+  expect(screen.getAllByRole('switch')[0]).not.toBeDisabled();
   expect(alertSpy).not.toHaveBeenCalled();
 });

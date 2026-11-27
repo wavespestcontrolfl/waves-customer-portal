@@ -11,6 +11,10 @@ jest.mock('../services/notification-bell-policy', () => ({
   OVERRIDABLE_CATEGORY_SET: new Set(['alert', 'estimate_change_request']),
   DEFAULT_ON_CATEGORIES: new Set(['estimate_change_request']),
   clearOverrideCache: jest.fn(),
+  isBellPolicyEnabled: jest.fn(() => false),
+  _private: {
+    TRIGGER_BELL_DENYLIST: new Set(['payment_succeeded', 'payment_refunded', 'dashboard_alert', 'internal_admin_alert', 'repeat_caller']),
+  },
 }));
 jest.mock('../services/push-notifications', () => ({
   status: jest.fn(() => ({ available: false, configured: false })),
@@ -69,6 +73,32 @@ describe('GET /preferences', () => {
     const prefs = res.json.mock.calls[0][0].preferences;
     expect(prefs.find((p) => p.key === 'new_lead')).toMatchObject({ push_enabled: true, bell_enabled: true, sound_enabled: true });
     expect(prefs.find((p) => p.key === 'job_complete')).toMatchObject({ push_enabled: false, bell_enabled: false, sound_enabled: false });
+  });
+
+  test('hides bell-policy denylisted triggers only when GATE_ADMIN_BELL_POLICY is enabled', async () => {
+    const { listTriggers } = require('../services/notification-triggers');
+    const bellPolicy = require('../services/notification-bell-policy');
+    const triggers = [
+      { key: 'new_lead', label: 'New lead' },
+      { key: 'payment_refunded', label: 'Payment refunded' },
+      { key: 'repeat_caller', label: 'Repeat caller' },
+    ];
+
+    // Policy OFF: denylisted triggers remain active and visible.
+    listTriggers.mockReturnValueOnce(triggers);
+    bellPolicy.isBellPolicyEnabled.mockReturnValueOnce(false);
+    const off = await invokePreferences({ rows: [] });
+    expect(off.res.json.mock.calls[0][0].preferences.map((p) => p.key)).toEqual([
+      'new_lead',
+      'payment_refunded',
+      'repeat_caller',
+    ]);
+
+    // Policy ON: denylisted retired triggers are hidden.
+    listTriggers.mockReturnValueOnce(triggers);
+    bellPolicy.isBellPolicyEnabled.mockReturnValueOnce(true);
+    const on = await invokePreferences({ rows: [] });
+    expect(on.res.json.mock.calls[0][0].preferences.map((p) => p.key)).toEqual(['new_lead']);
   });
 
   test('returns defaults when the query succeeds with genuinely no saved rows', async () => {

@@ -18,7 +18,7 @@ const db = require('../models/db');
 const { listTriggers, TRIGGER_REGISTRY } = require('../services/notification-triggers');
 const {
   OVERRIDABLE_CATEGORY_SET, DEFAULT_ON_CATEGORIES,
-  clearOverrideCache,
+  clearOverrideCache, isBellPolicyEnabled, _private: bellPolicyPrivate,
 } = require('../services/notification-bell-policy');
 const PushService = require('../services/push-notifications');
 const { STAFF_APP_BUNDLE_ID } = require('../services/apns');
@@ -288,7 +288,11 @@ const techMayMute = (key) => TRIGGER_REGISTRY?.[key]?.techVisible === true;
 router.get('/preferences', async (req, res, next) => {
   try {
     const adminUserId = req.technicianId;
-    const triggers = req.techRole === 'admin' ? listTriggers() : listTriggers().filter((t) => techMayMute(t.key));
+    const denylisted = typeof isBellPolicyEnabled === 'function' && isBellPolicyEnabled()
+      ? (bellPolicyPrivate?.TRIGGER_BELL_DENYLIST || new Set())
+      : new Set();
+    const visibleTriggers = listTriggers().filter((t) => !denylisted.has(t.key));
+    const triggers = req.techRole === 'admin' ? visibleTriggers : visibleTriggers.filter((t) => techMayMute(t.key));
 
     const rows = await db('notification_preferences').where({ admin_user_id: adminUserId });
 
