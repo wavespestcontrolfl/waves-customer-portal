@@ -601,7 +601,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'a'.repeat(48)}` });
         await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
         const [row] = await otherRows();
-        expect(row).toMatchObject({ id: copy.id, source: 'call_caller_provided', reminder_contact_id: null, track_token: `vr_${'a'.repeat(48)}` });
+        expect(row).toMatchObject({ id: copy.id, source: 'call_caller_provided', reminder_contact_id: null, track_token: null });
         await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
       });
@@ -627,13 +627,26 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'c'.repeat(48)}`, deliveries: { [`confirmation:${OTHER_DATE}T09:00`]: 'sent' } });
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
-        const fresh = await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
-        expect(fresh.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
+        // an unspecified scope: the call takes the copy over for this visit, and lists nobody (it created no row)
+        const fresh = await record({ scheduledServiceId: otherVisitId });
+        expect(fresh.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
+        expect(await listed()).toHaveLength(0);
         const [row] = await otherRows();
         // taken over in place: same id and claims (nothing sent twice), no old link, no longer a copy
         expect(row).toMatchObject({ id: copy.id, source: 'call_caller_provided', track_token: null, reminder_contact_id: null });
         expect(row.deliveries).toEqual({ [`confirmation:${OTHER_DATE}T09:00`]: 'sent' });
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+      });
+
+      test('a recheck built under one list entry fails once the copy is rebound to another', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        const [contact] = await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation');
+        const meta = { scheduled_service_id: otherVisitId, kind: 'confirmation', visit_recipient_id: contact.visitRecipientId, claim_key: contact.claimKey, recipient_customer_id: customerId, reminder_contact_id: contact.reminderContactId };
+        expect(await VisitRecipient.recipientStillOwed(meta)).toEqual({ ok: true });
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await db('customer_reminder_contacts').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x' });
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        expect(await VisitRecipient.recipientStillOwed(meta)).toMatchObject({ ok: false, code: 'VISIT_RECIPIENT_NOT_OWED' });
       });
 
       test('a customer merge never moves the list: the loser\'s entries stay on the loser', async () => {

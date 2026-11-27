@@ -194,15 +194,14 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
       if (sameCustomer && existing.source === REMINDER_SOURCE) {
         // A list copy on this visit becomes this call's own grant for the visit, IN PLACE: same customer, so its delivery
-        // claims stay (nothing is sent twice), and the visit keeps the person even if the list entry later goes. A copy whose
-        // entry is already gone (it stayed on another account in a merge) also loses its tracker token, so an old link never
-        // comes back.
-        const live = await copyLive(existing, visit.customer_id, trx);
+        // claims stay (nothing is sent twice), and the visit keeps the person even if the list entry later goes. Its tracker
+        // token is always cleared (the next en-route text mints a new one), so no old link survives the change of grant, and a
+        // text queued under the copy (it carries the copy's entry id) drops. Not a created row: the list is not touched.
         await trx(TABLE).where({ id: existing.id }).update({
-          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null,
+          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null, track_token: null,
           first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,
-          ...(live ? {} : { track_token: null }),
         });
+        return 'kept';
       } else {
         if (sameCustomer) return 'kept';
         if (existing) await trx(TABLE).where({ id: existing.id }).del();
@@ -400,6 +399,9 @@ async function ownedContact(row, visit, kind, conn, taken) {
     visitRecipientId: row.id,
     // The customer this row was recorded for, carried in every send's recheck and replay: a row with another binding is another row.
     recipientCustomerId: row.customer_id,
+    // The list entry a copy was made from (null for a call's own grant), carried in every recheck and replay: a text built
+    // under one grant never goes out under another.
+    reminderContactId: row.reminder_contact_id || null,
     claimKey: `${kind}:${scheduledDate || ''}T${windowStart || ''}`,
     visit: { id: visit.id, customerId: visit.customer_id, serviceType: visit.service_type, scheduledDate, windowStart },
   };
@@ -516,6 +518,7 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
       ...(recheckMeta.arrival_start ? { arrival_start: recheckMeta.arrival_start } : {}),
       ...(recheckMeta.recipient_hint ? { recipient_hint: recheckMeta.recipient_hint } : {}),
       ...(recheckMeta.recipient_customer_id ? { recipient_customer_id: recheckMeta.recipient_customer_id } : {}),
+      reminder_contact_id: recheckMeta.reminder_contact_id || null,
       replay_purpose: KINDS[kind].purpose,
       slot_scheduled_date: contact.visit.scheduledDate,
       ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
@@ -695,7 +698,7 @@ async function visitForTrackToken(token, { conn = db } = {}) {
 }
 
 async function resolveTrackToken(token, conn) {
-  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'customer_id');
+  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'customer_id', 'reminder_contact_id');
   if (!row) return null;
   // The cheap check FIRST: the short lifetime (en route within 3 h of en_route_at, on site within 4 h of arrived_at, or up to two
   // hours after completion; never scheduled,
@@ -708,7 +711,7 @@ async function resolveTrackToken(token, conn) {
     if (!visit || !rowBelongsToVisitCustomer(row, visit) || !recipientLinkEligible(visit)) return null;
     // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
     // provider handoff, read fresh on every request.
-    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id, recipient_customer_id: row.customer_id }, { conn, anyVisitStatus: true });
+    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id, recipient_customer_id: row.customer_id, reminder_contact_id: row.reminder_contact_id || null }, { conn, anyVisitStatus: true });
     if (!permission.ok) return null;
     // The final recheck: the visit as it stands now, after the permission reads.
     const again = await readLinkVisit(row.scheduled_service_id, conn);
@@ -772,6 +775,7 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
     // Who staff should check if this text cannot be confirmed at the handoff: the first name and the LAST 4 digits only.
     recipient_hint: recipientHint(contact),
     recipient_customer_id: contact.recipientCustomerId,
+    reminder_contact_id: contact.reminderContactId,
     ...(dayOnly ? { promise_level: 'day' } : {}),
     ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
   };
@@ -837,7 +841,8 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   // The row must be the one the send was built with: its id (found above) AND its customer binding. A caller with no recorded
   // customer is not owed. This also drops any text queued before the binding existed, deliberately and with no backfill:
   // GATE_CALL_GIVEN_VISIT_TEXTS has never been on in production, so no such queued row exists.
-  if (!meta.recipient_customer_id || String(mine.recipientCustomerId || '') !== String(meta.recipient_customer_id)) {
+  if (!meta.recipient_customer_id || String(mine.recipientCustomerId || '') !== String(meta.recipient_customer_id)
+    || String(mine.reminderContactId || '') !== String(meta.reminder_contact_id || '')) {
     return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
   }
   // The hold on the visit above is the HOLDER's number; the person's own number can be held by another call.
