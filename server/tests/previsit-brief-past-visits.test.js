@@ -11,8 +11,6 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 jest.mock('../services/llm/call', () => ({ dispatchWithFallback: jest.fn() }));
-const mockTechStopMemberIds = jest.fn();
-jest.mock('../services/visit-prep', () => ({ techStopMemberIds: (...a) => mockTechStopMemberIds(...a) }));
 
 const { deterministicVisitFacts } = require('../services/previsit-brief');
 
@@ -20,10 +18,10 @@ const SVC = { id: 'svc-now', customer_id: 'cust-1', service_type: 'Pest Control 
 
 const rec = (id, date, type, extra = {}) => ({
   id, customer_id: 'cust-1', service_type: type, service_line: null, service_date: date,
-  technician_notes: null, is_callback: false, service_key: null, scheduled_service_id: `sched-${id}`, ...extra,
+  technician_notes: null, is_callback: false, service_key: null, service_key_snapshot: null, scheduled_service_id: `sched-${id}`, ...extra,
 });
 
-// Newest first, mixed lines, so the cap, the stop exclusion and the date bound all matter.
+// Newest first, mixed lines, so the cap and the strictly-before rule matter.
 const ROWS = [
   // A visit dated AFTER the viewed stop (viewing an older stop): never "past".
   rec('r0', '2026-12-01', 'Pest Control Service'),
@@ -31,7 +29,8 @@ const ROWS = [
   rec('r8', '2026-11-26', 'Lawn Care Treatment', { scheduled_service_id: 'svc-sib' }),
   rec('r1', '2026-11-10', 'Lawn Care Treatment', { technician_notes: 'Edged the bed near the gate.' }),
   rec('r2', '2026-10-20', 'Pest Control Re-Service', { is_callback: true, technician_notes: 'Ants back at the lanai door.' }),
-  rec('r3', '2026-09-30', 'Pest Control Service', { scheduled_service_id: 'svc-now' }),
+  // The viewed visit's own record, dated the viewed day: never past.
+  rec('r3', '2026-11-26', 'Pest Control Service', { scheduled_service_id: 'svc-now' }),
   rec('r4', '2026-09-01', 'Mosquito Control'),
   rec('r5', '2026-08-01', 'Pest Control Service'),
   rec('r6', '2026-07-01', 'Lawn Care Treatment'),
@@ -46,20 +45,14 @@ const PRODUCTS = [
 ];
 
 // Chainable knex stub. The past-visits read is the 'service_records as sr' select: it applies the
-// "not this stop" where-callback, the date bound and the limit to ROWS.
-function fakeDbh({ throws = {} } = {}) {
+// strictly-before date bound and the limit to ROWS.
+function fakeDbh({ throws = {}, rows = ROWS } = {}) {
   return (table) => {
-    const state = { excludeIds: [], maxDay: null, limit: null };
+    const state = { beforeDay: null, limit: null };
     const q = {};
-    for (const m of ['whereIn', 'whereNotIn', 'orderBy', 'offset', 'leftJoin']) q[m] = () => q;
-    q.modify = (fn) => { fn(q); return q; };
+    for (const m of ['whereIn', 'whereNotIn', 'orderBy', 'offset', 'leftJoin', 'modify']) q[m] = () => q;
     q.where = (arg, op, val) => {
-      if (typeof arg === 'function') {
-        const r = { whereNull: () => r, orWhereNotIn: (col, ids) => { if (col === 'sr.scheduled_service_id') state.excludeIds = ids.map(String); return r; } };
-        arg.call(r);
-      } else if (arg === 'sr.service_date' && op === '<=') {
-        state.maxDay = val;
-      }
+      if (arg === 'sr.service_date' && op === '<') state.beforeDay = val;
       return q;
     };
     q.limit = (n) => { state.limit = n; return q; };
@@ -67,17 +60,15 @@ function fakeDbh({ throws = {} } = {}) {
       if (throws[table]) throw new Error(`${table} outage`);
       if (table === 'service_products as sp') return PRODUCTS;
       if (table !== 'service_records as sr') return [];
-      return ROWS
-        .filter((r) => !state.excludeIds.includes(String(r.scheduled_service_id)))
-        .filter((r) => !state.maxDay || r.service_date <= state.maxDay)
-        .slice(0, state.limit ?? ROWS.length);
+      // No bound given = every row: a test fails if the code ever drops the bound.
+      return rows
+        .filter((r) => !state.beforeDay || r.service_date < state.beforeDay)
+        .slice(0, state.limit ?? rows.length);
     };
     q.first = async () => undefined;
     return q;
   };
 }
-
-beforeEach(() => { mockTechStopMemberIds.mockReset().mockResolvedValue(['svc-now', 'svc-sib']); });
 
 describe('deterministicVisitFacts past_visits', () => {
   test('five newest completed visits across every line, current visit left out', async () => {
@@ -87,40 +78,37 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(facts.past_visits.map((v) => v.date)).not.toContain('2026-09-30');
   });
 
-  test('a grouped stop: a sibling member\'s just-completed record is not a past visit', async () => {
+  test('nothing from the viewed day is listed: the stop\'s own records and a sibling\'s just-completed one stay out', async () => {
     const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
     expect(visits.map((v) => v.date)).not.toContain('2026-11-26');
   });
 
-  test('stop lookup outage: the viewed visit itself is still left out, no throw', async () => {
-    mockTechStopMemberIds.mockRejectedValue(new Error('stop outage'));
-    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
-    expect(visits.map((v) => v.date)).not.toContain('2026-09-30');
-    // Without the stop lookup the sibling cannot be known: it shows (never a thrown facts read).
-    expect(visits).toHaveLength(5);
-  });
-
-  test('bounded by the viewed visit day: an older stop never lists a later visit', async () => {
+  test('an older stop never lists a later visit', async () => {
     const { past_visits: visits } = await deterministicVisitFacts({ ...SVC, scheduled_date: '2026-10-25' }, fakeDbh());
     expect(visits.map((v) => v.date)).toEqual(['2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01', '2026-06-01']);
   });
 
-  test('free return mark: a catalog re-service counts with the record flag off; a rodent follow-up never does', async () => {
+  test('an unreadable scheduled_date omits the key instead of listing everything', async () => {
+    const facts = await deterministicVisitFacts({ ...SVC, scheduled_date: null }, fakeDbh());
+    expect(facts).not.toHaveProperty('past_visits');
+  });
+
+  test('free return mark: catalog or saved key re-service counts with the record flag off; a rodent follow-up never does', async () => {
     const extra = [
       rec('c1', '2026-11-20', 'Pest Control Re-Service', { service_key: 'pest_re_service', is_callback: false }),
       rec('c2', '2026-11-19', 'Lawn Care Re-Service', { service_key: 'lawn_re_service', is_callback: false }),
       rec('c3', '2026-11-18', 'Rodent Trapping Follow-up', { service_key: 'rodent_trapping_followup', is_callback: true }),
       rec('c4', '2026-11-17', 'Pest Control Service', { service_key: 'pest_control', is_callback: false }),
+      // No catalog link (null service_id): the visit's saved key decides.
+      rec('c5', '2026-11-16', 'Pest Control Re-Service', { service_key: null, service_key_snapshot: 'pest_re_service', is_callback: false }),
+      rec('c6', '2026-11-15', 'Rodent Trapping Follow-up', { service_key: null, service_key_snapshot: 'rodent_trapping_followup', is_callback: true }),
     ];
-    ROWS.splice(2, 0, ...extra);
-    try {
-      const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
-      expect(Object.fromEntries(visits.map((v) => [v.date, v.callback]))).toMatchObject({
-        '2026-11-20': true, '2026-11-19': true, '2026-11-18': false, '2026-11-17': false,
-      });
-    } finally {
-      ROWS.splice(2, extra.length);
-    }
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows: extra.slice(0, 5) }));
+    const more = await deterministicVisitFacts(SVC, fakeDbh({ rows: extra.slice(5) }));
+    const byDate = Object.fromEntries([...visits, ...more.past_visits].map((v) => [v.date, v.callback]));
+    expect(byDate).toEqual({
+      '2026-11-20': true, '2026-11-19': true, '2026-11-18': false, '2026-11-17': false, '2026-11-16': true, '2026-11-15': false,
+    });
   });
 
   test('entry shape: service name, the day note, product names, free return visit mark', async () => {

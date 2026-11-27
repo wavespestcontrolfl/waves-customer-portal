@@ -68,13 +68,17 @@ describe('VisitBriefPanel past visits', () => {
     expect(screen.queryByText('Old single note.')).toBeNull();
   });
 
-  it.each([
-    ['no key (old server)', { access: null, last_visit: { date: '2026-05-05', type: 'Pest Control Service', products: [] } }],
-    ['an empty list', { access: null, last_visit: { date: '2026-05-05', type: 'Pest Control Service', products: [] }, past_visits: [] }],
-  ])('%s: today\'s Last visit block stays', (_label, facts) => {
-    renderPanel(facts);
+  it('key absent on every member (old server, read failure): today\'s Last visit block stays', () => {
+    renderPanel({ access: null, last_visit: { date: '2026-05-05', type: 'Pest Control Service', products: [] } });
     expect(screen.getByText('Last visit')).toBeInTheDocument();
     expect(screen.getByText('Old single note.')).toBeInTheDocument();
+    expect(screen.queryByText('Past visits')).toBeNull();
+  });
+
+  it('an empty list is a confirmed "no earlier visits": nothing, not the old block', () => {
+    renderPanel({ access: null, last_visit: { date: '2026-05-05', type: 'Pest Control Service', products: [] }, past_visits: [] });
+    expect(screen.queryByText('Last visit')).toBeNull();
+    expect(screen.queryByText('Old single note.')).toBeNull();
     expect(screen.queryByText('Past visits')).toBeNull();
   });
 });

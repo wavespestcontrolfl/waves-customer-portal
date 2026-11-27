@@ -2,8 +2,9 @@
 // (facts.past_visits from GET /admin/schedule/:id/visit-brief; owner 2026-11-26). Read-only:
 // date, service, the note written that day, product names and a free return visit mark.
 // No prices. The panel shows this in place of its single "Last visit" block; this component
-// owns that choice: it renders its children (the old block) when no member's facts carry
-// past_visits (old server, outage, empty list). Tech portal style rule: inline styles only.
+// owns that choice: it renders its children (the old block) only when NO member's facts carry
+// the past_visits key (old server, read failure). An empty list is a confirmed "no earlier
+// visits" and renders nothing. Tech portal style rule: inline styles only.
 import { useState } from 'react';
 
 const INITIAL_SHOWN = 3;
@@ -60,8 +61,9 @@ function PastVisitList({ visits }) {
   );
 }
 
-// The list is customer-wide, so every member's facts carry the same one: the first that has it.
+// The list is customer-wide, so every member's facts carry the same one: the first that has the key.
 export default function PastVisitsSection({ memberBits = [], children = null }) {
-  const visits = memberBits.map((m) => m.facts?.past_visits).find((v) => Array.isArray(v) && v.length);
-  return visits ? <PastVisitList visits={visits} /> : children;
+  const visits = memberBits.map((m) => m.facts?.past_visits).find(Array.isArray);
+  if (!visits) return children;
+  return visits.length ? <PastVisitList visits={visits} /> : null;
 }
