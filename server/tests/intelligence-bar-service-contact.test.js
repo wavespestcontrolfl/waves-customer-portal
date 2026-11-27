@@ -66,7 +66,7 @@ describe('set_customer_service_contact preview', () => {
     expect(p._version.body).toMatchObject({ serviceContact2Name: 'Sam Example', serviceContact2Phone: '(941) 555-0122', serviceContact3Name: '' });
     const lines = effectText(p);
     expect(lines).toMatch(/sam@example\.invalid can get this account's appointment emails and service reports, as the account's notification settings/);
-    expect(lines).toMatch(/No contact gets texts until they agree/);
+    expect(lines).toMatch(/No contact gets texts until the account holder confirms the contact list/);
     expect(lines).toMatch(/Nothing is sent now/);
     expect(cardLines('set_customer_service_contact', p)[0].text).toBe('Add contact: Sam Example (family member, +19415550122, sam@example.invalid) on Robin Sample');
     const contract = buildContract({ toolName: 'set_customer_service_contact', params: { customer_id: CUST }, displayParams: {}, preview: p, summary: 'x' });
@@ -96,9 +96,8 @@ describe('set_customer_service_contact preview', () => {
     const p = await preview({ action: 'remove', slot: 2 });
     expect(p.contacts_after).toEqual(['Ava Example (+19415550111)', 'Lee Example (lee@example.invalid)']);
     const lines = effectText(p);
-    expect(lines).toMatch(/Sam Example stops getting/);
     expect(lines).toMatch(/every contact, including the ones who stay, loses app sign-in/);
-    expect(lines).toMatch(/Sam Example on \+19415550122 is signed out of the app/);
+    expect(lines).toMatch(/\+19415550122 is no longer a contact number: anyone signed into the app with it is signed out/);
   });
 
   test('a tenant is recorded as a tenant and the card says they get no service reports', async () => {
@@ -110,9 +109,30 @@ describe('set_customer_service_contact preview', () => {
 
   test('a change of every detail without a relationship shows the role the save clears, not the old one', async () => {
     Object.assign(state.customer, { service_contact_name: 'Tess Tenant', service_contact_email: 'tess@example.invalid', service_contact_role: 'tenant' });
-    const p = await preview({ action: 'change', slot: 1, name: 'New Person', email: 'new@example.invalid' });
-    expect(p.contacts_after).toEqual(['New Person (new@example.invalid)']);
-    expect(effectText(p)).toMatch(/appointment emails and service reports/);
+    const refused = await preview({ action: 'change', slot: 1, name: 'New Person', email: 'new@example.invalid' });
+    expect(refused.code).toBe('invalid_input');
+    expect(refused.error).toMatch(/their current one: tenant/);
+    const p = await preview({ action: 'change', slot: 1, relationship: 'tenant', name: 'New Person', email: 'new@example.invalid' });
+    expect(p.contacts_after).toEqual(['New Person (tenant, new@example.invalid)']);
+    expect(effectText(p)).toMatch(/appointment emails but no service reports/);
+  });
+
+  test('a phone another slot still lists is not described as signed out', async () => {
+    Object.assign(state.customer, {
+      service_contact_name: 'Ava Example', service_contact_phone: '+19415550111',
+      service_contact2_name: 'Ava Again', service_contact2_phone: '+19415550111', service_contact2_email: 'ava@example.invalid',
+    });
+    const p = await preview({ action: 'remove', slot: 1 });
+    expect(effectText(p)).not.toMatch(/no longer a contact number/);
+  });
+
+  test('a consent renewed after the card makes the confirm refuse', async () => {
+    state.customer.service_contacts_consent_at = new Date('2026-11-01T12:00:00Z');
+    const input = { action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' };
+    const p = await preview(input);
+    state.customer.service_contacts_consent_at = new Date('2026-11-20T12:00:00Z');
+    expect((await confirm(input, p._version)).code).toBe('preview_changed');
+    expect(Customers.setServiceContactsFromBar).not.toHaveBeenCalled();
   });
 
   test('without a slot, the reply lists the numbered contacts on file', async () => {

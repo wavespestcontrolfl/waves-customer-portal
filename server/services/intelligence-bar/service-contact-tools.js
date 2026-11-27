@@ -53,7 +53,7 @@ const SERVICE_CONTACT_TOOLS = [
   {
     name: 'set_customer_service_contact',
     description: `Add, change or remove ONE extra contact on a customer account: the customer page's "Service contacts" (up to three people besides the account holder, such as a spouse, a family member allowed to speak for the account, a tenant, or an on-site manager). The first call returns a PREVIEW and saves nothing; the operator approves it, and the approved run re-checks it and refuses if anything changed.
-action "add": name, relationship, and a phone or an email (both when known); goes in the first empty slot. action "change": slot (1-3) plus what changes. action "remove": slot (1-3). Without a slot, the reply lists the numbered contacts on file.
+action "add": name, relationship, and a phone or an email (both when known); goes in the first empty slot. action "change": slot (1-3), relationship (restate it), plus what changes. action "remove": slot (1-3). Without a slot, the reply lists the numbered contacts on file.
 Effects: a contact with an email can get this account's appointment emails, and service reports unless they are a tenant, as the account's notification settings allow. Texts to contacts need their consent in the app; a change to who is listed clears it. Removing a contact or changing their phone ends their app sign-in. Nothing is sent now. Admin only.
 Not this tool: linking two customer profiles as one family for the multi-home discount (customer page "Same family"), a payer who receives the invoices (set_customer_bill_to), or the account holder's own name, phone or email.
 Use for: "add his wife as a contact", "add <name> as an authorized family member", "put the tenant on the account", "add a second contact", "change the contact's phone", "remove <name> from the account".`,
@@ -66,7 +66,7 @@ Use for: "add his wife as a contact", "add <name> as an authorized family member
         name: { type: 'string', description: 'The contact\'s name, e.g. "Maria Lopez" (required to add)' },
         phone: { type: 'string', description: 'The contact\'s phone number' },
         email: { type: 'string', description: 'The contact\'s email address' },
-        relationship: { type: 'string', enum: RELATIONSHIPS, description: 'Who the person is to the account (required to add; ask if unclear), e.g. spouse_partner, family_member, tenant' },
+        relationship: { type: 'string', enum: RELATIONSHIPS, description: 'Who the person is to the account (required to add or change; ask if unclear), e.g. spouse_partner, family_member, tenant' },
       },
       required: ['customer_id', 'action'],
     },
@@ -126,10 +126,12 @@ function requestedSlots(slots, input) {
     next[index] = { name: '', phone: '', email: '' };
     return { action, index, next, roles: {} };
   }
-  if (!fields.length && !relationship) return refusal('Give the name, phone, email or relationship that changes.', 'invalid_input');
+  // Always restated on a change: the save re-derives a role by matching the person, and an edit of every detail
+  // matches no one and clears it (a tenant would lose the tenant rule).
+  if (!relationship) return refusal(`Ask who ${slots[index].name || 'this contact'} is to the account, then pass relationship (their current one: ${slots[index].role ? relationshipLabel(slots[index].role) : 'none recorded'}).`, 'invalid_input', { contacts: listed });
   for (const k of fields) next[index][k] = text(input[k]);
   if (!isFilled(next[index])) return refusal('That would leave the contact empty. Use action "remove" instead.', 'invalid_input');
-  return { action, index, next, roles: relationship ? { [index]: relationship } : {} };
+  return { action, index, next, roles: { [index]: relationship } };
 }
 
 // The columns the handler would write for this body, run through the route's own normalizer and compactor on the
@@ -179,10 +181,10 @@ function textLines({ plan, consentOnFile, consentCleared }) {
   const { serviceContactsConsented } = require('../customer-contact');
   const checkOff = serviceContactsConsented({ service_contacts_consent_at: null });
   return [
-    consentCleared ? { kind: 'comms', text: 'Clears the consent on file for this account\'s contacts: every contact, including the ones who stay, loses app sign-in until they agree again in the app. The account holder is not affected.' } : null,
+    consentCleared ? { kind: 'comms', text: 'Clears the consent on file for this account\'s contacts: every contact, including the ones who stay, loses app sign-in until the account holder confirms the contact list again in the app. The account holder is not affected.' } : null,
     checkOff ? { kind: 'comms', text: 'Texts to contacts follow the account\'s notification settings (the contact texting consent check is switched off).' } : null,
-    !checkOff && consentCleared ? { kind: 'comms', text: 'No contact gets texts until they agree again in the app.' } : null,
-    !checkOff && !consentOnFile && plan.action !== 'remove' ? { kind: 'comms', text: 'No contact gets texts until they agree to texts in the app. The account holder\'s texts do not change.' } : null,
+    !checkOff && consentCleared ? { kind: 'comms', text: 'No contact gets texts until the account holder confirms the contact list again in the app.' } : null,
+    !checkOff && !consentOnFile && plan.action !== 'remove' ? { kind: 'comms', text: 'No contact gets texts until the account holder confirms the contact list in the app. The account holder\'s texts do not change.' } : null,
   ];
 }
 
@@ -193,17 +195,13 @@ function planEffects({ account, name, before, after, target, plan, consentOnFile
       ? `Contacts on ${name || 'this account'} after this: ${listed.map((s, i) => `${i + 1}. ${describe(s)}`).join('; ')}.`
       : `${name || 'This account'} has no extra contacts after this.` },
   ];
-  if (plan.action === 'remove') {
-    lines.push({ kind: 'comms', text: `${target.name || 'This contact'} stops getting this account's emails and texts.` });
-  } else {
-    lines.push(emailLine(account, target));
-  }
+  if (plan.action !== 'remove') lines.push(emailLine(account, target));
   lines.push(...textLines({ plan, consentOnFile, consentCleared }));
-  // The handler prunes the removed phone's own notification choices and revokes its app sessions; a later re-add
-  // starts fresh.
+  // The handler prunes notification choices and push subscriptions, and revokes app sessions, only for a phone no
+  // slot lists after the save; a later re-add starts fresh.
   const oldPhone = before[plan.index].phone;
-  if (oldPhone && (plan.action === 'remove' || phoneKey(oldPhone) !== phoneKey(target.phone))) {
-    lines.push({ kind: 'operational', text: `${before[plan.index].name || 'This contact'} on ${oldPhone} is signed out of the app, and their push alerts and own notification choices are removed. Adding them back later does not restore those.` });
+  if (oldPhone && !after.some((slot) => phoneKey(slot.phone) === phoneKey(oldPhone))) {
+    lines.push({ kind: 'operational', text: `${oldPhone} is no longer a contact number: anyone signed into the app with it is signed out, and its push alerts and own notification choices are removed. Adding it back later does not restore those.` });
   }
   lines.push({ kind: 'comms', text: 'Nothing is sent now: no text, email or call goes to anyone.' });
   lines.push({ kind: 'operational', text: 'To undo, edit the contacts on the customer page.' });
@@ -218,8 +216,12 @@ async function buildPlan(input, { database = db } = {}) {
   const before = storedSlots(customer);
   const plan = requestedSlots(before, input);
   if (plan.error) return plan;
+  // The account holder as the senders see this profile: a property profile takes the account primary's contact
+  // details where its own are blank, and its role (withAccountPrimaryContactStrict). The duplicate check and the
+  // report rule both read it.
+  const account = await require('../customer-contact').withAccountPrimaryContactStrict(customer, { db: database });
   if (plan.action !== 'remove') {
-    const dupe = duplicateOf(customer, before, plan.index, plan.next[plan.index]);
+    const dupe = duplicateOf(account, before, plan.index, plan.next[plan.index]);
     if (dupe) return refusal(`That phone or email is already on this account as ${dupe}. Change that contact instead.`, 'already_on_account');
   }
   const { problem, updates, roleColumns, after } = plannedWrite(customer, plan.next, plan.roles);
@@ -227,9 +229,6 @@ async function buildPlan(input, { database = db } = {}) {
   // Compaction keeps slot order and drops empty slots, so the changed person lands after the filled slots before it;
   // the card describes them as stored there (the role the compactor kept or cleared included).
   const target = plan.action === 'remove' ? before[plan.index] : after[plan.next.slice(0, plan.index).filter(isFilled).length];
-  // The report rule reads the ACCOUNT holder's role; a property profile takes it from the account primary, as the
-  // report sender does (withAccountPrimaryContactStrict).
-  const account = await require('../customer-contact').withAccountPrimaryContactStrict(customer, { db: database });
   const name = customerName(customer);
   const consentOnFile = !!customer.service_contacts_consent_at;
   const consentCleared = consentOnFile && updates.service_contacts_consent_at === null;
@@ -249,7 +248,8 @@ async function buildPlan(input, { database = db } = {}) {
     sends_to_customer: false,
     // What the confirm and the locked re-check compare: the customer, the stored slots, the stamp and the write.
     _version: { customer_id: customer.id, customer_name: name, account_role: text(account.account_contact_role ?? account.contact_role) || null,
-      before, consent_on_file: consentOnFile, body, roles: roleColumns, after },
+      holder_phone: text(account.phone), holder_email: text(account.email),
+      before, consent_at: consentOnFile ? new Date(customer.service_contacts_consent_at).toISOString() : null, body, roles: roleColumns, after },
     note: 'PREVIEW ONLY — nothing was changed. Confirm saves exactly these contacts; if anything changed it refuses.',
   };
 }
