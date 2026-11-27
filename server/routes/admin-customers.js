@@ -12,6 +12,7 @@ const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../midd
 const logger = require('../services/logger');
 const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services/customer-name-search');
 const { stageLifecycleStamps } = require('../services/customer-stages');
+const { normalizeChurnReasonCode } = require('../services/churn-reason-map');
 const LifecycleGuard = require('../services/customer-lifecycle-guard');
 const { summarizeLedgerRows } = require('../services/nutrient-ledger');
 const { etDateString } = require('../utils/datetime-et');
@@ -3950,6 +3951,8 @@ router.get('/:id', async (req, res, next) => {
         servicePauseReason: c.service_pause_reason || null,
         memberSince: c.member_since, active: c.active,
         pipelineStage: c.pipeline_stage, leadScore: c.lead_score,
+        churnReason: c.churn_reason,
+        churnReasonCode: c.churn_reason_code,
         leadSource: c.lead_source, leadSourceDetail: c.lead_source_detail,
         landingPageUrl: c.landing_page_url,
         assignedTo: c.assigned_to, lastContactDate,
@@ -4356,6 +4359,34 @@ router.post('/', requireAdmin, async (req, res, next) => {
   }
 });
 
+function parseChurnReasonCodeInput(raw) {
+  if (raw === undefined || raw === null || raw === '') return { ok: true, code: undefined };
+  const code = normalizeChurnReasonCode(raw);
+  return code ? { ok: true, code } : { ok: false, error: 'Invalid churnReasonCode' };
+}
+
+function applyStageChurnStamps(updates, before, body, churnReasonCode) {
+  const nextStage = updates.pipeline_stage !== undefined ? updates.pipeline_stage : before.pipeline_stage;
+  if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
+    Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, {
+      today: etDateString(), churnReason: body.churnReason, churnReasonCode,
+    }));
+  } else if (nextStage === 'churned' && (body.churnReason || churnReasonCode)) {
+    Object.assign(updates, stageLifecycleStamps('churned', 'churned', before, {
+      today: etDateString(), churnReason: body.churnReason, churnReasonCode,
+    }));
+  }
+}
+
+function reconcileLockedStageChurnStamps(updates, before, lockedBefore, body, churnReasonCode) {
+  if (lockedBefore.pipeline_stage === before.pipeline_stage) return;
+  for (const k of ['pipeline_stage_changed_at', 'churned_at', 'churn_reason', 'churn_reason_code', 'churn_episode_id', 'member_since']) {
+    delete updates[k];
+  }
+  applyStageChurnStamps(updates, lockedBefore, body, churnReasonCode);
+  if (updates.pipeline_stage === 'churned') delete updates.active;
+}
+
 // PUT /api/admin/customers/:id
 // Named so the Intelligence Bar's set_customer_bill_to card (setCustomerBillToFromBar, below) runs this very handler.
 const customerUpdateHandler = async (req, res, next) => {
@@ -4366,6 +4397,8 @@ const customerUpdateHandler = async (req, res, next) => {
     if (req.body.pipelineStage !== undefined && !isValidStage(req.body.pipelineStage)) {
       return res.status(400).json({ error: 'Invalid pipeline stage' });
     }
+    const parsedChurnCode = parseChurnReasonCodeInput(req.body.churnReasonCode);
+    if (!parsedChurnCode.ok) return res.status(400).json({ error: parsedChurnCode.error });
     // contact_role: '' / null clears; anything else must be a known role.
     const contactRole = req.body.contactRole !== undefined ? normalizeContactRole(req.body.contactRole) : null;
     if (contactRole && !contactRole.ok) {
@@ -4520,12 +4553,10 @@ const customerUpdateHandler = async (req, res, next) => {
       delete updates.next_charge_date;
       suppressChurnMembershipEmail = true;
     }
-    if (updates.pipeline_stage !== undefined && updates.pipeline_stage !== before.pipeline_stage) {
-      // Same lifecycle stamps as PUT /:id/stage — Customers 360 saves stage
-      // edits through this endpoint, so member_since/churned_at must be kept here
-      // too. (member_since/churned_at aren't editable fields, so no clobber.)
-      Object.assign(updates, stageLifecycleStamps(before.pipeline_stage, updates.pipeline_stage, before, { today: etDateString(), churnReason: req.body.churnReason }));
-    }
+    // Same lifecycle stamps as PUT /:id/stage — Customers 360 saves stage
+    // edits through this endpoint, so member_since/churned_at/churn_reason_code
+    // stay consistent here too.
+    applyStageChurnStamps(updates, before, req.body, parsedChurnCode.code);
     // req.ibServiceContactRoles is set only by setServiceContactsFromBar (never an HTTP field): the relationship the bar
     // card recorded, as role columns ({ service_contact2_role: 'tenant' }), applied before compaction so it travels with
     // its person, as the call pipeline's explicit role does.
@@ -4681,6 +4712,7 @@ const customerUpdateHandler = async (req, res, next) => {
             });
           }
           contactAuditAt = new Date();
+          reconcileLockedStageChurnStamps(updates, before, lockedBefore, req.body, parsedChurnCode.code);
           // ADMIN-BUG-R10 (round 3): on EVERY write of pipeline_stage=
           // 'churned' — including a re-save on an already-churned row, so a
           // pre-fix residue row self-heals — refuse while a future visit, an
@@ -5670,6 +5702,8 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
   try {
     const { stage, notes } = req.body;
     if (!isValidStage(stage)) return res.status(400).json({ error: 'Invalid pipeline stage' });
+    const parsedChurnCode = parseChurnReasonCodeInput(req.body.churnReasonCode);
+    if (!parsedChurnCode.ok) return res.status(400).json({ error: parsedChurnCode.error });
     const customer = await db('customers').where({ id: req.params.id }).whereNull('deleted_at').first();
     if (!customer) return res.status(404).json({ error: 'Customer not found' });
     // oldStage/stageUpdates are derived from the LOCKED row inside the
@@ -5703,7 +5737,9 @@ router.put('/:id/stage', requireAdmin, async (req, res, next) => {
         oldStage = locked.pipeline_stage;
         const stageUpdates = {
           pipeline_stage: stage,
-          ...stageLifecycleStamps(oldStage, stage, locked, { today: etDateString(), churnReason: req.body.churnReason }),
+          ...stageLifecycleStamps(oldStage, stage, locked, {
+            today: etDateString(), churnReason: req.body.churnReason, churnReasonCode: parsedChurnCode.code,
+          }),
         };
         if (stage === 'churned') {
           const decision = await LifecycleGuard.churnGuardOrRepair(trx, req.params.id, locked);

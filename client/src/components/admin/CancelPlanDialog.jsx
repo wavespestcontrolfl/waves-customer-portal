@@ -21,6 +21,7 @@ import {
   Radio,
   Select,
   Textarea,
+  cn,
 } from "../ui";
 import { adminFetch } from "../../utils/admin-fetch";
 import { formatETDate, formatETDateOnly } from "../../lib/timezone";
@@ -47,6 +48,60 @@ const REASON_LABELS = {
   other: "Other",
 };
 
+const QUICK_REASON_CODES = [
+  "price",
+  "results_pest",
+  "results_lawn",
+  "moving_or_property_change",
+  "away",
+  "competitor",
+];
+
+function CancelReasonField({ reasonCode, onChange, reasonCodes, required, disabled }) {
+  const available = reasonCodes?.length ? reasonCodes : Object.keys(REASON_LABELS);
+  const quickCodes = QUICK_REASON_CODES.filter((code) => available.includes(code));
+  return (
+    <div className="flex flex-col gap-2 sm:col-span-2">
+      <label htmlFor="cancel-plan-reason" className="text-12 uppercase tracking-label text-ink-secondary">
+        Reason {required ? "(required)" : "(optional on retry)"}
+      </label>
+      {quickCodes.length > 0 && (
+        <div className="flex flex-wrap gap-1.5" role="group" aria-label="Common cancellation reasons">
+          {quickCodes.map((code) => {
+            const selected = reasonCode === code;
+            return (
+              <button
+                key={code}
+                type="button"
+                disabled={disabled}
+                aria-pressed={selected}
+                onClick={() => onChange(code)}
+                className={cn(
+                  "min-h-8 px-2.5 py-1 rounded-sm border-hairline text-14 transition-colors u-focus-ring disabled:opacity-50",
+                  selected
+                    ? "bg-zinc-900 text-white border-zinc-900"
+                    : "bg-white text-zinc-800 border-zinc-300 hover:bg-zinc-50",
+                )}
+              >
+                {REASON_LABELS[code] || code}
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <Select id="cancel-plan-reason" value={reasonCode} onChange={(e) => onChange(e.target.value)} disabled={disabled} aria-label="Reason">
+        <option value="">Select a reason…</option>
+        {available.map((code) => (
+          <option key={code} value={code}>{REASON_LABELS[code] || code}</option>
+        ))}
+      </Select>
+      {required && !reasonCode && (
+        <div className="text-14 text-alert-fg">Pick a cancellation reason before cancelling.</div>
+      )}
+    </div>
+  );
+}
+
 function money(v) {
   if (v === null || v === undefined || Number.isNaN(Number(v))) return "—";
   return `$${Number(v).toFixed(2)}`;
@@ -69,6 +124,11 @@ function Fact({ label, children }) {
       <span className="text-zinc-900 text-right u-nums">{children}</span>
     </div>
   );
+}
+
+function isCancelCommitReady({ preview, loadErr, scopeBlocked, reasonCode, loading, running, result }) {
+  if (!preview || loadErr || !preview.eligible || scopeBlocked || loading || running || result) return false;
+  return preview.repairRetry === true || Boolean(reasonCode);
 }
 
 export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
@@ -160,12 +220,18 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
   // reads as a mistake they have not made (ui-verify, 2026-09-02).
   const modeMismatch = !wholeAccount && families.length > 0 && preview?.wholeAccount === true;
   const scopeBlocked = !wholeAccount && (families.length === 0 || preview?.scopedSupported === false || modeMismatch);
+  // Admin cancellations must record a reason so churn analytics stay out of
+  // "unclassified". Repair retries inherit the accepted original request, so
+  // they stay unblocked even without re-picking a reason.
+  const reasonRequired = preview?.repairRetry !== true;
   // !loadErr: a FAILED refresh leaves the prior preview rendered (so the
   // scope checkboxes survive), but it must never back the red button — the
   // facts shown and the scope committed have to come from the same
   // successful response (in-flight refreshes are already blocked by
   // !loading, and out-of-order responses by the effect's cancelled flag).
-  const canCommit = !!preview && !loadErr && preview.eligible && !scopeBlocked && !loading && !running && !result;
+  const canCommit = isCancelCommitReady({
+    preview, loadErr, scopeBlocked, reasonCode, loading, running, result,
+  });
 
   const commit = async () => {
     setRunning(true);
@@ -356,15 +422,13 @@ export default function CancelPlanDialog({ customer, onClose, onDone, layer }) {
 
             {/* REASON + NOTE */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="flex flex-col gap-1">
-                <span className="text-12 uppercase tracking-label text-ink-secondary">Reason (optional)</span>
-                <Select value={reasonCode} onChange={(e) => setReasonCode(e.target.value)} disabled={running} aria-label="Reason">
-                  <option value="">—</option>
-                  {(preview?.reasonCodes || Object.keys(REASON_LABELS)).map((code) => (
-                    <option key={code} value={code}>{REASON_LABELS[code] || code}</option>
-                  ))}
-                </Select>
-              </label>
+              <CancelReasonField
+                reasonCode={reasonCode}
+                onChange={setReasonCode}
+                reasonCodes={preview?.reasonCodes}
+                required={reasonRequired}
+                disabled={running}
+              />
               <label className="flex flex-col gap-1 sm:col-span-2">
                 <span className="text-12 uppercase tracking-label text-ink-secondary">Note (optional)</span>
                 <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} disabled={running} maxLength={2000} aria-label="Note" />

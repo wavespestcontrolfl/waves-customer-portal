@@ -124,11 +124,15 @@ describe('CancelPlanDialog', () => {
     expect(screen.getByText('text + email')).toBeInTheDocument();
     expect(calls[0].body).toEqual(expect.objectContaining({ families: [], effectiveDate: 'now', sendConfirmation: true, waiveLateFee: false }));
 
+    const commit = screen.getByRole('button', { name: 'Cancel the whole plan' });
+    // Admin cancellations require a reason before committing.
+    expect(commit).toBeDisabled();
+    expect(screen.getByText(/Pick a cancellation reason before cancelling/)).toBeInTheDocument();
+
     fireEvent.click(screen.getByLabelText('Waive the scheduled-visit fee on pulled visits'));
-    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'price' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Price' }));
     fireEvent.change(screen.getByLabelText('Note'), { target: { value: 'Called in' } });
 
-    const commit = screen.getByRole('button', { name: 'Cancel the whole plan' });
     expect(commit).toBeEnabled();
     fireEvent.click(commit);
 
@@ -186,6 +190,7 @@ describe('CancelPlanDialog', () => {
     });
     render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn().mockResolvedValue(null)} />);
     await screen.findByText('the whole plan');
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'price' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel the whole plan' }));
     await screen.findByText('Partially done — the office review alert has the details.');
     expect(screen.queryByText('Done.')).not.toBeInTheDocument();
@@ -231,6 +236,7 @@ describe('CancelPlanDialog', () => {
 
     fireEvent.click(screen.getByLabelText(/^Lawn Care/));
     fireEvent.click(screen.getByLabelText(/^Pest Control/));
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'price' } });
     await waitFor(() => expect(calls.at(-1).body.families).toEqual(['pest_control']));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel Pest Control' })).toBeEnabled());
   });
@@ -261,6 +267,7 @@ describe('CancelPlanDialog', () => {
     await screen.findByText(/Tick at least one service/);
     expect(screen.queryByText('Silver → none')).not.toBeInTheDocument();
     fireEvent.click(screen.getByLabelText(/^Pest Control/));
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'price' } });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel Pest Control' })).toBeEnabled());
 
     fireEvent.click(screen.getByLabelText(/^Lawn Care/));
@@ -286,6 +293,7 @@ describe('CancelPlanDialog', () => {
     });
     render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
     await screen.findByText('the whole plan');
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'price' } });
     expect(screen.getByRole('button', { name: 'Cancel the whole plan' })).toBeEnabled();
 
     // The operator changes the facts; the refresh FAILS. The old facts stay
@@ -322,6 +330,7 @@ describe('CancelPlanDialog', () => {
     expect(screen.queryByText(/not refunded automatically/)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText('Send the customer the confirmation text and email'));
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'other' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel the whole plan' }));
     await screen.findByText('Done.');
     const commitCall = calls.find((c) => /\/cancel-plan$/.test(c.path));
@@ -339,6 +348,7 @@ describe('CancelPlanDialog', () => {
     });
     render(<CancelPlanDialog customer={CUSTOMER} onClose={vi.fn()} onDone={vi.fn()} />);
     await screen.findByText('the whole plan');
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'price' } });
     fireEvent.click(screen.getByRole('button', { name: 'Cancel the whole plan' }));
     await screen.findByText(/Partially done/);
     expect(screen.getByText(/Needs review: in_progress_visit:s9/)).toBeInTheDocument();

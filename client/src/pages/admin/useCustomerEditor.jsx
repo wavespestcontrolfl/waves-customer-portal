@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Input, Select, Button, Field, ActionFeedback } from "../../components/ui";
+import { EditChurnReasonField, isChurnReasonMissing } from "../../components/admin/ChurnReasonPicker";
 import { adminFetch } from "../../utils/admin-fetch";
 
 function customerEditValues(c) {
@@ -17,6 +18,7 @@ function customerEditValues(c) {
     tier: c.tier || null,
     monthlyRate: c.monthlyRate || "",
     pipelineStage: c.pipelineStage || "new_lead",
+    churnReasonCode: c.churnReasonCode || "",
     serviceContactName: c.serviceContactName || "",
     serviceContactPhone: c.serviceContactPhone || "",
     serviceContactEmail: c.serviceContactEmail || "",
@@ -33,11 +35,13 @@ function customerEditValues(c) {
 // the same draft, even while the customer workspace temporarily hides the list.
 export default function useCustomerEditor(onSaved, stages, feedbackEnabled = false) {
   const [editingId, setEditingId] = useState(null);
+  const [initialStage, setInitialStage] = useState(null);
   const [editForm, setEditForm] = useState({});
   const [savingEdit, setSavingEdit] = useState(false);
   const [saveError, setSaveError] = useState("");
   const startEdit = (c) => {
     setEditingId(c.id);
+    setInitialStage(c.pipelineStage || "new_lead");
     setEditForm(customerEditValues(c));
     setSaveError("");
   };
@@ -66,6 +70,7 @@ export default function useCustomerEditor(onSaved, stages, feedbackEnabled = fal
     editor: (
       <CustomerEditor
         editForm={editForm}
+        initialStage={initialStage}
         setEditForm={setEditForm}
         savingEdit={savingEdit}
         saveError={feedbackEnabled ? saveError : ""}
@@ -73,6 +78,7 @@ export default function useCustomerEditor(onSaved, stages, feedbackEnabled = fal
         stages={stages}
         onCancel={() => {
           setEditingId(null);
+          setInitialStage(null);
           setSaveError("");
         }}
       />
@@ -80,7 +86,8 @@ export default function useCustomerEditor(onSaved, stages, feedbackEnabled = fal
   };
 }
 
-function CustomerEditor({ editForm, setEditForm, savingEdit, saveError, saveEdit, stages, onCancel }) {
+function CustomerEditor({ editForm, initialStage, setEditForm, savingEdit, saveError, saveEdit, stages, onCancel }) {
+  const churnReasonMissing = isChurnReasonMissing(editForm.pipelineStage, initialStage, editForm.churnReasonCode);
   return <section aria-label="Edit customer" className="bg-white border-hairline border-zinc-900 rounded-sm p-5 mt-1">
     <h2 className="text-16 font-medium text-ink-primary mb-3">Edit customer</h2>
     <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
@@ -104,6 +111,14 @@ function CustomerEditor({ editForm, setEditForm, savingEdit, saveError, saveEdit
           {stages.map((stage) => <option key={stage.key} value={stage.key}>{stage.label}</option>)}
         </Select>
       </Field>
+      <EditChurnReasonField
+        id="directory-edit-churn-reason"
+        stage={editForm.pipelineStage}
+        initialStage={initialStage}
+        value={editForm.churnReasonCode || ""}
+        onChange={(code) => setEditForm((previous) => ({ ...previous, churnReasonCode: code }))}
+        disabled={savingEdit}
+      />
     </div>
     {/* The existing recipient slots and server-side compaction remain authoritative. */}
     {[
@@ -124,7 +139,7 @@ function CustomerEditor({ editForm, setEditForm, savingEdit, saveError, saveEdit
     </fieldset>)}
     {saveError && <ActionFeedback error onRetry={savingEdit ? undefined : saveEdit} className="mb-3">{saveError}</ActionFeedback>}
     <div className="ui-record-actions">
-      <Button onClick={saveEdit} loading={savingEdit}>{savingEdit ? "Saving…" : "Save"}</Button>
+      <Button onClick={saveEdit} loading={savingEdit} disabled={savingEdit || churnReasonMissing}>{savingEdit ? "Saving…" : "Save"}</Button>
       <Button variant="ghost" onClick={onCancel}>Cancel</Button>
     </div>
   </section>;

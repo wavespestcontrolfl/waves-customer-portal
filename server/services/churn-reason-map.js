@@ -22,6 +22,12 @@
  * existing churns with this map (a test pins that its rows agree).
  */
 
+const CHURN_REASON_CODES = Object.freeze([
+  'price', 'moving', 'service_quality', 'results', 'competitor',
+  'seasonal_pause', 'financial', 'no_longer_needed', 'other', 'unclassified',
+]);
+const CHURN_REASON_SET = new Set(CHURN_REASON_CODES);
+
 const CANCEL_TO_CHURN = Object.freeze({
   price: 'price',
   results_pest: 'results',
@@ -99,8 +105,26 @@ function churnClassifierInput({ cancelReasonCode = null, words = null, reason = 
   return text.slice(0, 500);
 }
 
+/**
+ * Normalize either a direct churn taxonomy code (e.g. 'moving', 'results')
+ * or a v2 cancel reason code (e.g. 'moving_or_property_change', 'results_pest')
+ * into a DB-valid customers.churn_reason_code value, or null if unknown.
+ */
+function normalizeChurnReasonCode(code, { allowUnclassified = true } = {}) {
+  if (code == null) return null;
+  const key = String(code).trim();
+  if (!key) return null;
+  if (CHURN_REASON_SET.has(key)) {
+    if (!allowUnclassified && key === 'unclassified') return null;
+    return key;
+  }
+  return churnCodeForCancelReason(key);
+}
+
 module.exports = {
+  CHURN_REASON_CODES,
   CANCEL_TO_CHURN,
   churnCodeForCancelReason,
+  normalizeChurnReasonCode,
   churnClassifierInput,
 };

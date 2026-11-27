@@ -56,11 +56,16 @@ const CONVERSION_DATE_SQL = "COALESCE(member_since, (created_at AT TIME ZONE 'Am
 // Returns {} for a no-op (same-stage) save so it never resets
 // pipeline_stage_changed_at or restamps churned_at on a churned→churned
 // re-save.
-function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason } = {}) {
+function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason, churnReasonCode } = {}) {
   if (newStage === oldStage) {
     // No-op (same-stage) save: never restamp churned_at / pipeline_stage_changed_at,
-    // but still let an admin correct/add a churn reason on an already-churned row.
-    return (newStage === 'churned' && churnReason) ? { churn_reason: churnReason } : {};
+    // but still let an admin correct/add a churn reason or taxonomy code on an
+    // already-churned row.
+    if (newStage !== 'churned') return {};
+    const patch = {};
+    if (churnReason) patch.churn_reason = churnReason;
+    if (churnReasonCode) patch.churn_reason_code = churnReasonCode;
+    return patch;
   }
   const stamps = { pipeline_stage_changed_at: new Date() };
   if (newStage === 'churned') {
@@ -69,6 +74,9 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
     // prior churn never carries over to a fresh one.
     stamps.churned_at = today;
     stamps.churn_reason = churnReason || null;
+    if (churnReasonCode !== undefined || customer?.churn_reason_code) {
+      stamps.churn_reason_code = churnReasonCode || null;
+    }
   } else {
     // Churn stamps clear ONLY on a real reactivation — entry into a live
     // CUSTOMER_STAGE (codex #3282 r1+r3 P2s): archival/lateral moves
@@ -82,6 +90,7 @@ function stageLifecycleStamps(oldStage, newStage, customer, { today, churnReason
       if (oldStage === 'churned' || customer.churned_at) {
         stamps.churned_at = null;
         stamps.churn_reason = null;
+        stamps.churn_reason_code = null;
         // The churn EPISODE (cancellation-processor mints it) ends with the
         // reactivation — the next churn is a new one with fresh side effects.
         stamps.churn_episode_id = null;
@@ -142,6 +151,7 @@ async function promoteCustomerOnBooking(database, customerId, { serviceType = nu
     updates.active = true;
     updates.churned_at = null;
     updates.churn_reason = null;
+    updates.churn_reason_code = null;
     updates.churn_episode_id = null;
   }
   if (!Object.keys(updates).length) return false;

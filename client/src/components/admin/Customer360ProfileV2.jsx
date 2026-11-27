@@ -149,6 +149,7 @@ import CustomerMovingCardV2 from "./CustomerMovingCardV2";
 import CustomerGeocodeReviewPanel, { confirmDiscardDraft } from "./CustomerGeocodeReviewPanel";
 import CustomerPropertiesPanelV2 from "./CustomerPropertiesPanelV2";
 import CancelPlanDialog from "./CancelPlanDialog";
+import { EditChurnReasonField, isChurnReasonMissing } from "./ChurnReasonPicker";
 import RemovePaymentMethodDialog from "./RemovePaymentMethodDialog";
 import { CONTACT_ROLE_OPTIONS, contactRoleLabel, contactRoleTitle } from "../../lib/contact-roles";
 import { ZoneMarkingStep, StationMarkingStep } from "../../pages/admin/SchedulePage";
@@ -9063,6 +9064,14 @@ function CustomerProfileEditor({
                 ))}
               </Select>{" "}
             </div>{" "}
+            <EditChurnReasonField
+              id="c360-edit-churn-reason"
+              stage={editForm.pipelineStage}
+              initialStage={initialEditForm.current?.pipelineStage}
+              value={editForm.churnReasonCode || ""}
+              onChange={(code) => setEditForm((p) => ({ ...p, churnReasonCode: code }))}
+              disabled={savingEdit || deletingCustomer}
+            />
           </div>
           {editErr && (
             <div className="mx-4 mb-3 px-2.5 py-1.5 bg-alert-bg text-alert-fg rounded-xs text-ui-label">
@@ -9164,7 +9173,15 @@ function CustomerProfileEditor({
                   }
                   setSavingEdit(false);
                 }}
-                disabled={savingEdit || deletingCustomer}
+                disabled={
+                  savingEdit ||
+                  deletingCustomer ||
+                  isChurnReasonMissing(
+                    editForm.pipelineStage,
+                    initialEditForm.current?.pipelineStage,
+                    editForm.churnReasonCode,
+                  )
+                }
               >
                 {savingEdit ? "Saving…" : "Save"}
               </Button>{" "}
@@ -10988,22 +11005,25 @@ function useCustomerProfileEditor({
   // menu copy once dropped profileLabel, so the mobile modal showed it blank).
   const openEditModal = () => {
     const c = data.customer;
+    const addr = c.address || {};
+    const str = (v) => v || "";
     editAddressRef.current = c.address;
     const form = {
-      firstName: c.firstName || "",
-      lastName: c.lastName || "",
-      email: c.email || "",
-      phone: c.phone || "",
-      profileLabel: c.profileLabel || "",
-      addressLine1: c.address?.line1 || "",
-      addressLine2: c.address?.line2 || "",
-      city: c.address?.city || "",
-      state: c.address?.state || "",
-      zip: c.address?.zip || "",
+      firstName: str(c.firstName),
+      lastName: str(c.lastName),
+      email: str(c.email),
+      phone: str(c.phone),
+      profileLabel: str(c.profileLabel),
+      addressLine1: str(addr.line1),
+      addressLine2: str(addr.line2),
+      city: str(addr.city),
+      state: str(addr.state),
+      zip: str(addr.zip),
       monthlyRate: c.monthlyRate ?? "",
-      tier: c.tier || "",
+      tier: str(c.tier),
       pipelineStage: c.pipelineStage || "new_lead",
-      contactRole: c.contactRole || "",
+      churnReasonCode: str(c.churnReasonCode),
+      contactRole: str(c.contactRole),
     };
     initialEditForm.current = form;
     setEditForm(form);
