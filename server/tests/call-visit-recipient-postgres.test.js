@@ -549,7 +549,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           const first = await stopBob('customer');
           // an id in capitals is the same id
           const again = await VisitRecipient.setReminderContactStopped({ customerId, id: String(first.id).toUpperCase(), stopped: true, by: 'staff' });
-          expect(again).toMatchObject({ stoppedBy: 'customer' });
+          expect(again).toMatchObject({ stoppedBy: 'customer', changed: false });
+          expect(first).toMatchObject({ changed: true });
           const [{ id: strangerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Stranger', phone: phone(44) }).returning('id');
           try {
             expect(await VisitRecipient.setReminderContactStopped({ customerId: strangerId, id: first.id, stopped: false, by: 'customer' })).toBeNull();
@@ -584,6 +585,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: false, canGiveAppAccess: false })]);
             await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ role: 'spouse_partner' });
             expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: true })]);
+            // a number still waiting on its own YES reply: a save cannot give sign-in, so no button
+            await db('customers').where({ id: customerId }).update({ service_preferences: JSON.stringify({ unconsented_slot_phone_keys: [BOB.slice(-10)] }) });
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ canGiveAppAccess: false })]);
+            await db('customers').where({ id: customerId }).update({ service_preferences: JSON.stringify({}) });
           } finally {
             delete process.env.GATE_CONTACT_LOGIN;
           }

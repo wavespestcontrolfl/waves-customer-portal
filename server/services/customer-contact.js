@@ -561,6 +561,7 @@ module.exports = {
   loginAttestedPhoneKeys,
   findServiceContactSlotByPhoneKey,
   phoneKeyOf,
+  unconsentedSlotPhoneKeys,
   isServiceContactRole,
   slotWithheldFromReports,
   withAccountPrimaryContactStrict,

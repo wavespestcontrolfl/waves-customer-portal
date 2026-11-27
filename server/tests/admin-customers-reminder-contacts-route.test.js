@@ -26,7 +26,7 @@ jest.mock('../models/db', () => {
 });
 jest.mock('../services/call-visit-recipient', () => ({
   listReminderContacts: jest.fn(async () => [{ id: 'r', firstName: 'Bob', stopped: false }]),
-  setReminderContactStopped: jest.fn(async ({ stopped, by }) => ({ id: 'r', stopped, stoppedBy: stopped ? by : null })),
+  setReminderContactStopped: jest.fn(async ({ stopped, by }) => ({ id: 'r', stopped, stoppedBy: stopped ? by : null, changed: true })),
 }));
 
 const CUSTOMER = '11111111-1111-4111-8111-111111111111';
@@ -71,6 +71,13 @@ test('a staff stop and restart are recorded as staff and audited', async () => {
   expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_stopped', resource_id: CUSTOMER, critical: true, trx: 'TRX' }));
   await run('post', '/:id/reminder-contacts/:reminderId/restart', { id: CUSTOMER, reminderId: REMINDER });
   expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_restarted' }));
+});
+
+test('a Stop on a row already stopped (or a Restart on an active one) writes no audit row', async () => {
+  VisitRecipient.setReminderContactStopped.mockResolvedValueOnce({ id: 'r', stopped: true, stoppedBy: 'customer', changed: false });
+  const res = await run('post', '/:id/reminder-contacts/:reminderId/stop', { id: CUSTOMER, reminderId: REMINDER });
+  expect(res.body.reminderContact).toMatchObject({ stoppedBy: 'customer' });
+  expect(recordAuditEvent).not.toHaveBeenCalled();
 });
 
 test('bad ids are a 400; an id not on the list is a 404 with no audit row', async () => {

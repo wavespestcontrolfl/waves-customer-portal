@@ -2920,6 +2920,8 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
       const entry = await db.transaction(async (trx) => {
         const changed = await VisitRecipient.setReminderContactStopped({ customerId: req.params.id, id: req.params.reminderId, stopped, by: 'staff', conn: trx });
         if (!changed) return null;
+        // Audit only a real change: a stale screen's repeat Stop must not record that staff stopped someone the customer did.
+        if (!changed.changed) return changed;
         await recordAuditEvent({
           actor_type: 'technician',
           actor_id: req.technicianId || null,

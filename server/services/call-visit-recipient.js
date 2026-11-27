@@ -953,7 +953,9 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'role', 'stopped_at', 'stopped_by', 'created_at');
   if (!rows.length) return [];
   const customer = await conn('customers').where({ id: customerId }).first();
-  const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn } = require('./customer-contact');
+  const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn, unconsentedSlotPhoneKeys } = require('./customer-contact');
+  // Numbers waiting on their own YES reply: the holder's save keeps that hold, so it cannot give sign-in.
+  const held = unconsentedSlotPhoneKeys(customer || {});
   const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
   const loginLive = require('../config/feature-gates').contactLoginLive();
   return rows.map((row) => ({
@@ -972,7 +974,7 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     hasAppAccess: loginLive && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
     // A contact save can give sign-in only while the contact login is on. Never for a person the call recorded as a
     // TENANT: the contacts save stores no role, and a tenant must never reach the service reports (slotWithheldFromReports).
-    canGiveAppAccess: loginLive && String(row.role || '').trim().toLowerCase() !== 'tenant'
+    canGiveAppAccess: loginLive && String(row.role || '').trim().toLowerCase() !== 'tenant' && !held.has(row.phone_key)
       && !(slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key)),
   }));
 }
@@ -986,12 +988,14 @@ async function setReminderContactStopped({ customerId, id, stopped, by, conn = d
   if (!customerId || !id || !['customer', 'staff'].includes(by)) return null;
   const patch = stopped ? { stopped_at: conn.fn.now(), stopped_by: by } : { stopped_at: null, stopped_by: null };
   const query = conn(REMINDER_TABLE).where({ id, customer_id: customerId });
-  // A repeat stop keeps the first stop's time and who made it.
-  if (stopped) query.whereNull('stopped_at');
+  // Only a real change writes: a repeat stop keeps the first stop's time and who made it; a restart needs a stop.
+  if (stopped) query.whereNull('stopped_at'); else query.whereNotNull('stopped_at');
   const updated = await query.update(patch).returning('id');
   if (!updated.length && !(await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).first('id'))) return null;
   const want = String(id).toLowerCase();
-  return (await listReminderContacts(customerId, { conn })).find((entry) => String(entry.id).toLowerCase() === want) || null;
+  const entry = (await listReminderContacts(customerId, { conn })).find((e) => String(e.id).toLowerCase() === want) || null;
+  // `changed`: false when the row already was in that state (the caller audits real changes only).
+  return entry && { ...entry, changed: updated.length > 0 };
 }
 
 module.exports = {
