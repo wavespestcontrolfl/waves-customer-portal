@@ -2942,9 +2942,9 @@ function SavedHomeView({ customer, entry, identity, property }) {
           padding: '12px 16px', paddingTop: 'calc(12px + env(safe-area-inset-top, 0px))',
           display: 'flex', alignItems: 'center', gap: 10,
         }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <img src="/waves-logo.png" alt="" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2 }}>Waves</div>
             <div role="status" data-testid="portal-updating" style={{ fontSize: 14, color: PORTAL_SHELL.muted, lineHeight: 1.3 }}>Updating…</div>
           </div>
         </div>
@@ -17862,20 +17862,21 @@ function MyRequestsCard({ focusRequestId } = {}) {
 // =========================================================================
 // MAIN PORTAL
 // =========================================================================
-// Bottom nav pins the five most-used destinations; the rest live behind a
-// "More" sheet. Short labels picked specifically for the 5-across layout.
+// Bottom nav pins the four primary destinations plus "More" (5 items across,
+// matching Apple HIG / Material 3 mobile bar limits); the rest live behind the
+// "More" sheet. Desktop keeps all tabs via [...PRIMARY_TABS, ...MORE_TABS].
 const PRIMARY_TABS = [
   { id: 'dashboard', label: 'Home', icon: 'home' },
-  { id: 'plan', label: 'Plan', icon: 'plan' },
   { id: 'visits', label: 'Visits', icon: 'calendar' },
   { id: 'billing', label: 'Billing', icon: 'card' },
-  { id: 'refer', label: 'Refer', icon: 'gift' },
+  { id: 'plan', label: 'Plan', icon: 'plan' },
 ];
 const MORE_TABS = [
   // Listed only while the server offers it (usePortalMessagesGate answers 200).
   { id: 'messages', label: 'Messages', icon: 'message', description: 'Questions and answers with our team' },
   { id: 'documents', label: 'Documents', icon: 'document', description: 'Reports, invoices, and agreements' },
   { id: 'property', label: 'My Property', icon: 'house', description: 'Property details and service notes' },
+  { id: 'refer', label: 'Refer', icon: 'gift', description: 'Share Waves with friends and neighbors' },
   { id: 'learn', label: 'Learn', icon: 'bulb', description: 'Local tips, articles, and FAQs' },
 ];
 // C4: the read-only surfaces a cancelled customer keeps — plan (cancelled
@@ -19282,9 +19283,9 @@ export default function PortalPage() {
         position: 'sticky', top: 0, zIndex: 100,
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: '1 1 auto', minWidth: 0 }}>
-          <img src="/waves-logo.png" alt="Waves" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
+          <img src="/waves-logo.png" alt="" style={{ height: 34, width: 'auto', display: 'block', flexShrink: 0 }} />
           <div style={{ minWidth: 0 }}>
-            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Customer Portal</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PORTAL_SHELL.text, lineHeight: 1.2, overflowWrap: 'anywhere' }}>Waves</div>
           </div>
         </div>
         {/* Desktop tab nav moved out of this bar (owner 2026-07-09) — it now
