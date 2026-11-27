@@ -261,6 +261,15 @@ describe('unlink_customer_family', () => {
     expect(cardLines('unlink_customer_family', card).map((l) => l.text)).toContain('Casey Sample stays in the family.');
   });
 
+  it('a leftover one-row family clears only this profile', async () => {
+    families = { [A]: 'f' };
+    const card = await unlink();
+    expect(card).toMatchObject({ dissolves: true, stays_alone: false });
+    expect(cardLines('unlink_customer_family', card).map((l) => l.text)).toContain('No other profile is left in this family (the others were removed), so only this profile\'s leftover link is cleared.');
+    const result = await executeFamilyLinkTool('unlink_customer_family', { customer_id: A, confirmed: true, _verified_family_link_version: card._version }, ADMIN);
+    expect(result.note).not.toContain('other profile');
+  });
+
   it('keeps the others linked in a bigger family', async () => {
     families = { [A]: 'f', [B]: 'f', [C]: 'f' };
     const card = await unlink();

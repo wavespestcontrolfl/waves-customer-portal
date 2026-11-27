@@ -86,7 +86,7 @@ function laterEffects(op = 'link') {
   const email = gates.multiHomeDiscountEmailLive();
   if (op === 'unlink') {
     return email
-      ? [{ kind: 'comms', text: 'Later, automatically: if a home in this family is waiting on its Multi-Home Discount, taking this profile out can let the discount email go to the paying address of the homes that stay (one email per accepted plan and paying address).' }]
+      ? [{ kind: 'comms', text: 'Later, automatically: if a home in this family is waiting on its Multi-Home Discount, taking this profile out can let the discount email go out: to the paying address of a qualifying home on either side, this profile included (one email per accepted plan and paying address).' }]
       : [];
   }
   return [
@@ -209,10 +209,13 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
     family_now: mine.members.map(memberLabel),
     stays_linked: dissolves ? [] : others.map(memberLabel),
     dissolves,
+    stays_alone: dissolves && others.length > 0,
     effects: [
       { kind: 'operational', text: `${mine.name} is taken out of the Same family link.` },
-      dissolves
-        ? { kind: 'operational', text: `${others[0] ? others[0].name : 'The other profile'} is then alone, so the family link is removed from both profiles.` }
+      !others.length
+        ? { kind: 'operational', text: 'No other profile is left in this family (the others were removed), so only this profile\'s leftover link is cleared.' }
+        : dissolves
+        ? { kind: 'operational', text: `${others[0].name} is then alone, so the family link is removed from both profiles.` }
         : { kind: 'operational', text: others.length === 1 ? `${others[0].name} stays in the family.` : `The other ${others.length} profiles stay linked to each other.` },
       { kind: 'operational', text: `${mine.name} no longer counts in that multi-home family for the 10% Multi-Home Discount. A discount already on a visit stays.` },
       NO_MONEY,
@@ -272,7 +275,7 @@ async function commit(toolName, input, actionContext) {
       note: `${plan.account.name} and ${plan.family_member.name} are now linked as the Same family. Nothing was sent to anyone and no price changed.` };
   }
   return { customer_id: plan.customer_id, success: true, sent_to_customer: false,
-    note: `${plan.account.name} is no longer in a Same family link.${plan.dissolves ? ' The family link is removed from the other profile too.' : ''} Nothing was sent to anyone and no price changed.` };
+    note: `${plan.account.name} is no longer in a Same family link.${plan.dissolves && plan.stays_alone ? ' The family link is removed from the other profile too.' : ''} Nothing was sent to anyone and no price changed.` };
 }
 
 // ── card lines (authorization-contract.js) ──────────────────────
