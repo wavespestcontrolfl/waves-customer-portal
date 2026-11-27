@@ -302,9 +302,13 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
 }
 
 // The account holder or staff stopped this number on the customer's list.
+// A stop on the customer's list, or the same stop stamped on a visit row of the number on this customer's visits (the
+// stamp moves with a visit when two customer records are merged; the list stays on the old record).
 async function stoppedOnList(customerId, phoneKey, conn) {
   if (!customerId || !phoneKey) return false;
-  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNotNull('stopped_at').first('id'));
+  if (await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNotNull('stopped_at').first('id')) return true;
+  return !!(await conn(`${TABLE} as r`).join('scheduled_services as s', 's.id', 'r.scheduled_service_id')
+    .where({ 's.customer_id': customerId, 'r.phone_key': phoneKey }).whereNotNull('r.stopped_at').first('r.id'));
 }
 
 // The customer lists the number for every visit.
@@ -977,12 +981,20 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
  */
 async function setReminderContactStopped({ customerId, id, stopped, by, conn = db }) {
   if (!customerId || !id || !['customer', 'staff'].includes(by)) return null;
+  if (!conn.isTransaction) return conn.transaction((trx) => setReminderContactStopped({ customerId, id, stopped, by, conn: trx }));
   const patch = stopped ? { stopped_at: conn.fn.now(), stopped_by: by } : { stopped_at: null, stopped_by: null };
   const query = conn(REMINDER_TABLE).where({ id, customer_id: customerId });
   // Only a real change writes: a repeat stop keeps the first stop's time and who made it; a restart needs a stop.
   if (stopped) query.whereNull('stopped_at'); else query.whereNotNull('stopped_at');
-  const cols = ['id', 'stopped_at', 'stopped_by'];
+  const cols = ['id', 'phone_key', 'stopped_at', 'stopped_by'];
   const updated = await query.update(patch).returning(cols);
+  // The same stop (or restart) on the number's visit rows of this customer's visits, in the same transaction: the stamp
+  // moves with a visit on a customer merge, so a merged record never starts texting a stopped person again.
+  if (updated[0]) {
+    const visitIds = conn('scheduled_services').where({ customer_id: customerId }).select('id');
+    await conn(TABLE).where({ phone_key: updated[0].phone_key }).whereIn('scheduled_service_id', visitIds)
+      .update({ stopped_at: stopped ? updated[0].stopped_at : null });
+  }
   // The answer is the row as written (or as it stands, for a no-op): no other read, so a committed change is never
   // reported as a failure. The caller merges it into the entry it shows. `changed`: false when nothing was written
   // (the caller audits real changes only).

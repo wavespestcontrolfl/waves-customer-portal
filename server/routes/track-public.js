@@ -758,6 +758,11 @@ function withRecipientRow(query, hit, token) {
     .whereNotExists(function notStopped() {
       this.select(db.raw('1')).from('customer_reminder_contacts as st')
         .whereRaw('st.customer_id = s.customer_id AND st.phone_key = r.phone_key AND st.stopped_at IS NOT NULL');
+    })
+    // The same stop stamped on a visit row of the number (it moves with its visit on a customer merge).
+    .whereNotExists(function notStampedStopped() {
+      this.select(db.raw('1')).from('visit_text_recipients as sr').join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+        .whereRaw('ss.customer_id = s.customer_id AND sr.phone_key = r.phone_key AND sr.stopped_at IS NOT NULL');
     });
 }
 
