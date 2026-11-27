@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProtocolReferenceTabV2 from "./ProtocolReferenceTabV2";
+import MixSafetySection from "./MixSafetySection";
 
 const API_BASE = import.meta.env.VITE_API_URL || "/api";
 
@@ -173,12 +174,18 @@ function BridgeList({ title, items }) {
 
 const PROTOCOL_SECTIONS = [
   { key: "mixing", label: "Mixing", Icon: Beaker },
+  { key: "mix-safety", label: "Mix safety", Icon: ShieldCheck },
   { key: "overview", label: "Overview", Icon: Sprout },
   { key: "products", label: "Products", Icon: Package },
   { key: "bridges", label: "Instructions", Icon: BookOpen },
   { key: "audit", label: "History", Icon: Clock },
 ];
 const PROTOCOL_TAB_KEYS = new Set(PROTOCOL_SECTIONS.map(({ key }) => key));
+// Tabs that load their own data and have no draft/publish actions.
+const SELF_LOADING_PANELS = new Map([
+  ["mixing", ProtocolReferenceTabV2],
+  ["mix-safety", MixSafetySection],
+]);
 
 function normalizeProtocolTab(value) {
   if (["readiness", "gates", "calibration"].includes(value)) return "overview";
@@ -241,7 +248,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
   };
 
   useEffect(() => {
-    if (activeTab !== "mixing" && !data) load();
+    if (!SELF_LOADING_PANELS.has(activeTab) && !data) load();
   }, [activeTab]);
 
   const protocol = data?.protocol || {};
@@ -359,7 +366,8 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
     }
   }
 
-  const headerActions = activeTab === "mixing" ? [] : [
+  const SelfLoadingPanel = SELF_LOADING_PANELS.get(activeTab);
+  const headerActions = SELF_LOADING_PANELS.has(activeTab) ? [] : [
     {
       key: "create-draft",
       label: "Create Draft",
@@ -398,7 +406,7 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
       activeKey: activeTab,
       onChange: (key) => hubNavRef.current.setActiveTab(key),
       ariaLabel: "Protocol section",
-      navGridClassName: "grid-cols-2 lg:grid-cols-5",
+      navGridClassName: "grid-cols-2 lg:grid-cols-6",
       actions: hubNavRef.current.headerActions.map((a) => ({
         ...a,
         onClick: (...args) => {
@@ -424,12 +432,12 @@ export default function LawnProtocolCommandCenterPage({ embedded = false, onSeco
         onSectionChange={setActiveTab}
         headingLevel={embedded ? 2 : 1}
         sticky={!embedded}
-        navGridClassName="grid-cols-2 lg:grid-cols-5"
+        navGridClassName="grid-cols-2 lg:grid-cols-6"
         actions={headerActions}
       />
       )}
 
-      {activeTab === "mixing" ? <ProtocolReferenceTabV2 /> : <>
+      {SelfLoadingPanel ? <SelfLoadingPanel /> : <>
       {error && (
         <div className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-13 text-red-700">
           {error}
