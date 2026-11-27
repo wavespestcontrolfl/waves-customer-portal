@@ -18,7 +18,7 @@ export default function ProtocolMixTable({ mixRates }) {
               {columns.map((column) => (
                 <th key={column.key} scope="col" className="px-3 py-1.5 font-medium whitespace-nowrap">{column.label}</th>
               ))}
-              <th scope="col" className="px-3 py-1.5 font-medium">Spray volume / limit</th>
+              <th scope="col" className="px-3 py-1.5 font-medium">Spray volume, placement, limit</th>
             </tr>
           </thead>
           <tbody>
@@ -30,11 +30,11 @@ export default function ProtocolMixTable({ mixRates }) {
                 </th>
                 {columns.map((column) => (
                   <td key={column.key} className="px-3 py-1.5 font-mono u-nums whitespace-nowrap">
-                    {row.amounts[column.key] || (row.dose && column === columns[0] ? row.dose : "—")}
+                    {row.amounts[column.key] || "—"}
                   </td>
                 ))}
                 <td className="px-3 py-1.5 text-ink-secondary">
-                  {!columns.length && row.dose ? <div className="font-mono u-nums">{row.dose}</div> : null}
+                  {row.dose ? <div>Placed by hand, not in a tank: <span className="font-mono u-nums">{row.dose}</span></div> : null}
                   {row.sprayVolume ? <div>{row.sprayVolume}</div> : null}
                   {row.limit ? <div className="text-ink-tertiary">{row.limit}</div> : null}
                 </td>

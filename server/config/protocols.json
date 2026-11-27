@@ -2551,8 +2551,7 @@
               "unit": "fl oz"
             },
             "sprayers": [
-              "flowzone_4_gal",
-              "bg_1_gal"
+              "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,500 sq ft",
             "limit": "21 days between applications; no spray above 15 mph wind",
@@ -2566,8 +2565,7 @@
               "unit": "fl oz"
             },
             "sprayers": [
-              "flowzone_4_gal",
-              "bg_1_gal"
+              "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,500 sq ft",
             "epa": "53883-335"
@@ -2684,8 +2682,7 @@
               "unit": "fl oz"
             },
             "sprayers": [
-              "flowzone_4_gal",
-              "bg_1_gal"
+              "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,500 sq ft",
             "limit": "21 days between applications; no spray above 15 mph wind",
@@ -2699,8 +2696,7 @@
               "unit": "fl oz"
             },
             "sprayers": [
-              "flowzone_4_gal",
-              "bg_1_gal"
+              "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,500 sq ft",
             "epa": "53883-335"
@@ -2762,8 +2758,7 @@
               "unit": "fl oz"
             },
             "sprayers": [
-              "flowzone_4_gal",
-              "bg_1_gal"
+              "flowzone_4_gal"
             ],
             "sprayVolume": "1 gal per 1,000 sq ft",
             "limit": "7 days between applications at this rate",
@@ -3702,7 +3697,7 @@
           },
           {
             "product": "CimeXa Insecticide Dust",
-            "where": "Wall voids, outlets cover off, bed frame voids",
+            "where": "Wall voids, bed frame joints, under the box spring cover; none inside electrical boxes",
             "dose": "2 oz per 100 sq ft, a light film",
             "epa": "73079-12"
           }

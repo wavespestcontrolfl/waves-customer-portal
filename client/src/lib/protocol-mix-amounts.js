@@ -16,18 +16,23 @@ function trim(n) {
   return String(Number(n.toFixed(digits)));
 }
 
-function one(amount, unit) {
-  if (unit === "g" && amount >= 1000) return `${trim(amount / 1000)} kg`;
-  if (unit === "fl oz" && amount >= 128) return `${trim(amount / 128)} gal`;
-  return `${trim(amount)} ${unit}`;
+// One unit for the whole amount, picked from its largest value, so a band never mixes units ("500 to 1,500 g").
+function scale(largest, unit) {
+  if (unit === "g" && largest >= 1000) return { divide: 1000, unit: "kg" };
+  if (unit === "fl oz" && largest >= 128) return { divide: 128, unit: "gal" };
+  return { divide: 1, unit };
 }
 
-// "0.625 fl oz (18 mL)": under 1 fl oz a tech measures in mL.
+// "0.625 fl oz (18 mL)": under 1 fl oz a tech measures in mL. The mL figure rounds DOWN to the half mL, so a measured
+// amount is never above the rate (0.66 fl oz = 19.5 mL, not 20).
 export function formatMixAmount(amount, unit, amountMax) {
   if (!(amount > 0) || !unit) return "";
   const hasBand = amountMax > amount;
-  const text = hasBand ? `${trim(amount)} to ${one(amountMax, unit)}` : one(amount, unit);
-  if (unit === "fl oz" && !hasBand && amount < 1) return `${text} (${Math.round(amount * ML_PER_FL_OZ)} mL)`;
+  const shown = scale(hasBand ? amountMax : amount, unit);
+  const text = hasBand
+    ? `${trim(amount / shown.divide)} to ${trim(amountMax / shown.divide)} ${shown.unit}`
+    : `${trim(amount / shown.divide)} ${shown.unit}`;
+  if (unit === "fl oz" && !hasBand && amount < 1) return `${text} (${Math.floor(amount * ML_PER_FL_OZ * 2) / 2} mL)`;
   return text;
 }
 

@@ -14,6 +14,8 @@ describe("protocol mix amounts", () => {
 
   it("shows a label band and large units", () => {
     expect(formatMixAmount(10, "g", 30)).toBe("10 to 30 g");
+    expect(formatMixAmount(500, "g", 1500)).toBe("0.5 to 1.5 kg");
+    expect(formatMixAmount(0.66, "fl oz")).toBe("0.66 fl oz (19.5 mL)");
     expect(formatMixAmount(1000, "g")).toBe("1 kg");
     expect(formatMixAmount(80, "fl oz")).toBe("80 fl oz");
     expect(formatMixAmount(6400, "fl oz")).toBe("50 gal");
@@ -35,6 +37,8 @@ describe("protocol mix amounts", () => {
     expect(amounts("cockroach", 1, "Tekko Pro IGR").flowzone_4_gal).toBe("8 fl oz");
     expect(amounts("flea", 1, "Tekko Pro IGR").flowzone_4_gal).toBe("2.64 fl oz");
     expect(amounts("mosquito", 1, "Suspend Polyzone").flowzone_4_gal).toBe("4.4 fl oz");
+    expect(amounts("mosquito", 1, "Suspend Polyzone").bg_1_gal).toBeUndefined();
+    expect(amounts("flea", 1, "Tekko Pro IGR").bg_1_gal).toBe("0.66 fl oz (19.5 mL)");
     expect(amounts("termite", 3, "Termidor SC").rig_100_gal).toBe("80 fl oz");
   });
 });
