@@ -257,7 +257,7 @@ async function readLastVisitLabelFacts({ customerId, conn = db, today = etDateSt
   // LABEL_VISIT_WINDOW_DAYS days. Every guard below holds for it as for the latest visit; null = the latest performed visit.
   // (an asked-about visit is never older than the window; a later one than the latest visit is refused inside the read)
   const wanted = serviceDate == null ? null : String(serviceDate);
-  if (wanted !== null && (!/^\d{4}-\d{2}-\d{2}$/.test(wanted) || wanted < isoAddDays(today, -LABEL_VISIT_WINDOW_DAYS))) return null;
+  if (wanted !== null && (dateOnlyString(wanted) !== wanted || wanted < isoAddDays(today, -LABEL_VISIT_WINDOW_DAYS))) return null;
   // ONE consistent read: the newest performed date, the stale-visit guards and the products must all come from the same snapshot, or a
   // visit that lands between two queries leaves the facts describing a visit that is no longer the last one. A connection that can open
   // transactions (knex) reads inside a REPEATABLE READ, READ ONLY transaction; any other connection is re-checked after the read
