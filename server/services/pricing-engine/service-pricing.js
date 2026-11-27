@@ -909,10 +909,11 @@ function optionBooleanTrue(value) {
   return value === true || value === 'true' || value === 'TRUE' || value === 'YES' || value === 'yes';
 }
 
-// Size basis of the whole-home services (cockroach treatment, bed bug treatment, rodent guarantee). 'total_living_area' is the
-// live rule (owner 2026-11-26 "whole home"); 'ground_floor' is the rule before it (living area / stories), kept ONLY so a
-// stored estimate quoted that way replays at the price it was sent at (property.wholeHomeSizingLegacy, set by the engine from
-// the estimate's own stamp: estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), and for a COMMERCIAL building
+// Size basis of the whole-home services (bed bug treatment, rodent guarantee). 'total_living_area' is the live rule (owner
+// 2026-11-26 "whole home"; the cockroach treatment went back to the ground-floor footprint, owner 2026-11-27). 'ground_floor'
+// is the rule before it (living area / stories), kept ONLY so a stored estimate quoted that way replays at the price it was
+// sent at (property.wholeHomeSizingLegacy, set by the engine from the estimate's own stamp: estimate-floor-signal-replay.js
+// savedLegacyWholeHomeSizingSignal), and for a COMMERCIAL building
 // (property.wholeHomeSizingCommercial, the engine's own commercial verdict): the whole-home rule is for homes, and a commercial
 // caller sends a measured building footprint beside a placeholder homeSqFt, so a commercial line keeps the footprint path exactly.
 const HOME_SIZE_BASIS_TOTAL = 'total_living_area';
@@ -1788,10 +1789,7 @@ function pricePestInitialRoach(property, options = {}) {
   const severityMeta = normalizeRoachSeverity(requestedSeverityInput);
   const roachType = roachMeta.roachType;
   if (roachType === 'none') return null;
-  // The treatment covers every floor, so the bracket reads the home's TOTAL living area (owner 2026-11-26 "whole home"), not the
-  // ground-floor footprint. A stored estimate quoted before that replays the footprint (property.wholeHomeSizingLegacy).
-  // An unclear size (a building measurement on a multi-story home) adds the resolution's size review reason and warning below.
-  const footprintResolution = resolveWholeHomeBasisSize(property);
+  const footprintResolution = resolvePestFootprint(property);
 
   // Standalone Cockroach Treatment (without recurring pest) uses a higher
   // scale — no future visits to amortize the heavier visit-1 burden across.
@@ -1826,20 +1824,16 @@ function pricePestInitialRoach(property, options = {}) {
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
   const isGerman = roachType === 'german';
-  // The route's "no measured building" flag is about the size it POSTED (its 2,000 sq ft placeholder). When the server lookup's
-  // own measured home sized this line instead (whole-home basis only), the bracket is not a guess and the flag does not apply.
-  const unmeasuredFootprint = buildingSizeMeasured === false && footprintResolution.source !== 'lookup_measured_home';
+  const unmeasuredFootprint = buildingSizeMeasured === false;
   const manualReviewReasons = uniqueList([
     ...footprintResolution.manualReviewReasons,
     ...(unmeasuredFootprint ? ['building_size_unmeasured_pest_footprint'] : []),
-    ...footprintResolution.sizeReviewReasons,
     ...(severityMeta.severity === 'severe' && !isGerman
       ? ['severe_native_roach_activity_manual_review']
       : []),
   ]);
   const warnings = uniqueList([
     ...footprintResolution.warnings,
-    ...footprintResolution.sizeWarnings,
     ...roachMeta.roachWarnings,
     ...severityMeta.warnings,
     ...(severityMeta.severity === 'severe' && isGerman
@@ -1896,9 +1890,6 @@ function pricePestInitialRoach(property, options = {}) {
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
-    homeSizeBasis: footprintResolution.homeSizeBasis,
-    // Present only when the server lookup's measured home replaced the posted size (a website quote).
-    ...footprintResolution.postedSizeFields,
     requiresManualReview: footprintResolution.requiresManualReview || manualReviewReasons.length > 0,
     manualReviewReasons,
     warnings,
@@ -8980,8 +8971,8 @@ function fleaOfferConfig(cfg) {
 const FLEA_SIZE_BASIS_TOTAL = 'total_living_area';
 const FLEA_SIZE_BASIS_GROUND_FLOOR = 'ground_floor';
 
-// The size a whole-home service steps on: the home's total living area (flea interior, cockroach treatment, bed bug
-// treatment; owner 2026-11-26 "whole home"). Same result shape as resolvePestFootprint. Order: the living-area inputs
+// The size a whole-home service steps on: the home's total living area (flea interior, bed bug treatment; owner 2026-11-26
+// "whole home"). Same result shape as resolvePestFootprint. Order: the living-area inputs
 // first (homeSqFt, livingAreaSqFt; see the provenance flags below), then a measured ground-floor footprint
 // scaled up by the story count (a footprint alone is the best evidence left
 // of the whole home; buildingSqFt is a footprint too and scales the same way).
@@ -9004,7 +8995,7 @@ function resolveWholeHomeSize(property = {}) {
       requiresManualReview: false,
       manualReviewReasons: [],
       warnings: [],
-      // The size the request posted, which the measured home replaced. It rides onto a cockroach or bed bug row under the key
+      // The size the request posted, which the measured home replaced. It rides onto a bed bug or rodent guarantee row under the key
       // the flea row gave it (priceFlea writes its own): a revision of the sent quote compares it to tell whether the operator
       // edited the size (estimate-flea-size-replay generateWithFleaRecord).
       postedSizeFields: Number(property.homeSqFt) > 0 ? { fleaPostedHomeSqFt: Math.round(Number(property.homeSqFt)) } : {},
@@ -9055,7 +9046,7 @@ function resolveWholeHomeSize(property = {}) {
 // Without a caller size: the shared resolver's size, null when the property carries no size evidence (the 2,000 fallback is not a
 // measurement). The caller passes the story count the guarantee prices with in property.stories, so a footprint is scaled by the
 // same count that picks the tier.
-// lineFields: the size evidence a cockroach or bed bug row carries (basis, size, source, and the posted size a measured home
+// lineFields: the size evidence a bed bug row carries (basis, size, source, and the posted size a measured home
 // replaced: the replay restores the measurement from the row, estimate-flea-size-replay.js), plus the resolver's review reasons
 // and warnings when there is no usable size or the size may be the ground floor only.
 // Ground-floor basis (a quote priced before the rule, property.wholeHomeSizingLegacy, or a commercial building): the caller's
@@ -9086,7 +9077,7 @@ function resolveGuaranteeHomeSize(property = {}, callerHomeSqFt) {
   };
 }
 
-// The size the cockroach treatment and the bed bug treatment price on, under the basis the estimate was priced with. Live rule:
+// The size the bed bug treatment prices on, under the basis the estimate was priced with. Live rule:
 // the total living area. A quote priced before the rule (property.wholeHomeSizingLegacy): the ground-floor footprint
 // (resolvePestFootprint, the code it was sold on). Same shape as resolvePestFootprint, plus homeSizeBasis and the review reason
 // and warning for a size that may be the ground floor only (sizeReviewReasons / sizeWarnings: always lists, empty when the size
