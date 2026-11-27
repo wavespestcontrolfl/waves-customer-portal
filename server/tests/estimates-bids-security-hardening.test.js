@@ -48,7 +48,7 @@ describe('Estimates & Bids security hardening (PR 1)', () => {
     });
   });
 
-  test('admin-estimates translates PG 22P02 invalid UUID errors to 404 instead of 500', async () => {
+  test('admin-estimates translates PG 22P02 only for malformed :id UUIDs, not valid-UUID DB errors', async () => {
     jest.doMock('../middleware/admin-auth', () => ({
       adminAuthenticate: (req, _res, next) => { req.technicianId = 'admin-1'; req.techRole = 'admin'; next(); },
       requireAdmin: (_req, _res, next) => next(),
@@ -60,9 +60,12 @@ describe('Estimates & Bids security hardening (PR 1)', () => {
     })));
     const router = require('../routes/admin-estimates');
     await withApp('/api/admin/estimates', router, async (baseUrl) => {
-      const r = await fetch(`${baseUrl}/api/admin/estimates/not-a-uuid/edit-source`);
-      expect(r.status).toBe(404);
-      expect(await r.json()).toEqual({ error: 'Estimate not found' });
+      const rBad = await fetch(`${baseUrl}/api/admin/estimates/not-a-uuid/edit-source`);
+      expect(rBad.status).toBe(404);
+      expect(await rBad.json()).toEqual({ error: 'Estimate not found' });
+
+      const rValid = await fetch(`${baseUrl}/api/admin/estimates/11111111-1111-4111-8111-111111111111/edit-source`);
+      expect(rValid.status).toBe(500);
     });
   });
 

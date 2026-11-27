@@ -7,8 +7,13 @@ const { estimateNeverIssued, estimateHasBahiaLawn } = require('../services/estim
 const { legacyAutofillPriceReasons, rowHeldForLegacyAutofillPrice } = require('../services/estimate-legacy-autofill-hold');
 const { satellitePalmCountToConfirm } = require('../services/estimator-engine/lookup-palm-review');
 const router = express.Router();
+const ESTIMATE_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+router.param('id', (req, _res, next, id) => {
+  req._estimateIdParam = id;
+  next();
+});
 const db = require('../models/db');
-const { DELIVERY_CLAIM_NOT_LIVE_SQL, ESTIMATE_DELIVERY_CLAIM_TTL_MS, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
+const { DELIVERY_CLAIM_NOT_LIVE_SQL, callSideBlockForEstimateData, callSideBlocksForEstimates, REPRICE_PENDING_ABSENT_SQL } = require('../utils/estimate-claim-sql');
 const smsTemplatesRouter = require('./admin-sms-templates');
 const { adminAuthenticate, requireAdmin } = require('../middleware/admin-auth');
 const logger = require('../services/logger');
@@ -52,6 +57,7 @@ const { deliveredEstimateScope } = require('../services/triage-auto-resolve');
 const updatedWording = require('../services/estimate-updated-wording');
 const {
   createOrReuseAdminEstimate,
+  deliveryClaimFresh,
   estimateExpiresAt,
   estimateReviseBlock,
   selfServeMintEditRefusal,
@@ -6260,12 +6266,19 @@ function bookingLinkOneTimeLabel(estimateData) {
   }
 }
 
+function isExpiredUnacceptedBookingOffer(estimate) {
+  return estimate.status !== 'accepted'
+    && Boolean(estimate.expires_at)
+    && new Date(estimate.expires_at).getTime() <= Date.now();
+}
+
 // Whether a list row may offer "Send booking link": the route's refusals that
-// depend on the row alone (status, archived, invoice mode, unresolved manager
-// approval, and a recurring-only offer, which routes through onboarding). The
-// phone checks and the booked-slot guard stay request-time in the route.
+// depend on the row alone (status, expiry, archived, invoice mode, unresolved
+// manager approval, and a recurring-only offer, which routes through onboarding).
+// The phone checks and the booked-slot guard stay request-time in the route.
 function bookingLinkEligible(estimate, estimateData = estimate.estimate_data) {
   if (!['sent', 'viewed', 'accepted'].includes(estimate.status)) return false;
+  if (isExpiredUnacceptedBookingOffer(estimate)) return false;
   if (estimate.archived_at || estimate.bill_by_invoice) return false;
   try {
     if (estimateDataHasUnresolvedManagerApproval(estimateData)) return false;
@@ -6303,8 +6316,7 @@ router.post('/:id/send-booking-link', async (req, res, next) => {
         error: `Booking link can only be sent for sent/viewed/accepted estimates. Current status: ${estimate.status}.`,
       });
     }
-    if (estimate.status !== 'accepted' && estimate.expires_at
-      && new Date(estimate.expires_at).getTime() <= Date.now()) {
+    if (isExpiredUnacceptedBookingOffer(estimate)) {
       return res.status(400).json({
         error: 'This estimate has expired. Extend or resend it before sending a booking link.',
       });
@@ -6812,14 +6824,6 @@ router.patch('/:id', async (req, res, next) => {
   }
 });
 
-function hasLiveDeliveryClaim(row, nowMs = Date.now()) {
-  const data = parseEstimateData(row?.estimate_data);
-  const deliveringAt = data?.estimatorEngine?.delivering_at;
-  if (!deliveringAt) return false;
-  const ts = Date.parse(deliveringAt);
-  return Number.isFinite(ts) && (nowMs - ts) < ESTIMATE_DELIVERY_CLAIM_TTL_MS;
-}
-
 function draftDeleteError(statusCode, message) {
   const err = new Error(message);
   err.statusCode = statusCode;
@@ -6827,18 +6831,31 @@ function draftDeleteError(statusCode, message) {
 }
 
 async function deleteDraftEstimateInTransaction(trx, estimateId) {
-  const locked = await trx('estimates').where({ id: estimateId }).forUpdate().first();
-  if (!locked) throw draftDeleteError(404, 'Estimate not found');
-  if (locked.status !== 'draft' || locked.price_locked_at || hasLiveDeliveryClaim(locked)) {
-    throw draftDeleteError(409, 'This estimate changed while you were deleting it. Refresh and retry.');
-  }
+  // Lock one_tap_purchases BEFORE estimates — matching server/services/one-tap-purchase.js
+  // confirmation lock order so concurrent delete vs confirm cannot deadlock.
   const lockedOneTapRows = await trx('one_tap_purchases')
     .where({ estimate_id: estimateId })
+    .orderBy('id')
     .forUpdate()
     .select('id', 'status');
+  const locked = await trx('estimates').where({ id: estimateId }).forUpdate().first();
+  if (!locked) throw draftDeleteError(404, 'Estimate not found');
+  if (
+    locked.status !== 'draft'
+    || locked.price_locked_at
+    || deliveryClaimFresh(parseEstimateData(locked.estimate_data)?.estimatorEngine)
+  ) {
+    throw draftDeleteError(409, 'This estimate changed while you were deleting it. Refresh and retry.');
+  }
   if (lockedOneTapRows.some((r) => r.status === 'completed')) {
     throw draftDeleteError(400, 'This estimate carries a completed one-tap purchase and cannot be deleted.');
   }
+  // Release any live uncommitted slot holds inside this transaction AFTER the
+  // locked eligibility checks so a failed/409 delete never discards a customer's hold.
+  await require('../services/slot-reservation').releaseEstimateHolds({
+    estimateId,
+    database: trx,
+  });
   if (lockedOneTapRows.length) {
     await trx('one_tap_purchases')
       .whereIn('id', lockedOneTapRows.map((r) => r.id))
@@ -6868,7 +6885,7 @@ router.delete('/:id', async (req, res, next) => {
     if (estimate.status !== 'draft') {
       return res.status(400).json({ error: 'Only draft estimates can be deleted. Archive closed estimates instead.' });
     }
-    if (estimate.price_locked_at || hasLiveDeliveryClaim(estimate)) {
+    if (estimate.price_locked_at || deliveryClaimFresh(parseEstimateData(estimate.estimate_data)?.estimatorEngine)) {
       return res.status(409).json({ error: 'This estimate is locked or being sent and cannot be deleted.' });
     }
     // One-tap ledger rows FK this estimate (NO ACTION): without removing
@@ -6881,21 +6898,6 @@ router.delete('/:id', async (req, res, next) => {
     if (oneTapRows.some((r) => r.status === 'completed')) {
       return res.status(400).json({ error: 'This estimate carries a completed one-tap purchase and cannot be deleted.' });
     }
-    // A reserved attempt's LIVE hold also references this estimate
-    // (scheduled_services.source_estimate_id, NO ACTION) — release it
-    // through the slot-reservation mechanism first or the estimate delete
-    // below still 23503s until the hold sweeper runs.
-    const liveHolds = await db('scheduled_services')
-      .where({ source_estimate_id: req.params.id })
-      .whereNull('customer_id')
-      .whereNotNull('reservation_expires_at')
-      .select('id');
-    for (const hold of liveHolds) {
-      await require('../services/slot-reservation').releaseReservation({
-        scheduledServiceId: hold.id,
-        estimateId: req.params.id,
-      });
-    }
     await db.transaction((trx) => deleteDraftEstimateInTransaction(trx, req.params.id));
     logger.info(`[estimates] Deleted estimate ${req.params.id}`);
     res.json({ success: true });
@@ -6905,10 +6907,13 @@ router.delete('/:id', async (req, res, next) => {
   }
 });
 
-// Malformed UUID path parameters throw Postgres 22P02; answer 404 instead of 500
-// while keeping synthetic-id unit mocks unaffected.
-router.use((err, _req, res, next) => (
-  err?.code === '22P02' ? res.status(404).json({ error: 'Estimate not found' }) : next(err)
+// Malformed UUID :id path parameters throw Postgres 22P02; answer 404 instead
+// of 500 while preserving unrelated 22P02 DB errors on valid estimate UUIDs
+// and keeping synthetic-id unit mocks unaffected.
+router.use((err, req, res, next) => (
+  err?.code === '22P02' && req._estimateIdParam && !ESTIMATE_UUID_RE.test(req._estimateIdParam)
+    ? res.status(404).json({ error: 'Estimate not found' })
+    : next(err)
 ));
 
 // The old POST /cleanup-demo endpoint (bulk-delete estimates matching a

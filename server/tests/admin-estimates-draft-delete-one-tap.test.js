@@ -43,6 +43,7 @@ jest.mock('../services/lead-estimate-link', () => ({ markLinkedLeadEstimateSent:
 jest.mock('../services/estimate-manual-acceptance', () => ({ markEstimateManuallyAccepted: jest.fn() }));
 jest.mock('../services/admin-estimate-persistence', () => ({
   createOrReuseAdminEstimate: jest.fn(),
+  deliveryClaimFresh: jest.requireActual('../services/admin-estimate-persistence').deliveryClaimFresh,
   estimateExpiresAt: jest.fn(() => new Date('2026-08-04T00:00:00.000Z')),
   estimateViewUrl: jest.fn((token) => `https://portal.wavespestcontrol.com/estimate/${token}`),
 }));
@@ -56,6 +57,7 @@ jest.mock('../services/sendgrid-mail', () => ({ isConfigured: jest.fn(() => true
 jest.mock('../services/automation-runner', () => ({ enrollCustomer: jest.fn() }));
 jest.mock('../services/slot-reservation', () => ({
   releaseReservation: jest.fn(async () => ({ released: true })),
+  releaseEstimateHolds: jest.fn(async () => ({ released: 1 })),
 }));
 
 const express = require('express');
@@ -175,7 +177,7 @@ describe('draft delete with one-tap ledger rows', () => {
     });
   });
 
-  test('a reserved attempt\'s LIVE hold is released through slot-reservation before the estimate delete (GH r6 P2)', async () => {
+  test('a reserved attempt\'s LIVE hold is released inside the transaction after locked checks (GH r6 P2)', async () => {
     const calls = makeTableDb({
       estimate: { id: 'est-1', status: 'draft' },
       oneTapRows: [{ id: 'otp-1', status: 'reserved' }],
@@ -184,8 +186,8 @@ describe('draft delete with one-tap ledger rows', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
       expect(res.status).toBe(200);
-      expect(slotReservation.releaseReservation).toHaveBeenCalledWith({
-        scheduledServiceId: 'ss-hold-1', estimateId: 'est-1',
+      expect(slotReservation.releaseEstimateHolds).toHaveBeenCalledWith({
+        estimateId: 'est-1', database: expect.any(Function),
       });
       expect(calls.deleted).toEqual(expect.arrayContaining(['one_tap_purchases', 'estimates']));
     });
@@ -201,7 +203,7 @@ describe('draft delete with one-tap ledger rows', () => {
     });
   });
 
-  test('refuses with 409 when the draft transitions to sent between pre-read and FOR UPDATE lock', async () => {
+  test('refuses with 409 without releasing holds when the draft transitions to sent between pre-read and FOR UPDATE lock', async () => {
     const calls = makeTableDb({
       estimate: { id: 'est-1', status: 'draft' },
       lockedEstimate: { id: 'est-1', status: 'sent' },
@@ -209,6 +211,7 @@ describe('draft delete with one-tap ledger rows', () => {
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/estimates/est-1`, { method: 'DELETE' });
       expect(res.status).toBe(409);
+      expect(slotReservation.releaseEstimateHolds).not.toHaveBeenCalled();
       expect(calls.deleted).toEqual([]);
       expect(calls.updated).toEqual([]);
     });
