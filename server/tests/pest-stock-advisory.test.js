@@ -327,6 +327,17 @@ describe('the office alert for an amount no visit uses', () => {
     expect(() => compose.composeAdminAlert(spec)).not.toThrow();
   });
 
+  test('lines over together: one alert for the product names the combined amount and each contributing line', async () => {
+    const together = { combinedAmount: 101, combinedAmountUnit: 'lb', contributingLines: ['60 lb', '41 lb'] };
+    await run({ id: 'visit-1', customer_id: 'customer-1', service_type: 'Lawn Care' }, [
+      refused({ amount: 60, amountUnit: 'lb', ...together }), refused({ amount: 41, amountUnit: 'lb', ...together }),
+    ]);
+    expect(compose.raiseAdminAlert).toHaveBeenCalledTimes(1);
+    const [, , opts] = compose.raiseAdminAlert.mock.calls[0];
+    expect(opts.detail).toContain('101 lb was entered across 2 lines on a lawn visit (60 lb + 41 lb)');
+    expect(opts.metadata).toMatchObject({ amount: 101, amountUnit: 'lb', contributingLines: ['60 lb', '41 lb'] });
+  });
+
   test('a name the alert rules refuse falls back to plain words', async () => {
     await run({ id: 'visit-1', service_type: 'Quarterly Pest Control' }, [refused({ productName: 'Bait [old lot]' })]);
     const [, spec] = compose.raiseAdminAlert.mock.calls[0];

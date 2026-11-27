@@ -746,6 +746,19 @@ describe('calcProductsCost — an application amount is priced per unit, never p
       expect((await cost({ product_id: 'p-jug', quantity_applied: 1000000, quantity_unit: 'oz' })).productsCost).toBeGreaterThan(0);
     });
 
+    test('a flagged line is skipped by the service product it was recorded on, not by an amount key (406.0005 lb stores as 406.001)', async () => {
+      const notes = { inventoryDeductions: [{ productId: 'p-jug', serviceProductId: 'sp-1', amount: 406.0005, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
+      const row = { product_id: 'p-jug', service_product_id: 'sp-1', quantity_applied: '406.001', quantity_unit: 'fl_oz' };
+      expect((await cost(row, notes)).productsCost).toBe(0);
+      // A different service product of the same product, amount and unit is not the flagged line.
+      expect((await cost({ ...row, service_product_id: 'sp-2' }, notes)).productsCost).toBeGreaterThan(0);
+    });
+
+    test('a deduction saved before the service product id was kept still matches 406.0005 to the stored 406.001', async () => {
+      const notes = { inventoryDeductions: [{ productId: 'p-jug', amount: 406.0005, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
+      expect((await cost({ product_id: 'p-jug', quantity_applied: '406.001', quantity_unit: 'fl_oz' }, notes)).productsCost).toBe(0);
+    });
+
     test('a refused amount with more decimals than the ledger keeps still matches the stored decimal(8,3) row', async () => {
       const notes = { inventoryDeductions: [{ productId: 'p-jug', amount: 641.1234, amountUnit: 'fl_oz', status: 'not_deducted_implausible' }] };
       expect((await cost({ product_id: 'p-jug', quantity_applied: '641.123', quantity_unit: 'fl_oz' }, notes)).productsCost).toBe(0);

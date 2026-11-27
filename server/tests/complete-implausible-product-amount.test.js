@@ -163,6 +163,30 @@ describe('the fixed per-visit limit (a warning, never a refusal)', () => {
     expect([exceedsVisitLimit(l), exceedsVisitLimit(l)]).toEqual([true, true]);
   });
 
+  test('lines over together carry the combined amount and each contributing line into the flag and the warning', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: 60, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 41, amountUnit: 'lb', areaAddOnKey: 'x' }];
+    expect((await marked(products)).over).toEqual([true, true]);
+    for (const index of [0, 1]) {
+      const { result } = await deduct(products, index, 500);
+      expect(result).toMatchObject({
+        status: 'not_deducted_implausible', combinedAmount: 101, combinedAmountUnit: 'lb', contributingLines: ['60 lb', '41 lb'], serviceProductId: 'sp-1',
+        warning: '101 lb of Celsius WG across 2 lines is too much for one visit, so stock was not changed. Check the amounts.',
+      });
+    }
+  });
+
+  test('mixed units report the total in the base unit and each line as entered', async () => {
+    const products = [{ productId: CELSIUS, totalAmount: 60, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 960, amountUnit: 'oz' }];
+    await marked(products);
+    expect((await deduct(products, 1, 500)).result).toMatchObject({ combinedAmount: 120, combinedAmountUnit: 'lb', contributingLines: ['60 lb', '960 oz'] });
+  });
+
+  test('a single flagged line carries no combined fields', async () => {
+    const products = line(406);
+    await marked(products);
+    expect((await deduct(products, 0, 500)).result.combinedAmount).toBeUndefined();
+  });
+
   test('a client cannot mark its own line: a submitted flag changes nothing', async () => {
     const products = [{ productId: CELSIUS, totalAmount: 2, amountUnit: 'lb', overVisitLimit: true, status: 'not_deducted_implausible' }];
     expect(await marked(products)).toEqual({ out: null, over: [false] });

@@ -1752,8 +1752,10 @@ function exceedsVisitLimit(line) {
 // just be alerts, they should not stop the job from being completed or finished"). deductProductInventory records the
 // line, leaves stock alone and flags it not_deducted_implausible, and notifyOfficeOfStockShortfalls alerts the office.
 // vetProductAmounts marks the lines whose product total is over the ceiling here, so the deduction treats each of them as
-// over even when no single line is. A WeakSet: nothing is added to the submitted line, so nothing is saved or hashed.
-const OVER_VISIT_LIMIT_LINES = new WeakSet();
+// over even when no single line is, and keeps the combined amount and the contributing lines for the warning. A WeakMap:
+// nothing is added to the submitted line, so nothing is saved or hashed. The decision is made ONCE per line (the products
+// loop in completeScheduledService); every derived sink (stock, movement, job cost, nutrient ledger) is skipped by it.
+const OVER_VISIT_LIMIT_LINES = new WeakMap();
 // A submitted line is over its ceiling when vetProductAmounts marked it (its product's lines together are over) or it is over alone.
 const isOverVisitLimit = (submittedLine, judged) => Number.isFinite(judged.amount) && judged.amount > 0
   && (OVER_VISIT_LIMIT_LINES.has(submittedLine) || exceedsVisitLimit(judged));
@@ -1808,10 +1810,12 @@ function visitLimitInput(submitted, catalogRow) {
   return { amount, amountUnit };
 }
 
-// The keys (product id + dimension bucket) of the products whose lines TOGETHER are over its visit limit.
+// The products whose lines TOGETHER are over its visit limit, as key (product id + dimension bucket) -> { amount, amountUnit,
+// parts } for the warning: the combined amount (the submitted total when the lines share one unit, else the total in the
+// dimension's base unit) and each contributing line's own amount and unit.
 // Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's use)
 // and by dimension, each line converted to the dimension's base unit from its own submitted unit.
-function overVisitLimitGroupKeys(lines, rowById) {
+function overVisitLimitGroups(lines, rowById) {
   const groups = new Map();
   for (const line of lines) {
     const catalogRow = rowById.get(line.productId);
@@ -1819,13 +1823,24 @@ function overVisitLimitGroupKeys(lines, rowById) {
     if (!judged) continue;
     const share = visitLimitShare(judged);
     const key = `${line.productId}|${share.bucket}`;
-    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), limit: share.limit, baseUnit: share.baseUnit };
+    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), parts: [], limit: share.limit, baseUnit: share.baseUnit };
+    group.parts.push({ amount: judged.amount, amountUnit: judged.amountUnit });
     group.value += share.value;
     group.raw += judged.amount;
     group.units.add(String(judged.amountUnit || '').trim().toLowerCase());
     groups.set(key, group);
   }
-  return new Set([...groups].filter(([, group]) => group.value > group.limit).map(([key]) => key));
+  const over = new Map();
+  for (const [key, group] of groups) {
+    if (group.value <= group.limit) continue;
+    const single = group.units.size === 1;
+    over.set(key, {
+      amount: Number((single ? group.raw : group.value).toFixed(4)),
+      amountUnit: single ? [...group.units][0] : group.baseUnit,
+      parts: group.parts,
+    });
+  }
+  return over;
 }
 
 // Vets every submitted product line before the first write. The ids are already canonical (canonicalizeProductLines ran at
@@ -1842,11 +1857,12 @@ async function vetProductAmounts(database, { products, skip = false }) {
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
   const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
   if (invalid) return invalid;
-  const overKeys = overVisitLimitGroupKeys(lines, rowById);
-  if (overKeys.size) {
+  const overGroups = overVisitLimitGroups(lines, rowById);
+  if (overGroups.size) {
     for (const line of lines) {
       const judged = visitLimitInput(line, rowById.get(line.productId));
-      if (judged && overKeys.has(`${line.productId}|${visitLimitShare(judged).bucket}`)) OVER_VISIT_LIMIT_LINES.add(line);
+      const group = judged && overGroups.get(`${line.productId}|${visitLimitShare(judged).bucket}`);
+      if (group) OVER_VISIT_LIMIT_LINES.set(line, group);
     }
   }
   return null;
@@ -1854,19 +1870,32 @@ async function vetProductAmounts(database, { products, skip = false }) {
 
 // A line over its product's ceiling still completes, but it is flagged and moves no stock and no cost. No later path can
 // deduct it or stop the visit (untracked stock, a unit that will not convert, a visit before a physical count, the hard
-// lockout). The office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount. Null when the line is not over.
-function implausibleDeduction(snapshot, inventoryProduct, productInput) {
+// lockout). The office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount. When the product's lines are over
+// TOGETHER, the flag carries the combined amount and each contributing line, so the warning names the total and the lines.
+// `overCeiling` is the one decision made for the line in the products loop (a caller that made none gets it decided here).
+// Null when the line is not over.
+function implausibleDeduction(snapshot, inventoryProduct, productInput, overCeiling) {
   const { amount, amountUnit } = snapshot;
-  if (!isOverVisitLimit(productInput, { amount, amountUnit })) return null;
+  if (!(overCeiling ?? isOverVisitLimit(productInput, { amount, amountUnit }))) return null;
+  const unitText = (unit) => String(unit || '').replace(/_/g, ' ');
   const onHand = inventoryProduct.inventory_on_hand != null ? Number(inventoryProduct.inventory_on_hand) : NaN;
   const stockBefore = Number.isFinite(onHand) ? onHand : null;
+  const group = OVER_VISIT_LIMIT_LINES.get(productInput);
+  const together = group && group.parts.length > 1 ? group : null;
   return {
     ...snapshot,
     status: 'not_deducted_implausible',
     inventoryUnit: inventoryProduct.inventory_unit || amountUnit,
     stockBefore,
     remainingStock: stockBefore,
-    warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
+    ...(together ? {
+      combinedAmount: together.amount,
+      combinedAmountUnit: together.amountUnit,
+      contributingLines: together.parts.map((part) => `${part.amount} ${unitText(part.amountUnit)}`.trim()),
+    } : {}),
+    warning: together
+      ? `${together.amount} ${unitText(together.amountUnit)} of ${inventoryProduct.name} across ${together.parts.length} lines is too much for one visit, so stock was not changed. Check the amounts.`
+      : `${amount} ${unitText(amountUnit)} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
   };
 }
 
@@ -1877,6 +1906,7 @@ async function deductProductInventory(trx, {
   serviceRecord,
   scheduledService,
   allowNegative = false,
+  overCeiling,
 }) {
   const lockedProduct = await trx('products_catalog')
     .where({ id: product.id })
@@ -1890,6 +1920,7 @@ async function deductProductInventory(trx, {
   const snapshot = {
     productId: inventoryProduct.id,
     productName: inventoryProduct.name,
+    serviceProductId: serviceProduct.id,
     amount,
     amountUnit,
     status: 'not_deducted',
@@ -1898,7 +1929,7 @@ async function deductProductInventory(trx, {
 
   // Owner "dont block", and owner 2026-11-26 for every role ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED"): a line over
   // its product's ceiling is judged first, before every other early return and the hard lockout, whatever the shelf holds.
-  const implausible = implausibleDeduction(snapshot, inventoryProduct, productInput);
+  const implausible = implausibleDeduction(snapshot, inventoryProduct, productInput, overCeiling);
   if (implausible) return implausible;
 
   const notDeductibleWarning = notDeductibleInputWarning(inventoryProduct, amount, amountUnit);
@@ -2550,8 +2581,15 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
       link: `/admin/customers?customerId=${svc.customer_id}`,
       doneWhen: 'amount_checked',
     }, {
-      detail: `${fullName}: ${deduction.amount} ${String(deduction.amountUnit || '').replace(/_/g, ' ')} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
-      metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, amount: deduction.amount, amountUnit: deduction.amountUnit },
+      detail: Array.isArray(deduction.contributingLines) && deduction.contributingLines.length > 1
+        // The product's lines are over TOGETHER: name the total and each line, as one alert for the record and product.
+        ? `${fullName}: ${deduction.combinedAmount} ${String(deduction.combinedAmountUnit || '').replace(/_/g, ' ')} was entered across ${deduction.contributingLines.length} lines on a ${visitLabel} visit (${deduction.contributingLines.join(' + ')}). That is too much for one visit, so stock was not changed and no cost was recorded. Check the amounts entered, and fix the visit's product lines if they are wrong.`
+        : `${fullName}: ${deduction.amount} ${String(deduction.amountUnit || '').replace(/_/g, ' ')} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
+      metadata: {
+        productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id,
+        amount: deduction.combinedAmount ?? deduction.amount, amountUnit: deduction.combinedAmountUnit ?? deduction.amountUnit,
+        ...(deduction.contributingLines ? { contributingLines: deduction.contributingLines } : {}),
+      },
     });
   };
   const kinds = [
@@ -2559,7 +2597,13 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
     { status: 'not_deducted_implausible', label: 'amount', send: sendAmount },
   ];
   for (const { status, label, send } of kinds) {
+    const seenProducts = new Set();
     for (const deduction of lines.filter((line) => line?.status === status && line.productId)) {
+      // One amount alert for each product on the record: the lines of one product share one combined warning.
+      if (status === 'not_deducted_implausible') {
+        if (seenProducts.has(deduction.productId)) continue;
+        seenProducts.add(deduction.productId);
+      }
       try {
         if (!(await send(deduction))) logger.error(`[dispatch] stock ${label} alert NOT recorded for record ${record.id} (admin alert returned null)`);
       } catch (err) {
@@ -8990,6 +9034,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
+            // The ONE decision for this line (owner 2026-11-26): a line over its product's ceiling is recorded in service_products
+            // and the FDACS ledger as entered, and skipped by every derived sink: stock, movement, job cost and the nutrient ledger.
+            const overCeiling = isOverVisitLimit(p, { amount: appliedAmount, amountUnit: appliedAmountUnit });
             const serviceProductInsert = {
               service_record_id: record.id,
               product_name: product.name,
@@ -9017,7 +9064,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 
-            await recordServiceProductNutrients(trx, {
+            if (!overCeiling) await recordServiceProductNutrients(trx, {
               customerId: svc.customer_id,
               turfProfile: lawnDefaultsEnabled ? {
                 ...turfProfile,
@@ -9039,6 +9086,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               // Advisory inventory posture: a pest, lawn or tree & shrub visit
               // (isStockAdvisoryCompletion).
               allowNegative: isStockAdvisoryCompletion(svc),
+              overCeiling,
             });
             inventoryDeductions.push(deduction);
           }
