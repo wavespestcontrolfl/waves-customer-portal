@@ -118,7 +118,7 @@ export default function TreeShrubFieldGuide({ guide, mode = 'admin', safetyRules
         return <div key={key} className="border-b border-hairline border-t-0 border-x-0 border-solid border-zinc-200">
           <button type="button" aria-expanded={expanded} aria-controls={panelId} onClick={() => setOpen(expanded ? null : key)}
             className={`appearance-none border-0 bg-transparent px-0 w-full min-h-11 text-left py-3 u-focus-ring ${tech ? '' : 'md:grid md:grid-cols-[minmax(180px,2fr)_repeat(3,minmax(100px,1fr))] md:gap-3 md:items-center'}`}>
-            <span className="block"><span className="font-medium">{product.name}</span><span aria-hidden="true" className="ml-2">{expanded ? '−' : '+'}</span><span className="block text-ink-secondary">{row.where}</span></span>
+            <span className="block"><span className="font-medium">{product.name}</span><span aria-hidden="true" className="ml-2">{expanded ? '−' : '+'}</span><span className="block text-ink-secondary">{row.where}</span>{product.mixWarning && <span role="alert" className="block text-alert-fg">Warning: {product.mixWarning}</span>}</span>
             <span className={`block text-ink-secondary ${tech ? '' : 'md:hidden'}`}>{amountFor(product, TANKS.find(t => t.id === tank).gallons)}</span>
             {!tech && (product.mix ? TANKS.map(t => <span className="hidden md:block tabular-nums" key={t.id}>{amountFor(product, t.gallons)}</span>) : <span className="hidden md:block md:col-span-3 text-ink-secondary">{product.summary}</span>)}
           </button>
