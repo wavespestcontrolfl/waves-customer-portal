@@ -181,6 +181,30 @@ describe('prompt v32: the day/time conflict rule and billing_choice, in both lay
     expect(new Set([PROMPT_HASH, APS_PROMPT_HASH, SYSTEM_PROMPT_HASH, SYSTEM_APS_PROMPT_HASH]).size).toBe(4);
   });
 
+  test('system-layout cohort hashes exclude pre-systemInstruction Gemini rows while keeping gate-off hashes unchanged', () => {
+    const crypto = require('crypto');
+    const schema = require('../schemas/call-extraction.model-output.schema.json');
+    const parts = buildExtractionPromptParts('', '', '', {});
+    const oldSysHash = crypto.createHash('sha256')
+      .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(schema)}`)
+      .digest('hex')
+      .slice(0, 12);
+    const oldSysVersion = `${PROMPT_VERSION}s-${oldSysHash}`;
+    expect(SYSTEM_PROMPT_HASH).not.toBe(oldSysVersion);
+    expect(extractionPromptVersion(['General Pest Control'], { systemLayout: true })).not.toContain(oldSysHash);
+
+    const savedGate = process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+    process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = 'true';
+    try {
+      const { apsCohortVersion } = require('../scripts/v2-promotion-readiness');
+      expect(apsCohortVersion([])).toBe(SYSTEM_APS_PROMPT_HASH);
+      expect(apsCohortVersion([])).not.toContain(oldSysHash);
+    } finally {
+      if (savedGate === undefined) delete process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT;
+      else process.env.GATE_CALL_EXTRACTION_SYSTEM_PROMPT = savedGate;
+    }
+  });
+
   test('the day/time conflict rule is in the one-message prompt, the system part and the gate-on prompts', () => {
     for (const text of [oneMessage, system, buildExtractionPrompt(TRANSCRIPT, PHONE, '2026-10-29', { agentProposedSlotCommitment: true }),
       buildExtractionPromptParts(TRANSCRIPT, PHONE, '2026-10-29', { agentProposedSlotCommitment: true }).system]) {

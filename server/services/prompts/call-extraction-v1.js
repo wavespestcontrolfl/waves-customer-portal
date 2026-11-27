@@ -661,11 +661,13 @@ const APS_PROMPT_HASH = `${PROMPT_VERSION}a-${_apsContractHash}`;
 // order and channel, so its calls are their own cohorts. The version columns are full at 30
 // characters (see above), so the mark is again ONE letter inside the leading token: `s` for
 // the system layout, `b` for the system layout with the agent-proposed-slot block (both).
-// Each hash is over that cohort's own rendered contract: system part, user template, schema.
+// Each hash is over that cohort's own rendered contract: system part, user template, schema,
+// and the Gemini native systemInstruction channel stamp so rows written when callGemini
+// folded `system` into `contents` cannot mix into the systemInstruction cohort.
 const _systemContractHash = (opts) => {
   const parts = buildExtractionPromptParts('', '', '', opts);
   return crypto.createHash('sha256')
-    .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(modelOutputSchema)}`)
+    .update(`${parts.system}\n\u0000\n${parts.user}\n${JSON.stringify(modelOutputSchema)}\nchannel:gemini=systemInstruction`)
     .digest('hex')
     .slice(0, 12);
 };
