@@ -37,9 +37,9 @@ function visitHoldLive() {
 }
 
 // Builder helper: skip held rows. `alias` is the table or alias the builder reads scheduled_services as.
-function excludeHeld(query, alias = 'scheduled_services') {
-  if (visitHoldLive()) query.whereNull(`${alias}.held_at`);
-  return query;
+function excludeHeld(builder, alias = 'scheduled_services') {
+  if (visitHoldLive()) builder.whereNull(`${alias}.held_at`);
+  return builder;
 }
 
 // Raw-SQL twin: ' AND ss.held_at IS NULL' while the gate is live, '' otherwise.
