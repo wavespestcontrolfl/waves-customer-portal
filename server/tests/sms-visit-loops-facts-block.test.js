@@ -52,7 +52,7 @@ describe('renderVisitLoopsSection', () => {
     // no minutes: the alert's figure is frozen and measured from the internal job block
     expect(out).toContain('- DELAY FLAGGED (the Quarterly Pest visit, 8-10am): dispatch flagged this visit past its window — apologize once for the delay; never say "on time"\n');
     // owner 2026-11-25: no line orders a follow-up promise; a hand-off is an escalated ABSTAIN
-    expect(out).toContain("- WINDOW PASSED: the Quarterly Pest window 8-10am has passed and the visit is not marked complete — apologize for the delay and escalate needs_person; promise no check, reply or timing (return ABSTAIN when the apology is all you can say)\n");
+    expect(out).toContain("- WINDOW PASSED: the Quarterly Pest window 8-10am has passed and the visit is not marked complete — you may say \"Your Quarterly Pest visit is still on our schedule and is not marked done yet.\" word for word (never a reason or a new time); apologize for the delay and escalate needs_person; promise no check, reply or timing (return ABSTAIN when the apology is all you can say)\n");
     const loops = fullLoops();
     expect(renderVisitLoopsSection({ ...loops, pastWindow: { ...loops.pastWindow, assigned: false } })).not.toMatch(/checking with|FOLLOW-UP SLA/);
     expect(out).not.toContain('no tech location');
@@ -242,7 +242,7 @@ describe('system prompt', () => {
     expect(off).not.toContain('Totally fine');
     process.env[GATE] = 'true';
     const on = buildSystemPrompt();
-    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, the thread');
+    expect(on).toContain('LATEST CALL TRANSCRIPT, COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, SCHEDULE CHANGES, the thread');
     expect(on).toContain(`\n${HEADER}\n- When the VISIT STATUS & OPEN LOOPS section lists a DELAY FLAGGED, WINDOW PASSED, MISSED VISIT, WE OWE THEM or THEY ARE WAITING ON US FOR line, the customer may still be waiting on something we owe, so a bare thanks or ok is never an ACK`);
     expect(on).toContain('or return ABSTAIN so a person handles it. Never promise a reply, a follow-up or any timing for it.');
     expect(on).toContain('Never promise an arrival time, or say the tech is "on time"');
@@ -374,13 +374,15 @@ describe('visitLoopStatus', () => {
   test('facts with the section: the visit-status signature (null when nothing time-sensitive); without the section: no snapshot', () => {
     const late = { visitId: 'v1', windowStart: '09:00:00', scheduledDate: '2026-10-01', type: 'tech_late', missingTracking: false };
     expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, 'UPCOMING SERVICES:\n- none\nBILLING:\n')).toBeNull(); // facts without the section
-    expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, WITH)).toEqual({ signature: 'late:v1@2026-10-01T09:00:00::tech_late:false' });
+    expect(visitLoopStatus({ visitLoops: { lateAlert: late } }, WITH)).toEqual({ signature: 'late:v1@2026-10-01T09:00:00::tech_late:false', schedule: 'unread', scheduleVisits: [] });
     expect(visitLoopStatus({ visitLoops: { pastWindow: { visitId: 'v1', windowStart: '09:00:00' }, lateAlert: { visitId: 'v1', windowStart: '09:00:00', type: 'tech_late', missingTracking: false } } }, WITH))
-      .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00:::assigned' });
+      .toEqual({ signature: 'late:v1@T09:00:00::tech_late:false|past:v1@T09:00:00:::assigned', schedule: 'unread', scheduleVisits: [] });
     // the section was rendered with nothing time-sensitive: a null signature is still
     // persisted, so a delay / passed window / miss that appears while the card waits refuses
-    expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toEqual({ signature: null });
-    expect(visitLoopStatus({}, WITH)).toEqual({ signature: null });
+    expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toEqual({ signature: null, schedule: 'unread', scheduleVisits: [] });
+    expect(visitLoopStatus({}, WITH)).toEqual({ signature: null, schedule: 'unread', scheduleVisits: [] });
+    // the SCHEDULE CHANGES the reply was written beside ride along ('' = read, none)
+    expect(visitLoopStatus({ visitLoops: { scheduleChanges: { moves: [], stopped: [], listed: [] } } }, WITH)).toEqual({ signature: null, schedule: '', scheduleVisits: [] });
   });
 });
 

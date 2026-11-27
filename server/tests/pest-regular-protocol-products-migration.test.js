@@ -551,14 +551,13 @@ describe('pest regular protocol products: the protocol hints', () => {
     expect(JSON.stringify(protocols)).not.toMatch(/Advion Cockroach Gel Bait|Talstar P/);
   });
 
-  // The pest program's visit 2 (a copy of the cockroach cleanout) is retired; the remaining visits are 3 to 6.
-  test('visits 3 to 6 keep their hints', () => {
-    expect(protocols.pest.visits.map((visit) => visit.visit)).toEqual([1, 3, 4, 5, 6]);
+  // The pest program's visit 2 (a copy of the cockroach cleanout) and visits 5 and 6 (copies of the rodent and mosquito programs'
+  // cards, protocols audit 2026-11-26) are retired; the remaining visits are 1, 3 and 4.
+  test('visits 3 and 4 keep their hints', () => {
+    expect(protocols.pest.visits.map((visit) => visit.visit)).toEqual([1, 3, 4]);
     const hintsByVisit = protocols.pest.visits.slice(1).map((visit) => Object.values(visit.lineMeta || {}).map((m) => m.catalogProductHints || null));
     expect(hintsByVisit).toEqual([
       [['Advion Ant Gel'], ['Atticus Antapex WSG'], null],
-      [],
-      [null, ['Tomcat Bait Chunx with Bromethalin'], ['Contrac Blox'], null, null, null, null, null, null] /* home and commercial bait as their own lines (owner 2026-11-25 D15b); the rest record no treatment */,
       [],
     ]);
   });

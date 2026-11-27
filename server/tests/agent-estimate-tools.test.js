@@ -118,15 +118,14 @@ const INPUT = {
     homeSqFt: { value: 2000, source: 'county', confidence: 'high' },
     'services.pest.frequency': { value: 'quarterly', source: 'operator_confirmation', confidence: 'high' },
   },
-  protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 5 }],
+  // The pest card has 3 visits: its rodent bait and mosquito visits were copies of the cards the rodent and mosquito
+  // programs own (PR #8672), so the rodent baits are reviewed under the rodent program, not here.
+  protocolReview: [{ serviceKey: 'pest', programKey: 'pest', visitCount: 3 }],
   inventoryReview: [
     { serviceKey: 'pest', productName: 'LESCO Crosscheck Plus', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Atticus Antapex WSG', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion WDG Granular', status: 'in_stock', onHand: 8 },
     { serviceKey: 'pest', productName: 'Advion Ant Gel', status: 'in_stock', onHand: 8 },
-    // The pest rodent visit names home bait (Tomcat) and commercial bait (Contrac) as separate lines (owner 2026-11-25, D15b).
-    { serviceKey: 'pest', productName: 'Tomcat Bait Chunx with Bromethalin', status: 'in_stock', onHand: 8 },
-    { serviceKey: 'pest', productName: 'Contrac Blox', status: 'in_stock', onHand: 8 },
   ],
 };
 
