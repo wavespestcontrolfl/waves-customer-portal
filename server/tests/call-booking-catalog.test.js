@@ -2408,6 +2408,52 @@ describe('existing-customer lawn/pest callback & structured V2 re-service intent
       catalogRow: LAWN_ONE_TIME,
       v2Extraction: roachWithPlanRateV2,
     })).toEqual({ price: null, source: null });
+    // Accepted per_application price on a one-time job is preserved (matches commercial booking guard).
+    const perApplicationV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: 150,
+        price_accepted_by_caller: true,
+        price_is_final: true,
+        price: { amount_usd: 150, unit: 'per_application', caller_response: 'accepted', accepted: true },
+      },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: 150,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: perApplicationV2,
+    })).toEqual({ price: 150, source: 'transcript' });
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 150, call_summary: 'Booked a $150 callback treatment.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: perApplicationV2,
+    })?.service_key).toBe('lawn_care_one_time');
+    // Declined or non-final total contradicted by V2 evidence is rejected for BOTH selection and billing.
+    const declinedOnlyV2 = {
+      ...LAWN_FOLLOWUP_V2,
+      service_request: {
+        ...LAWN_FOLLOWUP_V2.service_request,
+        quoted_price_usd: 150,
+        price: { amount_usd: 150, unit: 'one_time', caller_response: 'declined', accepted: false },
+      },
+    };
+    expect(resolveCallBookingPrice({
+      quotedPrice: 150,
+      catalogRow: LAWN_ONE_TIME,
+      v2Extraction: declinedOnlyV2,
+    })).toEqual({ price: null, source: null });
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: 'One-Time Lawn Care Service', quoted_price: 150, call_summary: 'Booked a callback treatment for the lawn.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['lawn'],
+      coarseServiceLabel: 'Lawn Care',
+      v2Extraction: declinedOnlyV2,
+    })?.service_key).toBe('lawn_re_service');
     // A non-total sr.price entry (e.g. a $99 WaveGuard Gold setup fee with quoted_price_usd: null, price_is_final: false)
     // is NOT turned into an invoice price for a separate visit.
     const setupFeeOnlyV2 = {
@@ -2434,11 +2480,22 @@ describe('existing-customer lawn/pest callback & structured V2 re-service intent
     })?.service_key).toBe('lawn_re_service');
   });
 
-  test('explicit negation or regular-visit booking wording overrides structured V2 intent', () => {
+  test('explicit negation or regular-visit booking wording overrides BOTH explicit callback references and structured V2 intent', () => {
     expect(hasCallReServiceIntent({ call_summary: "I don't need a re-service, just my regular visit" }, LAWN_FOLLOWUP_V2)).toBe(false);
     expect(hasCallReServiceIntent({ call_summary: 'Customer called to schedule my regular quarterly visit for Thursday.' }, {
       ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general' },
     })).toBe(false);
+    // Past callback praise + explicit regular quarterly booking stays Quarterly Pest Control (never replaced by free callback).
+    expect(hasCallReServiceIntent({ call_summary: 'The callback visit helped. Please schedule my regular quarterly visit.' })).toBe(false);
+    expect(resolveCallBookingCatalogService({
+      extracted: { specific_service_name: PEST_QUARTERLY.name, call_summary: 'The callback visit helped. Please schedule my regular quarterly visit.' },
+      services: SERVICES,
+      reServices: RE_SERVICES,
+      reServiceLanes: ['pest'],
+      coarseServiceLabel: 'General Pest Control',
+    })?.service_key).toBe('pest_general_quarterly');
+    // Negated regular-visit phrase does NOT block an explicit re-service request.
+    expect(hasCallReServiceIntent({ call_summary: "I don't want to schedule my regular quarterly visit yet, I need a re-service." })).toBe(true);
     // Past reference to a regular visit does NOT block a real callback.
     expect(hasCallReServiceIntent({ call_summary: 'Ants are back after our regular quarterly visit last week.' }, {
       ...LAWN_FOLLOWUP_V2, service_request: { ...LAWN_FOLLOWUP_V2.service_request, primary_service_category: 'pest_general' },

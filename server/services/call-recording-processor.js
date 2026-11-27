@@ -8316,7 +8316,7 @@ function commercialQuoteBookableFor({ extracted = {}, preAdoptionExtracted = nul
           services,
           coarseServiceLabel: coarse.ok ? coarse.service : null,
         });
-        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row }).price === quoted;
+        return !!row && resolveCallBookingPrice({ quotedPrice: quoted, catalogRow: row, v2Extraction }).price === quoted;
       });
     } catch (_e) {
       return false;

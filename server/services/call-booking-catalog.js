@@ -364,9 +364,13 @@ const STRUCTURED_RE_SERVICE_CATEGORY_LANE = Object.freeze({
   bundled_waveguard: 'either',
 });
 const EXISTING_SERVICE_FOLLOWUP_INTENTS = new Set(['follow_up_existing_service', 'complaint_or_callback']);
-const REGULAR_PLAN_VISIT_RE = /\b(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\s+up|confirm(?:ed|ing)?|just\s+(?:want|need)(?:ed|ing)?)\s+(?:(?:my|our|the|their|a|her|his)\s+)?(?:regular|routine|normal|next|scheduled)\s+(?:(?:quarterly|monthly|bi[-\s]?monthly|6[-\s]?week|every\s+6\s+weeks?|pest(?:\s+control)?|lawn(?:\s+care)?)\s+){0,2}(?:visit|service|treatment|appointment)\b/i;
-
-const RECURRING_V2_PRICE_UNITS = new Set(['per_month', 'per_quarter', 'per_year', 'per_application']);
+const REGULAR_PLAN_VISIT_PHRASE = "(?:(?:my|our|the|their|a|her|his)\\s+)?(?:regular|routine|normal|next|scheduled)\\s+(?:(?:quarterly|monthly|bi[-\\s]?monthly|6[-\\s]?week|every\\s+6\\s+weeks?|pest(?:\\s+control)?|lawn(?:\\s+care)?)\\s+){0,2}(?:visit|service|treatment|appointment)";
+const REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|just\\s+(?:want|need)(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'i');
+const NEGATED_REGULAR_PLAN_VISIT_RE = new RegExp(`\\b(?:no|not|don['’]?t|doesn['’]?t|didn['’]?t|won['’]?t|never|rather\\s+than|instead\\s+of)\\s+(?:[\\w'’]+\\s+){0,3}(?:book(?:ed|ing)?|schedul(?:e|ed|ing)|set(?:ting)?\\s+up|confirm(?:ed|ing)?|want(?:ed|ing)?|need(?:ed|ing)?)\\s+${REGULAR_PLAN_VISIT_PHRASE}\\b`, 'gi');
+// Recurring cadence units only (matches call-commercial-dictated-booking.js:
+// per_application is a valid per-visit price unit on one-time jobs).
+const RECURRING_V2_PRICE_UNITS = new Set(['per_month', 'per_quarter', 'per_year']);
+const REJECTED_V2_PRICE_RESPONSES = new Set(['declined', 'no_response', 'not_at_issue']);
 
 function v2PriceEntries(v2Extraction) {
   const sr = v2Extraction?.service_request;
@@ -380,30 +384,44 @@ function isAcceptedV2Price(entry) {
     : entry.accepted === true));
 }
 
-// True when V2's structured price entries identify `amount` as a recurring
-// plan rate rather than an accepted one-time visit price (e.g. model echoed a
-// quarterly rate into quoted_price_usd, even if a declined one-time offer
-// shared the same dollar amount).
-function isRecurringOnlyV2Amount(amount, entries) {
+function isRejectedV2Price(entry) {
+  return Boolean(entry && (REJECTED_V2_PRICE_RESPONSES.has(entry.caller_response) || entry.accepted === false));
+}
+
+// True when V2's acceptance/finality judgements or matching structured price
+// entries contradict `amount` as an accepted final per-visit charge (declined /
+// unaccepted, non-final, or solely a recurring per_month/per_quarter/per_year
+// rate echoed into quoted_price_usd).
+function isInvalidV2VisitPrice(amount, sr, entries) {
+  if (sr?.price_accepted_by_caller === false || sr?.price_is_final === false) return true;
   const matching = entries.filter((e) => sanitizeQuotedCallPrice(e.amount_usd) === amount);
   if (matching.length === 0) return false;
   const accepted = matching.filter(isAcceptedV2Price);
-  const nonDeclined = matching.filter((e) => e.caller_response !== 'declined' && e.accepted !== false);
-  const relevant = accepted.length > 0 ? accepted : nonDeclined;
-  return relevant.length > 0 && relevant.every((e) => RECURRING_V2_PRICE_UNITS.has(e.unit));
+  const usable = accepted.length > 0 ? accepted : matching.filter((e) => !isRejectedV2Price(e));
+  return usable.length === 0 || usable.every((e) => RECURRING_V2_PRICE_UNITS.has(e.unit));
 }
 
 // Single validated one-time visit price shared by re-service eligibility AND
 // resolveCallBookingPrice: uses ONLY the booked service's quoted total
 // (quoted_price_usd / extracted.quoted_price), never arbitrary sr.price /
 // sr.prices entries (which can carry a plan setup fee or another service's
-// price when quoted_price_usd is null), and rejects recurring plan rates
-// echoed into quoted_price_usd.
+// price when quoted_price_usd is null), and rejects recurring plan rates or
+// totals contradicted by acceptance/finality evidence.
 function agreedOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
-  const scalar = sanitizeQuotedCallPrice(v2Extraction?.service_request?.quoted_price_usd)
+  const sr = v2Extraction?.service_request;
+  const scalar = sanitizeQuotedCallPrice(sr?.quoted_price_usd)
     ?? sanitizeQuotedCallPrice(extracted?.quoted_price);
   if (scalar === null) return null;
-  return isRecurringOnlyV2Amount(scalar, v2PriceEntries(v2Extraction)) ? null : scalar;
+  return isInvalidV2VisitPrice(scalar, sr, v2PriceEntries(v2Extraction)) ? null : scalar;
+}
+
+function requestsRegularPlanVisit(extracted = {}, v2Extraction = null) {
+  const combined = [
+    callBookingReServiceIntentText(extracted),
+    v2Extraction?.meta?.call_summary,
+    v2Extraction?.scheduling?.scheduling_notes_raw,
+  ].filter(Boolean).join(' ');
+  return REGULAR_PLAN_VISIT_RE.test(combined.replace(NEGATED_REGULAR_PLAN_VISIT_RE, ' '));
 }
 
 function v2CategoryLaneForReService(v2Extraction) {
@@ -443,18 +461,20 @@ function structuredReServiceLane(extracted = {}, v2Extraction = null) {
   const lane = structuredReServiceCategoryLane(v2Extraction);
   if (!lane) return null;
   if (agreedOneTimeVisitPrice(extracted, v2Extraction) !== null) return null;
+  if (requestsRegularPlanVisit(extracted, v2Extraction)) return null;
   const combined = [
     callBookingReServiceIntentText(extracted),
     v2Extraction?.meta?.call_summary,
     v2Extraction?.scheduling?.scheduling_notes_raw,
   ].filter(Boolean).join(' ');
-  if (hasNegatedReServiceIntent(combined) || REGULAR_PLAN_VISIT_RE.test(combined)) return null;
+  if (hasNegatedReServiceIntent(combined)) return null;
   return lane;
 }
 
 // Cheap pre-gate so the processor only runs the re-service eligibility lookups
 // (customer row + live lanes) on revisit-shaped calls.
 function hasCallReServiceIntent(extracted = {}, v2Extraction = null) {
+  if (requestsRegularPlanVisit(extracted, v2Extraction)) return false;
   const intentText = callBookingReServiceIntentText(extracted);
   if (intentText && hasAffirmativeReServiceIntent(intentText)) return true;
   return Boolean(structuredReServiceLane(extracted, v2Extraction));
@@ -596,10 +616,10 @@ function reServiceLaneEvidence(haystack) {
 }
 
 function reServiceOverrideRow({ extracted, haystack, reServices, reServiceLanes, coarseServiceLabel, pickPlanLane, v2Extraction }) {
-  // Never replace a call that agreed on a one-time visit price with a $0
-  // re-service row (whether the model picked a specific one-time service, a
-  // generic appointment, or nothing).
+  // Never replace a call that agreed on a one-time visit price or explicitly
+  // asks to schedule a regular plan visit with a $0 re-service row.
   if (agreedOneTimeVisitPrice(extracted, v2Extraction) !== null) return null;
+  if (requestsRegularPlanVisit(extracted, v2Extraction)) return null;
   const intentText = callBookingReServiceIntentText(extracted);
   const hasExplicitIntent = !!intentText && hasAffirmativeReServiceIntent(intentText);
   const structuredLane = hasExplicitIntent ? null : structuredReServiceLane(extracted, v2Extraction);
