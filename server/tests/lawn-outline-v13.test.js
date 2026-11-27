@@ -13,7 +13,6 @@
 
 const v13 = require('../config/lawn-protocol-v13.json');
 const outline = require('../services/lawn-service-outline');
-const { PROGRAM_DETAIL_V13 } = require('../services/service-report/lawn-program-line');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
@@ -101,10 +100,13 @@ const ST_AUG_ESTIMATE = estimateWith(formLawn('st_augustine'));
 const build = (estimate, input = {}) => outline.buildOutline({ db: makeDb(), estimate, input, now: new Date('2026-10-24T12:00:00Z') });
 const section = (result, key) => result.content.sections.find((s) => s.key === key);
 const categoriesOf = (bullets) => bullets.map((b) => b.replace(CONDITIONAL_TAIL, ''));
+// The detailed layout, for a plan drawn by month (these estimates carry no plan line).
 const V13_KEYS = [
-  'lawn_program', 'season_focus', 'program_year', 'treatment_categories', 'typical_visit',
-  'local_rules', 'safety', 'after_visit', 'not_included',
+  'year_bar', 'program_year', 'typical_visit', 'after_visit_timeline', 'after_visit', 'your_watering', 'your_mowing',
+  'problems', 'products', 'not_included', 'faq',
 ];
+// The month's drawn steps, from the month list.
+const monthOf = (result, month) => section(result, 'program_year').visual.months[month - 1];
 // What the customer page shows (content.turf and generatedAt are not drawn).
 const visible = ({ title, intro, property, season, sections, treatmentCategories, productCards, cta }) => (
   { title, intro, property, season, sections, treatmentCategories, productCards, cta }
@@ -115,7 +117,7 @@ describe('the gate', () => {
     await withGates({}, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
       expect(section(result, 'your_turf_type')).toBeTruthy();
-      expect(section(result, 'lawn_program')).toBeUndefined();
+      expect(section(result, 'year_bar')).toBeUndefined();
       expect(result.meta.contentLibraryVersion).toBe('seed-v1');
       expect(outline.contentLibraryVersion()).toBe('seed-v1');
     });
@@ -127,10 +129,10 @@ describe('the gate', () => {
       expect((await build(ST_AUG_ESTIMATE)).meta.contentLibraryVersion).toBe('seed-v1');
     });
     await withGates(V13_ON, async () => {
-      expect(outline.contentLibraryVersion()).toBe('lawn-v13-copy-4');
+      expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-4');
       expect(outline.CONTENT_LIBRARY_VERSION).toBe('seed-v1');
       const result = await build(ST_AUG_ESTIMATE);
-      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
+      expect(result.meta.contentLibraryVersion).toBe('lawn-v13-visual-4');
       expect(result.meta.protocolVersion).toBe('lawn-v13');
     });
   });
@@ -185,8 +187,8 @@ describe('the grass is the one the estimate recorded', () => {
       expect(result.content.title).toBe('Your Waves Lawn Care Program Overview');
       expect(result.content.property.turfType).toBeNull();
       expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
-      // The one program still plans an unknown lawn (the shared key), so the month has its bullets.
-      expect(categoriesOf(section(result, 'season_focus').bullets)).toContain('Fertilizer and nutrition');
+      // The one program still plans an unknown lawn (the shared key), so the month has its steps.
+      expect(monthOf(result, 4).main).toContain('feeding');
       expect(result.validation.status).toBe('passed');
     });
   });
@@ -203,7 +205,6 @@ describe('the grass is the one the estimate recorded', () => {
       expect(result.meta.turf.turfType).toBe('bahia');
       expect(result.validation.status).toBe('blocked');
       expect(result.validation.errors.join(' ')).toMatch(/no lawn program/i);
-      expect(section(result, 'season_focus').bullets).toEqual([]);
     });
   });
 
@@ -213,7 +214,7 @@ describe('the grass is the one the estimate recorded', () => {
       expect(result.meta.turf.turfType).toBe('mixed');
       expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
       expect(JSON.stringify(result.content)).not.toMatch(/admin confirmation/i);
-      expect(categoriesOf(section(result, 'season_focus').bullets)).toContain('Micronutrients');
+      expect(monthOf(result, 6).main).toContain('micros');
       expect(result.validation.status).toBe('passed');
     });
   });
@@ -227,10 +228,10 @@ describe('one page for every lawn', () => {
         expect([grass, visible((await build(estimateWith(formLawn(grass)), { month })).content)]).toEqual([grass, page]);
       }
       const text = JSON.stringify(page);
-      expect(section({ content: page }, 'lawn_program').body).toMatch(/^Most of the lawns we treat are St\. Augustine, so the program is built around it\./);
-      expect(text.match(/augustine/gi)).toHaveLength(1);
-      // The intro (owner-approved words) names bermudagrass only as a spot the crew maps, never as the lawn's grass.
-      expect(text.replace('insects, disease or bermudagrass.', 'insects or disease.')).not.toMatch(/bermuda|zoysia|bahia|grass type|turf type/i);
+      // The page names the program, never the lawn's grass: bermudagrass appears only as a spot the crew maps and in the
+      // owner-approved FAQ answer about getting rid of it.
+      expect(page.property.turfType).toBeNull();
+      expect(text).not.toMatch(/zoysia|bahia|turf type/i);
     });
   });
 });
@@ -250,13 +251,13 @@ describe('regenerating an older outline', () => {
       expect(outline.regenerationTurfType(pickedPacket)).toBe('zoysia');
       const regenerated = await build(ST_AUG_ESTIMATE, { month: 10, turfType: outline.regenerationTurfType(guessedPacket) });
       expect(regenerated.meta.turf.turfType).toBe('st_augustine');
-      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
+      expect(regenerated.meta.contentLibraryVersion).toBe('lawn-v13-visual-4');
     });
   });
 });
 
 describe('the sections', () => {
-  test('one program section, the report month text, the drawn year, no tier line and no restricted-season line', async () => {
+  test('the detailed layout, the drawn year, no tier line and no restricted-season line', async () => {
     await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
       expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
@@ -266,33 +267,19 @@ describe('the sections', () => {
       const text = JSON.stringify(result.content.sections);
       expect(text).not.toMatch(/service tier/i);
       expect(text).not.toMatch(/restricted-season logic/i);
-      expect(text).not.toMatch(/soil.test/i);
       // Owner 2026-10-24: the twelve "In <month> the program focuses on ..." sentences read as filler; the year is drawn.
       expect(text).not.toMatch(/program focuses on/i);
-      expect(section(result, 'local_rules').bullets).toEqual([
-        'Your rule area: Sarasota County, FL',
-        'What it limits: No nitrogen or phosphorus from June 1 through September 30.',
-        'What we do instead: Micronutrients for color, inspection, and spot treatments, with no nitrogen or phosphorus',
-      ]);
-      // One tile row in place of the report and portal sections; GPS records arrival only.
-      expect(section(result, 'after_visit').bullets).toContain('Arrival record: GPS on the service vehicle records when the technician arrives');
+      // The rule area and its limit ride on the year bar's caption.
+      expect(section(result, 'year_bar').visual.caption).toBe('Your rule area: Sarasota County, FL. No nitrogen or phosphorus from June 1 to September 30; micronutrients keep the color instead.');
       expect(text).not.toMatch(/arrival and completion/i);
-      expect(result.content.treatmentCategories.map((c) => c.label)).toEqual(section(result, 'treatment_categories').bullets.map((b) => b.split(':')[0]));
     });
   });
 
   test('every drawn section keeps text bullets that say what the drawing says', async () => {
     await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 10 });
-      // Every section is boxed (owner 2026-10-24: "make the boxes").
-      expect(result.content.sections.map((s) => [s.key, s.visual?.type])).toEqual([
-        ['lawn_program', 'tiles'], ['season_focus', 'chips'], ['program_year', 'year'], ['treatment_categories', 'categories'], ['typical_visit', 'steps'],
-        ['local_rules', 'tiles'], ['safety', 'tiles'], ['after_visit', 'tiles'], ['not_included', 'tags'],
-      ]);
-      for (const tiles of result.content.sections.filter((s) => s.visual.type === 'tiles')) {
-        expect([tiles.key, tiles.bullets]).toEqual([tiles.key, tiles.visual.items.map((t) => `${t.title}: ${t.text}`)]);
-      }
-      expect(section(result, 'safety').visual.items.map((t) => t.title)).toEqual(['Label directions', 'Stay off until dry', 'Follow your report', 'EPA numbers']);
+      expect(result.content.sections.map((s) => s.key)).toEqual(V13_KEYS);
+      for (const drawn of result.content.sections) expect([drawn.key, drawn.bullets.length > 0]).toEqual([drawn.key, true]);
       const tags = section(result, 'not_included');
       expect(tags.bullets).toEqual(tags.visual.items);
       expect(tags.visual.items).toEqual(['Irrigation repairs', 'Mowing', 'Sod', 'Seed', 'Topdressing', 'Cultural repairs', 'Heavy shade corrections']);
@@ -301,10 +288,8 @@ describe('the sections', () => {
       expect(steps.visual.items.map((t) => t.title)).toEqual(['Check', 'Decide', 'Treat', 'Report']);
       expect(steps.bullets).toEqual(steps.visual.items.map((t) => `${t.title}: ${t.text}`));
       expect(steps.body).toBe('');
-      const cards = section(result, 'treatment_categories');
-      expect(cards.bullets).toEqual(cards.visual.items.map((c) => `${c.label}: ${c.text}`));
-      expect(section(result, 'program_year').bullets[9]).toBe('October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control, Wetting agent');
-      // The legacy outline draws nothing.
+      expect(section(result, 'program_year').bullets[9]).toMatch(/^October: Fertilizer, Pre-emergent; as needed: Disease control, Insect control, Weed control, Wetting agent\./);
+      // The old outline draws nothing.
       await withGates({}, async () => {
         expect((await build(ST_AUG_ESTIMATE, { month: 10 })).content.sections.some((s) => 'visual' in s)).toBe(false);
       });
@@ -332,45 +317,26 @@ describe('the sections', () => {
         for (const step of [...m.main, ...m.asNeeded]) expect(visual.labels[step]).toEqual(expect.any(String));
         expect(m.main.filter((step) => m.asNeeded.includes(step))).toEqual([]);
       }
-      // The month chips are the same steps.
-      const chips = section(await build(ST_AUG_ESTIMATE, { month: 10 }), 'season_focus').visual.items;
-      expect(chips.filter((c) => c.tier === 'main').map((c) => c.key)).toEqual(byMonth.Oct.main);
-      expect(chips.filter((c) => c.tier === 'as_needed').map((c) => c.key)).toEqual(byMonth.Oct.asNeeded);
     });
   });
 
   test('May presents scouting as the main step and insect treatment only after evidence', async () => {
     await withGates(V13_ON, async () => {
       const result = await build(ST_AUG_ESTIMATE, { month: 5 });
-      const focus = section(result, 'season_focus');
-      expect(focus.visual.items).toEqual(expect.arrayContaining([
-        { key: 'inspection', label: 'Inspection', tier: 'main' },
-        { key: 'insects', label: 'Insect control', tier: 'as_needed' },
-      ]));
-      expect(focus.bullets).toContain('Insect scouting checks current insect pressure and records the target and observations; treatment is only as needed after evidence is found.');
-      expect(focus.bullets).toContain(`Insect control${CONDITIONAL_TAIL}`);
-      const insectCard = section(result, 'treatment_categories').visual.items.find((item) => item.key === 'insects');
-      expect(insectCard.text).toContain('only as needed after current evidence is recorded');
-      expect(insectCard.text).toContain('A scouting-only May visit is valid.');
+      const may = monthOf(result, 5);
+      expect(may.main).toEqual(['inspection']);
+      expect(may.asNeeded).toContain('insects');
+      const insectCard = result.content.treatmentCategories.find((item) => item.key === 'insects');
+      expect(insectCard.reason).toContain('only as needed after current evidence is recorded');
+      expect(insectCard.reason).toContain('A scouting-only May visit is valid.');
       expect(JSON.stringify(result.content)).not.toMatch(/whole-lawn insect treatment/i);
     });
   });
 
-  test('a lawn with no program (bahia) draws an empty year and no chips', async () => {
+  test('a lawn with no program (bahia) draws an empty year', async () => {
     await withGates(V13_ON, async () => {
       const result = await build(estimateWith(formLawn('bahia')), { month: 10 });
       expect(section(result, 'program_year').visual.months.every((m) => !m.main.length && !m.asNeeded.length)).toBe(true);
-      expect(section(result, 'season_focus').visual.items).toEqual([]);
-    });
-  });
-
-  test.each(MONTHS)('month %i: the season text is the lawn report\'s own "why now" text', async (month) => {
-    await withGates(V13_ON, async () => {
-      const result = await build(ST_AUG_ESTIMATE, { month });
-      const season = section(result, 'season_focus');
-      expect(season.title).toBe(`${MONTH_ABBR[month - 1]} Service Focus`);
-      expect(season.body).toBe(PROGRAM_DETAIL_V13[month].whyNow);
-      expect(season.bullets.length).toBeGreaterThan(0);
     });
   });
 
@@ -429,26 +395,16 @@ describe('the month bullets cover every v13 line', () => {
     });
   });
 
-  test('April lists the 12x bag and the 9x pre-emergent bag', async () => {
-    await withGates(V13_ON, async () => {
-      const result = await build(ST_AUG_ESTIMATE, { month: 4 });
-      expect(categoriesOf(section(result, 'season_focus').bullets)).toEqual(expect.arrayContaining([
-        'Fertilizer and nutrition',
-        'Pre-emergent weed control with fertilizer',
-        'Disease control',
-        'Insect control',
-      ]));
-    });
-  });
-
   test('no product name, number or rate reaches a bullet, and add-on steps never do', async () => {
-    const aprilBullets = async (gates) => withGates(gates, async () => section(await build(ST_AUG_ESTIMATE, { month: 4 }), 'season_focus').bullets);
-    expect(await aprilBullets({ ...V13_ON, GATE_LAWN_BERMUDA_REMOVAL: 'true' })).toEqual(await aprilBullets(V13_ON));
+    const aprilSteps = async (gates) => withGates(gates, async () => {
+      const { main, asNeeded } = monthOf(await build(ST_AUG_ESTIMATE, { month: 4 }), 4);
+      return { main, asNeeded };
+    });
+    expect(await aprilSteps({ ...V13_ON, GATE_LAWN_BERMUDA_REMOVAL: 'true' })).toEqual(await aprilSteps(V13_ON));
     await withGates({ ...V13_ON, GATE_LAWN_BERMUDA_REMOVAL: 'true' }, async () => {
-      for (const grass of ['st_augustine', 'bermuda', 'zoysia']) {
-        for (const month of MONTHS) {
-          const bullets = section(await build(estimateWith(formLawn(grass)), { month }), 'season_focus').bullets;
-          for (const bullet of bullets) {
+      for (const track of Object.values(v13)) {
+        for (const visit of track.visits) {
+          for (const bullet of outline.customerProtocolBullets(visit)) {
             expect(bullet).not.toMatch(/\d/);
             for (const name of productNames) {
               const words = name.toLowerCase().split(/\s+/);

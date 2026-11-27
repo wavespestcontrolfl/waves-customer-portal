@@ -19,7 +19,7 @@ export function ConsumerNoticeHint({ blocked }) {
 }
 
 /**
- * The Florida consumer notice (GATE_ESTIMATE_CONSUMER_NOTICE, Rule 5E-14.105(1)). `consumerNotice` is /data's
+ * The Florida consumer notice (Rule 5E-14.105(1)). `consumerNotice` is /data's
  * cta.consumerNotice: { state: 'none' | 'awaiting' | 'signed', canSign, reason? }, absent unless the server asks for
  * the notice, so this renders nothing otherwise.
  *

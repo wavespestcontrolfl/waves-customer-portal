@@ -13,7 +13,7 @@
  */
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-const mockGates = { inPersonCardLive: jest.fn(), estimateConsumerNoticeLive: jest.fn(), isEnabled: jest.fn() };
+const mockGates = { inPersonCardLive: jest.fn(), isEnabled: jest.fn() };
 jest.mock('../config/feature-gates', () => mockGates);
 const mockRoute = {
   acceptanceTermsApplyTo: jest.fn(),
@@ -65,7 +65,6 @@ beforeEach(() => {
   lockedEstimate = { id: 'est-1', customer_id: 'cust-1', status: 'accepted', terms_version: null };
   writes = [];
   mockGates.inPersonCardLive.mockReturnValue(true);
-  mockGates.estimateConsumerNoticeLive.mockReturnValue(false);
   mockGates.isEnabled.mockImplementation((gate) => gate === 'estimateAcceptanceTerms');
   mockRoute.acceptanceTermsApplyTo.mockReturnValue(true);
   mockRoute.acceptanceTermsScopeFor.mockReturnValue('plan');
@@ -126,7 +125,6 @@ describe('buildTermsPayload (GET /api/public/secure-card/:token)', () => {
   });
 
   test('a termite notice alone never withholds the pay link', async () => {
-    mockGates.estimateConsumerNoticeLive.mockReturnValue(true);
     mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(true);
     mockRoute.acceptanceTermsApplyTo.mockReturnValue(false);
     expect(await block({ state: 'prepay_selected', payUrl: 'https://portal.test/pay/inv-token' }))
@@ -134,7 +132,6 @@ describe('buildTermsPayload (GET /api/public/secure-card/:token)', () => {
   });
 
   test('a termite estimate\'s notice rides on its own; terms stay excluded', async () => {
-    mockGates.estimateConsumerNoticeLive.mockReturnValue(true);
     mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(true);
     mockRoute.acceptanceTermsApplyTo.mockReturnValue(false);
     expect(await block()).toEqual({ consumerNotice: { text: 'Florida notice text.' } });
@@ -267,7 +264,6 @@ describe('recordCardPageTerms', () => {
   });
 
   test('when the Florida notice applies, the page must have shown it', async () => {
-    mockGates.estimateConsumerNoticeLive.mockReturnValue(true);
     mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(true);
     expect(await recordCardPageTerms(args({ consumerNoticeShown: false }))).toMatchObject({ ok: false, status: 409, code: 'consumer_notice_required' });
     expect(writes).toEqual([]);
@@ -360,7 +356,6 @@ describe('markTermsRequired (the in-person route)', () => {
   });
 
   test('flags a termite estimate for the separate-signature notice', async () => {
-    mockGates.estimateConsumerNoticeLive.mockReturnValue(true);
     mockNotice.consumerNoticeBlocksAccept.mockResolvedValue(true);
     mockRoute.acceptanceTermsApplyTo.mockReturnValue(false);
     expect(await markTermsRequired('visit-1')).toEqual({ marked: true });

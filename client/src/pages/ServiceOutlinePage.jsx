@@ -247,7 +247,7 @@ function YearVisual({ months = [], labels = {}, limitLabel }) {
   );
 }
 
-// The detailed outline's month list (GATE_LAWN_OUTLINE_DETAIL): one row per month with its steps; the build month
+// The detailed outline's month list: one row per month with its steps; the build month
 // and the next two arrive open, and any other row opens on a tap to show what that visit does and one thing to do at
 // home.
 function MonthsVisual({ months = [], labels = {}, limitLabel }) {

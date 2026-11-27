@@ -79,7 +79,7 @@ describe('slab pre-treat tax (GATE_SLAB_HOME_NO_TAX)', () => {
   test('gate on: other commercial services keep their tax', async () => {
     process.env.GATE_SLAB_HOME_NO_TAX = 'true';
     expect(await tax('Recurring Pest Control')).toMatchObject({ rate: 0.07, taxable: true });
-    expect(await tax('Bed Pre-Emergent Weed Control')).toMatchObject({ rate: 0.07, taxable: true });
+    expect(await tax('Mosquito Misting System Installation')).toMatchObject({ rate: 0.07, taxable: true });
     expect(await tax('Termite Trenching')).toMatchObject({ rate: 0.07, taxable: true });
   });
 

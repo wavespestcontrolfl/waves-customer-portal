@@ -1,5 +1,5 @@
 /**
- * GATE_LAWN_SPRAY_NO_TAX: Florida does not tax lawn spraying, residential or
+ * Lawn and landscape tax: Florida does not tax lawn spraying, residential or
  * nonresidential (Rule 12A-1.009(6)), and taxes pest control only for an
  * infestation of a nonresidential building, so tree and shrub and palm care is
  * not taxed either. TaxCalculator.calculateTax must not tax them for a
@@ -71,16 +71,8 @@ const GROUNDS_NAMES = [
   'lawn_recurring',
 ];
 
-afterEach(() => { delete process.env.GATE_LAWN_SPRAY_NO_TAX; });
-
-describe('lawn and landscape tax (GATE_LAWN_SPRAY_NO_TAX)', () => {
-  test('gate off: a commercial account pays county tax on lawn and tree and shrub work, as today', async () => {
-    expect(await tax('Every 6 Weeks Lawn Care Service')).toMatchObject({ rate: 0.07, amount: 7, taxable: true, county: 'Manatee' });
-    expect(await tax('Tree & Shrub Care')).toMatchObject({ rate: 0.07, amount: 7, taxable: true, county: 'Manatee' });
-  });
-
-  test.each(['1', 'true', 'on'])('gate %s: lawn, tree and shrub and palm work is not taxed for a commercial account', async (value) => {
-    process.env.GATE_LAWN_SPRAY_NO_TAX = value;
+describe('lawn and landscape tax', () => {
+  test('lawn, tree and shrub and palm work is not taxed for a commercial account', async () => {
     for (const name of GROUNDS_NAMES) {
       const result = await tax(name);
       expect(result).toMatchObject({ rate: 0, amount: 0, taxable: false });
@@ -88,20 +80,17 @@ describe('lawn and landscape tax (GATE_LAWN_SPRAY_NO_TAX)', () => {
     }
   });
 
-  test('gate on: building pest work, mosquito work and a combined visit keep the commercial tax', async () => {
-    process.env.GATE_LAWN_SPRAY_NO_TAX = 'true';
+  test('building pest work, mosquito work and a combined visit keep the commercial tax', async () => {
     for (const name of ['Recurring Pest Control', 'Monthly Mosquito Control Service', 'Lawn & Mosquito Program', 'Lawn Care Visit #4 + Quarterly Pest Control', 'Lawn Care Visit #4 + Palmetto Bug Treatment', 'Mosquito Misting System Installation', 'Termite Trenching', 'Palmetto Bug Treatment']) {
       expect(await tax(name)).toMatchObject({ rate: 0.07, amount: 7, taxable: true });
     }
   });
 
-  test('gate on: a residential lawn visit stays untaxed', async () => {
-    process.env.GATE_LAWN_SPRAY_NO_TAX = 'true';
+  test('a residential lawn visit stays untaxed', async () => {
     expect(await tax('Monthly Lawn Care Service', { propertyType: 'residential' })).toMatchObject({ rate: 0, amount: 0, taxable: false });
   });
 
-  test('gate on: a verified exemption still answers first', async () => {
-    process.env.GATE_LAWN_SPRAY_NO_TAX = 'true';
+  test('a verified exemption still answers first', async () => {
     const result = await tax('Lawn Care Visit', { exemption: { exemption_type: 'resale', certificate_number: 'X-1' } });
     expect(result).toMatchObject({ rate: 0, taxable: false });
     expect(result.reason).toContain('Tax exempt');

@@ -137,7 +137,6 @@
  *   GATE_SHIFT_CLOSE_REVIEW=true (census H8 + M7, owner 2026-10-25: a shift the 9 PM/11 PM job or the 14-hour check closes for a technician who forgot to clock out ends at the last real activity (the latest completed visit or the end of the last job/drive/break/admin entry in the shift) instead of the forced time, is marked auto-closed and needing review, and blocks the technician's pay run line until an admin edits the clock-out or taps Confirm on the approvals screen; the 9 PM reminder and 11 PM notice go to the owner as an internal text and to every other technician as a Today card + push, never a customer-thread text. Read at call time via shiftCloseReviewLive(), strict 'true', dark by default; off = clock_out is the forced time, no flag, the same texts as today; rollback = unset. Texts only the owner's own phone.)
  *   GATE_PNL_PAY_RUN_WAGES=true (census M11, owner 2026-10-26, choice B "from the payroll the portal already runs": the P&L and the Schedule C draft count W-2 wages and employer payroll taxes from FINALIZED pay runs (payroll_checks.status 'finalized', by pay_date): wages = gross, employer taxes = employer Social Security + employer Medicare + FUTA + Florida reemployment. Bank payroll payments (net pay, the federal deposit, FUTA, RT-6) go in the expense category "Payroll (counted from pay runs)" (expense_categories.counted_from_pay_runs), which both leave out so nothing counts twice. P&L labor line = wages + employer taxes, plus a payroll block in the P&L JSON; Schedule C line 26 = wages, line 23 = employer taxes plus the other Taxes and licenses rows; the CPA README says so when GATE_TAX_PACKAGE_W2_LABOR is also on. Read at call time via pnlPayRunWagesLive(), strict 'true', dark by default; off = every output is byte for byte today's; rollback = unset. Changes report figures only; sends, files and pays nothing.)
  *   GATE_PAYROLL_BANK_MATCH=true (basic payroll item 8, owner 2026-10-28, "pay package is still being built, do these": the bank import ties a bank line to the paycheck or payroll tax payment it paid. A debit on a business account equal to a finalized, not-voided paycheck's net pay (pay date minus 3 days to plus 45 days, or plus 7 for a bank transfer) links when exactly one check and one bank line pair up, and a check number printed on the line breaks a tie; an IRS / EFTPS debit equal to a payroll federal deposit calendar row, and a Florida Department of Revenue debit equal to a payroll RT-6 row, link the same way. A linked line is booked as an expense in "Payroll (counted from pay runs)", which the P&L and Schedule C draft leave out. Anything else (two checks with one amount, an amount one cent off, a different check number) stays a suggestion with the paycheck named, and the owner picks. An automatic link is verified right after it commits (a later same-amount line or paycheck puts it back to review, nothing deleted), and a crash leftover is verified at the top of the next pass. It never moves money and never marks a calendar row paid; the Payroll tab shows Bank: matched / not seen yet / needs your pick per check, and the filing calendar shows Seen in the bank on <date>. Voiding a pay run releases the lines matched to its checks. That release, a changed or deleted calendar row and the owner's Unlink never delete or re-price an expense: the expense the match made stays as it is (the next pass finds it as the existing expense), and one it re-categorized gets its category back. Needs GATE_BANK_IMPORT for the bank lines, GATE_PAYROLL for the pay runs and GATE_PNL_PAY_RUN_WAGES (the match does nothing while that gate is off, so no expense is moved into a category the books do not leave out). Read at call time via payrollBankMatchLive(), strict 'true', dark by default; off = the bank import, the books and every response are byte for byte today's; rollback = unset (existing links stay).)
- *   GATE_TECH_PAY_STUBS=true (payroll item 7, owner 2026-10-28, "pay package is still being built, do these"; allowed by the technician allow-list v1 ruling of 2026-10-02, which gives a technician login its own pay. A technician sees a Pay stubs list on the Staff page for their own FINALIZED, not-voided pay checks and can open the stub (the admin stub: hours, earnings, taxes withheld, year to date, net pay; no employer taxes). GET /api/tech/payroll/checks and GET /api/tech/payroll/checks/:id/stub scope by the authenticated technician id; another person's check, a draft run or a voided run answers 404. Read at call time via techPayStubsLive(), strict 'true', dark by default; off = both routes answer 404 before any query and the list does not render. Everything else about payroll stays admin only. Pays, sends and files nothing; rollback = unset.)
  *   GATE_TECH_CARD_ON_FILE=true (owner 2026-11-04, technician visibility audit D4 A: card on file at the visit. A technician may charge a customer's saved card (never a saved bank account) for an invoice bound to its OWN visit scheduled today (ET) that it has completed, and only for the booked visit's own lines (a checkout extra needs the customer at the door); the visit row is re-checked under the charge's own lock, the charge refuses a collections hold or a stopped collection (an admin charge may override both), and it needs the quoted total. The visit payment sheet then shows Card on File to that technician. Read at call time via techCardOnFileLive(), strict 'true', dark by default; off = POST /api/admin/invoices/:id/charge-card and /charge-card-quote stay admin only and the sheet shows no Card on File to a technician. Charges money; the owner flips it. Rollback = unset.)
  *   GATE_CHECKOUT_TENDER_RECEIPT=true (owner 2026-11-18, after a check paid at the visit got no receipt: the dispatch checkout's Cash and Check sheets queue the paid receipt with the payment (the automatic receipt queue, as for a card payment: the customer's receipt opt-out, email choice, text choice and send window apply, with retries) and record exactly the amount the sheet showed (a balance that moved since is refused). Read at call time via checkoutTenderReceiptLive(), strict 'true', dark by default; texts and emails customers, so the owner flips it; off = the sheets record the payment with no receipt, as before. Rollback = unset.)
  *   GATE_REPORT_AFTER_PAY=true (owner 2026-11-19, the report speed plan's *report after pay*: a payment on an arrived (on_site) visit's own day no longer closes the visit when the paid invoice is the visit's only bill and the visit's completion sends the customer a report: the payment's closeout records a hold on the visit instead (an audit_log row, decided once, read by every reader; a visit with another bill on it, one whose completion sends the customer no report, or one nobody had arrived at when the payment's closeout ran, closes as before; a payment recorded through the Intelligence Bar's record-payment card never holds and closes the visit at once, as before; a receipt resend records no hold). The dispatch checkout, a card the office charges and a pay link still record the payment and send the receipt as before, but the visit stays open: after a checkout payment the completion sheet opens, and the completion reuses the paid invoice (no second invoice or charge; the completion text takes its paid branch), and a bill added after the payment stays the office's: the visit completes on the paid invoice. With no report sent, the daily 11:37 AM retry sweep closes the visit quietly on its payment once its day has passed, as it closes any arrived visit. Read at call time via reportAfterPayLive() (invoice-issued-closeout.js: reportAfterPayWouldHold, recordReportAfterPayHold, reportAfterPayHold, paymentReversed, the retry sweeps' visit filter, and reportAfterPayHeldVisitIds, the one source of the Dispatch "Paid, report not sent" row flag), strict 'true', dark by default; on = a customer paid on the visit day can get a report and a completion text, so the owner flips it; off = no new hold and recorded ones are ignored: a same-day payment closes the visit at once, as before. Rollback = unset.)
@@ -339,7 +338,6 @@
  *   GATE_ESTIMATE_REFERRAL_CODE=true (owner 2026-11-18: the estimate page's code field also takes a referrer's code, saved on the estimate as referral evidence; once the estimate is accepted and the customer is on a plan, the code's owner is confirmed as the referrer through the Queue's deferred-only confirm, so nothing is sent and both rewards wait for the first recurring service as for any referral; a card that confirm refuses waits in Referrals → Queue; dev-open, prod dark; off = the field takes no referral code and no typed code is confirmed)
  *   GATE_REFERRAL_STEP2=true (owner 2026-11-20, referral Step 2 PR 1a, member side: the member's account credit for a friend's first recurring service is a flat $25, and at most 10 member credits a calendar year (America/New_York). It posts at the same moment as today's credit, the friend's first performed recurring plan visit; the friend's credit is the referee_discount_cents setting (paid at that visit with the gate on; with the gate off only while require_service_completion is on, because an immediate conversion pays the promoter alone), and with the gate on the server-written lines (the friend's invitation email, the member's invitation email, share text and share email, via referral-step2.js) say it is an account credit after the first plan service (owner 2026-11-21). Flip day order: turn this on, then set the Referee Discount setting, and publish the new words of the website's referral page last; the stored referral texts (referral_nudge email, invite text) and the office composer's referral insert switch with this gate and read the live amount, so no portal text is edited by hand; going back is the reverse: the website page, the setting, then this gate (docs/gates-and-env.md). The numbers are the step2_* columns of referral_program_settings. Under the gate every referral conversion is deferred to the first paid service (the immediate promoter-balance payout is never used). Moves money into customer accounts, so the owner flips it (planned about Feb 1). Read via isEnabled('referralStep2') at boot, strict 'true', dark in every environment; off = the flat referrer_reward_cents credit at the friend's first recurring service, exactly as before. Kill: delete the variable.)
  *   GATE_REFERRAL_FRIEND_PAGE=true (owner 2026-11-20 referral plan, part 4: a member's referral link /r/:code lands on the website's friend page /referrer/ instead of the homepage, and only while the live Step 2 friend credit equals the amount that page states ($50) and the code has a live owner; otherwise the homepage, as today. Own gate: the link switches after the website page is live, and switches back without a change to the money rules. No message, no money. Dark in every environment)
- *   GATE_REFERRAL_INBOUND_BELL=true (owner 2026-10-29 "ok go": one admin bell row for each card waiting in Referrals → Queue, with server-set buttons that run the Queue's own steps: Confirm <referrer>, only for one sure referrer, while rewards wait for the first visit, before the friend's first plan visit and not at a milestone (checked again under the confirm's locks), and Not a referral; the row closes when the card is answered in the bell or the Queue. Read at call time via referralInboundBellLive(), strict 'true', dark by default; off = no row is raised, and no button is served or run.)
  *   GATE_ALERT_CALL_BUTTON=true (owner 2026-11-02 "cant we add a call button, where we can call them from the admin notification": a Call button the server sets on admin bell rows about one caller (missed call, voicemail, promise chaser, repeat caller, Sandy hand-offs, landline, lead CALL replies, text call-back follow-ups); a tap reads the call or customer again and runs POST /api/admin/communications/call in-process with the body the linked page's own Call button sends, so the owner's phone rings first and press 1 connects; the row stays open until the caller is reached, Called back / Handled or Done. Read at call time via alertCallButtonLive(), strict 'true', dark by default; off = no Call button is served and a tap answers 409. A row's Called back / Handled button is always served.)
  *   GATE_BID_ALERT_BUTTONS=true (owner 2026-10-29 "bid buttons, as a trial", PR 3 of the bell buttons: No bid on a new bid invite's bell row, and Bid only once the bid's due date is confirmed; a tap runs the Bid desk's own save step, sends nothing to a buyer or customer and moves no money. Week-1 read-out: ops job bid-buttons-trial-week1, Nov 5. Read at call time via bidAlertButtonsLive(), strict 'true', dark by default; off = the rows serve no such button and a tap answers 409.)
  *   GATE_ADS_NEGATIVES=true (owner plan A 2026-11-02: the owner's negative word list goes to Google Ads as phrase negatives on every linked campaign, each ads-advisor word arrives as one bell row with Add and Decline (3 a day at most), and every block can be undone on the Ads page; sends nothing to a customer and moves no money, but changes where the ads can show. Read at call time via adsNegativesLive(), strict 'true', dark by default; off = the /negatives routes answer 404, the bell rows serve no buttons, the advisor writes no rows, the 6 AM sync skips the step and no Google write runs.)
@@ -368,14 +366,12 @@
  *   GATE_LAWN_WATERING_FORECAST=true (lawn watering banner forecast + rain close-out, needs GATE_LAWN_WATERING_RULE: at completion a water-in instruction whose property forecast says at least the water-in amount of rain falls inside its window freezes ONE conditional sentence (instruction.forecast, in INCHES, never a probability) that the LIVE web banner shows beside the unchanged lines; on the live view only, radar-measured (MRMS) rain on whole days inside the window that reaches the water-in amount closes the banner with a measured-inches line. Holds never get either. The PDF, email, watering text, hero and assistant never change; ships DARK, read at call time via lawnWateringForecastLive(); off = byte-identical payload)
  *   GATE_LAWN_WATERING_TEXT_FORECAST=true (lawn watering forecast from two sources, needs GATE_LAWN_WATERING_FORECAST: the water-in rain sentence is frozen only when Open-Meteo's amount AND an NWS hourly "rain likely" hour agree in the window; a timed hold then a water-in gets the sentence for rain after the hold ends; the watering text carries the frozen sentence. Off = today: Open-Meteo alone, plain water-in only, live banner only)
  *   GATE_LAWN_WATERING_TEXT_HOURS=true (owner 2026-11-15, decision 5b A, "hours": the short lawn watering text after a visit names the watering order's evening window instead of the clock deadline: "Water about 1/4 inch tonight between 8 PM and midnight, even on an off day." (a weekday instead of "tonight" when the window falls on a later day, e.g. after a hold). The window is the first ET evening 8 PM to 11:59 PM that starts after the hold ends (else after the visit) and ends by the water-in deadline, and only when the county's restriction policy allows that whole window; a visit stamped at another address, a text that carries the rain sentence, a text that would pass 2 segments, or any failed lookup keeps today's wording, and the text still sends. Changes only the run clause; the hold, long-window and no-change sentences are unchanged. Customer text, so strict `=== 'true'`, read at call time via lawnWateringTextHoursLive(); ships DARK; needs GATE_LAWN_WATERING_SMS and GATE_LAWN_WATERING_RULE. Off = no extra reads and byte-identical texts. Kill = unset.)
- *   GATE_ESTIMATE_CONSUMER_NOTICE=true (owner 2026-10-25, Rule 5E-14.105(1), F.A.C.: an estimate with a termite line asks the customer to read and sign the FDACS-13692 consumer notice on the estimate page BEFORE they can accept. Adds POST /api/estimates/:token/consumer-notice (issues the consumer_notice.fdacs_13692 Document Request and returns its signing URL), cta.consumerNotice on GET /:token/data, and refuses PUT /:token/accept with 409 consumer_notice_required until the customer has a notice on file. Read at call time via estimateConsumerNoticeLive(), strict 1/true/on, dark by default; off = byte-identical estimate page and accept. Sends nothing to a customer.)
  *   GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND=true (owner 2026-10-26, Rule 5E-14.105(1), F.A.C.: after the office's Mark accepted (or the Intelligence Bar accept) commits on an estimate with a termite line, and the customer has no signed FDACS-13692 on file, the consumer_notice.fdacs_13692 Document Request is issued (or the open one reused) and its signing link is sent by email and text through the Document Requests delivery; a failure rings the office bell. Read at call time via manualAcceptConsumerNoticeSendLive(), strict 1/true/on, dark by default; off = Mark accepted sends nothing new.)
  *   GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE=true (daily catch-up for the Mark accepted consumer notice send, needs GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND: the send runs detached after the accept commits, so a restart in between loses it with no bell. The 6:10 AM ET document run re-runs the same send for an office accept from the last 21 days (none before the send went live on 2026-10-26) when no email or text of a 13692 Document Request went out since the accept and the office got no bell for it. Read at call time via manualAcceptConsumerNoticeReconcileLive(), strict 1/true/on, dark by default; off = no catch-up.)
  *   GATE_PREPAY_YEAR_END_BELL=true (office bell before a prepaid year ends: a daily job in the renewal-reminder workflow raises ONE bell per annual prepay term (not termite) from 30 days before the term ends until 60 days after, "Billing — send <name> next year's prepay", with what the nightly booking does after the year ends (the plan stops booking, or visits bill up to $X) and next year's prepay rule (visits x visit price, minus 5%). Closes itself once the customer has a later term that is paid and live, chose cancel or another plan, moved off annual prepay billing, or was deleted. Sends nothing to a customer and charges nothing. Read at call time via prepayYearEndBellLive(), strict 1/true/on, dark by default; off = the job returns before any query.)
  *   GATE_LAWN_EXPECTATIONS=true (lawn report monthly program line: snapshot.seasonalNote carries one calendar-based, tier-neutral sentence about what the lawn program v13 focuses on this month (lawn-program-line.js PROGRAM_LINES_V13, claims proven against server/config/lawn-protocol-v13.json), in place of the peak/shoulder/dormant season note, and the lead layout renders it once beside the trends; recurring lawn plan visits only (one-time jobs, callbacks and unresolved service identities keep the old note), and only a visit whose plan resolved the staged v13 version with GATE_LAWN_V13 on: a visit with no recorded version or an older one keeps the old note (the retired per-grass sentences were removed, so no past report is rewritten); null in Jun-Sep when a nitrogen product may have been applied (any unresolved product counts), then the old note stays; lawn only; ships DARK, read at call time via lawnExpectationsLive(); off = byte-identical report payload and render)
  *   GATE_LAWN_COVERAGE_HIDE_DEFAULT_ZONES=true (lawn report: no Lawn Coverage section when the visit's coverage zones were only the schematic defaults (no technician-marked zone) AT COMPLETION; owner 2026-10-06; the verdict is frozen once at completion by the lawn write gate into service_records.structured_notes.lawnCoverageVerdict { v: 1, defaultsOnly, frozenAt }, first writer wins, only while the gate is live and the zone / geometry reads succeeded; a render and the PDF key (':covhide=1' only for a frozen defaultsOnly true) read that frozen value and never the live zone rows; a visit with no frozen verdict, such as an older visit, renders exactly as with the gate off; ships DARK, read at call time via lawnCoverageHideDefaultZonesLive(); off = byte-identical payload)
  *   GATE_LAWN_PROGRAM_DETAIL=true (lawn report: under the v13 month sentence, the month's "Why now" line from lawn-program-line.js PROGRAM_DETAIL_V13: seasonal facts and the step by category, no product names, rates, watering advice or outcome timing; needs GATE_LAWN_EXPECTATIONS; strict 'true' only; owner 2026-10-06; ships DARK, read at call time via lawnProgramDetailLive(); off = byte-identical payload)
- *   GATE_LAWN_OUTLINE_DETAIL=true (lawn service outline, detailed: owner 2026-10-26 "this needs to be more detailed, and we should be using the protocols, and youtube transcripts", decisions D1-B/D2-A on the decision page, "do whatever you recommend"; since 2026-11-01 drawn in the new layout (owner "build" 2026-10-31 on the nine-round outline scope page, owner "flip the gate" 2026-11-01, after which the layout's own gate was removed): server/services/lawn-outline-visual.js, called from lawn-service-outline.js for every lawn outline: a year bar (nine round blocks for an estimate whose lawn line would seed as lawn_rounds_9; twelve month blocks for every other plan) with the local summer-rule band and caption, round cards or today's month list (each month's report "why now" line plus one thing to do at home), an after-a-visit timeline, fact cards (sample pictures, the Monday watering email with the Manatee/Sarasota one-day watering order until 2027-03-31, mowing), Products We May Use (the v13 track's product names with the catalog's active ingredient, no rate) and a closed Problems and Common Questions list; the property carries planLabel; a year bar block carries its from/to dates, which the page reads to mark today; every section keeps its text bullets; packets stamped content lawn-v13-visual-2; needs GATE_LAWN_V13 (fails closed); read at call time via lawnOutlineDetailLive(); off = the v13 outline exactly; sends nothing to a customer)
  *   GATE_LAWN_VISIT_MEMORY=true (lawn report treatment memory: freezes this visit's "what we applied / what we said we would watch" entry into service_records.structured_notes.lawnVisitMemory[assessmentId], first writer wins, no migration, and attaches reportV2.sinceLast built from the PRIOR visit's frozen entry (same property, strictly earlier date); data only, no customer render yet (the progress engine and copy writer read it later); ships DARK, read at call time via lawnVisitMemoryLive(); off = no reads, no writes, byte-identical report payload; the same gate builds the server-internal progress block, in-process only and never in the payload)
  *   GATE_LAWN_RAINFAST_WATCH=true (lawn rainfast breach watch, P31, needs GATE_LAWN_VISIT_MEMORY: on the LIVE web view only, once a product's stated rainfast interval (products_catalog.rainfast_minutes; no interval = never judged) has ended plus an hour, the property's hourly weather-model rain (Open-Meteo, past hours; not a gauge) is read for the whole hours inside [completion, completion + interval]; a total of at least 0.25 inch records ONE retreatCheck item on the frozen visit memory (first writer wins, compare-and-set, never creates an entry) and adds ONE fixed sentence to the lead's Watching line; any missing hour, failed fetch or missing completion time = no item and no sentence; the PDF, static builds, SMS and email never change; sends nothing to a customer; ships DARK, read at call time via lawnRainfastWatchLive(); off = byte-identical payload, no fetch, no write)
  *   GATE_LAWN_DIAGNOSTIC_EVIDENCE=true (prospect lawn report "why we think so": GET /api/public/lawn-diagnostic/:token adds a `basis` line ("Based on 4 photos.", plus a fixed note when photo quality limited the read) and, per finding, `evidence` { why, certainty, confirm }: what the condition looks like, how sure the read is, and the on-site check that would settle it. Every string is fixed copy in lawn-diagnostic-evidence.js selected by the finding's allowlisted condition label and clamped confidence; the stored observed_evidence / inferred_context / confirmation_step free text is still never published. One extra read (a photo count) per report view while live. The lawn-assessment teaser is unchanged. Ships DARK, read at call time via lawnDiagnosticEvidenceLive(); off = byte-identical payload and page)
@@ -2397,16 +2393,6 @@ const gates = {
   // before. See services/call-reschedule-apply.js.
   // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
   callRescheduleApply: process.env.GATE_CALL_RESCHEDULE_APPLY === 'true',
-  // Make-up move (owner 2026-10-22): a recurring visit that was MISSED (its
-  // 6 PM missed-appointment check left an open customer_noshow row) and the
-  // customer then calls, the agent agrees a new time and the caller accepts.
-  // The pipeline moves THAT visit (series default policy) instead of
-  // inserting a new general-service visit beside it. Runs before the booking
-  // branch; a candidate that cannot be moved holds the booking for review,
-  // never falls back to a new visit. NO customer communication. Off → today's
-  // booking behavior. See services/call-reschedule-apply.js applyCallMakeupMove.
-  // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
-  callMakeupMove: process.env.GATE_CALL_MAKEUP_MOVE === 'true',
   rescheduleProposalCard: gateEnvValue('GATE_RESCHEDULE_PROPOSAL_CARD'),
   smsAdditionalProperty: gateEnvValue('GATE_SMS_ADDITIONAL_PROPERTY'),
   // Missing-departure/arrival tracking: flags a scheduled_services row whose
@@ -2767,8 +2753,6 @@ const gates = {
   // unchanged). Once per customer ever, mirroring referral.invite's own
   // idempotency. Unset = referral.invite email returns.
   referralNudgeEnroll: process.env.GATE_REFERRAL_NUDGE_ENROLL === 'true',
-  // GATE_REFERRAL_INBOUND_BELL (a bell row with Confirm / Not a referral for each card in Referrals → Queue, dark). Boot-log entry only; the call-time reader is referralInboundBellLive().
-  referralInboundBell: process.env.GATE_REFERRAL_INBOUND_BELL === 'true',
   // GATE_ALERT_CALL_BUTTON (a Call button on bell rows about one caller, dark). Boot-log entry only; the call-time reader is alertCallButtonLive().
   alertCallButton: process.env.GATE_ALERT_CALL_BUTTON === 'true',
   // GATE_BID_ALERT_BUTTONS (No bid / Bid buttons on a new bid invite's bell row, dark trial). Boot-log entry only; the call-time reader is bidAlertButtonsLive().
@@ -3788,15 +3772,6 @@ const gates = {
   // by default. Off = the amount field stays locked to the full amount due and the writer refuses a smaller amount. Kill switch: unset.
   partialPayments: process.env.GATE_PARTIAL_PAYMENTS === 'true',
 
-  // Lawn and landscape treatments are not taxed (2026-10-25): Florida does not
-  // tax lawn spraying, residential or nonresidential (Rule 12A-1.009(6)), and
-  // taxes pest control only for an infestation of a nonresidential building, so
-  // tree and shrub and palm care is not taxed either. Mosquito work keeps its tax.
-  // TaxCalculator.calculateTax reads it at call time via lawnSprayNoTaxLive();
-  // dark by default. Off = these services are taxed by the customer's
-  // property_type exactly as before.
-  lawnSprayNoTax: gateEnvValue('GATE_LAWN_SPRAY_NO_TAX'),
-
   // Stops-away tracker count (2026-08-14): "N stops away" on the portal
   // ServiceTracker + public /track page. Read-only, fires no comms; count
   // is bare (never other customers' info), capped at 3, clamped monotonic
@@ -4358,9 +4333,6 @@ const gates = {
   // bridge row. This entry is for logGateStatus; job-cost-recost.js, open-time routes and admin-dashboard.js read
   // techOpenTimeLive() at CALL time. Ships DARK: exactly 'true' only. Needs GATE_TECH_COST_RATES.
   techOpenTime: process.env.GATE_TECH_OPEN_TIME === 'true',
-  // Tech pay stubs (payroll item 7, owner 2026-10-28): a technician opens their own finalized pay stubs. This entry is for
-  // logGateStatus; routes/tech-payroll.js reads techPayStubsLive() at CALL time. Ships DARK: exactly 'true' only.
-  techPayStubs: process.env.GATE_TECH_PAY_STUBS === 'true',
   // Tech card on file at the visit (owner 2026-11-04, D4 A). This entry is for logGateStatus; routes/admin-invoices.js reads
   // techCardOnFileLive() at CALL time. Ships DARK: exactly 'true' only. Charges money: the owner flips it.
   techCardOnFile: process.env.GATE_TECH_CARD_ON_FILE === 'true',
@@ -4920,11 +4892,6 @@ const gates = {
   // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE at call time via manualAcceptConsumerNoticeReconcileLive().
   manualAcceptConsumerNoticeReconcile: gateEnvValue('GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE'),
 
-  // Estimate consumer notice (owner 2026-10-25). Ships DARK. This entry is for
-  // logGateStatus only: estimate-public.js and estimate-consumer-notice.js read
-  // GATE_ESTIMATE_CONSUMER_NOTICE at call time via estimateConsumerNoticeLive().
-  estimateConsumerNotice: gateEnvValue('GATE_ESTIMATE_CONSUMER_NOTICE'),
-
   // Prepaid-year-end office bell. Ships DARK. This entry is for logGateStatus
   // only: prepay-year-end-bell.js reads GATE_PREPAY_YEAR_END_BELL at call time
   // via prepayYearEndBellLive().
@@ -5069,9 +5036,6 @@ const gates = {
   // Lawn Fast Complete photo label (owner 2026-10-09). Ships DARK. This entry is for logGateStatus only: lawn-photo-shots.js callers read
   // GATE_LAWN_PHOTO_LABEL_PICK at call time via lawnPhotoLabelPickLive().
   lawnPhotoLabelPick: process.env.GATE_LAWN_PHOTO_LABEL_PICK === 'true',
-  // Detailed lawn service outline (owner 2026-10-26). This entry is for logGateStatus only: lawn-service-outline.js reads
-  // GATE_LAWN_OUTLINE_DETAIL at call time via lawnOutlineDetailLive() (which also needs GATE_LAWN_V13).
-  lawnOutlineDetail: process.env.GATE_LAWN_OUTLINE_DETAIL === 'true',
   // Lawn v13 May Tetrino chinch rate (owner 2026-10-22). This entry is for logGateStatus only: waveguard-plan-engine.js reads
   // GATE_LAWN_CHINCH_TETRINO_RATE at call time via lawnChinchTetrinoRateLive() (which also needs GATE_LAWN_TROUBLE_AREAS).
   lawnChinchTetrinoRate: process.env.GATE_LAWN_CHINCH_TETRINO_RATE === 'true',
@@ -5980,11 +5944,6 @@ function slabBusinessSiteTaxLive() {
   return gateEnvValue('GATE_SLAB_BUSINESS_SITE_TAX');
 }
 
-// GATE_LAWN_SPRAY_NO_TAX read at CALL time (so a flip needs no redeploy).
-function lawnSprayNoTaxLive() {
-  return gateEnvValue('GATE_LAWN_SPRAY_NO_TAX');
-}
-
 // GATE_PORTAL_CHAT_CUSTOMER_CAP read at CALL time (so a flip needs no redeploy); strict 'true'.
 function portalChatCustomerCapLive() {
   return process.env.GATE_PORTAL_CHAT_CUSTOMER_CAP === 'true';
@@ -6400,13 +6359,6 @@ function reserviceDetailsRequiredLive() {
   return process.env.GATE_RESERVICE_DETAILS_REQUIRED === 'true';
 }
 
-// GATE_REFERRAL_INBOUND_BELL read at CALL time, strict `=== 'true'`, dark by default. The one reader for the new-referral
-// bell row and its buttons (services/referral-inbound-bell.js, the scheduler's referral-inbound-bell job).
-// Off: no row is raised, open rows serve no buttons, a tap answers 409. Kill: unset.
-function referralInboundBellLive() {
-  return process.env.GATE_REFERRAL_INBOUND_BELL === 'true';
-}
-
 // GATE_ALERT_CALL_BUTTON read at CALL time, strict `=== 'true'`, dark by default. The one reader for the Call button
 // of the call_back kind (services/alert-call-button.js): a call through the linked page's own Call step from a bell
 // row about one caller. Off: no Call button is served and a tap answers 409. Kill: unset.
@@ -6814,14 +6766,6 @@ function manualAcceptConsumerNoticeSendLive() {
 // restart lost. Off = no catch-up.
 function manualAcceptConsumerNoticeReconcileLive() {
   return gateEnvValue('GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE');
-}
-
-// GATE_ESTIMATE_CONSUMER_NOTICE read at CALL time (same 1/true/on convention as
-// gateEnvValue). Owner 2026-10-25, Rule 5E-14.105(1): the customer signs the
-// FDACS-13692 consumer notice on the estimate page before accepting a termite
-// estimate. Off = the estimate page, /data and accept are byte-identical.
-function estimateConsumerNoticeLive() {
-  return gateEnvValue('GATE_ESTIMATE_CONSUMER_NOTICE');
 }
 
 // GATE_PREPAY_YEAR_END_BELL read at CALL time (same 1/true/on convention as
@@ -7433,12 +7377,6 @@ function techOpenTimeLive() {
   return process.env.GATE_TECH_OPEN_TIME === 'true';
 }
 
-// Tech pay stubs (routes/tech-payroll.js, services/payroll-runs.js), read at CALL time. Strict `=== 'true'`, dark in every
-// environment; unsetting it is the kill switch. Off = both /api/tech/payroll routes answer 404 before any query.
-function techPayStubsLive() {
-  return process.env.GATE_TECH_PAY_STUBS === 'true';
-}
-
 // Tech card on file at the visit (routes/admin-invoices.js), read at CALL time. Strict `=== 'true'`, dark in every environment;
 // unsetting it is the kill switch. Off = charge-card and charge-card-quote stay admin only.
 function techCardOnFileLive() {
@@ -7830,14 +7768,6 @@ function lawnV13Live() {
 // the plan engine, the tank sheet and the cost line in service-pricing.js). Off = every output is byte-identical to before.
 function lawnBermudaRemovalLive() {
   return process.env.GATE_LAWN_BERMUDA_REMOVAL === 'true';
-}
-
-// GATE_LAWN_OUTLINE_DETAIL read at CALL time — strict `'true'` only, so an unset variable is the kill switch. Live only while the
-// v13 program (GATE_LAWN_V13) is too (fail closed): the detailed outline, drawn in the new layout (lawn-outline-visual.js), extends the v13
-// outline. The outline build, its packet stamp and the stale check on the Estimates list follow this one reader; off = the v13
-// outline exactly.
-function lawnOutlineDetailLive() {
-  return process.env.GATE_LAWN_OUTLINE_DETAIL === 'true' && lawnV13Live();
 }
 
 // GATE_LAWN_SPOT_RULES read at CALL time — strict `'true'` only, so an unset variable
@@ -8478,8 +8408,6 @@ module.exports.ibLeadConvertLive = ibLeadConvertLive;
 // GATE_SHORTLINK_LEGACY_EXPIRE reader, on its own line.
 module.exports.shortlinkLegacyExpireLive = shortlinkLegacyExpireLive;
 module.exports.reserviceDetailsRequiredLive = reserviceDetailsRequiredLive;
-// GATE_REFERRAL_INBOUND_BELL reader, on its own line so gate PRs never conflict.
-module.exports.referralInboundBellLive = referralInboundBellLive;
 // GATE_ALERT_CALL_BUTTON reader, on its own line so gate PRs never conflict.
 module.exports.alertCallButtonLive = alertCallButtonLive;
 // GATE_BID_ALERT_BUTTONS reader, on its own line so gate PRs never conflict.
@@ -8548,8 +8476,6 @@ module.exports.estimateFollowupServiceNameLive = estimateFollowupServiceNameLive
 module.exports.lawnV13Live = lawnV13Live;
 // GATE_LAWN_BERMUDA_REMOVAL reader, on its own line so gate PRs never conflict.
 module.exports.lawnBermudaRemovalLive = lawnBermudaRemovalLive;
-// GATE_LAWN_OUTLINE_DETAIL reader, on its own line so gate PRs never conflict.
-module.exports.lawnOutlineDetailLive = lawnOutlineDetailLive;
 // GATE_LAWN_SPOT_RULES reader, on its own line so gate PRs never conflict.
 module.exports.lawnSpotRulesLive = lawnSpotRulesLive;
 // GATE_LAWN_TREATMENT_GUIDE reader, on its own line so gate PRs never conflict.
@@ -8900,8 +8826,6 @@ module.exports.commercialProposalSignLive = commercialProposalSignLive;
 module.exports.commercialAutopayLive = commercialAutopayLive;
 // GATE_SLAB_HOME_NO_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabHomeNoTaxLive = slabHomeNoTaxLive;
-// GATE_LAWN_SPRAY_NO_TAX reader, on its own line so gate PRs never conflict.
-module.exports.lawnSprayNoTaxLive = lawnSprayNoTaxLive;
 // GATE_PUBLIC_LLM_SHARED_CAP reader, on its own line so gate PRs never conflict.
 module.exports.publicLlmSharedCapLive = publicLlmSharedCapLive;
 // GATE_PORTAL_CHAT_CUSTOMER_CAP reader, on its own line so gate PRs never conflict.
@@ -8914,8 +8838,6 @@ module.exports.planRateLedgerReconcileLive = planRateLedgerReconcileLive;
 module.exports.leadDraftPropertyLookupLive = leadDraftPropertyLookupLive;
 // GATE_WIZARD_SUPERSEDES_FORM_DRAFT reader, on its own line so gate PRs never conflict.
 module.exports.wizardSupersedesFormDraftLive = wizardSupersedesFormDraftLive;
-// GATE_ESTIMATE_CONSUMER_NOTICE reader, on its own line so gate PRs never conflict.
-module.exports.estimateConsumerNoticeLive = estimateConsumerNoticeLive;
 // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_SEND reader, on its own line so gate PRs never conflict.
 module.exports.manualAcceptConsumerNoticeSendLive = manualAcceptConsumerNoticeSendLive;
 // GATE_PREPAY_YEAR_END_BELL reader, on its own line so gate PRs never conflict.
@@ -8958,8 +8880,6 @@ module.exports.autopayHoldTimeoutMode = autopayHoldTimeoutMode;
 module.exports.techCostRatesLive = techCostRatesLive;
 // GATE_TECH_OPEN_TIME reader, on its own line so gate PRs never conflict.
 module.exports.techOpenTimeLive = techOpenTimeLive;
-// GATE_TECH_PAY_STUBS reader, on its own line so gate PRs never conflict.
-module.exports.techPayStubsLive = techPayStubsLive;
 // GATE_TECH_CARD_ON_FILE reader, on its own line so gate PRs never conflict.
 module.exports.techCardOnFileLive = techCardOnFileLive;
 // GATE_MANUAL_ACCEPT_CONSUMER_NOTICE_RECONCILE reader, on its own line so gate PRs never conflict.

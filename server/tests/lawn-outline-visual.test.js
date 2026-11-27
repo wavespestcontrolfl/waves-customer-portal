@@ -1,4 +1,4 @@
-// The lawn outline layout every detailed outline (GATE_LAWN_OUTLINE_DETAIL) draws (owner "build" 2026-10-31, the
+// The lawn outline layout every detailed outline draws (owner "build" 2026-10-31, the
 // nine-round outline scope page; owner "flip the gate" 2026-11-01, after which its own gate was removed). Synthetic
 // inputs: no database.
 //
@@ -13,8 +13,8 @@ const outline = require('../services/lawn-service-outline');
 const { findBannedCustomerCopy } = require('../services/service-report/activity-indicators');
 const { validateCustomerCopy } = require('../services/service-report/premium-experience');
 
-const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_OUTLINE_DETAIL', 'GATE_LAWN_BERMUDA_REMOVAL'];
-const DETAIL = { GATE_LAWN_V13: 'true', GATE_LAWN_OUTLINE_DETAIL: 'true' };
+const GATE_NAMES = ['GATE_LAWN_V13', 'GATE_LAWN_BERMUDA_REMOVAL'];
+const DETAIL = { GATE_LAWN_V13: 'true' };
 const OCT_26 = new Date('2026-10-26T12:00:00Z');
 
 async function withGates(values, fn) {
@@ -119,16 +119,16 @@ const AS_NEEDED = [
 const DERIVED_MAIN = [['barrier', 'micros'], ['feeding', 'barrier'], ['feeding'], ['inspection'], ['micros', 'barrier'], ['micros'], ['micros'], ['feeding', 'barrier'], ['feeding']];
 
 describe('the stamp', () => {
-  test('the detailed outline stamps the layout\'s version; the plain v13 outline draws no year bar or plan line', async () => {
+  test('the detailed outline stamps the layout\'s version; the old outline (GATE_LAWN_V13 off) draws no year bar or plan line', async () => {
     await withGates(DETAIL, async () => {
       expect((await build({ line: ROUNDS_LINE })).meta.contentLibraryVersion).toBe('lawn-v13-visual-4');
       expect(outline.contentLibraryVersion()).toBe('lawn-v13-visual-4');
     });
-    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
-      const plain = await build({ line: ROUNDS_LINE });
-      expect(section(plain, 'year_bar')).toBeUndefined();
-      expect(plain.content.property.planLabel).toBeUndefined();
-      expect(plain.meta.contentLibraryVersion).toBe('lawn-v13-copy-4');
+    await withGates({}, async () => {
+      const old = await build({ line: ROUNDS_LINE });
+      expect(section(old, 'year_bar')).toBeUndefined();
+      expect(old.content.property.planLabel).toBeUndefined();
+      expect(old.meta.contentLibraryVersion).toBe('seed-v1');
     });
   });
 });
@@ -228,13 +228,6 @@ describe('a 9-visit rounds estimate', () => {
       const sarasota = await build({ ...input, jurisdictionId: 'sarasota_county_fl' });
       expect(section(sarasota, 'year_bar').visual.blocks[3]).toMatchObject({ short: 'Feed', main: ['feeding'] });
       expect(sarasota.contentHtml).toContain('44-0-0');
-    });
-    await withGates({ GATE_LAWN_V13: 'true' }, async () => {
-      const result = await build(input);
-      expect(section(result, 'season_focus').body).toContain('April 1');
-      expect(section(result, 'season_focus').visual.items.map((i) => i.key)).not.toContain('feeding');
-      expect(section(result, 'program_year').visual.months[3].main).toEqual(['inspection']);
-      expect(result.contentHtml).toContain('April: Inspection');
     });
   });
 

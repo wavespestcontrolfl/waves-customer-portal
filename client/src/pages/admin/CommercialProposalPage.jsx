@@ -100,10 +100,9 @@ function serviceTaxRule(registry, service) {
 // (tax-calculator.js step 1): an exempt customer's bills carry no tax whatever the building use or the gate. A read that
 // failed (null) leaves no basis for any row. The business rule is the proposal's service-family default, while a visit
 // bill follows the visit's own service name (TaxCalculator.serviceNotTaxable), so the notice says "usually". An untaxed
-// business rule is mostly the lawn and tree & shrub exemption, which bills only while GATE_LAWN_SPRAY_NO_TAX is on; with
-// it off the visit's name decides, so there is no basis.
+// business rule is mostly the lawn and tree & shrub exemption, which a visit bill honors.
 function billedTaxableFor(buildingUse, row, registry, savedRules, {
-  buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial = true, proposalTaxable, lawnSprayNoTaxLive = true,
+  buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial = true, proposalTaxable,
 } = {}) {
   if (billToTaxBasis === null || accountCommercial === null) return undefined;
   if (billToTaxBasis === 'payer_exempt') return false;
@@ -116,7 +115,7 @@ function billedTaxableFor(buildingUse, row, registry, savedRules, {
   if (buildingUse !== 'nonresidential') return undefined;
   const saved = row.id ? savedRules?.[row.id] : null;
   const rule = saved && saved.service === row.service ? saved.rule : serviceTaxRule(registry, row.service);
-  return rule === false && !lawnSprayNoTaxLive ? undefined : rule;
+  return rule;
 }
 const ROW_TAX_NOTICES = {
   true: 'Visit bills do not read this box: this service is usually billed with tax here.',
@@ -508,8 +507,6 @@ function CommercialProposalEditor() {
   const [billToTaxBasis, setBillToTaxBasis] = useState('self');
   // GET /proposal accountCommercial: false for a residential account; null when the read failed (no row warnings then).
   const [accountCommercial, setAccountCommercial] = useState(true);
-  // GET /proposal lawnSprayNoTaxLive: whether lawn and tree & shrub visits bill untaxed (GATE_LAWN_SPRAY_NO_TAX).
-  const [lawnSprayNoTaxLive, setLawnSprayNoTaxLive] = useState(true);
   // Family → generated inclusions/exclusions/taxability registry, served on
   // load like responsibilityRegistry — the family-change resync prunes the
   // old family's generated lines and installs the new family's stack by
@@ -557,7 +554,6 @@ function CommercialProposalEditor() {
     setBillToTaxBasis(data.billToTaxBasis === null ? null
       : ['payer_exempt', 'payer_taxed'].includes(data.billToTaxBasis) ? data.billToTaxBasis : 'self');
     setAccountCommercial(data.accountCommercial === null ? null : data.accountCommercial !== false);
-    setLawnSprayNoTaxLive(data.lawnSprayNoTaxLive !== false);
     if (!bidToolsChosenRef.current) {
       setBidToolsOpen(
         (data.projectCosting?.rows?.length || 0) > 0
@@ -682,7 +678,7 @@ function CommercialProposalEditor() {
     || correctiveWork.filter((w) => String(w.label || '').trim()).some((w) => w.taxable === true && roundMoney(w.amount) > 0);
   // Staff warning on a row whose Taxable box differs from what visit bills do (billedTaxableFor); none on a locked proposal.
   const rowNotice = (row) => (locked ? null : rowTaxNotice(buildingUse, row, familyRegistryRef.current, savedBizRulesRef.current,
-    { buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial, proposalTaxable, lawnSprayNoTaxLive }));
+    { buildingUseTaxLive, taxExemptVerified, billToTaxBasis, accountCommercial, proposalTaxable }));
   const differingTaxRows = [
     ...programsState,
     ...(programsMode ? [] : buildings.flatMap((b) => b.lineItems || [])),
