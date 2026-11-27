@@ -239,8 +239,8 @@ function BidTable({ bids, selectedId, onSelect, visibleColumns = ALL_BID_COLUMNS
 // A lost reply whose recovery read failed too (the connection is still down): the bid on screen is not refreshed.
 const RELOAD_FAILED_MESSAGE = "Could not confirm the save, and the bid could not be reloaded. What you typed is kept: save again when the connection is back.";
 const isFailure = (message) => message.startsWith("Not saved") || message === UNCONFIRMED_MESSAGE || message === RELOAD_FAILED_MESSAGE;
-const isBidDetailDirty = (bid, dueEditedAt, status, note) => Boolean(
-  bid && (dueEditedAt !== null || status !== bid.status || note !== (bid.decision_note || "")),
+const isBidDetailDirty = (bid, dueEditedAt, status, note, checklistDirty = false) => Boolean(
+  bid && (checklistDirty || dueEditedAt !== null || status !== bid.status || note !== (bid.decision_note || "")),
 );
 
 function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
@@ -251,6 +251,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   const [dueEditedAt, setDueEditedAt] = useState(null);
   const [status, setStatus] = useState("new");
   const [note, setNote] = useState("");
+  const [checklistDirty, setChecklistDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const headingRef = useRef(null);
@@ -336,7 +337,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
   };
 
   const { bid, emails, extras } = state;
-  const dirty = isBidDetailDirty(bid, dueEditedAt, status, note);
+  const dirty = isBidDetailDirty(bid, dueEditedAt, status, note, checklistDirty);
   useUnsavedLeaveGuard(dirty, "Leave this bid with unsaved changes?");
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -406,7 +407,7 @@ function BidDetail({ bidId, onChanged, onClose, onProgress, onDirtyChange }) {
         {message && <ActionFeedback error={isFailure(message)} className="mb-3">{message}</ActionFeedback>}
 
         {extras && (
-          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} />
+          <BidChecklistPanel key={bid.id} bidId={bidId} bid={bid} extras={extras} save={save} busy={busy} invite={status === "submitted"} onProgress={onProgress} onDirtyChange={setChecklistDirty} />
         )}
 
         {showEmailHeading(bid, emails) && <h3 className={`mb-1 text-ui-body font-medium text-zinc-900${extras ? " mt-4" : ""}`}>Emails on this bid</h3>}

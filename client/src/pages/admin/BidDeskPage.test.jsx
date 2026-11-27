@@ -521,3 +521,23 @@ it("prompts before switching to another bid row when the open detail has unsaved
   await waitFor(() => expect(screen.getByLabelText("Note")).toHaveValue(""));
   confirmSpy.mockRestore();
 });
+
+it("prompts before closing a bid when submission confirmation has unsaved edits", async () => {
+  route({
+    "GET /admin/bid-desk/": () => reply({ bids: LIST }),
+    "GET /admin/bid-desk/b1": () => reply({ bid: bid(), emails: [], checklist: [], checklist_progress: { checked: 0, required: 0, total: 0 }, checklist_missing: 0, estimate: null, documents: [] }),
+  });
+  const confirmSpy = vi.spyOn(window, "confirm").mockReturnValueOnce(false).mockReturnValueOnce(true);
+  renderPage("/?bid=b1");
+  const receipt = await screen.findByLabelText("Confirmation number or receipt");
+  fireEvent.change(receipt, { target: { value: "CONF-9988" } });
+
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(confirmSpy).toHaveBeenCalledTimes(1);
+  expect(screen.getByLabelText("Confirmation number or receipt")).toHaveValue("CONF-9988");
+
+  fireEvent.click(screen.getByRole("button", { name: "Close" }));
+  expect(confirmSpy).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(screen.queryByLabelText("Confirmation number or receipt")).toBeNull());
+  confirmSpy.mockRestore();
+});

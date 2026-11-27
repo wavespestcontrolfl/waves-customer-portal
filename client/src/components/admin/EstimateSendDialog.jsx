@@ -16,9 +16,10 @@ async function parseJsonReceipt(response) {
 }
 
 function isChannelDisabled(key, preview, allowedChannels) {
-  if (allowedChannels) {
-    if (key === "both" && (!allowedChannels.includes("sms") || !allowedChannels.includes("email"))) return true;
-    if (key !== "both" && !allowedChannels.includes(key)) return true;
+  const allowed = Array.isArray(allowedChannels) && allowedChannels.length ? allowedChannels : null;
+  if (allowed) {
+    if (key === "both" && (!allowed.includes("sms") || !allowed.includes("email"))) return true;
+    if (key !== "both" && !allowed.includes(key)) return true;
   }
   return (key !== "email" && (!preview.customerPhone || !!preview.smsBlockReason))
     || (key !== "sms" && !preview.customerEmail);
@@ -30,9 +31,27 @@ function isPreDispatchRejection(status, data) {
   return status === 409 && data?.code !== "SEND_OUTCOME_UNCERTAIN";
 }
 
+function classifySendResponse(response, parsed, isRetry) {
+  const { data } = parsed;
+  if (response.ok && !parsed.ok) {
+    return { kind: "throw", error: "The server returned an unreadable send receipt." };
+  }
+  if (!response.ok && !isRetry && parsed.ok && isPreDispatchRejection(response.status, data)) {
+    return { kind: "unlock", error: data.error || "Send could not be started. Review the details and try again." };
+  }
+  if (!response.ok && !data.channels) {
+    return { kind: "throw", error: data.error || "Send failed. Your saved estimate is retained." };
+  }
+  return {
+    kind: "outcome",
+    outcome: { ...data, status: response.status },
+    error: response.ok ? "" : (data.error || "No requested channel reached a provider."),
+  };
+}
+
 function validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt }) {
   let scheduled = null;
-  if (scheduledAt) {
+  if (scheduledAt && !hasAttempt) {
     // The portal is Eastern-only. An offset supplied by the selected date's
     // ET calendar avoids interpreting a datetime-local value in another zone.
     const when = new Date(etDatetimeLocalToISO(scheduledAt));
@@ -109,9 +128,10 @@ export default function EstimateSendDialog({ request, onClose }) {
           window.location.href = adminLoginUrl(window.location);
           throw new Error("Session expired");
         }
-        const { data } = await parseJsonReceipt(response);
-        if (!response.ok) throw new Error(data.error || "Could not load the saved estimate.");
-        if (!controller.signal.aborted) setPreview(data);
+        const parsed = await parseJsonReceipt(response);
+        if (!response.ok) throw new Error(parsed.data.error || "Could not load the saved estimate.");
+        if (!parsed.ok) throw new Error("The server returned an unreadable estimate preview.");
+        if (!controller.signal.aborted) setPreview(parsed.data);
       })
       .catch((err) => { if (!controller.signal.aborted) setError(err.message); });
     return () => controller.abort();
@@ -119,7 +139,8 @@ export default function EstimateSendDialog({ request, onClose }) {
 
   async function send() {
     if (inFlight.current || !preview || !method || outcome) return;
-    const validated = validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt: !!attempt.current });
+    const isRetry = Boolean(attempt.current);
+    const validated = validateSendInputs({ scheduledAt, preview, palmCount, hasAttempt: isRetry });
     if (validated.error) { setError(validated.error); return; }
     inFlight.current = true;
     sendingLabel.current = submitLabel;
@@ -140,26 +161,22 @@ export default function EstimateSendDialog({ request, onClose }) {
         method: "POST", headers: headers(), body: JSON.stringify(attempt.current),
       });
       if (response.status === 401) {
-        attempt.current = null;
+        if (!isRetry) attempt.current = null;
         window.location.href = adminLoginUrl(window.location);
         setError("Session expired. Sign in again to send.");
         return;
       }
-      const parsed = await parseJsonReceipt(response);
-      const data = parsed.data;
-      if (response.ok && !parsed.ok) {
-        throw new Error("The server returned an unreadable send receipt.");
-      }
-      if (!response.ok && isPreDispatchRejection(response.status, data)) {
-        // Server rejected the request before any provider dispatch — release
+      const verdict = classifySendResponse(response, await parseJsonReceipt(response), isRetry);
+      if (verdict.kind === "throw") throw new Error(verdict.error);
+      if (verdict.kind === "unlock") {
+        // Server rejected the original request before any provider dispatch — release
         // the attempt lock so the operator can adjust inputs and retry cleanly.
         attempt.current = null;
-        setError(data.error || "Send could not be started. Review the details and try again.");
+        setError(verdict.error);
         return;
       }
-      if (!response.ok && !data.channels) throw new Error(data.error || "Send failed. Your saved estimate is retained.");
-      setOutcome({ ...data, status: response.status });
-      if (!response.ok) setError(data.error || "No requested channel reached a provider.");
+      setOutcome(verdict.outcome);
+      if (verdict.error) setError(verdict.error);
     } catch (err) {
       setError(`${err.message} The saved estimate is retained. Retrying checks the same attempt.`);
     } finally {
@@ -176,7 +193,6 @@ export default function EstimateSendDialog({ request, onClose }) {
   const stale = request.expectedEditVersion && preview?.editVersion && request.expectedEditVersion !== preview.editVersion;
   const notice = [request.warning, preview?.requiresEngineReview ? preview.blockReason : "", preview?.uncertainAttempt ? "An earlier send has an uncertain outcome. Check the conversation and email delivery records; another send could duplicate it." : ""].filter(Boolean).join(" ");
   const needsAcknowledgment = !!notice;
-  const allowedChannels = Array.isArray(request.allowedChannels) && request.allowedChannels.length ? request.allowedChannels : null;
   const submitLabel = attempt.current ? "Check / retry attempt" : scheduledAt ? "Confirm scheduled send" : "Confirm send";
   return createPortal(
     <UiSurface density="comfortable" onClick={(event) => event.stopPropagation()} className="fixed inset-0 z-[120] bg-black/40 flex items-center justify-center px-3 sm:px-6 pt-[calc(12px+env(safe-area-inset-top,0px))] pb-[calc(12px+env(safe-area-inset-bottom,0px))]">
@@ -200,7 +216,7 @@ export default function EstimateSendDialog({ request, onClose }) {
           <fieldset disabled={locked} className="border-0 p-0 min-w-0">
             <legend className="font-medium mb-2">Choose delivery channel</legend>
             {Object.entries(CHANNEL_LABELS).map(([key, label]) => <label key={key} className="ui-choice-label flex items-center gap-3">
-              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={isChannelDisabled(key, preview, allowedChannels)} />
+              <Radio name="estimate-send-channel" value={key} checked={method === key} onChange={() => setMethod(key)} disabled={isChannelDisabled(key, preview, request.allowedChannels)} />
               <span>{label}</span>
             </label>)}
             <p className="text-14 text-ink-secondary mt-2 break-words">Text: {preview.customerPhone || "No phone saved"}<br />Email: {preview.customerEmail || "No email saved"}</p>
