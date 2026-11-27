@@ -406,6 +406,9 @@ async function propertyOrdinanceZone(db, propertyId) {
 
 // The visit's catalog key as the job card reads it: the booking snapshot, else the live catalog row (a visit booked before the
 // snapshot existed). A failed read leaves the snapshot's null, as before.
+// A failed read is KEY_UNREAD, never "no key": the name alone then decides the products as before, but a no-card answer
+// built on that guess is not a confirmed no card (the close-out's noCardConfirmed would drop its rows and actions).
+const KEY_UNREAD = Symbol('key_unread');
 async function catalogKeyOf(db, scheduled) {
   if (scheduled.service_key_snapshot) return scheduled.service_key_snapshot;
   if (!scheduled.service_id) return null;
@@ -413,8 +416,14 @@ async function catalogKeyOf(db, scheduled) {
     const row = await db('services').where({ id: scheduled.service_id }).first('service_key');
     return row?.service_key || null;
   } catch {
-    return null;
+    return KEY_UNREAD;
   }
+}
+
+// The no-card reason only when the key was read: on an unread key it is 'key_unread' (indeterminate).
+function confirmedNoCard(resolved, keyRead) {
+  if (keyRead !== KEY_UNREAD || resolved.matchedVisit?.reason !== 'no_protocol') return resolved;
+  return { ...resolved, matchedVisit: { ...resolved.matchedVisit, reason: 'key_unread' } };
 }
 
 // The route-facing orchestrator: loads the scheduled service + its
@@ -442,16 +451,17 @@ async function resolveCompletionProductDefaults({ db, serviceId, protocols } = {
     // on the config file for callers that pass their own (e.g. tests
     // with synthetic protocols).
     const protocolSet = protocols || require('../config/protocols.json');
-    const resolved = resolveCompletionDefaultProductNames({
+    const keyRead = await catalogKeyOf(db, scheduled);
+    const resolved = confirmedNoCard(resolveCompletionDefaultProductNames({
       protocols: protocolSet,
       serviceType: scheduled.service_type,
-      serviceKey: await catalogKeyOf(db, scheduled),
+      serviceKey: keyRead === KEY_UNREAD ? null : keyRead,
       month,
       // A row this IS a follow-up child of (Codex r3 P1, PR #5049) — see
       // resolveCompletionDefaultProductNames' own isFollowup doc above.
       // A later visit of a package booked up front counts too (protocol-package-stage.js).
       isFollowup: !!scheduled.followup_source_service_id || await isLaterPackageVisit(db, scheduled, { protocols: protocolSet }),
-    });
+    }), keyRead);
 
     let holds = [];
     if (resolved.programKey === 'tree_shrub') {

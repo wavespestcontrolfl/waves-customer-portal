@@ -1894,7 +1894,67 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted."
+        "notes": "Default recurring pest template for quarterly, bimonthly, and monthly visits. Keep interior treatment targeted.",
+        "mixRates": [
+          {
+            "product": "LESCO Crosscheck Plus",
+            "where": "Outside: perimeter band",
+            "perGallon": {
+              "amount": 0.625,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "about 1.5 gal per 1,000 sq ft",
+            "limit": "1 fl oz per 1,000 sq ft at most; 7 days between applications",
+            "epa": "10404-120"
+          },
+          {
+            "product": "Taurus SC",
+            "where": "Outside: foundation band, 1 ft up and 1 ft out; 1-in pin stream at openings",
+            "perGallon": {
+              "amount": 0.4,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "2 qt per 160 linear ft",
+            "limit": "A calendar year allows four applications at this strength, or two at this strength and one at 0.8 fl oz per gal, or two at 0.8",
+            "epa": "53883-279"
+          },
+          {
+            "product": "LESCO 90/10 Nonionic Surfactant",
+            "where": "Same tank as the outside mix",
+            "perGallon": {
+              "amount": 0.0625,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "0.25 fl oz in the 4 gal FlowZone"
+          },
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Inside: cracks and crevices where ants are active",
+            "perGallon": {
+              "amount": 10,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Roaches: use the roach card rate. Not for Pharaoh ants. 3 days between applications",
+            "epa": "91234-401"
+          }
+        ]
       },
       {
         "visit": 3,
@@ -1929,7 +1989,30 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Species ID drives product choice. Ghost ants require patience and non-repellent transfer."
+        "notes": "Species ID drives product choice. Ghost ants require patience and non-repellent transfer.",
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Ant trails and entry points, inside or outside",
+            "perGallon": {
+              "amount": 10,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Not for Pharaoh ants, inside or outside",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Advion Ant Bait Gel",
+            "where": "Along active trails",
+            "dose": "0.1 to 1 g per spot",
+            "epa": "100-1498"
+          }
+        ]
       },
       {
         "visit": 4,
@@ -1945,76 +2028,82 @@
           "premium": true
         },
         "notes": "Flea jobs use the Flea Control card. Do not guarantee resolution unless pet treatment and vacuum protocol are followed."
-      },
+      }
+    ]
+  },
+  "assessment": {
+    "name": "Waves Assessment Protocol",
+    "notes": [
+      "A Waves Assessment is a free walk of the property to find the problem and recommend a plan. It is booked when the service could not be named on the call.",
+      "No product is applied or logged on an assessment. A treatment the customer buys on the spot is done and logged on the sold service's own visit (owner pick D13, 2026-11-25).",
+      "Log on the sheet: the outcome, what the customer is interested in, the call-back date when not sold, the pest or problem found, the site limits and the photos.",
+      "Bring a flashlight, a phone, a hand lens and a clean jar for a specimen. Wear closed shoes, and gloves for an attic hatch or a meter box."
+    ],
+    "visits": [
       {
-        "visit": 5,
+        "visit": 1,
         "month": "Any",
-        "primary": "Rodent monitoring / bait\nInspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries\nOutdoor stations where activity shows: the bait this site uses (below)\nSnap traps in the attic only, spread apart, screwed or tied down, when activity is active",
-        "secondary": "Outdoors at a home: bromethalin bait in a locked, anchored station\nCommercial sites only: a second-generation bait in locked, anchored stations\nDocument exclusion findings with photos\nEscalate seal-up proposal when entry points are active\nRemove carcasses and reset traps on follow-up",
-        "lineMeta": {
-          "Outdoor stations where activity shows: the bait this site uses (below)": {
-            "scope": "exterior",
-            "treatmentApplied": false
-          },
-          "Outdoors at a home: bromethalin bait in a locked, anchored station": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Tomcat Bait Chunx with Bromethalin"
-            ],
-            "completionApplicationMethod": "bait_placement"
-          },
-          "Commercial sites only: a second-generation bait in locked, anchored stations": {
-            "scope": "exterior",
-            "treatmentApplied": true,
-            "catalogProductHints": [
-              "Contrac Blox"
-            ],
-            "completionApplicationMethod": "bait_placement"
-          },
-          "Rodent monitoring / bait": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Inspect attic, garage, exterior penetrations, roof returns, AC chase, and utility entries": {
-            "scope": "exterior",
-            "treatmentApplied": false
-          },
-          "Snap traps in the attic only, spread apart, screwed or tied down, when activity is active": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Document exclusion findings with photos": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Escalate seal-up proposal when entry points are active": {
-            "scope": "interior",
-            "treatmentApplied": false
-          },
-          "Remove carcasses and reset traps on follow-up": {
-            "scope": "interior",
-            "treatmentApplied": false
-          }
-        },
-        "material_cost": "inventory",
-        "labor_cost": "elevated",
+        "primary": "Waves Assessment (about 30 minutes, no product)\nBefore the door: read the call note and the problem the customer named; open the draft estimate\nAsk three questions: what did you see and where; since when; pets, children, a well, a pond or a canal on the lot\nOutside walk, clockwise from the front door. Pest: trails, droppings, webs, nests, entry gaps, mulch against the wall, branches on the roof, standing water\nOutside walk, lawn and plants: grass type, weeds, thin or brown areas, irrigation; shrubs and palms: scale, whitefly, frond color\nRecord the site limits that change a quote: water within 15 ft (fresh) or 60 ft (canal or bay), pool cage and lanai, eave height, locked gate, dog, edible garden\nTake 4 to 8 photos: the front of the home, each problem, each site limit\nFinish the estimate on the phone and show the customer its price: the recommended plan first, then one alternative. Never write or say a price that is not on the estimate\nAsk for the booking now. Yes: book the first visit before leaving. No: set the call-back date on the sheet",
+        "secondary": "Inside only where the customer reports a problem: kitchen, baths, garage, and the attic hatch when rodents are named. Flashlight only\nCustomer says yes and wants treatment today: call the office to book the sold service on this visit, then treat from that service's card and log the products there\nNobody home: use the no-show choice on the sheet",
+        "material_cost": "inspection",
+        "labor_cost": "inspection",
         "tiers": {
-          "bronze": false,
-          "silver": false,
+          "bronze": true,
+          "silver": true,
           "enhanced": true,
           "premium": true
         },
-        "notes": "Baiting without exclusion is monitoring, not remediation. Separate exclusion scope when needed."
-      },
-      {
-        "visit": 6,
-        "month": "Any",
-        "primary": "Mosquito Barrier\nEssential Barrier: bifenthrin adulticide directed to foliage, fence lines, shaded resting zones, lanai perimeter, and pool cage edges\nPrecision Barrier: gamma-cyhalothrin adulticide for heavy vegetation, water adjacency, pool cages, and higher residual expectations\nPyriproxyfen + novaluron IGR support where breeding pressure exists",
-        "secondary": "Inspect drains, planters, saucers, bromeliads, gutters, tarps, toys, and other water-holding sites\nDump standing water where practical and document sources that cannot be removed\nUse mosquito stations or Bti dunk tablets when breeding sources cannot be fully eliminated\nAvoid blooming plants and pollinator activity windows",
-        "material_cost": "inventory",
-        "labor_cost": "standard",
-        "notes": "Use gas-powered backpack sprayer for directed barrier application. Peak pressure May-Oct. Wind, rain, inaccessible water, and source-reduction notes must be documented."
+        "notes": "No product on this visit. The price the customer sees is the estimate's price.",
+        "lineMeta": {
+          "Waves Assessment (about 30 minutes, no product)": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Before the door: read the call note and the problem the customer named; open the draft estimate": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Ask three questions: what did you see and where; since when; pets, children, a well, a pond or a canal on the lot": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Outside walk, clockwise from the front door. Pest: trails, droppings, webs, nests, entry gaps, mulch against the wall, branches on the roof, standing water": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Outside walk, lawn and plants: grass type, weeds, thin or brown areas, irrigation; shrubs and palms: scale, whitefly, frond color": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Record the site limits that change a quote: water within 15 ft (fresh) or 60 ft (canal or bay), pool cage and lanai, eave height, locked gate, dog, edible garden": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Take 4 to 8 photos: the front of the home, each problem, each site limit": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Finish the estimate on the phone and show the customer its price: the recommended plan first, then one alternative. Never write or say a price that is not on the estimate": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Ask for the booking now. Yes: book the first visit before leaving. No: set the call-back date on the sheet": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Inside only where the customer reports a problem: kitchen, baths, garage, and the attic hatch when rodents are named. Flashlight only": {
+            "scope": "interior",
+            "treatmentApplied": false
+          },
+          "Customer says yes and wants treatment today: call the office to book the sold service on this visit, then treat from that service's card and log the products there": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          },
+          "Nobody home: use the no-show choice on the sheet": {
+            "scope": "exterior",
+            "treatmentApplied": false
+          }
+        }
       }
     ]
   },
@@ -2471,6 +2560,41 @@
         "completionDefaultProducts": [
           "Suspend Polyzone",
           "Tekko Pro IGR"
+        ],
+        "mixRates": [
+          {
+            "product": "Suspend Polyzone",
+            "where": "Barrier: shaded foliage and resting sites",
+            "perGallon": {
+              "amount": 1.1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "limit": "21 days between applications; no spray above 15 mph wind",
+            "epa": "101563-143"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Same tank as the PolyZone",
+            "perGallon": {
+              "amount": 1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Summit Bti Dunks",
+            "where": "Standing water that cannot be dumped",
+            "dose": "1 dunk per 100 sq ft of water, every 30 days. Never an HOA or CDD pond",
+            "epa": "6218-87"
+          }
         ]
       },
       {
@@ -2567,6 +2691,41 @@
         "completionDefaultProducts": [
           "Suspend Polyzone",
           "Tekko Pro IGR"
+        ],
+        "mixRates": [
+          {
+            "product": "Suspend Polyzone",
+            "where": "Barrier: shaded foliage and resting sites",
+            "perGallon": {
+              "amount": 1.1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "limit": "21 days between applications; no spray above 15 mph wind",
+            "epa": "101563-143"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Same tank as the PolyZone",
+            "perGallon": {
+              "amount": 1,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,500 sq ft",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Summit Bti Dunks",
+            "where": "Standing water that cannot be dumped",
+            "dose": "1 dunk per 100 sq ft of water, every 30 days. Never an HOA or CDD pond",
+            "epa": "6218-87"
+          }
         ]
       },
       {
@@ -2608,7 +2767,23 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "A re-service visit. It prefills no spray: PolyZone repeats only at 21 days, and Tekko Pro outdoors not inside 14 days."
+        "notes": "A re-service visit. It prefills no spray: PolyZone repeats only at 21 days, and Tekko Pro outdoors not inside 14 days.",
+        "mixRates": [
+          {
+            "product": "LESCO Crosscheck Plus",
+            "where": "Callback before day 21: resting sites only",
+            "perGallon": {
+              "amount": 0.33,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "7 days between applications at this rate",
+            "epa": "10404-120"
+          }
+        ]
       },
       {
         "visit": 5,
@@ -2981,6 +3156,44 @@
           "Atticus Antapex WSG",
           "Tekko Pro IGR",
           "Advion Evolution Cockroach Gel Bait"
+        ],
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Inside: cracks and crevices",
+            "perGallon": {
+              "amount": 10,
+              "amountMax": 30,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "3 days between applications",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Inside: cracks, crevices and spots",
+            "perGallon": {
+              "amount": 2,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Advion Evolution Cockroach Gel Bait",
+            "where": "Hinges, appliance motors, cabinet corners",
+            "dose": "0.5 g per spot; 1 to 3 spots per 10 linear ft, 3 to 5 when heavy",
+            "epa": "100-1484"
+          }
         ]
       },
       {
@@ -3115,6 +3328,44 @@
           "Atticus Antapex WSG",
           "Tekko Pro IGR",
           "Advion Evolution Cockroach Gel Bait"
+        ],
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Vehicle: cracks and seams, light application",
+            "perGallon": {
+              "amount": 10,
+              "amountMax": 30,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "keep off electrical parts",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Vehicle: cracks and spots, light application",
+            "perGallon": {
+              "amount": 2,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Do not wet carpet; keep off electrical parts",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Advion Evolution Cockroach Gel Bait",
+            "where": "Vehicle: out of reach of children and pets",
+            "dose": "0.5 g per spot",
+            "epa": "100-1484"
+          }
         ]
       },
       {
@@ -3187,6 +3438,28 @@
         "completionDefaultProducts": [
           "Tekko Pro IGR",
           "Advion Evolution Cockroach Gel Bait"
+        ],
+        "mixRates": [
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Vehicle: cracks and spots, light application",
+            "perGallon": {
+              "amount": 2,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "Do not wet carpet; keep off electrical parts",
+            "epa": "53883-335"
+          },
+          {
+            "product": "Advion Evolution Cockroach Gel Bait",
+            "where": "Vehicle: out of reach of children and pets",
+            "dose": "0.5 g per spot",
+            "epa": "100-1484"
+          }
         ]
       }
     ]
@@ -3262,6 +3535,37 @@
         "completionDefaultProducts": [
           "Atticus Antapex WSG",
           "Tekko Pro IGR"
+        ],
+        "mixRates": [
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Inside floors, rugs and pet areas; shaded pet zones outside",
+            "perGallon": {
+              "amount": 10,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "epa": "91234-401"
+          },
+          {
+            "product": "Tekko Pro IGR",
+            "where": "Same tank as the Antapex",
+            "perGallon": {
+              "amount": 0.66,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "21 days between inside applications",
+            "epa": "53883-335"
+          }
         ]
       },
       {
@@ -3287,7 +3591,23 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Treatment 2 is a check first. Spray only where live fleas are found."
+        "notes": "Treatment 2 is a check first. Spray only where live fleas are found.",
+        "mixRates": [
+          {
+            "product": "Onslaught FastCap",
+            "where": "Only where live fleas are found",
+            "perGallon": {
+              "amount": 0.5,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "epa": "1021-2574"
+          }
+        ]
       }
     ]
   },
@@ -3363,6 +3683,43 @@
         "completionDefaultProducts": [
           "MGK Crossfire Bed Bug Concentrate",
           "Atticus Antapex WSG"
+        ],
+        "mixRates": [
+          {
+            "product": "MGK Crossfire Bed Bug Concentrate",
+            "where": "Mattress seams, bed frame, furniture",
+            "perGallon": {
+              "amount": 13,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "13 fl oz plus 115 fl oz of water makes 1 gal",
+            "limit": "Mix only what the job needs",
+            "epa": "1021-2776"
+          },
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Baseboards and off-bed cracks, never on a mattress",
+            "perGallon": {
+              "amount": 20,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "3 days between applications",
+            "epa": "91234-401"
+          },
+          {
+            "product": "CimeXa Insecticide Dust",
+            "where": "Wall voids, bed frame joints, under the box spring cover; none inside electrical boxes",
+            "dose": "2 oz per 100 sq ft, a light film",
+            "epa": "73079-12"
+          }
         ]
       },
       {
@@ -3400,7 +3757,44 @@
           "enhanced": true,
           "premium": true
         },
-        "notes": "Every bed bug visit after treatment 1 uses this card: treatment 2 at day 14, each clearance check, and the third treatment on a heavy job. It is a check first. Spray only where live bugs or fresh eggs are found."
+        "notes": "Every bed bug visit after treatment 1 uses this card: treatment 2 at day 14, each clearance check, and the third treatment on a heavy job. It is a check first. Spray only where live bugs or fresh eggs are found.",
+        "mixRates": [
+          {
+            "product": "MGK Crossfire Bed Bug Concentrate",
+            "where": "Only where live bugs or fresh eggs are found",
+            "perGallon": {
+              "amount": 13,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal"
+            ],
+            "sprayVolume": "13 fl oz plus 115 fl oz of water makes 1 gal",
+            "limit": "Mix only what the job needs",
+            "epa": "1021-2776"
+          },
+          {
+            "product": "Atticus Antapex WSG",
+            "where": "Bugs found off the bed, never on a mattress",
+            "perGallon": {
+              "amount": 20,
+              "unit": "g"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 gal per 1,000 sq ft",
+            "limit": "3 days between applications",
+            "epa": "91234-401"
+          },
+          {
+            "product": "CimeXa Insecticide Dust",
+            "where": "Top up where dust was removed",
+            "dose": "2 oz per 100 sq ft, a light film",
+            "epa": "73079-12"
+          }
+        ]
       }
     ]
   },
@@ -3455,7 +3849,39 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "High-liability workflow. Requires exact label rate, volume, diagram, and access notes."
+        "notes": "High-liability workflow. Requires exact label rate, volume, diagram, and access notes.",
+        "mixRates": [
+          {
+            "product": "Termidor SC",
+            "where": "Trench and rod along the foundation",
+            "perGallon": {
+              "amount": 0.8,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "4 gal per 10 linear ft for each foot of depth. 100 gal tank: 78 fl oz (label table)",
+            "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
+            "epa": "7969-210"
+          },
+          {
+            "product": "Taurus SC",
+            "where": "Same use, only when the work order names Taurus",
+            "perGallon": {
+              "amount": 0.8,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "4 gal per 10 linear ft for each foot of depth. 100 gal tank: 78 fl oz (label table)",
+            "limit": "Use the product and rate on the work order. Never weaker than 0.8 fl oz per gal",
+            "epa": "53883-279"
+          }
+        ]
       },
       {
         "visit": 4,
@@ -3485,7 +3911,23 @@
           "enhanced": false,
           "premium": true
         },
-        "notes": "Best for accessible wood. Cost scales by treatable sqft and dilution/application method."
+        "notes": "Best for accessible wood. Cost scales by treatable sqft and dilution/application method.",
+        "mixRates": [
+          {
+            "product": "Bora-Care",
+            "where": "Raw wood, sprayed",
+            "perGallon": {
+              "amount": 64,
+              "unit": "fl oz"
+            },
+            "sprayers": [
+              "bg_1_gal",
+              "flowzone_4_gal"
+            ],
+            "sprayVolume": "1 part Bora-Care to 1 part water; up to 400 sq ft per gal",
+            "epa": "64405-1"
+          }
+        ]
       },
       {
         "visit": 6,

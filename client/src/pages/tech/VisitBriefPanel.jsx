@@ -51,6 +51,7 @@ import {
 } from './visitBrief';
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
+import VisitTextsSection from './VisitTextsSection';
 import { detectServiceCategory } from '../../lib/service-colors';
 import HomeNoteSection from './HomeNoteSection';
 import PastVisitsSection from './PastVisitsSection';
@@ -1432,6 +1433,8 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         request={request}
         onRefresh={onRetry}
       />
+
+      <VisitTextsSection service={service} byService={byService} request={request} />
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>

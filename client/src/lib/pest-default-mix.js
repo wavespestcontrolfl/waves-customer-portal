@@ -70,20 +70,48 @@ const NON_MIX_SERVICE_RE =
 // off a bare name) — isPestDefaultMixVisit below covers the common bare-
 // label case separately, by the row's stable catalog key instead.
 const RECURRING_GENERAL_PEST_RE =
-  /general pest|quarterly|bi-?monthly|\bmonthly\b|semi-?annual|recurring pest|one[-\s]?time\s+pest\s+control/i;
+  /general pest|quarterly|bi-?monthly|\bmonthly\b|recurring pest|one[-\s]?time\s+pest\s+control/i;
+// "Semi-annual" counts as the server's general pest card does: with "pest" in the name, under a general pest key, or as a
+// WHOLE bare name ("Semi-Annual Service") with no key (KEYLESS_GENERAL_PEST_RE).
+const SEMIANNUAL_RE = /semi ?annual/;
 
 // The mix belongs on recurring general-pest maintenance visits and pest
 // re-services ONLY. Callers on an un-gated surface pass the whole
 // schedule row (name tokens exclude the other lines); the recap lane is
 // additionally server-gated to the pest_control category.
+// The general pest catalog keys (server protocol-matcher.js, the general pest rule's serviceKeys, less the two the name
+// test above always excludes: the initial cleanout and pest + rodent).
+// The server's keylessNames for the general pest card (protocol-matcher.js), the same set on the same normalized name
+// (lower case, every run of other characters one space): a WHOLE bare name on a visit with no key.
+const KEYLESS_GENERAL_PEST_RE = /^(re service|reservice|callback|semi annual|semiannual|recurring)( service| visit)?$/;
+const GENERAL_PEST_KEYS = new Set([
+  "pest_general_quarterly", "pest_general_monthly", "pest_general_bimonthly", "pest_general_semiannual",
+  "one_time_pest_control", "pest_re_service",
+]);
+
 export function isPestDefaultMixVisit(service) {
   const raw =
     service?.serviceTypeRaw || service?.serviceType || service?.service_type || "";
   const s = String(raw).toLowerCase();
   if (NON_MIX_SERVICE_RE.test(s)) return false;
-  const isReservice =
-    service?.isCallback === true || /re-?service|callback/.test(s);
-  if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
+  const key = String(
+    service?.completionProfile?.serviceKey
+      || service?.serviceKey
+      || service?.service_key_snapshot
+      || "",
+  ).toLowerCase();
+  // A booked Waves Assessment (key lawn_inspection) is a walk with no product under any name, "Quarterly Service" too.
+  if (key === "lawn_inspection") return false;
+  // A re-service counts as the server's general pest card does (protocol-matcher.js): its name says pest, or its key is a
+  // general pest service, or the WHOLE name is a bare "Re-Service" / "Callback" with no key at all. A callback booking whose
+  // name and key say nothing ("Courtesy Visit"), or a bare "Re-Service" under another service's key, has no card on the
+  // server (no_protocol, owner pick D18): inspection only, nothing prefilled.
+  const name = s.replace(/[^a-z0-9]+/g, " ").trim();
+  const pestWork = /\bpest\b/.test(name) || GENERAL_PEST_KEYS.has(key);
+  const keylessGeneral = !key && KEYLESS_GENERAL_PEST_RE.test(name);
+  const isReservice = (service?.isCallback === true || /re ?service|callback/.test(name)) && pestWork;
+  const semiannual = SEMIANNUAL_RE.test(name) && pestWork;
+  if (keylessGeneral || isReservice || semiannual || RECURRING_GENERAL_PEST_RE.test(s)) return true;
   // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
   // admin-created One-Time Pest Control Service job is often scheduled
   // under the bare "Pest Control Service" label (admin-schedule.js's
@@ -96,12 +124,6 @@ export function isPestDefaultMixVisit(service) {
   // has its own distinct one (tick_control, bee_wasp_removal, …). Checked
   // across every field a caller's dispatch-shaped service object might
   // carry it under.
-  const key = String(
-    service?.completionProfile?.serviceKey
-      || service?.serviceKey
-      || service?.service_key_snapshot
-      || "",
-  ).toLowerCase();
   return key === "one_time_pest_control";
 }
 
