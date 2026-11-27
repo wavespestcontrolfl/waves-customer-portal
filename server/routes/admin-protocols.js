@@ -61,6 +61,7 @@ const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/
 const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../services/protocol-reader');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
+const { tankReference, sprayerTestWarning } = require('../services/lawn-tank-reference');
 const { completionRateFields } = require('../utils/protocol-label-rate');
 const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -746,6 +747,19 @@ async function getActiveCalibration(equipmentSystemId) {
   return query.first().catch(() => null);
 }
 
+// The FlowZone backpack's active calibration, for the tank sheet's 4 gal amounts (lawn-tank-reference.js). null when none is on file.
+async function getBackpackCalibration() {
+  const rows = await db('equipment_calibrations as ec')
+    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+    .where('ec.active', true)
+    .where('es.active', true)
+    .where('es.system_type', 'backpack')
+    .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
+    .orderBy('es.name', 'asc')
+    .catch(() => []);
+  return (rows || []).find((row) => row.system_type === 'backpack') || null;
+}
+
 // GET /api/admin/protocols/photos/relevant — context-aware photo references
 router.get('/photos/relevant', async (req, res, next) => {
   try {
@@ -970,6 +984,8 @@ function lawnMixRig(calibration) {
     tankCapacityGal: tankCapacity || null,
     tankCoverageSqft: tankCoverageSqft ? Math.round(tankCoverageSqft) : null,
     expiresAt: calibration.expires_at || null,
+    calibratedAt: calibration.calibrated_at || null,
+    calibrationStatus: calibration.calibration_status || null,
   } : null;
   return { carrier, tankCoverageSqft, equipment };
 }
@@ -977,14 +993,21 @@ function lawnMixRig(calibration) {
 // The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
 // selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
 // the restriction on every gated row), then the cadence and limit warnings.
-function lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
+function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
   const warnings = [];
   if (!calibration) {
     warnings.push({
       code: 'missing_calibration',
-      message: 'No active calibration was found for the selected equipment. Mix amounts require a water application rate.',
+      message: 'No sprayer test on file for the selected tank, so tank amounts are not shown. Test the sprayer.',
     });
   }
+  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide).
+  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated' });
+  if (rigWarning) warnings.push(rigWarning);
+  const usesBackpackTest = items.some((item) => item.tankAmounts?.backpack4Gal?.carrierSource === 'calibration');
+  const backpackWarning = usesBackpackTest && backpack?.equipment_system_id !== calibration?.equipment_system_id
+    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated' }) : null;
+  if (backpackWarning) warnings.push(backpackWarning);
   const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
   if (unmatchedPricedLines.length) {
     warnings.push({
@@ -1101,6 +1124,7 @@ router.get('/lawn-mix', async (req, res, next) => {
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
     const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
+    const backpack = await getBackpackCalibration();
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
@@ -1223,6 +1247,9 @@ router.get('/lawn-mix', async (req, res, next) => {
         fullTankMix,
         plannedMix,
         plannedFullTankMix,
+        // The tank sheet's per-fill amounts (100 gal, full tank, 4 gal FlowZone): shown for every matched product, with the plan's
+        // state as a warning beside them, never in place of them. No job amount or cost reads these.
+        tankAmounts: tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack }),
       };
     });
     const items = bermuda.decorate(builtItems);
@@ -1239,7 +1266,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
+    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
 
     res.json(lawnMixResponse({
       seesPricing: viewerSeesPricing(req),

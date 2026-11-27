@@ -1346,7 +1346,7 @@ export default function ProtocolReferenceTabV2() {
               </Card>
             ) : (
               mixPlan && <>
-                <ProtocolTankSheet plan={mixPlan} calibration={equipmentOptions.find((row) => row.id === mixPlan.equipment?.calibrationId)} safetyRules={safetyRules} />
+                <ProtocolTankSheet plan={mixPlan} safetyRules={safetyRules} />
                 <Button variant="secondary" onClick={() => setShowDetailedMix((value) => !value)}>
                   {showDetailedMix ? "Hide application details" : "Application details & conditional products"}
                 </Button>

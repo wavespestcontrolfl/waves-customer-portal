@@ -10,14 +10,51 @@ const TANK_MIX_CATEGORIES = new Set([
   "solution_sl", "liquid_fertilizer", "adjuvant_last",
 ]);
 
-// Amounts come from the existing server calculation. Never scale a different
-// rig's output or turn an optional product into a selected tank ingredient.
-export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] }) {
+const unitText = (unit) => String(unit || "").replaceAll("_", " ");
+const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 3 });
+const fillText = (fill) => `${num(fill.amount)} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
+const PLAN_STATE_NOTES = {
+  capped: "Limit reached: do not apply at this visit.",
+  held: "City hold: do not apply at this visit.",
+  unavailable: "No program rate: catalog rate shown.",
+};
+
+// One product's fill amounts (server: lawn-tank-reference.js) as [label, text] rows, and the one amount the heading shows.
+function amountRows(amounts) {
+  if (!amounts) return { rows: [], heading: "No amount" };
+  const rate = amounts.ratePer1000 ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} per 1,000 sq ft` : null;
+  if (amounts.application === "spreader") {
+    return { rows: [["Spreader", rate || "Rate not on file. Use the label rate."]], heading: rate ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} / 1,000 sq ft` : "No amount" };
+  }
+  const rows = [["Rate", amounts.concentrationPercent ? `${num(amounts.concentrationPercent)}% of the spray volume` : rate || "Not on file. Use the label rate."]];
+  if (amounts.per100Gal) rows.push(["100 gal tank", fillText(amounts.per100Gal)]);
+  if (amounts.fullTank) rows.push([`Full ${num(amounts.fullTank.gallons)} gal tank`, fillText(amounts.fullTank)]);
+  if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", fillText(amounts.backpack4Gal)]);
+  else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
+  if (amounts.lineCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.lineCarrierGalPer1000)} gal per 1,000 sq ft (protocol line)`]);
+  const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
+  return { rows, heading: main ? `${fillText(main)} / ${num(main.gallons)} gal${main === amounts.backpack4Gal ? " FlowZone" : ""}` : "No amount" };
+}
+
+// The checks that once withheld a product's amount, now short warnings beside it (owner 2026-11-26: warn, never hide).
+function productCautions(item, exclusions) {
+  const { product, tankAmounts: amounts = {} } = item;
+  const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "").startsWith("staugustine"));
+  return [
+    !product.labelVerifiedAt && "Label not verified in the app.",
+    excludesDefaultTurf && "Not labeled for St. Augustine.",
+    item.conditional && "Conditional: confirm the trigger first.",
+    amounts?.application === "spray" && !TANK_MIX_CATEGORIES.has(product.mixingOrderCategory) && "Tank mixing not set in the app. Check the label.",
+    PLAN_STATE_NOTES[amounts?.planState],
+    item.fieldHold && "On hold: see the warning above.",
+  ].filter(Boolean);
+}
+
+// Amounts come from the server calculation, from the selected rig's last
+// sprayer test. Every check is a warning beside the amount, never in place of
+// it (owner 2026-11-26); only a missing sprayer test leaves an amount out.
+export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
-  const currentCalibration = calibration?.id === equipment?.calibrationId
-    && calibration?.calibration_status === "field_verified"
-    && (!equipment?.expiresAt || new Date(equipment.expiresAt) > new Date());
-  const tankReady = Number(equipment?.tankCapacityGal) === 110 && currentCalibration;
   const products = (plan.items || []).filter((item) => item.product);
   const sheet = (
     <>
@@ -37,31 +74,23 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
           <p className="mt-2">Each product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
-        {!tankReady && (
-          <p role="alert" className="rounded-md border border-alert-fg/30 bg-alert-bg p-3 text-alert-fg">
-            Tank quantities are unavailable. Select a 110-gallon tank with a current, field-verified calibration.
-          </p>
-        )}
-        {tankReady && (
+        {equipment?.carrierGalPer1000 > 0 && (
           <p className="protocol-tank-meta">
             Carrier: {equipment.carrierGalPer1000} gal per 1,000 sq ft · Full-tank coverage: {Number(equipment.tankCoverageSqft).toLocaleString("en-US")} sq ft
           </p>
         )}
-        {(plan.warnings || []).map((warning, index) => (
+        {[...(plan.warnings || []), ...(plan.blocks || [])].map((warning, index) => (
           <p key={`${warning.code}-${index}`} className="text-alert-fg">{warning.message}</p>
         ))}
         {safetyRules.map((rule) => <p key={rule} className="text-alert-fg">{rule}</p>)}
         {!products.length && <p>No mapped products are available for this month.</p>}
         {products.map((item, index) => {
         const product = item.product;
-        const mix = item.fullTankMix;
+        const amounts = item.tankAmounts;
+        const { rows: fills, heading } = amountRows(amounts);
         const labelLink = productLabelLink(product);
-        const tankProduct = TANK_MIX_CATEGORIES.has(product.mixingOrderCategory);
         const exclusions = product.excludedTurfSpecies || [];
-        const excludesDefaultTurf = exclusions.some((species) => String(species).toLowerCase().replace(/[^a-z]/g, "").startsWith("staugustine"));
-        const quantityChecks = [item.selected, tankReady, tankProduct, product.labelVerifiedAt, !excludesDefaultTurf,
-          Number.isFinite(mix?.amount), mix?.amount > 0, mix?.amountUnit];
-        const hasAmount = quantityChecks.every(Boolean);
+        const cautions = productCautions(item, exclusions);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
           ["Active ingredient", product.activeIngredient],
@@ -80,12 +109,12 @@ export default function ProtocolTankSheet({ plan, calibration, safetyRules = [] 
           <section key={`${product.id}-${index}`} className="protocol-tank-product">
             <div className="field-section-heading protocol-tank-product-heading doc-keep-with-next flex flex-wrap justify-between gap-2">
               <h3>{product.name}</h3>
-              <span className="protocol-tank-meta font-mono">{hasAmount ? `${mix.amount} ${mix.amountUnit.replaceAll("_", " ")} / 110 gal` : "Quantity withheld"}</span>
+              <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
             <p className="mt-2 font-medium">Separate single-product tank</p>
-            <p className="mt-2 text-zinc-600">{item.conditional ? "Conditional product — confirm its trigger before use." : "Protocol product"} {item.selected ? "Selected." : "Not selected for this tank."}</p>
-            {!tankProduct && <p className="mt-2">Tank mixing is not established for this product. Check its application method and label.</p>}
-            {!product.labelVerifiedAt && <p className="mt-2 text-alert-fg">Label verification missing.</p>}
+            <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
+            {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
+            {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
             <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
             <dl className="protocol-tank-meta mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{String(value)}</dd></div>)}</dl>
