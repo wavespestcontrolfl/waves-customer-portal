@@ -52,6 +52,13 @@ const briefView = (services, byService) => {
   const wrongCustomer = Boolean(services && carriedForOtherCustomer(services, carried));
   return { picked: wrongCustomer ? null : carried, wrongCustomer };
 };
+// The member row the edit started on now belongs to another customer (a merge or undo moved the visit): this holds even when
+// the refreshed brief carries no note at all, so the check reads the schedule row, not the brief.
+const pinnedMemberMoved = (services, pin) => {
+  const now = services && pin && pin.memberId && memberCustomerId(services, pin.memberId);
+  return Boolean(now && pin.customerId && now !== pin.customerId);
+};
+const livePinOf = (pin, stopKey, blocked) => (pin && pin.stopKey === stopKey && !blocked ? pin : null);
 const visitNotePath = (id) => `/admin/schedule/${id}/home-note`;
 
 function byline(note) {
@@ -125,9 +132,9 @@ const saveFailure = (err) => {
 const initialLoad = (picked) => (picked
   ? { status: 'ready', note: picked.note, customerId: picked.customerId }
   : { status: 'loading', note: null, customerId: null });
-// What editing is checked against: the stop, the customer, and the exact note (id + revision) it started from.
-const pinFor = (route, stopKey, load) => ({
-  route, stopKey, noteId: load.note?.id || null, revision: load.note?.revision || 0, customerId: load.customerId,
+// What editing is checked against: the stop, the member row, the customer, and the exact note (id + revision) it started from.
+const pinFor = (route, stopKey, load, memberId) => ({
+  route, stopKey, memberId, noteId: load.note?.id || null, revision: load.note?.revision || 0, customerId: load.customerId,
 });
 const repinned = (pin, note) => ({ ...pin, noteId: note?.id || null, revision: note?.revision || 0 });
 // An answer with no `note` field (an unreadable 2xx) is an unknown outcome: the draft stays.
@@ -153,7 +160,8 @@ export default function HomeNoteSection({ request, path, stopKey, services, bySe
   const [state, setState] = useState(IDLE);
   // The draft belongs to ONE stop: a different stopKey ends it at once (nothing of it renders or can be saved), while the same
   // stopKey keeps it across a refresh that omits the note or a grouped stop switching the member that supplies it.
-  const livePin = pin && pin.stopKey === stopKey && !wrongCustomer ? pin : null;
+  const pinMoved = pinnedMemberMoved(services, pin);
+  const livePin = livePinOf(pin, stopKey, wrongCustomer || pinMoved);
   const shownDraft = livePin ? draft : null;
   const route = noteRoute(picked, livePin, fed ? null : path);
   // The pin an in-flight save belongs to: an answer arriving after the draft ended (Cancel, another customer) is ignored.
@@ -174,7 +182,7 @@ export default function HomeNoteSection({ request, path, stopKey, services, bySe
   // which member supplies it, leaves the draft exactly as typed.
   const dropDraft = () => { setDraft(null); setPin(null); setState(IDLE); };
   useEffect(() => { if (movedToOtherCustomer(livePin, pickedCustomer)) dropDraft(); }, [pickedCustomer]);
-  useEffect(() => { if (pin && !livePin) dropDraft(); }, [stopKey, wrongCustomer]);
+  useEffect(() => { if (pin && !livePin) dropDraft(); }, [stopKey, wrongCustomer, pinMoved]);
   useEffect(() => { if (!fed) dropDraft(); }, [fed, path]);
 
   async function save() {
@@ -194,7 +202,7 @@ export default function HomeNoteSection({ request, path, stopKey, services, bySe
       setState(saveFailure(err));
     }
   }
-  const startEdit = () => { setPin(pinFor(route, stopKey, load)); setDraft(load.note?.body || ''); setState(IDLE); };
+  const startEdit = () => { setPin(pinFor(route, stopKey, load, picked && picked.id)); setDraft(load.note?.body || ''); setState(IDLE); };
   // Keep editing: the draft stays, and the next save is checked against the newer note it just saw.
   const keepMine = () => { setPin(repinned(livePin, state.conflict.note)); setLoad({ ...load, note: state.conflict.note }); setState(IDLE); };
   const cancelEdit = () => { if (state.conflict) setLoad({ ...load, note: state.conflict.note }); setDraft(null); setPin(null); setState(IDLE); };

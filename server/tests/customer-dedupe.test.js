@@ -583,9 +583,17 @@ describe('mergeHomeNotes ("About this home" staff notes: never lose text)', () =
   it('both profiles have a note: the kept row holds both texts, the archived row goes', async () => {
     const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'Gate sticks.', revision: 3 }, loserNote: { id: 'n2', body: 'Dog inside.', revision: 1 } });
     await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L');
-    expect(state.updated).toEqual({ body: 'Gate sticks.\n(merged) Dog inside.', revision: 4, updated_at: 'NOW' });
+    expect(state.updated).toEqual({
+      body: 'Gate sticks.\n(merged) Dog inside.', revision: 4, updated_by_type: 'admin', updated_by_id: null, updated_at: 'NOW',
+    });
     expect(state.deleted).toBe(true);
     expect(state.repointed).toBeNull();
+  });
+
+  it('the joined note is authored by the admin who ran the merge, never the kept customer\'s last editor', async () => {
+    const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'a', revision: 1, updated_by_id: 'tech-9', updated_by_type: 'technician' }, loserNote: { id: 'n2', body: 'b', revision: 1 } });
+    await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L', { performedById: 'adm-1' });
+    expect(state.updated).toMatchObject({ updated_by_type: 'admin', updated_by_id: 'adm-1' });
   });
 
   it('only the archived profile has a note: it is repointed to the kept customer, text unchanged', async () => {

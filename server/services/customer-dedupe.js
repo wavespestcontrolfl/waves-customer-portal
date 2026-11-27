@@ -2286,7 +2286,7 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
 // operation and database error code only.
 const HOME_NOTE_JOINT = '\n(merged) ';
 const HOME_NOTE_TABLE_MAX = 2100;
-async function mergeHomeNotes(trx, table, column, winnerId, loserId) {
+async function mergeHomeNotes(trx, table, column, winnerId, loserId, { performedById = null } = {}) {
   const rows = new Map();
   for (const id of [winnerId, loserId].sort()) rows.set(id, await trx(table).where(column, id).forUpdate().first());
   const loserRow = rows.get(loserId);
@@ -2298,7 +2298,15 @@ async function mergeHomeNotes(trx, table, column, winnerId, loserId) {
     throw new Error(`home notes are too long to join (${joined.length} characters, limit ${HOME_NOTE_TABLE_MAX}): shorten one note, then merge again`);
   }
   try {
-    await trx(table).where(column, winnerId).update({ body: joined, revision: Number(winnerRow.revision) + 1, updated_at: trx.fn.now() });
+    await trx(table).where(column, winnerId).update({
+      body: joined,
+      revision: Number(winnerRow.revision) + 1,
+      // The joined text is nobody's single edit: the author is the admin who ran the merge, or none (the byline then shows
+      // the date alone), never the kept customer's last editor.
+      updated_by_type: 'admin',
+      updated_by_id: performedById || null,
+      updated_at: trx.fn.now(),
+    });
   } catch (err) {
     // A failed UPDATE's message can carry its bound values (both notes), and merge errors are logged: only the operation and
     // the database error code go on.
@@ -3995,7 +4003,7 @@ async function executeMerge({ winnerId, loserId, performedBy, performedById = nu
         if (uniqueViolation && handler) {
           // copyNewSod is the executor's own premise test (the one the move stamp uses), so the
           // preference fill and the stamp can never disagree about whether the home moved.
-          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: sodFollowsMerge, timerPremise });
+          repointed[`${table}.${column}`] = await handler(trx, table, column, winnerId, loserId, { copyNewSod: sodFollowsMerge, timerPremise, performedById });
           // The handler moved/merged/deleted rows that are NOT in
           // repointedIds — this merge can no longer be replayed backwards.
           if (!collisionHandlers.includes(table)) collisionHandlers.push(table);

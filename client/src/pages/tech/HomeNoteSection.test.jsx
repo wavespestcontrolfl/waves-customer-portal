@@ -263,4 +263,23 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     render(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={[{ id: 'b' }]} byService={answered(NOTE)} />);
     expect(screen.getByText(NOTE.body)).toBeInTheDocument();
   });
+
+  it('a merge moves the visit to another customer and the refreshed brief omits the note: the draft is gone, same stopKey', async () => {
+    const request = vi.fn(async () => ({}));
+    const { rerender } = render(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: CUSTOMER }]} byService={answered(NOTE)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'typed for customer A' } });
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: 'c2' }]} byService={{ b: { brief: { brief: null } } }} />);
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+    // Even when the brief later carries the new customer's note, the old draft does not come back.
+    rerender(<HomeNoteSection request={request} stopKey="stop-1" services={[{ id: 'b', customer_id: 'c2' }]} byService={{ b: { brief: { homeNote: { note: null, customerId: 'c2' } } } }} />);
+    expect(screen.getByText('No note yet.')).toBeInTheDocument();
+    expect(screen.queryByLabelText('About this home')).toBeNull();
+    expect(puts(request)).toHaveLength(0);
+  });
+
+  it('a note with no author (a merged note) reads Updated <date> with no name', () => {
+    render(<HomeNoteSection request={vi.fn()} stopKey="stop-1" services={[{ id: 'b' }]} byService={answered({ ...NOTE, updatedByFirstName: null })} />);
+    expect(screen.getByText('Updated Nov 26, 2026')).toBeInTheDocument();
+  });
 });

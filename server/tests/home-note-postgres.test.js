@@ -155,9 +155,13 @@ jest.setTimeout(30000);
     const [{ id: loserId }] = await database('customers').insert({}).returning('id');
     await saveHomeNote({ customer_id: customerId }, { body: 'Gate sticks.', actor: actor() });
     await saveHomeNote({ customer_id: loserId }, { body: 'Dog inside.', actor: actor() });
-    await database.transaction((trx) => mergeHomeNotes(trx, 'home_notes', 'customer_id', customerId, loserId));
-    const rows = await database('home_notes').select('customer_id', 'body');
-    expect(rows).toEqual([{ customer_id: customerId, body: 'Gate sticks.\n(merged) Dog inside.' }]);
+    await database.transaction((trx) => mergeHomeNotes(trx, 'home_notes', 'customer_id', customerId, loserId, { performedById: techId }));
+    const rows = await database('home_notes').select('customer_id', 'body', 'updated_by_type', 'updated_by_id');
+    expect(rows).toEqual([{ customer_id: customerId, body: 'Gate sticks.\n(merged) Dog inside.', updated_by_type: 'admin', updated_by_id: techId }]);
+    // The joined note names the merge's admin in the byline; with no actor it names nobody.
+    expect((await readHomeNote(visit())).note.updatedByFirstName).toBe('Ada');
+    await database('home_notes').update({ updated_by_id: null });
+    expect((await readHomeNote(visit())).note.updatedByFirstName).toBeNull();
     await database('home_notes').del();
     await saveHomeNote({ customer_id: loserId }, { body: 'Only theirs.', actor: actor() });
     await database.transaction((trx) => mergeHomeNotes(trx, 'home_notes', 'customer_id', customerId, loserId));
