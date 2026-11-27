@@ -960,7 +960,7 @@ router.post('/', leadWebhookIpLimiter, leadWebhookPhoneLimiter, async (req, res)
           first_contact_channel: 'form',
           status: 'new',
           customer_id: customer.id,
-          ...(createdEstimateId ? { estimate_id: createdEstimateId } : {}),
+          estimate_id: createdEstimateId,
           gclid: gclid || null,
           wbraid: wbraid || null,
           gbraid: gbraid || null,

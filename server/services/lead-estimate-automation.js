@@ -222,7 +222,7 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
     } else if (lawnPest) {
       services.lawnPestControl = {};
       review.push('lawn_pest_control_defaulted');
-    } else if (oneTime || /\bweeds?\b/.test(text)) {
+    } else if (oneTime || (!recurring && wants(/\bweeds?\b/))) {
       services.oneTimeLawn = { treatmentType: /\bfertilization\b/.test(text) ? 'fertilizer' : 'weed' };
     } else {
       services.lawn = { track: 'st_augustine', tier: 'enhanced' };
@@ -324,26 +324,40 @@ function explicitFormBool(value) {
   return null;
 }
 
-function resolvePoolCageFeature(body, countyFeatures) {
-  const explicitCage = explicitFormBool(body.poolCage ?? body.pool_cage);
-  const poolCage = explicitCage !== null ? explicitCage : Boolean(countyFeatures?.poolCage);
-  if (!poolCage) return { poolCage: false };
-  const rawBodySize = firstNonEmpty(body.poolCageSize, body.pool_cage_size).toLowerCase();
-  const bodySize = ['small', 'medium', 'large', 'oversized'].includes(rawBodySize) ? rawBodySize : null;
-  const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
-  if (bodySize) {
-    const held = bodySize === 'large' || bodySize === 'oversized';
-    return {
-      poolCage: true,
-      poolCageSize: twoSizesOn ? (bodySize === 'oversized' ? 'large' : 'medium') : bodySize,
-      ...(twoSizesOn && held ? { poolCageReview: true } : {}),
-    };
-  }
+const VALID_POOL_CAGE_SIZES = new Set(['small', 'medium', 'large', 'oversized']);
+
+function countyCagePayload(countyFeatures) {
   return {
     poolCage: true,
     ...(countyFeatures?.poolCageSize ? { poolCageSize: countyFeatures.poolCageSize } : {}),
     ...(countyFeatures?.poolCageReview === true ? { poolCageReview: true } : {}),
   };
+}
+
+function bodyCagePayload(bodySize) {
+  const twoSizesOn = require('../config/feature-gates').cageTwoSizesLive?.() === true;
+  if (!twoSizesOn) return { poolCage: true, poolCageSize: bodySize };
+  const held = bodySize === 'large' || bodySize === 'oversized';
+  return {
+    poolCage: true,
+    poolCageSize: bodySize === 'oversized' ? 'large' : 'medium',
+    ...(held ? { poolCageReview: true } : {}),
+  };
+}
+
+function resolvePoolCageFeature(body, countyFeatures) {
+  const explicitCage = explicitFormBool(body.poolCage ?? body.pool_cage);
+  const poolCage = explicitCage !== null ? explicitCage : Boolean(countyFeatures?.poolCage);
+  if (!poolCage) return { poolCage: false };
+  // County-assessed cage area wins for size and large-cage review holds (mirrors
+  // public-quote.js): a visitor tapping "Standard/Medium" must never clear a
+  // measured large-cage hold.
+  if (Number(countyFeatures?.poolCageSqft) > 0 && countyFeatures?.poolCageSize) {
+    return countyCagePayload(countyFeatures);
+  }
+  const rawBodySize = firstNonEmpty(body.poolCageSize, body.pool_cage_size).toLowerCase();
+  if (VALID_POOL_CAGE_SIZES.has(rawBodySize)) return bodyCagePayload(rawBodySize);
+  return countyCagePayload(countyFeatures);
 }
 
 function resolveLeadFeatures(body, county) {
@@ -364,7 +378,16 @@ function resolveLeadFeatures(body, county) {
 
 function countyTurfEngineFields(county) {
   const turf = county?.turf;
-  if (!turf || !(Number(turf.estimatedTurfSf) > 0)) return {};
+  if (!turf) return {};
+  if (turf.turfKnownZero === true || Number(turf.estimatedTurfSf) === 0) {
+    return {
+      lawnSqFt: 0,
+      estimatedTurfSf: 0,
+      turfSource: turf.turfSource || null,
+      turfCappedToParcel: false,
+    };
+  }
+  if (!(Number(turf.estimatedTurfSf) > 0)) return {};
   return {
     estimatedTurfSf: Number(turf.estimatedTurfSf),
     turfSource: turf.turfSource || null,
@@ -479,6 +502,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       category: body.category || null,
       isCommercial: false,
       features: resolveLeadFeatures(body, county),
+      ...(county?.pestPhotoFacts ? { pestPhotoFacts: county.pestPhotoFacts } : {}),
       services,
       leadSource: 'lead_webhook',
       address: leadDraftAddress({ intake, customer }),

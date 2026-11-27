@@ -431,7 +431,7 @@ describe('the lead webhook reads the cache before its lock and schedules the ste
     expect(triage).toBeGreaterThan(caught);
     expect(src.slice(triage, src.indexOf('});', triage))).toContain('measurements: await pendingLeadMeasurements(createdEstimateId),');
     // The webhook links the lead row to its draft estimate on creation.
-    expect(src).toContain('...(createdEstimateId ? { estimate_id: createdEstimateId } : {}),');
+    expect(src).toContain('estimate_id: createdEstimateId,');
   });
 });
 
@@ -519,6 +519,17 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(noCageDraft.automation.engineInput.features.poolCage).toBe(false);
     expect(noCageDraft.automation.status).toBe('generated');
 
+    // A visitor tapping "medium" must NOT clear a record-backed 1,200 sf large-cage hold.
+    const formMediumBeatsNothing = await buildAutomatedLeadDraftEstimate({
+      ...readyLead({ body: { poolCage: 'yes', poolCageSize: 'medium' } }),
+      measurements: countyWithCage,
+    });
+    expect(formMediumBeatsNothing.automation.engineInput.features).toMatchObject({
+      poolCage: true, poolCageSize: 'large', poolCageReview: true,
+    });
+    expect(formMediumBeatsNothing.automation.status).toBe('manual_review_required');
+    expect(formMediumBeatsNothing.automation.quoteRequiredReason).toBe('large_pool_cage');
+
     const formLargeCage = await buildAutomatedLeadDraftEstimate({
       ...readyLead({ body: { poolCage: 'yes', poolCageSize: 'large' } }),
       measurements: countyMeasurements(lookupOf(countyRecord())),
@@ -527,7 +538,7 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(formLargeCage.automation.quoteRequiredReason).toBe('large_pool_cage');
   });
 
-  test('photo facts and aerial turf respect lookup confidence, _observed provenance, and AI divergences', () => {
+  test('photo facts and aerial turf respect lookup confidence, _observed provenance, zero turf, and scope lawn-doubt facts to pest only', async () => {
     process.env.GATE_PEST_PRICE_PHOTO_FACTS = 'true';
     const lookup = {
       propertyRecord: countyRecord(),
@@ -538,18 +549,31 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
         hasAttachedGarage: true,
         shrubDensity: 'HEAVY',
         landscapeComplexity: 'COMPLEX',
-        nearWater: 'CANAL',
+        nearWater: 'YES',
         _observed: { shrubDensity: true, landscapeComplexity: false, nearWater: true },
         fieldVerifyFlags: [{ field: 'estimatedTurfSf', priority: 'MEDIUM' }],
       },
       aiAnalysis: { aiDivergences: [{ field: 'nearWater' }] },
     };
     const measured = countyMeasurements(lookup);
-    // Lawn area flagged -> turf omitted, but non-disputed observed photo fact (shrubs) & county garage survive.
+    // Lawn area flagged -> turf omitted; photo facts stay OUT of shared features (so mosquito
+    // is unaffected) and ride strictly in pestPhotoFacts for observed, non-disputed fields.
     expect(measured.turf).toBeUndefined();
-    expect(measured.features).toMatchObject({ attachedGarage: true, shrubs: 'heavy' });
-    expect(measured.features.complexity).toBeUndefined(); // _observed: false
-    expect(measured.features.nearWater).toBeUndefined(); // disputed in aiDivergences
+    expect(measured.features).toEqual({ attachedGarage: true });
+    expect(measured.pestPhotoFacts).toEqual({ shrubs: 'heavy' });
+
+    // Missing aiAnalysis -> no pestPhotoFacts under lawn-doubt exception.
+    const noAnalysis = { propertyRecord: countyRecord(), enriched: lookup.enriched };
+    expect(countyMeasurements(noAnalysis).pestPhotoFacts).toBeUndefined();
+
+    // Trusted zero turf is preserved and carried through as lawnSqFt: 0 (never inferred from lot).
+    const zeroTurf = countyMeasurements(lookupOf(countyRecord(), {
+      aiConfidence: 90, turfSource: 'vision', estimatedTurfSf: 0, turfObservation: 'none_present',
+    }));
+    expect(zeroTurf.turf).toMatchObject({ estimatedTurfSf: 0, turfKnownZero: true });
+    const zeroDraft = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: zeroTurf });
+    expect(zeroDraft.automation.engineInput.lawnSqFt).toBe(0);
+    expect(zeroDraft.automation.engineInput.estimatedTurfSf).toBe(0);
 
     // Unflagged high-confidence turf flows through cleanly.
     const cleanTurf = countyMeasurements(lookupOf(countyRecord(), {
@@ -558,15 +582,18 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
     expect(cleanTurf.turf).toEqual({ estimatedTurfSf: 4200, turfSource: 'vision', turfCappedToParcel: false });
   });
 
-  test('plural service-interest keywords map cleanly instead of falling through to unsupported', () => {
+  test('plural service-interest keywords map cleanly and negated weeds keep recurring lawn care', () => {
     expect(mapServiceInterestToEstimateServices('Ants and roaches in kitchen').services).toHaveProperty('pest');
     expect(mapServiceInterestToEstimateServices('Mosquitoes in backyard').services).toHaveProperty('mosquito');
     expect(mapServiceInterestToEstimateServices('Fleas and ticks').services).toHaveProperty('flea');
     expect(mapServiceInterestToEstimateServices('Wasps on patio').services).toHaveProperty('stinging');
     expect(mapServiceInterestToEstimateServices('Weeds in lawn').services).toHaveProperty('oneTimeLawn');
+    const recurringNoWeeds = mapServiceInterestToEstimateServices('Quarterly lawn care, no weeds');
+    expect(recurringNoWeeds.services).toHaveProperty('lawn');
+    expect(recurringNoWeeds.services).not.toHaveProperty('oneTimeLawn');
   });
 
-  test('admin-leads withEstimatePreview marks county-verified SERVER drafts sendReady and strips internal columns', () => {
+  test('admin-leads withEstimatePreview marks county-verified SERVER drafts sendReady only when share link exists', () => {
     const { withEstimatePreview } = require('../routes/admin-leads')._estimatePreview;
     const readyRow = {
       id: 'lead-1',
@@ -577,6 +604,7 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
       _est_annual: '504.00',
       _est_onetime: null,
       _est_authority: 'SERVER',
+      _est_has_link: true,
       _est_archived_at: null,
       _est_sent_at: null,
       _est_scheduled_at: null,
@@ -593,6 +621,7 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
         },
       }),
     };
+    const noLinkRow = { ...readyRow, id: 'lead-nolink', estimate_id: 'est-nolink', _est_has_link: false };
     const heldRow = {
       ...readyRow,
       id: 'lead-2',
@@ -613,9 +642,10 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
         },
       }),
     };
-    const [outReady, outHeld] = withEstimatePreview([readyRow, heldRow]);
+    const [outReady, outNoLink, outHeld] = withEstimatePreview([readyRow, noLinkRow, heldRow]);
     expect(outReady).not.toHaveProperty('_est_data');
     expect(outReady).not.toHaveProperty('_est_authority');
+    expect(outReady).not.toHaveProperty('_est_has_link');
     expect(outReady.estimate_preview).toMatchObject({
       status: 'draft',
       monthly: 42,
@@ -623,6 +653,7 @@ describe('county propertyType, pool cage, photo facts, and aerial turf wiring (2
       sendReady: true,
       sizeSource: 'county_assessed',
     });
+    expect(outNoLink.estimate_preview.sendReady).toBe(false);
     expect(outHeld.estimate_preview).toMatchObject({
       status: 'draft',
       monthly: 48,

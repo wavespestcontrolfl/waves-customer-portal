@@ -783,10 +783,10 @@ function parseEstimateDataSafe(raw) {
 }
 
 function estimateRowIsSendReady(row) {
-  if (!row || row.status !== 'draft' || row.source === 'quote_wizard') return false;
+  if (!row || row.status !== 'draft' || row.source === 'quote_wizard' || !row.hasShareLink) return false;
   try {
-    // Share-link presence is enforced authoritatively at POST /estimates/:id/send;
-    // the Leads list never reads credential columns (estimates.token).
+    // Share-link presence is verified above via SQL boolean (_est_has_link) and
+    // enforced authoritatively at POST /estimates/:id/send; token bytes never leave Postgres.
     require('./admin-estimates')._internals.assertEstimateSendable(row, { requireShareLink: false });
     return true;
   } catch {
@@ -803,6 +803,7 @@ function buildEstimateRowForPreview(lead, estCols, estData) {
     annual_total: estCols.annual ?? null,
     onetime_total: estCols.onetime ?? null,
     pricing_authority: estCols.authority ?? null,
+    hasShareLink: estCols.hasLink === true,
     archived_at: estCols.archivedAt ?? null,
     sent_at: estCols.sentAt ?? null,
     scheduled_at: estCols.scheduledAt ?? null,
@@ -846,6 +847,7 @@ function withEstimatePreview(rows = []) {
       _est_annual: annual,
       _est_onetime: onetime,
       _est_authority: authority,
+      _est_has_link: hasLink,
       _est_archived_at: archivedAt,
       _est_sent_at: sentAt,
       _est_scheduled_at: scheduledAt,
@@ -854,7 +856,7 @@ function withEstimatePreview(rows = []) {
       ...lead
     } = row;
     if (!lead.estimate_id || archivedAt) return lead;
-    const estCols = { source, monthly, annual, onetime, authority, archivedAt, sentAt, scheduledAt, createdAt, rawData };
+    const estCols = { source, monthly, annual, onetime, authority, hasLink, archivedAt, sentAt, scheduledAt, createdAt, rawData };
     return { ...lead, estimate_preview: buildEstimatePreview(lead, estCols) };
   });
 }
@@ -891,6 +893,7 @@ router.get('/', async (req, res, next) => {
         'estimates.annual_total as _est_annual',
         'estimates.onetime_total as _est_onetime',
         'estimates.pricing_authority as _est_authority',
+        db.raw("NULLIF(BTRIM(COALESCE(estimates.token, '')), '') IS NOT NULL as _est_has_link"),
         'estimates.archived_at as _est_archived_at',
         'estimates.sent_at as _est_sent_at',
         'estimates.scheduled_at as _est_scheduled_at',

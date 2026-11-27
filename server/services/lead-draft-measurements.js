@@ -43,6 +43,7 @@ const {
   lookupLawnAreaIsTheOnlyFeatureDoubt,
   lookupDisputedPhotoFields,
   lookupTurfEstimateIsTrustworthy,
+  lookupTurfZeroIsObserved,
   recordPropertyTypeIsTrustworthy,
   lookupPropertyTypeIsTrustworthy,
   poolFeaturesAreRecordBacked,
@@ -136,11 +137,14 @@ function isPhotoFactTrusted(disputed, obs, field) {
   return !disputed.has(field) && (!obs || obs[field] !== false);
 }
 
-function trustedCountyPhotoFacts(enriched, aiAnalysis, featuresTrusted) {
-  const photoAllowed = featuresTrusted
-    || (require('../config/feature-gates').pestPricePhotoFactsLive?.() === true
-      && lookupLawnAreaIsTheOnlyFeatureDoubt(enriched));
-  if (!photoAllowed) return {};
+const PEST_PHOTO_FACT_READS = [
+  ['shrubs', 'shrubDensity', { LIGHT: 'light', MODERATE: 'moderate', HEAVY: 'heavy' }],
+  ['complexity', 'landscapeComplexity', { SIMPLE: 'simple', MODERATE: 'moderate', COMPLEX: 'complex' }],
+  ['nearWater', 'nearWater', { YES: true, NO: false, NONE: false }],
+];
+
+function trustedSharedPhotoFacts(enriched, aiAnalysis, featuresTrusted) {
+  if (!featuresTrusted) return {};
   const obs = enriched._observed && typeof enriched._observed === 'object' ? enriched._observed : null;
   const disputed = lookupDisputedPhotoFields(aiAnalysis);
   const out = {};
@@ -159,13 +163,34 @@ function trustedCountyPhotoFacts(enriched, aiAnalysis, featuresTrusted) {
   return out;
 }
 
+// Mirrors customer-pricing-ai.js pestPhotoFactsFor: when lawn area is the ONLY
+// feature doubt, carry explicitly observed, non-disputed photo facts ONLY via
+// `pestPhotoFacts` (never shared features) so non-pest lines keep strict gating.
+function trustedCountyPestPhotoFacts(lookup) {
+  const enriched = lookup?.enriched;
+  if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
+  if (lookupFeaturesAreTrustworthy(enriched)) return null;
+  if (require('../config/feature-gates').pestPricePhotoFactsLive?.() !== true) return null;
+  if (!lookupLawnAreaIsTheOnlyFeatureDoubt(enriched)) return null;
+  const observed = enriched._observed;
+  const aiAnalysis = lookup?.aiAnalysis;
+  if (!observed || typeof observed !== 'object' || !aiAnalysis || typeof aiAnalysis !== 'object') return null;
+  const disputed = lookupDisputedPhotoFields(aiAnalysis);
+  const facts = {};
+  for (const [fact, field, known] of PEST_PHOTO_FACT_READS) {
+    const word = String(enriched[field] ?? '').trim().toUpperCase();
+    if (Object.hasOwn(known, word) && observed[field] === true && !disputed.has(field)) facts[fact] = known[word];
+  }
+  return Object.keys(facts).length ? facts : null;
+}
+
 function trustedCountyFeatures(lookup) {
   const enriched = lookup?.enriched;
   if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
   const featuresTrusted = lookupFeaturesAreTrustworthy(enriched);
   const out = {
     ...trustedCountyPoolCageFeatures(enriched, featuresTrusted),
-    ...trustedCountyPhotoFacts(enriched, lookup?.aiAnalysis, featuresTrusted),
+    ...trustedSharedPhotoFacts(enriched, lookup?.aiAnalysis, featuresTrusted),
     ...(enriched.hasAttachedGarage === true ? { attachedGarage: true } : {}),
   };
   return Object.keys(out).length ? out : null;
@@ -174,6 +199,14 @@ function trustedCountyFeatures(lookup) {
 function trustedCountyTurf(enriched) {
   if (!enriched || typeof enriched !== 'object' || hasGlobalVerifyFlag(enriched)) return null;
   if (String(enriched.turfObservation || '').trim().toLowerCase() === 'unobservable') return null;
+  if (lookupTurfZeroIsObserved(enriched)) {
+    return {
+      estimatedTurfSf: 0,
+      turfSource: enriched.turfSource || null,
+      turfCappedToParcel: false,
+      turfKnownZero: true,
+    };
+  }
   if (!lookupTurfEstimateIsTrustworthy(enriched)) return null;
   return {
     estimatedTurfSf: Math.round(Number(enriched.estimatedTurfSf)),
@@ -210,6 +243,7 @@ function countyMeasurements(lookup) {
   const stories = trustedCountyStories(propertyRecord, facts, lookup.enriched);
   const propertyType = trustedCountyPropertyType(propertyRecord, lookup.enriched);
   const features = trustedCountyFeatures(lookup);
+  const pestPhotoFacts = trustedCountyPestPhotoFacts(lookup);
   const turf = trustedCountyTurf(lookup.enriched);
   return {
     homeSqFt,
@@ -217,6 +251,7 @@ function countyMeasurements(lookup) {
     ...(stories ? { stories } : {}),
     ...(propertyType ? { propertyType } : {}),
     ...(features ? { features } : {}),
+    ...(pestPhotoFacts ? { pestPhotoFacts } : {}),
     ...(turf ? { turf } : {}),
     source: MEASUREMENTS_SOURCE,
   };
