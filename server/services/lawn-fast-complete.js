@@ -606,16 +606,19 @@ async function loadChinch({ loaded, sheet, svc, knex, readFailures }) {
 // and the wetting-agent rows, by what their staged rows say), as `{ guidedProductIds }` or `{}`. The
 // sheet holds their taps until the fresh guide has answered, so a card never finds its product
 // already on the sheet. Pure; no limit read.
-function guidedProductIds(loaded, sheet, takeAllMapped = false) {
+// `holds`: fungicideHolds for the visit.
+function guidedProductIds(loaded, sheet, { takeAllMapped = false, successiveHeld = [] } = {}) {
   if (!featureGates.lawnTreatmentGuideLive() || !loaded.eligible) return {};
   const guide = require('./lawn-treatment-guide');
   const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const picks = guide.pickAddOns(candidates, rows, { takeAllMapped });
+  const picks = guide.pickAddOns(candidates, rows, { takeAllMapped, successiveHeld });
   return {
     guidedProductIds: Object.values(picks).filter(Boolean).map((pick) => pick.item.productId),
     // Every take-all fungicide of the month (a pick or not): the sheet never lists it with the plain add-ons. The large patch Artavia row the
     // pick passed over (Group 11 stacking on a take-all lawn) is held the same way.
+    // A row at its label limit on applications in a row (a third Velista) is NOT held: the pick passes it over, but it stays on
+    // the list and in the search, and the job card warns beside the amount (owner 2026-11-26: such alerts never stop the job).
     takeAllProductIds: [...guide.takeAllAddOns(candidates, rows), ...guide.group11HeldAddOns(candidates, rows, { takeAllMapped })].map((candidate) => candidate.item.productId),
   };
 }
@@ -625,13 +628,17 @@ function guidedProductIds(loaded, sheet, takeAllMapped = false) {
 // guide, or on the chinch context read, so a gate that is off or a read that failed never lets the sheet list or search the row. The sheet
 // treats these ids as blocked from the start (no list, no search), until a fresh guide answer replaces this with its own blocked list. If
 // the staged rows cannot be read the ids are unknown and the key is left out (the guide, when it answers, still blocks the row).
-async function group11HeldContext({ loaded, sheet, svc, knex }) {
+// `holds` = fungicideHolds for this visit (its takeAllMapped is the Group 11 pass-over, released in December after a Velista run). A
+// row at its label limit on applications in a row is never held here (owner 2026-11-26: an alert, never a stop).
+async function group11HeldContext({ loaded, sheet, svc, knex, holds = null }) {
   try {
-    if (featureGates.lawnV13Live?.() !== true || !(await group11PassOver({ svc, knex }))) return {};
+    if (featureGates.lawnV13Live?.() !== true) return {};
+    const { takeAllMapped } = holds || await fungicideHolds({ svc, knex });
+    if (!takeAllMapped) return {};
     const guide = require('./lawn-treatment-guide');
     const rows = require('./waveguard-plan-engine').v13ProtocolRows(loaded.plan?.protocol?.structured);
     const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-    const held = guide.group11HeldAddOns(candidates, rows, { takeAllMapped: true }).map((candidate) => candidate.item.productId);
+    const held = guide.group11HeldAddOns(candidates, rows, { takeAllMapped }).map((candidate) => candidate.item.productId);
     return held.length ? { group11HeldProductIds: held } : {};
   } catch (err) {
     logger.warn(`[lawn-fast] Group 11 held rows unavailable for ${loaded?.plan ? 'a visit' : 'no plan'}: ${err?.code || err?.name || 'Error'}`);
@@ -882,6 +889,14 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
     const sheet = await sheetPlanned(loaded, knex);
     const weed = await loadWeedMix({ addOns: loaded.addOns, svc, plan: loaded.plan, knex, readFailures });
     const chinch = await loadChinch({ loaded, sheet, svc, knex, readFailures });
+    const holds = await fungicideHolds({ svc, knex });
+    const guided = readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, holds);
+    const heldContext = await group11HeldContext({ loaded, sheet, svc, knex, holds });
+    // With the guide on, the sheet's search leaves out only a product it governs, and its governed set comes from the picks and
+    // takeAllProductIds. So every held id rides takeAllProductIds too, also when there are no picks (completion defaults not
+    // eligible for this property): held and not governed, the search would still list it.
+    const governedHeld = heldContext.group11HeldProductIds?.length && !readFailures.has('treatment_guide')
+      ? { takeAllProductIds: [...new Set([...(guided.takeAllProductIds || []), ...heldContext.group11HeldProductIds])] } : {};
     return {
       source: 'plan',
       unavailable: null,
@@ -895,8 +910,9 @@ async function loadPlannedProducts(svc, knex, visitType, readFailures, tetrinoSc
       ...(loaded.tetrinoScout ? { tetrinoScout: loaded.tetrinoScout } : {}),
       ...weed,
       ...chinch,
-      ...(readFailures.has('treatment_guide') ? {} : guidedProductIds(loaded, sheet, await group11PassOver({ svc, knex }))),
-      ...await group11HeldContext({ loaded, sheet, svc, knex }),
+      ...guided,
+      ...heldContext,
+      ...governedHeld,
       // GATE_LAWN_TROUBLE_AREAS: what the places' limit read needs (stripped from the payload by the context).
       ...(featureGates.lawnTroubleAreasLive() ? { troubleSeed: troubleSeedOf({ loaded, sheet, weed, chinch }) } : {}),
     };
@@ -1182,6 +1198,38 @@ async function group11PassOver({ svc, knex }) {
   return GROUP11_MONTHS.includes(visitMonthOf(svc)) && takeAllMappedOn({ svc, knex });
 }
 
+// The fungicide rows the guide passes over on this visit, as `{ takeAllMapped, successiveHeld }`:
+//   - successiveHeld: the label limits on applications in a row that this lawn has reached (Velista: two; the approval
+//     engine's own history read, SUCCESSIVE_USE_LIMITS, at the visit's property or the one its address resolves to). The
+//     guide does not suggest the product and suggests the next fungicide. The product stays on the list and in the search;
+//     the job card warns and the close-out records the finding (owner 2026-11-26: an alert never stops the job);
+//   - takeAllMapped: the Group 11 pass-over above, EXCEPT when such a limit is reached and a record at this property
+//     ended the Group 11 run: the lawn's latest fungicide application is placed here, each product of it has a group on
+//     file and none is Group 11. That is the December case of the card: Artavia in September, Headway in October, Velista
+//     in October and November. November's Velista ended the run, so December's Artavia row is the one offered. In
+//     every other case both rows stay passed over.
+// A history read that fails leaves every listed product unsuggested (nobody read its run) and leaves the Group 11
+// pass-over as it was, the way an unread take-all status counts as mapped.
+const GROUP11_RELEASE_MONTH = 12;
+async function fungicideHolds({ svc, knex }) {
+  const group11 = await group11PassOver({ svc, knex });
+  const engine = require('./waveguard-approval-engine');
+  let takeAllMapped = group11;
+  let successiveHeld;
+  try {
+    const { reached, rowsByCategory, propertyId } = await engine.successiveLimitsReached(knex, {
+      customerId: svc.customer_id, propertyId: svc.property_id || null, visit: svc, serviceDate: svc.scheduled_date, serviceId: svc.id || null, strict: true,
+    });
+    successiveHeld = reached.map((entry) => entry.limit);
+    // December only: the card's one Artavia case. October's large patch pass stays Velista alone, and November's row is Velista.
+    if (successiveHeld.length && visitMonthOf(svc) === GROUP11_RELEASE_MONTH && engine.latestApplicationEndsGroup(rowsByCategory.get('fungicide'), '11', { propertyId })) takeAllMapped = false;
+  } catch (err) {
+    logger.warn(`[lawn-fast] fungicide history unavailable for ${svc.id}: ${err?.code || err?.name || 'Error'}`);
+    successiveHeld = [...engine.SUCCESSIVE_USE_LIMITS];
+  }
+  return { takeAllMapped, successiveHeld };
+}
+
 /**
  * GET /:serviceId/lawn-fast/treatment-guide?assessmentId=: the "Suggested from this lawn" cards for
  * the visit's CONFIRMED assessment (GATE_LAWN_TREATMENT_GUIDE, lawn-treatment-guide.js). The sheet
@@ -1228,9 +1276,9 @@ async function buildLawnTreatmentGuide({ serviceId, assessmentId, knex = db, pro
   // loadWeedMix catches a defect into readFailures for the context's sake; here that would read as "no weed group".
   if (readFailures.has('weed_mix')) throw new Error('weed mix unavailable');
   const candidates = loaded.addOns.map((raw, i) => ({ raw, item: sheet.addOns[i] }));
-  const takeAllMapped = await group11PassOver({ svc, knex });
+  const { takeAllMapped, successiveHeld } = await fungicideHolds({ svc, knex });
   const [offers, chinch] = await Promise.all([
-    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped }),
+    guide.addOnOffers({ candidates, rows, svc, knex, places: await limitPlaces(svc, knex), takeAllMapped, successiveHeld }),
     loaded.eligible ? chinchOffer({ svc, structured, sheetAddOns: sheet.addOns, knex, places: await limitPlaces(svc, knex) }) : null,
   ]);
   // A read that throws fails the request (the sheet then follows the context's decisions); only a
@@ -1545,6 +1593,8 @@ module.exports = {
   prepareLawnRecommendations,
   takeAllMappedOn,
   group11PassOver,
+  fungicideHolds,
+  loadPlannedProducts,
   guidedProductIds,
   group11HeldContext,
   takeAllProductIdsFor,

@@ -2381,6 +2381,8 @@ function ServiceRowV2({ service: s, initiallyExpanded = false }) {
                         <span className="font-medium text-zinc-900">
                           {approvalCodeLabel(block.code)}
                         </span>
+                        {/* A label limit (a third Velista in a row): recorded with the visit, never covered by the approval above. */}
+                        {block.approvable === false ? " · Label limit, not covered by an approval" : ""}
                         {block.productName ? ` · ${block.productName}` : ""}
                         {block.message ? ` — ${block.message}` : ""}
                       </div>

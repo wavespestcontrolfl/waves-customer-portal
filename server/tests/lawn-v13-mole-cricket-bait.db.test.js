@@ -86,11 +86,11 @@ describe('recipe: Group 11 stacking (Headway label: no more than 2 consecutive Q
     expect(lineFor(oct, 'Headway Fungicide')).toMatch(/mapped take-all areas, second fall application/);
     const dec = visit(grass, 'Dec').secondary;
     expect(lineFor(dec, N.VEL)).toMatch(/active large patch, mapped areas, on a lawn also mapped for take-all/);
-    expect(lineFor(dec, N.ART)).toBe(`${N.ART} — active large patch, mapped areas, on a lawn mapped for large patch alone`);
+    expect(lineFor(dec, N.ART)).toBe(`${N.ART} — active large patch, mapped areas, on a lawn mapped for large patch alone, and on a lawn also mapped for take-all that took Velista in both October and November (November's Velista ended the Group 11 run)`);
     expect(lines(dec).findIndex((line) => line.startsWith('Velista')) ).toBeLessThan(lines(dec).findIndex((line) => line.startsWith('Artavia')));
     const notes = v13Recipe[grass].notes.join('\n');
     expect(notes).toMatch(/Large patch: Artavia, then Velista\./);
-    expect(notes).toMatch(/its October large patch pass is Velista alone and its December curative is Velista/);
+    expect(notes).toMatch(/its October large patch pass is Velista alone, and its December curative is Velista only when Velista ran in only one of October and November/);
     expect(notes).toMatch(/A lawn mapped for large patch only keeps Artavia, then Velista\./);
     expect(notes).toMatch(/Velista \(Group 7\) works on large patch, not take-all; azoxystrobin does nothing on dollar spot\./);
     // The rotation check stays advisory: the take-all pair exception text is unchanged.
@@ -238,8 +238,8 @@ describe('treatment guide: a failed take-all lookup is read as mapped, never as 
     jest.spyOn(require('../services/waveguard-plan-engine'), 'v13ProtocolRows').mockReturnValue(rows);
     const loaded = { eligible: true, plan: { protocol: { structured: {} } }, addOns: [{ product: { id: 'vel', name: N.VEL } }, { product: { id: 'art', name: N.ART } }] };
     const sheet = { addOns: [{ productId: 'vel', name: N.VEL }, { productId: 'art', name: N.ART }] };
-    expect(guidedProductIds(loaded, sheet, false)).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [] });
-    expect(guidedProductIds(loaded, sheet, true)).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
+    expect(guidedProductIds(loaded, sheet, { takeAllMapped: false })).toEqual({ guidedProductIds: ['art'], takeAllProductIds: [] });
+    expect(guidedProductIds(loaded, sheet, { takeAllMapped: true })).toEqual({ guidedProductIds: ['vel'], takeAllProductIds: ['art'] });
   });
 
   test('the active-area read throws (or the property cannot be resolved): the lawn counts as mapped, so the guide suggests Velista and never Artavia', async () => {
