@@ -542,13 +542,52 @@ async function syncCustomerCredits(conn, from, to, ctx) {
 
 // ── 1. Invoices (Initial Post + Coverage Conversion + Zero/Edit Deltas + Voids) ─
 
+function extractPrepayInvoiceFields(row, prefix) {
+  if (!row) return null;
+  if (row.prepay_invoice) return row.prepay_invoice;
+  const tax = row[`${prefix}_tax`];
+  const sub = row[`${prefix}_subtotal`];
+  const total = row[`${prefix}_total`];
+  if (tax == null && sub == null && total == null) return null;
+  return {
+    subtotal: sub,
+    discount_amount: row[`${prefix}_discount`] ?? 0,
+    tax_amount: tax ?? 0,
+    total,
+    line_items: row[`${prefix}_line_items`] ?? null,
+  };
+}
+
+/**
+ * Pure: strip embedded FL sales tax from a tax-inclusive annual-prepay allocation so
+ * earned-revenue recognition debits only the pre-tax portion originally credited to 2300.
+ */
+function stripPrepaidSalesTaxCents(grossCents, termPrepayCents, prepayInv) {
+  if (!(grossCents > 0) || !prepayInv) return Math.max(0, grossCents || 0);
+  const invTax = safeNonNegCents(prepayInv.tax_amount);
+  if (invTax <= 0) return grossCents;
+  const invGross = billedInvoicePrincipalCents(prepayInv);
+  const invPreTax = Math.max(0, invGross - invTax);
+  if (invPreTax <= 0 || invGross <= invPreTax) return grossCents;
+  if (termPrepayCents > 0) {
+    if (termPrepayCents <= invPreTax) return grossCents;
+    const embeddedTax = Math.min(invTax, termPrepayCents - invPreTax);
+    const netTermPrepay = termPrepayCents - embeddedTax;
+    return Math.round((grossCents * netTermPrepay) / termPrepayCents);
+  }
+  return Math.round((grossCents * invPreTax) / invGross);
+}
+
 function buildCoveredPrepayVisitPayload(inv, issueDate, serviceLine, isCommercial, taxCents) {
-  const discountedVisitCents = safeNonNegCents(inv.visit_prepaid_amount ?? inv.prepaid_amount);
+  const prepayInv = extractPrepayInvoiceFields(inv, 'cov_prepay_inv');
   const termPrepayCents = safeNonNegCents(inv.cov_term_prepay_amount ?? inv.term_prepay_amount);
   const termVisitCount = Math.trunc(Number(inv.cov_term_visit_count ?? inv.coverage_visit_count) || 0);
-  const discountedTermSliceCents = termPrepayCents > 0 && termVisitCount > 0
+  const discountedVisitRaw = safeNonNegCents(inv.visit_prepaid_amount ?? inv.prepaid_amount);
+  const discountedVisitCents = stripPrepaidSalesTaxCents(discountedVisitRaw, termPrepayCents, prepayInv);
+  const discountedTermRaw = termPrepayCents > 0 && termVisitCount > 0
     ? Math.round(termPrepayCents / termVisitCount)
     : 0;
+  const discountedTermSliceCents = stripPrepaidSalesTaxCents(discountedTermRaw, termPrepayCents, prepayInv);
   const rawPreTax = (dollarsToCents(inv.subtotal || 0) || 0) - (dollarsToCents(inv.discount_amount || 0) || 0);
   const invoicePreTaxCents = rawPreTax > 0 ? rawPreTax : Math.max(0, billedInvoicePrincipalCents(inv) - taxCents);
   const visitFallbackCents = computePrepayVisitRecognitionCents({
@@ -755,7 +794,11 @@ async function syncInvoices(conn, from, to, ctx) {
 
   let q = conn('invoices as i').leftJoin('customers as c', 'c.id', 'i.customer_id');
   if (hasPayerStatements) q = q.leftJoin('payer_statements as ps', 'ps.id', 'i.payer_statement_id');
-  if (hasPrepayTerms) q = q.leftJoin('annual_prepay_terms as cov_term', 'cov_term.id', 'i.annual_prepay_covered_term_id');
+  if (hasPrepayTerms) {
+    q = q
+      .leftJoin('annual_prepay_terms as cov_term', 'cov_term.id', 'i.annual_prepay_covered_term_id')
+      .leftJoin('invoices as cov_prepay_inv', 'cov_prepay_inv.id', 'cov_term.prepay_invoice_id');
+  }
   if (hasScheduledServices) q = q.leftJoin('scheduled_services as ss', 'ss.id', 'i.scheduled_service_id');
 
   const selectCols = [
@@ -777,6 +820,11 @@ async function syncInvoices(conn, from, to, ctx) {
       'cov_term.prepay_amount as cov_term_prepay_amount',
       'cov_term.coverage_visit_count as cov_term_visit_count',
       'cov_term.monthly_rate as cov_term_monthly_rate',
+      'cov_prepay_inv.subtotal as cov_prepay_inv_subtotal',
+      'cov_prepay_inv.discount_amount as cov_prepay_inv_discount',
+      'cov_prepay_inv.tax_amount as cov_prepay_inv_tax',
+      'cov_prepay_inv.total as cov_prepay_inv_total',
+      'cov_prepay_inv.line_items as cov_prepay_inv_line_items',
     );
   }
   if (hasScheduledServices) {
@@ -836,15 +884,19 @@ async function syncInvoices(conn, from, to, ctx) {
  * Pure: determine earned revenue to recognize from 2300 Unearned Revenue when an
  * annual-prepay covered visit completes. Discounted prepay allocations (stamped
  * prepaid_amount or term prepay_amount / coverage_visit_count) always take priority
- * over undiscounted visit estimated_price so 2300 clears cleanly to $0.00.
+ * over undiscounted visit estimated_price, with embedded prepaid sales tax stripped
+ * so 2300 clears cleanly to $0.00.
  */
 function computePrepayVisitRecognitionCents(visit, term = null) {
   if (!visit) return 0;
-  const prepaid = safeNonNegCents(visit.prepaid_amount);
-  if (prepaid > 0) return prepaid;
+  const prepayInv = term?.prepay_invoice || extractPrepayInvoiceFields(visit, 'prepay_inv');
   const termPrepay = safeNonNegCents(term?.prepay_amount ?? visit.term_prepay_amount);
+  const prepaid = safeNonNegCents(visit.prepaid_amount);
+  if (prepaid > 0) return stripPrepaidSalesTaxCents(prepaid, termPrepay, prepayInv);
   const visitCount = Math.trunc(Number(term?.coverage_visit_count ?? visit.coverage_visit_count) || 0);
-  if (termPrepay > 0 && visitCount > 0) return Math.round(termPrepay / visitCount);
+  if (termPrepay > 0 && visitCount > 0) {
+    return stripPrepaidSalesTaxCents(Math.round(termPrepay / visitCount), termPrepay, prepayInv);
+  }
   const est = safeNonNegCents(visit.estimated_price);
   if (est > 0) return est;
   const monthly = safeNonNegCents(term?.monthly_rate ?? visit.term_monthly_rate);
@@ -872,6 +924,7 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
 
   const visits = await conn('scheduled_services as ss')
     .join('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
+    .leftJoin('invoices as prepay_inv', 'prepay_inv.id', 'apt.prepay_invoice_id')
     .leftJoin('customers as c', 'c.id', 'ss.customer_id')
     .where('ss.status', 'completed')
     .whereNotNull('ss.annual_prepay_term_id')
@@ -894,6 +947,9 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
       conn.raw('ss.scheduled_date::text as scheduled_date'),
       'apt.prepay_amount as term_prepay_amount', 'apt.monthly_rate as term_monthly_rate',
       'apt.coverage_visit_count',
+      'prepay_inv.subtotal as prepay_inv_subtotal', 'prepay_inv.discount_amount as prepay_inv_discount',
+      'prepay_inv.tax_amount as prepay_inv_tax', 'prepay_inv.total as prepay_inv_total',
+      'prepay_inv.line_items as prepay_inv_line_items',
       'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
     );
 

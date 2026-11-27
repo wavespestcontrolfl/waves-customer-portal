@@ -347,18 +347,22 @@ function computeCashFlowStatement(accounts, periodSums, openingSums, { from, to 
 
 // ── Database Query Helpers ───────────────────────────────────────────────────
 
+function excludeClosingEntries(q) {
+  return q
+    .leftJoin('gl_journal_entries as close_orig', 'close_orig.id', 'e.reverses_entry_id')
+    .where('e.entry_type', '<>', 'closing')
+    .where((sub) => {
+      sub.whereNull('close_orig.id').orWhere('close_orig.entry_type', '<>', 'closing');
+    });
+}
+
 async function queryAccountSums(conn, { from = null, to = null, basis = 'accrual', excludeClosing = false } = {}) {
   let q = conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
     .where('e.status', 'posted');
 
   if (excludeClosing) {
-    q = q
-      .leftJoin('gl_journal_entries as close_orig', 'close_orig.id', 'e.reverses_entry_id')
-      .where('e.entry_type', '<>', 'closing')
-      .where((sub) => {
-        sub.whereNull('close_orig.id').orWhere('close_orig.entry_type', '<>', 'closing');
-      });
+    q = excludeClosingEntries(q);
   }
 
   if (from) q = q.where('e.entry_date', '>=', from);
@@ -1053,6 +1057,7 @@ function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
   let excluded1099kCents = 0;
 
   for (const r of vendorLines || []) {
+    if (r.entry_type === 'closing' || r.reversed_entry_type === 'closing') continue;
     const netCents = Number(r.debit_cents) - Number(r.credit_cents);
     if (netCents === 0) continue;
 
@@ -1098,7 +1103,7 @@ function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
     .sort((a, b) => b.total_paid_cents - a.total_paid_cents);
 
   const unlinkedContractorEntries = (unlinkedLines || [])
-    .filter((u) => !isExcluded1099Payment(u))
+    .filter((u) => u.entry_type !== 'closing' && u.reversed_entry_type !== 'closing' && !isExcluded1099Payment(u))
     .map((u) => ({
       entry_id: u.entry_id,
       entry_number: Number(u.entry_number),
@@ -1126,7 +1131,8 @@ function summarize1099VendorLines(vendorLines, unlinkedLines, thresholdCents) {
  * 1099-NEC Vendor Payment Summary driven by gl_vendors + gl_journal_lines.
  * Uses $600 threshold through 2025 and $2,000 threshold from 2026 onward (P.L. 119-21).
  * Excludes card, debit-card, and platform (1099-K) payments per tax-worksheets.js rules,
- * and surfaces unlinked non-card Contract Labor (5500) lines missing a vendor_id.
+ * excludes period-closing entries (and their reversals), and surfaces unlinked non-card
+ * Contract Labor (5500) lines missing a vendor_id.
  */
 async function get1099VendorSummary({ year = null, conn = db } = {}) {
   const targetYear = parseInt(year, 10) || etParts(new Date()).year;
@@ -1139,16 +1145,19 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
   );
 
   const [vendorLines, unlinkedLines] = await Promise.all([
-    conn('gl_journal_lines as l')
-      .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
-      .join('gl_accounts as a', 'a.id', 'l.account_id')
-      .join('gl_vendors as v', 'v.id', 'l.vendor_id')
-      .where('e.status', 'posted')
-      .whereBetween('e.entry_date', [from, to])
-      .whereIn('a.account_type', ['cogs', 'expense'])
-      .where('v.is_1099_eligible', true)
+    excludeClosingEntries(
+      conn('gl_journal_lines as l')
+        .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+        .join('gl_accounts as a', 'a.id', 'l.account_id')
+        .join('gl_vendors as v', 'v.id', 'l.vendor_id')
+        .where('e.status', 'posted')
+        .whereBetween('e.entry_date', [from, to])
+        .whereIn('a.account_type', ['cogs', 'expense'])
+        .where('v.is_1099_eligible', true),
+    )
       .select(
         'e.id as entry_id',
+        'e.entry_type',
         'e.memo as entry_memo',
         'l.memo as line_memo',
         'l.payment_method',
@@ -1162,16 +1171,19 @@ async function get1099VendorSummary({ year = null, conn = db } = {}) {
         'v.tin_last4',
         creditCardExistsRaw,
       ),
-    conn('gl_journal_lines as l')
-      .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
-      .join('gl_accounts as a', 'a.id', 'l.account_id')
-      .where('e.status', 'posted')
-      .whereBetween('e.entry_date', [from, to])
-      .whereNull('l.vendor_id')
-      .where((q) => q.where('a.code', SYSTEM_CODES.COGS_SUBCONTRACTORS).orWhere('a.sub_type', 'subcontractors'))
+    excludeClosingEntries(
+      conn('gl_journal_lines as l')
+        .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+        .join('gl_accounts as a', 'a.id', 'l.account_id')
+        .where('e.status', 'posted')
+        .whereBetween('e.entry_date', [from, to])
+        .whereNull('l.vendor_id')
+        .where((q) => q.where('a.code', SYSTEM_CODES.COGS_SUBCONTRACTORS).orWhere('a.sub_type', 'subcontractors')),
+    )
       .orderBy('e.entry_date', 'asc')
       .select(
         'e.id as entry_id',
+        'e.entry_type',
         'e.entry_number',
         conn.raw('e.entry_date::text as entry_date'),
         'e.memo as entry_memo',

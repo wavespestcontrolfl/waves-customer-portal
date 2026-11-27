@@ -2115,4 +2115,100 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     });
     expect(openJe.lines[0]).toMatchObject({ accountCode: '1595', debitCents: 0, creditCents: 100000 });
   });
+
+  test('Codex R5: taxable annual prepayments strip prepaid sales tax on recognition and 1099 summary excludes closing entries', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // Commercial annual prepay: $1,000 service + $70 FL sales tax = $1,070 total across 4 visits ($267.50 gross slice each)
+    const prepayInvJe = rules.buildInvoiceEntry({
+      invoiceId: 'inv-tax-prepay-1070',
+      issueDate: '2026-01-01',
+      subtotalCents: 100000,
+      taxCents: 7000,
+      isCommercial: true,
+      isAnnualPrepay: true,
+    });
+
+    // Visit-only path (2 visits with stamped gross prepaid_amount $267.50)
+    const visitAmt1 = computePrepayVisitRecognitionCents({
+      prepaid_amount: '267.50',
+      estimated_price: '275.00',
+      term_prepay_amount: '1070.00',
+      coverage_visit_count: 4,
+      prepay_inv_subtotal: '1000.00',
+      prepay_inv_discount: '0',
+      prepay_inv_tax: '70.00',
+      prepay_inv_total: '1070.00',
+    });
+    expect(visitAmt1).toBe(25000);
+
+    // Covered-invoice path (2 visits with gross slice / gross term_prepay_amount)
+    const covJes = [1, 2].map((n) => buildInvoiceGlPayload({
+      id: `inv-tax-cov-${n}`,
+      invoice_number: `WPC-TCOV-${n}`,
+      annual_prepay_covered_term_id: 'term-tax-1070',
+      subtotal: '275.00',
+      discount_amount: '0',
+      tax_amount: '0',
+      total: '0',
+      visit_prepaid_amount: n === 1 ? '267.50' : null,
+      cov_term_prepay_amount: '1070.00',
+      cov_term_visit_count: 4,
+      cov_prepay_inv_subtotal: '1000.00',
+      cov_prepay_inv_discount: '0',
+      cov_prepay_inv_tax: '70.00',
+      cov_prepay_inv_total: '1070.00',
+      service_type: 'commercial',
+      service_date: `2026-0${n + 2}-15`,
+      property_type: 'commercial',
+    }, new Set()));
+    expect(validateJournalEntryInput(covJes[0]).totalCents).toBe(25000);
+    expect(validateJournalEntryInput(covJes[1]).totalCents).toBe(25000);
+
+    // Already pre-tax term.prepay_amount ($1,000) is NOT double-stripped
+    expect(computePrepayVisitRecognitionCents({
+      prepaid_amount: '250.00',
+      term_prepay_amount: '1000.00',
+      coverage_visit_count: 4,
+      prepay_inv_subtotal: '1000.00',
+      prepay_inv_tax: '70.00',
+      prepay_inv_total: '1070.00',
+    })).toBe(25000);
+
+    // Full 4-visit recognition clears 2300 to $0.00, keeps 2100 at $70.00, and earns exactly $1,000.00
+    const visitJes = [1, 2].map((n) => rules.buildUnearnedRecognitionEntry({
+      sourceId: `covered-visit:v-${n}`,
+      idempotencyKey: `unearned-visit:v-${n}`,
+      recognitionDate: `2026-0${n}-15`,
+      amountCents: visitAmt1,
+      serviceLine: 'commercial',
+      isCommercial: true,
+    }));
+    const sums = accumulateEntries(accounts, [prepayInvJe, ...visitJes, ...covJes]);
+    expect(bal(sums, SYSTEM_CODES.UNEARNED_REVENUE)).toBe(0);
+    expect(bal(sums, SYSTEM_CODES.SALES_TAX_PAYABLE)).toBe(7000);
+    expect(bal(sums, SYSTEM_CODES.REV_COMMERCIAL_PEST)).toBe(100000);
+
+    // 1099-NEC summary ignores period-closing entries and their reversals on 5500 Contract Labor
+    const summary1099 = summarize1099VendorLines(
+      [
+        { vendor_id: 'v1', display_name: 'Sub One', entity_type: 'sole_prop', w9_received_at: '2026-01-10', entry_id: 'e1', entry_type: 'operational', payment_method: 'check', debit_cents: 250000, credit_cents: 0, paid_by_credit_card: false },
+        { vendor_id: 'v1', display_name: 'Sub One', entity_type: 'sole_prop', w9_received_at: '2026-01-10', entry_id: 'e-close', entry_type: 'closing', payment_method: null, debit_cents: 0, credit_cents: 250000, paid_by_credit_card: false },
+      ],
+      [
+        { entry_id: 'e-close', entry_type: 'closing', entry_number: 99, entry_date: '2026-12-31', entry_memo: 'Year-end close', debit_cents: 0, credit_cents: 250000, paid_by_credit_card: false },
+        { entry_id: 'e-close-rev', entry_type: 'reversal', reversed_entry_type: 'closing', entry_number: 100, entry_date: '2026-12-31', entry_memo: 'Reverse close', debit_cents: 250000, credit_cents: 0, paid_by_credit_card: false },
+      ],
+      200000,
+    );
+    expect(summary1099.vendors[0].total_paid_cents).toBe(250000);
+    expect(summary1099.unlinked_contractor_count).toBe(0);
+    expect(summary1099.ready_for_filing).toBe(true);
+  });
 });

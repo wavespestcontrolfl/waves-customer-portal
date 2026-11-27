@@ -95,6 +95,32 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
           ],
         });
       }
+      if (u.includes("/admin/accounting/journal-entries")) {
+        const isPageTwo = u.includes("offset=50");
+        return jsonResponse({
+          total: 120,
+          limit: 50,
+          offset: isPageTwo ? 50 : 0,
+          entries: [
+            {
+              id: isPageTwo ? "je-older" : "je-newest",
+              entry_number: isPageTwo ? 70 : 120,
+              entry_date: isPageTwo ? "2026-06-15" : "2026-11-27",
+              entry_type: "operational",
+              memo: isPageTwo ? "Older June Entry" : "Latest Nov Entry",
+              total_cents: 10000,
+              lines: [],
+            },
+          ],
+        });
+      }
+      if (u.endsWith("/admin/accounting/accounts")) {
+        return jsonResponse({
+          accounts: [
+            { id: "acc-1010", code: "1010", name: "Capital One Operating Checking", account_type: "asset", sub_type: "checking" },
+          ],
+        });
+      }
       return jsonResponse({});
     });
 
@@ -135,6 +161,16 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
     const expenseValues = Array.from(subSelect.options).map((o) => o.value);
     expect(expenseValues).toContain("depreciation_expense");
     expect(expenseValues).not.toContain("depreciation");
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    // Journal Entries tab paginates past the initial 50 entries so older entries can be inspected & reversed
+    fireEvent.click(screen.getByRole("tab", { name: "Journal Entries" }));
+    expect(await screen.findByText("Latest Nov Entry")).toBeTruthy();
+    expect(screen.getByText(/Showing 1–1 of 120/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(await screen.findByText("Older June Entry")).toBeTruthy();
+    expect(screen.getByText(/Showing 51–51 of 120/)).toBeTruthy();
   });
 
   it("switches from Profit & Loss to Balance Sheet without crashing and ignores stale responses", async () => {

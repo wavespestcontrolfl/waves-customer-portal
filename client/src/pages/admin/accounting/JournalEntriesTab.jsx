@@ -24,6 +24,72 @@ import {
 import { etDateString } from "../../../lib/timezone";
 import { getJson, postJson, formatCents, parseDollarsToCents } from "./api";
 
+const JOURNAL_PAGE_SIZE = 50;
+
+function JournalPaginationBar({ offset, pageSize, count, total, loading, onPrev, onNext }) {
+  if (total <= pageSize && offset === 0) return null;
+  const pageStart = total > 0 ? offset + 1 : 0;
+  const pageEnd = Math.min(offset + count, total);
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-t border-hairline border-zinc-200 text-14 text-zinc-600">
+      <span>Showing {pageStart}–{pageEnd} of {total}</span>
+      <div className="flex items-center gap-2">
+        <Button variant="secondary" size="sm" disabled={offset === 0 || loading} onClick={onPrev}>
+          Previous
+        </Button>
+        <Button variant="secondary" size="sm" disabled={offset + pageSize >= total || loading} onClick={onNext}>
+          Next
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function JournalEntriesTableBody({ entries, onStartReverse }) {
+  if (entries.length === 0) {
+    return (
+      <TR><TD colSpan={6} className="text-center text-zinc-500 py-8">No journal entries posted yet.</TD></TR>
+    );
+  }
+  return entries.map((e) => (
+    <TR key={e.id}>
+      <TD className="whitespace-nowrap align-top">{e.entry_date}</TD>
+      <TD className="font-mono text-zinc-600 align-top">#{e.entry_number}</TD>
+      <TD className="align-top">
+        <div className="font-medium text-zinc-900">{e.memo}</div>
+        <div className="mt-1 space-y-0.5 text-14 text-zinc-600">
+          {(e.lines || []).map((l) => (
+            <div key={l.id} className="flex items-center justify-between gap-4">
+              <span>
+                <span className="font-mono text-zinc-500 mr-1.5">{l.account_code}</span>
+                {l.account_name}
+              </span>
+              <span className="font-mono whitespace-nowrap">
+                {l.debit_cents ? `DR ${formatCents(l.debit_cents)}` : `CR ${formatCents(l.credit_cents)}`}
+              </span>
+            </div>
+          ))}
+        </div>
+      </TD>
+      <TD className="align-top">
+        <Badge tone={e.reversed_by_entry_id ? "warn" : "neutral"}>
+          {e.reversed_by_entry_id ? "reversed" : e.entry_type}
+        </Badge>
+      </TD>
+      <TD className="text-right font-mono font-medium align-top whitespace-nowrap">
+        {formatCents(e.total_cents)}
+      </TD>
+      <TD className="text-right align-top">
+        {!e.reversed_by_entry_id && e.entry_type !== "reversal" ? (
+          <Button variant="secondary" size="sm" onClick={() => onStartReverse(e)}>
+            Reverse
+          </Button>
+        ) : null}
+      </TD>
+    </TR>
+  ));
+}
+
 function blankLine() {
   return { accountId: "", debit: "", credit: "", memo: "" };
 }
@@ -38,10 +104,14 @@ function mintSubmissionKey(prefix) {
 export default function JournalEntriesTab({ onChanged }) {
   const today = etDateString(new Date());
   const [entries, setEntries] = useState([]);
+  const [totalEntries, setTotalEntries] = useState(0);
+  const [offset, setOffset] = useState(0);
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
 
   // New JE dialog
   const [jeOpen, setJeOpen] = useState(false);
@@ -72,19 +142,27 @@ export default function JournalEntriesTab({ onChanged }) {
     setLoading(true);
     setError("");
     try {
-      const qs = search.trim() ? `?search=${encodeURIComponent(search.trim())}` : "";
+      const params = new URLSearchParams({
+        limit: String(JOURNAL_PAGE_SIZE),
+        offset: String(offset),
+      });
+      if (search.trim()) params.set("search", search.trim());
+      if (fromDate) params.set("from", fromDate);
+      if (toDate) params.set("to", toDate);
       const [jeRes, acctRes] = await Promise.all([
-        getJson(`/journal-entries${qs}`),
+        getJson(`/journal-entries?${params.toString()}`),
         getJson("/accounts"),
       ]);
-      setEntries(jeRes.entries || []);
+      const list = jeRes.entries || [];
+      setEntries(list);
+      setTotalEntries(Number(jeRes.total ?? list.length));
       setAccounts(acctRes.accounts || []);
     } catch (err) {
       setError(err.message || "Could not load journal entries.");
     } finally {
       setLoading(false);
     }
-  }, [search]);
+  }, [search, fromDate, toDate, offset]);
 
   useEffect(() => {
     loadData();
@@ -221,17 +299,43 @@ export default function JournalEntriesTab({ onChanged }) {
   };
 
   const bsAccounts = accounts.filter((a) => a.account_type === "asset" || a.account_type === "liability");
+  const hasFilters = Boolean(search.trim() || fromDate || toDate);
 
   return (
     <div className="space-y-4">
       <Card>
         <CardBody className="flex flex-wrap items-center justify-between gap-3">
-          <Input
-            placeholder="Search memo or reference..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-64"
-          />
+          <div className="flex flex-wrap items-center gap-2">
+            <Input
+              placeholder="Search memo or reference..."
+              value={search}
+              onChange={(e) => { setOffset(0); setSearch(e.target.value); }}
+              className="w-56"
+            />
+            <Input
+              aria-label="Journal from date"
+              type="date"
+              value={fromDate}
+              onChange={(e) => { setOffset(0); setFromDate(e.target.value); }}
+              className="w-40"
+            />
+            <Input
+              aria-label="Journal to date"
+              type="date"
+              value={toDate}
+              onChange={(e) => { setOffset(0); setToDate(e.target.value); }}
+              className="w-40"
+            />
+            {hasFilters ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => { setOffset(0); setSearch(""); setFromDate(""); setToDate(""); }}
+              >
+                Clear
+              </Button>
+            ) : null}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" onClick={() => { setFormError(""); setXferOpen(true); }}>
               Record Transfer / Card Payment
@@ -247,7 +351,7 @@ export default function JournalEntriesTab({ onChanged }) {
 
       <Card>
         <CardHeader>
-          <CardTitle>General Journal ({entries.length})</CardTitle>
+          <CardTitle>General Journal ({totalEntries})</CardTitle>
         </CardHeader>
         <CardBody className="p-0">
           {loading ? (
@@ -265,52 +369,22 @@ export default function JournalEntriesTab({ onChanged }) {
                 </TR>
               </THead>
               <TBody>
-                {entries.length === 0 ? (
-                  <TR><TD colSpan={6} className="text-center text-zinc-500 py-8">No journal entries posted yet.</TD></TR>
-                ) : entries.map((e) => (
-                  <TR key={e.id}>
-                    <TD className="whitespace-nowrap align-top">{e.entry_date}</TD>
-                    <TD className="font-mono text-zinc-600 align-top">#{e.entry_number}</TD>
-                    <TD className="align-top">
-                      <div className="font-medium text-zinc-900">{e.memo}</div>
-                      <div className="mt-1 space-y-0.5 text-14 text-zinc-600">
-                        {(e.lines || []).map((l) => (
-                          <div key={l.id} className="flex items-center justify-between gap-4">
-                            <span>
-                              <span className="font-mono text-zinc-500 mr-1.5">{l.account_code}</span>
-                              {l.account_name}
-                            </span>
-                            <span className="font-mono whitespace-nowrap">
-                              {l.debit_cents ? `DR ${formatCents(l.debit_cents)}` : `CR ${formatCents(l.credit_cents)}`}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </TD>
-                    <TD className="align-top">
-                      <Badge tone={e.reversed_by_entry_id ? "warn" : "neutral"}>
-                        {e.reversed_by_entry_id ? "reversed" : e.entry_type}
-                      </Badge>
-                    </TD>
-                    <TD className="text-right font-mono font-medium align-top whitespace-nowrap">
-                      {formatCents(e.total_cents)}
-                    </TD>
-                    <TD className="text-right align-top">
-                      {!e.reversed_by_entry_id && e.entry_type !== "reversal" ? (
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => { setFormError(""); setReversing(e); setReverseDate(today); }}
-                        >
-                          Reverse
-                        </Button>
-                      ) : null}
-                    </TD>
-                  </TR>
-                ))}
+                <JournalEntriesTableBody
+                  entries={entries}
+                  onStartReverse={(e) => { setFormError(""); setReversing(e); setReverseDate(today); }}
+                />
               </TBody>
             </Table>
           )}
+          <JournalPaginationBar
+            offset={offset}
+            pageSize={JOURNAL_PAGE_SIZE}
+            count={entries.length}
+            total={totalEntries}
+            loading={loading}
+            onPrev={() => setOffset((prev) => Math.max(0, prev - JOURNAL_PAGE_SIZE))}
+            onNext={() => setOffset((prev) => prev + JOURNAL_PAGE_SIZE)}
+          />
         </CardBody>
       </Card>
 
