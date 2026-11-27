@@ -231,14 +231,16 @@ const countsFor = (visit, app) => Boolean(visit.property_id && app.property_id =
  * Each visit is judged in the ET calendar year of its own date only, so a December run covering a January 1 visit
  * reads the new year (the one-visit count, which also asks about today's year, is the close-out's, not this).
  * An unknown history (no customer, or the read failed) leaves Taurus off, as the close-outs do.
- * @param {{ id: string, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }[]} visits
+ * @param {{ id: string, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null, window_start?: string|null }[]} visits
  * @returns {Promise<{ fits: Map<string, boolean>, failed: boolean }>}
  */
 async function projectTaurusEligibility(visits, { knex = db, now = new Date() } = {}) {
   const thisYear = etYearBounds(now).year;
   const plan = visits.map((visit) => {
     const day = String(dateOnlyString(visit.scheduled_date));
-    return { visit, day, bounds: yearBoundsOf(Number(day.slice(0, 4)) || thisYear) };
+    // Visits the same day are judged in the order they are driven: window start, an unset time last, then id.
+    const at = `${day}T${visit.window_start ? String(visit.window_start).slice(0, 8) : '99'}`;
+    return { visit, at, bounds: yearBoundsOf(Number(day.slice(0, 4)) || thisYear) };
   });
   const homes = plan.filter(({ visit }) => visit.customer_id);
   const fits = new Map(plan.map(({ visit }) => [visit.id, false]));
@@ -266,7 +268,7 @@ async function projectTaurusEligibility(visits, { knex = db, now = new Date() } 
     return { fits, failed: true };
   }
   const used = [];
-  for (const { visit, bounds } of homes.sort((a, b) => a.day.localeCompare(b.day) || String(a.visit.id).localeCompare(String(b.visit.id)))) {
+  for (const { visit, bounds } of homes.sort((a, b) => a.at.localeCompare(b.at) || String(a.visit.id).localeCompare(String(b.visit.id)))) {
     const ledger = counts.get(`${bounds.year}|${pairKey(visit)}`);
     const projected = used.filter((app) => app.year === bounds.year && countsFor(visit, app)).length;
     const fit = taurusEligible({ high: ledger.high, low: ledger.low + projected });

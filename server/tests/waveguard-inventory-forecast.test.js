@@ -420,6 +420,48 @@ describe('technician forecast (audit A2 / C1): product totals for all, names onl
   });
 });
 
+describe('visits whose plan gives no usable amounts (the weekly buy list warns instead of reading zero)', () => {
+  const blocked = (code, items) => ({
+    propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [{ code, severity: 'block', message: code }] },
+    appointmentAssignment: {},
+    mixCalculator: { items },
+  });
+  const stock = { unit: 'gal', onHand: 1, lowStockThreshold: 0.25 };
+  const run = async (plansById) => {
+    visits = readQuery([{ id: 'v-a', scheduled_date: '2030-01-10' }, { id: 'v-b', scheduled_date: '2030-01-10' }, { id: 'v-c', scheduled_date: '2030-01-10' }, { id: 'v-d', scheduled_date: '2030-01-10' }]);
+    buildPlanForService.mockImplementation(async (id) => plansById[id]);
+    return buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  };
+
+  test('every kind of block that leaves no amount is reported; a block that still gave an amount, and a plain empty visit, are not', async () => {
+    const result = await run({
+      'v-a': blocked('missing_lawn_area', [item('short', null, 'fl_oz', stock)]), // sqft missing: amounts are null
+      'v-b': blocked('lawn_v13_bahia_no_program', []), // no program for the grass: no lines at all
+      'v-c': blocked('missing_nutrient_rate', [item('short', 64, 'fl_oz', stock)]), // blocked, but the amount is there
+      'v-d': { propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [] }, appointmentAssignment: {}, mixCalculator: { items: [] } }, // nothing planned, nothing wrong
+    });
+    expect(result.noUsablePlan).toEqual(['v-a', 'v-b']);
+    expect(result.errors).toEqual([]);
+    expect(result.products.find((row) => row.productId === 'short').appointments.map((a) => a.serviceId)).toEqual(['v-c']);
+  });
+
+  test('lines with no amount and no block still read as no usable plan (an unmatched product, a zero amount)', async () => {
+    const result = await run({
+      'v-a': { propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [] }, appointmentAssignment: {}, mixCalculator: { items: [{ product: null, mix: { amount: 5 } }, item('short', 0, 'fl_oz', stock)] } },
+      'v-b': blocked('x', [item('short', 64, 'fl_oz', stock)]),
+      'v-c': blocked('x', [item('short', 64, 'fl_oz', stock)]),
+      'v-d': blocked('x', [item('short', 64, 'fl_oz', stock)]),
+    });
+    expect(result.noUsablePlan).toEqual(['v-a']);
+  });
+
+  test('the technician projection never carries the ids, as with serviceIds', async () => {
+    const projected = await forecastForTechnician({ products: [], errors: [], skippedNonProgram: [], serviceIds: ['v-a'], noUsablePlan: ['v-a'] }, { technicianId: 'tech-1' }, db);
+    expect(projected).not.toHaveProperty('noUsablePlan');
+    expect(projected).not.toHaveProperty('serviceIds');
+  });
+});
+
 describe('explicit date range (the weekly buy list reads a Monday-Saturday week)', () => {
   test('an explicit range replaces the rolling window and names the visits it read', async () => {
     const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20, startDate: '2030-02-04', endDate: '2030-02-09' });

@@ -83,8 +83,11 @@ function weekBounds(now = new Date()) {
 
 // ---- demand ----------------------------------------------------------------
 
+// A visit's start as a sortable key: its day, then its window start; no start time sorts after every time that day.
+const visitStart = (v) => `${dateOnlyString(v.scheduled_date)}T${v.window_start ? String(v.window_start).slice(0, 8) : '99'}`;
+
 function newGroup() {
-  return { demand: new Map(), firstDate: null, lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), taurusLeft: 0, hasLawn: false, mixVisit: false, extra: new Set() };
+  return { demand: new Map(), firstAt: null, lawnNoPlan: 0, lawnNoUsable: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), taurusLeft: 0, hasLawn: false, mixVisit: false, extra: new Set() };
 }
 
 // Sum demand for one product, kept in the unit of its first entry.
@@ -115,13 +118,17 @@ function addLawnDemand(groups, visitById, forecast) {
       if (g) g.unitProblems.add(String(row.productId));
     }
   }
-  for (const e of forecast?.errors || []) {
-    const g = groupOf(e.serviceId);
-    if (g) g.lawnNoPlan += 1;
-  }
-  for (const s of forecast?.skippedNonProgram || []) {
-    const g = groupOf(s.serviceId);
-    if (g) g.unplanned += 1;
+  countLawnGaps(groupOf, forecast);
+}
+
+// Lawn visits the forecast could not plan (an error entry), could not use (ids), or left out as not on a program.
+function countLawnGaps(groupOf, forecast) {
+  const counted = [[forecast?.errors, 'lawnNoPlan'], [forecast?.noUsablePlan, 'lawnNoUsable'], [forecast?.skippedNonProgram, 'unplanned']];
+  for (const [entries, field] of counted) {
+    for (const entry of entries || []) {
+      const g = groupOf(entry?.serviceId ?? entry);
+      if (g) g[field] += 1;
+    }
   }
 }
 
@@ -143,8 +150,8 @@ function deriveDemand({ visits, forecast, mix, kit }) {
   const forecastIds = new Set((forecast?.serviceIds || []).map(String));
   for (const v of visitById.values()) {
     const g = groups.get(v.groupKey);
-    const date = dateOnlyString(v.scheduled_date);
-    if (date < (g.firstDate || '9999')) g.firstDate = date;
+    const at = visitStart(v);
+    if (at < (g.firstAt || '9999')) g.firstAt = at;
     const line = detectServiceLine(v.service_type);
     addPlannedDemand(g, v, { line, mix, planned: forecastIds.has(String(v.id)) });
     // The close-out's own rule for the kit: an inspection or an internal-only visit leaves none (noKitReason).
@@ -181,11 +188,11 @@ function addPlannedDemand(g, v, { line, mix, planned }) {
 
 // ---- planning --------------------------------------------------------------
 
-// Assigned technicians first, always; then the earlier first visit; then the lower id.
+// Assigned technicians first, always; then the earlier first visit (day, then start time, an unset time last); then the lower id.
 const compareGroups = (groups) => (a, b) => {
   if ((a === UNASSIGNED) !== (b === UNASSIGNED)) return a === UNASSIGNED ? 1 : -1;
-  const da = groups.get(a).firstDate || '9999';
-  const db2 = groups.get(b).firstDate || '9999';
+  const da = groups.get(a).firstAt || '9999';
+  const db2 = groups.get(b).firstAt || '9999';
   if (da !== db2) return da < db2 ? -1 : 1;
   return a < b ? -1 : 1;
 };
@@ -236,24 +243,32 @@ function planGroups({ groups, products, techs }) {
       sharing.set(pid, (sharing.get(pid) || 0) + 1);
       const gap = exact(need - take);
       const short = gap > (product.pack?.pack > 0 ? product.pack.pack : need) * NOISE ? gap : 0;
-      const line = { pid, product, need, short, reasons: [...d.reasons], packs: null, label: null };
+      const line = { key, pid, product, need, short, reasons: [...d.reasons], packs: null, label: null };
       if (line.short > 0) Object.assign(line, packsFor(product, line.short));
       lines.get(key).push(line);
       notes.get(key).push(...lineNotes(product, line));
     }
     if (groups.get(key).taurusLeft) notes.get(key).push(`Taurus SC is left out of ${groups.get(key).taurusLeft} ${plural(groups.get(key).taurusLeft, 'visit', 'visits')}: the home reached the label's yearly limit, or its count is unavailable.`);
   }
-  applySpareFloor({ order, lines });
+  applySpareFloor({ order, lines, notes });
   const out = new Map();
   for (const key of order) out.set(key, groupEntry({ key, group: groups.get(key), lines: lines.get(key), notes: notes.get(key), sharing, techs }));
   return out;
 }
 
-// One SEALED container of an everyday liquid stays on the shelf after the week. Opened containers do not
-// combine: a technician's purchase only leaves sealed what he did not need to open, and the company's stock
-// leaves sealed what whole containers remain after the stock handed out. When no sealed container would
-// remain, the first technician with demand for it buys one more.
-function applySpareFloor({ order, lines }) {
+// One SEALED container of an everyday liquid should still be on the shelf after the week. The stock count is a
+// volume, not a count of containers, so it cannot prove one is sealed (two opened jugs at 0.75 gal each add up to
+// "one jug"). So, in plain words:
+//  - A pack this list buys and does not need to open is sealed for certain: no spare is needed.
+//  - Otherwise it rests on the stock that remains after what this week hands out (the shelf plus what is on order):
+//    * under one pack: buy one spare;
+//    * two packs or more: certainly one sealed, buy nothing;
+//    * one to two packs: buy nothing, and tell the technician to check the shelf, because it may be one sealed pack
+//      or two part-used ones;
+//    A line with demand always draws on the stock first, so whenever there is stock on the shelf something is handed out of it;
+//    whole packs on the shelf are never counted as sealed on the volume alone.
+// Opened containers never combine. The spare goes to the first technician with demand for the product.
+function applySpareFloor({ order, lines, notes }) {
   const floorKeys = new Set(PEST_HOUSE_MIX.filter((e) => e.floor).map((e) => e.key));
   const byProduct = new Map();
   for (const key of order) for (const line of lines.get(key)) {
@@ -265,12 +280,16 @@ function applySpareFloor({ order, lines }) {
     const { product } = entries[0];
     const size = product.pack?.pack;
     if (product.hold || product.countOrder || !(size > 0)) continue;
-    const supply = Math.max(0, product.onHand ?? 0) + product.onOrder;
+    const sealedBought = entries.reduce((sum, l) => sum + Math.max(0, (l.packs || 0) - Math.ceil(l.short / size - NOISE)), 0);
+    if (sealedBought >= 1) continue;
     const drawn = entries.reduce((sum, l) => sum + (l.need - l.short), 0);
-    const sealedStock = Math.floor(exact((supply - drawn) / size) + 1e-9);
-    const sealedBought = entries.reduce((sum, l) => sum + Math.max(0, (l.packs || 0) - Math.ceil(l.short / size - 1e-9)), 0);
-    if (sealedStock + sealedBought >= 1) continue;
+    const packsLeft = exact((Math.max(0, product.onHand ?? 0) + product.onOrder - drawn) / size);
+    if (packsLeft >= 2 - NOISE) continue;
     const first = entries[0];
+    if (packsLeft >= 1 - NOISE) {
+      notes.get(first.key).push(`Check the shelf: one unopened ${product.packLabel || 'container'} of ${product.name} should remain.`);
+      continue;
+    }
     first.packs = (first.packs || 0) + 1;
     first.label = product.packLabel || null;
     first.reasons = [...first.reasons, 'spare_floor'];
@@ -280,6 +299,7 @@ function applySpareFloor({ order, lines }) {
 // [value read off a group (falsy = no warning), the sentence for it]
 const WARNING_TEXT = [
   [(g) => g.lawnNoPlan, (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} no lawn plan`],
+  [(g) => g.lawnNoUsable, (n) => `${n} lawn ${plural(n, 'visit has', 'visits have')} no usable plan, so its need is unknown`],
   [(g) => g.unplanned, (n) => `${n} ${plural(n, 'visit', 'visits')} of types this list does not plan yet`],
   [(g) => g.unitProblems.size, (n) => `${n} ${plural(n, 'product has', 'products have')} units that do not convert, so its need is left out`],
   [(g) => [...g.mixMissing].sort().join(', '), (names) => `The pest house mix is missing from the catalog (${names}), so it is left out`],
@@ -346,7 +366,7 @@ function weekVisits(knex, { fromDate, weekEnd }) {
     // An estimate-slot hold (customer_id NULL with a reservation stamp, live or awaiting cleanup) is not a booking;
     // a pending booking has a customer or no stamp. Same rule as scheduling/occupancy.js (includeHolds: false).
     .where((q) => q.whereNotNull('ss.customer_id').orWhereNull('ss.reservation_expires_at'))
-    .select('ss.id', 'ss.technician_id', 'ss.service_type', 'ss.scheduled_date', 'ss.is_callback', 'ss.service_key_snapshot', 'ss.service_id', 'ss.is_recurring', 'ss.customer_id', 'ss.property_id');
+    .select('ss.id', 'ss.technician_id', 'ss.service_type', 'ss.scheduled_date', 'ss.is_callback', 'ss.service_key_snapshot', 'ss.service_id', 'ss.is_recurring', 'ss.customer_id', 'ss.property_id', 'ss.window_start');
 }
 
 // What each visit's close-out will be, read the way the close-out reads it (its completion profile): an
@@ -385,15 +405,18 @@ async function readOnOrder(knex, ids) {
     })
     .whereIn('prr.product_id', ids)
     .where((q) => q.where('prr.status', 'ordered').orWhere((live) => live.whereNotNull('vo.id').whereRaw(RECEIVED_SETTLES_SQL)))
-    .select('prr.id', 'prr.product_id', 'prr.requested_quantity', 'prr.unit', 'vo.request_payload');
+    .select('prr.id', 'prr.product_id', 'prr.requested_quantity', 'prr.unit', 'vo.request_payload', 'vo.status as order_status');
 }
 
 const asObject = (value) => (typeof value === 'string' ? (() => { try { return JSON.parse(value) || {}; } catch { return {}; } })() : (value || {}));
 
 // Sum the on-order rows per product in its stock unit; a row that does not convert is reported, not guessed.
-function onOrderByProduct(orderRows, units, problems) {
+function onOrderByProduct(orderRows, units, problems, unsettled) {
   const total = new Map();
   for (const row of orderRows) {
+    // Counted as on order (no duplicate buy), but a claim still being placed, or parked for review after submit, is not
+    // confirmed yet: the list says so until it settles as placed.
+    if (['placing', 'needs_review'].includes(row.order_status)) unsettled.add(String(row.product_id));
     const held = Number(asObject(row.request_payload).orderedQuantity);
     const qty = held > 0 ? held : Number(row.requested_quantity);
     const unit = units.get(String(row.product_id));
@@ -408,7 +431,7 @@ function onOrderByProduct(orderRows, units, problems) {
   return total;
 }
 
-// Returns { products, onOrderProblems }. Callers read it inside ONE snapshot (inSnapshot): stock and what is on order
+// Returns { products, onOrderProblems, onOrderUnsettled }. Callers read it inside ONE snapshot (inSnapshot): stock and what is on order
 // must be the same moment, or a receive between the two reads is counted twice (or missed).
 async function readCatalog(knex, { ids, mixRows, now }) {
   const rows = ids.length
@@ -426,13 +449,14 @@ async function readCatalog(knex, { ids, mixRows, now }) {
       'pv.name as vendor_name', 'pv.code as vendor_code')
     : [];
   const onOrderProblems = new Set();
-  const onOrder = onOrderByProduct(await readOnOrder(knex, ids), new Map(rows.map((r) => [String(r.id), r.inventory_unit])), onOrderProblems);
+  const onOrderUnsettled = new Set();
+  const onOrder = onOrderByProduct(await readOnOrder(knex, ids), new Map(rows.map((r) => [String(r.id), r.inventory_unit])), onOrderProblems, onOrderUnsettled);
   const floorKeyOf = new Map(mixRows.matched.map((m) => [String(m.product.id), m.entry.key]));
   const products = new Map(rows.map((row) => [String(row.id), toPlanProduct({
     row, now, floorKey: floorKeyOf.get(String(row.id)) || null, onOrder: onOrder.get(String(row.id)) || 0,
     pricing: pricing.filter((p) => String(p.product_id) === String(row.id)),
   })]));
-  return { products, onOrderProblems };
+  return { products, onOrderProblems, onOrderUnsettled };
 }
 
 // One consistent read: a read-only REPEATABLE READ transaction, so every statement sees the same moment. A caller
@@ -482,11 +506,12 @@ async function buildWeeklyBuyList({ knex = db, now = new Date() } = {}) {
   const { visits: withTaurus, failed: taurusFailed } = await withTaurusAnswer(visits, { knex, now, mix });
   const groups = deriveDemand({ visits: withTaurus, forecast, mix, kit });
   const demandIds = new Set([...groups.values()].flatMap((g) => [...g.demand.keys()]));
-  const { products, onOrderProblems } = await inSnapshot(knex, (conn) => readCatalog(conn, { ids: [...demandIds], mixRows: mix, now }));
+  const { products, onOrderProblems, onOrderUnsettled } = await inSnapshot(knex, (conn) => readCatalog(conn, { ids: [...demandIds], mixRows: mix, now }));
   for (const pid of demandIds) {
     if (!products.has(pid)) warnGroups(groups, (g) => g.demand.has(pid), 'A product with scheduled need is no longer in the catalog, so its need is left out.');
   }
   for (const pid of onOrderProblems) warnGroups(groups, (g) => g.demand.has(pid), 'An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.');
+  for (const pid of onOrderUnsettled) warnGroups(groups, (g) => g.demand.has(pid), 'An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.');
   if (taurusFailed) warnGroups(groups, (g) => g.mixVisit, TAURUS_FAILED);
   if (lawnCapped) warnGroups(groups, (g) => g.hasLawn, LAWN_CAPPED);
   const listWarnings = [taurusFailed && TAURUS_FAILED, lawnCapped && LAWN_CAPPED].filter(Boolean);

@@ -94,6 +94,7 @@ jest.setTimeout(60000);
     expect(tech.warnings).toEqual([
       '1 visit of types this list does not plan yet', // the roach job; the assessment applies nothing
       'The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out', // only CrossCheck is in this fixture catalog
+      'An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.', // the placing stake order
     ]);
     const cross = tech.items.find((i) => i.name === 'LESCO CrossCheck Plus');
     // 0.01 gal on hand: the technician and the unassigned visit each open their own 2.5 gal pack, so one more
@@ -105,10 +106,15 @@ jest.setTimeout(60000);
     expect(list.unassigned.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 1, shortQty: 1, packs: null }); // no price on file
     // 1 (marked ordered) + 1 (placing order) + 1 (revoked order: the request's own figure) = 3 on order for the 4 stakes needed
     expect(tech.items.find((i) => i.name === 'Synthetic Stake')).toMatchObject({ needQty: 4, onOrder: 3, shortQty: 1 });
+    // one of those orders is still being placed (not confirmed): counted, and the list says so
+    expect(tech.warnings).toContain('An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.');
     expect(list.unassigned.items.find((i) => i.name === 'Synthetic Stake')).toMatchObject({ needQty: 1, onOrder: 3, shortQty: 1 }); // the same 3 are spoken for
     expect(tech.items.find((i) => i.name === 'Synthetic Yard Sign')).toMatchObject({ needQty: 4 }); // three pest visits and the roach job; not the assessment
-    expect(list.unassigned.warnings).toEqual(['The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out']);
-    expect(list.warnings).toEqual([]);
+    expect(list.unassigned.warnings).toEqual([
+      'The pest house mix is missing from the catalog (surfactant, taurus sc), so it is left out',
+      'An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.',
+    ]);
+    expect(list.warnings).toEqual(['An order is being placed or waiting for review and is not confirmed yet: it is counted as on order for now.']);
   });
 
   test('the supply reads work in a snapshot of their own and inside a transaction the caller already holds', async () => {

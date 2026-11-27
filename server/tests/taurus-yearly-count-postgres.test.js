@@ -273,6 +273,23 @@ describeOrSkip('taurus yearly count on PostgreSQL', () => {
       expect(fits.get(late.id)).toBe(false);
     });
 
+    it('visits the same day are judged by window start (an unset time last), then id', async () => {
+      const cust = randomUUID();
+      for (let i = 0; i < 2; i += 1) await application({ cust, property: propA }); // two at the home: room for two more
+      const mk = (id, window_start) => ({ id, customer_id: cust, property_id: propA, scheduled_date: '2026-12-10', window_start });
+      // ids sort the opposite way to the times: the afternoon stop has the smallest id
+      const afternoon = mk('00000000-0000-4000-8000-000000000001', '14:00:00');
+      const morning = mk('00000000-0000-4000-8000-000000000002', '08:00:00');
+      const unset = mk('00000000-0000-4000-8000-000000000003', null);
+      const { fits } = await project([unset, afternoon, morning]);
+      expect([morning, afternoon, unset].map((v) => fits.get(v.id))).toEqual([true, true, false]);
+      // same time: the lower id goes first
+      const tieA = mk('00000000-0000-4000-8000-0000000000a1', '09:00:00');
+      const tieB = mk('00000000-0000-4000-8000-0000000000b1', '09:00:00');
+      const tie = await project([tieB, tieA, { ...morning, id: '00000000-0000-4000-8000-0000000000c1', scheduled_date: '2026-12-09' }]);
+      expect([tieA, tieB].map((v) => tie.fits.get(v.id))).toEqual([true, false]); // the earlier-day visit took the third; one more fits
+    });
+
     it('a visit with no customer, or a failed read, leaves Taurus off', async () => {
       const lone = { id: randomUUID(), customer_id: null, property_id: propA, scheduled_date: '2026-12-08' };
       expect((await project([lone])).fits.get(lone.id)).toBe(false);
