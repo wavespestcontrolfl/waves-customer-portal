@@ -4,10 +4,12 @@
  *
  * EVERY VISIT: a person recorded from a call also goes on the customer's list (customer_reminder_contacts). Before any
  * visit's text goes out, materializeForVisit copies that list onto the visit as ordinary visit rows, so everything below
- * applies to them unchanged; a copy stands only while the customer still lists the person. Every existing stop route
+ * applies to them unchanged: once written, a copy is a plain visit grant. List entries are never deleted or changed by a
+ * call. Every existing stop route
  * (STOP, suppression, opt-in decline, own choices, a "no texts" call) is read at each send, as for every row. A caller who limits the texts to the booked visit ("just this visit": the extraction's
  * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The staff and portal
- * list, with its own sticky stop, is a follow-up change; the gate stays off until it ships.
+ * list adds a sticky stop (a stopped_at column read by declinedByRecipient, never a row delete) in a follow-up change; the
+ * gate stays off until it ships.
  * The rest of this header describes the per-visit rows.
  *
  * A caller who books a visit and gives another person's number to be texted ("my husband Bob will
@@ -190,25 +192,11 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source', 'reminder_contact_id');
-      const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
-      // A LIVE list copy already grants this visit: the call changes nothing (its link, claims and queued texts stand). A copy
-      // whose entry is gone (it stayed on another account in a merge) grants nothing, so the call takes it over as its own
-      // grant for this visit, IN PLACE: same customer, so its delivery claims stay (nothing is sent twice); its tracker token
-      // is cleared (no old link comes back) and a text queued under the copy (it carries the copy's entry id) drops. Not a
-      // created row: the list is not touched. Nothing in this change removes a list entry; the staff and portal list that
-      // will must keep the visit grants a call made.
-      if (sameCustomer && existing.source === REMINDER_SOURCE && !(await copyLive(existing, visit.customer_id, trx))) {
-        await trx(TABLE).where({ id: existing.id }).update({
-          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null, track_token: null,
-          first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,
-        });
-        return 'kept';
-      } else {
-        if (sameCustomer) return 'kept';
-        if (existing) await trx(TABLE).where({ id: existing.id }).del();
-        await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
-      }
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
+      // A row already bound to this customer (a call's or a list copy: once written, a copy is a plain visit grant) stands as it is.
+      if (existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
+      if (existing) await trx(TABLE).where({ id: existing.id }).del();
+      await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
       // CREATES this visit's row for the number may list them: a reprocess of any call, or a second call about the same visit,
       // finds the row and lists nobody, so no replay order can widen a "just this visit" answer (the cost: a later call that
@@ -284,21 +272,9 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
           AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id)`,
       [scheduledServiceId, owner, ...live],
     );
-    // A copy of THIS customer whose entry is gone, for a number the customer lists again under a NEW entry: rebound in place
-    // to that entry with its tracker token cleared (an entry id is never reused, so an old link never revives; the delivery
-    // claims stay, so nothing is sent twice).
     await trx.raw(
-      `UPDATE ${TABLE} r SET reminder_contact_id = c.id, track_token = NULL, first_name = c.first_name, last_name = c.last_name,
-              role = c.role, consent_version = c.consent_version, call_log_id = c.call_log_id
-         FROM scheduled_services s, ${REMINDER_TABLE} c
-        WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${live.map(() => '?').join(', ')}) AND r.scheduled_service_id = s.id
-          AND r.customer_id = s.customer_id AND r.source = ? AND c.customer_id = s.customer_id AND c.phone_key = r.phone_key
-          AND r.reminder_contact_id IS DISTINCT FROM c.id`,
-      [scheduledServiceId, owner, ...live, REMINDER_SOURCE],
-    );
-    await trx.raw(
-      `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id, reminder_contact_id)
-       SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id, c.id
+      `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
+       SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
          FROM scheduled_services s
          JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id
         WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
@@ -313,12 +289,6 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
     }
     return owner;
   });
-}
-
-// A list copy grants only while the EXACT entry it was made from exists and belongs to the visit's current customer.
-async function copyLive(row, visitCustomerId, conn) {
-  if (!row.reminder_contact_id) return false;
-  return !!(await conn(REMINDER_TABLE).where({ id: row.reminder_contact_id, customer_id: visitCustomerId }).first('id'));
 }
 
 /**
@@ -393,9 +363,6 @@ function rowBelongsToVisitCustomer(row, visit) {
 // visit was reassigned) or to none, or a person who has declined.
 async function ownedContact(row, visit, kind, conn, taken) {
   if (taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit)) return null;
-  // A copy of the every-visit list stands only while the entry it was made from still exists for the visit's CURRENT
-  // customer (a merge leaves the entry on the other account). A missing entry is no permission.
-  if (row.source === REMINDER_SOURCE && !(await copyLive(row, visit.customer_id, conn))) return null;
   if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS[kind].purpose, conn })) return null;
   const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
   const scheduledDate = dateOnlyString(visit.scheduled_date);
@@ -408,9 +375,6 @@ async function ownedContact(row, visit, kind, conn, taken) {
     visitRecipientId: row.id,
     // The customer this row was recorded for, carried in every send's recheck and replay: a row with another binding is another row.
     recipientCustomerId: row.customer_id,
-    // The list entry a copy was made from (null for a call's own grant), carried in every recheck and replay: a text built
-    // under one grant never goes out under another.
-    reminderContactId: row.reminder_contact_id || null,
     claimKey: `${kind}:${scheduledDate || ''}T${windowStart || ''}`,
     visit: { id: visit.id, customerId: visit.customer_id, serviceType: visit.service_type, scheduledDate, windowStart },
   };
@@ -527,7 +491,6 @@ async function queueDeferred({ contact, kind, body, result, promiseMeta = {}, re
       ...(recheckMeta.arrival_start ? { arrival_start: recheckMeta.arrival_start } : {}),
       ...(recheckMeta.recipient_hint ? { recipient_hint: recheckMeta.recipient_hint } : {}),
       ...(recheckMeta.recipient_customer_id ? { recipient_customer_id: recheckMeta.recipient_customer_id } : {}),
-      reminder_contact_id: recheckMeta.reminder_contact_id || null,
       replay_purpose: KINDS[kind].purpose,
       slot_scheduled_date: contact.visit.scheduledDate,
       ...(contact.visit.windowStart ? { slot_window_start: contact.visit.windowStart } : {}),
@@ -712,7 +675,7 @@ async function visitForTrackToken(token, { conn = db } = {}) {
 }
 
 async function resolveTrackToken(token, conn) {
-  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'customer_id', 'reminder_contact_id');
+  const row = await conn(TABLE).where({ track_token: token }).first('id', 'scheduled_service_id', 'customer_id');
   if (!row) return null;
   // The cheap check FIRST: the short lifetime (en route within 3 h of en_route_at, on site within 4 h of arrived_at, or up to two
   // hours after completion; never scheduled,
@@ -725,7 +688,7 @@ async function resolveTrackToken(token, conn) {
     if (!visit || !rowBelongsToVisitCustomer(row, visit) || !recipientLinkEligible(visit)) return null;
     // Only a link that can still open pays for the permission reads: the same check the en-route send makes at the
     // provider handoff, read fresh on every request.
-    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id, recipient_customer_id: row.customer_id, reminder_contact_id: row.reminder_contact_id || null }, { conn, anyVisitStatus: true });
+    const permission = await recipientPermission({ scheduled_service_id: row.scheduled_service_id, kind: 'en_route', visit_recipient_id: row.id, recipient_customer_id: row.customer_id }, { conn, anyVisitStatus: true });
     if (!permission.ok) return null;
     // The final recheck: the visit as it stands now, after the permission reads.
     const again = await readLinkVisit(row.scheduled_service_id, conn);
@@ -789,7 +752,6 @@ async function sendToRecipient({ contact, kind, context, dayOnly, conn }) {
     // Who staff should check if this text cannot be confirmed at the handoff: the first name and the LAST 4 digits only.
     recipient_hint: recipientHint(contact),
     recipient_customer_id: contact.recipientCustomerId,
-    reminder_contact_id: contact.reminderContactId,
     ...(dayOnly ? { promise_level: 'day' } : {}),
     ...(arrivalStart && !dayOnly ? { arrival_start: arrivalStart } : {}),
   };
@@ -855,8 +817,7 @@ async function recipientPermission(meta, { conn = db, anyVisitStatus = false } =
   // The row must be the one the send was built with: its id (found above) AND its customer binding. A caller with no recorded
   // customer is not owed. This also drops any text queued before the binding existed, deliberately and with no backfill:
   // GATE_CALL_GIVEN_VISIT_TEXTS has never been on in production, so no such queued row exists.
-  if (!meta.recipient_customer_id || String(mine.recipientCustomerId || '') !== String(meta.recipient_customer_id)
-    || String(mine.reminderContactId || '') !== String(meta.reminder_contact_id || '')) {
+  if (!meta.recipient_customer_id || String(mine.recipientCustomerId || '') !== String(meta.recipient_customer_id)) {
     return noVerdict('VISIT_RECIPIENT_NOT_OWED', 'recipient-not-owed');
   }
   // The hold on the visit above is the HOLDER's number; the person's own number can be held by another call.
