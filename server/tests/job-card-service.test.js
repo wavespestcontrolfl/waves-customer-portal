@@ -1131,6 +1131,74 @@ describe('PR review r5', () => {
     expect(verified.amountNote).toBeNull();
   });
 
+  // Owner 2026-11-27: every lawn granular card shows its LESCO spreader number (spreader-settings.js) at the plan's rate.
+  test('a lawn granular card shows its spreader number; a sprayed card and a pest granular with no row show none', async () => {
+    const build = (facts, line) => jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04', ...facts }, lines: [line], verdicts: [], packSizes: {} });
+    const bag = { id: 'f', name: 'LESCO 10-0-22 50% PolyPlus OPTI45 Turfgrass Granular Fertilizer', rate_unit: 'lb', default_rate_per_1000: 4, label_verified_at: '2026-08-01' };
+    const raw = 'LESCO 10-0-22 50% PolyPlus OPTI45 Turfgrass Granular Fertilizer — 4.5 lb per 1,000 sq ft (0.45 lb N), spreader';
+    const [planned] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: bag, planMix: { amount: 45, amountUnit: 'lb', ratePer1000: 4.5, rateUnit: 'lb' } });
+    expect(planned.spreader).toMatchObject({ setting: 12, text: 'Spreader: LESCO #12 (field tested)' });
+    // No plan mix: the line's own 4.5 lb, not the catalog's 4 lb.
+    const [unplanned] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: bag });
+    expect(unplanned.spreader.setting).toBe(12);
+    // A rate the rows do not cover: no number, a weigh test; the amount stays.
+    const [halved] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: bag, planMix: { amount: 22.5, amountUnit: 'lb', ratePer1000: 2.25, rateUnit: 'lb' } });
+    expect(halved).toMatchObject({ spreader: { setting: null, text: 'No spreader number for this rate: weigh test.' }, planned: { amount: 22.5 } });
+    const [sprayed] = await build({ isLawn: true }, { raw: 'Celsius WG — weed spots', role: 'base', selected: true, product: { id: 'c', name: 'Celsius WG', rate_unit: 'oz', label_verified_at: '2026-08-01' } });
+    expect(sprayed.spreader).toBeNull();
+    // The card never withholds a dose (owner 2026-11-26: every reason is a warning beside the amount), so a spray-check hold
+    // or an unverified label keeps the amount and its spreader number.
+    const verdicts = [{ productId: 'f', verdict: 'hold', reason: 'Synthetic hold' }];
+    const [heldCard] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04', isLawn: true }, lines: [{ raw, role: 'base', selected: true, product: bag, planMix: { amount: 45, amountUnit: 'lb', ratePer1000: 4.5, rateUnit: 'lb' } }], verdicts, packSizes: {} });
+    expect(heldCard).toMatchObject({ planned: { amount: 45, unit: 'lb' }, spreader: { setting: 12 } });
+    const [unverifiedCard] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: { ...bag, label_verified_at: null }, planMix: { amount: 45, amountUnit: 'lb', ratePer1000: 4.5, rateUnit: 'lb' } });
+    expect(unverifiedCard.spreader).toMatchObject({ setting: 12 });
+    // A ranged line with no plan rate never takes the catalog rate's number.
+    const [ranged] = await build({ isLawn: true }, { raw: 'Topchoice Granular Insecticide — 1-2 lb per 1,000 sq ft', role: 'base', selected: true, product: { id: 't', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 2, label_verified_at: '2026-08-01' } });
+    expect(ranged.spreader).toMatchObject({ setting: null });
+    // The compact range ("1–2 lb/1,000 sq ft") is a range too: never the catalog rate's number.
+    const [compactRange] = await build({ isLawn: true }, { raw: 'Topchoice Granular Insecticide — 1–2 lb/1,000 sq ft', role: 'base', selected: true, product: { id: 't2', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 2, label_verified_at: '2026-08-01' } });
+    expect(compactRange.spreader).toMatchObject({ setting: null });
+    // A catalog row with no unit still gets its number when the line states the lb rate.
+    const [noUnit] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: { ...bag, id: 'f2', rate_unit: null, default_rate_per_1000: null } });
+    expect(noUnit.spreader).toMatchObject({ setting: 12 });
+    // An approved swap: the swapped-in bag's identity only.
+    const [swapped] = await build({ isLawn: true }, { raw, role: 'base', selected: true, substitutedFor: bag.name, product: { id: 's', name: 'Synthetic swap bag', rate_unit: 'lb', default_rate_per_1000: 4.5, label_verified_at: '2026-08-01' } });
+    expect(swapped.spreader).toMatchObject({ setting: null, text: 'No spreader number for this product: weigh test.' });
+    // An unverified label with no plan mix: the number comes from the line's own stated rate.
+    const [noMix] = await build({ isLawn: true }, { raw, role: 'base', selected: true, product: { ...bag, label_verified_at: null } });
+    expect(noMix.spreader).toMatchObject({ setting: 12 });
+    // A line the plan marks unavailable (a v13 line with no linked row) carries that state to the card: no number.
+    const buildPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Dec', visit: 12, blocks: [] }, mixCalculator: { items: [
+      { raw, role: 'base', conditional: false, selected: true, product: { id: 'f' }, mix: null, unavailable: { kind: 'no_protocol_row', reason: 'Synthetic' } },
+    ], conditionalOptions: [] } });
+    const resolved = await jobCard.resolveVisitLines({ facts: { serviceId: 'svc1', isLawn: true, strip: { program: 'Lawn Care' } }, protocols: {}, catalog: [bag], dbh: () => ({}), deps: { buildPlan } });
+    expect(resolved.lines[0]).toMatchObject({ planUnavailable: true });
+    const [unavailableCard] = await build({ isLawn: true }, resolved.lines[0]);
+    expect(unavailableCard.spreader).toBeNull();
+    // A sold add-on with no plan mix (the fire-ant yard add-on): its governed 2 lb rate, not the catalog's; a hold keeps it.
+    const topchoice = { id: 'tc', name: 'Topchoice Granular Insecticide', rate_unit: 'lb', default_rate_per_1000: 1.5, label_verified_at: '2026-08-01' };
+    const governedLine = { raw: 'Topchoice Granular Insecticide — broadcast the granules', role: 'base', selected: true, product: topchoice, governed: { rate: '2 lb per 1,000 sq ft', ratePer1000: 2, rateUnit: 'lb' } };
+    const [governed] = await build({ isLawn: true }, governedLine);
+    expect(governed.spreader).toMatchObject({ setting: 8, text: 'Spreader: LESCO #8, start number. Weigh test at first use.' });
+    const [governedHeld] = await jobCard._test.buildProductCards({ facts: { customerId: 'c1', scheduledDate: '2026-09-04', isLawn: true }, lines: [governedLine], verdicts: [{ productId: 'tc', verdict: 'hold', reason: 'Synthetic hold' }], packSizes: {} });
+    expect(governedHeld.spreader).toMatchObject({ setting: 8 });
+    // A product not spread by spreader (a gel, a station, an injection) or not rated in lb gets no spreader line on a lawn visit.
+    for (const product of [{ ...topchoice, id: 'g', name: 'Synthetic gel', application_method: 'gel bait' }, { ...topchoice, id: 'st', name: 'Synthetic station', rate_unit: 'each' }]) {
+      const [card] = await build({ isLawn: true }, { raw: `${product.name} — as labeled`, role: 'base', selected: true, product });
+      expect(card.spreader).toBeNull();
+    }
+    // A spot row's staged rate rides through resolution to the lookup, ahead of the line text and the catalog rate.
+    const spotPlan = jest.fn().mockResolvedValue({ propertyGate: { month: 'Oct', visit: 10, blocks: [] }, mixCalculator: { items: [
+      { raw: 'Topchoice Granular Insecticide — 1 lb per 1,000 sq ft', role: 'conditional', conditional: true, selected: true, product: { id: 'tc' }, mix: null, spot: { ratePer1000: 2, rateUnit: 'lb' } },
+    ], conditionalOptions: [] } });
+    const spotLines = await jobCard.resolveVisitLines({ facts: { serviceId: 'svc1', isLawn: true, strip: { program: 'Lawn Care' } }, protocols: {}, catalog: [topchoice], dbh: () => ({}), deps: { buildPlan: spotPlan } });
+    const [spotCard] = await build({ isLawn: true }, spotLines.lines[0]);
+    expect(spotCard.spreader).toMatchObject({ setting: 8 });
+    const [pest] = await build({ isLawn: false }, { raw: 'Synthetic ant bait granule', role: 'base', selected: true, product: { id: 'a', name: 'Synthetic ant bait granule', rate_unit: 'lb', label_verified_at: '2026-08-01' } });
+    expect(pest.spreader).toBeNull();
+  });
+
   test('rotation history covers MOA-only products (P2)', async () => {
     const seen = [];
     const dbh = (table) => {

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// Visit Brief "Customer texts · last 7 days" (GATE_TECH_VISIT_TEXTS). Synthetic data only.
+// Visit Brief "Customer texts · since <day>" (GATE_TECH_VISIT_TEXTS). Synthetic data only.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
@@ -15,6 +15,15 @@ const renderWith = (request, byService = ON, service = SVC1) => render(<VisitTex
 const wait = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 describe('VisitTextsSection', () => {
+  it('owner 2026-11-27: names the day the texts start (the last visit, or 7 days back)', async () => {
+    const request = vi.fn(async () => ({
+      enabled: true, hidden: 0, since: '2026-10-20',
+      texts: [{ id: 't1', direction: 'inbound', at: '2026-10-21T15:00:00.000Z', body: 'Ants are back', photos: [] }],
+    }));
+    renderWith(request);
+    expect(await screen.findByText('Customer texts · since Oct 20')).toBeInTheDocument();
+  });
+
   it('shows each text with who sent it, the ET time, and photos that open full size', async () => {
     const open = vi.spyOn(window, 'open').mockImplementation(() => null);
     const request = vi.fn(async () => ({

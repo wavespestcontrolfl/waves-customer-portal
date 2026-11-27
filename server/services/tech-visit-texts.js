@@ -1,7 +1,8 @@
 /**
- * Technician Visit Brief: the customer's texts of the last 7 days (GATE_TECH_VISIT_TEXTS).
+ * Technician Visit Brief: the customer's texts since the last visit (GATE_TECH_VISIT_TEXTS).
  *
- * Read-only. One customer, one window (ET midnight 7 days before the visit date, up to now), sms_log only: no call_log,
+ * Read-only. One customer, one window (textWindowStart: ET midnight of the day of the customer's last completed visit, or of 7
+ * days before the visit date when that reaches further back, never more than 120 days; up to now), sms_log only: no call_log,
  * no transcript, no model call. Every row is sorted into one of three bins by textVerdict():
  *   show    a plain customer reply, or an office text of a visit-related type with no money word in it;
  *   hidden  money or unknown: counted, the body never leaves this module;
@@ -23,6 +24,8 @@ const psl = require('psl');
 const TWILIO_NUMBERS = require('../config/twilio-numbers');
 
 const WINDOW_DAYS = 7;
+// Owner 2026-11-27: "any text from the last visit or 7 days before the visit". The window never reaches past this.
+const MAX_WINDOW_DAYS = 120;
 const MAX_TEXTS = 40;
 const PAGE_SIZE = 200;
 const MAX_PAGES = 5;
@@ -225,6 +228,47 @@ function windowStart(scheduledDate) {
   return parseETDateTime(`${etDateString(addETDays(noon, -WINDOW_DAYS))}T00:00`);
 }
 
+// Where the texts start (owner 2026-11-27): ET midnight of the customer's last completed visit before the viewed day (a
+// completed record or a completed appointment, the later of the two), or the 7-day start when that is earlier, never earlier than MAX_WINDOW_DAYS before the visit. A record of the viewed day is not "the
+// last visit". No earlier visit, or a failed read, keeps the 7-day start.
+async function textWindowStart(db, svc) {
+  const sevenDay = windowStart(svc.scheduled_date);
+  if (!sevenDay || !svc.customer_id) return sevenDay;
+  const day = dateOnlyString(svc.scheduled_date);
+  const noon = parseETDateTime(`${day}T12:00`);
+  const floor = parseETDateTime(`${etDateString(addETDays(noon, -MAX_WINDOW_DAYS))}T00:00`);
+  // Two sources: a completed record, and a completed appointment (one can exist without the other). The later day wins.
+  // Either read failing keeps the 7-day start: a partial answer could name an older day and widen the window.
+  let failed = false;
+  const lastOf = async (read) => {
+    try {
+      const row = await read();
+      return row?.last ? dateOnlyString(row.last) : null;
+    } catch {
+      failed = true;
+      return null;
+    }
+  };
+  const fromRecords = await lastOf(() => db('service_records')
+    .where('customer_id', svc.customer_id)
+    .whereRaw("COALESCE(status, 'completed') = 'completed'")
+    .where('service_date', '<', day)
+    .max('service_date as last')
+    .first());
+  const fromVisits = await lastOf(() => db('scheduled_services')
+    .where('customer_id', svc.customer_id)
+    .where('status', 'completed')
+    .where('scheduled_date', '<', day)
+    .max('scheduled_date as last')
+    .first());
+  if (failed) return sevenDay;
+  const last = [fromRecords, fromVisits].filter(Boolean).sort().pop() || null;
+  if (!last) return sevenDay;
+  const lastStart = parseETDateTime(`${last}T00:00`);
+  if (!(lastStart < sevenDay)) return sevenDay;
+  return lastStart < floor ? floor : lastStart;
+}
+
 // The photos the customer sent (GATE_TECH_VISIT_TEXT_PHOTOS), as short-lived signed links. Only a stored object (S3 key) is
 // ever linked: a provider URL is never returned, and a photo that cannot be signed is left out.
 async function signedPhotos(row, sign) {
@@ -317,12 +361,12 @@ async function readStoredCodes(db, customerId) {
 }
 
 async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos = false } = {}) {
-  const start = windowStart(svc.scheduled_date);
-  if (!svc.customer_id || !start) return { texts: [], hidden: 0 };
+  if (!svc.customer_id || !windowStart(svc.scheduled_date)) return { texts: [], hidden: 0 };
   const signer = sign || ((media) => require('./sms-media').signMediaForClient(media));
   // The stored codes first: when they cannot be read, no text is read, shown or signed.
   const codes = await readStoredCodes(db, svc.customer_id);
   if (codes === false) return { unavailable: true, texts: [], hidden: 0 };
+  const start = await textWindowStart(db, svc);
   const rows = await windowRows(db, svc.customer_id, start, now);
   let hidden = 0;
   const shown = [];
@@ -340,7 +384,7 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
     photos: withPhotos ? await signedPhotos(row, signer) : [],
     photoCount: photosOf(row).length,
   })));
-  return { texts, hidden };
+  return { texts, hidden, since: etDateString(start) };
 }
 
-module.exports = { sequenceHeldIds, screenBodyForTechnician, readStoredCodes, textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };
+module.exports = { sequenceHeldIds, screenBodyForTechnician, readStoredCodes, textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, textWindowStart, visitTexts, WINDOW_DAYS, MAX_WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };

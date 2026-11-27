@@ -1,12 +1,14 @@
 /**
- * Whole-home sizing for the cockroach treatment, the bed bug treatment and the yearly rodent guarantee (owner ruling
- * 2026-11-26 "fix this", same rule as flea: total living area, not the ground-floor footprint). One-time pest and the
- * recurring pest program are NOT part of this change.
+ * Whole-home sizing for the bed bug treatment and the yearly rodent guarantee (owner ruling 2026-11-26 "fix this", same rule
+ * as flea: total living area, not the ground-floor footprint). One-time pest and the recurring pest program are NOT part of
+ * this change. The cockroach treatment was part of it in #8666 and went back to the ground-floor footprint (owner 2026-11-27
+ * "skip the cockroach"): no quote was priced on its whole-home basis, so it prices on the footprint for every quote, whatever
+ * stamp the estimate carries, and carries no stamp of its own.
  *
  * Replay contract (the #8654 pattern, plan-wide): the engine stamps pricingMetadata.legacyWholeHomeSizing on every run, false
- * on a fresh quote. A priced estimate with no stamp, or one that kept only inputs asking for one of the three services, was
+ * on a fresh quote. A priced estimate with no stamp, or one that kept only inputs asking for bed bug or the guarantee, was
  * quoted on the ground-floor footprint and keeps it (estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), and
- * a legacy quote runs main's code path unchanged. One of the three added to a legacy estimate stays on the footprint.
+ * a legacy quote runs main's code path unchanged. One of the two added to a legacy estimate stays on the footprint.
  * Regressions it guards: a sent quote rising when the rule ships; an old quote read as new for lack of a stamp on any save
  * shape (lines only, mapped result, snapshot only, a dropped snapshot bundle, inputs only); the bed bug added-room rule
  * (#8648) and this size basis disagreeing; the browser fallback disagreeing with the server.
@@ -59,28 +61,40 @@ const roach = (homeSqFt, stories, extra) => lineOf(generateEstimate({ ...home(ho
 const bedBug = (homeSqFt, stories, extra) => lineOf(generateEstimate({ ...home(homeSqFt, stories, extra), services: BED_BUG_SERVICES }), 'bed_bug');
 const guarantee = (homeSqFt, stories, extra, services = GUARANTEE_SERVICES) => lineOf(generateEstimate({ ...home(homeSqFt, stories, extra), services }), 'rodent_guarantee');
 
-describe('cockroach treatment prices on the whole home', () => {
-  test('a two-story home pays what a one-story home of the same living area pays (2,800 sq ft: $289, was $202.50)', () => {
-    expect(roach(2800, 1).price).toBe(289);
-    expect(roach(2800, 2).price).toBe(289);
-    expect(roach(2800, 2, { legacyWholeHomeSizing: true }).price).toBe(202.5);
-  });
+describe('cockroach treatment prices on the ground-floor footprint (owner 2026-11-27), as before #8666', () => {
+  const STAMPS = [{}, { legacyWholeHomeSizing: false }, { legacyWholeHomeSizing: true }];
+  const planRoach = (homeSqFt, stories, roachType, extra) => lineOf(generateEstimate({
+    ...home(homeSqFt, stories, extra), services: { pest: { frequency: 'quarterly', roachType } },
+  }), 'pest_initial_roach');
 
-  test('2,000 / 2,800 / 3,500 sq ft, one and two stories', () => {
-    for (const homeSqFt of HOMES) {
-      expect(roach(homeSqFt, 2).price).toBe(roach(homeSqFt, 1).price);
+  test('a two-story 2,800 sq ft home: stand-alone $202.50, plan-added regular $119, plan-added German $169, under every stamp', () => {
+    for (const extra of STAMPS) {
+      expect(roach(2800, 2, extra).price).toBe(202.5);
+      expect(planRoach(2800, 2, 'REGULAR', extra).price).toBe(119);
+      expect(planRoach(2800, 2, 'GERMAN', extra).price).toBe(169);
     }
-    expect(HOMES.map((homeSqFt) => roach(homeSqFt, 2).price)).toEqual([239, 289, 289]);
-    // The ground-floor basis it replaces.
-    expect(HOMES.map((homeSqFt) => roach(homeSqFt, 2, { legacyWholeHomeSizing: true }).price)).toEqual([202.5, 202.5, 239]);
+    // A one-story home of the same living area has a larger footprint and a higher bracket.
+    expect(roach(2800, 1).price).toBe(289);
   });
 
-  test('the roach added by a recurring pest plan sizes on the whole home too', () => {
-    const planRoach = (homeSqFt, stories, extra) => lineOf(generateEstimate({
-      ...home(homeSqFt, stories, extra), services: { pest: { frequency: 'quarterly', roachType: 'REGULAR' } },
-    }), 'pest_initial_roach');
-    expect(planRoach(3000, 2).price).toBe(169);
-    expect(planRoach(3000, 2, { legacyWholeHomeSizing: true }).price).toBe(139);
+  test('an estimate stamped legacyWholeHomeSizing false (a whole-home quote) still prices the cockroach treatment on the footprint', () => {
+    const stamped = { ...home(2800, 2), legacyWholeHomeSizing: false, services: { ...ROACH_SERVICES, ...bedBugServices(1) } };
+    const fresh = generateEstimate(stamped);
+    expect(fresh.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+    expect(lineOf(fresh, 'pest_initial_roach')).toMatchObject({ price: 202.5, footprintUsed: 1400 });
+    // The bed bug line beside it is on the whole home.
+    expect(lineOf(fresh, 'bed_bug')).toMatchObject({ price: 519, homeSizeBasis: 'total_living_area' });
+    // The same through the saved-estimate replay path.
+    const saved = { engineInputs: stamped, engineResult: fresh };
+    expect(replay.savedFloorReplaySignals(saved).legacyWholeHomeSizing).toBe(false);
+    expect(lineOf(generateEstimate(extractEngineInputs(saved)), 'pest_initial_roach').price).toBe(202.5);
+  });
+
+  test('2,000 / 2,800 / 3,500 sq ft two-story homes price their footprint bracket, whatever the stamp', () => {
+    for (const extra of STAMPS) {
+      expect(HOMES.map((homeSqFt) => roach(homeSqFt, 2, extra).price)).toEqual([202.5, 202.5, 239]);
+    }
+    expect(planRoach(3000, 2, 'REGULAR').price).toBe(139);
   });
 
   test('the recurring pest program itself did not move (footprint-priced, out of scope)', () => {
@@ -88,36 +102,33 @@ describe('cockroach treatment prices on the whole home', () => {
     expect(pest({}).annual).toBe(pest({ legacyWholeHomeSizing: true }).annual);
   });
 
-  test('the line says which basis priced it', () => {
-    expect(roach(2800, 2).homeSizeBasis).toBe('total_living_area');
-    expect(roach(2800, 2, { legacyWholeHomeSizing: true }).homeSizeBasis).toBe('ground_floor');
-    expect(roach(2800, 2).legacyWholeHomeSizing).toBe(false);
-    expect(roach(2800, 2, { legacyWholeHomeSizing: true }).legacyWholeHomeSizing).toBe(true);
+  test('the line carries no whole-home basis or stamp', () => {
+    for (const extra of STAMPS) {
+      const line = roach(2800, 2, extra);
+      expect(line).not.toHaveProperty('homeSizeBasis');
+      expect(line).not.toHaveProperty('legacyWholeHomeSizing');
+      expect(line).not.toHaveProperty('fleaPostedHomeSqFt');
+    }
   });
 
-  test('an unclear size never raises a price without review: a building measurement on a multi-story home goes to review', () => {
-    const line = sp.pricePestInitialRoach({ buildingSqFt: 2000, stories: 2 }, { roachType: 'regular', standalone: true });
-    // Read as a living area (never inflated): the lower bracket, with a person confirming the total.
-    expect(line.price).toBe(239);
-    expect(line.requiresManualReview).toBe(true);
-    expect(line.manualReviewReasons).toContain('home_size_source_unclear');
-    const clear = sp.pricePestInitialRoach({ homeSqFt: 2000, stories: 2 }, { roachType: 'regular', standalone: true });
-    expect(clear.manualReviewReasons).not.toContain('home_size_source_unclear');
-    // Beside an unmeasured building the first reason is unchanged (the website quote and the lead draft report reasons[0]).
-    const both = sp.pricePestInitialRoach({ homeSqFt: 2600, buildingSqFt: 2600, stories: 2 }, { roachType: 'regular', standalone: true, buildingSizeMeasured: false });
-    expect(both.manualReviewReasons).toEqual(['building_size_unmeasured_pest_footprint', 'home_size_source_unclear']);
-    // A quote priced before the rule carries neither the size reason nor the warning.
-    const legacy = sp.pricePestInitialRoach({ buildingSqFt: 2000, stories: 2, wholeHomeSizingLegacy: true }, { roachType: 'regular', standalone: true });
-    expect(legacy.manualReviewReasons).not.toContain('home_size_source_unclear');
-    expect(legacy.homeSizeBasis).toBe('ground_floor');
-  });
-
-  test('the living area beats a supplied footprint; a footprint alone is read x stories; nothing known keeps the 2,000 review fallback', () => {
-    expect(sp.pricePestInitialRoach({ homeSqFt: 2800, footprint: 900, stories: 2 }, { roachType: 'regular', standalone: true }).price).toBe(289);
-    expect(sp.pricePestInitialRoach({ footprint: 1400, stories: 2 }, { roachType: 'regular', standalone: true }).price).toBe(289);
-    const unknown = sp.pricePestInitialRoach({ stories: 2 }, { roachType: 'regular', standalone: true });
+  test('the pricer reads no whole-home key: legacy, commercial and measured-home keys change nothing', () => {
+    const regular = { roachType: 'regular', standalone: true };
+    for (const property of [{ buildingSqFt: 2000, stories: 2 }, { homeSqFt: 2800, footprint: 900, stories: 2 }, { footprint: 1400, stories: 2 }, { stories: 2 }]) {
+      const plain = sp.pricePestInitialRoach(property, regular);
+      for (const extra of [{ wholeHomeSizingLegacy: true }, { wholeHomeSizingCommercial: true }, { fleaMeasuredHomeSqFt: 5000, fleaHomeSqFtIsDefault: true }]) {
+        expect(sp.pricePestInitialRoach({ ...property, ...extra }, regular)).toEqual(plain);
+      }
+      expect(plain.manualReviewReasons).not.toContain('home_size_source_unclear');
+    }
+    // main's footprint answers: the supplied footprint wins over the living area; no size keeps the 2,000 review fallback.
+    expect(sp.pricePestInitialRoach({ homeSqFt: 2800, footprint: 900, stories: 2 }, regular)).toMatchObject({ price: 202.5, footprintUsed: 900 });
+    expect(sp.pricePestInitialRoach({ footprint: 1400, stories: 2 }, regular)).toMatchObject({ price: 202.5, footprintUsed: 1400 });
+    const unknown = sp.pricePestInitialRoach({ stories: 2 }, regular);
     expect(unknown.footprintSource).toBe('fallback_2000');
     expect(unknown.requiresManualReview).toBe(true);
+    // Beside an unmeasured building the only reason is the unmeasured footprint.
+    expect(sp.pricePestInitialRoach({ homeSqFt: 2600, buildingSqFt: 2600, stories: 2 }, { ...regular, buildingSizeMeasured: false }).manualReviewReasons)
+      .toEqual(['building_size_unmeasured_pest_footprint']);
   });
 
   test('a unit-scoped association aggregate keeps the pest footprint rules (never prices a summed living area)', () => {
@@ -256,11 +267,10 @@ describe('a commercial building keeps the footprint path (the whole-home rule is
       .toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2000, footprintSource: 'homeSqFt' });
   });
 
-  test('the basis helper reads the engine\'s commercial verdict, for the cockroach treatment and the guarantee size too', () => {
+  test('the basis helper reads the engine\'s commercial verdict for the guarantee size; the cockroach treatment is on the footprint either way', () => {
     const commercial = { homeSqFt: 2000, footprintSqFt: 6000, footprint: 6000, stories: 1, wholeHomeSizingCommercial: true };
-    expect(sp.pricePestInitialRoach(commercial, { roachType: 'regular' })).toMatchObject({ homeSizeBasis: 'ground_floor', footprintUsed: 6000 });
-    expect(sp.pricePestInitialRoach({ ...commercial, wholeHomeSizingCommercial: false }, { roachType: 'regular' }))
-      .toMatchObject({ homeSizeBasis: 'total_living_area', footprintUsed: 2000 });
+    expect(sp.pricePestInitialRoach(commercial, { roachType: 'regular' })).toMatchObject({ footprintUsed: 6000 });
+    expect(sp.pricePestInitialRoach({ ...commercial, wholeHomeSizingCommercial: false }, { roachType: 'regular' })).toMatchObject({ footprintUsed: 6000 });
     expect(sp.resolveGuaranteeHomeSize(commercial)).toEqual({ homeSqFt: 6000, lineFields: {} });
   });
 });
@@ -359,9 +369,10 @@ describe('the yearly rodent guarantee prices on the whole home', () => {
     const unmeasured = (extra) => lineOf(generateEstimate({ stories: 1, lotSqFt: 9000, ...extra, services: GUARANTEE_SERVICES }), 'rodent_guarantee');
     const line = unmeasured();
     expect(line?.price).toBe(199);
-    // The shared resolver's own reason for "no usable size" rides on the line, as it does on a cockroach or bed bug line.
+    // The shared resolver's own reason for "no usable size" rides on the line (the pest footprint fallback's reason for the
+    // engine profile's zero footprint).
     expect(line.requiresManualReview).toBe(true);
-    expect(line.manualReviewReasons).toEqual(roach(undefined, 1).manualReviewReasons);
+    expect(line.manualReviewReasons).toEqual(['invalid_or_zero_pest_footprint']);
     expect(line.manualReviewReasons.length).toBeGreaterThan(0);
     expect(line.manualReviewReasons).not.toContain('home_size_source_unclear');
     expect(line.warnings.length).toBeGreaterThan(0);
@@ -379,37 +390,39 @@ describe('the yearly rodent guarantee prices on the whole home', () => {
     expect(legacy).not.toHaveProperty('warnings');
   });
 
-  test('the public price sweep sizes the cockroach and bed bug rows on home size (a 2-story 2,150 sq ft home reads the 2,150 bracket)', () => {
+  test('the public price sweep sizes the bed bug row on home size and the cockroach row on the footprint', () => {
     const src = fs.readFileSync(path.join(__dirname, '../services/pricing-engine/public-ranges.js'), 'utf8');
-    expect(src).toContain('sp.pricePestInitialRoach({ homeSqFt, stories: 1 }');
+    expect(src).toContain('sp.pricePestInitialRoach({ footprint: f }');
     expect(src).toContain('{ homeSqFt, stories: 1 },');
   });
 });
 
 describe('replay: a quote priced before this change keeps the ground-floor basis', () => {
-  const quoteInputs = (homeSqFt, stories, services = ROACH_SERVICES) => home(homeSqFt, stories, { services });
-  // main, two-story 2,800 sq ft: stand-alone cockroach $202.50, bed bug two rooms $821, rodent guarantee $249 (4,500 sq ft: $249).
-  const soldRoach = { engineResult: { lineItems: [{ service: 'pest_initial_roach', price: 202.5 }] }, engineInputs: quoteInputs(2800, 2) };
+  // The vehicle for the stamp: the rodent guarantee on a two-story 4,500 sq ft home ($299 on the whole home, main's $249 on its
+  // 2,250 sq ft ground floor).
+  const quoteInputs = (homeSqFt, stories, services = GUARANTEE_SERVICES) => home(homeSqFt, stories, { services });
+  const soldGuarantee = { engineResult: { lineItems: [{ service: 'rodent_guarantee', price: 249 }] }, engineInputs: quoteInputs(4500, 2) };
 
-  test('the engine stamps the basis on every run, on the metadata and on the three lines', () => {
-    expect(generateEstimate(quoteInputs(2800, 2)).pricingMetadata.legacyWholeHomeSizing).toBe(false);
-    expect(generateEstimate({ ...quoteInputs(2800, 2), legacyWholeHomeSizing: true }).pricingMetadata.legacyWholeHomeSizing).toBe(true);
-    for (const line of [roach(2800, 2), bedBug(2800, 2), guarantee(2800, 2)]) {
+  test('the engine stamps the basis on every run, on the metadata and on the bed bug and guarantee lines (never the cockroach line)', () => {
+    expect(generateEstimate(quoteInputs(4500, 2)).pricingMetadata.legacyWholeHomeSizing).toBe(false);
+    expect(generateEstimate({ ...quoteInputs(4500, 2), legacyWholeHomeSizing: true }).pricingMetadata.legacyWholeHomeSizing).toBe(true);
+    for (const line of [bedBug(2800, 2), guarantee(2800, 2)]) {
       expect(line.legacyWholeHomeSizing).toBe(false);
     }
-    for (const line of [roach(2800, 2, { legacyWholeHomeSizing: true }), bedBug(2800, 2, { legacyWholeHomeSizing: true }), guarantee(2800, 2, { legacyWholeHomeSizing: true })]) {
+    for (const line of [bedBug(2800, 2, { legacyWholeHomeSizing: true }), guarantee(2800, 2, { legacyWholeHomeSizing: true })]) {
       expect(line.legacyWholeHomeSizing).toBe(true);
     }
+    expect(roach(2800, 2)).not.toHaveProperty('legacyWholeHomeSizing');
     // Only a literal true selects the old basis.
-    expect(roach(2800, 2, { legacyWholeHomeSizing: 'true' }).price).toBe(289);
-    expect(roach(2800, 2, { legacyWholeHomeSizing: undefined }).price).toBe(289);
+    expect(guarantee(4500, 2, { legacyWholeHomeSizing: 'true' }).price).toBe(299);
+    expect(guarantee(4500, 2, { legacyWholeHomeSizing: undefined }).price).toBe(299);
   });
 
   test('a priced estimate with no stamp was quoted on the ground floor: it replays main\'s price through the real signal reader', () => {
-    expect(replay.savedLegacyWholeHomeSizingSignal(soldRoach)).toEqual({ legacyWholeHomeSizing: true });
-    expect(replay.savedFloorReplaySignals(soldRoach).legacyWholeHomeSizing).toBe(true);
-    const replayed = generateEstimate(extractEngineInputs(soldRoach));
-    expect(lineOf(replayed, 'pest_initial_roach').price).toBe(202.5);
+    expect(replay.savedLegacyWholeHomeSizingSignal(soldGuarantee)).toEqual({ legacyWholeHomeSizing: true });
+    expect(replay.savedFloorReplaySignals(soldGuarantee).legacyWholeHomeSizing).toBe(true);
+    const replayed = generateEstimate(extractEngineInputs(soldGuarantee));
+    expect(lineOf(replayed, 'rodent_guarantee').price).toBe(249);
     expect(replayed.pricingMetadata.legacyWholeHomeSizing).toBe(true);
   });
 
@@ -432,33 +445,33 @@ describe('replay: a quote priced before this change keeps the ground-floor basis
   });
 
   test('a stamped estimate reads back the basis it was priced with, and a fresh draft stays on the whole home through the replay path', () => {
-    const fresh = generateEstimate(quoteInputs(2800, 2));
-    const saved = { engineInputs: quoteInputs(2800, 2), engineResult: fresh, result: mapV1ToLegacyShape(fresh) };
+    const fresh = generateEstimate(quoteInputs(4500, 2));
+    const saved = { engineInputs: quoteInputs(4500, 2), engineResult: fresh, result: mapV1ToLegacyShape(fresh) };
     expect(replay.savedFloorReplaySignals(saved).legacyWholeHomeSizing).toBe(false);
-    expect(lineOf(generateEstimate(extractEngineInputs(saved)), 'pest_initial_roach').price).toBe(289);
-    const older = generateEstimate({ ...quoteInputs(2800, 2), legacyWholeHomeSizing: true });
+    expect(lineOf(generateEstimate(extractEngineInputs(saved)), 'rodent_guarantee').price).toBe(299);
+    const older = generateEstimate({ ...quoteInputs(4500, 2), legacyWholeHomeSizing: true });
     expect(replay.savedLegacyWholeHomeSizingSignal({ engineResult: older }).legacyWholeHomeSizing).toBe(true);
   });
 
   test('mapped result: the v1-legacy-mapper output keeps the estimate-wide stamp, new and legacy', () => {
-    const fresh = mapV1ToLegacyShape(generateEstimate(quoteInputs(2800, 2)));
+    const fresh = mapV1ToLegacyShape(generateEstimate(quoteInputs(4500, 2)));
     expect(fresh.pricingMetadata.legacyWholeHomeSizing).toBe(false);
-    const persisted = { engineInputs: quoteInputs(2800, 2), result: fresh };
+    const persisted = { engineInputs: quoteInputs(4500, 2), result: fresh };
     expect(replay.savedLegacyWholeHomeSizingSignal(persisted).legacyWholeHomeSizing).toBe(false);
-    expect(lineOf(generateEstimate(extractEngineInputs(persisted)), 'pest_initial_roach').price).toBe(289);
-    const legacy = { engineInputs: quoteInputs(2800, 2), result: mapV1ToLegacyShape(generateEstimate({ ...quoteInputs(2800, 2), legacyWholeHomeSizing: true })) };
+    expect(lineOf(generateEstimate(extractEngineInputs(persisted)), 'rodent_guarantee').price).toBe(299);
+    const legacy = { engineInputs: quoteInputs(4500, 2), result: mapV1ToLegacyShape(generateEstimate({ ...quoteInputs(4500, 2), legacyWholeHomeSizing: true })) };
     expect(legacy.result.pricingMetadata.legacyWholeHomeSizing).toBe(true);
-    expect(lineOf(generateEstimate(extractEngineInputs(legacy)), 'pest_initial_roach').price).toBe(202.5);
+    expect(lineOf(generateEstimate(extractEngineInputs(legacy)), 'rodent_guarantee').price).toBe(249);
   });
 
   test('a save path that drops pricingMetadata still reads the stamp from the lines', () => {
-    const fresh = roach(2800, 2);
+    const fresh = guarantee(4500, 2);
     expect(replay.savedLegacyWholeHomeSizingSignal({ engineResult: { lineItems: [fresh] } })).toEqual({ legacyWholeHomeSizing: false });
     expect(replay.savedLegacyWholeHomeSizingSignal({ engineResult: { lineItems: [{ ...fresh, legacyWholeHomeSizing: true }] } }))
       .toEqual({ legacyWholeHomeSizing: true });
   });
 
-  test('the same replay holds for the bed bug and rodent guarantee lines, and for the roach a pest plan adds', () => {
+  test('the same replay holds for the bed bug line; the roach a pest plan adds prices on the footprint stamped or not', () => {
     // Unstamped, so it predates the bed bug room rule too: main's old room curve on the footprint (3,500 sq ft, two-story, two rooms).
     const storedBedBug = { engineResult: { lineItems: [{ service: 'bed_bug', price: 786 }] }, engineInputs: quoteInputs(3500, 2, BED_BUG_SERVICES) };
     expect(lineOf(generateEstimate(extractEngineInputs(storedBedBug)), 'bed_bug').price).toBe(786);
@@ -467,35 +480,32 @@ describe('replay: a quote priced before this change keeps the ground-floor basis
     const planServices = { pest: { frequency: 'quarterly', roachType: 'REGULAR' } };
     const storedPlan = { engineResult: { lineItems: [{ service: 'pest_initial_roach', price: 119 }] }, engineInputs: quoteInputs(2800, 2, planServices) };
     expect(lineOf(generateEstimate(extractEngineInputs(storedPlan)), 'pest_initial_roach').price).toBe(119);
-    expect(lineOf(generateEstimate(quoteInputs(2800, 2, planServices)), 'pest_initial_roach').price).toBe(169);
+    expect(lineOf(generateEstimate(quoteInputs(2800, 2, planServices)), 'pest_initial_roach').price).toBe(119);
   });
 
-  test('an inputs-only estimate asking for one of the three reads legacy; one asking for none pins nothing; a stamped draft stays new', () => {
+  test('an inputs-only estimate asking for bed bug or the guarantee reads legacy; one asking for neither pins nothing; a stamped draft stays new', () => {
     const inputsOnly = (services) => ({ engineInputs: quoteInputs(2800, 2, services) });
-    for (const services of [ROACH_SERVICES, BED_BUG_SERVICES, GUARANTEE_SERVICES, { pest: { frequency: 'quarterly', roachType: 'REGULAR' } }]) {
+    for (const services of [BED_BUG_SERVICES, GUARANTEE_SERVICES]) {
       expect(replay.savedLegacyWholeHomeSizingSignal(inputsOnly(services))).toEqual({ legacyWholeHomeSizing: true });
       // The stored text form reads the same.
       expect(replay.savedLegacyWholeHomeSizingSignal(JSON.stringify(inputsOnly(services)))).toEqual({ legacyWholeHomeSizing: true });
     }
-    expect(lineOf(generateEstimate(extractEngineInputs(inputsOnly(ROACH_SERVICES))), 'pest_initial_roach').price).toBe(202.5);
     expect(lineOf(generateEstimate(extractEngineInputs(inputsOnly(bedBugServices(1)))), 'bed_bug').price).toBe(472);
-    // A pest plan with no roach, or another service, asks for none of the three.
-    for (const services of [{ pest: { frequency: 'quarterly' } }, { pest: { frequency: 'quarterly', roachType: 'none' } }, { lawn: {} }, { exclusion: { simple: 2 } }]) {
+    // A cockroach request (stand-alone or added by a pest plan), a pest plan with no roach, or another service: no evidence.
+    for (const services of [ROACH_SERVICES, { pest: { frequency: 'quarterly', roachType: 'REGULAR' } }, { pest: { frequency: 'quarterly' } },
+      { pest: { frequency: 'quarterly', roachType: 'none' } }, { lawn: {} }, { exclusion: { simple: 2 } }]) {
       expect(replay.savedLegacyWholeHomeSizingSignal(inputsOnly(services))).toEqual({ legacyWholeHomeSizing: undefined });
     }
-    expect(replay.savedLegacyWholeHomeSizingSignal({ ...inputsOnly(ROACH_SERVICES), pricingMetadata: { legacyWholeHomeSizing: false } }))
+    expect(lineOf(generateEstimate(extractEngineInputs(inputsOnly(ROACH_SERVICES))), 'pest_initial_roach').price).toBe(202.5);
+    expect(replay.savedLegacyWholeHomeSizingSignal({ ...inputsOnly(BED_BUG_SERVICES), pricingMetadata: { legacyWholeHomeSizing: false } }))
       .toEqual({ legacyWholeHomeSizing: false });
-    // The builder request names its services as tokens; the plan's roach rides its option.
-    for (const selectedServices of [['ROACH'], ['BEDBUG'], ['RODENT_GUARANTEE'], ['bedbug']]) {
+    // The builder request names its services as tokens.
+    for (const selectedServices of [['BEDBUG'], ['RODENT_GUARANTEE'], ['bedbug']]) {
       expect(replay.savedLegacyWholeHomeSizingSignal({ engineRequest: { selectedServices } })).toEqual({ legacyWholeHomeSizing: true });
     }
-    expect(replay.savedLegacyWholeHomeSizingSignal({ engineRequest: { selectedServices: ['PEST'], options: { roachModifier: 'REGULAR' } } }))
-      .toEqual({ legacyWholeHomeSizing: true });
-    expect(replay.savedLegacyWholeHomeSizingSignal({ engineRequest: { selectedServices: ['PEST'], options: { recurringRoachType: 'german' } } }))
-      .toEqual({ legacyWholeHomeSizing: true });
-    expect(replay.savedLegacyWholeHomeSizingSignal({ engineRequest: { selectedServices: ['LAWN'], options: { standaloneRoachTreatment: true } } }))
-      .toEqual({ legacyWholeHomeSizing: true });
-    for (const request of [{ selectedServices: ['PEST'] }, { selectedServices: ['PEST'], options: { roachModifier: 'NONE' } }, { selectedServices: ['EXCLUSION', 'LAWN'] }]) {
+    for (const request of [{ selectedServices: ['ROACH'] }, { selectedServices: ['PEST'], options: { roachModifier: 'REGULAR' } },
+      { selectedServices: ['PEST'], options: { recurringRoachType: 'german' } }, { selectedServices: ['LAWN'], options: { standaloneRoachTreatment: true } },
+      { selectedServices: ['PEST'] }, { selectedServices: ['PEST'], options: { roachModifier: 'NONE' } }, { selectedServices: ['EXCLUSION', 'LAWN'] }]) {
       expect(replay.savedLegacyWholeHomeSizingSignal({ engineRequest: request })).toEqual({ legacyWholeHomeSizing: undefined });
     }
   });
@@ -508,16 +518,17 @@ describe('replay: a quote priced before this change keeps the ground-floor basis
     expect({ legacyWholeHomeSizing: true, ...replay.savedFloorReplaySignals({}) }.legacyWholeHomeSizing).toBeUndefined();
   });
 
-  test('plan-wide: one of the three added to a legacy estimate stays on the footprint, on the revision and on every later replay', () => {
+  test('plan-wide: one of the two added to a legacy estimate stays on the footprint, on the revision and on every later replay', () => {
     const base = home(2800, 2, { legacyWholeHomeSizing: true, services: { ...ROACH_SERVICES, ...bedBugServices(1) } });
     // The add-service rail names the added service; this rule has no per-service marker, so it changes nothing.
     const revised = generateEstimate({ ...base, addedServiceKeys: ['pest_initial_roach', 'bed_bug'], currentRulesServices: ['pest_initial_roach', 'bed_bug'] });
     expect(lineOf(revised, 'pest_initial_roach').price).toBe(202.5);
     expect(lineOf(revised, 'bed_bug').price).toBe(472);
     expect(revised.pricingMetadata.legacyWholeHomeSizing).toBe(true);
-    expect(lineOf(revised, 'pest_initial_roach').legacyWholeHomeSizing).toBe(true);
+    expect(lineOf(revised, 'bed_bug').legacyWholeHomeSizing).toBe(true);
     const signals = replay.savedFloorReplaySignals({ engineResult: revised });
     expect(signals.legacyWholeHomeSizing).toBe(true);
+    expect(lineOf(generateEstimate({ ...base, ...signals }), 'bed_bug').price).toBe(472);
     expect(lineOf(generateEstimate({ ...base, ...signals }), 'pest_initial_roach').price).toBe(202.5);
   });
 
@@ -582,10 +593,10 @@ describe('replay: a quote priced before this change keeps the ground-floor basis
     const lead = fs.readFileSync(path.join(__dirname, '../services/lead-estimate-automation.js'), 'utf8');
     expect(lead).toContain('legacyWholeHomeSizing: estimate.pricingMetadata.legacyWholeHomeSizing');
     const { compactLineItem } = require('../services/lead-estimate-automation');
-    expect(compactLineItem(roach(2800, 2)).legacyWholeHomeSizing).toBe(false);
-    expect(compactLineItem(roach(2800, 2, { legacyWholeHomeSizing: true })).legacyWholeHomeSizing).toBe(true);
+    expect(compactLineItem(guarantee(2800, 2)).legacyWholeHomeSizing).toBe(false);
+    expect(compactLineItem(guarantee(2800, 2, { legacyWholeHomeSizing: true })).legacyWholeHomeSizing).toBe(true);
     // The compacted shape (a line with its stamp, no metadata) reads back.
-    expect(replay.savedLegacyWholeHomeSizingSignal({ engineResult: { lineItems: [compactLineItem(roach(2800, 2))] } })).toEqual({ legacyWholeHomeSizing: false });
+    expect(replay.savedLegacyWholeHomeSizingSignal({ engineResult: { lineItems: [compactLineItem(guarantee(2800, 2))] } })).toEqual({ legacyWholeHomeSizing: false });
   });
 
   test('a posted value never switches the rule, and the saved stamp reaches the add-service revision and the list-price replay', () => {
@@ -601,7 +612,7 @@ describe('replay: a quote priced before this change keeps the ground-floor basis
 });
 
 
-describe('website quote: the server lookup\'s measured home replaces the wizard\'s 2,000 sq ft placeholder for every whole-home service', () => {
+describe('website quote: the server lookup\'s measured home replaces the wizard\'s 2,000 sq ft placeholder for bed bug and the guarantee (never the cockroach treatment)', () => {
   const { serverRecomputeFromEstimateData } = require('../services/admin-estimate-persistence');
   const { fleaSizeReplayOverrides, fleaPriceRecord, generateWithFleaRecord } = require('../services/estimate-flea-size-replay');
   // What public-quote.js hands the engine when the wizard kept its placeholder and the lookup measured a 2,800 sq ft home.
@@ -613,50 +624,58 @@ describe('website quote: the server lookup\'s measured home replaces the wizard\
     homeSizeBasis: line.homeSizeBasis, footprintUsed: line.footprintUsed, footprintSource: line.footprintSource, fleaPostedHomeSqFt: line.fleaPostedHomeSqFt,
   });
 
-  test('cockroach quotes $289 on the measured 2,800 sq ft home, not $239 on the placeholder; bed bug and the plan-added roach follow', () => {
-    const line = lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach');
-    expect(line).toMatchObject({ price: 289, footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
-    expect(line.requiresManualReview).toBe(false);
-    expect(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach').price).toBe(239);
+  test('bed bug quotes on the measured 2,800 sq ft home; the cockroach treatment stays on the footprint of the posted size', () => {
     expect(lineOf(generateEstimate(website(bedBugServices(1))), 'bed_bug')).toMatchObject({ price: 519, footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 });
-    expect(lineOf(generateEstimate(website({ pest: { frequency: 'quarterly', roachType: 'regular' } })), 'pest_initial_roach')).toMatchObject({ price: 169, footprintUsed: 2800 });
+    // The cockroach line is the line the placeholder alone prices (main's line before #8666), stand-alone and plan-added.
+    for (const services of [ROACH_SERVICES, { pest: { frequency: 'quarterly', roachType: 'regular' } }]) {
+      const measured = lineOf(generateEstimate(website(services)), 'pest_initial_roach');
+      expect(measured).toEqual(lineOf(generateEstimate(placeholderOnly(services)), 'pest_initial_roach'));
+      expect(measured.footprintSource).not.toBe('lookup_measured_home');
+      expect(measured).not.toHaveProperty('fleaPostedHomeSqFt');
+    }
+    expect(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach').price).toBe(202.5);
+    expect(lineOf(generateEstimate(website({ pest: { frequency: 'quarterly', roachType: 'regular' } })), 'pest_initial_roach').price).toBe(119);
     expect(lineOf(generateEstimate(website(GUARANTEE_SERVICES)), 'rodent_guarantee').tier).toBe('complex');
     // The pest plan itself stays on the footprint of the posted size (out of scope).
     expect(lineOf(generateEstimate(website({ pest: { frequency: 'quarterly' } })), 'pest_control').footprintUsed)
       .toBe(lineOf(generateEstimate(placeholderOnly({ pest: { frequency: 'quarterly' } })), 'pest_control').footprintUsed);
     // A quote priced before the rule ignores the measurement: main's footprint price.
-    expect(lineOf(generateEstimate({ ...website(ROACH_SERVICES), legacyWholeHomeSizing: true }), 'pest_initial_roach')).toMatchObject({ price: 202.5, footprintSource: 'footprint' });
+    expect(lineOf(generateEstimate({ ...website(bedBugServices(1)), legacyWholeHomeSizing: true }), 'bed_bug')).toMatchObject({ price: 472, homeSizeBasis: 'ground_floor' });
   });
 
   test('the route sends the measurement whatever the request asks for, but only while the home size is the default; a confirmed size wins', () => {
     const route = fs.readFileSync(path.join(__dirname, '../routes/public-quote.js'), 'utf8');
-    // Not tied to a flea request any more: the cockroach and bed bug pricers read the same two keys.
+    // Not tied to a flea request any more: the bed bug and guarantee pricers read the same two keys.
     expect(route).toMatch(/const fleaMeasuredHomeSqFt = !commercialDetected && homeSizeIsDefault\n\s+\? trustedFleaHomeSqFt\(trustedTurf, trustedRecord\)\n\s+: null;/);
     // The default test is unchanged: no posted size, or the wizard's untouched 2,000 placeholder (never a confirmed size).
     expect(route).toContain("const homeSizeIsDefault = !(Number(homeSqFt) > 0) || (wizardShaped && buildingSizeConfirmed !== true && Number(homeSqFt) === 2000);");
     expect(route).toContain("...(fleaMeasuredHomeSqFt ? { fleaMeasuredHomeSqFt, homeSqFtIsDefault: true } : {}),");
-    // Its compact row writer keeps the size, its source and the posted size on a cockroach or bed bug row.
+    // Its compact row writer keeps the size, its source and the posted size on a bed bug or guarantee row.
     expect(route).toContain('...(item.homeSizeBasis ? { homeSizeBasis: item.homeSizeBasis, footprintUsed: item.footprintUsed, footprintSource: item.footprintSource, fleaPostedHomeSqFt: item.fleaPostedHomeSqFt } : {}),');
-    // Without the two keys (a customer-confirmed 2,000 sq ft home) the posted size prices: $239.
-    expect(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach')).toMatchObject({ price: 239, footprintSource: 'homeSqFt' });
+    // Without the two keys (a customer-confirmed 2,000 sq ft home) the posted size prices.
+    expect(lineOf(generateEstimate(placeholderOnly(bedBugServices(1))), 'bed_bug')).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
   });
 
-  test('the replay restores the measurement from the stored cockroach row only, so a view or accept keeps $289', async () => {
-    const fresh = generateEstimate(website(ROACH_SERVICES));
-    const row = compact(lineOf(fresh, 'pest_initial_roach'));
-    const published = { engineInputs: website(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
+  test('the replay restores the measurement from the stored bed bug row only, so a view or accept keeps $519', async () => {
+    const fresh = generateEstimate(website(bedBugServices(1)));
+    const row = compact(lineOf(fresh, 'bed_bug'));
+    const published = { engineInputs: website(bedBugServices(1)), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
     expect(fleaSizeReplayOverrides(published)).toMatchObject({ fleaMeasuredHomeSqFt: 2800, homeSqFtIsDefault: true });
-    // The mapped result an Admin save stores keeps the same record, for the bed bug row too.
+    // The mapped result an Admin save stores keeps the same record.
     expect(fleaSizeReplayOverrides({ result: mapV1ToLegacyShape(fresh) })).toMatchObject({ fleaMeasuredHomeSqFt: 2800, homeSqFtIsDefault: true });
-    expect(fleaSizeReplayOverrides({ result: mapV1ToLegacyShape(generateEstimate(website(bedBugServices(1)))) })).toMatchObject({ fleaMeasuredHomeSqFt: 2800 });
     const replayed = await serverRecomputeFromEstimateData(published, { needsSync: () => false, replaySavedPricingKnobs: true });
     expect(replayed.recomputed).toBe(true);
-    expect(lineOf(replayed.rawEngineResult, 'pest_initial_roach').price).toBe(289);
+    expect(lineOf(replayed.rawEngineResult, 'bed_bug').price).toBe(519);
     // A copy in the stored inputs with no measured row behind it never prices (a browser cannot supply a measurement).
-    const forged = { engineInputs: { ...website(ROACH_SERVICES), fleaMeasuredHomeSqFt: 5000 }, engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [compact(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach'))] } };
+    const placeholderPrice = lineOf(generateEstimate(placeholderOnly(bedBugServices(1))), 'bed_bug').price;
+    const forged = { engineInputs: { ...website(bedBugServices(1)), fleaMeasuredHomeSqFt: 5000 }, engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [compact(lineOf(generateEstimate(placeholderOnly(bedBugServices(1))), 'bed_bug'))] } };
     expect(fleaSizeReplayOverrides(forged)).toMatchObject({ fleaMeasuredHomeSqFt: undefined, homeSqFtIsDefault: undefined });
     const forgedReplay = await serverRecomputeFromEstimateData(forged, { needsSync: () => false, replaySavedPricingKnobs: true });
-    expect(lineOf(forgedReplay.rawEngineResult, 'pest_initial_roach').price).toBe(239);
+    expect(lineOf(forgedReplay.rawEngineResult, 'bed_bug').price).toBe(placeholderPrice);
+    // A cockroach row is never the record, even one stamped like a measured row (a row stored by the #8666 build).
+    const roachRow = { service: 'pest_initial_roach', price: 289, homeSizeBasis: 'total_living_area', footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000 };
+    expect(fleaSizeReplayOverrides({ engineInputs: placeholderOnly(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [roachRow] } }))
+      .toMatchObject({ fleaMeasuredHomeSqFt: undefined, homeSqFtIsDefault: undefined });
   });
 
   test('the rodent guarantee row records the measured home that chose its tier, and a replay reads it: $299 stays $299, not $249 on the placeholder', async () => {
@@ -667,7 +686,7 @@ describe('website quote: the server lookup\'s measured home replaces the wizard\
       price: 299, tier: 'estate', homeSizeBasis: 'total_living_area', footprintUsed: 4500, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000,
     });
     expect(lineOf(generateEstimate(placeholderOnly(GUARANTEE_SERVICES)), 'rodent_guarantee')).toMatchObject({ price: 249, footprintUsed: 2000, footprintSource: 'homeSqFt' });
-    // The guarantee row alone (no flea, cockroach or bed bug row beside it) restores the measurement on a view or accept.
+    // The guarantee row alone (no flea or bed bug row beside it) restores the measurement on a view or accept.
     const published = { engineInputs: measured(), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [compact(line)] } };
     expect(fleaSizeReplayOverrides(published)).toMatchObject({ fleaMeasuredHomeSqFt: 4500, homeSqFtIsDefault: true });
     expect(fleaSizeReplayOverrides({ result: mapV1ToLegacyShape(generateEstimate(measured())) })).toMatchObject({ fleaMeasuredHomeSqFt: 4500 });
@@ -692,54 +711,52 @@ describe('website quote: the server lookup\'s measured home replaces the wizard\
     for (const key of ['homeSizeBasis', 'footprintUsed', 'footprintSource', 'footprintWasDefaulted', 'fleaPostedHomeSqFt']) expect(legacy).not.toHaveProperty(key);
   });
 
-  test('the stand-alone cockroach size check: the lookup\'s measured home is a measurement, the posted placeholder is not', () => {
+  test('the stand-alone cockroach size check reads the posted size only: the lookup\'s measured home does not clear it', () => {
     // public-quote.js sends buildingSizeMeasured false when the wizard kept its placeholder and posted no profile of its own.
     const standalone = (input) => lineOf(generateEstimate({ ...input, buildingSizeMeasured: false }), 'pest_initial_roach');
     const measured = standalone(website(ROACH_SERVICES));
-    expect(measured).toMatchObject({ price: 289, footprintUsed: 2800, footprintSource: 'lookup_measured_home', requiresManualReview: false });
-    expect(measured.manualReviewReasons).not.toContain('building_size_unmeasured_pest_footprint');
-    // No measurement behind the placeholder: the bracket is a guess and the line goes to the team, as before.
-    expect(standalone(placeholderOnly(ROACH_SERVICES))).toMatchObject({ requiresManualReview: true, manualReviewReasons: expect.arrayContaining(['building_size_unmeasured_pest_footprint']) });
-    // A quote priced before the rule never reads the measurement, so its size check is unchanged.
-    expect(standalone({ ...website(ROACH_SERVICES), legacyWholeHomeSizing: true }).manualReviewReasons).toContain('building_size_unmeasured_pest_footprint');
+    expect(measured).toEqual(standalone(placeholderOnly(ROACH_SERVICES)));
+    expect(measured).toMatchObject({ requiresManualReview: true, manualReviewReasons: expect.arrayContaining(['building_size_unmeasured_pest_footprint']) });
   });
 
   test('a mixed estimate: the measurement on one service\'s row is read even when another whole-home service sits in the other result container', () => {
     const { storedEstimateContainer } = require('../services/estimate-result-container');
-    const measuredRoach = compact(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach'));
-    const placeholderRoach = compact(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach'));
+    const measuredGuarantee = compact(lineOf(generateEstimate(website(GUARANTEE_SERVICES)), 'rodent_guarantee'));
+    const placeholderGuarantee = compact(lineOf(generateEstimate(placeholderOnly(GUARANTEE_SERVICES)), 'rodent_guarantee'));
     const placeholderBedBug = compact(lineOf(generateEstimate(placeholderOnly(bedBugServices(1))), 'bed_bug'));
+    expect(measuredGuarantee).toMatchObject({ footprintUsed: 2800, footprintSource: 'lookup_measured_home' });
     const container = (...rows) => ({ pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: rows });
     const restored = (data) => fleaSizeReplayOverrides(data).fleaMeasuredHomeSqFt;
-    // Distinct services split across the two containers, either way round: the cockroach row's measurement is found.
-    expect(restored({ result: container(placeholderBedBug), engineResult: container(measuredRoach) })).toBe(2800);
-    expect(restored({ result: container(measuredRoach), engineResult: container(placeholderBedBug) })).toBe(2800);
+    // Distinct services split across the two containers, either way round: the guarantee row's measurement is found.
+    expect(restored({ result: container(placeholderBedBug), engineResult: container(measuredGuarantee) })).toBe(2800);
+    expect(restored({ result: container(measuredGuarantee), engineResult: container(placeholderBedBug) })).toBe(2800);
     // The same service in both containers: the authoritative container's row wins, the other copy is never read.
     for (const data of [
-      { result: container(placeholderRoach), engineResult: container(measuredRoach) },
-      { result: container(measuredRoach), engineResult: container(placeholderRoach) },
+      { result: container(placeholderGuarantee), engineResult: container(measuredGuarantee) },
+      { result: container(measuredGuarantee), engineResult: container(placeholderGuarantee) },
     ]) {
       const chosenRow = storedEstimateContainer(data).lineItems[0];
       expect(restored(data)).toBe(chosenRow.footprintSource === 'lookup_measured_home' ? 2800 : undefined);
     }
     // A SERVER reprice rewrote `result`: the other container's unmatched rows are removed or re-priced services, never evidence.
-    const repriced = { pricingAuthorityAtLock: 'SERVER', result: container(placeholderBedBug), engineResult: container(measuredRoach) };
+    const repriced = { pricingAuthorityAtLock: 'SERVER', result: container(placeholderBedBug), engineResult: container(measuredGuarantee) };
     expect(storedEstimateContainer(repriced)).toBe(repriced.result);
     expect(restored(repriced)).toBeUndefined();
   });
 
   test('a staff revision keeps the measured home while the home size is left alone, and re-prices when it is edited', () => {
-    const row = compact(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach'));
-    const stored = { engineInputs: placeholderOnly(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
+    const row = compact(lineOf(generateEstimate(website(bedBugServices(1))), 'bed_bug'));
+    const stored = { engineInputs: placeholderOnly(bedBugServices(1)), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };
     const record = fleaPriceRecord({ status: 'sent', address: '1 Sample Way' }, stored);
     expect(record).toMatchObject({ basis: 'measured_home', measuredHomeSqFt: 2800, postedHomeSqFt: 2000 });
-    const revised = (inputs) => lineOf(generateWithFleaRecord(generateEstimate, inputs, record), 'pest_initial_roach');
-    expect(revised(placeholderOnly(ROACH_SERVICES))).toMatchObject({ price: 289, footprintUsed: 2800 });
-    expect(revised({ ...placeholderOnly(ROACH_SERVICES), homeSqFt: 2400 })).toMatchObject({ price: 239, footprintUsed: 2400 });
+    const revised = (inputs) => lineOf(generateWithFleaRecord(generateEstimate, inputs, record), 'bed_bug');
+    expect(revised(placeholderOnly(bedBugServices(1)))).toMatchObject({ price: 519, footprintUsed: 2800 });
+    const edited = { ...placeholderOnly(bedBugServices(1)), homeSqFt: 2400 };
+    expect(revised(edited)).toMatchObject({ price: lineOf(generateEstimate(edited), 'bed_bug').price, footprintUsed: 2400 });
   });
 });
 
-describe('the deprecated browser estimator mirrors the server on total living area', () => {
+describe('the deprecated browser estimator mirrors the server (bed bug on total living area, cockroach on the footprint)', () => {
   const clientEstimatorPath = path.resolve(__dirname, '../../client/src/lib/estimateEngine.js');
   let calculateEstimate;
 
@@ -766,12 +783,13 @@ describe('the deprecated browser estimator mirrors the server on total living ar
     return [...(estimate.oneTime.items || []), ...(estimate.oneTime.specItems || [])].find(match);
   };
 
-  test('standalone cockroach treatment: a two-story home prices like a one-story home, as the server does', () => {
+  test('standalone cockroach treatment: the browser prices the ground-floor footprint, as the server does', () => {
     for (const homeSqFt of HOMES) {
       const client = (stories) => clientLine({ homeSqFt, stories, svcRoach: true, roachType: 'REGULAR' }, (row) => row.service === 'pest_initial_roach').price;
-      expect(client(2)).toBe(client(1));
       expect(client(2)).toBe(roach(homeSqFt, 2).price);
+      expect(client(1)).toBe(roach(homeSqFt, 1).price);
     }
+    expect(clientLine({ homeSqFt: 2800, stories: 2, svcRoach: true, roachType: 'REGULAR' }, (row) => row.service === 'pest_initial_roach').price).toBe(202.5);
     expect(calculateEstimate({ homeSqFt: 2800, stories: 2, lotSqFt: 9000, propertyType: 'single_family', svcRoach: true, roachType: 'REGULAR' }).pricingMetadata.legacyWholeHomeSizing).toBe(false);
   });
 
@@ -792,91 +810,94 @@ describe('the deprecated browser estimator mirrors the server on total living ar
     const inputs = { homeSqFt: 2800, stories: 2, lotSqFt: 9000, propertyType: 'single_family', svcRoach: true, roachType: 'REGULAR' };
     const withoutStamp = (metadata) => Object.fromEntries(Object.entries(metadata || {}).filter(([key]) => key !== 'legacyWholeHomeSizing'));
     const currentBundle = (extraInputs) => ({ inputs: { ...inputs, ...extraInputs }, result: calculateEstimate({ ...inputs, ...extraInputs }) });
-    // A page cached before the rule: no stamp anywhere, and the cockroach treatment priced on the 1,400 sq ft ground floor.
+    // A page cached before the whole-home rule: no stamp anywhere (its cockroach price is the footprint price, the same as today).
     const cachedBundle = (extraInputs) => {
       const save = currentBundle(extraInputs);
       const result = { ...save.result, pricingMetadata: withoutStamp(save.result.pricingMetadata), routingMetadata: withoutStamp(save.result.routingMetadata) };
-      for (const row of [...(result.oneTime.items || []), ...(result.oneTime.specItems || [])]) {
-        if (row.service === 'pest_initial_roach') row.price = 202.5;
-      }
       return { ...save, result };
     };
+    const guaranteeSave = () => ({ result: { lineItems: [{ service: 'rodent_guarantee', price: 249 }] } });
     const stampOf = (save) => replay.savedLegacyWholeHomeSizingSignal(save).legacyWholeHomeSizing;
     const guard = (save, storedEstimateData = null) => guardWholeHomeSizingOnClientFallbackSave(save, { storedEstimateData });
 
-    test('a browser-priced save with a cockroach or rodent guarantee row is refused, whatever stamp it posts', () => {
-      // A page cached before the rule (footprint price, no stamp) and the current page (whole-home price, stamp false) alike:
-      // the browser's cockroach brackets are hard-coded, so its stamp cannot prove the price matches Settings.
-      for (const save of [cachedBundle(), currentBundle(), cachedBundle({ stories: 1 }), currentBundle({ stories: 1 })]) {
-        expect(() => guard(save)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      }
-      expect(stampOf(currentBundle())).toBe(false);
-      const forged = cachedBundle();
-      forged.result.pricingMetadata.legacyWholeHomeSizing = true;
+    test('a browser-priced save with a rodent guarantee row is refused, whatever stamp it posts', () => {
+      // The browser has no rodent guarantee price: every posted shape is read.
+      expect(() => guard(guaranteeSave())).toThrow(expect.objectContaining({ statusCode: 409 }));
+      const forged = guaranteeSave();
+      forged.result.pricingMetadata = { legacyWholeHomeSizing: true };
       expect(() => guard(forged)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      // The cockroach treatment a pest plan adds is refused the same way.
-      const planRoach = currentBundle({ svcRoach: false, svcPest: true, pestFreq: 4, roachModifier: 'REGULAR' });
-      expect([...(planRoach.result.oneTime.items || []), ...(planRoach.result.oneTime.specItems || [])].some((row) => row.service === 'pest_initial_roach')).toBe(true);
-      expect(() => guard(planRoach)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      // A rodent guarantee row, a row known only by its name, a camelCase block, a list: every posted shape is read.
-      expect(() => guard({ result: { lineItems: [{ service: 'rodent_guarantee', price: 249 }] } })).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard({ result: { oneTime: { specItems: [{ name: 'Cockroach Treatment Service', price: 239 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard({ result: { pestInitialRoach: { price: 239 } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard({ result: { oneTime: { items: [{ name: 'German Roach Cleanout', price: 450 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard([{ service: 'pest_initial_roach', price: 202.5 }])).toThrow(expect.objectContaining({ statusCode: 409 }));
-      // Not a cockroach row: "approach" in a note, a lawn row, the pest plan's own roach option with no treatment added.
+      expect(() => guard({ result: { oneTime: { specItems: [{ name: 'Rodent Guarantee', price: 249 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard({ result: { rodentGuarantee: { price: 249 } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard([{ service: 'rodent_guarantee', price: 249 }])).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // Not a guarantee row: a lawn row, a pest plan.
       expect(() => guard([{ service: 'lawn_care', price: 60, detail: 'A new approach to weeds' }])).not.toThrow();
       expect(() => guard({ result: { lineItems: [{ service: 'pest_control', roachType: 'none', price: 39 }] } })).not.toThrow();
     });
 
-    test('a stored estimate re-saved this way is refused too (no unchanged-resave exception): the server must price it', () => {
-      const storedLegacy = cachedBundle();
-      expect(() => guard(cachedBundle(), storedLegacy)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard(currentBundle(), storedLegacy)).toThrow(expect.objectContaining({ statusCode: 409 }));
-      expect(() => guard(currentBundle(), currentBundle())).toThrow(expect.objectContaining({ statusCode: 409 }));
+    test('a cockroach row is not refused: the browser prices the footprint, as the server does (stand-alone, plan-added, any name)', () => {
+      const planRoach = currentBundle({ svcRoach: false, svcPest: true, pestFreq: 4, roachModifier: 'REGULAR' });
+      expect([...(planRoach.result.oneTime.items || []), ...(planRoach.result.oneTime.specItems || [])].some((row) => row.service === 'pest_initial_roach')).toBe(true);
+      for (const save of [cachedBundle(), currentBundle(), cachedBundle({ stories: 1 }), currentBundle({ stories: 1 }), planRoach,
+        { result: { oneTime: { specItems: [{ name: 'Cockroach Treatment Service', price: 202.5 }] } } }, { result: { pestInitialRoach: { price: 202.5 } } },
+        [{ service: 'pest_initial_roach', price: 202.5 }]]) {
+        expect(() => guard(save)).not.toThrow();
+      }
+      // The browser's stand-alone price is the server's.
+      const row = [...(currentBundle().result.oneTime.items || []), ...(currentBundle().result.oneTime.specItems || [])].find((r) => r.service === 'pest_initial_roach');
+      expect(row.price).toBe(roach(2800, 2).price);
     });
 
-    test('a save with none of the rows is not refused, and its stamp is the server\'s reading: new on a first save, the stored estimate\'s on a revision', () => {
+    test('a stored estimate re-saved with a guarantee row is refused too (no unchanged-resave exception): the server must price it', () => {
+      const storedLegacy = cachedBundle();
+      expect(() => guard(guaranteeSave(), storedLegacy)).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard(guaranteeSave(), currentBundle())).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard(guaranteeSave(), guaranteeSave())).toThrow(expect.objectContaining({ statusCode: 409 }));
+    });
+
+    test('a save with no guarantee row is not refused, and its stamp is the server\'s reading: new on a first save, the stored estimate\'s on a revision', () => {
       const pestOnly = (bundle) => bundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 });
-      for (const bundle of [cachedBundle, currentBundle]) {
-        const first = pestOnly(bundle);
-        expect(() => guard(first)).not.toThrow();
-        expect(first.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
-        // A revision of an estimate sold before the rule stays on it (one of the three added later by the server keeps the footprint).
-        const revision = pestOnly(bundle);
-        expect(() => guard(revision, cachedBundle())).not.toThrow();
-        expect(stampOf(revision)).toBe(true);
-        // A posted stamp is never read: a forged legacy stamp on a first save is overwritten.
-        const forged = pestOnly(bundle);
-        forged.result.pricingMetadata.legacyWholeHomeSizing = true;
-        guard(forged);
-        expect(forged.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+      const roachOnly = (bundle) => bundle();
+      for (const make of [pestOnly, roachOnly]) {
+        for (const bundle of [cachedBundle, currentBundle]) {
+          const first = make(bundle);
+          expect(() => guard(first)).not.toThrow();
+          expect(first.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+          // A revision of an estimate sold before the rule stays on it (bed bug or the guarantee added later by the server keeps the footprint).
+          const revision = make(bundle);
+          expect(() => guard(revision, cachedBundle())).not.toThrow();
+          expect(stampOf(revision)).toBe(true);
+          // A posted stamp is never read: a forged legacy stamp on a first save is overwritten.
+          const forged = make(bundle);
+          forged.result.pricingMetadata.legacyWholeHomeSizing = true;
+          guard(forged);
+          expect(forged.result.pricingMetadata.legacyWholeHomeSizing).toBe(false);
+        }
       }
     });
 
     test('the check sits on the CLIENT_FALLBACK decision; a server price is untouched', async () => {
-      const price = (estimateData, recompute) => resolveServerAuthoritativePricing({
-        estimateData, clientPreview: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 202.5 }, quoteRequired: false, now: () => new Date('2026-11-27T15:00:00Z'), recompute,
+      const price = (estimateData, recompute, onetimeTotal = 202.5) => resolveServerAuthoritativePricing({
+        estimateData, clientPreview: { monthlyTotal: 0, annualTotal: 0, onetimeTotal }, quoteRequired: false, now: () => new Date('2026-11-27T15:00:00Z'), recompute,
       });
       for (const reason of ['NO_INPUTS', 'ENGINE_ERROR']) {
         const recompute = async () => ({ recomputed: false, reason, ...(reason === 'ENGINE_ERROR' ? { error: new Error('down') } : {}) });
-        await expect(price(cachedBundle(), recompute)).rejects.toMatchObject({ statusCode: 409 });
-        await expect(price(currentBundle(), recompute)).rejects.toMatchObject({ statusCode: 409 });
-        const pestOnly = currentBundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 });
-        const out = await price(pestOnly, recompute);
-        expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
-        expect(stampOf(pestOnly)).toBe(false);
+        await expect(price(guaranteeSave(), recompute, 249)).rejects.toMatchObject({ statusCode: 409 });
+        for (const save of [currentBundle({ svcRoach: false, roachType: 'NONE', svcPest: true, pestFreq: 4 }), cachedBundle()]) {
+          const out = await price(save, recompute);
+          expect(out.audit.pricing_authority).toBe('CLIENT_FALLBACK');
+          expect(stampOf(save)).toBe(false);
+        }
       }
-      const served = cachedBundle();
-      const out = await price(served, async () => ({ recomputed: true, serverResult: { recurring: {} }, serverTotals: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 289 } }));
+      const served = guaranteeSave();
+      const out = await price(served, async () => ({ recomputed: true, serverResult: { recurring: {} }, serverTotals: { monthlyTotal: 0, annualTotal: 0, onetimeTotal: 249 } }), 249);
       expect(out.audit.pricing_authority).toBe('SERVER');
     });
   });
 
-  test('the plan-added cockroach treatment sizes on the whole home in the browser too', () => {
+  test('the plan-added cockroach treatment sizes on the footprint in the browser too', () => {
     const planRoach = (stories) => clientLine({ homeSqFt: 2800, stories, svcPest: true, pestFreq: 4, roachModifier: 'REGULAR' }, (row) => row.service === 'pest_initial_roach');
-    expect(planRoach(2).price).toBe(planRoach(1).price);
-    expect(planRoach(2).price).toBe(169);
+    expect(planRoach(2).price).toBe(119);
+    expect(planRoach(1).price).toBe(169);
   });
 
   test('bed bug size step reads total living area (the browser fallback keeps no story factor)', () => {

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-// Tree & Shrub Fast Complete, GATE_TS_NEONIC_CAP: the "left this year" line under a capped
-// product's amount, the hold when the entered amount passes it, and the gate-off sheet that
+// Tree & Shrub Fast Complete, yearly neonicotinoid cap: the "left this year" line under a capped
+// product's amount, the hold when the entered amount passes it, and the sheet with no cap in its context that
 // shows and holds nothing. Synthetic data only.
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -89,7 +89,7 @@ async function useMerit(amount) {
   fireEvent.change(await screen.findByLabelText('How much?'), { target: { value: amount } });
 }
 
-describe('gate off (no neonicCap in the context)', () => {
+describe('no neonicCap in the context', () => {
   test('no line and no hold, however much is entered', async () => {
     await readyVisit(BASE_CONTEXT);
     await useMerit('99');
@@ -98,7 +98,7 @@ describe('gate off (no neonicCap in the context)', () => {
   });
 });
 
-describe('gate on', () => {
+describe('with a neonicCap', () => {
   test('a capped product shows what is left of its yearly amount; an uncapped one shows nothing', async () => {
     await readyVisit({ ...BASE_CONTEXT, neonicCap: NEONIC_CAP });
     await useMerit('1');

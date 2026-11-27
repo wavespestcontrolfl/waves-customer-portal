@@ -1,5 +1,5 @@
 /**
- * Tree & Shrub neonicotinoid yearly cap, per property (GATE_TS_NEONIC_CAP, owner 2026-10-09).
+ * Tree & Shrub neonicotinoid yearly cap, per property (owner 2026-10-09).
  *
  * The label caps live in config/tree-shrub-neonic-caps.js (per acre per year, in each product's
  * unit). This file scales them to the property's bed area, adds up what the property already had
@@ -24,11 +24,6 @@ const { etCalendarDayOf } = require('../utils/datetime-et');
 
 const BED_AREA_NEEDED = 'bed_area_needed';
 const PROPERTY_NEEDED = 'property_needed';
-
-function tsNeonicCapLive() {
-  const gates = require('../config/feature-gates');
-  return typeof gates.tsNeonicCapLive === 'function' && gates.tsNeonicCapLive() === true;
-}
 
 const round4 = (n) => Math.round(n * 10000) / 10000;
 const positive = (value) => {
@@ -206,7 +201,6 @@ async function buildNeonicCapContext(svc, serviceDate, catalog, database = db) {
 module.exports = {
   BED_AREA_NEEDED,
   PROPERTY_NEEDED,
-  tsNeonicCapLive,
   capFor,
   computeNeonicLedger,
   isTreeShrubLedgerRow,

@@ -82,13 +82,11 @@ function prime({
 describe('notifyTechVisitPrepPhotos', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    delete process.env.GATE_VISIT_PREP_TECH_ALERTS;
     delete process.env.GATE_VISIT_PREP_PHOTOS;
     prime();
   });
 
   afterAll(() => {
-    delete process.env.GATE_VISIT_PREP_TECH_ALERTS;
     delete process.env.GATE_VISIT_PREP_PHOTOS;
   });
 
@@ -97,36 +95,14 @@ describe('notifyTechVisitPrepPhotos', () => {
   });
 
   describe('gate matrix', () => {
-    test('both gates unset → nothing read or written', async () => {
+    test('GATE_VISIT_PREP_PHOTOS unset → nothing read or written', async () => {
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(db).not.toHaveBeenCalled();
       expect(mockInsertCard).not.toHaveBeenCalled();
       expect(mockSendToAdminUser).not.toHaveBeenCalled();
     });
 
-    test('GATE_VISIT_PREP_TECH_ALERTS on, GATE_VISIT_PREP_PHOTOS off → nothing', async () => {
-      process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
-      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
-      expect(db).not.toHaveBeenCalled();
-      expect(mockInsertCard).not.toHaveBeenCalled();
-    });
-
-    test('GATE_VISIT_PREP_PHOTOS on, GATE_VISIT_PREP_TECH_ALERTS off → nothing', async () => {
-      process.env.GATE_VISIT_PREP_PHOTOS = 'true';
-      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
-      expect(db).not.toHaveBeenCalled();
-      expect(mockInsertCard).not.toHaveBeenCalled();
-    });
-
-    test('a non-"true" value (e.g. "1") is off, same as unset', async () => {
-      process.env.GATE_VISIT_PREP_TECH_ALERTS = '1';
-      process.env.GATE_VISIT_PREP_PHOTOS = 'true';
-      await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
-      expect(mockInsertCard).not.toHaveBeenCalled();
-    });
-
-    test('both gates true → card written and pushed', async () => {
-      process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
+    test('GATE_VISIT_PREP_PHOTOS on → card written and pushed', async () => {
       process.env.GATE_VISIT_PREP_PHOTOS = 'true';
       await notice.notifyTechVisitPrepPhotos({ scheduledServiceId: 'svc-1' });
       expect(mockInsertCard).toHaveBeenCalledWith('tech-1', expect.objectContaining({
@@ -149,9 +125,8 @@ describe('notifyTechVisitPrepPhotos', () => {
     });
   });
 
-  describe('with both gates on', () => {
+  describe('with the photos gate on', () => {
     beforeEach(() => {
-      process.env.GATE_VISIT_PREP_TECH_ALERTS = 'true';
       process.env.GATE_VISIT_PREP_PHOTOS = 'true';
     });
 

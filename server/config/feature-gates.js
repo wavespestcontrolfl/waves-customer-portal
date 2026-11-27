@@ -112,7 +112,6 @@
  *   GATE_IB_INVOICE_EMAIL=true (owner ruling 2026-10-31, gap #20: send_invoice may also EMAIL the invoice (PDF + pay link) with at most one CC, on the same confirm card. Needs GATE_IB_INVOICE_ACTIONS. Read at call time via ibInvoiceEmailLive(), strict 'true', dark by default; off = send_invoice is text-only, exactly as before.)
  *   GATE_TRUCK_CLOCK_IN=shadow|start (owner 2026-10-25, "this works": the rule is that a technician's shift starts by itself from the truck's GPS; shadow ONLY RECORDS what that rule would do; owner 2026-11-26: with start, the truck's recorded first-arrival time is the official start of the paid day (see the start paragraph below). The first of two triggers each Eastern work day wins: the truck's first GPS arrival at one of that technician's visits, or the start of the truck's first trip of the day (no earlier trip-start of a different trip for that truck in bouncie_webhook_log that Eastern day) within 200 m of the office. It notes whether the technician has no active shift and has a completed Vehicle Use & Commuting Agreement. Training days stay by hand (a trainee rides in the trainer's truck). Read at call time via truckClockInMode(): exactly 'shadow' (trimmed, any case) = decide and record one truck_clock_in_shadow row a day, never write time_entries; exactly 'start' = the same recording plus a follow-up job every 2 minutes (services/truck-start-apply.js, NOT the Bouncie receiver) that, for each unapplied row of the current Eastern work day, sets the shift start from the row's GPS time: no shift yet = create one at that time; the first shift starts later = move its start back to that time (original kept, audited); it starts more than 5 minutes earlier = change nothing and ring one admin bell; anything unclear (several shifts, an overlap, a shift closed before the arrival, an approved or paid week) = change nothing and ring one admin bell. Needs a webhook the receiver verified (secret matched under enforce), an active technician with the vehicle agreement completed at or before the GPS time, and an arrival before the 11 PM auto-close (a tick after it writes nothing). Anything else, including 'true' and 'live', = off, no code path runs. Clock-out, the 9 PM reminder and the 11 PM close are unchanged. Sends nothing to a customer or staff member. Rollback = unset or shadow.)
  *   GATE_PIN_PARKED_CHECK=true (pin check after a visit, owner "build guardrail" 2026-10-09: a daily job compares the map pin of each customer whose visit was completed in the last 2 ET days with where the technician's Bouncie truck actually stopped that day. When the truck parked 175 m to 1500 m from the pin (the arrival radius is the setting gps_arrival.radius_meters) for 10+ minutes and never stopped inside that radius, it stores ONE open suggestion for the customer and posts ONE admin notification; the customer's address review panel shows the truck's spot with "Use the truck's spot" (fills the existing verify_pin form, staff still confirm) and "Dismiss". It never changes a pin, never calls the geocoder and sends nothing to a customer. Read at call time via pinParkedCheckLive(), strict 'true', dark by default; off = the job does nothing, the review endpoints carry no suggestion and the panel shows nothing new.)
- *   GATE_CALL_APPLICANT_HANDLING=true (a phone call whose caller is a JOB APPLICANT or a vendor/partner is handled as that third party, not as a customer call: the call is labeled vendor_logged even when the model recommended no_action_needed; no customer-only review card is raised on it (service address, email, name, consent capture); a promise the office made on it is stored as kind other, so the customer follow-up watchdog does not page on it; and a job applicant call with a valid extraction files ONE Careers application (role technician, status new, source phone_call) unless an open application with the same phone already exists. Sends nothing to the applicant: no text, no email, no invite, no AI screen. Read at call time via callApplicantHandlingLive(), strict 'true', dark by default; off = every call is handled exactly as before.)
  *   GATE_CALL_PREPAY_CHOICE=true (a caller who chose annual prepay on a call, when the call extraction carries service_request.billing_choice = annual_prepay: (1) the scheduling payload of a not-booked call and its held-visit row on Dispatch say "Caller chose annual prepay", and Book it opens the New appointment form with Annual prepay preselected when the customer's linked estimate is prepay-eligible; (2) for a call the pipeline DID book, one admin-only Needs Review card (reason call_prepay_choice) per call, filed every 10 minutes while the customer's newest open estimate is prepay-eligible, whose one tap "Accept as annual prepay" runs the same accept the New appointment form runs (a DRAFT annual prepay invoice that is NOT sent, plus a payment-pending term). The office decides every accept; nothing is accepted, invoiced or texted by the sweep. Read at call time via callPrepayChoiceLive(), strict 'true', dark by default; off = no field is carried, no card is filed, the card's route answers 404, and the form opens as before.)
  *   GATE_CALL_PHONE_YES_ACCEPT=true (a call that booked a pest visit while the customer had an open estimate: every 10 minutes the call-phone-yes sweep files ONE admin card for it, "Caller said yes to pay per application on the call" with the caller's words, or "No yes heard" (a later annual prepay choice, cancellation or one-time ask is no yes, named on the card; an annual choice on the booking call itself is the prepay card's). The card records a shadow verdict (would an automatic accept go ahead, and why not) and stays open while a visit the call booked is on the calendar, also after the estimate expires. Filing accepts nothing and sends nothing; the booking text keeps the accept link. The card's tap, Accept as pay per application (admin only), runs the office's own accept and books the plan from the visit the call booked; the customer gets what Mark accepted sends (the membership email). Owner 2026-11-18 "ok go" (step 1: the office taps); the owner flips it. Kill: unset it; off = no card and no tap. Read at call time: callPhoneYesAcceptLive())
  *   GATE_AI_CHANGE_CHECK=true (owner 2026-10-30, "all": before-and-after AI check for every content change. The daily impact tracker compares how often AI answers cited a changed page in the 14 days before its deploy with the 14 days after, adjusted for site-wide Waves citations, and stores gained / lost / moved / flat / no_data on the content_optimization_impact row ("moved" = a loss whose questions still cite Waves through another page; no alert). A "lost" verdict adds one FIX leg to the impact digest (also needs GATE_IMPACT_DIGEST), at most one email a day. Reads seo_llm_mentions that the daily prober already stored; fires no probes, costs $0, sends nothing to a customer. Read at call time via aiChangeCheckLive(), strict 'true', dark by default; off = no check runs and the digest has no such leg.)
@@ -244,7 +243,6 @@
  *   GATE_ADS_CAPACITY_WORK_DAYS=true (ads capacity counts a technician only on dates they work: absences and, with GATE_TECH_WORK_DAYS, off weekdays; strict 'true', read at call time via adsCapacityWorkDaysLive(); off = every assignable technician every day; changes ad budgets only, sends nothing to a customer)
  *   GATE_ADS_GAP_RULE=shadow|true (the 2-hour Google Ads budget job decides from the technician's next 7 days of open stops instead of one day: runs the ad at its base budget while open stops are plentiful, drops it to the 1% floor when few are left, and keeps its state between; the owner can also hold a campaign at base or stop until a chosen end date. 'shadow' records what the new rule would do and changes nothing; 'true' makes it the rule. Read at call time via adsGapRuleMode(); unset or anything else = off, byte-identical to today. Changes ad budgets only; sends nothing to a customer)
  *   GATE_SECOND_TECH_LOWS=true (owner 2026-10-25, second technician census lows L1 + L3: (L1) the admin dashboard tech utilization counts only assignable field staff (active and field-dispatchable) and, for each, only the days in the window they work (technicians.work_days; no list = every day), 8 hours a work day, instead of every active row on every calendar day; (L3) the four Intelligence Bar schedule-tool sites that pick a technician by name text with an unordered first() match use resolveTechnicianByName instead: assignable technicians only, and a name that fits two technicians is an error that lists them, never a guess. Strict opt-in: exactly 'true', read at call time via secondTechLowsLive(). Ships DARK; off = both paths byte-identical to before. Admin-only, sends nothing to a customer.)
- *   GATE_BOOKING_FUNNEL_CANARY=true (alert when /book funnel entries see zero conversions)
  *   GATE_LLM_DISPATCH_METRICS=true (log dispatcher outcomes + daily exception digest email)
  *   GATE_LLM_CALL_LEDGER=true   (one llm_dispatch_log row per provider call — tokens, latency, served model, lane / run correlation; dark in dev AND prod)
  *   GATE_AGENT_CONTROL_READ=true (Agents hub Control center reads: /api/admin/agents/control/areas + /control/lanes over the call ledger, features.ledger on the hub probe; off = 404 + probe says no ledger; dark in dev AND prod)
@@ -424,7 +422,6 @@
  *   GATE_TS_PEST_CHECK=true (Tree & Shrub live-insect check, owner 2026-10-05, tech-facing and storage only: GET /:serviceId/tree-shrub/fast-context adds `pestCheck`, the Fast Complete sheet shows a "Live insects found?" Yes / No block with insect-type chips, blocks Merit when only armored scale is picked, notes a live-finds-only product on a No, and the answers are FROZEN on the service record (structured_notes.treeShrubPestCheck). Nothing reaches the customer report, PDF, SMS or email. Strict opt-in: exactly 'true' in every environment, read at call time via tsPestCheckLive(). Ships DARK; off = fast-context has no pestCheck key and nothing is stored.)
  *   GATE_ASSESSMENT_FAST_COMPLETE=true (Waves Assessment Fast Complete, owner 2026-10-09: the schedule payload carries `assessmentFastCompleteEnabled` for a visit whose completion profile is the assessment key, and admin Dispatch opens a one-screen sheet (talk note, photos, warm/cold/lost, recommended interests, the inspection credit toggle where the full form shows it) in place of the full form. Complete records the consultation outcome, then posts /complete with texts and the review ask off. Strict opt-in: exactly 'true', read at call time via assessmentFastCompleteLive(). Ships DARK; off = the full form as before.)
  *   GATE_LEAD_SERVICE_DISPLAY=true (Lead service names, owner 2026-10-09: the lead list and lead detail responses carry `service_display`, the lead's service named the way the booking catalog names it, and the Leads screen shows it with the stored text as a tooltip; lead search also matches the shown name. Display only: `leads.service_interest` is never rewritten and nothing is sent to a customer. Strict opt-in: exactly 'true', read at call time via leadServiceDisplayLive(). Ships DARK; off = the screen shows the stored text.)
- *   GATE_TS_NEONIC_CAP=true (Tree & Shrub yearly neonicotinoid cap per property, owner 2026-10-09, tech-facing; server/services/tree-shrub-neonic-ledger.js, server/config/tree-shrub-neonic-caps.js: Zylam and Safari share one dinotefuran cap, Merit has its own imidacloprid cap, each a label amount per acre per calendar year scaled to the property's bed area (customer_properties.bed_sqft); dinotefuran counts from any visit at the property, imidacloprid from tree & shrub visits only. GET /:serviceId/tree-shrub/fast-context adds `neonicCap`, the Fast Complete sheet shows how much of each capped product is left this year and holds Complete when an entered amount passes it. Like the live-insect check the hold is the sheet's; /complete does not refuse. No bed area = the yearly amount cannot be computed and the amount check blocks nothing; the application-count hold and the no-limit-on-file hold need no bed area and still apply. Nothing reaches the customer. Strict opt-in: exactly 'true' in every environment, read at call time via tsNeonicCapLive(). Ships DARK; off = fast-context has no neonicCap key and /complete never checks.)
  *   GATE_LAWN_RESERVICE_FAST_COMPLETE=true (Lawn re-service Fast Complete: GET /:serviceId/lawn-reservice/fast-context answers the one-screen completion sheet's last-lawn-visit product tiles and catalog, and the schedule payload carries `lawnReserviceFastCompleteEnabled` per service so the tech portal opens the sheet for a lawn_re_service visit instead of the typed Dispatch form. The sheet completes through the full /complete with one_time_lawn_treatment findings. Customer text is the full form's default completion text. Strict opt-in: exactly 'true' in every environment, read at call time via lawnReserviceFastCompleteLive(). Ships DARK; off = the route answers 404 {enabled:false}, the flag is false and routing is the typed Dispatch form exactly as before.)
  *   GATE_RESERVICE_ASKS=true (Re-service asks, step S1 of the consolidated re-service report, owner 2026-11-02: GET /:serviceId/reservice-asks answers every message in which the customer described the problem behind a pest or lawn re-service (booking words, texts, calls and emails, 10 days before the booking to now) through services/reservice-asks.js, and the AI report writer's one-time window on a re-service opens 10 days before the booking instead of at it. Read-only. Strict opt-in: exactly 'true' in every environment, read at call time via reserviceAsksLive(). Ships DARK; off = the route answers 404 {enabled:false} and the writer's window is as before.)
  *   GATE_RESERVICE_FOLD=true (re-service fold, owner 2026-11-17: a free pest or lawn re-service with no add-on line that the office books within 14 days before the same customer's next plan visit of that line books nothing; that one plan visit moves up to the re-service's time and the customer gets the existing "visit moved" text when the office's confirmation box is on. The rest of the plan stays put. Read at call time via reserviceFoldLive(), exact 'true'; the re-service link and AI booking come in later PRs, each behind its own gate. Off = booking is exactly as before. Kill switch: unset.)
@@ -445,7 +442,6 @@
  *   GATE_BOOK_PREFERRED_TIME=true (/book "Can't find a time?" block under the time picker: text-our-team link plus a preferred day/time request form -> POST /api/booking/preferred-time, which files an internal lead + one admin bell, and the lead closes itself as 'handled' (neither won nor lost, one admin FYI) when the customer later books online. Sends NOTHING to the customer (no SMS, no email, no confirmation text) and retires any open abandoned-booking intent for the same phone/session so the recovery worker cannot text them either. Strict opt-in in EVERY environment, read at call time via bookPreferredTimeLive(); the client learns it from GET /api/booking/config `preferred_time`. Off = the generic 404 on the POST and no block on the page.)
  *   GATE_BLOG_READ_DEPTH=true   (anonymous, cookie-free blog scroll-depth counter — POST /api/public/blog-read-depth accepts a no-cors beacon from the hub + spoke blog posts and upserts an aggregate daily count keyed by site/path/milestone; owner-approved 2026-09-27, "E2: cookie-free read-depth counts", extends the 2026-07-16 pre-consent Cloudflare-counter exception. Dark = the generic unknown-route 404 for EVERY request to the path, before the route's own rate limiter, per the house dark-GATE_* contract. No cookies, no IP, no per-visitor identifier is ever stored — see docs/public-route-contracts.md.)
  *   GATE_VISIT_PREP_PHOTOS=true (server-only dark foundation: customer attaches photos + a short note to a specific upcoming visit from the public /appointment/:token page — POST /api/public/appointment/:token/photos, plus an additive prepPhotos summary on the existing GET. Strict opt-in, read at call time via visitPrepPhotosLive(). The appointment-page entry ALSO needs GATE_APPOINTMENT_PAGE (it rides that router). The Waves app entry — POST /api/schedule/:id/prep-photos and the prepPhotos field on GET /api/schedule/next — needs only this gate; flipping it opens both entry points. Off = the generic 404 on both POST routes: the anonymous appointment-page route answers it before any body parse (visitPrepPreParserGuard, mounted ahead of the shared parsers in index.js); the authenticated app route answers it after the schedule router's normal authentication and shared parsers (a logged-in route exposes nothing to an anonymous probe), before its own limiter and multipart parse. Neither GET payload carries a prepPhotos key. Surfaces when on: the appointment-page box, the app's Send photos button, the tech Visit Brief's Customer flagged block, the stop chip, and the office feed item. Sends nothing to a customer.)
- *   GATE_VISIT_PREP_TECH_ALERTS=true (PR 6, customer-visit-photos scope doc §5.4 item 4: the assigned field technician gets a tech-home card plus a one-line push — "A customer sent photos for a visit on your route" — when a customer submits visit prep photos. Strict opt-in, read at call time via visitPrepTechAlertsLive() in server/services/visit-prep-tech-alert.js. ALSO requires GATE_VISIT_PREP_PHOTOS live (nothing to alert about otherwise). Deliberately its OWN gate rather than GATE_TECH_VISIT_NOTIFICATIONS — that gate is off in production, and this can be the first tech visit card to go live; it reuses that mechanism's card/push plumbing (tech_notifications + PushService.sendToAdminUser) without depending on its gate. Recipient = the visit's CURRENT assigned technician, re-read fresh at send time — never the pre-lock row. No technician, or a non-assignable one → no card. Never fired for a duplicate-only resubmit. Sends nothing to a customer.)
  *   GATE_EMAIL_APP_LINKS=true (customer emails: anchors to customer pages on the portal host skip SendGrid's click rewrite (clicktracking=off) so iOS universal links / Android App Links open them in the Waves app - services/messaging/email-link-policy.js untrackAppLinks via sendOne. Strict opt-in, read at call time via emailAppLinksLive(). Off = every link tracked as before #7229. Keep OFF until the app lands on the tapped page: device test 2026-10-31 opened the iPhone app on Home for /?tab=billing and /book.)
  *   GATE_SMS_LINK_WRAP=true (every portal link in an outbound customer/lead SMS becomes a tracked /l/<code> short link stamped to the text it went out in, so clicks show for ALL texts including manual ones typed with a full link — services/messaging/sms-link-wrap.js, wired at the sendCustomerMessage choke point before countSegments. Strict opt-in, read at call time via smsLinkWrapLive(). Customer/lead SMS only, never internal or MMS bodies, never non-portal hosts or links already /l/; any shortener error keeps the original link and logs a warn — never blocks a send. Dark = every body byte-identical to today.)
  *   GATE_OUTLINK_TRACKING=true (prep guides: every link to an OUTSIDE site — Amazon, Chewy, Elanco, Bravecto, ... — in the prep email and the public /prep/:token page is rewritten at RENDER time to /go/<code> on the portal host, which logs the click (template key, prep visit, customer, sha256 ip hash, UA; bots skipped) and 302s to the exact original URL. Destinations are pre-registered outbound_links rows keyed by a hash of the URL — the route never reads a URL from the request, so it is not an open redirect — and are never tagged or altered. Own-site, portal, mailto and tel links are untouched; the prep PDF keeps direct links; template content is never edited. Strict opt-in, read at call time via outlinkTrackingLive(). The /go route itself stays live in every state so links already sent keep working after the gate is turned off. Off = byte-identical to today. Sends nothing to a customer.)
@@ -549,10 +545,6 @@ const gates = {
   // logGateStatus only; the route and service read visitPrepPhotosLive()
   // at call time below so a flip needs no redeploy.
   visitPrepPhotos: process.env.GATE_VISIT_PREP_PHOTOS === 'true',
-  // Tech card + push for a visit-prep photo submission (PR 6). Registered
-  // for logGateStatus only; the service reads visitPrepTechAlertsLive() at
-  // call time below so a flip needs no redeploy.
-  visitPrepTechAlerts: process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true',
   // Visit prep photos — automatic pest read (PR 5). Registered for
   // logGateStatus only; services/visit-prep-pest-read.js reads
   // visitPrepPestReadLive() at call time below (its own strict opt-in,
@@ -1291,13 +1283,6 @@ const gates = {
   // zoneRouteDaysLive(). Kill switch: unset.
   zoneRouteDays: process.env.GATE_ZONE_ROUTE_DAYS === 'true',
 
-  // Booking-funnel conversion canary (2026-07-18): alerts Adam when real
-  // /book funnel entries see zero conversions across a window — the July
-  // slot_sig outage signature. Opt-in in EVERY environment (it texts
-  // ADAM_PHONE; dev/test must not fire it by accident). Kill switch: unset —
-  // the scheduler tick no-ops and nothing else changes.
-  bookingFunnelCanary: process.env.GATE_BOOKING_FUNNEL_CANARY === 'true',
-
   // LLM dispatch observability (2026-07-31): every dispatchWithFallback chain
   // logs one llm_dispatch_log row, and a daily cron emails ONLY exceptions
   // (all-providers-failed, fallback-rate spike, policy gone silent) to the
@@ -1503,10 +1488,6 @@ const gates = {
   smsOperationalActions: gateEnvValue('GATE_SMS_OPERATIONAL_ACTIONS'),
   // Separate activation for commitment capture, follow-up bells and staff closure.
   smsCommitmentFollowup: gateEnvValue('GATE_SMS_COMMITMENT_FOLLOWUP'),
-  // Owner 2026-10-04: an access code saves from the client's own wording
-  // ("Gate code is 1234"), not only from the strict sentence form. Read at
-  // call time in sms-operational-extractor.js. Off = strict form only.
-  accessCodeCapture: gateEnvValue('GATE_ACCESS_CODE_CAPTURE'),
 
   // Email asks + staff promises, same shape as the SMS lane above. Also
   // requires GATE_EMAIL_OPERATIONAL_ACTIONS_SINCE. Read at call time in
@@ -2342,8 +2323,6 @@ const gates = {
   // unless exactly 'true'. This entry is for logGateStatus only — the canonical
   // CALL-TIME reader is pinParkedCheckLive() below.
   pinParkedCheck: process.env.GATE_PIN_PARKED_CHECK === 'true',
-  // GATE_CALL_APPLICANT_HANDLING (job-applicant / vendor call hygiene + Careers row, dark). Boot-log entry only; the call-time reader is callApplicantHandlingLive().
-  callApplicantHandling: process.env.GATE_CALL_APPLICANT_HANDLING === 'true',
   // Implied consent for INBOUND bookings: a caller who called us and agreed to
   // a time has implied consent for the transactional confirmation SMS
   // (established business relationship). do-not-contact always overrides.
@@ -2385,14 +2364,6 @@ const gates = {
   // voicemail's open Needs Review cards and dismisses its open callback
   // promise, so a settled voicemail stops asking for work (2026-10-09 audit).
   callbackSpamClosesParent: process.env.GATE_CALLBACK_SPAM_CLOSES_PARENT === 'true',
-  // Callback spoken-number link (2026-10-20 audit): an office callback dials the
-  // voicemail's caller ID, but the caller may have spoken another number to ring
-  // back, already a customer's primary phone (a quote form filed minutes
-  // later). On, the call pass tries that number as a second chance before it
-  // would create a customer. Nothing is sent or written to the phone fields.
-  // Strict opt-in, read at call time via callbackSpokenNumberLinkLive(). Off =
-  // today's behavior. Rollback: unset.
-  callbackSpokenNumberLink: process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK === 'true',
   // Call commitments: every processed call records what Waves promised and
   // what the caller agreed to as evidence-linked rows (call_commitments),
   // seeded from the V2 extraction plus one bounded model pass over the
@@ -2434,7 +2405,6 @@ const gates = {
   // booking behavior. See services/call-reschedule-apply.js applyCallMakeupMove.
   // Automatic moves also require GATE_CALL_AGENT_COMMIT_TRUSTED_LABELS.
   callMakeupMove: process.env.GATE_CALL_MAKEUP_MOVE === 'true',
-  callbackCard: gateEnvValue('GATE_CALLBACK_CARD'),
   // Missing-departure/arrival tracking: flags a scheduled_services row whose
   // promised window (the last communicated arrival window — SMS/email/call
   // evidence, never the raw schedule) has passed with no en_route/arrived
@@ -2462,16 +2432,6 @@ const gates = {
   // normal pipeline runs on it: extraction, summary, follow-ups. A call WITH a recording never
   // uses it. Dark: the extracted follow-ups can text a customer. Strict 'true'.
   liveCallBackupTranscript: process.env.GATE_LIVE_CALL_BACKUP_TRANSCRIPT === 'true',
-  // Booking-miss watchdog: a 30-min cron that rings an admin bell when a
-  // call's V2 extraction says a concrete appointment slot was CONFIRMED but
-  // no non-cancelled scheduled_services row exists for that customer on that
-  // ET date — the pager for confirmed-but-never-booked calls (outbound skip,
-  // v2 routing block, missing fields all park silently in triage otherwise;
-  // born from a 2026-07-28 outbound callback whose confirmed Saturday-noon
-  // slot was never booked). Reads call_log + scheduled_services; writes only
-  // admin notifications.
-  // Off → cron ticks are no-ops.
-  callBookingMissWatchdog: process.env.GATE_CALL_BOOKING_MISS_WATCHDOG === 'true',
   // Dispatch "Promised on a call, not booked" strip (owner 2026-10-12): a call
   // where staff agreed a visit with the caller and nothing is on the calendar
   // shows as a display-only HELD row on that day, with a Book it button.
@@ -3902,16 +3862,6 @@ const gates = {
   // gateEnvValue() at call time. Kill switch: unset — today's order.
   customerRainRank: gateEnvValue('GATE_CUSTOMER_RAIN_RANK'),
 
-  // Call booking rain flag (owner 2026-10-08): the call pipeline books the
-  // time a person agreed with the caller, so there is nothing to rank. When
-  // that fresh visit is outdoor work in a rain window (rain-fit.js: 60%+
-  // from the start through 2 h after the end, next 3 dates), the office gets
-  // one admin notification on the 'schedule' channel. Nothing is moved, no
-  // customer is texted, no triage card is created. OFF in every environment;
-  // call-booking-rain-flag.js reads it through gateEnvValue() at call time.
-  // Kill switch: unset.
-  callBookingRainFlag: gateEnvValue('GATE_CALL_BOOKING_RAIN_FLAG'),
-
   // Auto-dispatch rain pass (owner 2026-10-08): the 04:10 run never moves a
   // visit inside 72 hours and the hourly rain forecast is good for 3 dates,
   // so the run cannot see rain. This pass reads the booked visits on those 3
@@ -4799,11 +4749,6 @@ const gates = {
   // tsPestCheckLive().
   tsPestCheck: process.env.GATE_TS_PEST_CHECK === 'true',
 
-  // Tree & Shrub yearly neonicotinoid cap per property (owner 2026-10-09). Ships DARK in every
-  // environment. This entry is for logGateStatus only: the fast-context answer reads
-  // GATE_TS_NEONIC_CAP at call time via tsNeonicCapLive().
-  tsNeonicCap: process.env.GATE_TS_NEONIC_CAP === 'true',
-
   // Tree & Shrub report "From your technician" paragraph (proposed 2026-10-05, owner go-ahead pending): one
   // model call at completion, frozen, printed on the T&S report. Ships DARK in
   // every environment. This entry is for logGateStatus only: the completion
@@ -5346,12 +5291,6 @@ function tsLightingLive() {
 // the completion freeze of the live-insect answers.
 function tsPestCheckLive() {
   return process.env.GATE_TS_PEST_CHECK === 'true';
-}
-
-// GATE_TS_NEONIC_CAP read at CALL time — strict `=== 'true'`, dark in every
-// environment. The canonical reader for the T&S fast-context `neonicCap`.
-function tsNeonicCapLive() {
-  return process.env.GATE_TS_NEONIC_CAP === 'true';
 }
 
 // GATE_TS_TECH_PARAGRAPH read at CALL time — strict `=== 'true'`, dark in every
@@ -7062,18 +7001,6 @@ function leadEmailLinksLive() {
   return process.env.GATE_LEAD_EMAIL_LINKS === 'true';
 }
 
-// GATE_VISIT_PREP_TECH_ALERTS read at CALL time — strict `=== 'true'`, same
-// convention as visitPrepPhotosLive(). The canonical reader for
-// server/services/visit-prep-tech-alert.js. Deliberately independent of
-// GATE_TECH_VISIT_NOTIFICATIONS (unset in production): this gate alone
-// decides whether the customer-photos tech card/push go out, so it can be
-// the first tech visit card to go live without also turning on assignment/
-// reschedule/cancel cards. The service ALSO requires visitPrepPhotosLive()
-// — see its own header for why.
-function visitPrepTechAlertsLive() {
-  return process.env.GATE_VISIT_PREP_TECH_ALERTS === 'true';
-}
-
 // GATE_HOME_LINE read at CALL time — strict `=== 'true'`. The canonical
 // reader for the customer home line (twilio.js deriveOutboundNumber and the
 // home-line sweep); the `homeLine` gates-map entry above is for
@@ -7361,14 +7288,6 @@ function callFirstNameAdvisoryLive() {
 // entry above is for logGateStatus only.
 function callAgreedOneTimeJobLive() {
   return process.env.GATE_CALL_AGREED_ONE_TIME_JOB === 'true';
-}
-
-// GATE_CALLBACK_SPOKEN_NUMBER_LINK read at CALL time — strict `=== 'true'`, dark by
-// default. The canonical reader for call-recording-processor.js
-// findCustomerViaCallbackSpokenNumber. The `callbackSpokenNumberLink` gates-map
-// entry above is for logGateStatus only.
-function callbackSpokenNumberLinkLive() {
-  return process.env.GATE_CALLBACK_SPOKEN_NUMBER_LINK === 'true';
 }
 
 // GATE_CALL_LAST_NAME_LOOKUP read at CALL time — strict `=== 'true'`, dark by
@@ -8138,7 +8057,7 @@ function callRingFactLive() {
   return process.env.GATE_CALL_RING_FACT === 'true';
 }
 
-module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepTechAlertsLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
+module.exports = { gates, isEnabled, logGateStatus, gateEnvValue, gateEnvTimestamp, discountStackingLive, voiceRelayOpenaiLive, voiceRelayOpenaiInboundLive, reserviceRankAfterNewLive, termiteAnnualPlanSelectionEnabled, leadInspectionLinkLive, recurringSeriesTopUpLive, cancelReseedsRecurringLive, rateReviewLive, cancelReseedInTermLive, estimateConsultationOfferLive, estimateEmailConsultationOfferLive, askWavesTopicRoutingLive, askWavesEmergencyCheckLive, commercialSuiteSizingLive, condoUnitFolioLive, autoDispatchSharedModelLive, bookCapacityCommitLive, visitPrepPhotosLive, reportPhotoContentLive, stampedZeroFreeLive, pestInsiderProofLive, ibCancelAppointmentLive, ibCancelWithEffectsLive, emailAreaIntelLive, visitPrepPestReadLive, visitPrepReadSweepLive, outlinkTrackingLive, promiseEvidenceCloseLive, promiseContactCheckLive, adminAlertRelevanceLive, alertEpisodesLive, visitPrepPlantReadLive };
 // Own-line reader exports go BELOW the object export above: an assignment above it is replaced with the object and lost
 // (these three read undefined, so off, from #7911 and #7929 until 2026-11-18). feature-gates-own-line-exports.test.js checks it.
 // GATE_RESERVICE_FOLD reader, on its own line so gate PRs never conflict.
@@ -8339,7 +8258,6 @@ module.exports.callExtractionSystemPromptLive = callExtractionSystemPromptLive;
 module.exports.callExtractionV1FallbackLive = callExtractionV1FallbackLive;
 module.exports.callFirstNameAdvisoryLive = callFirstNameAdvisoryLive;
 module.exports.callAgreedOneTimeJobLive = callAgreedOneTimeJobLive;
-module.exports.callbackSpokenNumberLinkLive = callbackSpokenNumberLinkLive;
 module.exports.callLeadFormAddressStreetLevelLive = callLeadFormAddressStreetLevelLive;
 module.exports.bookPreferredTimeLive = bookPreferredTimeLive;
 module.exports.lawnWateringRuleLive = lawnWateringRuleLive;
@@ -8462,8 +8380,6 @@ module.exports.tsOutlineLive = tsOutlineLive;
 module.exports.pestOutlineLive = pestOutlineLive;
 // GATE_MOSQUITO_OUTLINE reader, on its own line so gate PRs never conflict.
 module.exports.mosquitoOutlineLive = mosquitoOutlineLive;
-// GATE_TS_NEONIC_CAP reader, on its own line so gate PRs never conflict.
-module.exports.tsNeonicCapLive = tsNeonicCapLive;
 // GATE_TS_TECH_PARAGRAPH reader, on its own line so gate PRs never conflict.
 module.exports.tsTechParagraphLive = tsTechParagraphLive;
 module.exports.lawnReserviceFastCompleteLive = lawnReserviceFastCompleteLive;
@@ -8767,18 +8683,6 @@ module.exports.awayWatchLive = awayWatchLive;
 // GATE_SMS_BARE_YES_REPLY reader, on its own line so gate PRs never conflict.
 module.exports.smsBareYesReplyLive = smsBareYesReplyLive;
 
-// GATE_ALERT_RING_ONCE read at CALL time, strict `=== 'true'`, dark in every environment.
-// On, an overdue promise bell (SMS and email, ringOverdueBell) never makes a second row or
-// ring for a promise while its row is still open, and the call booking-miss watchdog skips its
-// repeat rings. A customer's text alert (one open row per customer, owner 2026-11-16) rings
-// again only when a promise joins from a text that has no promise on it. Off = the 24-hour
-// rolling dedupe: a new row and bell each day.
-function alertRingOnceLive() {
-  return process.env.GATE_ALERT_RING_ONCE === 'true';
-}
-// GATE_ALERT_RING_ONCE reader, on its own line so gate PRs never conflict.
-module.exports.alertRingOnceLive = alertRingOnceLive;
-
 // GATE_ALERT_EXPLAINER read at CALL time, strict `=== 'true'`, dark in every environment (owner 2026-11-02: "I want the
 // show full text to be a brief description that I can understand ... if it's a customer, the customer needs to be
 // named"). On, the admin bell names the customer an alert is about and its "Show full text" becomes "What to do": a
@@ -8805,14 +8709,6 @@ module.exports.moveNoticeEmailLive = moveNoticeEmailLive;
 // GATE_REVIEW_ASK_AFTER_REPORT reader, on its own line so gate PRs never conflict.
 module.exports.reviewAskAfterReportLive = reviewAskAfterReportLive;
 
-
-// GATE_CALL_APPLICANT_HANDLING read at CALL time, strict `=== 'true'`, dark by default.
-// Off: a job-applicant or vendor call is processed exactly as before. On: it keeps the vendor_logged label, raises no
-// customer-only review card, stores office promises as kind other, and (job applicant) files one Careers row.
-// Nothing is sent to the applicant. Kill: unset.
-function callApplicantHandlingLive() {
-  return process.env.GATE_CALL_APPLICANT_HANDLING === 'true';
-}
 
 // GATE_CALL_BOUNCE_OTHER_SPELLING read at CALL time, strict `=== 'true'`, dark by default (owner 2026-11-04).
 // Off: a drip bounce is handled exactly as before. On: services/call-email-spelling-retry.js also tries the other spelling the
@@ -9025,8 +8921,6 @@ module.exports.promiseRecordEvidenceMode = promiseRecordEvidenceMode;
 module.exports.taxServiceCountyLive = taxServiceCountyLive;
 // GATE_SLAB_BUSINESS_SITE_TAX reader, on its own line so gate PRs never conflict.
 module.exports.slabBusinessSiteTaxLive = slabBusinessSiteTaxLive;
-// GATE_CALL_APPLICANT_HANDLING reader, on its own line so gate PRs never conflict.
-module.exports.callApplicantHandlingLive = callApplicantHandlingLive;
 // GATE_CALL_PREPAY_CHOICE reader, on its own line so gate PRs never conflict.
 module.exports.callPrepayChoiceLive = callPrepayChoiceLive;
 // GATE_CALL_PHONE_YES_ACCEPT reader, on its own line so gate PRs never conflict.

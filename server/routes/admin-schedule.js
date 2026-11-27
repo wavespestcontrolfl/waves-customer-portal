@@ -25116,7 +25116,7 @@ router.get('/:id/visit-texts', async (req, res, next) => {
     const { customerId, scheduledDate } = req.query;
     if (typeof customerId !== 'string' || typeof scheduledDate !== 'string' || !customerId || !scheduledDate) return res.status(400).json({ error: 'customerId and scheduledDate are required' });
     if (String(svc.customer_id) !== customerId || dateOnly(svc.scheduled_date) !== scheduledDate) return res.status(404).json({ error: 'Scheduled service not found' });
-    const { texts, hidden, unavailable } = await require('../services/tech-visit-texts').visitTexts(db, svc, { withPhotos: require('../config/feature-gates').techVisitTextPhotosLive() });
+    const { texts, hidden, since, unavailable } = await require('../services/tech-visit-texts').visitTexts(db, svc, { withPhotos: require('../config/feature-gates').techVisitTextPhotosLive() });
     // Bound to the customer and the visit date the texts were read for: a merge or undo that moved the visit to another customer,
     // or a reschedule that moved the window, mid-read withholds the answer, as visit-brief's finalRecheck does for the customer.
     const stillOwned = await db('scheduled_services')
@@ -25124,7 +25124,7 @@ router.get('/:id/visit-texts', async (req, res, next) => {
       .modify((q) => technicianCurrentVisitFilter(req, q))
       .first('scheduled_services.id');
     if (!stillOwned) return res.status(404).json({ error: 'Scheduled service not found' });
-    res.json({ enabled: true, texts, hidden, ...(unavailable ? { unavailable: true } : {}) });
+    res.json({ enabled: true, texts, hidden, ...(since ? { since } : {}), ...(unavailable ? { unavailable: true } : {}) });
   } catch (err) { next(err); }
 });
 

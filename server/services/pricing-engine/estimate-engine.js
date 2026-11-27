@@ -1089,14 +1089,15 @@ function legacyPestAboveTable(input) {
   return input?.legacyPestAboveTable === true;
 }
 
-// Whole-home sizing (owner 2026-11-26 "whole home"): the cockroach treatment, the bed bug treatment and the yearly rodent
-// guarantee price on the home's TOTAL living area, as flea does, new quotes only. Its own stamp
+// Whole-home sizing (owner 2026-11-26 "whole home"): the bed bug treatment and the yearly rodent guarantee price on the home's
+// TOTAL living area, as flea does, new quotes only. The cockroach treatment went back to the ground-floor footprint (owner
+// 2026-11-27 "skip the cockroach"; no quote was ever priced on its whole-home basis), so it reads no stamp. Its own stamp
 // (pricingMetadata.legacyWholeHomeSizing), same replay mechanism: input.legacyWholeHomeSizing is derived from the estimate's own
 // stamp (estimate-floor-signal-replay.js savedLegacyWholeHomeSizingSignal), a priced estimate with no stamp, or one that kept only
-// inputs asking for one of the three, predates the rule, and a legacy quote runs the existing ground-floor code unchanged. A fresh
+// inputs asking for one of the two, predates the rule, and a legacy quote runs the existing ground-floor code unchanged. A fresh
 // quote never sets it. Plan-wide (no per-service marker): a service a revision adds to a legacy estimate stays on the old rule, so
 // a replay never raises a sold price.
-const WHOLE_HOME_SIZING_SERVICES = new Set(['pest_initial_roach', 'bed_bug', 'rodent_guarantee']);
+const WHOLE_HOME_SIZING_SERVICES = new Set(['bed_bug', 'rodent_guarantee']);
 function legacyWholeHomeSizing(input) {
   return input?.legacyWholeHomeSizing === true;
 }
@@ -1445,7 +1446,8 @@ function generateEstimate(input) {
     delete propertyForCommercialDetection.propertyType;
   }
   const propertyIsCommercial = profileIsCommercial || isCommercialProperty(propertyForCommercialDetection, commercialContext);
-  // Whole-home sizing inputs for the flea package, cockroach treatment, bed bug treatment and rodent guarantee.
+  // Whole-home sizing inputs for the flea package, bed bug treatment and rodent guarantee (the cockroach treatment prices on
+  // the ground-floor footprint and never receives them).
   // calculatePropertyProfile clears footprintUnknown once a measured footprint exists and
   // derives footprint = homeSqFt / stories when none was supplied, so the pricers need the caller's original flag and footprint.
   // wholeHomeSizingLegacy: a quote priced before the rule keeps the ground-floor basis it was sold on.
@@ -1608,7 +1610,7 @@ function generateEstimate(input) {
       // which only paid back if the customer stayed past visit ~3.
       if (result.roachType && result.roachType !== 'none') {
         const pestOptions = serviceOptions(services.pest);
-        const initialRoach = pricePestInitialRoach({ ...property, ...wholeHomeSizing }, {
+        const initialRoach = pricePestInitialRoach(property, {
           roachType: result.roachType,
           standalone: false,
           autoFiredFromRecurringPest: true,
@@ -2318,7 +2320,7 @@ function generateEstimate(input) {
         skippedReason: 'recurring_pest_initial_roach_already_covers_regular_roach',
       });
     } else {
-      const result = pricePestInitialRoach({ ...property, ...wholeHomeSizing }, {
+      const result = pricePestInitialRoach(property, {
         ...pestInitialRoachOptions,
         roachType: standaloneRoachMeta.roachType,
         standalone: true,
@@ -2824,7 +2826,7 @@ function generateEstimate(input) {
     // A caller's own homeSqFt is the total living area (the Admin V2 path passes it). The fallback is the home's TOTAL living
     // area too (owner 2026-11-26 "whole home"), with a review mark when that size may be the ground floor only; a quote priced
     // before that falls back to the ground-floor footprint, as sold (resolveGuaranteeHomeSize reads wholeHomeSizingLegacy).
-    // The line records the size it tiered on and its source (lineFields), as the cockroach and bed bug lines do.
+    // The line records the size it tiered on and its source (lineFields), as the bed bug line does.
     const guaranteeSize = resolveGuaranteeHomeSize({ ...property, ...wholeHomeSizing, stories: guaranteeStories }, opts.homeSqFt);
     const guaranteeOpts = {
       homeSqFt: guaranteeSize.homeSqFt || 2000,

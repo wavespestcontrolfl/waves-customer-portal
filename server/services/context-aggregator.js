@@ -258,8 +258,9 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
   } catch { return null; }
 }
 
-// Texting AI facts (owner 2026-11-25): the open estimate's per-application price, the customer's prepaid visits left, the prep guide of the
-// booked (else last) visit, and (owner 2026-11-26, texting AI gap 2) whether the latest visits' service reports went out by email and the
+// Texting AI facts (owner 2026-11-25): the open estimate's per-application price (with its setup fee and pay-for-the-year total, owner
+// 2026-11-26), the customer's prepaid visits left, the prep guide of the booked (else last) visit, and (owner 2026-11-26, texting AI gap
+// 2) whether the latest visits' service reports went out by email and the
 // findings of the OLDER visits SERVICE HISTORY lists (sms-staff-facts, loadLatestVisitFindings). Numbers, the guide's own published sentences,
 // a delivery state and the findings pipeline's own rows only (never technician or visit notes, never an email address); a read that fails is
 // null. OPT IN (`includeSmsStaffFacts`: true = all of them, or an object naming the ones a caller needs): only the texting AI's draft and
@@ -1402,7 +1403,7 @@ class ContextAggregator {
   // inbound SMS webhook resolve a single active customer with deleted_at and
   // shared-number protection — re-looking up by phone here could silently
   // pick a different (or deleted) account that shares the number.
-  // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, the prepaid visits left and the booked visit's prep guide,
+  // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, setup fee and pay-for-the-year total, the prepaid visits left and the booked visit's prep guide,
   // for the texting AI's draft, its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
   // `smsPrepGuideFamily` (texting AI gap 5): the prep guide family the customer's text names ("the lawn treatment"); with it, the PREP GUIDE is
   // the guide of the soonest upcoming visit that carries that family when the booked visit does not. Read only with the guide itself.

@@ -1,4 +1,4 @@
-// T&S yearly neonicotinoid cap per property (GATE_TS_NEONIC_CAP): the share math across Zylam + Safari,
+// T&S yearly neonicotinoid cap per property: the share math across Zylam + Safari,
 // the separate Merit cap, unsized rows, no bed area, and which ledger rows count. The hold is the sheet's.
 // Synthetic data; a table-keyed fake database (the SQL scoping itself is application-limits' own, reused).
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -315,19 +315,5 @@ describe('wiring', () => {
   const source = fs.readFileSync(path.join(__dirname, '../services/complete-scheduled-service.js'), 'utf8');
   test('/complete does not refuse on the cap: the hold is the sheet\'s, like the live-insect check', () => {
     expect(source).not.toMatch(/neonic/i);
-  });
-  test('the gate is a strict opt-in with its own reader', () => {
-    const gates = require('../config/feature-gates');
-    const saved = process.env.GATE_TS_NEONIC_CAP;
-    try {
-      delete process.env.GATE_TS_NEONIC_CAP;
-      expect(gates.tsNeonicCapLive()).toBe(false);
-      process.env.GATE_TS_NEONIC_CAP = '1';
-      expect(gates.tsNeonicCapLive()).toBe(false);
-      process.env.GATE_TS_NEONIC_CAP = 'true';
-      expect(gates.tsNeonicCapLive()).toBe(true);
-    } finally {
-      if (saved === undefined) delete process.env.GATE_TS_NEONIC_CAP; else process.env.GATE_TS_NEONIC_CAP = saved;
-    }
   });
 });

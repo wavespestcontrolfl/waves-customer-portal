@@ -96,9 +96,10 @@ const { stripTrailingUnit, normalizeZip, unitKey, streetEmbeddedUnitKey, STREET_
 
 // data_hygiene_source_extractions.extractor_version is varchar(32).
 const VERSION = 'access-net-v1';
-// Reuses the SMS lane's switchboard entry: a new lane id would need its own
-// registry rows, and this call is the same kind of work (a text read for the profile).
-const LANE_ID = 'sms-operational-actions';
+// Its own lane since the SMS operational extraction moved to its own model
+// policy (2026-11-27): this call stays on highStakes, and a shared lane id
+// would show the wrong model for it on the switchboard and in the ledger.
+// The id is written at the dispatch call below (the ledger coverage test reads it there).
 const KINDS = ['neighborhood_gate', 'property_gate', 'door', 'lockbox', 'garage', 'call_box', 'pass', 'other'];
 const LIVES = ['standing', 'visit'];
 // The profile field a standing code of this kind may fill when it is empty.
@@ -419,7 +420,7 @@ async function readItems(build, context, promptVersion) {
     throw err;
   }
   const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
-    text: prompt, jsonSchema: SCHEMA, maxTokens: 4096, laneId: LANE_ID, promptVersion,
+    text: prompt, jsonSchema: SCHEMA, maxTokens: 4096, laneId: 'access-code-capture', promptVersion,
   });
   if (!result.ok) throw new Error('access_net_provider_failed');
   if (!validateOutput(result.json)) throw new Error('access_net_invalid_schema');

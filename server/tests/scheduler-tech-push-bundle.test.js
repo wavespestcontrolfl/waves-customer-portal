@@ -29,6 +29,7 @@ jest.mock('../services/analytics/ga4-crons', () => ({ initGA4Crons: jest.fn() })
 jest.mock('../services/tech-visit-notifications', () => ({ flushBundledPushes: jest.fn(async () => ({ pushed: 0 })) }));
 jest.mock('../services/live-call-card-pause', () => ({ recoverOpenPauses: jest.fn(async () => ({ action: 'swept' })) }));
 jest.mock('../services/call-hold', () => ({ recoverPendingHolds: jest.fn(async () => ({ action: 'swept' })) }));
+jest.mock('../services/stripe-email-sync', () => ({ drainDue: jest.fn(async () => ({})) }));
 jest.mock('../services/call-conference-path', () => ({
   recoverStaffEnds: jest.fn(async () => ({ action: 'swept' })),
   recoverUnansweredRings: jest.fn(async () => ({ action: 'swept' })),
@@ -79,8 +80,8 @@ test('the card-pause recovery sweep is registered every minute even with every g
   isEnabled.mockImplementation(() => false);
   recoverOpenPauses.mockRejectedValueOnce(new Error('db down'));
   const everyMinute = await runEveryMinuteHandlers();
-  // The bundled push sweep, the card-pause recovery sweep and the star-key hold recovery sweep.
-  expect(everyMinute).toHaveLength(3);
+  // The bundled push sweep, the card-pause recovery sweep, the star-key hold recovery sweep and the Stripe email sync.
+  expect(everyMinute).toHaveLength(4);
   expect(recoverOpenPauses).toHaveBeenCalledTimes(1);
   expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[live-card-pause] recovery tick failed: db down'));
 });
