@@ -77,6 +77,9 @@ const LANE_RUNTIME = {
   'call-commitment-contact-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', workflow_id: 'call-commitment-contact-check', ...LONG_BATCH },
   'call-promise-later-text-check': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'compliance_check', maturity: 'M3', ...LONG_BATCH },
   'sms-operational-actions': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', workflow_id: 'sms-operational-actions', ...LONG_BATCH },
+  // Runs inside the sms-operational-actions job; its own lane because it keeps
+  // the highStakes model. No workflow_id: that job's health maps to the lane above.
+  'sms-access-code-capture': { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'interactive', eval_family: 'structured_extraction', maturity: 'M3', ...LONG_BATCH },
   // Email asks + staff promises (PR 1, 2026-09-29) — same shape as the SMS
   // lane above, minus workflow_id/LONG_BATCH: it does not (yet) join the
   // Control-center job-health mapping (LANE_RUNTIME's own workflow_id set is

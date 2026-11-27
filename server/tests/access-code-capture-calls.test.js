@@ -286,7 +286,7 @@ describe('call prompt and read', () => {
     dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { items: [] } });
     expect(await readCallAccessCodes({ message: call(transcript) })).toEqual({ items: [] });
     expect(dispatchWithFallback).toHaveBeenCalledTimes(1);
-    expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ promptVersion: CALL_VERSION, laneId: 'sms-operational-actions' });
+    expect(dispatchWithFallback.mock.calls[0][1]).toMatchObject({ promptVersion: CALL_VERSION, laneId: 'sms-access-code-capture' });
     dispatchWithFallback.mockResolvedValueOnce({ ok: false });
     await expect(readCallAccessCodes({ message: call(transcript) })).rejects.toThrow('access_net_provider_failed');
     dispatchWithFallback.mockResolvedValueOnce({ ok: true, json: { items: 'nope' } });
