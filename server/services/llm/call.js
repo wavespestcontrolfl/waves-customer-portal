@@ -947,10 +947,22 @@ const PROVIDER_CAN_SERVE = {
   [PROVIDER.CLOUDFLARE]: (p) => Boolean((process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN) && process.env.CF_ACCOUNT_ID && p.questions && typeof p.questions === 'object'),
 };
 
+function modelSupportsPayload(route, payload) {
+  if (route.provider === PROVIDER.TYPESAFE && !TYPESAFE_PINNED_MODEL_RE.test(route.model)) return false;
+  if (route.provider === PROVIDER.CLOUDFLARE && !workersAiDecisionModel(route.model)) return false;
+  const entry = MODEL_CATALOG?.[route.model];
+  if (!entry) return true;
+  if (entry.provider && entry.provider !== route.provider) return false;
+  const caps = Array.isArray(entry.caps) ? entry.caps : [];
+  if (payload.images?.length && !caps.includes('vision')) return false;
+  return true;
+}
+
 function canRouteServePayload(route, payload = {}) {
   if (!route?.provider || !route.model) return false;
   if (payload.audio && route.provider !== PROVIDER.GEMINI) return false;
   if (payload.tools?.length && route.provider !== PROVIDER.ANTHROPIC) return false;
+  if (!modelSupportsPayload(route, payload)) return false;
   const check = PROVIDER_CAN_SERVE[route.provider];
   return typeof check === 'function' ? check(payload) : false;
 }

@@ -73,6 +73,15 @@ describe('llm/circuit-breaker', () => {
     expect(legs[0]).toMatchObject({ model: 'gpt-6-sol' });
     expect(evalLib.legsCostUsd(legs)).toBeGreaterThan(0);
     expect(evalLib.unpricedLegCount(legs)).toBe(0);
+
+    // Daily digest distinguishes circuit-skipped failures from unconfigured single-leg policies and both-provider failures.
+    const metrics = require('../services/llm-dispatch-metrics');
+    const exCircuit = metrics.detectExceptions([{ policy: 'customerCopy', total: 10, fallbacks: 0, failed: 2, singleLeg: false, circuitSkippedFailed: 1 }], []);
+    expect(exCircuit[0].detail).toContain('1 skipped primary via open circuit and failed on backup');
+    expect(exCircuit[0].detail).not.toContain('no fallback configured');
+    expect(exCircuit[0].detail).not.toContain('BOTH providers');
+    const exSingle = metrics.detectExceptions([{ policy: 'smsShadow:anthropic:sealed', total: 10, fallbacks: 0, failed: 2, singleLeg: true, circuitSkippedFailed: 0 }], []);
+    expect(exSingle[0].detail).toContain('no fallback configured');
   });
 
   test('keeps in-window failures across ordinary successes until window expires', () => {
@@ -367,6 +376,28 @@ describe('llm/circuit-breaker', () => {
       expect(rPdf.ok).toBe(true);
       expect(rPdf.provider).toBe('openai');
       expect(global.fetch).toHaveBeenCalledTimes(4);
+
+      // Text-only backup model (gpt-6-luna lacks 'vision' cap) cannot serve image payloads, so open Gemini primary is NOT skipped.
+      cb.afterAttempt('gemini', { ok: false, reason: 'gemini_503' });
+      cb.afterAttempt('gemini', { ok: false, reason: 'gemini_503' });
+      const textOnlyBackupPolicy = {
+        name: 'testVisionCapCircuit',
+        primary: { provider: 'gemini', model: MODELS.GEMINI_VISION_BEST },
+        fallback: { provider: 'openai', model: 'gpt-6-luna' },
+      };
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ candidates: [{ content: { parts: [{ text: '{"ok":true}' }] } }] }),
+      });
+      const rImg = await llm.dispatchWithFallback(textOnlyBackupPolicy, {
+        text: 'inspect photo',
+        images: [{ mimeType: 'image/jpeg', data: 'AA==' }],
+        jsonMode: true,
+      });
+      expect(rImg.ok).toBe(true);
+      expect(rImg.provider).toBe('gemini');
+      expect(global.fetch).toHaveBeenCalledTimes(5);
 
       // When payload requires tools (Anthropic-only in dispatch()), OpenAI backup cannot serve it, so Anthropic primary is NOT skipped.
       process.env.ANTHROPIC_API_KEY = 'test-anthropic';
