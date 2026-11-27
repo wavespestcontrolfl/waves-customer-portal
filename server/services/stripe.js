@@ -821,15 +821,20 @@ const StripeService = {
    * one). Returns 'updated' | 'not_linked' | 'no_email' | 'not_configured'. Throws on a Stripe or read failure; callers
    * run it after commit and log a failure.
    */
-  async syncStripeCustomerEmail(customerId, { database = db } = {}) {
-    const customer = await database('customers').where({ id: customerId }).first('id', 'email', 'stripe_customer_id');
-    if (!customer?.stripe_customer_id) return 'not_linked';
-    const email = String(customer.email || '').trim();
-    if (!email) return 'no_email';
+  // Serialized per customer across processes (a transaction-scoped advisory lock): two overlapping syncs run one after
+  // the other, and each reads the email inside the lock, so the last one to finish always writes the newest address.
+  async syncStripeCustomerEmail(customerId) {
     const stripe = getStripe();
     if (!stripe) return 'not_configured';
-    await stripe.customers.update(customer.stripe_customer_id, { email });
-    return 'updated';
+    return db.transaction(async (trx) => {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`stripe-customer-email:${customerId}`]);
+      const customer = await trx('customers').where({ id: customerId }).first('id', 'email', 'stripe_customer_id');
+      if (!customer?.stripe_customer_id) return 'not_linked';
+      const email = String(customer.email || '').trim();
+      if (!email) return 'no_email';
+      await stripe.customers.update(customer.stripe_customer_id, { email });
+      return 'updated';
+    });
   },
 
   /**
@@ -914,6 +919,17 @@ const StripeService = {
       }
 
       logger.info(`[stripe] Customer created: ${stripeCustomerId} for ${customerId}`);
+      // The email may have changed while Stripe was creating the customer (an app email change whose sync saw no link
+      // yet). Re-read it on the same handle and bring Stripe up to date; a failure is logged, the link stands.
+      try {
+        const now = await database('customers').where({ id: customerId }).first('email');
+        const nowEmail = String(now?.email || '').trim();
+        if (nowEmail && nowEmail !== String(customer.email || '').trim()) {
+          await stripe.customers.update(stripeCustomerId, { email: nowEmail });
+        }
+      } catch (syncErr) {
+        logger.warn(`[stripe] email reconcile after create failed for ${customerId}: ${syncErr.code || syncErr.type || syncErr.name || 'sync_failed'}`);
+      }
       return stripeCustomerId;
     } catch (err) {
       if (err && err.code === 'CUSTOMER_RETIRED') throw err;

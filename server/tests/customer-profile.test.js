@@ -530,6 +530,18 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(mockStripeSync).toHaveBeenCalledWith(CUSTOMER_ID);
   });
 
+  test('an address the alert copy rules refuse (an underscore) still raises the alert, with a fixed sentence', async () => {
+    mockNotifyAdmin.mockClear();
+    mockCode.checkCode.mockResolvedValue(okCheck('first_last@example.test'));
+    mockApplyEmail.mockImplementation(async () => changed());
+    expect((await confirm('123456', 'first_last@example.test')).status).toBe(200);
+    await flush();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [, , body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(body).toBe('A customer changed their email, and both addresses are in the details.');
+    expect(opts.detail).toContain('New email: first_last@example.test');
+  });
+
   test('a failed alert or Stripe sync never undoes or fails the change', async () => {
     mockNotifyAdmin.mockClear().mockRejectedValueOnce(new Error('bell down'));
     mockStripeSync.mockClear().mockRejectedValueOnce(Object.assign(new Error('stripe down'), { type: 'StripeConnectionError' }));

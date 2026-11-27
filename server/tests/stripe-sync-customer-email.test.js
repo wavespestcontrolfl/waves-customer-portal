@@ -7,19 +7,25 @@ describe('syncStripeCustomerEmail', () => {
     jest.resetModules();
     const update = jest.fn(async () => ({}));
     const stripeClient = { customers: { update } };
-    const db = jest.fn(() => ({ where: () => ({ first: jest.fn(async () => row) }) }));
+    const events = [];
+    const trx = jest.fn(() => ({ where: () => ({ first: jest.fn(async () => { events.push('read'); return row; }) }) }));
+    trx.raw = jest.fn(async (sql, args) => { events.push(`lock:${args[0]}`); });
+    const db = jest.fn();
+    db.transaction = jest.fn(async (fn) => fn(trx));
     jest.doMock('../models/db', () => db);
     jest.doMock('stripe', () => jest.fn(() => stripeClient));
     jest.doMock('../config', () => ({}));
     jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_mock', publishableKey: 'pk_test_mock' }));
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
-    return { StripeService: require('../services/stripe'), update };
+    return { StripeService: require('../services/stripe'), update, events, trx };
   }
 
-  test('updates the linked Stripe customer with the email on file now', async () => {
-    const { StripeService, update } = load({ id: 'c1', email: ' new@example.test ', stripe_customer_id: 'cus_1' });
+  test('updates the linked Stripe customer with the email on file now, read inside the per-customer lock', async () => {
+    const { StripeService, update, events, trx } = load({ id: 'c1', email: ' new@example.test ', stripe_customer_id: 'cus_1' });
     await expect(StripeService.syncStripeCustomerEmail('c1')).resolves.toBe('updated');
     expect(update).toHaveBeenCalledWith('cus_1', { email: 'new@example.test' });
+    expect(trx.raw.mock.calls[0][0]).toMatch(/pg_advisory_xact_lock/);
+    expect(events).toEqual(['lock:stripe-customer-email:c1', 'read']);
   });
 
   test('does nothing for a customer with no Stripe customer or no email', async () => {

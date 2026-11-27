@@ -224,11 +224,14 @@ function sendChangeNotices({ customerId, before, after, changes }) {
 // code and never undoes the change. The alert is internal (the admin bell), so it carries the addresses; the office
 // checks the change looks right (a customer who says "this was not me" calls about it).
 // One sentence of at most 110 characters (the alert rule); both addresses always ride the detail lines too.
+// A name or address the copy rules refuse (an underscore, a bracket, a date-like run) falls back to a fixed sentence.
 function emailChangeWhy(name, oldEmail, newEmail) {
+  const { breaksAlertRules } = require('../services/admin-alert-compose');
+  const fits = (text) => text.length <= 110 && !breaksAlertRules(text);
   const full = `${name} moved from ${oldEmail || 'no email'} to ${newEmail}.`;
-  if (full.length <= 110) return full;
+  if (fits(full)) return full;
   const short = `${name} now uses ${newEmail}.`;
-  return short.length <= 110 ? short : `${name} changed their email; both addresses are in the details.`;
+  return fits(short) ? short : 'A customer changed their email, and both addresses are in the details.';
 }
 
 function afterEmailChange({ customerId, before, after, requestId }) {

@@ -34,7 +34,7 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
       return q;
     };
     const database = jest.fn(query);
-    stripeClient = { customers: { create: jest.fn(async () => ({ id: 'cus_new' })) } };
+    stripeClient = { customers: { create: jest.fn(async () => ({ id: 'cus_new' })), update: jest.fn(async () => ({})) } };
     logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     jest.doMock('../models/db', () => jest.fn());
     jest.doMock('stripe', () => jest.fn(() => stripeClient));
@@ -50,6 +50,25 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
     expect(state.row.stripe_customer_id).toBe('cus_new');
     expect(updates).toEqual([{ nulls: ['stripe_customer_id'], notMerged: true, patch: { stripe_customer_id: 'cus_new' } }]);
+  });
+
+  // Owner 11-27 "add both": an app email change confirmed while Stripe was creating the customer (its sync saw no
+  // link yet) is copied onto the new Stripe customer once the link lands.
+  test('an email that changed during creation is copied onto the new Stripe customer after the link', async () => {
+    const { StripeService, database } = load({ row: { email: 'old@example.test' }, beforeLink: (st) => { st.row.email = 'new@example.test'; } });
+    await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
+    expect(stripeClient.customers.create.mock.calls[0][0].email).toBe('old@example.test');
+    expect(stripeClient.customers.update).toHaveBeenCalledWith('cus_new', { email: 'new@example.test' });
+  });
+
+  test('an unchanged email makes no extra Stripe call, and a failed reconcile keeps the link', async () => {
+    const a = load({ row: { email: 'same@example.test' } });
+    await a.StripeService.ensureStripeCustomer('cust-1', { database: a.database });
+    expect(stripeClient.customers.update).not.toHaveBeenCalled();
+    const b = load({ row: { email: 'old@example.test' }, beforeLink: (st) => { st.row.email = 'new@example.test'; } });
+    stripeClient.customers.update.mockRejectedValue(new Error('stripe down'));
+    await expect(b.StripeService.ensureStripeCustomer('cust-1', { database: b.database })).resolves.toBe('cus_new');
+    expect(b.state.row.stripe_customer_id).toBe('cus_new');
   });
 
   test('already linked: returns it with no Stripe call and no write (fast path unchanged)', async () => {
