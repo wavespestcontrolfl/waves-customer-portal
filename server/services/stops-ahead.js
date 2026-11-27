@@ -347,26 +347,27 @@ async function countStopsAhead(db, serviceId, today) {
       ...NOT_A_STOP_STATUSES,
     ]
   );
-  const agg = countRes?.rows?.[0];
-  const raw = Number(agg?.ahead);
-  const yourStop = Number(agg?.before_all) + 1;
-  const totalStops = Number(agg?.others_all) + 1;
+  // No row reads as an empty aggregate: every figure below is then NaN and the count is null.
+  const agg = countRes?.rows?.[0] || {};
+  const raw = Number(agg.ahead);
+  const yourStop = Number(agg.before_all) + 1;
+  const totalStops = Number(agg.others_all) + 1;
   // The truck's REAL position, measured — never derived from the clamped
   // count (a clamped numeral with a derived position fabricates "Now at
   // stop X"). currentStop = finished stops before you, +1 while the tech
   // is actively at/driving to one of them.
-  const doneBefore = Number(agg?.done_before);
-  const atBefore = Number(agg?.at_before);
-  const enrouteBefore = Number(agg?.enroute_before);
+  const doneBefore = Number(agg.done_before);
+  const atBefore = Number(agg.at_before);
+  const enrouteBefore = Number(agg.enroute_before);
   // Three truthful truck phases (a merely-en-route stop must not read as
   // "Now at"): atStop = physically AT a stop (on-site/on-property);
   // headingToStop = driving to one (en-route); neither = between stops.
   // A stop that is somehow both reads as AT (on-property wins). The SQL
   // classifies per GROUP, so a mixed stop (one line completed, one line
   // active) is the active stop exactly once — never done AND active.
-  const atStop = Number.isFinite(atBefore) && atBefore > 0;
-  const headingToStop = !atStop && Number.isFinite(enrouteBefore) && enrouteBefore > 0;
-  const currentStop = (Number.isFinite(doneBefore) ? doneBefore : 0)
+  const atStop = atBefore > 0; // NaN > 0 is false
+  const headingToStop = !atStop && enrouteBefore > 0;
+  const currentStop = doneBefore // a NaN here means an empty aggregate, which the finite check below already nulls
     + (atStop || headingToStop ? 1 : 0);
   if (!Number.isFinite(raw) || !Number.isFinite(yourStop) || !Number.isFinite(totalStops)) return null;
   // The tech at/driving-to — or already FINISHED with — a stop that
@@ -374,7 +375,7 @@ async function countStopsAhead(db, serviceId, today) {
   // order) makes the planned count a lie: "You're next" / "Route starts
   // soon" while the truck is working, or was already past, a LATER
   // stop. Fail to the generic state, persist nothing.
-  if (Number(agg?.progressed_beyond) > 0) return null;
+  if (Number(agg.progressed_beyond) > 0) return null;
 
   // Clamp against the persisted floor — the GROUP's smallest same-day
   // floor (fetched in the same snapshot as the count), not the requested
@@ -384,20 +385,20 @@ async function countStopsAhead(db, serviceId, today) {
   // older sibling's link keeps showing a number. The SQL already
   // restricted the MIN to rows whose shown_date is today, so a stale
   // floor from another day never clamps.
-  const groupFloorRaw = agg?.group_floor;
+  const groupFloorRaw = agg.group_floor;
   const groupFloor = groupFloorRaw == null ? null : Number(groupFloorRaw);
   let clamped = raw;
   if (Number.isInteger(groupFloor)) clamped = Math.min(raw, groupFloor);
   if (clamped > STOPS_AHEAD_DISPLAY_CAP) return null;
   return {
     svc, svcDate, groupFloor, raw, clamped, yourStop, totalStops, currentStop, atStop, headingToStop,
-    tied: Number(agg?.tied), targetRows: Number(agg?.target_rows), siblingAdvanced: Number(agg?.sibling_advanced),
+    tied: Number(agg.tied), targetRows: Number(agg.target_rows), siblingAdvanced: Number(agg.sibling_advanced),
     stop: {
-      technicianId: agg?.t_technician_id ?? null, customerId: agg?.t_customer_id ?? null,
-      date: agg?.t_scheduled_date ?? null, windowStart: agg?.t_window_start ?? null,
+      technicianId: agg.t_technician_id, customerId: agg.t_customer_id,
+      date: agg.t_scheduled_date, windowStart: agg.t_window_start,
     },
-    memberIds: Array.isArray(agg?.member_ids) ? agg.member_ids : [],
-    openStopsToday: Number(agg?.open_stops_today),
+    memberIds: Array.isArray(agg.member_ids) ? agg.member_ids : [],
+    openStopsToday: Number(agg.open_stops_today),
   };
 }
 
