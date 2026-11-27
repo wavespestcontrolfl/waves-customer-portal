@@ -878,6 +878,66 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.restoreAllMocks();
   });
 
+  test('P0-1 + P1-1 + P1-2 + P1-3: live direction forwards to Google, expired hold stays retained when live push unavailable, DB failure rolls back Google, and stale clearHold no-ops under lock', async () => {
+    // P0-1: setBudget forwards requireDirection to updateBudget and propagates budget_direction_invalid without persisting.
+    campaignFirstRow = baseCampaign(); // base 40, current 40
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockRejectedValueOnce(Object.assign(new Error('live google is $20'), { code: 'budget_direction_invalid' }));
+    await expect(BudgetManager.setBudget('c-1', 30, 'advisor', { requireLivePush: true, requireDirection: 'decrease' }))
+      .rejects.toMatchObject({ code: 'budget_direction_invalid' });
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 30, { requireDirection: 'decrease' });
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+
+    // P1-1: linked throttled branded campaign with expired hold keeps its hold when adsBudgetLivePush is OFF.
+    jest.clearAllMocks();
+    const expiredBranded = {
+      ...baseCampaign(),
+      is_branded: true,
+      budget_mode: 'stop',
+      daily_budget_current: '0.40',
+      metadata: { budget_hold: { mode: 'stop', until: '2020-01-01' } },
+    };
+    campaignRows = [expiredBranded];
+    campaignFirstRow = expiredBranded;
+    mockIsEnabled.mockReturnValue(false);
+    mockIsConfigured.mockReturnValue(true);
+    const skippedRes = await BudgetManager.adjustBudgets();
+    expect(skippedRes).toEqual({ evaluated: 0, changed: 0, failed: 0 });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+
+    // P1-2: DB persist failure after expired-hold Google push rolls back Google and increments summary.failed.
+    jest.clearAllMocks();
+    campaignRows = [expiredBranded];
+    campaignFirstRow = expiredBranded;
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    mockUpdateBudget.mockResolvedValue({ ok: true, previousDailyBudget: 0.4 });
+    mockLogInsert.mockRejectedValueOnce(new Error('db write failed'));
+    const failRes = await BudgetManager.adjustBudgets();
+    expect(failRes.failed).toBe(1);
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
+    expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
+
+    // P1-3: stale DELETE clearHold (hold already cleared concurrently before FOR UPDATE lock) must NOT push base to Google.
+    jest.clearAllMocks();
+    campaignFirstRow = {
+      ...baseCampaign(),
+      is_branded: true,
+      budget_mode: 'stop',
+      daily_budget_current: '0.40',
+      metadata: {}, // hold already removed by another request before lock acquired
+    };
+    const staleRes = await BudgetManager.setMode('c-1', 'base', 'Hold cleared', {
+      requireLivePush: true,
+      requireActive: true,
+      clearHold: { at: '2026-11-27T00:00:00Z', by: 'admin-1', requireIneligibleRestore: true, expectedMode: 'stop', expectedUntil: '2099-01-01' },
+    });
+    expect(staleRes.noop).toBe(true);
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).not.toHaveBeenCalled();
+  });
+
   test('setBudget requireBoundFactor: target == locked base == current throws budget_noop', async () => {
     campaignFirstRow = baseCampaign(); // base 40, current 40 (strings parse to 40)
     mockIsConfigured.mockReturnValue(true);

@@ -221,5 +221,17 @@ describe('ASOS wxcodes thunderstorm grading', () => {
     ].join('\n');
     const noPrecipObs = w.parseObs(noPrecipCsv, '2026-11-25');
     expect(w.tallyHours(noPrecipObs, ['SRQ'], [13])).toEqual({ wet_hours: 1, inches: null, missing: 0 });
+
+    // P1-7: dry local observation at nearest station (SRQ) is NOT overridden by thunder at fallback station (VNC).
+    const localDryFallbackStormCsv = [
+      'station,valid,p01i,wxcodes',
+      'SRQ,2026-11-25 14:53,0.00,M',
+      'VNC,2026-11-25 14:53,0.00,TS',
+      'VNC,2026-11-25 15:53,0.00,TS',
+    ].join('\n');
+    const mixedObs = w.parseObs(localDryFallbackStormCsv, '2026-11-25');
+    // Hour 14: SRQ reported dry -> Sarasota stays dry; Hour 15: SRQ has no report -> falls back to VNC thunder.
+    expect(w.tallyHours(mixedObs, ['SRQ', 'VNC'], [14])).toEqual({ wet_hours: 0, inches: 0, missing: 0 });
+    expect(w.tallyHours(mixedObs, ['SRQ', 'VNC'], [15])).toEqual({ wet_hours: 1, inches: 0, missing: 0 });
   });
 });

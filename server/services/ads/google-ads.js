@@ -564,7 +564,7 @@ async function enableCampaign(platformCampaignId) {
 // ---------------------------------------------------------------------------
 // updateBudget — change a campaign's daily budget via Google Ads API
 // ---------------------------------------------------------------------------
-async function updateBudget(platformCampaignId, dailyBudgetDollars) {
+async function updateBudget(platformCampaignId, dailyBudgetDollars, { requireDirection = null } = {}) {
   const customer = getCustomer();
   if (!customer) return null;
 
@@ -598,6 +598,28 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
       return null;
     }
 
+    const previousMicros = campaignData.campaign_budget?.amount_micros;
+    const previousDailyBudget = previousMicros != null && previousMicros !== ''
+      ? Number(previousMicros) / 1_000_000
+      : null;
+    // W16 live-direction guard: when the caller requires a strict increase or
+    // decrease (advisor apply), verify against the LIVE Google Ads amount right
+    // before mutating — an unreadable live amount or wrong-way move is refused
+    // before mutateResources runs so a decrease can never raise live spend.
+    if (requireDirection) {
+      if (!(Number.isFinite(previousDailyBudget) && previousDailyBudget > 0)) {
+        const err = new Error(`Cannot verify live Google Ads daily budget for campaign ${platformCampaignId} before applying ${requireDirection}_budget — refusing to update.`);
+        err.code = 'budget_direction_invalid';
+        throw err;
+      }
+      if ((requireDirection === 'decrease' && dailyBudgetDollars >= previousDailyBudget)
+        || (requireDirection === 'increase' && dailyBudgetDollars <= previousDailyBudget)) {
+        const err = new Error(`Refusing ${requireDirection}_budget to $${dailyBudgetDollars}/day because live Google Ads budget is currently $${previousDailyBudget}/day.`);
+        err.code = 'budget_direction_invalid';
+        throw err;
+      }
+    }
+
     const budgetResourceName = campaignData.campaign.campaign_budget;
     const amountMicros = Math.round(dailyBudgetDollars * 1_000_000);
 
@@ -613,16 +635,16 @@ async function updateBudget(platformCampaignId, dailyBudgetDollars) {
     ]);
 
     logger.info(`[google-ads] Budget updated for campaign ${platformCampaignId}: $${dailyBudgetDollars}/day`);
-    const previousMicros = campaignData.campaign_budget?.amount_micros;
     return {
       success: true,
       platformCampaignId,
       dailyBudget: dailyBudgetDollars,
       // Live amount observed immediately before this mutation (null if the
       // API omitted it) — the rollback's restore target.
-      previousDailyBudget: previousMicros != null ? Number(previousMicros) / 1_000_000 : null,
+      previousDailyBudget: Number.isFinite(previousDailyBudget) ? previousDailyBudget : null,
     };
   } catch (err) {
+    if (err?.code === 'budget_direction_invalid') throw err;
     logger.error(`[google-ads] updateBudget failed: ${err.message}`);
     return null;
   }

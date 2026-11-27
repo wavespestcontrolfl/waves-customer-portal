@@ -208,6 +208,9 @@ async function promotionCandidates({ database = db } = {}) {
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
+    })
     .whereNotExists(function hasOpenSchedule() {
       this.select(database.raw('1')).from(`${TABLE} as c`)
         .whereRaw('c.customer_id = s.customer_id').whereIn('c.status', OPEN_STATUSES);

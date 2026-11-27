@@ -272,11 +272,16 @@ class BudgetManager {
    * throttled campaigns back to base budget and clears metadata.budget_hold under FOR UPDATE.
    */
   async releaseExpiredNonAutomatedHolds(candidates, now, todayEt) {
-    if (!Array.isArray(candidates) || candidates.length === 0) return;
+    const totals = { changed: 0, failed: 0 };
+    if (!Array.isArray(candidates) || candidates.length === 0) return totals;
     for (const listed of candidates) {
+      let restorePushed = null;
+      let outcome = null;
+      const opId = randomUUID();
       try {
         await db.transaction(async (trx) => {
           const campaign = await trx('ad_campaigns').where({ id: listed.id }).forUpdate().first();
+          const lockAcquiredAt = new Date();
           if (!campaign || campaign.status !== 'active' || campaign.platform !== 'google_ads') return;
           if (isCapacityEligibleCampaign(campaign)) return;
           const meta = parseJsonObject(campaign.metadata) || {};
@@ -294,18 +299,29 @@ class BudgetManager {
           });
           if (campaign.budget_mode !== 'base') {
             const restoredBudget = this.calculateBudget(campaign, 'base');
+            const linked = Boolean(campaign.platform_campaign_id);
             let pushedLive = false;
-            if (isEnabled('adsBudgetLivePush') && campaign.platform_campaign_id && campaign.daily_budget_base != null && getGoogleAds().isConfigured()) {
+            if (linked) {
+              // Linked campaigns MUST confirm live restoration on Google Ads before clearing the
+              // expired hold — if live push is disabled, unconfigured, or base is null, retain the
+              // hold so the campaign cannot stay throttled on Google while local state says base.
+              if (!isEnabled('adsBudgetLivePush') || campaign.daily_budget_base == null || !getGoogleAds().isConfigured()) {
+                logger.warn(`Budget: retaining expired hold on linked non-automated campaign ${campaign.campaign_name} until live Google restoration is available`);
+                return;
+              }
               if (restoredBudget > MAX_DAILY_BUDGET) {
                 logger.error(`Budget: ${campaign.campaign_name} expired hold restore to base ($${restoredBudget}/day) refused — exceeds daily safety cap of $${MAX_DAILY_BUDGET}`);
+                outcome = 'failed';
                 return;
               }
               const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, restoredBudget);
               if (!pushed) {
                 logger.error(`Budget: ${campaign.campaign_name} expired hold restore NOT applied — Google Ads push failed; will retry next run`);
+                outcome = 'failed';
                 return;
               }
               pushedLive = true;
+              restorePushed = { campaign, attempted: restoredBudget, startedAt: lockAcquiredAt, opId, preLive: pushed?.previousDailyBudget ?? null };
             }
             await trx('ad_campaigns').where({ id: campaign.id }).update({
               budget_mode: 'base',
@@ -322,10 +338,11 @@ class BudgetManager {
               new_budget: restoredBudget,
               reason: boundReason(`Expired hold released on non-automated campaign — restored to base${pushedLive ? ' (pushed to Google Ads)' : ''}`),
               trigger: 'auto',
-              op_id: randomUUID(),
+              op_id: opId,
               google_ads_updated: pushedLive,
               created_at: new Date(),
             });
+            outcome = 'changed';
             logger.info(`Budget: released expired hold on non-automated campaign ${campaign.campaign_name} (${campaign.budget_mode}→base, $${restoredBudget}/day)`);
           } else {
             await trx('ad_campaigns').where({ id: campaign.id }).update({
@@ -336,9 +353,26 @@ class BudgetManager {
           }
         });
       } catch (err) {
-        logger.error(`Budget adjust: failed to release expired hold on ${listed.campaign_name}: ${err.message}`);
+        if (restorePushed) {
+          const rollback = await this.rollbackAfterLivePush(
+            restorePushed.campaign, err, restorePushed.attempted, restorePushed.startedAt, restorePushed.opId, restorePushed.preLive,
+          );
+          if (rollback.code === 'apply_committed') {
+            outcome = 'changed';
+            logger.info(`Budget adjust: ${listed.campaign_name} expired-hold restore COMMIT ack was lost but is durable — no compensation needed`);
+          } else {
+            outcome = 'failed';
+            logger.error(`Budget adjust: ${listed.campaign_name} expired-hold persist failed after live push — ${rollback.message}`);
+          }
+        } else {
+          outcome = 'failed';
+          logger.error(`Budget adjust: failed to release expired hold on ${listed.campaign_name}: ${err.message}`);
+        }
       }
+      if (outcome === 'changed') totals.changed += 1;
+      else if (outcome === 'failed') totals.failed += 1;
     }
+    return totals;
   }
 
   /**
@@ -613,7 +647,9 @@ class BudgetManager {
       else if (outcome === 'failed') summary.failed += 1;
     }
 
-    await this.releaseExpiredNonAutomatedHolds(expiredNonAutomatedHolds, now, todayEt);
+    const expiredResults = await this.releaseExpiredNonAutomatedHolds(expiredNonAutomatedHolds, now, todayEt);
+    summary.changed += expiredResults.changed;
+    summary.failed += expiredResults.failed;
 
     // Record what the gap rule decided (live) or would have decided (shadow).
     // A recording problem never touches the budgets the loop already settled; it
@@ -1009,6 +1045,32 @@ class BudgetManager {
             const err = new Error(`Timed holds only apply to active non-branded Google Search campaigns managed by the automatic budget rule ("${campaign.campaign_name}" is not eligible).`);
             err.code = 'hold_not_eligible';
             throw err;
+          }
+          if (clearHold?.requireIneligibleRestore) {
+            // Re-verify the hold, eligibility, and throttled state on the LOCKED row:
+            // if a concurrent request already cleared the hold (or manually re-stopped
+            // the campaign after release), never push base over the newer manual state.
+            const lockedHold = parseJsonObject(parseJsonObject(campaign.metadata)?.budget_hold);
+            const sameHold = Boolean(lockedHold)
+              && (!clearHold.expectedMode || lockedHold.mode === clearHold.expectedMode)
+              && (!clearHold.expectedUntil || lockedHold.until === clearHold.expectedUntil);
+            if (!sameHold || isCapacityEligibleCampaign(campaign) || campaign.budget_mode === mode) {
+              if (sameHold) {
+                await trx('ad_campaigns').where({ id: campaignId }).update({
+                  ...withHold(campaign),
+                  updated_at: new Date(),
+                });
+              }
+              return {
+                campaign: campaign.campaign_name,
+                previousMode: campaign.budget_mode,
+                newMode: campaign.budget_mode,
+                newBudget: Number(campaign.daily_budget_current),
+                googleAdsUpdated: false,
+                livePushAttempted: false,
+                noop: true,
+              };
+            }
           }
           await assertNoChangeSince(trx, campaign, requireNoChangeSince);
           // Under the lock: two concurrent applies of the same rec both pass
@@ -1505,7 +1567,9 @@ class BudgetManager {
               err.code = 'live_push_unavailable';
               throw err;
             }
-            const pushed = await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
+            const pushed = requireDirection
+              ? await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget, { requireDirection })
+              : await getGoogleAds().updateBudget(campaign.platform_campaign_id, effectiveBudget);
             googleAdsUpdated = !!pushed;
             if (!googleAdsUpdated) {
               const err = new Error(`Google Ads refused the budget update for "${campaign.campaign_name}" — nothing was changed. Check the campaign in Google Ads (shared budgets can't be updated from here).`);

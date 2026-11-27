@@ -404,4 +404,22 @@ describe('storm-watch sweep', () => {
     expect(notifInsert.mock.calls.map((c) => c[0].type)).toEqual(['storm_watch_alert', 'weather_safety_advisory']);
     expect(notifInsert.mock.calls[1][0].message).toContain('Heat Advisory');
   });
+
+  test('P1-6: nonempty hourly rows lacking temperature/wind readings still invoke FAWN ground-truth fallback', async () => {
+    const { notifInsert } = wireDb({ stops: [stop()] });
+    // Nonempty hourly array with rainChance only (no temperatureF/relativeHumidity/windMph).
+    getHourlyRainOutlook.mockResolvedValue([{
+      startTime: new Date(NOON_ET.getTime() + 30 * 60_000).toISOString(),
+      rainChance: 10, hasThunder: false,
+    }]);
+    getNwsActiveAlerts.mockResolvedValue([]);
+    const readFawn = jest.fn().mockResolvedValue({ station: 'North Port', temp_f: 96, humidity_pct: 65, wind_mph: 28 });
+
+    const res = await StormWatch.sweep(NOON_ET, { readFawn });
+    expect(readFawn).toHaveBeenCalledTimes(1);
+    expect(res).toEqual({ checked: 1, alerted: 0, advisories: 1 });
+    expect(notifInsert.mock.calls[0][0].type).toBe('weather_safety_advisory');
+    expect(notifInsert.mock.calls[0][0].message).toContain('High Heat');
+    expect(notifInsert.mock.calls[0][0].message).toContain('High Wind');
+  });
 });

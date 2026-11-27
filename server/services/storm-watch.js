@@ -104,7 +104,8 @@ function hourlySafetyAdvisories(hours, now, existing) {
     peakGust = maxNum(peakGust, h.windGustMph);
     peakWind = maxNum(peakWind, h.windMph);
   }
-  const sawReadings = inWindow.some((h) => [h.temperatureF, h.windMph, h.windGustMph].some(Number.isFinite));
+  const sawHeat = inWindow.some((h) => heatIndexF(h.temperatureF, h.relativeHumidity) != null);
+  const sawWind = inWindow.some((h) => Number.isFinite(h.windMph) || Number.isFinite(h.windGustMph));
   if (!cats.has('heat_advisory') && peakHi >= HEAT_ADVISORY_INDEX_F) {
     out.push({ event: `High Heat (${Math.round(peakHi)}°F heat index)`, category: 'heat_advisory', moveTrigger: false });
   }
@@ -112,19 +113,19 @@ function hourlySafetyAdvisories(hours, now, existing) {
     const label = peakGust >= WIND_GUST_ADVISORY_MPH ? `${Math.round(peakGust)} mph gusts` : `${Math.round(peakWind)} mph wind`;
     out.push({ event: `High Wind (${label})`, category: 'wind_advisory', moveTrigger: false });
   }
-  return { advisories: out, sawReadings };
+  return { advisories: out, sawHeat, sawWind };
 }
 
-function fawnSafetyAdvisories(fawn, existing) {
+function fawnSafetyAdvisories(fawn, existing, { checkHeat = true, checkWind = true } = {}) {
   if (!fawn || fawn.station === 'unavailable') return existing;
   const out = [...existing];
   const cats = new Set(out.map((a) => a.category));
   const where = fawn.station ? ` at ${fawn.station}` : '';
   const hi = heatIndexF(fawn.temp_f, fawn.humidity_pct);
-  if (!cats.has('heat_advisory') && hi != null && Math.round(hi) >= HEAT_ADVISORY_INDEX_F) {
+  if (checkHeat && !cats.has('heat_advisory') && hi != null && Math.round(hi) >= HEAT_ADVISORY_INDEX_F) {
     out.push({ event: `High Heat (${Math.round(hi)}°F heat index${where})`, category: 'heat_advisory', moveTrigger: false, source: 'fawn' });
   }
-  if (!cats.has('wind_advisory') && Number.isFinite(fawn.wind_mph) && fawn.wind_mph >= WIND_ADVISORY_MPH) {
+  if (checkWind && !cats.has('wind_advisory') && Number.isFinite(fawn.wind_mph) && fawn.wind_mph >= WIND_ADVISORY_MPH) {
     out.push({ event: `High Wind (${Math.round(fawn.wind_mph)} mph${where})`, category: 'wind_advisory', moveTrigger: false, source: 'fawn' });
   }
   return out;
@@ -151,8 +152,10 @@ function stormSignal(hours, alerts, now = new Date(), fawn = null) {
   const active = (Array.isArray(alerts) ? alerts : []).filter(overlaps);
   const severeAlerts = active.filter((a) => a.moveTrigger === true);
   const nwsAdvisories = active.filter((a) => a.category === 'heat_advisory' || a.category === 'wind_advisory');
-  const { advisories: withHourly, sawReadings } = hourlySafetyAdvisories(hours, now, nwsAdvisories);
-  const advisories = sawReadings ? withHourly : fawnSafetyAdvisories(fawn, withHourly);
+  const { advisories: withHourly, sawHeat, sawWind } = hourlySafetyAdvisories(hours, now, nwsAdvisories);
+  const advisories = (!sawHeat || !sawWind)
+    ? fawnSafetyAdvisories(fawn, withHourly, { checkHeat: !sawHeat, checkWind: !sawWind })
+    : withHourly;
   const shouldNudge = severeAlerts.length > 0 || hasThunder || (peak != null && peak >= RAIN_CHANCE_THRESHOLD);
   return { peak, hasThunder, severeAlerts, advisories, shouldNudge };
 }
@@ -301,8 +304,10 @@ async function sweep(now = new Date(), { readFawn } = {}) {
       logger.info(`[storm-watch] hourly outlook failed for job ${job.id}: ${err.message}`);
     }
     const alerts = await readActiveAlertsSafe(job.customer_latitude, job.customer_longitude, alertsCache);
-    // FAWN ground-truth fallback only when hourly forecast is unavailable (avoids redundant calls).
-    const fawn = (!Array.isArray(hours) || hours.length === 0)
+    // FAWN ground-truth fallback whenever hourly rows within the forecast window lack usable
+    // heat-index or wind readings (even if the hourly array is nonempty with rainChance-only rows).
+    const { sawHeat, sawWind } = hourlySafetyAdvisories(hours, now, []);
+    const fawn = (!sawHeat || !sawWind)
       ? await readFawnSafe(job.customer_latitude, job.customer_longitude, fawnCache, readFawn)
       : null;
     const signal = stormSignal(hours, alerts, now, fawn);

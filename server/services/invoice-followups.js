@@ -29,6 +29,13 @@ const { billingLegDeliveryState, billingLegContactTime, originalBillingContactAr
 const db = require('../models/db');
 const invoiceHelpers = require('./invoice-helpers');
 const { invoiceWithdrawnFromCustomer } = invoiceHelpers;
+// Partial mocks of invoice-helpers in legacy unit suites may omit newer exports;
+// fall back to the same stamp predicate so neither production nor mocks break.
+const invoiceHeldForChemicalReview = (invoice) => (
+  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
+    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
+    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
+);
 const logger = require('./logger');
 const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
@@ -109,6 +116,7 @@ function isSchedulableInvoice(invoice) {
 function followupArmBlock(invoice) {
   if (!isSchedulableInvoice(invoice)) return 'not_schedulable';
   if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return 'payer_billed';
+  if (invoiceHeldForChemicalReview(invoice)) return 'chemical_addon_hold';
   return null;
 }
 
@@ -393,6 +401,7 @@ async function followupEmailInvoice(invoiceId) {
   const invoice = await db('invoices').where({ id: invoiceId }).first().catch(() => null);
   if (!invoice || isTerminalInvoice(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_not_eligible' } };
   if (invoice.payer_id || invoiceWithdrawnFromCustomer(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_payer_billed' } };
+  if (invoiceHeldForChemicalReview(invoice)) return { refusal: { ok: false, skipped: true, reason: 'invoice_chemical_addon_hold' } };
   return { invoice };
 }
 
@@ -999,6 +1008,9 @@ async function selectAdoptionCandidates() {
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
+    })
     .whereNull('c.deleted_at')
     // Same guard scheduleForInvoice applies under the invoice lock — filtered
     // here too so the dry-run candidate set matches what adoption would do.
@@ -1187,6 +1199,9 @@ async function runPending(options) {
     // move on a row whose payer_id stays NULL (Codex #4311 r31 P1).
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
     })
     // A customer on an open customer_dunning_schedules row: the schedule owns
     // the cadence and these rows are membership state, never fired here —
@@ -1447,6 +1462,9 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
     .where(function withdrawnExcluded() {
       this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'payer_billed:%');
     })
+    .where(function chemicalHoldExcluded() {
+      this.whereNull('i.scheduled_send_error').orWhereNot('i.scheduled_send_error', 'like', 'chemical_addon_review:%');
+    })
     .select(
       's.id', 's.invoice_id', 's.step_index', 's.anchor_at', 's.created_at', 'i.invoice_number',
       'i.sent_at as invoice_sent_at', 'i.sms_sent_at as invoice_sms_sent_at', 'i.created_at as invoice_created_at',
@@ -1481,7 +1499,8 @@ async function reviveFinishedSequences(minStepIndex, maxStepIndexExclusive, { re
       revived += await db.transaction(async (trx) => {
         const invoice = await trx('invoices').where({ id: row.invoice_id }).forUpdate().first('status', 'payer_id', 'scheduled_send_error');
         if (!invoice || !PUBLISHED_INVOICE_STATUSES.includes(normalizedStatus(invoice)) || invoice.payer_id
-          || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))) return 0;
+          || /^payer_billed:/.test(String(invoice.scheduled_send_error || ''))
+          || invoiceHeldForChemicalReview(invoice)) return 0;
         return Number(await trx('invoice_followup_sequences').where(guard).update(patch)) || 0;
       });
     } catch (err) {
@@ -2195,6 +2214,16 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is billed to a third-party payer`);
     return exitNoSend(report, 'skipped', 'invoice_payer_billed');
   }
+  if (invoiceHeldForChemicalReview({ scheduled_send_error: sendError })) {
+    await db('invoice_followup_sequences').where({ id: row.id }).update({
+      updated_at: db.fn.now(),
+      status: 'paused',
+      paused_reason: 'unrecorded_chemical_addon_review',
+      next_touch_at: null,
+    });
+    logger.info(`[invoice-followups] paused sequence ${row.id} — invoice ${row.invoice_id} is held for chemical add-on review`);
+    return exitNoSend(report, 'skipped', 'invoice_chemical_addon_hold');
+  }
 
   const customer = await db('customers').where({ id: row.customer_id }).first();
   // Guard every send path (cron runPending filters too, but sendNextTouchNow
@@ -2313,6 +2342,16 @@ async function fireTouch(row, { operatorInitiated = false, claimStamp = null, ve
     if (fresh && (fresh.payer_id || invoiceWithdrawnFromCustomer(fresh))) {
       logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} moved to a third-party payer during this run`);
       return exitNoSend(report, 'skipped', 'invoice_payer_billed');
+    }
+    if (fresh && invoiceHeldForChemicalReview(fresh)) {
+      await db('invoice_followup_sequences').where({ id: row.id }).update({
+        updated_at: db.fn.now(),
+        status: 'paused',
+        paused_reason: 'unrecorded_chemical_addon_review',
+        next_touch_at: null,
+      }).catch(() => {});
+      logger.info(`[invoice-followups] dropped touch for sequence ${row.id} — invoice ${row.invoice_id} held for chemical add-on review during this run`);
+      return exitNoSend(report, 'skipped', 'invoice_chemical_addon_hold');
     }
     if (fresh) {
       row.total = fresh.total;

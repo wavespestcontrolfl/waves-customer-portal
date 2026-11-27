@@ -321,7 +321,13 @@ describe('POST /campaigns/:id/hold', () => {
         requireLivePush: true,
         requireActive: true,
         trigger: 'manual',
-        clearHold: expect.objectContaining({ by: 'admin-1', at: expect.any(String) }),
+        clearHold: expect.objectContaining({
+          by: 'admin-1',
+          at: expect.any(String),
+          requireIneligibleRestore: true,
+          expectedMode: 'stop',
+          expectedUntil: inDays(3),
+        }),
       }),
     );
   });

@@ -9245,9 +9245,17 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // on this transaction, before the application rows are written (a fresh attempt
         // only; the preflight above cannot see a spray a concurrent completion commits).
         if (!resumingCommittedCompletion && insertedServiceProducts.length) {
-          // The cap re-check under the customer lock stays, but a breach is a warning (owner 2026-11-26), once per completion.
+          // The cap and pair re-checks under the customer lock stay, returning a typed warning
+          // ({ kind: 'pair' | 'limit', message }) deduplicated against the matching preflight finding.
           const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
-          if (capWarning && !lawnWarningFindings.some((finding) => finding.limitType === BERMUDA_STEP_LIMIT_TYPE)) lawnWarningFindings.push(bermudaStepFinding(capWarning));
+          if (capWarning) {
+            const kind = typeof capWarning === 'object' ? capWarning.kind : 'limit';
+            const msg = typeof capWarning === 'object' ? capWarning.message : capWarning;
+            const targetType = kind === 'pair' ? BERMUDA_PAIR_TYPE : BERMUDA_STEP_LIMIT_TYPE;
+            if (!lawnWarningFindings.some((finding) => finding.limitType === targetType)) {
+              lawnWarningFindings.push(kind === 'pair' ? bermudaPairFinding(msg) : bermudaStepFinding(msg));
+            }
+          }
         }
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
@@ -11812,14 +11820,51 @@ async function completeScheduledService(completionInput, packetContext = null) {
       isBackfillCompletion,
       annualPrepayCovered,
     };
+    if (unpaidExistingOnChemicalHold) {
+      // Persist the chemical-review billing hold on any existing/pre-minted unpaid
+      // invoice and pause active follow-up reminders so published invoices cannot
+      // trigger payment reminders or automated collection while the office reviews.
+      const heldIds = [...new Set([
+        existingCompletionInvoice && !['paid', 'prepaid'].includes(existingCompletionInvoice.status) ? existingCompletionInvoice.id : null,
+        preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status) ? preMintedInvoice.id : null,
+      ].filter(Boolean))];
+      try {
+        const { chemicalAddonHoldStamp } = require('../services/invoice-helpers');
+        const InvoiceFollowups = require('../services/invoice-followups');
+        for (const heldId of heldIds) {
+          await db('invoices')
+            .where({ id: heldId })
+            .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .update({
+              scheduled_send_error: chemicalAddonHoldStamp(svc.id),
+              updated_at: new Date(),
+            });
+          await InvoiceFollowups.pauseSequence(heldId, { reason: 'unrecorded_chemical_addon_review' });
+        }
+      } catch (holdPersistErr) {
+        logger.error(`[dispatch] chemical_addon_billing_alert_failed (persist hold failed) for visit ${svc.id} — closeout NOT finalized: ${holdPersistErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, holdPersistErr);
+        return ({ status: 503, body: {
+          error: released
+            ? 'This visit\'s chemical add-on billing hold could not be saved — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+            : `This visit's chemical add-on billing hold could not be saved — the closeout is saved but NOT finalized. Retry in about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes.`,
+          code: 'chemical_addon_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     // Annual-prepay covered visits route their add-on billing hold and held-invoice
     // office alert through reconcileCoveredVisitInvoice below; all other visits raise
-    // the fail-closed billing review alert here.
+    // the fail-closed billing review alert here. Using the counterfactual
+    // shouldAutoInvoiceCompletion check directly ensures out-of-band prepaid backfills
+    // (where backfill requires a review invoice despite prepaidCovered) still alert.
     const chemicalAddOnBillingHoldApplies = !packetEffects && unrecordedChemicalAddOnHold
       && !recapReviewOnly && !alreadyPaid && !autopayCoversVisit
       && ((unpaidExistingOnChemicalHold && !annualPrepayCovered)
-        || (!prepaidCovered && !shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
+        || (!shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
     if (chemicalAddOnBillingHoldApplies) {
       logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${unpaidExistingOnChemicalHold ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
       // This billing alert is the ONLY durable office work item for a held bill,

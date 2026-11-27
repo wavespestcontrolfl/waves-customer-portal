@@ -563,8 +563,9 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   // Return missing-pair, unconfigured-limits, and cap findings as non-blocking warnings inside the
   // locked transaction rather than rolling back completion.
   const inconsistent = !!stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit));
-  const pairProblem = stepVisit ? (inconsistent ? NOT_CONFIGURED_MESSAGE : pairMessage({ recognition, fusilade, unconfigured })) : null;
-  if (pairProblem) return pairProblem;
+  if (stepVisit && inconsistent) return { kind: 'limit', message: NOT_CONFIGURED_MESSAGE };
+  const pairProblem = stepVisit ? pairMessage({ recognition, fusilade, unconfigured }) : null;
+  if (pairProblem) return { kind: 'pair', message: pairProblem };
   const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
   if (!sprayed.length) return;
   const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
@@ -572,7 +573,7 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
     [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
   const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
-  return message || undefined;
+  return message ? { kind: 'limit', message } : undefined;
 }
 
 // The pest recap is not a place to record the bermuda removal spray: it takes no treated area

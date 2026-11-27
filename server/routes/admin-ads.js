@@ -662,7 +662,18 @@ router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
           existing.id,
           'base',
           'Hold cleared on non-automated campaign — restored to base budget',
-          { requireLivePush: true, requireActive: true, trigger: 'manual', clearHold: { at: clearedAt, by: clearedBy } },
+          {
+            requireLivePush: true,
+            requireActive: true,
+            trigger: 'manual',
+            clearHold: {
+              at: clearedAt,
+              by: clearedBy,
+              requireIneligibleRestore: true,
+              expectedMode: existingMeta.budget_hold?.mode || null,
+              expectedUntil: existingMeta.budget_hold?.until || null,
+            },
+          },
         ),
         res,
       );

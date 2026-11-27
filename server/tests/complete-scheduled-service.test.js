@@ -225,6 +225,7 @@ describe('customer-safe routine completion observations', () => {
           .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
       });
     } catch { /* proceeds past validation into unmodeled tx */ }
+    expect(db.transaction).toHaveBeenCalled();
     expect(result?.body?.code).not.toBe('conflicting_structured_observations');
   });
 
@@ -301,6 +302,7 @@ describe('customer-safe routine completion observations', () => {
       });
     } catch { /* proceeds past validation into unmodeled tx */ }
 
+    expect(db.transaction).toHaveBeenCalled();
     expect(result?.body?.code).not.toBe('conflicting_structured_observations');
   });
 
@@ -425,6 +427,7 @@ describe('customer-safe routine completion observations', () => {
       deliveryMode: 'auto_send',
     });
 
+    const logger = require('../services/logger');
     let result;
     try {
       result = await complete({
@@ -437,6 +440,8 @@ describe('customer-safe routine completion observations', () => {
       });
     } catch { /* proceeds past validation into the committed flow, which this fixture does not model */ }
 
+    expect(db.transaction).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking typed Tree & Shrub compliance warnings/));
     expect(result?.body?.code).not.toBe('invalid_structured_observation');
     expect(result?.body?.code).not.toBe('tree_shrub_typed_compliance');
   });
@@ -595,10 +600,13 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
   afterEach(() => pair.mockRestore());
 
   test('a fresh attempt is NOT refused for a bermuda pair warning (owner 2026-11-26): the message is a warning and the completion goes on', async () => {
+    const logger = require('../services/logger');
     const completionAttempt = { id: 'fixture-attempt' };
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
     let result;
     try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+    expect(db.transaction).toHaveBeenCalled();
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda pair warning/));
     expect(result?.body?.code).not.toBe('lawn_bermuda_pair_required');
     expect(pair).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
     expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_pair_required' }), expect.anything());
@@ -634,21 +642,27 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     afterEach(() => limit.mockRestore());
 
     test('a fresh attempt is NOT refused for a cap breach (owner 2026-11-26): the limit message is a warning and the completion goes on', async () => {
+      const logger = require('../services/logger');
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       let result;
       try { result = await complete({ products: [] }); } catch { /* the completion proceeds into the committed flow, which this fixture does not model */ }
+      expect(db.transaction).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda limit warning/));
       expect(result?.body?.code).not.toBe('lawn_bermuda_limit_reached');
       expect(limit).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
       expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
 
     test('"its limits are not loaded" is also warned rather than blocked (owner 2026-11-26)', async () => {
+      const logger = require('../services/logger');
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       limit.mockResolvedValue(removal.NOT_CONFIGURED_MESSAGE);
       let result;
       try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+      expect(db.transaction).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda limit warning/));
       expect(result?.body?.code).not.toBe('lawn_bermuda_limit_reached');
       expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
@@ -671,10 +685,13 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     afterEach(() => area.mockRestore());
 
     test('a fresh attempt is NOT refused for missing bermuda area/amount (owner 2026-11-26): the message is a warning and completion goes on', async () => {
+      const logger = require('../services/logger');
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       let result;
       try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+      expect(db.transaction).toHaveBeenCalled();
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/non-blocking bermuda area warning/));
       expect(result?.body?.code).not.toBe('lawn_bermuda_area_required');
       expect(area).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID, treatedSqft: undefined });
       expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
@@ -1293,5 +1310,50 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
       limitFindingDedupeKey(record, limit),
     ]);
     expect(keys.size).toBe(3);
+  });
+
+  test('P0-2 + P1-4: chemical add-on hold persists on published invoices, blocks reminders/collection, and still alerts on prepaid backfills', async () => {
+    const invoiceHelpers = require('../services/invoice-helpers');
+    const heldInv = {
+      id: 'inv-chem-1',
+      status: 'sent',
+      total: 125,
+      payer_id: null,
+      scheduled_send_error: invoiceHelpers.chemicalAddonHoldStamp('svc-123'),
+    };
+    expect(invoiceHelpers.invoiceHeldForChemicalReview(heldInv)).toBe(true);
+    expect(invoiceHelpers.isCollectibleOwnInvoice(heldInv)).toBe(false);
+    expect(() => invoiceHelpers.assertInvoiceCollectible(heldInv)).toThrow(/chemical area add-on/i);
+
+    const mockDbForDispatch = jest.fn(() => ({
+      where: () => ({ first: async () => heldInv }),
+    }));
+    const dispatchCheck = await invoiceHelpers.selfPayAtDispatch('inv-chem-1', mockDbForDispatch)();
+    expect(dispatchCheck).toMatchObject({ ok: false, code: 'INVOICE_CHEMICAL_ADDON_HOLD' });
+
+    // P1-4: out-of-band prepaid backfill would mint without chemical hold, so counterfactual alerts office.
+    const backfillPrepaid = {
+      isBackfillCompletion: true,
+      annualPrepayCovered: false,
+      prepaidCovered: true,
+      alreadyPaid: false,
+      autopayCoversVisit: false,
+      preMintedInvoice: null,
+      existingCompletionInvoice: null,
+      terminalInvoiceOnVisit: false,
+      unmintedSetupFeeHold: false,
+      createInvoiceOnComplete: true,
+      hasVisitPrice: true,
+      invoiceAmount: 125,
+      visitPerformed: true,
+    };
+    expect(shouldAutoInvoiceCompletion({ ...backfillPrepaid, unrecordedChemicalAddOnHold: false })).toBe(true);
+    expect(shouldAutoInvoiceCompletion({ ...backfillPrepaid, unrecordedChemicalAddOnHold: true })).toBe(false);
+
+    const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(svc.id)');
+    expect(source).toContain("InvoiceFollowups.pauseSequence(heldId, { reason: 'unrecorded_chemical_addon_review' })");
+    const holdAppliesAt = source.indexOf('const chemicalAddOnBillingHoldApplies =');
+    expect(source.slice(holdAppliesAt, holdAppliesAt + 350)).not.toContain('!prepaidCovered &&');
   });
 });

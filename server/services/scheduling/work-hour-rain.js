@@ -141,19 +141,21 @@ function fetchHourlyObs(day, { fetchFn = fetch, timeoutMs = FETCH_MS, now = Date
   return promise;
 }
 
-/** The inches for `hour` at the first of `stations` that has a reading, else null. */
-function readHour(obs, stations, hour) {
+/**
+ * Select ONE reporting station (nearest-first) for `hour` and return its rain and
+ * observed-thunder evidence together so a fallback station's storm never overrides
+ * a dry local observation at the nearest station.
+ */
+function readHourObs(obs, stations, hour) {
   for (const s of stations) {
     const v = obs?.[s]?.[hour];
-    if (Number.isFinite(v)) return v;
+    const hasRain = Number.isFinite(v);
+    const thunder = obs?._thunder?.[s]?.[hour] === true;
+    if (hasRain || thunder) {
+      return { inches: hasRain ? v : null, thunder };
+    }
   }
-  return null;
-}
-
-/** True when any of `stations` reported observed thunderstorm weather codes (TS / VCTS) during `hour`. */
-function hasThunderObs(obs, stations, hour) {
-  if (!obs?._thunder) return false;
-  return stations.some((s) => obs._thunder[s]?.[hour] === true);
+  return { inches: null, thunder: false };
 }
 
 /**
@@ -167,8 +169,7 @@ function tallyHours(obs, stations, hours) {
   let rainMeasured = 0;
   let inches = 0;
   for (const h of hours) {
-    const v = readHour(obs, stations, h);
-    const thunder = hasThunderObs(obs, stations, h);
+    const { inches: v, thunder } = readHourObs(obs, stations, h);
     if (v != null) {
       rainMeasured += 1;
       inches += v;
