@@ -1683,11 +1683,9 @@ export function lineIsRetiredSale(line) {
   return labelNamesRetiredSale(name) || labelNamesRetiredSale(`${name} ${cadence}`);
 }
 
-// What a Save posts that can change while it re-reads a price: the lines, the property, the WDO price question (customer,
-// property, linked estimate), the day, the arrival time and the tech (pre-push audit P1). `latest` is the form now,
-// `atClick` the form the save was pressed with.
-const SAVE_FORM_FIELDS = ['services', 'selectedPropertyId', 'wdoQuoteKey', 'apptDate', 'windowStart', 'techMode', 'techId'];
-export const saveFormMoved = (latest, atClick) => SAVE_FORM_FIELDS.some((field) => latest?.[field] !== atClick[field]);
+// Whether the form changed after Save was pressed: `atClick` is the form Save posts (saveForm, as rendered at the click),
+// `latest` the same fields as rendered now. Each field is a state value, so an unchanged field keeps its identity.
+export const saveFormMoved = (latest, atClick) => Object.keys(atClick).some((field) => latest?.[field] !== atClick[field]);
 
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
@@ -4433,6 +4431,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   });
 
   // Submit
+  // Everything a Save posts or acts on after it posts that the office can change while it re-reads a price (saveFormMoved;
+  // pre-push audit P0, P1): the lines, the property, the WDO price question (customer, property, linked estimate), the day,
+  // time and tech, the notes and the customer's words, the repeat and prepay choices, the appointment discount, the
+  // messages and the card choice.
+  const saveForm = {
+    services, selectedPropertyId, wdoQuoteKey, linkedEstimate, apptDate, windowStart, techMode, techId, customerAskedTime,
+    customerNotes, internalNotes, customerWords, usedSuggestion, recurringCount, skipWeekends, weekendShift,
+    appointmentDiscount, collectPrepay, billAsAnnualPrepay, billAsManualPrepay, prepayMethod, prepayNote, manualPrepay,
+    sendCardLink, cardHere, sendSms,
+  };
   const submitAppointments = async (separateProgram) => {
     // Consumed once, atomically, at the top of this submit — never read
     // again after this line, so a "Book another anyway" click can only
@@ -4539,8 +4547,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       // The form changed while the WDO price or the address was re-read (above): this save would post the form as it was at
       // the click, so it posts nothing (pre-push audit P1; Book checks its whole body the same way). Checked after the last
       // read, just before the first POST.
-      if (unsavedBlankWdoLines > 0
-        && saveFormMoved(latestSaveRef.current, { services, selectedPropertyId, wdoQuoteKey, apptDate, windowStart, techMode, techId })) {
+      if (unsavedBlankWdoLines > 0 && saveFormMoved(latestSaveRef.current.saveForm, saveForm)) {
         setToast('The booking changed while the WDO price was checked — check it, then save again');
         setTimeout(() => setToast(''), 3200);
         return;
@@ -5533,10 +5540,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
   const latestSaveRef = useRef(null);
-  latestSaveRef.current = {
-    handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine,
-    services, selectedPropertyId, wdoQuoteKey, apptDate, windowStart, techMode, techId,
-  };
+  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine, saveForm };
   useEffect(() => {
     if (!pendingQuickAddSave) return undefined;
     if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {

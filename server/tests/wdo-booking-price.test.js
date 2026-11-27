@@ -240,6 +240,26 @@ describe('a blank WDO line books at the table price of the home', () => {
     // The save's own check reads that same home, so it goes on.
     await expect(assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock }))
       .resolves.toBeUndefined();
+    // A primary property saved at another address does not stand in for it either; the account's own type still counts.
+    lookup.mockClear();
+    const primaryElsewhere = { ...RENTAL, is_primary: true };
+    wireDb({
+      customers: HOME,
+      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
+      customer_properties: (cond) => (cond.id === RENTAL.id || cond.is_primary ? primaryElsewhere : [primaryElsewhere]),
+    });
+    const atAddress = await bookBlankWdo({ refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } });
+    expect(atAddress.finalPrice).toBe(150);
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+    await expect(assertWdoTableHomeUnchanged(atAddress.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock }))
+      .resolves.toBeUndefined();
+    wireDb({
+      customers: { ...HOME, property_type: 'commercial' },
+      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
+      customer_properties: (cond) => (cond.id === RENTAL.id || cond.is_primary ? primaryElsewhere : [primaryElsewhere]),
+    });
+    expect((await bookBlankWdo({ customer: { ...HOME, property_type: 'commercial' }, refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } })).finalPrice).toBe(250);
   });
 
   test('the office save runs that check inside its transaction, right after it stamps the sole active property', () => {

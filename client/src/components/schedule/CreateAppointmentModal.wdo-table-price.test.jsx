@@ -383,17 +383,29 @@ describe('a WDO line in the modal', () => {
     expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a' });
   });
 
-  it('Save counts the form as changed when a line, the property, the price question, the day, the arrival time or the tech moved', () => {
+  it('Save counts the form as changed when any field it posts moved: a line, the day, the prepay choice, a note', () => {
     const services = [{ lineId: 'a' }];
-    const atClick = { services, selectedPropertyId: '', wdoQuoteKey: 'customerId=c', apptDate: '2026-12-01', windowStart: '09:00', techMode: 'auto', techId: '' };
-    expect(saveFormMoved({ ...atClick, handleSubmit: () => {} }, atClick)).toBe(false);
-    for (const [field, value] of [['services', [...services]], ['selectedPropertyId', 'p-2'], ['wdoQuoteKey', 'customerId=c&estimateId=e'],
-      ['apptDate', '2026-12-02'], ['windowStart', '10:00'], ['techMode', 'choose'], ['techId', 't-1']]) {
+    const atClick = { services, apptDate: '2026-12-01', collectPrepay: true, prepayNote: '', appointmentDiscount: null };
+    expect(saveFormMoved({ ...atClick }, atClick)).toBe(false);
+    for (const [field, value] of [['services', [...services]], ['apptDate', '2026-12-02'], ['collectPrepay', false], ['prepayNote', 'paid'],
+      ['appointmentDiscount', { id: 'd' }]]) {
       expect(saveFormMoved({ ...atClick, [field]: value }, atClick)).toBe(true);
+    }
+    // Every field the Save body posts, or the save acts on after it posts (the manual prepay invoice, the card form), is in
+    // the form it compares.
+    const saveFormLiteral = modalSource.slice(modalSource.indexOf('  const saveForm = {'), modalSource.indexOf('  };', modalSource.indexOf('  const saveForm = {')));
+    for (const field of ['services', 'selectedPropertyId', 'wdoQuoteKey', 'linkedEstimate', 'apptDate', 'windowStart', 'techMode', 'techId',
+      'customerAskedTime', 'customerNotes', 'internalNotes', 'customerWords', 'usedSuggestion', 'recurringCount', 'skipWeekends',
+      'weekendShift', 'appointmentDiscount', 'collectPrepay', 'billAsAnnualPrepay', 'billAsManualPrepay', 'prepayMethod', 'prepayNote',
+      'manualPrepay', 'sendCardLink', 'cardHere', 'sendSms']) {
+      expect(saveFormLiteral).toMatch(new RegExp(`\\b${field}\\b`));
     }
   });
 
-  it('a day changed while Save re-reads the WDO price books nothing; the next save books the new day', async () => {
+  it.each([
+    ['the day', 'new-appt-date', futureDate(31), { scheduledDate: futureDate(31) }],
+    ['the internal note', 'new-appt-internal-notes', 'Call before arriving', { internalNotes: 'Call before arriving' }],
+  ])('%s changed while Save re-reads the WDO price books nothing; the next save books the new one', async (_label, fieldId, value, posted) => {
     let holdReads = false;
     const releases = [];
     const fetcher = installFetch({
@@ -406,8 +418,8 @@ describe('a WDO line in the modal', () => {
     holdReads = true;
     fireEvent.click(saveButton());
     await waitFor(() => expect(releases).toHaveLength(1));
-    // The office moves the visit to the next day while the price is re-read.
-    fireEvent.change(document.getElementById('new-appt-date'), { target: { value: futureDate(31) } });
+    // The office changes the field while the price is re-read.
+    fireEvent.change(document.getElementById(fieldId), { target: { value } });
     releases.forEach((release) => release());
     expect(await screen.findByText(/The booking changed while the WDO price was checked/)).toBeTruthy();
     expect(schedulePosts(fetcher)).toHaveLength(0);
@@ -415,12 +427,12 @@ describe('a WDO line in the modal', () => {
     await waitFor(() => expect(saveButton().disabled).toBe(false));
     fireEvent.click(saveButton());
     await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
-    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', scheduledDate: futureDate(31) });
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', ...posted });
   });
 
   it('Save compares the form after its last read (the address re-read), just before its first POST', () => {
     const lastRead = modalSource.indexOf('? await recheckAddressAskAtSubmit({');
-    const compare = modalSource.indexOf('&& saveFormMoved(latestSaveRef.current, { services, selectedPropertyId, wdoQuoteKey, apptDate, windowStart, techMode, techId })) {');
+    const compare = modalSource.indexOf('if (unsavedBlankWdoLines > 0 && saveFormMoved(latestSaveRef.current.saveForm, saveForm)) {');
     const firstPost = modalSource.indexOf('const groups = groupServicesForAppointmentSubmit(services);', lastRead);
     expect(lastRead).toBe(modalSource.lastIndexOf('? await recheckAddressAskAtSubmit({'));
     expect(lastRead).toBeGreaterThan(0);

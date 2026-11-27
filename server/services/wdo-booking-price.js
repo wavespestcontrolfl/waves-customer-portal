@@ -73,8 +73,18 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   // estimate quoted the customer's own address is that address, never a lone other property (pre-push audit P0).
   const activeRows = propertyId || written || customerAddress ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
   const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
-  const at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
+  let at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
+  // The customer's own address a linked estimate quoted: a primary property saved at another address does not stand in for
+  // it, and only the account's own records can call it commercial (pre-push audit P0).
+  if (customerAddress && at.otherProperty) {
+    const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
+    at = {
+      customer: row,
+      otherProperty: false,
+      commercial: [row.waveguard_tier, row.property_type].some((type) => normalizePropertyType(type) === 'commercial'),
+    };
+  }
   // A saved property named with the address the visit is stamped with (a phone booking: the call's address, linked to the
   // property whose address key it matched, resolveCallBookingPropertyLinkage). The property must still have that address
   // now, by the same key (one ZIP carries several town names), or the visit would be stamped with one home and priced at
