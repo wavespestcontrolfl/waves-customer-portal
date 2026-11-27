@@ -95,12 +95,20 @@ async function validatePropertyOwnership(customerId, database) {
   }
 }
 
+function hasVerifiedSingleRecipientHeaders(row) {
+  return row?.cc_address != null
+    && row?.bcc_address != null
+    && addressesOf(row.cc_address).length === 0
+    && addressesOf(row.bcc_address).length === 0;
+}
+
 function inboundGuard(email, mailboxAddress) {
   const sender = normalizeAddress(email?.from_address);
   const labels = labelsOf(email);
   if (!email?.id || !email.gmail_thread_id || !iso(email.received_at)) return failure('invalid_email');
   if (labels.includes('SENT') || labels.includes('DRAFT') || isInternalEmailRecipient(sender)) return failure('not_inbound');
   if (!addressesOf(email.to_address).includes(mailboxAddress)) return failure('not_inbound');
+  if (!hasVerifiedSingleRecipientHeaders(email)) return failure('recipients_unverified');
   if (!hasAlignedAuth(email.authentication_results, domainFromAddress(sender))) return failure('sender_auth_unverified');
   if (!String(email.body_text || '').trim() && !String(email.body_html || '').trim()) return failure('inbound_body_unavailable');
   const topReply = boundedText(emailBody(email).text, Number.MAX_SAFE_INTEGER).text;
@@ -129,7 +137,7 @@ function stripSmsLinks(text) {
 
 function belongsToConversation(row, email, mailboxAddress, customerId) {
   if (row.customer_id && String(row.customer_id) !== String(customerId)) return false;
-  if (addressesOf(row.cc_address).length > 0 || addressesOf(row.bcc_address).length > 0) return false;
+  if (!hasVerifiedSingleRecipientHeaders(row)) return false;
   const sender = normalizeAddress(email.from_address);
   const toList = addressesOf(row.to_address);
   if (labelsOf(row).includes('SENT') || normalizeAddress(row.from_address) === mailboxAddress) {

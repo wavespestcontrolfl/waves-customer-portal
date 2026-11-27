@@ -30,7 +30,7 @@ suite('email reply context PostgreSQL contract', () => {
       phone: '+15555550123', email: `fixture-${randomUUID()}@example.test`,
       active: true, pipeline_stage: 'active_customer' }).returning('*');
     [inbound] = await mockDb('emails').insert({ gmail_id: randomUUID(), gmail_thread_id: randomUUID(),
-      from_address: customer.email, to_address: mailboxAddress, customer_id: customer.id,
+      from_address: customer.email, to_address: mailboxAddress, cc_address: '', bcc_address: '', customer_id: customer.id,
       authentication_results: 'mx.google.com; dkim=pass header.d=example.test',
       received_at: now, body_text: 'When is our next service?', label_ids: JSON.stringify(['INBOX']) }).returning('*');
     aggregator = { getContextForCustomer: jest.fn(async () => ({ known: true })) };
@@ -84,7 +84,7 @@ suite('email reply context PostgreSQL contract', () => {
 
   test('thread selection excludes other participants, drafts, and future replies before limiting', async () => {
     const base = { gmail_thread_id: inbound.gmail_thread_id, received_at: new Date(now - 60000),
-      from_address: customer.email, to_address: mailboxAddress, customer_id: customer.id,
+      from_address: customer.email, to_address: mailboxAddress, cc_address: '', bcc_address: '', customer_id: customer.id,
       authentication_results: inbound.authentication_results };
     await mockDb('emails').insert([
       { ...base, gmail_id: randomUUID(), body_text: 'Valid earlier question', label_ids: JSON.stringify(['INBOX']) },

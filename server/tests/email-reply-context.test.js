@@ -7,7 +7,7 @@ const CUSTOMER = {
 };
 const EMAIL = {
   id: 'email-current', gmail_thread_id: 'thread-1', from_address: CUSTOMER.email,
-  to_address: `Waves <${MAILBOX}>`, subject: 'Service question', body_text: 'Can you confirm my visit?',
+  to_address: `Waves <${MAILBOX}>`, cc_address: '', bcc_address: '', subject: 'Service question', body_text: 'Can you confirm my visit?',
   label_ids: ['INBOX'], received_at: '2026-09-10T16:00:00Z', customer_id: CUSTOMER.id,
   authentication_results: 'mx.google.com; dkim=pass header.d=example.test',
 };
@@ -417,8 +417,16 @@ describe('assembleEmailReplyContext', () => {
       body_text: 'Spoofed prior inbound should never enter thread',
       received_at: '2026-09-08T12:00:00Z',
     };
+    const uncapturedRecipientsEmail = {
+      ...EMAIL,
+      id: 'email-uncaptured-old',
+      cc_address: null,
+      bcc_address: null,
+      body_text: 'Legacy uncaptured-cc message should never leak',
+      received_at: '2026-09-07T12:00:00Z',
+    };
     const result = await assembleEmailReplyContext(EMAIL, {
-      database: fakeDatabase({ emails: [EMAIL, groupEmail, unauthedEmail] }),
+      database: fakeDatabase({ emails: [EMAIL, groupEmail, unauthedEmail, uncapturedRecipientsEmail] }),
       aggregator: {
         getContextForCustomer: jest.fn(async () => aggregatorContext({
           smsHistory: [{
@@ -433,8 +441,16 @@ describe('assembleEmailReplyContext', () => {
     expect(result.ok).toBe(true);
     expect(result.factsBlock).not.toContain('Private group-thread note');
     expect(result.factsBlock).not.toContain('Spoofed prior inbound');
+    expect(result.factsBlock).not.toContain('Legacy uncaptured-cc message');
     expect(result.factsBlock).not.toContain('secret-bearer-token-999');
     expect(result.factsBlock).not.toContain('bare-secret-token-777');
     expect(result.factsBlock).toContain('(link omitted)');
+
+    const uncapturedTrigger = await assembleEmailReplyContext({ ...EMAIL, cc_address: null }, {
+      database: fakeDatabase({ emails: [EMAIL] }),
+      aggregator: { getContextForCustomer: jest.fn() },
+      mailboxAddress: MAILBOX,
+    });
+    expect(uncapturedTrigger).toMatchObject({ ok: false, reason: 'recipients_unverified' });
   });
 });
