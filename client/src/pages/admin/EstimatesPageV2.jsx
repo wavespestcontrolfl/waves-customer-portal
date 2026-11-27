@@ -2272,26 +2272,56 @@ function EstimatePipelineViewV2({
     const currentFilter = activeFilterRef.current;
     // Always keep the active + archived-accepted dataset loaded for
     // PipelineAnalytics so switching to Archived never zeroes out KPI tiles,
-    // funnel counts, or Needs Attention. When viewing Archived, load the full
-    // archived list separately for the table rows.
-    const fetches = [
+    // funnel counts, or Needs Attention. When viewing Archived, settle archive
+    // loading independently so an analytics fetch error never hides the archive.
+    const finishRefresh = () => {
+      if (!silent && foregroundRequestRef.current === requestId) {
+        foregroundRequestRef.current = null;
+      }
+      if (
+        requestId === estimatesRequestRef.current &&
+        foregroundRequestRef.current === null &&
+        queuedSilentRefreshRef.current
+      ) {
+        queuedSilentRefreshRef.current = false;
+        refreshEstimates({ silent: true });
+      }
+    };
+    const analyticsPromise = Promise.all([
       fetchEstimatePipelineRows("all"),
       adminFetch("/admin/estimates?archived=only&status=accepted&limit=all"),
-    ];
+    ]);
     if (currentFilter === "archived") {
-      fetches.push(fetchEstimatePipelineRows("archived"));
+      Promise.allSettled([analyticsPromise, fetchEstimatePipelineRows("archived")])
+        .then(([analyticsRes, archivedRes]) => {
+          if (requestId !== estimatesRequestRef.current) return;
+          if (analyticsRes.status === "fulfilled") {
+            const [pipeline, archivedAccepted = {}] = analyticsRes.value;
+            setEstimates(mergeEstimateRows(pipeline.rows, archivedAccepted.estimates || []));
+          }
+          if (archivedRes.status === "fulfilled") {
+            const archivedList = archivedRes.value;
+            setArchivedEstimates(archivedList.rows || []);
+            const analyticsTrunc = analyticsRes.status === "fulfilled"
+              && (!!analyticsRes.value[0].truncated || !!analyticsRes.value[1]?.truncated);
+            setEstimatesTruncated(analyticsTrunc || !!archivedList.truncated);
+            setError(null);
+          } else if (!silent) {
+            setError(archivedRes.reason);
+          }
+          setLoading(false);
+        })
+        .finally(finishRefresh);
+      return;
     }
-    Promise.all(fetches)
-      .then(([pipeline, archivedAccepted = {}, archivedList = null]) => {
+    analyticsPromise
+      .then(([pipeline, archivedAccepted = {}]) => {
         if (requestId !== estimatesRequestRef.current) return;
         setEstimates(
           mergeEstimateRows(pipeline.rows, archivedAccepted.estimates || []),
         );
-        if (archivedList) setArchivedEstimates(archivedList.rows || []);
         setEstimatesTruncated(
-          !!pipeline.truncated ||
-            !!archivedAccepted.truncated ||
-            !!archivedList?.truncated,
+          !!pipeline.truncated || !!archivedAccepted.truncated,
         );
         setError(null);
         setLoading(false);
@@ -2301,19 +2331,7 @@ function EstimatePipelineViewV2({
         if (!silent) setError(err);
         setLoading(false);
       })
-      .finally(() => {
-        if (!silent && foregroundRequestRef.current === requestId) {
-          foregroundRequestRef.current = null;
-        }
-        if (
-          requestId === estimatesRequestRef.current &&
-          foregroundRequestRef.current === null &&
-          queuedSilentRefreshRef.current
-        ) {
-          queuedSilentRefreshRef.current = false;
-          refreshEstimates({ silent: true });
-        }
-      });
+      .finally(finishRefresh);
   }, []);
   const callOutcomes = useCallOutcomes({
     setEstimates,
@@ -3865,6 +3883,7 @@ function canToggleEstimateOptions(estimate) {
 function canMarkEstimateLost(estimate) {
   return (
     !estimate.archivedAt &&
+    !estimate.repricePending &&
     ["sent", "viewed", "scheduled", "send_failed"].includes(estimate.status)
   );
 }
