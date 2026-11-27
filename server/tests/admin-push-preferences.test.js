@@ -247,7 +247,7 @@ describe('a technician login (owner 2026-11-04)', () => {
     expect(insert).not.toHaveBeenCalled();
   });
 
-  test('advances version even when saving identical values so a delayed request cannot overwrite confirmed settings', async () => {
+  test('serializes concurrent PUTs with pg_advisory_xact_lock and advances version even on identical-value saves', async () => {
     const t0 = new Date('2026-11-27T12:00:00.000Z');
     const store = new Map([
       ['new_lead', {
@@ -260,25 +260,56 @@ describe('a technician login (owner 2026-11-04)', () => {
         updated_at: t0,
       }],
     ]);
+    // Do NOT serialize db.transaction itself — ONLY pg_advisory_xact_lock
+    // serializes overlapping transactions, proving the route acquires the lock
+    // BEFORE reading notification_preferences.
+    const opOrder = [];
     let lockChain = Promise.resolve();
+    let releaseFirstWrite;
+    let firstWriteEntered;
+    const firstWriteReady = new Promise((r) => { firstWriteEntered = r; });
+
+    const makeTrx = (tag) => {
+      let releaseLock = null;
+      const trx = (table) => ({
+        where: jest.fn(async () => {
+          opOrder.push(`${tag}:read:${table}`);
+          return [...store.values()].map((r) => ({ ...r }));
+        }),
+        insert: jest.fn((row) => ({
+          onConflict: jest.fn(() => ({
+            merge: jest.fn(async (patch) => {
+              opOrder.push(`${tag}:write:${table}`);
+              if (tag === 'tx1') {
+                firstWriteEntered();
+                await new Promise((r) => { releaseFirstWrite = r; });
+              }
+              const existing = store.get(row.trigger_key);
+              store.set(row.trigger_key, existing ? { ...existing, ...patch } : { ...row });
+            }),
+          })),
+        })),
+      });
+      trx.raw = jest.fn(async (sql) => {
+        if (/pg_advisory_xact_lock/.test(sql)) {
+          const prev = lockChain;
+          lockChain = new Promise((r) => { releaseLock = r; });
+          await prev;
+          opOrder.push(`${tag}:lock`);
+        }
+        return { rows: [] };
+      });
+      trx._releaseLock = () => { if (releaseLock) releaseLock(); };
+      return trx;
+    };
+
+    let txSeq = 0;
     db.transaction = jest.fn(async (fn) => {
-      const prev = lockChain;
-      let release;
-      lockChain = new Promise((r) => { release = r; });
-      await prev;
-      try { return await fn(db); } finally { release(); }
+      const trx = makeTrx(`tx${++txSeq}`);
+      try { return await fn(trx); } finally { trx._releaseLock(); }
     });
-    db.raw = jest.fn(async () => ({ rows: [] }));
     db.mockImplementation(() => ({
       where: jest.fn(async () => [...store.values()].map((r) => ({ ...r }))),
-      insert: jest.fn((row) => ({
-        onConflict: jest.fn(() => ({
-          merge: jest.fn(async (patch) => {
-            const existing = store.get(row.trigger_key);
-            store.set(row.trigger_key, existing ? { ...existing, ...patch } : { ...row });
-          }),
-        })),
-      })),
     }));
 
     // Read initial version V1 (new_lead push_enabled=true).
@@ -286,33 +317,44 @@ describe('a technician login (owner 2026-11-04)', () => {
     await preferencesHandler({ technicianId: 'admin-1', techRole: 'admin' }, getRes, jest.fn());
     const v1 = getRes.json.mock.calls[0][0].version;
 
-    // Request B (re-save of IDENTICAL original values) acquires the lock first and succeeds.
-    const resB = { json: jest.fn(), status: jest.fn(() => resB) };
-    await putHandler({
+    // Launch two CONCURRENT PUTs both carrying expectedVersion=V1:
+    // - PUT 1 re-saves the IDENTICAL original value (push_enabled=true)
+    // - PUT 2 attempts to overwrite with push_enabled=false while PUT 1 is mid-transaction
+    const res1 = { json: jest.fn(), status: jest.fn(() => res1) };
+    const res2 = { json: jest.fn(), status: jest.fn(() => res2) };
+    const p1 = putHandler({
       technicianId: 'admin-1',
       techRole: 'admin',
       body: {
         expectedVersion: v1,
         preferences: [{ key: 'new_lead', push_enabled: true, bell_enabled: true, sound_enabled: true }],
       },
-    }, resB, jest.fn());
-    expect(resB.status).not.toHaveBeenCalled();
-    const v2 = resB.json.mock.calls[0][0].version;
-    expect(v2).toBeTruthy();
-    expect(v2).not.toBe(v1);
-
-    // Delayed Request A (carrying stale V1, trying to flip push_enabled=false) arrives next and is rejected with 409.
-    const resA = { json: jest.fn(), status: jest.fn(() => resA) };
-    await putHandler({
+    }, res1, jest.fn());
+    await firstWriteReady;
+    const p2 = putHandler({
       technicianId: 'admin-1',
       techRole: 'admin',
       body: {
         expectedVersion: v1,
         preferences: [{ key: 'new_lead', push_enabled: false, bell_enabled: true, sound_enabled: true }],
       },
-    }, resA, jest.fn());
-    expect(resA.status).toHaveBeenCalledWith(409);
-    expect(resA.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'VERSION_CONFLICT', version: v2 }));
+    }, res2, jest.fn());
+    await new Promise((r) => setTimeout(r, 10));
+    releaseFirstWrite();
+    await Promise.all([p1, p2]);
+
+    // Advisory lock precedes reads in both transactions, and tx2 waits for tx1 to commit.
+    expect(opOrder.indexOf('tx1:lock')).toBeLessThan(opOrder.indexOf('tx1:read:notification_preferences'));
+    expect(opOrder.indexOf('tx2:lock')).toBeLessThan(opOrder.indexOf('tx2:read:notification_preferences'));
+    expect(opOrder.indexOf('tx1:write:notification_preferences')).toBeLessThan(opOrder.indexOf('tx2:lock'));
+
+    // Exactly one save succeeds (with a new version V2 != V1), and the overlapping stale PUT gets 409.
+    expect(res1.status).not.toHaveBeenCalled();
+    const v2 = res1.json.mock.calls[0][0].version;
+    expect(v2).toBeTruthy();
+    expect(v2).not.toBe(v1);
+    expect(res2.status).toHaveBeenCalledWith(409);
+    expect(res2.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'VERSION_CONFLICT', version: v2 }));
     expect(store.get('new_lead').push_enabled).toBe(true);
   });
 });
