@@ -263,6 +263,32 @@ jest.setTimeout(30000);
     expect((await inventory.updateRestockRequest(second.id, { action: 'close_counted' }, {})).request.status).toBe('received');
   });
 
+  test('the fingerprint binds the request and its order: another request, a changed request or a changed order refuses a stale confirm', async () => {
+    const req = await request();
+    const order = await ledger(req.id);
+    await invoiceMovement(2, 1);
+    const shown = await warningFor(req.id);
+    const stale = (id) => inventory.updateRestockRequest(id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {}).catch((err) => err);
+
+    // A different request on the same product sees the same receipts but another fingerprint.
+    const other = await request({ source: 'test_fixture' });
+    const otherShown = await warningFor(other.id);
+    expect(otherShown.details.receiptFingerprint).not.toBe(shown.details.receiptFingerprint);
+    expect((await stale(other.id)).code).toBe('already_counted_by_receipt');
+
+    // The order changes (late-order marker) after the dialog opened.
+    await mockConn('vendor_orders').where({ id: order.id }).update({ evidence: { landedAfterReceive: new Date().toISOString() } });
+    expect((await stale(req.id)).code).toBe('already_counted_by_receipt');
+    expect(await stock()).toBe(4);
+    await mockConn('vendor_orders').where({ id: order.id }).update({ evidence: {} });
+    expect((await warningFor(req.id)).details.receiptFingerprint).toBe(shown.details.receiptFingerprint);
+
+    // The request itself changes (another action touched it).
+    await mockConn('product_restock_requests').where({ id: req.id }).update({ updated_at: new Date(Date.now() + 1000) });
+    expect((await stale(req.id)).code).toBe('already_counted_by_receipt');
+    expect(await stock()).toBe(4);
+  });
+
   describe('a late automatic order after the request was received', () => {
     const lateRequest = async () => {
       const req = await request({ status: 'received', closed_at: new Date() });

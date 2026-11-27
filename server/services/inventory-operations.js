@@ -492,9 +492,8 @@ function validateTransition(request, action, guard) {
 // creation to catch that interleave; the warning only asks, and Receive anyway stays.
 const RECEIPT_WINDOW_MARGIN_MS = 60 * 60 * 1000;
 
-async function receiptStockAddedSince(conn, request) {
+async function receiptStockAddedSince(conn, request, order) {
   const { SOURCES } = require('./purchase-receipts/receipt-processor');
-  const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('created_at');
   const earliest = order?.created_at && new Date(order.created_at) < new Date(request.created_at) ? order.created_at : request.created_at;
   const since = new Date(new Date(earliest).getTime() - RECEIPT_WINDOW_MARGIN_MS);
   const movements = 'product_inventory_movements';
@@ -502,7 +501,7 @@ async function receiptStockAddedSince(conn, request) {
     .where({ [`${movements}.product_id`]: request.product_id, [`${movements}.movement_type`]: 'restock' })
     .whereIn(conn.raw(`${movements}.metadata->>'source'`), Object.values(SOURCES))
     .where(`${movements}.created_at`, '>=', since)
-    .whereRaw(`NOT EXISTS (SELECT 1 FROM ${movements} u WHERE u.metadata->>'undoOfMovementId' = ${movements}.id::text)`)
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM ${movements} u WHERE u.product_id = ${movements}.product_id AND u.metadata->>'undoOfMovementId' = ${movements}.id::text)`)
     .orderBy(`${movements}.created_at`, 'asc').select('id', 'quantity', 'unit', 'created_at');
 }
 
@@ -517,8 +516,12 @@ function describeReceiptsInUnit(rows, formatDay) {
   return `${each.slice(0, MOST_LISTED_RECEIPTS).join(', ')} and ${more} more`;
 }
 
-// Which receipts the operator was shown: a receipt that posts (or is undone) while the dialog is open changes it.
-const receiptFingerprint = (rows) => crypto.createHash('sha256').update(rows.map((row) => row.id).sort().join(',')).digest('base64url');
+// What the operator was shown: the receipts, the request (id and row version) and its automatic order (id, status and
+// the late-order marker). A confirm from a dialog that is stale on any of these is refused with a fresh warning.
+const receiptFingerprint = (rows, request, order) => crypto.createHash('sha256').update(JSON.stringify([
+  rows.map((row) => row.id).sort(), request.id, request.row_version,
+  order ? [order.id, order.status, !!restockMeta(order.evidence).landedAfterReceive] : null,
+])).digest('base64url');
 
 // Run under the product row lock (the receipt lane writes under the same lock), so the set cannot change
 // between this read and the write that follows. Receive anyway, and Close, already counted from the warning
@@ -527,8 +530,9 @@ const receiptFingerprint = (rows) => crypto.createHash('sha256').update(rows.map
 async function assertNotAlreadyCounted(conn, request, input) {
   const closing = input.action === 'close_counted';
   if (closing && !input.confirmFingerprint) return;
-  const rows = await receiptStockAddedSince(conn, request);
-  const fingerprint = rows.length ? receiptFingerprint(rows) : null;
+  const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('id', 'status', 'created_at', 'evidence');
+  const rows = await receiptStockAddedSince(conn, request, order);
+  const fingerprint = rows.length ? receiptFingerprint(rows, request, order) : null;
   if (closing ? fingerprint === input.confirmFingerprint : (!rows.length || (input.confirm && input.confirmFingerprint === fingerprint))) return;
   // The listed receipt was undone: closing "already counted" would now lose that stock.
   if (!rows.length) throw inventoryError('The receipts for this product changed while you looked. Reload the Restock tab.', 409, 'receipts_changed');
