@@ -84,6 +84,12 @@ describe('pickAskedVisitDate', () => {
     expect(pick('after the Lawn Pest Control visit can the dog go out')).toBe('2026-11-18');
   });
 
+  test('a multiword catalog name keeps its specialty; a list is never read as one name', () => {
+    expect(labelFactsLib.namedServiceFamily('What should I do before the Flea & Tick Pest Control visit?')).toBe('flea');
+    expect(labelFactsLib.namedServiceFamily('before my Flea Tick Pest Control service')).toBe('flea');
+    expect(labelFactsLib.namedServiceFamily('the fleas are back, and pest control is Friday')).toBe('interior_pest');
+  });
+
   test('a date: the one earlier visit every date reference resolves to', () => {
     expect(pick('Can the kids play on the grass after the Nov 18 visit?')).toBe('2026-11-18');
     expect(pick('About the 11/12 lawn treatment, is it dry?')).toBe('2026-11-12');
