@@ -268,7 +268,7 @@ function customerSafeVisitNotes(record, { projectLine = false } = {}) {
 // reads and the keys. The drafting callers pass the GATE_SMS_REAL_ANSWERS gate as the opt-in (a new draft needs it); the send-time recheck
 // asks regardless, so a reviewed card keeps its live recheck after a gate rollback. Never in a frozen replay (asOf): these read today's rows,
 // never an earlier day's.
-async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn }) {
+async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn, prepGuideFamily }) {
   if (!optedIn || asOfDate) return { estimateFacts: null, prepaidPlans: null, prepGuide: null, reportFacts: {}, olderVisitFindings: [] };
   const want = optedIn === true ? { estimate: true, prepaid: true, guide: true, reports: true, findings: true } : optedIn;
   const staffFacts = require('./sms-staff-facts');
@@ -281,7 +281,7 @@ async function loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, as
   const [estimateFacts, prepaidPlans, prepGuide] = await Promise.all([
     want.estimate ? staffFacts.loadEstimateFacts(pendingEstimate, { db }) : null,
     want.prepaid ? staffFacts.loadPrepaidPlanFacts(customer.id, { db }) : null,
-    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db }) : null,
+    want.guide ? staffFacts.loadPrepGuideFacts(customer.id, lastServices, { db, family: prepGuideFamily }) : null,
   ]);
   const [reportFacts, olderVisitFindings] = await Promise.all([
     // the latest completed visits' report emails (the key is absent unless asked for, so other callers' contexts keep their shape)
@@ -1404,6 +1404,8 @@ class ContextAggregator {
   // pick a different (or deleted) account that shares the number.
   // `includeSmsStaffFacts` (owner 2026-11-25): the open estimate's per-application price, the prepaid visits left and the booked visit's prep guide,
   // for the texting AI's draft, its send-time recheck and the unanswered-text fingerprint only (loadSmsStaffFacts).
+  // `smsPrepGuideFamily` (texting AI gap 5): the prep guide family the customer's text names ("the lawn treatment"); with it, the PREP GUIDE is
+  // the guide of the soonest upcoming visit that carries that family when the booked visit does not. Read only with the guide itself.
   // `includeLiveEta` (Codex round-2 P2, PR #5334 — inverted from the
   // earlier opt-OUT `skipLiveEta`): LIVE ETA resolution is an external GPS +
   // Distance Matrix call, so it defaults OFF and every caller that discards
@@ -1422,7 +1424,7 @@ class ContextAggregator {
   // Booking, invoice and visit state still reads as of now; that state has no history to rewind to.
   // `includeRouteStatus` (texting AI gap 4): TODAY's pre-en-route stop count sentence (loadRouteStatusFacts). Only the shadow drafter
   // opts in, with the real-answers gate on; every other caller pays no read and gets no key.
-  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, asOf = null } = {}) {
+  async getContextForCustomer(customer, { includeLiveEta = false, includeVisitLoops = false, includeSmsStaffFacts, includeRouteStatus, smsPrepGuideFamily, asOf = null } = {}) {
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     const cappedAt = (qb) => (asOfDate ? qb.where('created_at', '<=', asOfDate) : qb);
     // Parallel data fetch. The in-flight existence probe (payment-history.hasInFlightMoney,
@@ -1547,7 +1549,7 @@ class ContextAggregator {
 
     const lastService = serviceHistory[0] || null;
     const latestVisitFindings = await loadLatestVisitFindings(serviceHistory[0]);
-        const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts });
+        const { estimateFacts, prepaidPlans, prepGuide, reportFacts, olderVisitFindings } = await loadSmsStaffFacts({ customer, pendingEstimate, serviceHistory, asOfDate, optedIn: includeSmsStaffFacts, prepGuideFamily: smsPrepGuideFamily });
     const visitFindings = [latestVisitFindings, ...olderVisitFindings];
     // Third-party Bill-To (Codex r2, mirrors billing-v2 /balance): a payment
     // against a payer-billed invoice is the PAYER's even though the row sits

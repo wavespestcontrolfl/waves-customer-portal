@@ -248,12 +248,17 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // SCHEDULE CHANGES (owner 2026-11-26 "BUILD 1-6", texting AI gap 3): a listed visit's last logged move and a coming visit marked skipped or
 // cancelled become finished sentences in a new SCHEDULE CHANGES section (optional, like OPEN TIMES, so the fact key stays 'n'); the system
 // prompt says a move, skip or cancel is stated only from it, and WINDOW PASSED carries a plain status sentence. 77-80 are gap 2's (merged)
-// and 81-84 are gap 4's (in flight), so this change takes "85" / "86" (here) and "87" / "88" (B1).
+// and 81-84 are gap 4's (in flight), so gap 3 took "85" / "86" (here) and "87" / "88" (B1).
 // PHOTO CHECK (owner 2026-11-26 "BUILD 1-6", texting AI gap 6): a reply to a photo text gets the photo checker's stored reading as ONE
 // finished sentence (sms-photo-fact.js), and a PHOTOS prompt rule forbids describing a photo in the model's own words. A new optional
-// section and a prompt revision (fact key stays 'n'), so the numbers move to "69" / "70" (here) and "71" / "72" (B1): never shipped
+// section and a prompt revision (fact key stays 'n'), so gap 6 took "69" / "70" (here) and "71" / "72" (B1)
 // (73-96 are held by the other texting AI gap PRs, 77-80 and 85-88 on main), and two digits keep every tag plus a prompt patch under 40.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}69_n`;
+// LABEL + PREP FOR THE ASKED VISIT (owner 2026-11-26 "BUILD 1-6", texting AI gap 5): LABEL FACTS speaks for an earlier visit of the last 14
+// days the customer names by its service or date, and carries PRODUCT NOTES (the service report's own product wording and a "labeled for"
+// line for a pest the customer named); PREP GUIDE is the guide of a later booked visit the customer names by its service. A prompt revision
+// and a wider LABEL FACTS render (fact key stays 'n'), so the numbers move to "73" / "74" (here) and "75" / "76" (B1), numbers the coordinator assigned to this PR
+// (a three-digit number would overflow the 40-character prompt_version column with every tag on).
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}73_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -263,16 +268,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}69_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}70_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}74_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers72_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers76_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}71_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}72_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}75_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}76_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
@@ -1139,10 +1144,11 @@ function reserviceLanesBlockedReason(lanes, state, anyOf = false) {
 // label of the product applied at the customer's last visit. Best-effort,
 // gate-on only; null (section omitted) on gate off, no customer, nothing
 // verified, an error or a timeout. The DB read, the wording and the grounding
-// live in ./sms-label-facts.
-async function fetchLabelFacts({ customerId } = {}) {
+// live in ./sms-label-facts. `inbound` (texting AI gap 5): the customer's texts, current first; an earlier visit of the last 14 days they
+// clearly name (its service or its date) gets that visit's facts.
+async function fetchLabelFacts({ customerId, inbound = null } = {}) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return null;
-  return labelFactsLib.fetchLabelFacts({ customerId });
+  return labelFactsLib.fetchLabelFacts({ customerId, ...(inbound ? { inbound } : {}) });
 }
 
 function renderLabelFactsSection(labelFacts) {
@@ -1252,6 +1258,8 @@ function hasBannedCustomerCopy(text, opts = {}) {
     t = labelFactsLib.stripLabelSentences(labelFactsLib.stripHandoffDeadlines(t), opts.labelFactsText || '');
     // ...and a bare yes / ok / "you can" answering a re-entry or rain question the customer asked (opts.asked)
     if (labelFactsLib.hasUngroundedLabelClaim(t, opts.bankSentences) || labelFactsLib.answersAskedLabelQuestion(t, opts.asked, opts.bankSentences)) return true;
+    // ...and a "labeled for <pest>" claim that is not a verbatim PRODUCT NOTES copy (texting AI gap 5)
+    if (labelFactsLib.hasUnbackedLabeledForClaim(t, opts.bankSentences)) return true;
   }
   return (bannedCopyGuard(t) || []).length > 0 || SMS_COMPLIANCE_CLAIM_RE.test(t);
 }
@@ -4807,6 +4815,7 @@ COMPANY FACTS:
 
 LABEL FACTS (product timing from the label):
 - When a LABEL FACTS section is in the context block, each line is ONE finished sentence about the visit named in its header (a re-entry sentence and/or a rainfast sentence). To give label timing at all, COPY the sentence word for word - the whole sentence, unchanged, including its visit date. Never paraphrase, shorten, split, combine, round, convert, spell out, or add to it, and never give a time, a number of hours or minutes, a clock time, "overnight", "a couple of hours", "until dry", "rainfast", or a "you can go back out now" / "safe for the pets now" / "fine to water or mow" line in your own words. A re-entry sentence answers only when people or pets can go back out; a rainfast sentence answers only whether rain washes it off. Never name a product or brand.
+- The header names the visit: "the last visit", or "the visit the customer asked about" (an earlier visit they named by its service or date). LABEL FACTS may also carry PRODUCT NOTES after the timing sentences: our service report's own wording for a product applied at that visit (how it works, how to leave bait or treated spots) and "A treatment applied at your ... visit is one labeled for ..." for a pest the customer named. Copy a note word for word, the whole line, only when it helps answer what the customer asked, and never change, combine or add to it. A note never answers when people or pets can go back out or whether rain washes it off, and never say a treatment kills, keeps away or works on any pest a note does not name.
 - With no LABEL FACTS sentence of the kind asked about (or with LABEL FACTS saying none is on file), give no timing of that kind at all. For a rain question with no rainfast sentence, answer from the COMPANY FACTS rain line - a treatment needs to dry and bond to surfaces, and after that it holds up to weather - plainly, as your own knowledge of how we work; never say the label is silent, missing, or does not list a rainfast time.
 - Never call a treatment safe, pet-safe, kid-safe, or non-toxic, and never say EPA-approved or "safe for" anyone - LABEL FACTS gives timing, not safety claims. A question about symptoms, illness, or exposure is not a timing question: it stays with a person.
 
@@ -5155,7 +5164,8 @@ function prepGuideSection(context) {
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !guide || !Array.isArray(guide.sections) || !guide.label) return '';
   const lines = prepGuideLines(guide.sections);
   if (!lines.length) return '';
-  const which = guide.source === 'booked' ? 'their booked' : 'their last';
+  // ('named': a later upcoming visit the customer named by its service, not their next one)
+  const which = { booked: 'their booked', named: 'the later upcoming visit they asked about, their' }[guide.source] || 'their last';
   return `PREP GUIDE (our written prep guide for ${which} ${sanitizeSingleLine(guide.label, 60)}; for prep questions about that service, repeat these lines word for word and add no other step, time or rule; a line ending in a colon names the case the lines under it are for, so use those lines only when the customer's case is known to match it, and otherwise give no step from them; for any other service or a prep question these do not answer, give no prep advice):\n${lines.join('\n')}\n`;
 }
 
@@ -6567,17 +6577,17 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const reserviceBooked = reserviceState ? reserviceState.booked : {};
   // PAYMENT OPTIONS / Zelle target resolution + live Zelle facts (see resolveDraftPaymentState).
   const { zelleInvoiceId, factsExtras: paymentFactsExtras } = await resolveDraftPaymentState({ context, inboundMessage, frozenReplay: Boolean(presetFactsBlock) });
-  // (the LABEL FACTS section exists only with real answers on: with the gate off no label query runs at all)
-  const fetchedLabelFacts = presetFactsBlock || !realAnswersApplied ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null });
-  // LABEL FACTS speaks for the customer's LATEST performed visit only: a text
-  // pointing at another visit (a coming one, an older one, another day) gets
-  // the none-on-file section for that draft. Ambiguity reads as another visit.
+  // LABEL FACTS speaks for the customer's LATEST performed visit, or (texting AI gap 5) an earlier visit of the last 14 days the texts
+  // clearly name by its service or date: a text pointing at any other visit (a coming one, an older one, another day) gets the
+  // none-on-file section for that draft. Ambiguity reads as the latest visit, as before.
   // The label sentences are English: a text in another language gets none on
   // file too (a paraphrase in that language would slip past the English guard;
   // the guard also holds that language's timing words, sms-label-facts).
   const thread = readInboundThread(context, inboundMessage, inboundPhone);
   const askedTexts = thread.texts;
   logUnreadableThread(thread, context, presetLaneId || metricsLane);
+  // (the LABEL FACTS section exists only with real answers on: with the gate off no label query runs at all)
+  const fetchedLabelFacts = presetFactsBlock || !realAnswersApplied ? null : await fetchLabelFacts({ customerId: context?.customer?.id || null, inbound: askedTexts });
   // a short follow-up whose thread could not be read for this sender cannot be tied to the latest visit: none on file
   // A rendered thread with another number's (or an unattributable) inbound message gets none on file whatever the
   // current message says: the model reads that message too.
@@ -6964,7 +6974,9 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     const includeLiveEta = !liveEtaForcedOff && gateEnvValue('GATE_SMS_REAL_ANSWERS') && !gratitudeCandidate;
     const asOfDate = asOf instanceof Date && !Number.isNaN(asOf.getTime()) ? asOf : null;
     // the staff facts (prepaid visits left) are for a real-answers draft only; gate off adds no key, so the call stays byte-identical
-    const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true } : {};
+    // (texting AI gap 5) a text that names ONE service ("the lawn treatment") gets the prep guide of that service's upcoming visit
+    const prepGuideFamily = labelFactsLib.namedServiceFamily(inboundMessage);
+    const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true, smsPrepGuideFamily: prepGuideFamily } : {};
     const loadContext = (withLiveEta) => (customer
       ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
       : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
@@ -6974,7 +6986,7 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // the drafting context loads, so the reply is never written from data
     // older than its fingerprint: a change landing in between makes the
     // send-time comparison fail, which keeps the text with staff.
-    const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer);
+    const unansweredFacts = await require('./sms-unanswered-reply').draftFactsFingerprint(customer, { prepGuideFamily });
     let context = await loadContext(includeLiveEta);
     // PR #5499: a "thanks" while something is still open (a flagged delay, a passed
     // window, a promise we owe, an ask they are waiting on) is not a
@@ -7037,11 +7049,13 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // offer came from a booking picker: then a card, never a send), and
     // anything without a customer + inbound link stay silent shadow.
     const suggestMode = require('./sms-suggest-mode');
+    // LABEL FACTS product notes (texting AI gap 5): a draft whose facts carry any goes to a person, never auto-send (claimAutoSend
+    // refuses it again from the stored facts block)
     // PHOTO CHECK (texting AI gap 6): a reply to a text that carried a photo (or whose media state is unknown: callers pass true then) goes
     // to a person, never auto-send, gate on or off (claimAutoSend refuses it again at the claim). A reply that states a photo reading the facts
     // did not give stays a shadow row (photoReply.held, gate on).
     const photoReply = photoFact.replyPhotoVerdict({ reply: parsed.reply, context, photoCheck, inboundHasPhoto: hasMedia });
-    const requireReview = openLoopThanks || factsListOpenLoop(factsForDraft) || Boolean(hasMedia);
+    const requireReview = [openLoopThanks, factsListOpenLoop(factsForDraft), labelFactsLib.factsBlockCarriesProductNotes(factsForDraft), Boolean(hasMedia)].some(Boolean);
     // Only an ANSWER may leave the silent shadow lane (owner 2026-11-25). An ACK is the fixed acknowledgement and an ABSTAIN has no text:
     // routing sees an empty reply for both (deliverableReply), which is never eligible, so they stay shadow rows for the judge whatever the
     // suggest and auto-send gates say, and no card and no send can come from them.
