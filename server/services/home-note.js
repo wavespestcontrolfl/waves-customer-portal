@@ -45,7 +45,7 @@ const currentRow = (conn, customerId, { lock = false } = {}) => {
 async function readHomeNote(row, { conn = db } = {}) {
   const customerId = row && row.customer_id;
   if (!customerId) return { status: 200, note: null, editable: false };
-  return { status: 200, note: await shapeNote(await currentRow(conn, customerId), conn), editable: true };
+  return { status: 200, note: await shapeNote(await currentRow(conn, customerId), conn), editable: true, customerId };
 }
 
 // A database error can carry the bound values (the note's text) in its message; only the operation and the code go on.
@@ -69,12 +69,17 @@ async function writeRow(trx, customerId, current, body, actor) {
  * Save (or, with an empty body, delete) the customer's note. `actor` = { type: 'technician' | 'admin', id, ip, userAgent }.
  * Returns { status: 200, note } | { status: 400 | 409 | 422, error, note? }. Never throws for those refusals.
  */
-async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, { conn = db } = {}) {
+async function saveHomeNote(row, { body, expectedUpdatedAt = null, expectedCustomerId = null, actor }, { conn = db } = {}) {
   const text = typeof body === 'string' ? body.trim() : null;
   if (text === null) return refusal(400, 'The note must be text.');
   if (text.length > MAX_LENGTH) return refusal(400, `The note can be at most ${MAX_LENGTH} characters.`, { code: 'too_long' });
   const customerId = row && row.customer_id;
   if (!customerId) return refusal(422, 'This visit has no customer, so there is no note to keep.');
+  // The editor was opened for one customer's note; a merge or undo can move the visit to another while it stays open, and
+  // two empty notes would otherwise look "unchanged" to the time check.
+  if (String(expectedCustomerId || '') !== String(customerId)) {
+    return refusal(409, 'This visit now belongs to another customer. Reload it.', { code: 'customer_changed' });
+  }
   const changed = async (current, handle = conn) => refusal(409, 'Someone else changed this note.', { code: 'note_changed', note: await shapeNote(current, handle) });
   const run = async (trx) => {
     // A merged-away (archived) customer takes no note: the lock also holds a merge off until this save commits.
@@ -114,7 +119,11 @@ async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, { co
 // The PUT body as the service takes it: only a string body and a string time are passed on.
 const saveInput = (req) => {
   const b = req.body || {};
-  return { body: b.body, expectedUpdatedAt: typeof b.expectedUpdatedAt === 'string' ? b.expectedUpdatedAt : null };
+  return {
+    body: b.body,
+    expectedUpdatedAt: typeof b.expectedUpdatedAt === 'string' ? b.expectedUpdatedAt : null,
+    expectedCustomerId: typeof b.expectedCustomerId === 'string' ? b.expectedCustomerId : null,
+  };
 };
 
 // Who is saving: the staff login and its role (an admin's own login is a technicians row too).

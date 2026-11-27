@@ -5,7 +5,7 @@
 // visit-brief answer (first stop member that carried it), so the panel adds no request; the office page gives `path` and the
 // section reads it itself. The time a save is checked against is pinned when editing STARTS, so a brief that refreshes
 // under an open editor can never make a save overwrite a newer note. Tech portal style rule: inline styles, no Tailwind.
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { formatETDate } from '../../lib/timezone';
 
 const MAX = 1000;
@@ -28,11 +28,13 @@ const quietBtn = { ...btnStyle, border: `1px solid ${C.border}`, background: 'tr
 
 const refusalNote = (err) => (err?.details || err?.body || {}).note;
 
-// The note the Visit Brief answer carries (visit-brief's `homeNote`, one per home): the first stop member that answered
-// with it. { id, note } or null (no answer carried one: nothing to show).
+// The note the Visit Brief answer carries (visit-brief's `homeNote` = { note, customerId }, one per customer): the first stop
+// member that answered with it. { id, note, customerId } or null (no answer carried one: nothing to show).
 export function homeNoteFor(services, byService) {
   const member = services.find((s) => byService?.[s.id]?.brief?.homeNote !== undefined);
-  return member ? { id: member.id, note: byService[member.id].brief.homeNote } : null;
+  if (!member) return null;
+  const carried = byService[member.id].brief.homeNote;
+  return { id: member.id, note: carried?.note || null, customerId: carried?.customerId || null };
 }
 const visitNotePath = (id) => `/admin/schedule/${id}/home-note`;
 
@@ -48,6 +50,7 @@ function NoteEditor({ draft, setDraft, state, onSave, onCancel }) {
       <textarea
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
+        disabled={state.busy}
         rows={5}
         aria-label="About this home"
         style={{ width: '100%', boxSizing: 'border-box', padding: 8, borderRadius: 6, border: `1px solid ${C.border}`, background: C.card, color: C.text, fontSize: 16, resize: 'vertical' }}
@@ -80,46 +83,54 @@ const IDLE = { busy: false, error: '', saved: false, conflict: null };
 export default function HomeNoteSection({ request, path, services, byService, onSaved }) {
   const picked = services ? homeNoteFor(services, byService) : null;
   const fed = Boolean(services);
-  const provided = picked ? picked.note : undefined;
   const route = fed ? (picked && visitNotePath(picked.id)) : path;
-  const [load, setLoad] = useState(provided !== undefined ? { status: 'ready', note: provided } : { status: 'loading', note: null });
+  const [load, setLoad] = useState(picked ? { status: 'ready', note: picked.note, customerId: picked.customerId } : { status: 'loading', note: null, customerId: null });
   const [draft, setDraft] = useState(null);
-  // The note's time when editing started: what every save is checked against (null = there was no note).
-  const [base, setBase] = useState(null);
+  // What editing started from: the route, the customer and the note's time. Every save is checked against these, never
+  // against what the panel shows now, so a refreshed brief or a stop switched under an open editor cannot redirect it.
+  const [pin, setPin] = useState(null);
   const [state, setState] = useState(IDLE);
+  const routeRef = useRef(route);
+  routeRef.current = route;
   const read = useCallback(() => {
-    setLoad({ status: 'loading', note: null });
+    setLoad({ status: 'loading', note: null, customerId: null });
     request(route)
-      .then((data) => setLoad({ status: data?.editable === false ? 'none' : 'ready', note: data?.note || null }))
+      .then((data) => setLoad({ status: data?.editable === false ? 'none' : 'ready', note: data?.note || null, customerId: data?.customerId || null }))
       .catch((err) => {
         const quiet = [403, 404, 422].includes(err?.status);
-        setLoad({ status: quiet ? 'none' : 'error', note: null, message: err?.status === 422 ? err.message : '' });
+        setLoad({ status: quiet ? 'none' : 'error', note: null, customerId: null, message: err?.status === 422 ? err.message : '' });
       });
   }, [request, route]);
   useEffect(() => { if (!fed && request && route) read(); }, [fed, request, route, read]);
-  // The brief read again (after a save, or a refresh) brings the newest note down; an open editor keeps its pinned time.
-  useEffect(() => { if (provided !== undefined) setLoad({ status: 'ready', note: provided }); }, [provided]);
+  // The brief read again (after a save, or a refresh) brings the newest note down; an open editor keeps its pin.
+  const pickedNote = picked ? picked.note : undefined;
+  const pickedCustomer = picked ? picked.customerId : null;
+  useEffect(() => { if (pickedNote !== undefined) setLoad({ status: 'ready', note: pickedNote, customerId: pickedCustomer }); }, [pickedNote, pickedCustomer]);
+  // Another stop (or customer) selected: the open draft belongs to the one it was typed for, so it is dropped.
+  useEffect(() => { setDraft(null); setPin(null); setState(IDLE); }, [route]);
 
   async function save() {
-    if (state.busy) return;
+    if (state.busy || !pin) return;
     setState({ ...IDLE, busy: true });
     try {
-      const out = await request(route, { method: 'PUT', body: JSON.stringify({ body: draft, expectedUpdatedAt: base }) });
+      const out = await request(pin.route, { method: 'PUT', body: JSON.stringify({ body: draft, expectedUpdatedAt: pin.base, expectedCustomerId: pin.customerId }) });
+      if (routeRef.current !== pin.route) return;
       // An answer with no `note` field (an unreadable 2xx) is an unknown outcome: the draft stays.
       if (!out || !('note' in out)) throw new Error('Could not confirm the save. Your text is still here; check the note and try again.');
-      setLoad({ status: 'ready', note: out.note || null });
+      setLoad({ status: 'ready', note: out.note || null, customerId: pin.customerId });
       setDraft(null);
       setState({ ...IDLE, saved: true });
       onSaved?.();
     } catch (err) {
-      if (err?.status === 409) setState({ ...IDLE, conflict: { note: refusalNote(err) || null } });
+      if (routeRef.current !== pin.route) return;
+      if (err?.status === 409 && (err.details || err.body || {}).code !== 'customer_changed') setState({ ...IDLE, conflict: { note: refusalNote(err) || null } });
       else setState({ ...IDLE, error: String(err?.message || err).slice(0, 160) });
     }
   }
-  const startEdit = () => { setBase(load.note?.updatedAt || null); setDraft(load.note?.body || ''); setState(IDLE); };
+  const startEdit = () => { setPin({ route, base: load.note?.updatedAt || null, customerId: load.customerId }); setDraft(load.note?.body || ''); setState(IDLE); };
   // Keep editing: the draft stays, and the next save is checked against the newer note it just saw.
-  const keepMine = () => { setBase(state.conflict.note?.updatedAt || null); setLoad({ status: 'ready', note: state.conflict.note }); setState(IDLE); };
-  const cancelEdit = () => { if (state.conflict) setLoad({ status: 'ready', note: state.conflict.note }); setDraft(null); setState(IDLE); };
+  const keepMine = () => { setPin({ ...pin, base: state.conflict.note?.updatedAt || null }); setLoad({ ...load, note: state.conflict.note }); setState(IDLE); };
+  const cancelEdit = () => { if (state.conflict) setLoad({ ...load, note: state.conflict.note }); setDraft(null); setPin(null); setState(IDLE); };
 
   if (!request || !route || load.status === 'none') return load.message ? <p style={lineStyle}>{load.message}</p> : null;
   const note = load.note;

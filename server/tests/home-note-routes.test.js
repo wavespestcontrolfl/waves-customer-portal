@@ -48,6 +48,7 @@ function stubDb({ ownsVisit = true, customerExists = true } = {}) {
     q.where = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
     q.whereNull = jest.fn(() => q);
+    q.forShare = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
@@ -83,7 +84,7 @@ const NOTE = { body: 'Side gate sticks.', updatedAt: '2026-11-26T15:00:00.000Z',
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockRead.mockResolvedValue({ status: 200, note: NOTE, editable: true });
+  mockRead.mockResolvedValue({ status: 200, note: NOTE, editable: true, customerId: CUSTOMER });
   mockSave.mockResolvedValue({ status: 200, note: NOTE });
 });
 
@@ -93,13 +94,13 @@ describe('visit routes', () => {
     await withServer(async (base) => {
       const read = await call(base, `/admin/schedule/${VISIT}/home-note`, { role: 'technician' });
       expect(read.status).toBe(200);
-      expect(await read.json()).toEqual({ note: NOTE, editable: true });
+      expect(await read.json()).toEqual({ note: NOTE, editable: true, customerId: CUSTOMER });
       expect(mockRead).toHaveBeenCalledWith(VISIT_ROW);
-      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'New text', expectedUpdatedAt: NOTE.updatedAt } });
+      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'New text', expectedUpdatedAt: NOTE.updatedAt, expectedCustomerId: CUSTOMER } });
       expect(put.status).toBe(200);
       const [row, input, opts] = mockSave.mock.calls[0];
       expect(row).toEqual(VISIT_ROW);
-      expect(input).toMatchObject({ body: 'New text', expectedUpdatedAt: NOTE.updatedAt, actor: { type: 'technician', id: 'tech-1' } });
+      expect(input).toMatchObject({ body: 'New text', expectedUpdatedAt: NOTE.updatedAt, expectedCustomerId: CUSTOMER, actor: { type: 'technician', id: 'tech-1' } });
       expect(opts.conn).toBeDefined();
     });
   });
@@ -146,9 +147,9 @@ describe('visit brief read', () => {
   test('every visit-brief answer carries the home note (or null), so the tech panel needs no request of its own', async () => {
     stubDb();
     await withServer(async (base) => {
-      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: NOTE });
-      mockRead.mockResolvedValueOnce({ status: 200, note: null, editable: true });
-      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: null });
+      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: { note: NOTE, customerId: CUSTOMER } });
+      mockRead.mockResolvedValueOnce({ status: 200, note: null, editable: true, customerId: CUSTOMER });
+      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: { note: null, customerId: CUSTOMER } });
     });
   });
 
@@ -192,7 +193,7 @@ describe('reassignment between the first read and the answer', () => {
   test('the recheck is on even with every brief gate off, and still passes an unchanged visit', async () => {
     stubDb({ ownsVisit: [true, true] });
     await withServer(async (base) => {
-      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: NOTE });
+      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: { note: NOTE, customerId: CUSTOMER } });
     });
   });
 });

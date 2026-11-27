@@ -5025,7 +5025,10 @@ const ACTIVITY_CHECKED_TABLES = new Set(['scheduled_services', 'estimates', 'cus
   // r41: executing a health-alert action stamps the alert's updated_at and
   // mints kept-owner side effects (interactions, retention credits, a comp
   // visit) — a journaled alert acted on since the merge must refuse.
-  'customer_health_alerts']);
+  'customer_health_alerts',
+  // A home note only the archived customer had moves with the plain sweep; staff who then rewrite it for the kept
+  // customer stamp updated_at, and the undo must not carry that edited text back to the restored profile.
+  'home_notes']);
 
 // The undo's email-clear guard probes every surface that delivers to a
 // denormalized copy of the customer email. This table MIRRORS the canonical
@@ -5261,6 +5264,8 @@ const TABLE_TIMESTAMP_COLUMNS = {
   invoice_followup_sequences: ['created_at', 'updated_at'],
   newsletter_subscribers: ['created_at', 'updated_at'],
   customer_properties: ['created_at', 'updated_at'],
+  // explicit pair (20261127134200): the staff note's last edit stamp.
+  home_notes: ['created_at', 'updated_at'],
   // created_at ONLY (20260617120000, 20260401000107, 20260424000014,
   // 20260511000002) — append-only ledgers/authorizations/audit rows; no
   // in-place update to detect.

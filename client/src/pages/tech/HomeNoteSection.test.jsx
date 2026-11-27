@@ -9,13 +9,14 @@ import HomeNoteSection, { homeNoteFor } from './HomeNoteSection';
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const PATH = '/admin/customers/c1/home-note';
+const CUSTOMER = 'c1';
 const NOTE = { body: 'Side gate sticks. Dog stays inside.', updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
 const refusal = (status, details, message = 'refused') => Object.assign(new Error(message), { status, details });
 const puts = (request) => request.mock.calls.filter(([, options]) => options?.method === 'PUT');
 
 describe('HomeNoteSection (office page: reads its own path)', () => {
   it('shows the note with who changed it and when', async () => {
-    render(<HomeNoteSection request={vi.fn(async () => ({ note: NOTE, editable: true }))} path={PATH} />);
+    render(<HomeNoteSection request={vi.fn(async () => ({ note: NOTE, editable: true, customerId: CUSTOMER }))} path={PATH} />);
     expect(await screen.findByText(NOTE.body)).toBeInTheDocument();
     expect(screen.getByText('About this home')).toBeInTheDocument();
     expect(screen.getByText(/Updated Nov 26, 2026 by Ada/)).toBeInTheDocument();
@@ -23,7 +24,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
   });
 
   it('with no note shows one muted line and an Add note button', async () => {
-    render(<HomeNoteSection request={vi.fn(async () => ({ note: null, editable: true }))} path={PATH} />);
+    render(<HomeNoteSection request={vi.fn(async () => ({ note: null, editable: true, customerId: CUSTOMER }))} path={PATH} />);
     expect(await screen.findByText('No note yet.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Add note' })).toBeInTheDocument();
   });
@@ -31,7 +32,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
   it('saves an edit against the time the note had when editing started, and shows Saved.', async () => {
     const request = vi.fn(async (_path, options) => (options?.method === 'PUT'
       ? { note: { ...NOTE, body: 'New text', updatedAt: '2026-11-26T16:00:00.000Z' } }
-      : { note: NOTE, editable: true }));
+      : { note: NOTE, editable: true, customerId: CUSTOMER }));
     render(<HomeNoteSection request={request} path={PATH} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     const box = screen.getByLabelText('About this home');
@@ -41,12 +42,12 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     expect(await screen.findByText('Saved.')).toBeInTheDocument();
     expect(screen.getByText('New text')).toBeInTheDocument();
     expect(puts(request)[0][0]).toBe(PATH);
-    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'New text', expectedUpdatedAt: NOTE.updatedAt });
+    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'New text', expectedUpdatedAt: NOTE.updatedAt, expectedCustomerId: CUSTOMER });
   });
 
   it('counts past 1000 (a joined note can be longer), and will not save until it is shortened', async () => {
     const long = { ...NOTE, body: 'x'.repeat(1500) };
-    const request = vi.fn(async () => ({ note: long, editable: true }));
+    const request = vi.fn(async () => ({ note: long, editable: true, customerId: CUSTOMER }));
     render(<HomeNoteSection request={request} path={PATH} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     expect(screen.getByLabelText('About this home')).toHaveValue(long.body);
@@ -60,7 +61,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     const theirs = { ...NOTE, body: 'Their newer text', updatedAt: '2026-11-26T15:30:00.000Z', updatedByFirstName: 'Sam' };
     let calls = 0;
     const request = vi.fn(async (_path, options) => {
-      if (options?.method !== 'PUT') return { note: NOTE, editable: true };
+      if (options?.method !== 'PUT') return { note: NOTE, editable: true, customerId: CUSTOMER };
       calls += 1;
       if (calls === 1) throw refusal(409, { code: 'note_changed', note: theirs });
       return { note: { ...NOTE, body: 'Mine', updatedAt: '2026-11-26T16:00:00.000Z' } };
@@ -83,7 +84,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     const theirs = { ...NOTE, body: 'Their newer text' };
     const request = vi.fn(async (_path, options) => {
       if (options?.method === 'PUT') throw refusal(409, { note: theirs });
-      return { note: NOTE, editable: true };
+      return { note: NOTE, editable: true, customerId: CUSTOMER };
     });
     render(<HomeNoteSection request={request} path={PATH} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
@@ -97,7 +98,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
   it('shows the server\'s reason when a save is refused, and keeps the editor open', async () => {
     const request = vi.fn(async (_path, options) => {
       if (options?.method === 'PUT') throw refusal(400, {}, 'The note must be text.');
-      return { note: null, editable: true };
+      return { note: null, editable: true, customerId: CUSTOMER };
     });
     render(<HomeNoteSection request={request} path={PATH} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Add note' }));
@@ -108,7 +109,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
   });
 
   it('an unreadable success answer (no note field) keeps the draft and says the save is unconfirmed', async () => {
-    const request = vi.fn(async (_path, options) => (options?.method === 'PUT' ? {} : { note: NOTE, editable: true }));
+    const request = vi.fn(async (_path, options) => (options?.method === 'PUT' ? {} : { note: NOTE, editable: true, customerId: CUSTOMER }));
     render(<HomeNoteSection request={request} path={PATH} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Mine' } });
@@ -122,7 +123,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     const { container } = render(<HomeNoteSection request={vi.fn(async () => { throw refusal(403, {}); })} path={PATH} />);
     await waitFor(() => expect(container).toBeEmptyDOMElement());
     cleanup();
-    const flaky = vi.fn().mockRejectedValueOnce(refusal(500, {})).mockResolvedValueOnce({ note: NOTE, editable: true });
+    const flaky = vi.fn().mockRejectedValueOnce(refusal(500, {})).mockResolvedValueOnce({ note: NOTE, editable: true, customerId: CUSTOMER });
     render(<HomeNoteSection request={flaky} path={PATH} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     expect(await screen.findByText(NOTE.body)).toBeInTheDocument();
@@ -131,7 +132,7 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
 
 describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)', () => {
   const services = [{ id: 'a' }, { id: 'b' }];
-  const answered = (note) => ({ b: { brief: { homeNote: note } } });
+  const answered = (note) => ({ b: { brief: { homeNote: { note, customerId: CUSTOMER } } } });
 
   it('shows the note the brief carried without asking the server, and refreshes the brief after a save', async () => {
     const request = vi.fn(async () => ({ note: { ...NOTE, body: 'New text' } }));
@@ -154,7 +155,7 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     rerender(<HomeNoteSection request={request} services={services} byService={answered(newer)} />);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(puts(request)).toHaveLength(1));
-    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Mine', expectedUpdatedAt: NOTE.updatedAt });
+    expect(JSON.parse(puts(request)[0][1].body)).toEqual({ body: 'Mine', expectedUpdatedAt: NOTE.updatedAt, expectedCustomerId: CUSTOMER });
   });
 
   it('a refreshed brief brings a newer note down when no editor is open', async () => {
@@ -168,6 +169,34 @@ describe('HomeNoteSection inside the Visit Brief (note rides the brief answer)',
     expect(screen.getByText('No note yet.')).toBeInTheDocument();
     rerender(<HomeNoteSection request={vi.fn()} services={services} byService={{ a: { brief: { brief: null } } }} />);
     expect(container).toBeEmptyDOMElement();
-    expect(homeNoteFor(services, { a: { brief: { homeNote: null } }, b: { brief: { homeNote: NOTE } } })).toEqual({ id: 'a', note: null });
+    expect(homeNoteFor(services, { a: { brief: { homeNote: { note: null, customerId: CUSTOMER } } }, b: { brief: { homeNote: { note: NOTE, customerId: CUSTOMER } } } })).toEqual({ id: 'a', note: null, customerId: CUSTOMER });
+  });
+
+  it('switching to another stop drops the open draft, and a late answer from the old stop is ignored', async () => {
+    let release;
+    const request = vi.fn((_path, options) => (options?.method === 'PUT' ? new Promise((resolve) => { release = () => resolve({ note: { ...NOTE, body: 'Mine' } }); }) : Promise.resolve({})));
+    const onSaved = vi.fn();
+    const { rerender } = render(<HomeNoteSection request={request} services={services} byService={answered(NOTE)} onSaved={onSaved} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Mine' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(screen.getByLabelText('About this home')).toBeDisabled();
+    const other = [{ id: 'z' }];
+    rerender(<HomeNoteSection request={request} services={other} byService={{ z: { brief: { homeNote: { note: null, customerId: 'c2' } } } }} onSaved={onSaved} />);
+    release();
+    await waitFor(() => expect(screen.getByText('No note yet.')).toBeInTheDocument());
+    expect(screen.queryByText('Saved.')).toBeNull();
+    expect(onSaved).not.toHaveBeenCalled();
+    expect(puts(request)[0][0]).toBe('/admin/schedule/b/home-note');
+  });
+
+  it('a visit that moved to another customer is refused: the error shows, no conflict card', async () => {
+    const request = vi.fn(async () => { throw refusal(409, { code: 'customer_changed' }, 'This visit now belongs to another customer. Reload it.'); });
+    render(<HomeNoteSection request={request} services={services} byService={answered(null)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Add note' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/now belongs to another customer/)).toBeInTheDocument();
+    expect(screen.queryByTestId('home-note-conflict')).toBeNull();
   });
 });

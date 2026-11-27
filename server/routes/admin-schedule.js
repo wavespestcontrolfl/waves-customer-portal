@@ -24915,7 +24915,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         logger.warn(`[admin-schedule] visit-brief home note recheck failed for ${svc.id}: ${err.message}`);
       }
       if (!owned) return { brief: null };
-      return out ? { ...payload, homeNote: out.note } : payload;
+      return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
@@ -25005,7 +25005,13 @@ router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, a
     const HomeNote = require('../services/home-note');
     if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
     const out = await db.transaction(async (trx) => {
+      // Same lock order as a customer merge: the customer first, then the visit (the merge locks customers, then repoints visits).
+      const peek = await trx('scheduled_services').where({ id: req.params.id }).first('customer_id');
+      if (peek && peek.customer_id) await trx('customers').where({ id: peek.customer_id }).whereNull('deleted_at').forShare().first('id');
       const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id'], { allowCompleted: true });
+      if (peek && String(peek.customer_id || '') !== String(svc.customer_id || '')) {
+        return { status: 409, error: 'This visit now belongs to another customer. Reload it.', code: 'customer_changed' };
+      }
       return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
     });
     HomeNote.sendHomeNote(res, out);

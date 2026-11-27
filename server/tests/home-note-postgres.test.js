@@ -14,8 +14,11 @@ jest.mock('../services/logger', () => ({
 }));
 
 const migration = require('../models/migrations/20261127134200_home_notes');
-const { readHomeNote, saveHomeNote } = require('../services/home-note');
+const { readHomeNote, saveHomeNote: saveWithoutCustomer } = require('../services/home-note');
 const { mergeHomeNotes } = require('../services/customer-dedupe')._test;
+
+// Every save names the customer its editor was opened for (the route passes the browser's value).
+const saveHomeNote = (row, input, opts) => saveWithoutCustomer(row, { expectedCustomerId: row.customer_id, ...input }, opts);
 
 jest.setTimeout(30000);
 (SKIP ? describe.skip : describe)('home notes on PostgreSQL', () => {
@@ -55,7 +58,7 @@ jest.setTimeout(30000);
   const visit = () => ({ customer_id: customerId });
 
   test('a first save creates the note, a read returns it with the first name, and the audit row has no body', async () => {
-    expect(await readHomeNote(visit())).toEqual({ status: 200, note: null, editable: true });
+    expect(await readHomeNote(visit())).toEqual({ status: 200, note: null, editable: true, customerId });
     const saved = await saveHomeNote(visit(), { body: '  Gate sticks; use the side door.  ', actor: actor() });
     expect(saved.status).toBe(200);
     expect(saved.note).toMatchObject({ body: 'Gate sticks; use the side door.', updatedByFirstName: 'Ada' });
@@ -128,6 +131,14 @@ jest.setTimeout(30000);
     await saveHomeNote({ customer_id: loserId }, { body: 'Only theirs.', actor: actor() });
     await database.transaction((trx) => mergeHomeNotes(trx, 'home_notes', 'customer_id', customerId, loserId));
     expect(await database('home_notes').select('customer_id', 'body')).toEqual([{ customer_id: customerId, body: 'Only theirs.' }]);
+  });
+
+  test('a save for the customer the editor was NOT opened for is refused, even when both have no note', async () => {
+    const [{ id: other }] = await database('customers').insert({}).returning('id');
+    const moved = await saveWithoutCustomer(visit(), { body: 'A\'s home details', expectedCustomerId: other, actor: actor() });
+    expect(moved).toMatchObject({ status: 409, code: 'customer_changed' });
+    expect((await saveWithoutCustomer(visit(), { body: 'x', actor: actor() })).code).toBe('customer_changed');
+    expect(await database('home_notes').count('* as n').first()).toMatchObject({ n: '0' });
   });
 
   test('a merged-away (archived) customer takes no note', async () => {
