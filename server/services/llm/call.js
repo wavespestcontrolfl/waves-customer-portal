@@ -973,6 +973,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ha
     reason: result?.reason || null,
     aborted: Boolean(signal?.aborted),
     probeId: gate.probeId,
+    legMs,
   });
   return result;
 }

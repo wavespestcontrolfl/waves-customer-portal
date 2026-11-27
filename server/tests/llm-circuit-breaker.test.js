@@ -45,6 +45,11 @@ describe('llm/circuit-breaker', () => {
     expect(circuitBreaker.isProviderOutageReason('anthropic', 'anthropic_529')).toBe(true);
     expect(circuitBreaker.isProviderOutageReason('gemini', 'gemini_429')).toBe(true);
     expect(circuitBreaker.isProviderOutageReason('openai', 'openai_timeout')).toBe(true);
+    expect(circuitBreaker.isProviderOutageReason('openai', 'openai_timeout', { legMs: 15_000 })).toBe(true);
+    // Tight caller deadlines (e.g. Report Ask 5s cap) must not trip the global provider circuit.
+    expect(circuitBreaker.isProviderOutageReason('openai', 'openai_timeout', { legMs: 5_000 })).toBe(false);
+    // Explicit 429/5xx provider errors still count even on a short leg.
+    expect(circuitBreaker.isProviderOutageReason('openai', 'openai_503', { legMs: 5_000 })).toBe(true);
 
     expect(circuitBreaker.isProviderOutageReason('openai', 'openai_400')).toBe(false);
     expect(circuitBreaker.isProviderOutageReason('anthropic', 'anthropic_401')).toBe(false);
@@ -109,10 +114,33 @@ describe('llm/circuit-breaker', () => {
     expect(circuitBreaker.getCircuitBreakerSnapshot(recoverAt + 60).openai).toMatchObject({ state: 'closed', recentFailures: 0 });
   });
 
-  test('caller-aborted requests and 4xx errors never trip the circuit', () => {
+  test('disabling the gate mid-probe still releases the probe slot so re-enabling can recover', () => {
+    process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
+    process.env.LLM_CIRCUIT_COOLDOWN_MS = '30000';
+
+    const t0 = 200_000;
+    circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: t0 });
+    circuitBreaker.afterAttempt('openai', { ok: false, reason: 'openai_503', now: t0 + 100 });
+    const probe = circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 31_000 });
+    expect(probe).toMatchObject({ allow: true, isProbe: true });
+
+    // Gate turns off while probe is in flight; completion still clears activeProbeId.
+    delete process.env.GATE_LLM_CIRCUIT_BREAKER;
+    circuitBreaker.afterAttempt('openai', { ok: true, probeId: probe.probeId, now: t0 + 31_050 });
+
+    // Re-enabling the gate admits a fresh recovery probe instead of staying wedged.
+    process.env.GATE_LLM_CIRCUIT_BREAKER = 'true';
+    const nextProbe = circuitBreaker.beforeAttempt('openai', { hasBackup: true, now: t0 + 31_100 });
+    expect(nextProbe).toMatchObject({ allow: true, isProbe: true });
+    expect(nextProbe.probeId).not.toBe(probe.probeId);
+  });
+
+  test('caller-aborted requests, short caller-budget timeouts, and 4xx errors never trip the circuit', () => {
     process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_503', aborted: true, now: 10_000 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_503', aborted: true, now: 10_100 });
+    circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_timeout', legMs: 5_000, now: 10_150 });
+    circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_timeout', legMs: 5_000, now: 10_175 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_400', now: 10_200 });
     circuitBreaker.afterAttempt('anthropic', { ok: false, reason: 'anthropic_refusal', now: 10_300 });
     expect(circuitBreaker.beforeAttempt('anthropic', { hasBackup: true, now: 10_400 })).toEqual({ allow: true, isProbe: false, probeId: null });
