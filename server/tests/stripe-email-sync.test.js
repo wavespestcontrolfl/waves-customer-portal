@@ -72,7 +72,7 @@ describe('stripe-email-sync processJob', () => {
   test('updates Stripe with the email on file, holding the job and customer locks through the call', async () => {
     const sync = load({ customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
-    expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000, maxNetworkRetries: 0 });
+    expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000, maxNetworkRetries: 0, idempotencyKey: 'stripe-email-sync:job-1:cus_1' });
     // Customer first, then the job: the same order as an email confirm (no deadlock).
     expect(locks).toEqual(['customers:c1', 'stripe_email_sync_jobs:job-1', 'stripe-call']);
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'updated' });
@@ -125,6 +125,18 @@ describe('stripe-email-sync processJob', () => {
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
+  test('a drain still running makes the next tick in this process skip (no stacked drains)', async () => {
+    const sync = load({ customers: [cust()] });
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    let release;
+    updateEmail.mockImplementationOnce(() => new Promise((r) => { release = () => r('updated'); }));
+    const first = sync.drainDue();
+    await new Promise((r) => setImmediate(r));
+    await expect(sync.drainDue()).resolves.toEqual({ skipped_overlap: 1 });
+    release();
+    await expect(first).resolves.toEqual({ updated: 1 });
+  });
+
   test('busy jobs (customer row held) do not count: the drain pages past them to reach due work', async () => {
     const sync = load({ customers: [cust(), cust({ id: 'c2', stripe_customer_id: 'cus_2' })], lockedCustomers: ['c1'] });
     state.jobs.push({ id: 'job-2', customer_id: 'c2', email: 'new@example.test', status: 'pending', attempts: 0, due: true, updated_at: 'v1' });
@@ -143,6 +155,8 @@ describe('stripe-email-sync processJob', () => {
     const ok = load({ customers: [cust()] });
     await expect(ok.processJob('job-1')).resolves.toBe('updated');
     expect(readOwner).toHaveBeenCalledWith('cus_1', { timeout: 10000, maxNetworkRetries: 0 });
+    // A stable idempotency key per job and profile: a retry after a lost response replays the same write.
+    expect(updateEmail.mock.calls[0][2]).toMatchObject({ idempotencyKey: 'stripe-email-sync:job-1:cus_1' });
   });
 
   test('six failed ownership reads give up with an alert that says to confirm the owner first, and never write', async () => {

@@ -833,10 +833,11 @@ const StripeService = {
     return { deleted: Boolean(c.deleted), customerId: c.metadata?.waves_customer_id || null, payerId: c.metadata?.waves_payer_id || null };
   },
 
-  async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000, maxNetworkRetries = 0 } = {}) {
+  // idempotencyKey: the sync passes one per job and profile, so a retry after a lost response replays the same write.
+  async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000, maxNetworkRetries = 0, idempotencyKey } = {}) {
     const stripe = getStripe();
     if (!stripe) return 'not_configured';
-    await stripe.customers.update(stripeCustomerId, { email }, { timeout, maxNetworkRetries });
+    await stripe.customers.update(stripeCustomerId, { email }, { timeout, maxNetworkRetries, ...(idempotencyKey ? { idempotencyKey } : {}) });
     return 'updated';
   },
 

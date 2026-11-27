@@ -188,7 +188,8 @@ async function processJob(jobId) {
       const owner = await StripeService.readCustomerOwner(customer.stripe_customer_id, opts);
       if (!owner) return 'not_configured'; // untouched: a process with a key takes it (drainDue)
       if (!ownsProfile(owner, customer)) return end('skipped', 'stripe_owner', true);
-      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email, opts);
+      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email,
+        { ...opts, idempotencyKey: `stripe-email-sync:${job.id}:${customer.stripe_customer_id}` });
     } catch (err) {
       const attempts = job.attempts + 1;
       const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);
@@ -205,7 +206,20 @@ async function processJob(jobId) {
 // Up to `limit` jobs a tick, oldest due first. A job whose customer row another transaction holds answers 'busy' and
 // does not count: the drain moves past it (up to MAX_SCAN jobs a tick), so a few locked customers never starve the rest.
 const MAX_SCAN = 200;
-async function drainDue({ limit = 20 } = {}) {
+// One drain at a time in this process: a slow batch (two short Stripe calls per job) must not stack minute ticks, each
+// holding more database connections. Row locks still keep processes apart.
+let draining = false;
+async function drainDue(options) {
+  if (draining) return { skipped_overlap: 1 };
+  draining = true;
+  try {
+    return await drainOnce(options);
+  } finally {
+    draining = false;
+  }
+}
+
+async function drainOnce({ limit = 20 } = {}) {
   // A process with no Stripe key claims nothing, so it can never delay a job a configured process would send.
   if (!require('../config/stripe-config').secretKey) return {};
   const counts = {};
