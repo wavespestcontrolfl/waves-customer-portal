@@ -16,6 +16,10 @@ const lower = (value) => String(value || '').toLowerCase();
 const text = (p) => `${lower(p.name)} ${lower(p.active_ingredient)}`;
 const PYRETHROIDS = /bifenthrin|cyfluthrin|cyhalothrin|deltamethrin|permethrin|cypermethrin|esfenvalerate|etofenprox|fluvalinate|prallethrin/;
 const NEONICS = /imidacloprid|dinotefuran|thiamethoxam|clothianidin|acetamiprid/;
+// Herbicide actives, so a weed-and-feed row filed under fertilizer (LESCO Stonewall prodiamine, Dimension dithiopyr)
+// is a herbicide too.
+const HERBICIDE_ACTIVES = /dithiopyr|prodiamine|pendimethalin|oxadiazon|indaziflam|isoxaben|oryzalin|atrazine|simazine|2,4-d|dicamba|mecoprop|mcpp|metsulfuron|sulfentrazone|quinclorac|trifloxysulfuron|halosulfuron|imazaquin|carfentrazone|triclopyr|fluroxypyr|glyphosate/;
+const MITICIDES = /miticide|acaricide|bifenazate|hexythiazox|etoxazole|acequinocyl|fenpyroximate|clofentezine|spiromesifen/;
 // moa_group is shared by fungicides (FRAC) and herbicides (HRAC): "Group 3" on a fungicide is not a pyrethroid. Only
 // irac_group, or moa_group on a product that is not a fungicide or herbicide, is read as an IRAC code.
 const NON_IRAC_CATEGORIES = new Set(['fungicide', 'herbicide', 'fertilizer', 'liquid_fertilizer', 'adjuvant', 'soil_surfactant', 'pgr', 'soil_amendment']);
@@ -36,29 +40,37 @@ function iracCodes(product) {
   return codes;
 }
 
+// Any category naming fertilizer ("fertilizer", "liquid_fertilizer", "Micronutrient Fertilizer"), a liquid fertilizer
+// mixing order, or a combination subcategory such as "Pre-emergent + fertilizer combo".
+function isFertilizer(p) {
+  return /fertili[sz]er/.test(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' || /fertili[sz]er/.test(lower(p.subcategory));
+}
+
 // Product groups a rule may name, with the catalog fields that place a product in each. Mirrors the migration's
 // group check list (a test keeps them equal). A product can sit in more than one group.
 const GROUPS = [
   { key: 'any', label: 'Any other product (apply alone)', test: () => true },
-  // A combination product counts too (catalog subcategory such as "Pre-emergent + fertilizer combo").
-  // Any category naming fertilizer counts ("fertilizer", "liquid_fertilizer", "Micronutrient Fertilizer").
-  { key: 'fertilizer', label: 'Fertilizer', test: (p) => /fertili[sz]er/.test(lower(p.category)) || lower(p.mixing_order_category) === 'liquid_fertilizer' || /fertili[sz]er/.test(lower(p.subcategory)) },
+  { key: 'fertilizer', label: 'Fertilizer', test: isFertilizer },
   { key: 'surfactant', label: 'Surfactant or wetting agent', test: (p) => ['adjuvant', 'soil_surfactant'].includes(lower(p.category)) || /surfactant|wetting agent/.test(text(p)) },
   { key: 'oil', label: 'Spray oil', test: (p) => /spray oil|oil emulsion|horticultural oil|mineral oil|paraffinic oil|petroleum oil|neem oil/.test(text(p)) },
   { key: 'copper', label: 'Copper', test: (p) => /copper/.test(text(p)) },
   { key: 'pyrethroid', label: 'Pyrethroid (bifenthrin and others)', test: (p) => iracCodes(p).has('3a') || PYRETHROIDS.test(text(p)) },
   { key: 'neonic', label: 'Neonic (imidacloprid and others)', test: (p) => ['4', '4a'].some((code) => iracCodes(p).has(code)) || NEONICS.test(text(p)) },
   { key: 'granular', label: 'Granular product (spreader)', test: (p) => isSpreaderGranule(p) },
-  { key: 'herbicide', label: 'Herbicide', test: (p) => lower(p.category) === 'herbicide' },
+  // A combination row (weed and feed) is a herbicide as well as a fertilizer.
+  { key: 'herbicide', label: 'Herbicide', test: (p) => lower(p.category) === 'herbicide' || /herbicide|pre-?emergent|weed/.test(lower(p.subcategory)) || HERBICIDE_ACTIVES.test(lower(p.active_ingredient)) },
   { key: 'insecticide', label: 'Insecticide', test: (p) => lower(p.category) === 'insecticide' },
   { key: 'fungicide', label: 'Fungicide', test: (p) => lower(p.category) === 'fungicide' },
+  // Migration 20261127200000. A fertilizer that goes in a spray tank: liquid or soluble, not a dry spreader granule.
+  { key: 'spray_fertilizer', label: 'Sprayed fertilizer (liquid or soluble)', test: (p) => isFertilizer(p) && !isSpreaderGranule(p) },
+  { key: 'miticide', label: 'Miticide', test: (p) => MITICIDES.test(`${text(p)} ${lower(p.category)} ${lower(p.subcategory)}`) },
 ];
 const GROUP_KEYS = GROUPS.map((g) => g.key);
 const GROUP_BY_KEY = new Map(GROUPS.map((g) => [g.key, g]));
 // The one precedence for a pair's headline, whatever the source: never > caution > unknown > ok.
 const SEVERITY = { never: 4, caution: 3, unknown: 2, ok: 1 };
 
-const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'application_method', 'mixing_order_category', 'requires_surfactant', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes'];
+const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'application_method', 'mixing_order_category', 'requires_surfactant', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes', 'updated_at'];
 
 function validationError(message) {
   const err = new Error(message);
@@ -330,6 +342,14 @@ function ruleEntry(rule, kind) {
   };
 }
 
+// True when the product row was last changed no later than the rule. A missing date is never "older".
+function olderThan(product, rule) {
+  const time = (value) => (value == null || value === '' ? NaN : new Date(value).getTime());
+  const productAt = time(product && product.updated_at);
+  const ruleAt = time(rule && rule.updated_at);
+  return Number.isFinite(productAt) && Number.isFinite(ruleAt) && productAt <= ruleAt;
+}
+
 // One pair's answer: every matching entry (the pair's own rule, group rules with apply-alone, label restrictions,
 // catalog do-not-mix items and notes), then headline() picks the verdict.
 function evaluatePair(x, y, rules, notesById) {
@@ -341,9 +361,11 @@ function evaluatePair(x, y, rules, notesById) {
     (String(r.product_a_id).toLowerCase() === xid && inGroup(y, r.group_b))
     || (String(r.product_a_id).toLowerCase() === yid && inGroup(x, r.group_b))));
   const restrictions = [surfactantRestriction(x, y), surfactantRestriction(y, x), surfactantConflict(x, y)].filter(Boolean);
-  // Under a pair rule the catalog's free text (compatibility_notes) is background only: listed as an older note with
-  // no verdict. A do-not-mix item (do_not_tank_mix_with) always keeps its Caution.
-  const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => (pairRule && note.field === 'compatibility_notes'
+  // Under a pair rule, the catalog's free text (compatibility_notes) of a product row last changed before the rule is
+  // background only: listed as an older note with no verdict. A note on a row changed after the rule (or with no date
+  // to compare) keeps its Caution, and so does a do-not-mix item (do_not_tank_mix_with).
+  const rowOf = (pid) => (String(pid).toLowerCase() === xid ? x : y);
+  const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => (pairRule && note.field === 'compatibility_notes' && olderThan(rowOf(note.productId), pairRule)
     ? { ...note, kind: 'catalog_note', ruleId: null, jarTestRequired: false, verdict: null, reason: `Catalog note (older): ${note.reason}` }
     : { kind: 'catalog', ruleId: null, jarTestRequired: false, ...note }));
   return headline([...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupRules.map((r) => ruleEntry(r, 'group')), ...restrictions, ...catalog]);

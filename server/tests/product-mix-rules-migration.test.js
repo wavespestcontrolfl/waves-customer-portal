@@ -224,3 +224,34 @@ describe('20261127190000_reliant_fertilizer_test', () => {
     expect(knex.raw).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127200000_mix_rules_spray_fert_miticide', () => {
+  const fix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+  const seed = require('../models/migrations/20261127143000_product_mix_rules');
+  const reliantFix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
+
+  test('adds two groups to the seed list, moves exactly the 20261127190000 Reliant row, and quotes the Sequestar card', () => {
+    expect(fix._GROUPS_BEFORE).toEqual(seed._GROUPS);
+    expect(fix._GROUPS).toEqual([...seed._GROUPS, 'spray_fertilizer', 'miticide']);
+    for (const g of fix._GROUPS) expect(g.length).toBeLessThanOrEqual(30);
+    const { group_b: _group, ...reliantValues } = reliantFix._RULE;
+    expect(fix._RELIANT_RULE).toEqual(reliantValues);
+    const guide = fs.readFileSync(path.join(__dirname, '..', 'config', 'tree-shrub-field-guide.json'), 'utf8');
+    const line = 'Never tank-mix with oil. The label also bars mixing it with miticides in foliar sprays on trees.';
+    expect(guide).toContain(`"${line}"`);
+    expect(fix._SEQUESTAR_RULE).toMatchObject({ group_b: 'miticide', verdict: 'caution' });
+    expect(fix._SEQUESTAR_RULE.source).toContain(`"${line}"`);
+    expect(fix._SEQUESTAR_RULE.reason.length).toBeLessThanOrEqual(200);
+    expect(`migration:${fix._MIGRATION}:down:sequestar`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    knex.raw = jest.fn();
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+});

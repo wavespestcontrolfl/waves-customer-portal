@@ -47,7 +47,7 @@ const mix = require('../services/product-mix-rules');
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name varchar(150) NOT NULL, category varchar(30),
         subcategory varchar(100), active_ingredient varchar(150), moa_group varchar(30), irac_group varchar(10), formulation varchar(50),
         application_method varchar(50), mixing_order_category varchar(50), requires_surfactant boolean, allows_surfactant boolean,
-        do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true
+        do_not_tank_mix_with jsonb, compatibility_notes text, active boolean DEFAULT true, updated_at timestamptz DEFAULT now()
       );
     `);
     const products = [
@@ -243,6 +243,54 @@ const mix = require('../services/product-mix-rules');
     expect(mockAudit.events.map((e) => e.action)).toEqual(['migration:20261127190000_reliant_fertilizer_test:up']);
     await reliantFix.down(mockTrx);
     expect(await mockTrx('product_mix_rules').where({ product_a_id: reliant.id, group_b: 'fertilizer' })).toHaveLength(0);
+  });
+
+  test('migration 20261127200000 widens the groups, scopes Reliant to sprayed fertilizer, adds Sequestar + miticide; down() reverses', async () => {
+    const reliantFix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
+    const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    mockAudit.events = [];
+    const add = async (row) => (await mockTrx('products_catalog').insert(row).returning('id'))[0].id;
+    const reliant = await add({ name: 'Reliant Systemic Fungicide', category: 'fungicide' });
+    const sequestar = await add({ name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient', category: 'Micronutrient Fertilizer', formulation: 'soluble granule' });
+    const floramite = await add({ name: 'Floramite SC/LS 8 oz', category: 'insecticide', active_ingredient: 'Bifenazate' });
+    const granule = await add({ name: 'LESCO 24-0-11', category: 'fertilizer', formulation: 'granular' });
+    await reliantFix.up(mockTrx);
+    await groupsFix.up(mockTrx);
+    await groupsFix.up(mockTrx);
+    const reliantRows = () => mockTrx('product_mix_rules').where({ product_a_id: reliant }).select('group_b');
+    expect(await reliantRows()).toEqual([{ group_b: 'spray_fertilizer' }]);
+    expect((await mix.checkMix([reliant, ids.fert])).pairs[0]).toMatchObject({ verdict: 'caution', jarTestRequired: true });
+    expect((await mix.checkMix([reliant, granule])).pairs[0]).toMatchObject({ verdict: 'unknown', jarTestRequired: false });
+    expect((await mix.checkMix([floramite, sequestar])).pairs[0]).toMatchObject({ verdict: 'caution', reason: groupsFix._SEQUESTAR_RULE.reason });
+    expect(mockAudit.events.map((e) => e.action)).toEqual([
+      'migration:20261127190000_reliant_fertilizer_test:up',
+      'migration:20261127200000_mix_rules_spray_fert_miticide:up:reliant',
+      'migration:20261127200000_mix_rules_spray_fert_miticide:up:sequestar',
+    ]);
+    // down() refuses while another rule uses a new group, then reverses both rows and the CHECK list.
+    await mockTrx('product_mix_rules').insert({ product_a_id: ids.copper, group_b: 'miticide', verdict: 'ok', reason: 'Owner.' });
+    await mockTrx.raw('SAVEPOINT refuse');
+    await expect(groupsFix.down(mockTrx)).rejects.toThrow(/still use spray_fertilizer or miticide/);
+    await mockTrx.raw('ROLLBACK TO SAVEPOINT refuse');
+    await mockTrx('product_mix_rules').where({ product_a_id: ids.copper, group_b: 'miticide' }).del();
+    await groupsFix.down(mockTrx);
+    expect(await reliantRows()).toEqual([{ group_b: 'fertilizer' }]);
+    expect(await mockTrx('product_mix_rules').where({ product_a_id: sequestar })).toHaveLength(0);
+    await mockTrx.raw('SAVEPOINT old_check');
+    await expect(mockTrx('product_mix_rules').insert({ product_a_id: ids.copper, group_b: 'miticide', verdict: 'ok', reason: 'x' })).rejects.toMatchObject({ constraint: 'product_mix_rules_group_check' });
+    await mockTrx.raw('ROLLBACK TO SAVEPOINT old_check');
+  });
+
+  test('a catalog note on a row changed after the pair rule stays a Caution; an older one is listed as older', async () => {
+    const [a, b] = [ids.oil, ids.copper].sort();
+    await mockTrx('products_catalog').where({ id: ids.copper }).update({ compatibility_notes: 'Jar test with oils.', updated_at: mockTrx.raw("now() - interval '1 day'") });
+    await mockTrx('product_mix_rules').insert({ product_a_id: a, product_b_id: b, verdict: 'ok', reason: 'Owner checked.' });
+    await mockTrx('product_mix_rules').where({ product_a_id: ids.copper, group_b: 'oil' }).update({ active: false });
+    const kinds = async () => (await mix.checkMix([ids.oil, ids.copper])).pairs[0];
+    expect(await kinds()).toMatchObject({ verdict: 'ok', entries: [expect.objectContaining({ kind: 'pair' }), expect.objectContaining({ kind: 'catalog_note', verdict: null })] });
+    await mockTrx('products_catalog').where({ id: ids.copper }).update({ updated_at: mockTrx.raw("now() + interval '1 day'") });
+    expect(await kinds()).toMatchObject({ verdict: 'caution', reason: 'Southern Ag Copper Fungicide 27.15% label note: Jar test with oils.' });
   });
 
   test('migration 20261127160000 makes Certainty + 90/10 caution once, keeps an admin edit, and down() reverses it', async () => {

@@ -45,6 +45,10 @@ const SPEEDZONE = { id: id(4), name: 'SpeedZone Southern EW', category: 'herbici
 const DEMAND = { id: id(5), name: 'Demand CS', category: 'insecticide', compatibility_notes: 'Compatible with most insecticides and IGRs.' };
 const OIL = { id: id(6), name: 'TriTek Spray Oil Emulsion (OMRI)', category: 'insecticide', active_ingredient: 'Mineral oil' };
 const COPPER = { id: id(7), name: 'Southern Ag Copper Fungicide 27.15%', category: 'fungicide', active_ingredient: 'Copper diammonia diacetate complex' };
+// Rule and catalog dates: a note on a row changed at OLDER is older than a rule saved at RULE_AT; NEWER is not.
+const OLDER = new Date('2026-11-01T12:00:00Z');
+const RULE_AT = new Date('2026-11-10T12:00:00Z');
+const NEWER = new Date('2026-11-20T12:00:00Z');
 const rule = (n, fields) => ({ id: id(100 + n), active: true, jar_test_required: false, source: 'owner', product_b_id: null, group_b: null, ...fields });
 
 beforeEach(() => {
@@ -106,13 +110,15 @@ describe('checkMix', () => {
 
   test('under a pair rule a compatibility note is an older note only, and a do-not-mix item still raises a Yes to Caution', async () => {
     // Demand CS has only compatibility_notes: a pair Yes stands, the note is listed without a verdict.
-    mockTables.product_mix_rules.push(rule(5, { product_a_id: CELSIUS.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.' }));
+    // The Demand row was last changed before the rule.
+    mockTables.products_catalog = mockTables.products_catalog.map((p) => (p === DEMAND ? { ...DEMAND, updated_at: OLDER } : p));
+    mockTables.product_mix_rules.push(rule(5, { product_a_id: CELSIUS.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.', updated_at: RULE_AT }));
     const free = (await mix.checkMix([DEMAND.id, CELSIUS.id])).pairs[0];
     expect(free).toMatchObject({ verdict: 'ok', reason: 'Owner checked.' });
     expect(free.entries.map((e) => [e.kind, e.verdict])).toEqual([['pair', 'ok'], ['catalog_note', null]]);
     expect(free.entries[1].reason).toBe('Catalog note (older): Demand CS label note: Compatible with most insecticides and IGRs.');
     // SpeedZone's do_not_tank_mix_with stays a Caution and leads over the pair's Yes; the pair stays listed.
-    const speedzonePair = rule(6, { product_a_id: SPEEDZONE.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.' });
+    const speedzonePair = rule(6, { product_a_id: SPEEDZONE.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.', updated_at: RULE_AT });
     mockTables.product_mix_rules.push(speedzonePair);
     const restricted = (await mix.checkMix([DEMAND.id, SPEEDZONE.id])).pairs[0];
     expect(restricted).toMatchObject({ verdict: 'caution', reason: 'SpeedZone Southern EW label: do not tank mix with Additives that alter spray-solution pH below 5 or above 8.' });
@@ -230,9 +236,9 @@ test('a category naming fertilizer (Micronutrient Fertilizer) is in the fertiliz
 
 test('under a pair rule a catalog note is an older note, never a second verdict: Celsius + 90/10', async () => {
   const NIS = { id: id(15), name: 'LESCO 90/10 Nonionic Surfactant', category: 'adjuvant' };
-  mockTables.products_catalog = mockTables.products_catalog.map((p) => (p === CELSIUS ? { ...CELSIUS, compatibility_notes: 'Requires NIS surfactant. Do NOT tank-mix with fertilizer.' } : p));
+  mockTables.products_catalog = mockTables.products_catalog.map((p) => (p === CELSIUS ? { ...CELSIUS, compatibility_notes: 'Requires NIS surfactant. Do NOT tank-mix with fertilizer.', updated_at: OLDER } : p));
   mockTables.products_catalog.push(NIS);
-  mockTables.product_mix_rules.push(rule(12, { product_a_id: CELSIUS.id, product_b_id: NIS.id, verdict: 'caution', reason: 'Approved weed mix. In February and June to September, spray Celsius alone: no surfactant.' }));
+  mockTables.product_mix_rules.push(rule(12, { product_a_id: CELSIUS.id, product_b_id: NIS.id, verdict: 'caution', reason: 'Approved weed mix. In February and June to September, spray Celsius alone: no surfactant.', updated_at: RULE_AT }));
   const pair = (await mix.checkMix([NIS.id, CELSIUS.id])).pairs[0];
   expect(pair).toMatchObject({ verdict: 'caution', reason: 'Approved weed mix. In February and June to September, spray Celsius alone: no surfactant.' });
   expect(pair.entries.slice(1)).toEqual([expect.objectContaining({
@@ -311,7 +317,9 @@ describe('normalizeRuleInput', () => {
 });
 
 test('the service groups and verdicts match the migration check lists', () => {
-  expect(mix.GROUP_KEYS).toEqual(migration._GROUPS);
+  const widened = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+  expect(widened._GROUPS_BEFORE).toEqual(migration._GROUPS);
+  expect(mix.GROUP_KEYS).toEqual(widened._GROUPS);
   expect(mix.VERDICTS).toEqual(migration._VERDICTS);
 });
 
@@ -362,5 +370,59 @@ describe('headline precedence over every source x verdict', () => {
     const pair = (await mix.checkMix([HERB, WET])).pairs[0];
     expect(pair).toMatchObject({ verdict: 'caution', reason: 'Wet Y label: do not tank mix with acid water' });
     expect(pair.entries.map((e) => e.reason)).toEqual(['Wet Y label: do not tank mix with acid water', 'pair ok', 'group ok']);
+  });
+});
+
+describe('a catalog note under a pair rule, by date', () => {
+  test.each([
+    ['older than the rule: listed as an older note, the pair Yes leads', OLDER, 'ok', ['pair', 'catalog_note']],
+    ['the same instant as the rule: older note', RULE_AT, 'ok', ['pair', 'catalog_note']],
+    ['changed after the rule: stays a Caution and leads', NEWER, 'caution', ['catalog', 'pair']],
+    ['no date on the row: stays a Caution', null, 'caution', ['catalog', 'pair']],
+  ])('%s', async (_name, updatedAt, verdict, kinds) => {
+    mockTables.products_catalog = mockTables.products_catalog.map((p) => (p === DEMAND ? { ...DEMAND, updated_at: updatedAt } : p));
+    mockTables.product_mix_rules.push(rule(30, { product_a_id: CELSIUS.id, product_b_id: DEMAND.id, verdict: 'ok', reason: 'Owner checked.', updated_at: RULE_AT }));
+    const pair = (await mix.checkMix([CELSIUS.id, DEMAND.id])).pairs[0];
+    expect(pair.verdict).toBe(verdict);
+    expect(pair.entries.map((e) => e.kind)).toEqual(kinds);
+  });
+});
+
+describe('groups for combination, sprayed and miticide products', () => {
+  const STONEWALL_G = { name: 'LESCO Stonewall 0.43% 15-0-15 Pre-Emergent Plus Fertilizer', category: 'fertilizer', active_ingredient: 'Prodiamine', formulation: 'granular' };
+  const DIMENSION_G = { name: 'LESCO Dimension 0.21% 18-0-10 Pre-Emergent Plus Fertilizer', category: 'fertilizer', active_ingredient: 'Dithiopyr', formulation: 'granular' };
+  const ATRAZINE_FERT = { name: 'Weed and feed with atrazine', category: 'fertilizer', active_ingredient: 'Atrazine' };
+  const PLAIN_FERT = { name: 'LESCO 24-0-11', category: 'fertilizer', formulation: 'granular' };
+  const LIQUID_FERT = { name: 'LESCO 12-0-0 Chelated Iron Plus', category: 'fertilizer', mixing_order_category: 'liquid_fertilizer' };
+  const SOLUBLE = { name: 'Sequestar 6% Fe EDDHA Soluble Micronutrient', category: 'Micronutrient Fertilizer', formulation: 'soluble granule' };
+  const FLORAMITE = { name: 'Floramite SC/LS 8 oz', category: 'insecticide', active_ingredient: 'Bifenazate' };
+
+  test.each([
+    [STONEWALL_G, { fertilizer: true, herbicide: true, spray_fertilizer: false }],
+    [DIMENSION_G, { fertilizer: true, herbicide: true, spray_fertilizer: false }],
+    [ATRAZINE_FERT, { fertilizer: true, herbicide: true, spray_fertilizer: true }],
+    [PLAIN_FERT, { fertilizer: true, herbicide: false, spray_fertilizer: false }],
+    [LIQUID_FERT, { fertilizer: true, herbicide: false, spray_fertilizer: true }],
+    [SOLUBLE, { fertilizer: true, herbicide: false, spray_fertilizer: true }],
+    [FLORAMITE, { miticide: true, insecticide: true, fertilizer: false }],
+    [{ name: 'Hexygon IQ Miticide', category: 'insecticide' }, { miticide: true }],
+    [{ name: 'Celsius WG', category: 'herbicide' }, { herbicide: true, miticide: false, fertilizer: false }],
+  ])('%j', (product, expected) => {
+    for (const [group, inIt] of Object.entries(expected)) expect([group, mix.inGroup(product, group)]).toEqual([group, inIt]);
+  });
+
+  test('a herbicide Never reaches a weed-and-feed granule; a Reliant sprayed-fertilizer caution skips a spreader granule', async () => {
+    const COMBO = { id: id(50), ...STONEWALL_G };
+    const GRANULE = { id: id(51), ...PLAIN_FERT };
+    const LIQUID = { id: id(52), ...LIQUID_FERT };
+    const RELIANT = { id: id(53), name: 'Reliant Systemic Fungicide', category: 'fungicide' };
+    mockTables.products_catalog.push(COMBO, GRANULE, LIQUID, RELIANT);
+    mockTables.product_mix_rules.push(
+      rule(31, { product_a_id: OIL.id, group_b: 'herbicide', verdict: 'never', reason: 'No herbicide in the oil tank.' }),
+      rule(32, { product_a_id: RELIANT.id, group_b: 'spray_fertilizer', verdict: 'caution', reason: 'Jar test and plant test first.', jar_test_required: true }),
+    );
+    expect((await mix.checkMix([COMBO.id, OIL.id])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'No herbicide in the oil tank.' });
+    expect((await mix.checkMix([RELIANT.id, LIQUID.id])).pairs[0]).toMatchObject({ verdict: 'caution', jarTestRequired: true });
+    expect((await mix.checkMix([RELIANT.id, GRANULE.id])).pairs[0]).toMatchObject({ verdict: 'unknown', jarTestRequired: false });
   });
 });
