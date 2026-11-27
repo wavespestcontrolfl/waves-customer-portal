@@ -1,0 +1,217 @@
+// @vitest-environment jsdom
+/**
+ * WDO inspection table price on the Create Appointment modal (owner ruling 2026-11-27 "yes booking"). A WDO line starts
+ * blank and books at the table price by home size and construction ($150 to $275) for the home the visit is booked at; the
+ * line shows that price and what the table read before save, and a typed price overrides it. The answer belongs to one
+ * question (customer, picked property and linked estimate, or a new caller's picked address): an answer to another one is
+ * not shown, and a blank line is not booked until its price is shown and re-read at the moment of booking.
+ */
+import React from 'react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+vi.mock('../../hooks/useDiscountStacking', () => ({
+  useDiscountStackingState: vi.fn(() => ({ enabled: false, known: true, retry: vi.fn() })),
+  ensureStackingFresh: vi.fn(async () => ({ enabled: false, known: true })),
+}));
+import CreateAppointmentModal, {
+  newCallerBookBlockReason, wdoLineHintText, wdoQuoteAnswer, wdoQuoteQuery, wdoSubmitGate,
+} from './CreateAppointmentModal.jsx';
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
+});
+
+const FRAME_2600 = { price: 200, source: 'wdo_table', basis: '2,600 sq ft, wood frame', staffNote: null };
+
+describe('wdoQuoteQuery (the question the line asks)', () => {
+  it('asks for the customer once the booking property is settled, with the picked property and the linked estimate', () => {
+    expect(wdoQuoteQuery({ customerId: 'cust-1', propertySettled: false })).toBe('');
+    expect(wdoQuoteQuery({ customerId: 'cust-1', propertySettled: true })).toBe('customerId=cust-1');
+    expect(wdoQuoteQuery({ customerId: 'cust-1', propertySettled: true, propertyId: 'prop-2', estimateId: 'est-3' }))
+      .toBe('customerId=cust-1&propertyId=prop-2&estimateId=est-3');
+  });
+
+  it('a new caller with no customer asks by the picked address; a customer wins over a leftover address; nothing asks nothing', () => {
+    const address = { line1: '300 Sample Ct', city: 'Venice', state: '', zip: '34285', lat: 27.09, lng: -82.44 };
+    expect(wdoQuoteQuery({ newCallerAddress: address })).toBe('line1=300+Sample+Ct&city=Venice&zip=34285&lat=27.09&lng=-82.44');
+    expect(wdoQuoteQuery({ customerId: 'cust-1', propertySettled: true, newCallerAddress: address })).toBe('customerId=cust-1');
+    expect(wdoQuoteQuery({})).toBe('');
+  });
+});
+
+describe('wdoQuoteAnswer and wdoLineHintText (what the line shows)', () => {
+  const key = 'customerId=cust-1';
+
+  it('a table price shows its amount, what the table read and the office note', () => {
+    const answer = wdoQuoteAnswer(key, FRAME_2600);
+    expect(answer).toEqual({ key, status: 'ready', price: 200, tablePriced: true, basis: '2,600 sq ft, wood frame', staffNote: null });
+    expect(wdoLineHintText({ quote: answer, query: key })).toBe('Table price: $200.00 (2,600 sq ft, wood frame).');
+    const noted = wdoQuoteAnswer(key, {
+      price: 150, source: 'wdo_table', basis: 'no home size on record, construction not verified', staffNote: 'No home size on record: priced as 2,000 sq ft.',
+    });
+    expect(wdoLineHintText({ quote: noted, query: key }))
+      .toBe('Table price: $150.00 (no home size on record, construction not verified). No home size on record: priced as 2,000 sq ft.');
+  });
+
+  it('no table price shows the catalog price; no price at all asks for one', () => {
+    const catalog = wdoQuoteAnswer(key, { price: 250, source: 'catalog_base', basis: null, staffNote: null });
+    expect(catalog).toMatchObject({ price: 250, tablePriced: false });
+    expect(wdoLineHintText({ quote: catalog, query: key })).toBe('Catalog price: $250.00. The home size table has no price for this home.');
+    const none = wdoQuoteAnswer(key, { price: null, source: 'catalog_base' });
+    expect(none.price).toBeNull();
+    expect(wdoLineHintText({ quote: none, query: key })).toBe('No price for this home. Type a price.');
+  });
+
+  it('an answer to another question is not shown; a failed read and an unasked question say so', () => {
+    expect(wdoLineHintText({ quote: wdoQuoteAnswer('customerId=cust-0', FRAME_2600), query: key })).toBe('Reading the price for this home…');
+    expect(wdoLineHintText({ quote: { key, status: 'error' }, query: key })).toMatch(/^Could not read the price for this home/);
+    expect(wdoLineHintText({ quote: null, query: '' })).toBe('Priced by home size and construction once the customer and address are set.');
+  });
+});
+
+describe('wdoSubmitGate (the check at the moment of booking)', () => {
+  const query = 'customerId=cust-1';
+  const shown = wdoQuoteAnswer(query, FRAME_2600);
+
+  it('a typed price, or no WDO line left blank, needs no check', async () => {
+    const fetchQuote = vi.fn();
+    expect(await wdoSubmitGate({ needsPrice: false, quote: null, query: '', fetchQuote })).toBeNull();
+    expect(fetchQuote).not.toHaveBeenCalled();
+  });
+
+  it('holds the booking until the price for this question is shown; a failed read asks again', async () => {
+    const fetchQuote = vi.fn();
+    for (const quote of [null, { ...shown, key: 'customerId=cust-0' }, { key: query, status: 'loading' }]) {
+      expect(await wdoSubmitGate({ needsPrice: true, quote, query, fetchQuote }))
+        .toMatchObject({ retry: false, refresh: null, message: expect.stringMatching(/^Reading the WDO price/) });
+    }
+    expect(await wdoSubmitGate({ needsPrice: true, quote: null, query: '', fetchQuote })).toMatchObject({ retry: false, refresh: null });
+    expect(await wdoSubmitGate({ needsPrice: true, quote: { key: query, status: 'error' }, query, fetchQuote }))
+      .toMatchObject({ retry: true, refresh: null, message: expect.stringMatching(/^Could not read the WDO price/) });
+    expect(fetchQuote).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the shown price: the same price books, a changed one is shown first, a failed read retries', async () => {
+    const same = vi.fn(async () => FRAME_2600);
+    expect(await wdoSubmitGate({ needsPrice: true, quote: shown, query, fetchQuote: same })).toBeNull();
+    expect(same).toHaveBeenCalledWith('/admin/schedule/wdo-inspection-quote?customerId=cust-1');
+    const changed = await wdoSubmitGate({
+      needsPrice: true, quote: shown, query, fetchQuote: async () => ({ price: 225, source: 'wdo_table', basis: '3,600 sq ft, wood frame' }),
+    });
+    expect(changed).toMatchObject({ retry: false, refresh: { key: query, price: 225, basis: '3,600 sq ft, wood frame' }, message: expect.stringMatching(/changed/) });
+    const failed = await wdoSubmitGate({ needsPrice: true, quote: shown, query, fetchQuote: async () => { throw new Error('offline'); } });
+    expect(failed).toMatchObject({ retry: true, refresh: null });
+  });
+});
+
+describe('Book for a new caller', () => {
+  it('a blank WDO line blocks Book until its price is shown; the other reasons come first', () => {
+    expect(newCallerBookBlockReason({ serviceCount: 1, tablePriceUnread: true })).toMatch(/priced by home size/);
+    expect(newCallerBookBlockReason({ serviceCount: 1, tablePriceUnread: false })).toBe('');
+    expect(newCallerBookBlockReason({ serviceCount: 2, tablePriceUnread: true })).toMatch(/one service/);
+  });
+});
+
+// ── The line in the modal ───────────────────────────────────────────────────────────────────────────────────────────
+const json = (body, { ok = true, status = 200 } = {}) => ({ ok, status, json: vi.fn(async () => body) });
+const CUSTOMER = { id: 'customer-a', firstName: 'Ada', lastName: 'Lovelace' };
+const WDO = { id: 'svc-wdo', service_key: 'wdo_inspection', name: 'WDO Inspection Service', billing_type: 'one_time', base_price: 250, default_duration_minutes: 60 };
+
+function futureDate(days = 30) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return [d.getFullYear(), String(d.getMonth() + 1).padStart(2, '0'), String(d.getDate()).padStart(2, '0')].join('-');
+}
+
+// `quote()` answers the line's request (read each time, so a test can change the answer).
+function installFetch({ quote }) {
+  const fetcher = vi.fn((input, options = {}) => {
+    const url = String(input);
+    if (url.includes('/admin/schedule/wdo-inspection-quote?')) return Promise.resolve(json(quote()));
+    if (url.endsWith('/admin/schedule/preview') && options.method === 'POST') {
+      const groups = JSON.parse(options.body || '{}').groups || [];
+      return Promise.resolve(json({ regime: true, results: groups.map((g) => ({ key: g.key })) }));
+    }
+    if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(json({ id: 'appt-1' }));
+    if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
+    if (url.includes('/admin/services?')) return Promise.resolve(json({ services: [WDO] }));
+    if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
+    if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
+    if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
+    if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
+    if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));
+    if (url.endsWith('/card-request-availability')) return Promise.resolve(json({ enabled: false }));
+    if (url.endsWith('/admin/dispatch/slot-check')) return Promise.resolve(json({ ok: true, results: [{ conflicts: [] }] }));
+    if (url.includes('/admin/schedule/find-time')) return Promise.resolve(json({ gated: true }));
+    throw new Error(`Unhandled fetch in test: ${url}`);
+  });
+  vi.stubGlobal('fetch', fetcher);
+  return fetcher;
+}
+
+async function addWdoLine() {
+  if (!screen.queryByPlaceholderText('Search services')) fireEvent.click(screen.getByRole('button', { name: /\+ Add service/i }));
+  const box = screen.queryByPlaceholderText('Search services') || screen.getByPlaceholderText('Search to add service');
+  fireEvent.change(box, { target: { value: 'WDO' } });
+  fireEvent.click(await screen.findByRole('button', { name: /WDO Inspection Service/i }));
+}
+
+const mount = () => render(<CreateAppointmentModal defaultCustomer={CUSTOMER} defaultDate={futureDate()} defaultWindowStart="09:00" onClose={vi.fn()} onCreated={vi.fn()} onChange={vi.fn()} />);
+const hint = () => screen.queryByTestId('wdo-table-price');
+const total = () => screen.getByText(/^Total: \$/).textContent;
+const quoteCalls = (fetcher) => fetcher.mock.calls.map(([u]) => String(u)).filter((u) => u.includes('/admin/schedule/wdo-inspection-quote?'));
+const schedulePosts = (fetcher) => fetcher.mock.calls.filter(([u, o]) => String(u).endsWith('/admin/schedule') && o?.method === 'POST').map(([, o]) => JSON.parse(o.body));
+const saveButton = () => screen.getByRole('button', { name: 'Schedule appointment' });
+
+describe('a WDO line in the modal', () => {
+  it('starts blank, shows the table price and what it was read at, totals it, and books with no price so the server sets it', async () => {
+    const fetcher = installFetch({ quote: () => FRAME_2600 });
+    mount();
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
+    expect(screen.getByPlaceholderText('Auto (home size)').value).toBe('');
+    expect(total()).toContain('$200');
+    expect(quoteCalls(fetcher)[0]).toContain('/admin/schedule/wdo-inspection-quote?customerId=customer-a');
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', primaryLinePrice: null });
+    // The price is read again at the moment of booking.
+    expect(quoteCalls(fetcher)).toHaveLength(2);
+  });
+
+  it('a typed price overrides the table price: it totals and books as typed, and nothing is re-read', async () => {
+    const fetcher = installFetch({ quote: () => FRAME_2600 });
+    mount();
+    await addWdoLine();
+    await waitFor(() => expect(hint()).not.toBeNull());
+    fireEvent.change(screen.getByPlaceholderText('Auto (home size)'), { target: { value: '260' } });
+    await waitFor(() => expect(hint()).toBeNull());
+    expect(total()).toContain('$260');
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', primaryLinePrice: 260 });
+    expect(quoteCalls(fetcher)).toHaveLength(1);
+  });
+
+  it('a price that changed while the form sat open is shown before anything books', async () => {
+    let answer = FRAME_2600;
+    const fetcher = installFetch({ quote: () => answer });
+    mount();
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+    answer = { price: 225, source: 'wdo_table', basis: '3,600 sq ft, wood frame', staffNote: null };
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(hint()?.textContent).toBe('Table price: $225.00 (3,600 sq ft, wood frame).'));
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+    expect(total()).toContain('$225');
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ primaryLinePrice: null });
+  });
+});

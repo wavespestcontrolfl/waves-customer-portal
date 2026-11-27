@@ -964,11 +964,14 @@ function amountOrNull(value, preserveZero) {
 // GATE_NEW_CALLER_BOOKING: why Book cannot save a new caller's visit yet
 // ('' = it can). One service, no discount (discounts need a customer), and a
 // price the server can set without a customer: a lot-priced mosquito line
-// needs a typed price (the lot ladder reads the customer's property).
-export function newCallerBookBlockReason({ serviceCount = 0, hasDiscount = false, lotPricedWithoutPrice = false } = {}) {
+// needs a typed price (the lot ladder reads the customer's property). A WDO
+// line left blank books at the price for the picked address, so Book waits
+// until the line shows it (tablePriceUnread).
+export function newCallerBookBlockReason({ serviceCount = 0, hasDiscount = false, lotPricedWithoutPrice = false, tablePriceUnread = false } = {}) {
   if (serviceCount > 1) return 'Book saves one service for a new caller. Add the other services after the customer is linked.';
   if (serviceCount === 1 && hasDiscount) return 'Discounts wait until the customer exists. Remove the discount to book now.';
   if (serviceCount === 1 && lotPricedWithoutPrice) return 'This service is priced by lot size. Type the price to book now.';
+  if (serviceCount === 1 && tablePriceUnread) return 'This service is priced by home size. Wait for the price for this address, or type the price to book now.';
   return '';
 }
 
@@ -1011,7 +1014,7 @@ export function newCallerCallLabel(call) {
 export function appointmentGroupRequestBody({
   separateProgram, key, separateProgramReason,
   customerId, scheduledDate, primaryId, primaryName,
-  primaryIsBlankAutoMosquito, groupHasPrice, primaryBasePrice,
+  primaryIsBlankServerPriced, groupHasPrice, primaryBasePrice,
   primaryDiscount, primaryDiscountDollars,
   serviceAddons, windowStart, windowEnd,
   techMode, techId,
@@ -1050,12 +1053,13 @@ export function appointmentGroupRequestBody({
     scheduledDate,
     serviceType: primaryName,
     serviceId: primaryId || null,
-    // A blank-priced one-time mosquito line must reach the server as null
-    // price so the lot-ladder default applies — groupHasPrice would
-    // otherwise coerce it to 0 when another line in the group carries a
-    // price. An ENTERED 0 (deliberate waiver) still goes through as 0 via
-    // groupHasPrice + primaryBasePrice upstream.
-    primaryLinePrice: primaryIsBlankAutoMosquito ? null : (groupHasPrice ? primaryBasePrice : null),
+    // A blank-priced line the server prices itself (the one-time mosquito
+    // lot ladder, the WDO inspection table) must reach the server as null
+    // price so that price applies — groupHasPrice would otherwise coerce it
+    // to 0 when another line in the group carries a price. An ENTERED 0
+    // (deliberate waiver) still goes through as 0 via groupHasPrice +
+    // primaryBasePrice upstream.
+    primaryLinePrice: primaryIsBlankServerPriced ? null : (groupHasPrice ? primaryBasePrice : null),
     primaryLineDiscount: primaryDiscount ? lineDiscountFields(primaryDiscount, primaryDiscountDollars) : undefined,
     serviceAddons,
     windowStart,
@@ -1363,6 +1367,80 @@ export async function mosquitoSubmitGate({ quotePending, needsRevalidation, mosq
     message: 'The lot-based mosquito price changed — totals updated, review and submit again',
     holdMs: 3200, clearQuote: false, refresh: true, price: freshPrice,
   };
+}
+
+// WDO inspection table price (owner 2026-11-27 "yes booking"): a WDO line left blank books at the price the server reads
+// for the home the visit is booked at (GET /admin/schedule/wdo-inspection-quote: the table price by home size and
+// construction, else the catalog price). wdoQuoteQuery is that question for the booking home, as its query string, and
+// the key the answer belongs to; '' = nothing to ask yet. A customer's booking asks once the property picker has settled
+// (the booking property is not known before), with the same property and linked estimate the save posts. A new caller
+// booked by address asks with the picked address, as Book posts it.
+export function wdoQuoteQuery({ customerId = '', propertySettled = false, propertyId = '', estimateId = '', newCallerAddress = null } = {}) {
+  const present = (value) => value !== null && value !== undefined && String(value).trim() !== '';
+  if (present(customerId)) {
+    if (!propertySettled) return '';
+    const fields = { customerId, propertyId, estimateId };
+    return new URLSearchParams(Object.entries(fields).filter(([, v]) => present(v)).map(([k, v]) => [k, String(v)])).toString();
+  }
+  if (!newCallerAddress) return '';
+  return new URLSearchParams(Object.entries(newCallerAddress).filter(([, v]) => present(v)).map(([k, v]) => [k, String(v)])).toString();
+}
+
+// The quote route's answer as the line keeps it, for the question `key`.
+export function wdoQuoteAnswer(key, response) {
+  const price = Number(response?.price);
+  return {
+    key,
+    status: 'ready',
+    price: Number.isFinite(price) && price > 0 ? price : null,
+    tablePriced: response?.source === 'wdo_table',
+    basis: response?.basis || null,
+    staffNote: response?.staffNote || null,
+  };
+}
+
+// The WDO gate every submit passes before any group posts, the twin of mosquitoSubmitGate: a blank WDO line must not book
+// until the line shows the server's answer for this home, and that answer is read again at the moment of booking (the
+// home's record or the catalog may have changed while the form sat open). Resolves null to proceed, or the hold the form
+// applies: the toast and how long it stays, whether to ask again (`retry`), and the fresh answer the line must show
+// before the operator submits again (`refresh`). The fetch is injectable so the gate is testable without the form.
+export async function wdoSubmitGate({ needsPrice, quote, query, fetchQuote = adminFetch }) {
+  if (!needsPrice) return null;
+  if (!query || quote?.key !== query || quote?.status !== 'ready') {
+    const failed = !!query && quote?.key === query && quote?.status === 'error';
+    return {
+      message: failed
+        ? 'Could not read the WDO price for this home — retrying; submit again in a moment or type a price'
+        : 'Reading the WDO price for this home — try again in a moment or type a price',
+      holdMs: 2800, retry: failed, refresh: null,
+    };
+  }
+  let fresh;
+  try {
+    fresh = await fetchQuote(`/admin/schedule/wdo-inspection-quote?${query}`);
+  } catch {
+    return {
+      message: 'Could not re-check the WDO price for this home — retrying; submit again in a moment or type a price',
+      holdMs: 3200, retry: true, refresh: null,
+    };
+  }
+  const answer = wdoQuoteAnswer(query, fresh);
+  if (answer.price === quote.price) return null;
+  return {
+    message: 'The WDO price for this home changed — totals updated, review and submit again',
+    holdMs: 3200, retry: false, refresh: answer,
+  };
+}
+
+// The line under a blank WDO line: the price it books at and what the table read, or what it waits for.
+export function wdoLineHintText({ quote, query }) {
+  if (!query) return 'Priced by home size and construction once the customer and address are set.';
+  if (quote?.key !== query) return 'Reading the price for this home…';
+  if (quote.status === 'error') return 'Could not read the price for this home. Type a price, or save again to retry.';
+  if (quote.price == null) return 'No price for this home. Type a price.';
+  const amount = `$${quote.price.toFixed(2)}`;
+  if (!quote.tablePriced) return `Catalog price: ${amount}. The home size table has no price for this home.`;
+  return [`Table price: ${amount} (${quote.basis}).`, quote.staffNote].filter(Boolean).join(' ');
 }
 
 // Turn the mint response into the operator-facing notice text, any advisory
@@ -2415,9 +2493,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const addServiceFromCatalog = (svc) => {
     if (partialCommitLocked) return;
     // One-time mosquito is priced by the lot-based ladder on the server when
-    // no price is typed (owner decision 2026-07-28) — leave the field empty so
-    // the server computes it from the customer's lot size; typing still wins.
-    const defaultPrice = isOneTimeMosquitoLine(svc)
+    // no price is typed (owner decision 2026-07-28), and a WDO inspection by
+    // the home size and construction table (owner 2026-11-27) — leave the
+    // field empty so the server computes it for this home; typing still wins.
+    const defaultPrice = isOneTimeMosquitoLine(svc) || isWdoInspectionLine(svc)
       ? ''
       : (svc.priceMin || svc.base_price || '');
     const inferred = inferServiceCadence(svc);
@@ -2638,8 +2717,63 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     && !!selectedCustomer?.id
     && (mosquitoQuote?.customerId !== selectedCustomer.id || mosquitoQuote?.status !== 'ready')
   );
+  // GATE_NEW_CALLER_BOOKING (owner 2026-10-25): an address picked from the
+  // suggestions, with no name or phone typed, books a new caller's visit with
+  // no customer yet; the call-recording agent links the customer after the
+  // call and sends the confirmation. Typing a name or phone switches back to
+  // the customer flows below. Book stamps the live call the office answered.
+  const quickAddTyped = [quickAdd.firstName, quickAdd.lastName, quickAdd.phone].some((v) => String(v || '').trim() !== '');
+  const hasCoordinate = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
+  const newCallerBookMode = newCallerBooking && !selectedCustomer && showQuickAdd && !quickAddTyped
+    && hasCoordinate(quickAddTarget?.lat) && hasCoordinate(quickAddTarget?.lng);
+  // WDO inspection table price (wdoQuoteQuery, owner 2026-11-27 "yes booking"): a WDO line left blank books at the table
+  // price by home size and construction ($150 to $275) for the home this visit is booked at, else the catalog price; the
+  // server sets it on save. The line shows that price, what the table was read at and the office note before save;
+  // typing a price overrides it. An answer belongs to one question (customer, picked property and linked estimate, or a
+  // new caller's picked address): a changed question discards it, a late answer to an older one is ignored, and a blank
+  // line is not booked until its answer is shown (wdoSubmitGate; Book waits too).
+  const isWdoInspectionLine = (svc) => (svc?.service_key ?? svc?.serviceKey) === 'wdo_inspection';
+  const lineIsBlankWdo = (svc) => isWdoInspectionLine(svc) && !lineHasEnteredPrice(svc);
+  // The lines the server prices itself when left blank: blank, they post a null price; an entered 0 posts as 0.
+  const lineIsServerPriced = (svc) => isOneTimeMosquitoLine(svc) || isWdoInspectionLine(svc);
+  const lineIsBlankServerPriced = (svc) => lineIsServerPriced(svc) && !lineHasEnteredPrice(svc);
+  const hasBlankWdoLine = services.some(lineIsBlankWdo);
+  const wdoQuoteKey = hasBlankWdoLine ? wdoQuoteQuery({
+    customerId: selectedCustomer?.id,
+    propertySettled: ['ready', 'hidden', 'error'].includes(bookingPropertyState),
+    propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : '',
+    estimateId: linkedEstimate?.id || '',
+    newCallerAddress: newCallerBookMode ? {
+      line1: quickAdd.address, city: quickAdd.city, state: quickAdd.state, zip: quickAdd.zip,
+      lat: quickAddTarget?.lat, lng: quickAddTarget?.lng,
+    } : null,
+  }) : '';
+  const [wdoQuote, setWdoQuote] = useState(null);
+  // Bumped to ask the same question again after a failed read (wdoSubmitGate).
+  const [wdoQuoteAttempt, setWdoQuoteAttempt] = useState(0);
+  useEffect(() => {
+    if (!wdoQuoteKey) return undefined;
+    let current = true;
+    (async () => {
+      try {
+        const r = await adminFetch(`/admin/schedule/wdo-inspection-quote?${wdoQuoteKey}`);
+        if (current) setWdoQuote(wdoQuoteAnswer(wdoQuoteKey, r));
+      } catch {
+        if (current) setWdoQuote({ key: wdoQuoteKey, status: 'error', price: null, tablePriced: false, basis: null, staffNote: null });
+      }
+    })();
+    return () => { current = false; };
+  }, [wdoQuoteKey, wdoQuoteAttempt]);
+  const wdoQuoteShown = !!wdoQuoteKey && wdoQuote?.key === wdoQuoteKey && wdoQuote?.status === 'ready';
+  const wdoAutoAmount = (svc) => (lineIsBlankWdo(svc) && wdoQuoteShown && wdoQuote.price != null ? wdoQuote.price : null);
+  const wdoQuotePending = (svc) => lineIsBlankWdo(svc) && !wdoQuoteShown;
+  // A booking wdoSubmitGate held (Save and Book): ask again after a failed read, or show the changed price.
+  const applyWdoHold = (hold) => {
+    if (hold.retry) setWdoQuoteAttempt((n) => n + 1);
+    if (hold.refresh) setWdoQuote(hold.refresh);
+  };
   const lineEffectiveBaseAmount = (svc) => (
-    lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)
+    lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? wdoAutoAmount(svc) ?? 0)
   );
   const lineEffectiveNetAmount = (svc) => Math.max(0, Math.round((lineEffectiveBaseAmount(svc) - lineDiscountAmount(svc)) * 100) / 100);
   // Catalog row (stack group, cap) behind a chosen slot.
@@ -2906,15 +3040,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setServices((arr) => arr.map((s, i) => (i === idx ? { ...s, lineDiscount: null } : s)));
   };
   // Display totals use the EFFECTIVE amounts (entered price, or the auto
-  // lot-based mosquito charge) so the operator always sees what will bill.
+  // lot-based mosquito charge or WDO table price) so the operator always sees
+  // what will bill.
   const subtotal = useMemo(() => {
     return services.reduce((sum, s) => {
       return sum + lineEffectiveBaseAmount(s);
     }, 0);
-  }, [services, selectedCustomer, mosquitoQuote]);
+  }, [services, selectedCustomer, mosquitoQuote, wdoQuote, wdoQuoteKey]);
   const netSubtotal = useMemo(() => {
     return services.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
-  }, [services, selectedCustomer, mosquitoQuote]);
+  }, [services, selectedCustomer, mosquitoQuote, wdoQuote, wdoQuoteKey]);
   // The appointment-level slot previewed the way the server stacks it
   // (fixed credits first, percentages compounding on what is left).
   // What each line's own discount takes once the appointment slot is in the
@@ -3472,7 +3607,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       total: stacked.total,
       lines: services.map((s) => byService.get(s) || null),
     };
-  }, [services, selectedCustomer, mosquitoQuote, appointmentDiscount, netSubtotal, appointmentDiscountCompound, percentExcludedKeys, appointmentSubmitGroups]);
+  }, [services, selectedCustomer, mosquitoQuote, wdoQuote, wdoQuoteKey, appointmentDiscount, netSubtotal, appointmentDiscountCompound, percentExcludedKeys, appointmentSubmitGroups]);
   // ONE cadence group's fully stacked per-visit total. The appointment-level
   // discount rides exactly one group (appointmentDiscountGroup), so a group
   // that does not carry it totals to its own subtotal. Used for the prepay
@@ -3639,17 +3774,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // PREPAY_TOTAL_DIVERGED check then rejected. Mirrors
         // appointmentGroupRequestBody's own formula exactly now.
         const groupHasPrice = group.lines.some(lineHasEnteredPrice);
-        const primaryIsBlankAutoMosquito = isOneTimeMosquitoLine(primary) && !lineHasEnteredPrice(primary);
         return {
           key,
           customerId: selectedCustomer.id,
           scheduledDate: apptDate,
           serviceType: primary?.name,
           serviceId: primary?.id || null,
-          primaryLinePrice: primaryIsBlankAutoMosquito ? null : (groupHasPrice ? lineBaseAmount(primary) : null),
+          primaryLinePrice: lineIsBlankServerPriced(primary) ? null : (groupHasPrice ? lineBaseAmount(primary) : null),
           primaryLineDiscount: primary?.lineDiscount ? lineDiscountFields(primary.lineDiscount, lineDiscountAmount(primary)) : undefined,
           serviceAddons: extras.map((s) => {
-            const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
+            const preserveZero = lineIsServerPriced(s) && lineHasEnteredPrice(s);
             return {
               // GitHub round 4 P1 (Codex, blocked push 3): the real POST's
               // own addons array (below, in submitAppointments) always
@@ -3674,9 +3808,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           isRecurring: groupIsRecurring,
           recurringCount: groupIsRecurring ? (plannedRecurringCount(recurringCount) ?? undefined) : undefined,
           collectPrepay: groupIsRecurring ? !!collectPrepay : undefined,
-          // The refill's solution comes from the accepted misting estimate for THIS house, so the preview names the same
-          // property and estimate the create POST will (appointmentGroupRequestBody).
-          ...(group.lines.some(isMistingRefillLine) ? {
+          // The refill's solution comes from the accepted misting estimate for THIS house, and a blank WDO line's table
+          // price from THIS home, so the preview names the same property and estimate the create POST will
+          // (appointmentGroupRequestBody).
+          ...(group.lines.some((s) => isMistingRefillLine(s) || lineIsBlankWdo(s)) ? {
             propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : undefined,
             sourceEstimateId: linkedEstimate?.id || undefined,
           } : {}),
@@ -4097,7 +4232,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // committedGroupPricesRef check, and nothing else in this list changes
     // on a bare commit, so this memo would otherwise keep the pre-commit
     // (possibly now-stale) price until an unrelated edit forced a recompute.
-  }, [services, selectedCustomer, mosquitoQuote, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys, stackingEnabled, serverPreview, previewRequestKey, committedGroupKeysVersion]);
+  }, [services, selectedCustomer, mosquitoQuote, wdoQuote, wdoQuoteKey, apptDate, windowStart, skipWeekends, recurringCount, appointmentDiscount, appointmentDiscountGroup, appointmentDiscountCompound, percentExcludedKeys, stackingEnabled, serverPreview, previewRequestKey, committedGroupKeysVersion]);
   const manualPrepayQuery = manualPrepayPlan.query;
 
   // Preview fetch. Runs whenever the control is on screen — NOT only once
@@ -4298,6 +4433,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setTimeout(() => setToast(''), mosquitoHold.holdMs);
         return;
       }
+      // The same for a blank WDO line's table price (wdoSubmitGate).
+      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey });
+      assertSubmitCurrent();
+      if (wdoHold) {
+        applyWdoHold(wdoHold);
+        setToast(wdoHold.message);
+        setTimeout(() => setToast(''), wdoHold.holdMs);
+        return;
+      }
       // Keep this as the final await before the first appointment POST.
       const recheckController = new AbortController();
       addressSubmitRecheckRef.current?.controller.abort();
@@ -4332,10 +4476,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       let prepayAttachedThisSubmit = false;
       // Set when the series the manual prepay choice priced is actually created.
       let prepaySeriesId = null;
-      // A blank-priced one-time mosquito primary must reach the server as a
-      // null price — see appointmentGroupRequestBody. Named locally so the &&
-      // that decides it lives in its own scope, not submitAppointments's.
-      const isPrimaryBlankAutoMosquito = (s) => isOneTimeMosquitoLine(s) && !lineHasEnteredPrice(s);
+      // A blank-priced primary the server prices itself (one-time mosquito,
+      // WDO inspection) must reach the server as a null price — see
+      // appointmentGroupRequestBody (lineIsBlankServerPriced).
       const firstOfficeRequestGroup = groups.find((g) => isOfficeRequestLine(g.lines[0]));
       for (const group of groups) {
         const key = groupKey(group);
@@ -4362,12 +4505,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
           const addons = extras.map((s) => {
             const basePrice = lineBaseAmount(s);
             const p = lineNetAmount(s);
-            // One-time mosquito add-on lines: an ENTERED 0 (deliberate waiver)
-            // must reach the server as 0 — amountOrNull's `> 0 ? : null`
+            // One-time mosquito and WDO add-on lines: an ENTERED 0 (deliberate
+            // waiver) must reach the server as 0 — amountOrNull's `> 0 ? : null`
             // coercion would otherwise turn it into null and the server would
-            // stamp the lot-ladder charge instead. Blank stays null so the
-            // ladder applies.
-            const preserveZero = isOneTimeMosquitoLine(s) && lineHasEnteredPrice(s);
+            // stamp the lot-ladder charge or the table price instead. Blank
+            // stays null so the server's price applies.
+            const preserveZero = lineIsServerPriced(s) && lineHasEnteredPrice(s);
             const recurringLine = !!s.cadence && s.cadence !== 'one_time';
             return {
               serviceId: s.id || null,
@@ -4412,7 +4555,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
               scheduledDate: apptDate,
               primaryId: primary.id,
               primaryName: primary.name,
-              primaryIsBlankAutoMosquito: isPrimaryBlankAutoMosquito(primary),
+              primaryIsBlankServerPriced: lineIsBlankServerPriced(primary),
               groupHasPrice,
               primaryBasePrice: lineBaseAmount(primary),
               primaryDiscount: primary.lineDiscount,
@@ -5198,20 +5341,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // The server price preview runs only for a selected customer, so before one
   // exists it can never confirm: adding the customer does not wait on it, and
   // the booking after it does (canSubmit holds it as for any customer).
-  // GATE_NEW_CALLER_BOOKING (owner 2026-10-25): an address picked from the
-  // suggestions, with no name or phone typed, books a new caller's visit with
-  // no customer yet; the call-recording agent links the customer after the
-  // call and sends the confirmation. Typing a name or phone switches back to
-  // the customer flows below. Book stamps the live call the office answered.
-  const quickAddTyped = [quickAdd.firstName, quickAdd.lastName, quickAdd.phone].some((v) => String(v || '').trim() !== '');
-  const hasCoordinate = (v) => v !== null && v !== undefined && v !== '' && Number.isFinite(Number(v));
-  const newCallerBookMode = newCallerBooking && !selectedCustomer && showQuickAdd && !quickAddTyped
-    && hasCoordinate(quickAddTarget?.lat) && hasCoordinate(quickAddTarget?.lng);
+  // newCallerBookMode (GATE_NEW_CALLER_BOOKING) is set above, with the WDO
+  // table price that reads the picked address.
   const newCallerLine = services.length === 1 ? services[0] : null;
   const newCallerBlockReason = newCallerBookMode ? newCallerBookBlockReason({
     serviceCount: services.length,
     hasDiscount: !!(newCallerLine?.lineDiscount || appointmentDiscount),
     lotPricedWithoutPrice: !!newCallerLine && isOneTimeMosquitoLine(newCallerLine) && !lineHasEnteredPrice(newCallerLine),
+    tablePriceUnread: !!newCallerLine && wdoQuotePending(newCallerLine),
   }) : '';
   const newCallerNeedsCallPick = Array.isArray(newCallerCalls) && newCallerCalls.length > 1 && !newCallerCallId;
   // Also waits while Save-with-new-customer is still adding the customer or booking it:
@@ -5244,6 +5381,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setNewCallerError('');
     setNewCallerSubmitting(true);
     try {
+      // A blank WDO line books at the table price for this address: re-check it now, as Save does (wdoSubmitGate).
+      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey });
+      if (wdoHold) {
+        applyWdoHold(wdoHold);
+        if (modalMountedRef.current) setNewCallerError(wdoHold.message);
+        return;
+      }
       const result = await adminFetch('/admin/schedule/new-caller', {
         method: 'POST',
         body: JSON.stringify(newCallerRequestBody({
@@ -5297,7 +5441,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
   const latestSaveRef = useRef(null);
-  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine };
+  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine };
   useEffect(() => {
     if (!pendingQuickAddSave) return undefined;
     if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {
@@ -5329,6 +5473,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setQuickAddSaveNotice('Customer added. Check the mosquito price for this property, then press Schedule appointment.');
         return;
       }
+      if (latest.hasBlankWdoLine) {
+        setQuickAddSaveNotice('Customer added. Check the WDO price for this home, then press Schedule appointment.');
+        return;
+      }
       if (Math.round(latest.displayedTotal * 100) !== pendingQuickAddSave.totalAtSave) {
         setQuickAddSaveNotice(`Customer added. The total for this customer is now $${latest.displayedTotal.toFixed(2)}. Check it, then press Schedule appointment.`);
         return;
@@ -5336,7 +5484,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       latest.handleSubmit();
     }, QUICK_ADD_SAVE_SETTLE_MS);
     return () => clearTimeout(timer);
-  }, [pendingQuickAddSave, canSubmit, displayedTotal, hasAutoMosquitoLine, services, selectedCustomer?.id]);
+  }, [pendingQuickAddSave, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine, services, selectedCustomer?.id]);
   useEffect(() => {
     if (!selectedCustomer) setQuickAddSaveNotice('');
   }, [selectedCustomer?.id]);
@@ -6251,7 +6399,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     type="number"
                     value={svc.price ?? ''}
                     onChange={(e) => updateServicePrice(idx, e.target.value)}
-                    placeholder={isOneTimeMosquitoLine(svc) ? 'Auto (lot-based)' : '0.00'}
+                    placeholder={isOneTimeMosquitoLine(svc) ? 'Auto (lot-based)' : (isWdoInspectionLine(svc) ? 'Auto (home size)' : '0.00')}
                     step="0.01"
                     style={{ ...inputStyle, paddingLeft: 24 }}
                   />
@@ -6327,6 +6475,16 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     style={{ gridColumn: '1 / -1', fontSize: 14, lineHeight: 1.45, color: D.muted }}
                   >
                     {pestHintText}
+                  </div>
+                )}
+
+                {lineIsBlankWdo(svc) && (
+                  <div
+                    role="status"
+                    data-testid="wdo-table-price"
+                    style={{ gridColumn: '1 / -1', fontSize: 14, lineHeight: 1.45, color: D.muted }}
+                  >
+                    {wdoLineHintText({ quote: wdoQuote, query: wdoQuoteKey })}
                   </div>
                 )}
 

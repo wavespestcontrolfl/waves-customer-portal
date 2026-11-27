@@ -1,0 +1,367 @@
+/**
+ * Owner ruling 2026-11-27 "yes booking": a NEW WDO inspection booking fills the home size and construction table price
+ * ($150 to $275, PR #8631's priceWDO), not the flat catalog $250. A typed price and a price agreed on a call win.
+ * Behavior: the office booking (buildAppointmentPricing, GET /wdo-inspection-quote), the new caller booked by address and
+ * the phone bookings (wdoCallBookingPrice; the call pipeline's read before its transaction) price a blank WDO line from
+ * the cached property record of the home the visit is booked at, through the estimate tool's own translator and engine.
+ * Regressions it guards: the flat $250 on a new booking; a typed or quoted price replaced by the table; a commercial site or
+ * another customer's property priced off the table; a property record read inside a booking transaction; a booked visit or
+ * an invoice read or repriced. Fixtures are fictitious.
+ */
+jest.mock('../models/db', () => jest.fn());
+jest.mock('../middleware/admin-auth', () => ({
+  adminAuthenticate: (_req, _res, next) => next(),
+  requireAdmin: (_req, _res, next) => next(),
+  requireTechOrAdmin: (_req, _res, next) => next(),
+}));
+jest.mock('../services/discount-engine', () => ({
+  manualEligibilityFailures: jest.fn(),
+  clearCache: jest.fn(),
+}));
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The property record: the lookup's own cache, read strictly (no live or paid lookup). Each test says what it holds.
+jest.mock('../services/service-report/start-offer-lookup', () => ({ strictCacheOnlyPropertyLookup: jest.fn() }));
+
+const fs = require('fs');
+const path = require('path');
+const dbMock = require('../models/db');
+const { strictCacheOnlyPropertyLookup: lookup } = require('../services/service-report/start-offer-lookup');
+const {
+  wdoBookingPrice, wdoCallBookingPrice, wdoCallPriceBeforeBooking, wdoCallPriceForBooking, callBookingPriceNote, wdoTableNote,
+} = require('../services/wdo-booking-price');
+const adminSchedule = require('../routes/admin-schedule');
+
+const { buildAppointmentPricing } = adminSchedule._test;
+
+const CUSTOMER_ID = '3f2c8a52-0b1e-4c1a-9a47-2f6f6c1f0a11';
+const PROPERTY_ID = '7a1d2e90-4c5b-4d0e-8b21-9e0f3a6c5d77';
+const HOME = { id: CUSTOMER_ID, address_line1: '100 Example Ln', city: 'Bradenton', state: 'FL', zip: '34201', property_type: 'single_family' };
+const RENTAL = {
+  id: PROPERTY_ID, customer_id: CUSTOMER_ID, active: true, is_primary: false, address_line1: '200 Sample Rd', address_line2: null,
+  city: 'Parrish', state: 'FL', zip: '34219', property_type: 'single_family',
+};
+const WDO = { id: 'svc-wdo', name: 'WDO Inspection Service', service_key: 'wdo_inspection', category: 'termite', base_price: '250.00' };
+
+// The db handle: each table answers from `rows` (a row, or a function of the where clause); every table read is recorded.
+const touched = [];
+function wireDb(rows = {}) {
+  dbMock.mockImplementation((table) => {
+    touched.push(table);
+    const answer = (cond) => (typeof rows[table] === 'function' ? rows[table](cond) : rows[table]);
+    return { where: (cond) => ({ first: async () => answer(cond), select: async () => answer(cond) || [] }) };
+  });
+}
+
+// A cached property record whose walls or foundation the county record backs (the evidence #8631 trusts).
+const county = (field, value) => ({ [field]: [{ sourceType: 'county', value }] });
+const WALLS = {
+  block: { constructionMaterial: 'CONCRETE_BLOCK', fieldEvidence: county('constructionMaterial', 'CONCRETE_BLOCK') },
+  frame: { constructionMaterial: 'WOOD_FRAME', fieldEvidence: county('constructionMaterial', 'WOOD_FRAME') },
+  crawl: { foundationType: 'CRAWL_SPACE', fieldEvidence: county('foundationType', 'CRAWL_SPACE') },
+};
+const record = (homeSqFt, walls) => ({ enriched: { homeSqFt, ...WALLS[walls] } });
+const CONSTRUCTION_WORDS = { block: 'concrete block', frame: 'wood frame', crawl: 'crawl space or raised foundation' };
+
+// The owner's table (PR #8631): one home size in each step, by construction.
+const TABLE = [
+  [1600, { block: 150, frame: 175, crawl: 200 }],
+  [2600, { block: 175, frame: 200, crawl: 225 }],
+  [3600, { block: 200, frame: 225, crawl: 250 }],
+  [4200, { block: 225, frame: 250, crawl: 275 }],
+];
+const STEPS = TABLE.flatMap(([size, prices]) => Object.entries(prices).map(([walls, price]) => [size, walls, price]));
+
+const bookBlankWdo = (over = {}) => buildAppointmentPricing({
+  serviceRecord: WDO, estimatedPrice: null, primaryLinePrice: null, serviceAddons: [], customer: HOME, ...over,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  touched.length = 0;
+  wireDb({ customer_properties: undefined, customers: HOME, services: WDO });
+});
+
+// Whatever a test did, it read no visit and no invoice (an existing booking keeps its price).
+afterEach(() => {
+  expect(touched.filter((table) => /scheduled_services|invoice/.test(table))).toEqual([]);
+});
+
+describe('a blank WDO line books at the table price of the home', () => {
+  test.each(STEPS)('a %i sq ft %s home books at $%i, and the office sees what the table read', async (size, walls, price) => {
+    lookup.mockResolvedValue(record(size, walls));
+    const pricing = await bookBlankWdo();
+    expect(pricing.finalPrice).toBe(price);
+    expect(await wdoBookingPrice({ customer: HOME })).toEqual({
+      price, basis: `${size.toLocaleString('en-US')} sq ft, ${CONSTRUCTION_WORDS[walls]}`, staffNote: null,
+    });
+    // The record is the customer's own home, read from the cache by its address.
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+  });
+
+  test('no property record: the first size step as concrete block on a slab, with an office note that says so', async () => {
+    for (const none of [null, { enriched: {} }]) {
+      lookup.mockResolvedValue(none);
+      expect((await bookBlankWdo()).finalPrice).toBe(150);
+      const table = await wdoBookingPrice({ customer: HOME });
+      expect(table).toMatchObject({ price: 150, basis: 'no home size on record, construction not verified' });
+      expect(table.staffNote).toMatch(/^No home size on record: priced as 2,000 sq ft\. Priced as concrete block on a slab \(\$150\)/);
+      // The engine's quote-only instruction is not on a booking.
+      expect(table.staffNote).not.toMatch(/before sending/);
+    }
+  });
+
+  test('a size on record but no construction, or a reading its evidence does not back: priced as concrete block on a slab', async () => {
+    for (const enriched of [{ homeSqFt: 2600 }, { homeSqFt: 2600, constructionMaterial: 'WOOD_FRAME' }]) {
+      lookup.mockResolvedValue({ enriched });
+      expect((await bookBlankWdo()).finalPrice).toBe(175);
+      const table = await wdoBookingPrice({ customer: HOME });
+      expect(table).toMatchObject({ price: 175, basis: '2,600 sq ft, construction not verified' });
+      expect(table.staffNote).toMatch(/^Priced as concrete block on a slab \(\$175\).*wood frame on a slab would be \$200/);
+    }
+  });
+
+  test('a commercial site gets no table price: the catalog price stands', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    // The customer row, the primary property row, or the record itself calls it commercial.
+    expect((await bookBlankWdo({ customer: { ...HOME, property_type: 'commercial' } })).finalPrice).toBe(250);
+    wireDb({ customer_properties: { ...RENTAL, is_primary: true, occupancy_type: 'commercial' } });
+    expect((await bookBlankWdo()).finalPrice).toBe(250);
+    expect(lookup).not.toHaveBeenCalled();
+    wireDb({ customer_properties: undefined });
+    lookup.mockResolvedValue({ enriched: { homeSqFt: 2600, propertyType: 'commercial' } });
+    expect((await bookBlankWdo()).finalPrice).toBe(250);
+    expect(await wdoBookingPrice({ customer: HOME })).toBeNull();
+  });
+
+  test('a property that is not the customer\'s gets no table price and no record read: the catalog price stands', async () => {
+    lookup.mockResolvedValue(record(1600, 'block'));
+    const pricing = await bookBlankWdo({ refillContext: { propertyId: PROPERTY_ID, sourceEstimateId: null } });
+    expect(pricing.finalPrice).toBe(250);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test('another saved property of the customer is priced from its own address, never the primary home\'s', async () => {
+    wireDb({ customer_properties: (cond) => (cond.id === PROPERTY_ID ? RENTAL : undefined) });
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    const pricing = await bookBlankWdo({ refillContext: { propertyId: PROPERTY_ID, sourceEstimateId: null } });
+    expect(pricing.finalPrice).toBe(275);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
+    expect(lookup).not.toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+  });
+
+  test('a failed read never blocks a booking: the catalog price stands', async () => {
+    lookup.mockRejectedValue(Object.assign(new Error('connection reset at 100 Example Ln'), { code: 'ECONNRESET' }));
+    expect((await bookBlankWdo()).finalPrice).toBe(250);
+    expect(await wdoBookingPrice({ customer: HOME })).toBeNull();
+    // The log names the error code only, never the address it was reading.
+    const logger = require('../services/logger');
+    expect(logger.info.mock.calls.flat().join(' ')).not.toMatch(/Example Ln/);
+  });
+});
+
+describe('the office booking keeps the price a person gives', () => {
+  test('a typed price wins, and nothing is read', async () => {
+    lookup.mockResolvedValue(record(1600, 'block'));
+    expect((await bookBlankWdo({ primaryLinePrice: 300 })).finalPrice).toBe(300);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(touched).not.toContain('customer_properties');
+  });
+
+  test('a blank WDO add-on line gets the table price; a typed add-on price stands', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    const pest = { service_key: 'general_pest', category: 'pest_control', base_price: 150 };
+    const blank = await buildAppointmentPricing({
+      serviceRecord: pest, estimatedPrice: null, primaryLinePrice: 150, customer: HOME,
+      serviceAddons: [{ serviceId: 'svc-wdo', name: 'WDO Inspection Service', basePrice: null, price: null }],
+    });
+    expect(blank.addonLines[0].base).toBe(200);
+    expect(blank.finalPrice).toBe(350);
+    lookup.mockClear();
+    const typed = await buildAppointmentPricing({
+      serviceRecord: pest, estimatedPrice: null, primaryLinePrice: 150, customer: HOME,
+      serviceAddons: [{ serviceId: 'svc-wdo', name: 'WDO Inspection Service', basePrice: 260, price: 260 }],
+    });
+    expect(typed.addonLines[0].base).toBe(260);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test('the table price is read before a booking transaction opens: inside one it refuses, unless the price read before is passed in', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    const trx = jest.fn();
+    await expect(bookBlankWdo({ conn: trx })).rejects.toThrow(/read before the booking transaction opens/);
+    const table = { price: 200, basis: '2,600 sq ft, wood frame', staffNote: null };
+    expect((await bookBlankWdo({ conn: trx, wdoTable: table })).finalPrice).toBe(200);
+    expect((await bookBlankWdo({ conn: trx, wdoTable: null })).finalPrice).toBe(250);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(trx).not.toHaveBeenCalled();
+  });
+});
+
+describe('GET /wdo-inspection-quote (the booking screen shows the price before save)', () => {
+  const layer = adminSchedule.stack.find((l) => l.route && l.route.path === '/wdo-inspection-quote' && l.route.methods.get);
+  const handler = layer.route.stack[layer.route.stack.length - 1].handle;
+  const run = async (query) => {
+    const res = { json: jest.fn() };
+    const next = jest.fn();
+    await handler({ query }, res, next);
+    return { res, next };
+  };
+
+  test('answers the table price, what it was read at and the office note for the customer\'s home', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    const { res } = await run({ customerId: CUSTOMER_ID });
+    expect(res.json).toHaveBeenCalledWith({ price: 200, source: 'wdo_table', basis: '2,600 sq ft, wood frame', staffNote: null });
+  });
+
+  test('the property the screen names is the one priced; malformed ids are refused before any read', async () => {
+    wireDb({ customers: HOME, customer_properties: (cond) => (cond.id === PROPERTY_ID ? RENTAL : undefined) });
+    lookup.mockResolvedValue(record(1600, 'crawl'));
+    const { res } = await run({ customerId: CUSTOMER_ID, propertyId: PROPERTY_ID });
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ price: 200, source: 'wdo_table' }));
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
+    touched.length = 0;
+    for (const query of [{ customerId: 'nope' }, { customerId: CUSTOMER_ID, propertyId: 'nope' }, { customerId: CUSTOMER_ID, estimateId: 'nope' }]) {
+      const bad = await run(query);
+      expect(bad.next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    }
+    expect(touched).toEqual([]);
+  });
+
+  test('no table price: the catalog price, marked as the catalog\'s', async () => {
+    wireDb({ customers: { ...HOME, property_type: 'commercial' }, services: WDO });
+    const { res } = await run({ customerId: CUSTOMER_ID });
+    expect(res.json).toHaveBeenCalledWith({ price: 250, source: 'catalog_base', basis: null, staffNote: null });
+  });
+
+  test('a new caller booked by address is priced from the picked address; an address not picked from the suggestions is refused', async () => {
+    lookup.mockResolvedValue(record(3600, 'block'));
+    const picked = { line1: '300 Sample Ct', city: 'Venice', state: 'FL', zip: '34285', lat: '27.09', lng: '-82.44' };
+    const { res } = await run(picked);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ price: 200, source: 'wdo_table', basis: '3,600 sq ft, concrete block' }));
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('300 Sample Ct'));
+    expect(touched).not.toContain('customers');
+    lookup.mockClear();
+    const bad = await run({ line1: '300 Sample Ct', city: 'Venice', zip: '34285' });
+    expect(bad.next).toHaveBeenCalledWith(expect.objectContaining({ status: 400 }));
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test('an unknown customer is a 404', async () => {
+    wireDb({ customers: undefined });
+    const { next } = await run({ customerId: CUSTOMER_ID });
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ status: 404 }));
+  });
+});
+
+describe('phone bookings (the call pipeline, the voice agent, the new caller booked by address)', () => {
+  const ADDRESS = { line1: '100 Example Ln', line2: '', city: 'Bradenton', state: 'FL', zip: '34201' };
+  const CATALOG = { price: 250, source: 'catalog' };
+
+  test('a price agreed on the call wins: nothing is read, and the visit note says it was quoted', async () => {
+    const quoted = { price: 199, source: 'transcript' };
+    const resolveLinkage = jest.fn();
+    expect(await wdoCallBookingPrice(quoted, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: { address: ADDRESS } })).toBe(quoted);
+    expect(await wdoCallPriceBeforeBooking(quoted, { catalogRow: WDO, customerId: CUSTOMER_ID, resolveLinkage })).toBeNull();
+    expect(wdoCallPriceForBooking(quoted, null, { address: ADDRESS })).toBe(quoted);
+    expect(resolveLinkage).not.toHaveBeenCalled();
+    expect(lookup).not.toHaveBeenCalled();
+    expect(callBookingPriceNote(quoted)).toBe('Price quoted on call: $199.00.');
+    // A new caller's typed price is the same: only a catalog price is replaced.
+    const typed = { price: 260, source: 'typed' };
+    expect(await wdoCallBookingPrice(typed, { catalogRow: WDO, linkage: { address: ADDRESS } })).toBe(typed);
+  });
+
+  test('a catalog-priced WDO call booking gets the table price and an office note; any other service keeps its price', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    const priced = await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: { propertyId: null, address: ADDRESS } });
+    expect(priced).toEqual({ price: 200, source: 'wdo_table', wdoTable: { price: 200, basis: '2,600 sq ft, wood frame', staffNote: null } });
+    expect(callBookingPriceNote(priced)).toBe('Price by home size and construction: $200.00.');
+    expect(wdoTableNote(priced.wdoTable)).toBe('WDO price from the home size and construction table: $200.00 (2,600 sq ft, wood frame).');
+    expect(callBookingPriceNote(CATALOG)).toBe('Price from service catalog: $250.00.');
+    expect(wdoTableNote(null)).toBeNull();
+    // A new caller has no customer yet: the address the call gave is the home.
+    lookup.mockClear();
+    touched.length = 0;
+    const byAddress = await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, linkage: { address: { ...ADDRESS, line1: '300 Sample Ct' } } });
+    expect(byAddress.price).toBe(200);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('300 Sample Ct'));
+    expect(touched).toEqual([]);
+    // Not a WDO inspection: unchanged, nothing read.
+    lookup.mockClear();
+    const pest = { service_key: 'one_time_pest' };
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: pest, customerId: CUSTOMER_ID, linkage: { address: ADDRESS } })).toBe(CATALOG);
+    expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test('the call pipeline reads the table before its transaction, and keeps it only for the same home', async () => {
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    const linkage = { propertyId: null, address: ADDRESS };
+    const before = await wdoCallPriceBeforeBooking(CATALOG, {
+      catalogRow: WDO, customerId: CUSTOMER_ID, resolveLinkage: async () => linkage,
+    });
+    expect(before.priceInfo).toMatchObject({ price: 275, source: 'wdo_table' });
+    // Inside the transaction (no reads): the same home keeps it, a home that changed keeps the call's own price.
+    lookup.mockClear();
+    expect(wdoCallPriceForBooking(CATALOG, before, { propertyId: null, address: { ...ADDRESS } })).toBe(before.priceInfo);
+    expect(wdoCallPriceForBooking(CATALOG, before, { propertyId: PROPERTY_ID, address: ADDRESS })).toBe(CATALOG);
+    expect(wdoCallPriceForBooking(CATALOG, before, { propertyId: null, address: { ...ADDRESS, line2: 'Unit 2' } })).toBe(CATALOG);
+    expect(lookup).not.toHaveBeenCalled();
+    // A home that cannot be resolved before the transaction: no table price.
+    const failed = await wdoCallPriceBeforeBooking(CATALOG, {
+      catalogRow: WDO, customerId: CUSTOMER_ID, resolveLinkage: async () => { throw new Error('ambiguous address'); },
+    });
+    expect(failed).toBeNull();
+    expect(wdoCallPriceForBooking(CATALOG, failed, linkage)).toBe(CATALOG);
+  });
+
+  test('each booking path reads the table price before its booking transaction opens', () => {
+    const source = (file) => fs.readFileSync(path.join(__dirname, '..', file), 'utf8');
+    const order = (text, ...anchors) => anchors.map((anchor) => {
+      const at = text.indexOf(anchor);
+      expect(at).toBeGreaterThan(-1);
+      return at;
+    });
+    // The call pipeline: the read, then its one booking transaction, then the in-transaction choice.
+    const pipeline = source('services/call-recording-processor.js');
+    expect(pipeline.split('const svc = await db.transaction(').length - 1).toBe(1);
+    const [read, trx, keep] = order(pipeline, 'wdoCallPriceBeforeBooking(priceInfo', 'const svc = await db.transaction(', 'wdoCallPriceForBooking(priceInfo');
+    expect(read).toBeLessThan(trx);
+    expect(keep).toBeGreaterThan(trx);
+    // The new caller booked by address: the read, then the transaction.
+    const newCaller = source('services/booking/new-caller-visit.js');
+    const book = newCaller.slice(newCaller.indexOf('async function bookNewCallerVisit('), newCaller.indexOf('async function linkNewCallerVisit('));
+    const [callerRead, callerTrx] = order(book, 'await wdoCallBookingPrice(', 'conn.transaction(');
+    expect(callerRead).toBeLessThan(callerTrx);
+  });
+});
+
+describe('a booked visit is never repriced', () => {
+  test('the module reads no visit and no invoice and writes nothing', () => {
+    const code = fs.readFileSync(path.join(__dirname, '../services/wdo-booking-price.js'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+    expect(code).not.toMatch(/scheduled_services|invoices|\.insert\(|\.update\(|\.del\(|\.delete\(/);
+  });
+
+  test('only the new-booking paths ask for the table price (a reschedule, rebook or copy keeps the price it was booked at)', () => {
+    const root = path.join(__dirname, '..');
+    const skip = new Set(['node_modules', 'tests', '__tests__', 'migrations', 'coverage', 'dist', 'fixtures']);
+    const callers = [];
+    const walkDir = (dir) => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) { if (!skip.has(entry.name)) walkDir(full); continue; }
+        if (/\.(js|cjs|mjs)$/.test(entry.name) && /wdo-booking-price['"]/.test(fs.readFileSync(full, 'utf8'))) {
+          callers.push(path.relative(root, full).split(path.sep).join('/'));
+        }
+      }
+    };
+    walkDir(root);
+    expect(callers.sort()).toEqual([
+      'routes/admin-schedule.js',
+      'services/booking/new-caller-visit.js',
+      'services/call-recording-processor.js',
+      'services/intelligence-bar/tools.js',
+      'services/voice-agent/relay-booking.js',
+    ]);
+  });
+});

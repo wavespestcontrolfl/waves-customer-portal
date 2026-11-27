@@ -780,7 +780,12 @@ async function requestBookingText(input = {}, ctx = {}) {
   const slot = recheck.slot;
 
   const { resolveCallBookingPrice, callBookingInvoiceOnComplete } = require('../call-booking-catalog');
-  const priceInfo = resolveCallBookingPrice({ quotedPrice: null, catalogRow });
+  // A WDO inspection books at the table price of the home this visit is at (propertyLinkage, above), read here, before
+  // the booking transaction (owner 2026-11-27 "yes booking"); any other service keeps the catalog price.
+  const { wdoCallBookingPrice, wdoTableNote } = require('../wdo-booking-price');
+  const priceInfo = await wdoCallBookingPrice(resolveCallBookingPrice({ quotedPrice: null, catalogRow }), {
+    catalogRow, customerId, linkage: propertyLinkage,
+  });
 
   // Link the live call's call_log row (the signature-verified /voice webhook
   // creates it at call start) — it is what the review card FKs, and what lets
@@ -915,6 +920,7 @@ async function requestBookingText(input = {}, ctx = {}) {
       requestedSummary && requestedSummary.toLowerCase() !== String(catalogRow.name || '').toLowerCase()
         ? `Caller asked for: ${requestedSummary}.`
         : null,
+      wdoTableNote(priceInfo.wdoTable),
     ].filter(Boolean).join(' '),
     booking_source: 'phone_call',
     source_call_log_id: callLogId,

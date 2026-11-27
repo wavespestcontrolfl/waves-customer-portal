@@ -541,7 +541,7 @@ describe('appointmentGroupRequestBody', () => {
     separateProgram: null, key: 'quarterly', separateProgramReason: '',
     customerId: 'cust-1', scheduledDate: '2026-09-14',
     primaryId: 5, primaryName: 'Quarterly Pest',
-    primaryIsBlankAutoMosquito: false, groupHasPrice: true, primaryBasePrice: 40,
+    primaryIsBlankServerPriced: false, groupHasPrice: true, primaryBasePrice: 40,
     primaryDiscount: null, primaryDiscountDollars: 0,
     serviceAddons: [], windowStart: '09:00', windowEnd: '10:00',
     techMode: 'auto', techId: null,
@@ -601,8 +601,8 @@ describe('appointmentGroupRequestBody', () => {
     expect(body.discountAmount).toBeUndefined();
   });
 
-  it('sends a blank-priced auto-mosquito primary as null regardless of groupHasPrice, with no discount block', () => {
-    expect(appointmentGroupRequestBody({ ...base, primaryIsBlankAutoMosquito: true })).toMatchObject({ serviceId: 5, primaryLinePrice: null });
+  it('sends a blank-priced server-priced primary (auto mosquito, WDO table price) as null regardless of groupHasPrice, with no discount block', () => {
+    expect(appointmentGroupRequestBody({ ...base, primaryIsBlankServerPriced: true })).toMatchObject({ serviceId: 5, primaryLinePrice: null });
     expect(appointmentGroupRequestBody(base).primaryLineDiscount).toBeUndefined();
   });
 

@@ -14,6 +14,7 @@ const { findSoundAlikeCustomers, shouldSearchSoundAlike } = require('../services
 const areaAddOnRows = require('../services/area-addon-visit-rows');
 const mistingRefill = require('../services/misting-refill');
 const { oneTimePestBookingPrice } = require('../services/one-time-pest-booking-price');
+const { wdoBookingPrice, isWdoInspectionService, WDO_SERVICE_KEY } = require('../services/wdo-booking-price');
 const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
 const { callAnthropic, callOpenAI } = require('../services/llm/call');
@@ -3148,6 +3149,44 @@ function mosquitoOneTimeDefaultPrice(customer, catalogBasePrice = null, { recurr
   return Math.min(base, Math.max(floor, Math.round(base * (1 - rate))));
 }
 
+// A booking line the server prices itself when its price is left blank: the one-time mosquito line (the lot ladder, owner
+// 2026-07-28) and the WDO inspection (the home size and construction table, owner 2026-11-27 "yes booking"). The booking
+// screen leaves such a line blank; a typed price always wins and never reaches the server's price.
+const SERVER_PRICED_LINE_KEYS = new Set(['mosquito_one_time', WDO_SERVICE_KEY]);
+const bookingLineIsServerPriced = (service) => SERVER_PRICED_LINE_KEYS.has(service?.service_key);
+
+// The WDO table price of a booking (services/wdo-booking-price.js) at the home the booking lands at: the chosen property, else
+// the linked estimate's, else the customer's own (bookedHomeProperty, the create path's rule). null = no table price (a home
+// that cannot be told, a commercial property, a read failure), so the catalog price applies: the read never blocks a
+// booking. The property record is read on the shared pool: only ever BEFORE a booking transaction opens.
+async function wdoTableForBooking({ customer, propertyId = null, estimateId = null }) {
+  try {
+    const home = await bookedHomeProperty({ customerId: customer.id, propertyId, estimateId });
+    return home.unsure ? null : await wdoBookingPrice({ customer, propertyId: home.propertyId || null });
+  } catch (err) {
+    logger.warn(`[schedule] WDO table price unread for customer ${customer.id} (${err.code || err.name || 'error'}); the catalog price stands`);
+    return null;
+  }
+}
+
+// The server's own price for a blank line of one of those services, or null: the line takes its catalog price, as before
+// (mosquito: no lot size and no member perk; WDO: no table price). `context` is buildAppointmentPricing's: the customer,
+// recurringMembershipBooking, refillContext (the booking's property and linked estimate) and conn. The WDO answer is read
+// once and kept on it (wdoTable), so a primary line and an add-on of one booking price the same home the same way.
+async function blankLineServerPrice(service, context) {
+  if (service?.service_key === 'mosquito_one_time') {
+    return mosquitoOneTimeDefaultPrice(context.customer, service.base_price, { recurringOverride: context.recurringMembershipBooking });
+  }
+  if (!isWdoInspectionService(service) || !context.customer?.id) return null;
+  if (context.wdoTable === undefined) {
+    if (context.conn !== db) throw new Error('A WDO table price is read before the booking transaction opens');
+    context.wdoTable = await wdoTableForBooking({
+      customer: context.customer, propertyId: context.refillContext?.propertyId, estimateId: context.refillContext?.sourceEstimateId,
+    });
+  }
+  return context.wdoTable ? context.wdoTable.price : null;
+}
+
 // GET /mosquito-onetime-quote?customerId= — live default for the
 // create-appointment modal, computed by the same helper + catalog row the
 // booking path uses (post-syncConstantsFromDB, so admin pricing-config AND
@@ -3180,12 +3219,13 @@ router.get('/mosquito-onetime-quote', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Which property does the one-time pest hint price? The create path's own rule (callBookingGuardPropertyId: the chosen
-// property, else the linked estimate's property_id, else none = the customer's primary), plus one more case it cannot
-// settle: a linked estimate with NO property_id that quotes an address. That address is the primary only when it
-// matches (estimateQuotesCustomerAddress); otherwise it must name exactly ONE of the customer's saved properties.
-// { unsure: true } when the home cannot be told: the hint then shows nothing, never a guess.
-async function oneTimePestHintProperty({ customerId, propertyId, estimateId }) {
+// Which property does a booking price, for the one-time pest hint and the WDO table price? The create path's own rule
+// (callBookingGuardPropertyId: the chosen property, else the linked estimate's property_id, else none = the customer's
+// primary), plus one more case it cannot settle: a linked estimate with NO property_id that quotes an address. That address
+// is the primary only when it matches (estimateQuotesCustomerAddress); otherwise it must name exactly ONE of the customer's
+// saved properties. { unsure: true } when the home cannot be told: the hint shows nothing and the WDO line keeps its catalog
+// price, never a guess.
+async function bookedHomeProperty({ customerId, propertyId, estimateId }) {
   const chosen = await callBookingGuardPropertyId(db, {
     bookingProperty: propertyId ? { property_id: propertyId } : null,
     linkedEstimateId: estimateId || null,
@@ -3217,8 +3257,40 @@ router.get('/one-time-pest-quote', requireAdmin, async (req, res, next) => {
     const estimateId = req.query.estimateId == null ? '' : String(req.query.estimateId).trim();
     if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
     if (estimateId && !uuid.test(estimateId)) throw httpError(400, 'estimateId must be a valid estimate id');
-    const home = await oneTimePestHintProperty({ customerId, propertyId, estimateId });
+    const home = await bookedHomeProperty({ customerId, propertyId, estimateId });
     res.json({ price: home.unsure ? null : await oneTimePestBookingPrice(customerId, { propertyId: home.propertyId || null }) });
+  } catch (err) { next(err); }
+});
+
+// GET /wdo-inspection-quote?customerId=&propertyId=&estimateId= — what a WDO inspection line left blank books at, for the
+// create-appointment modal (owner 2026-11-27 "yes booking"): the table price by home size and construction, what it was read
+// at (`basis`) and the office note, else the catalog price. A new caller booked by address (no customer yet) passes the
+// picked address instead (line1, line2, city, state, zip, lat, lng), checked as the Book saves it. The booking's own reads:
+// wdoTableForBooking for a customer, wdoBookingPrice for an address, the catalog row's base_price when neither has a table
+// price. READ ONLY, cache-only (no live or paid lookup). requireAdmin, like the quotes above.
+router.get('/wdo-inspection-quote', requireAdmin, async (req, res, next) => {
+  try {
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    const param = (name) => (req.query[name] == null ? '' : String(req.query[name]).trim());
+    const customerId = param('customerId');
+    let table;
+    if (customerId) {
+      const [propertyId, estimateId] = [param('propertyId'), param('estimateId')];
+      if (!uuid.test(customerId)) throw httpError(400, 'customerId must be a valid customer id');
+      if (propertyId && !uuid.test(propertyId)) throw httpError(400, 'propertyId must be a valid property id');
+      if (estimateId && !uuid.test(estimateId)) throw httpError(400, 'estimateId must be a valid estimate id');
+      const customer = await db('customers').where({ id: customerId }).first();
+      if (!customer) throw httpError(404, 'Customer not found');
+      table = await wdoTableForBooking({ customer, propertyId: propertyId || null, estimateId: estimateId || null });
+    } else {
+      const { validateNewCallerAddress } = require('../services/booking/new-caller-visit');
+      const address = validateNewCallerAddress(Object.fromEntries(['line1', 'line2', 'city', 'state', 'zip', 'lat', 'lng'].map((f) => [f, req.query[f]])));
+      table = await wdoBookingPrice({ serviceAddress: address });
+    }
+    if (table) return res.json({ price: table.price, source: 'wdo_table', basis: table.basis, staffNote: table.staffNote });
+    const catalogRow = await db('services').where({ service_key: WDO_SERVICE_KEY }).first('base_price').catch(() => null);
+    const base = Number(catalogRow?.base_price);
+    res.json({ price: Number.isFinite(base) && base > 0 ? Math.round(base * 100) / 100 : null, source: 'catalog_base', basis: null, staffNote: null });
   } catch (err) { next(err); }
 });
 
@@ -3283,7 +3355,7 @@ function bookingCreatesWaveGuardCoverage({ isRecurring, isCallback, serviceType,
   return uniqueServiceFamilies(detectWaveGuardPlanKeys(row)).length > 0;
 }
 
-async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, refillContext = null, conn = db }) {
+async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, estimatedPrice, primaryLinePrice, primaryLineDiscount, serviceAddons, discountId, discountType, discountAmount, customer, recurringMembershipBooking = false, refillContext = null, wdoTable, conn = db }) {
   if (discountType && !discountId) {
     throw httpError(400, 'discountId is required for appointment-level discounts');
   }
@@ -3294,21 +3366,24 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     }, conn));
   }
 
-  // One-time mosquito default follows the lot-based ladder (owner decision
-  // 2026-07-28) instead of the flat catalog price. An explicitly typed price
-  // still wins; catalog base_price remains the fallback when the customer has
-  // no lot size on file. Applied per line (primary here, add-on lines below)
-  // so a grouped booking never silently bills mosquito at $0. recurringMembershipBooking
+  // A blank one-time mosquito line follows the lot-based ladder (owner decision
+  // 2026-07-28), and a blank WDO inspection the home size and construction
+  // table (owner 2026-11-27), instead of the flat catalog price
+  // (blankLineServerPrice). An explicitly typed price still wins; catalog
+  // base_price remains the fallback when the server has no price of its own.
+  // Applied per line (primary here, add-on lines below) so a grouped booking
+  // never silently bills either at $0. recurringMembershipBooking
   // ORs into the ladder's own hasMembership check (Codex r2 on #5093, P1): a
   // tierless customer whose live recurring coverage is the ONLY reason this
   // call carries the flag (IB's mosquito one-off path) must get the member
-  // ladder rate too — not just a WaveGuard-plan sale in progress.
-  let mosquitoLadderDefault = null;
-  if (serviceRecord?.service_key === 'mosquito_one_time' && primaryLinePrice == null) {
-    mosquitoLadderDefault = mosquitoOneTimeDefaultPrice(customer, serviceRecord?.base_price, { recurringOverride: recurringMembershipBooking });
-  }
-  const primaryBaseFallback = mosquitoLadderDefault != null
-    ? mosquitoLadderDefault
+  // ladder rate too — not just a WaveGuard-plan sale in progress. A caller
+  // that already read the WDO table price (the Intelligence Bar, before its
+  // transaction) passes it as `wdoTable` (null = none), so the builder never
+  // reads it again.
+  const serverPricing = { customer, recurringMembershipBooking, refillContext, conn, wdoTable };
+  const primaryServerPrice = primaryLinePrice == null ? await blankLineServerPrice(serviceRecord, serverPricing) : null;
+  const primaryBaseFallback = primaryServerPrice != null
+    ? primaryServerPrice
     : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
   const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
@@ -3347,12 +3422,12 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       base = refill.unitPrice;
       mistingRefills.push({ solution: refill.solution, solutionLabel: refill.solutionLabel, unitPrice: refill.unitPrice, estimateId: refill.estimateId });
     }
-    // Blank-priced one-time mosquito add-on lines get the same lot-ladder
-    // default as the primary (catalog base_price as the no-lot-data
-    // fallback) — a grouped booking must never silently bill mosquito at $0.
-    if (base == null && addonService?.service_key === 'mosquito_one_time') {
-      const ladder = mosquitoOneTimeDefaultPrice(customer, addonService.base_price, { recurringOverride: recurringMembershipBooking });
-      const fallback = ladder != null ? ladder : (addonService.base_price != null ? Number(addonService.base_price) : null);
+    // Blank-priced one-time mosquito and WDO add-on lines get the same server
+    // price as the primary (catalog base_price as the fallback) — a grouped
+    // booking must never silently bill either at $0.
+    if (base == null && bookingLineIsServerPriced(addonService)) {
+      const serverPrice = await blankLineServerPrice(addonService, serverPricing);
+      const fallback = serverPrice != null ? serverPrice : (addonService.base_price != null ? Number(addonService.base_price) : null);
       if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {

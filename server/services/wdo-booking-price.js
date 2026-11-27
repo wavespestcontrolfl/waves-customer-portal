@@ -1,0 +1,204 @@
+'use strict';
+
+/**
+ * The WDO inspection price of a NEW booking (owner 2026-11-27 "yes booking").
+ *
+ * PR #8631 made a new ESTIMATE price a WDO inspection off the home size and construction table ($150 to $275). A WDO job is
+ * almost never estimated: it is booked, and a booking filled the flat catalog price. This module is the ONE place a booking
+ * gets the table price. The office booking screen (admin-schedule buildAppointmentPricing and its /wdo-inspection-quote),
+ * the Intelligence Bar (ibBookingPricing), the booked-by-address new caller visit, and the two phone bookings (the call
+ * pipeline and the voice agent) all ask it. A price a person typed, or one agreed on a call, never reaches it. It reads no
+ * visit and no invoice: an existing booking keeps the price it was booked at.
+ *
+ * Nothing is priced here. The home's property record is the property lookup's own cached record for the booked address
+ * (CACHE-ONLY and strict: no live lookup, no paid call, nothing stored). The estimate tool's own translator
+ * (translateV2CallToV1Input) turns it into the engine input: the size, the walls and foundation, and the trust verdicts of
+ * lookup-confidence. The engine's own WDO line (priceWDO) prices it. So a booking and an estimate of the same home agree,
+ * and what earns a premium is decided in one place.
+ *
+ * What the engine's own defaults give a booking (priceWDO, resolvePestFootprint):
+ *   - no property record, or a record with no home size: the engine's default size, so the first size step;
+ *   - walls not on the record, or a reading the record's own evidence does not back: concrete block on a slab;
+ *   - both together: the lowest table price, with a staff note that says so and what a confirmed home would cost.
+ * A booking is never blocked. null means "no table price": the stored records call the property commercial (the engine
+ * quotes those by hand), the booking property is not the customer's, or the read failed. The caller then keeps the price it
+ * filled before this rule: the catalog price.
+ */
+
+const db = require('../models/db');
+const logger = require('./logger');
+
+// The catalog service a booking names, and the engine line that prices it (the two keys are the same word).
+const WDO_SERVICE_KEY = 'wdo_inspection';
+const ENGINE_WDO_LINE = 'wdo_inspection';
+// The price source a phone booking and the Intelligence Bar card show for a table price.
+const WDO_TABLE_SOURCE = 'wdo_table';
+
+const isWdoInspectionService = (row) => (row?.service_key ?? row?.serviceKey) === WDO_SERVICE_KEY;
+
+function noTablePrice(who, reason) {
+  logger.info(`[wdo-booking-price] ${who}: ${reason}; the catalog price stands`);
+  return null;
+}
+
+// A service address ({ line1, line2, city, state, zip }, the shape a visit is stamped with) as the lookup's address text,
+// through the one builder the customer's own address goes through.
+function serviceAddressText(address) {
+  const { addressForCustomer } = require('./customer-pricing-ai');
+  return addressForCustomer({
+    address_line1: address.line1, address_line2: address.line2, city: address.city, state: address.state, zip: address.zip,
+  });
+}
+
+// The home the visit is booked at, as the lookup's address text, or why no table price applies.
+//   A saved property, or none (the customer's own home): customerAtBookingProperty, the rule the one-time pest price reads
+//   the booked home by. It also says when the stored records call the place commercial.
+//   A service address with no saved property (a phone booking at an address the call gave, a new caller with no customer
+//   yet): that address as written.
+async function bookedHome({ customer, customerId, propertyId, serviceAddress, conn }) {
+  const row = customer || (customerId ? await conn('customers').where({ id: customerId }).first() : null);
+  const written = !propertyId && serviceAddress?.line1 ? serviceAddressText(serviceAddress) : null;
+  if (!row) return written ? { address: written } : { refusal: 'no customer and no service address' };
+  const { customerAtBookingProperty } = require('./one-time-pest-booking-price');
+  const { addressForCustomer } = require('./customer-pricing-ai');
+  const at = await customerAtBookingProperty(row, propertyId, conn);
+  if (!at) return { refusal: 'the booking property is not an active property of this customer' };
+  if (at.commercial) return { refusal: 'the stored records call this a commercial property' };
+  return { address: written || addressForCustomer(at.customer) };
+}
+
+// The engine's WDO line for a home's property record, as the estimate tool prices a looked-up home nobody has typed over.
+// No record ({}) is the engine's own "nothing known" quote.
+function wdoLineFor(profile) {
+  const { translateV2CallToV1Input } = require('../routes/property-lookup-v2');
+  const { generateEstimate } = require('./pricing-engine');
+  const estimate = generateEstimate(translateV2CallToV1Input(profile || {}, ['WDO'], {}));
+  return (estimate?.lineItems || []).find((line) => line?.service === ENGINE_WDO_LINE) || null;
+}
+
+// What the table was read at, in words, for the person booking: "2,600 sq ft, wood frame". A size or a construction the
+// engine did not read from the record says so ("no home size on record", "construction not verified"), never the default
+// it priced on.
+const CONSTRUCTION_WORDS = { block: 'concrete block', frame: 'wood frame', crawl: 'crawl space or raised foundation' };
+const squareFeet = (value) => `${Number(value).toLocaleString('en-US')} sq ft`;
+// No living area and no footprint on the record: the engine priced its default footprint.
+const sizeWasDefaulted = (line) => line.footprintWasDefaulted === true && Number(line.sizeUsed) > 0 && line.sizeUsed === line.footprintUsed;
+function sizeWords(line) {
+  if (line.sizeUsed == null) return 'home size not confirmed';
+  return sizeWasDefaulted(line) ? 'no home size on record' : squareFeet(line.sizeUsed);
+}
+function basisFor(line) {
+  return `${sizeWords(line)}, ${line.wdoConstructionKnown ? CONSTRUCTION_WORDS[line.wdoConstructionClass] : 'construction not verified'}`;
+}
+
+// The engine writes its staff notes for a quote that is about to be sent ("Confirm before sending."). On a booking the
+// same facts stand without that last instruction. A home with no size on record gets one more sentence: the engine marks
+// that line for review on a quote, and a booking has no review step.
+const QUOTE_ONLY_ENDING = /\s*Confirm (?:the home size )?before sending\.\s*$/;
+function staffNoteFor(line) {
+  const { SPECIALTY } = require('./pricing-engine/constants');
+  const marker = SPECIALTY.wdo.sizeTable.staffNoteMarker;
+  const notes = (line.warnings || [])
+    .filter((warning) => typeof warning === 'string' && warning.startsWith(marker))
+    .map((warning) => warning.slice(marker.length).replace(QUOTE_ONLY_ENDING, '').trim())
+    .map((note) => note.charAt(0).toUpperCase() + note.slice(1));
+  if (sizeWasDefaulted(line)) notes.unshift(`No home size on record: priced as ${squareFeet(line.sizeUsed)}.`);
+  return notes.join(' ') || null;
+}
+
+/**
+ * The table price of a WDO inspection booked at one home: { price, basis, staffNote }, or null (the catalog price stands).
+ *
+ *   customer / customerId  the customer the visit is for (the row, or its id); none for a new caller booked by address
+ *   propertyId             the saved property the visit is booked at; none = the customer's own home
+ *   serviceAddress         { line1, line2, city, state, zip } the visit is stamped with, used when no saved property is named
+ *   conn                   reads the customer and property rows. The property record itself is read on the shared pool, so
+ *                          call this BEFORE a booking transaction opens, never inside one.
+ */
+async function wdoBookingPrice({ customer = null, customerId = null, propertyId = null, serviceAddress = null, conn = db } = {}) {
+  const who = `customer ${customer?.id || customerId || 'none (booked by address)'}`;
+  try {
+    const home = await bookedHome({ customer, customerId, propertyId, serviceAddress, conn });
+    if (home.refusal) return noTablePrice(who, home.refusal);
+    const { strictCacheOnlyPropertyLookup } = require('./service-report/start-offer-lookup');
+    const lookup = home.address ? await strictCacheOnlyPropertyLookup(home.address) : null;
+    const line = wdoLineFor(lookup?.enriched);
+    const price = Number(line?.price);
+    if (!Number.isFinite(price) || price <= 0) return noTablePrice(who, 'the engine has no table price for this property');
+    return { price: Math.round(price * 100) / 100, basis: basisFor(line), staffNote: staffNoteFor(line) };
+  } catch (err) {
+    // The error code only: a database error can quote the address it was reading.
+    return noTablePrice(who, `the property record could not be read (${err.code || err.name || 'error'})`);
+  }
+}
+
+// ── Phone bookings (the call pipeline, the voice agent, the new caller booked by address) ────────────────────────────────
+// `priceInfo` is the booking's own price answer ({ price, source }: call-booking-catalog resolveCallBookingPrice, where a
+// price agreed on the call wins, else the catalog list price; or a new caller's typed price, else the catalog's). Only a
+// CATALOG price of a WDO inspection is replaced, by the table price of the home the visit is booked at (`linkage`: the
+// visit's { propertyId, address }), with `wdoTable` for the office note. Anything else comes back as it was given.
+async function wdoCallBookingPrice(priceInfo, { catalogRow, customerId, linkage, conn = db } = {}) {
+  if (priceInfo?.source !== 'catalog' || !isWdoInspectionService(catalogRow)) return priceInfo;
+  const table = await wdoBookingPrice({
+    customerId, propertyId: linkage?.propertyId || null, serviceAddress: linkage?.address || null, conn,
+  });
+  return table ? { price: table.price, source: WDO_TABLE_SOURCE, wdoTable: table } : priceInfo;
+}
+
+// The call pipeline resolves the visit's property INSIDE its booking transaction, and a transaction must not read the
+// property record (a second connection from the shared pool). So the pipeline reads the table price once BEFORE the
+// transaction, for the property and address its own resolver gives then (`resolveLinkage`), and the transaction keeps it
+// only when it resolves the same property and address. null = nothing to read (not a WDO inspection at the catalog price).
+async function wdoCallPriceBeforeBooking(priceInfo, { catalogRow, customerId, resolveLinkage } = {}) {
+  if (priceInfo?.source !== 'catalog' || !isWdoInspectionService(catalogRow)) return null;
+  try {
+    const linkage = await resolveLinkage();
+    return { linkage, priceInfo: await wdoCallBookingPrice(priceInfo, { catalogRow, customerId, linkage }) };
+  } catch (err) {
+    return noTablePrice(`customer ${customerId || 'none'}`, `the booking address could not be resolved (${err.code || err.name || 'error'})`);
+  }
+}
+
+const LINKAGE_ADDRESS_FIELDS = ['line1', 'line2', 'city', 'state', 'zip'];
+function sameLinkage(a, b) {
+  return String(a?.propertyId || '') === String(b?.propertyId || '')
+    && LINKAGE_ADDRESS_FIELDS.every((field) => String(a?.address?.[field] || '') === String(b?.address?.[field] || ''));
+}
+
+// Inside the booking transaction: the price the visit is saved with. A home that changed since the read (a property saved
+// or edited in between) keeps the call resolver's own price.
+function wdoCallPriceForBooking(priceInfo, before, linkage) {
+  if (!before) return priceInfo;
+  if (sameLinkage(before.linkage, linkage)) return before.priceInfo;
+  logger.info('[wdo-booking-price] the booked home changed after the table price was read; the call price stands');
+  return priceInfo;
+}
+
+// A phone booking's price sentence in the customer-visible visit note.
+function callBookingPriceNote(priceInfo) {
+  if (priceInfo?.price == null) return null;
+  const amount = `$${Number(priceInfo.price).toFixed(2)}`;
+  if (priceInfo.source === 'transcript') return `Price quoted on call: ${amount}.`;
+  if (priceInfo.source === WDO_TABLE_SOURCE) return `Price by home size and construction: ${amount}.`;
+  return `Price from service catalog: ${amount}.`;
+}
+
+// The office-only line (internal_notes) of a visit a phone or new-caller booking saved at a table price (`table`, the
+// wdoBookingPrice answer; none = no line): nobody saw that price before it was saved.
+function wdoTableNote(table) {
+  if (!table) return null;
+  return [`WDO price from the home size and construction table: $${Number(table.price).toFixed(2)}${table.basis ? ` (${table.basis})` : ''}.`, table.staffNote]
+    .filter(Boolean).join(' ');
+}
+
+module.exports = {
+  WDO_SERVICE_KEY,
+  WDO_TABLE_SOURCE,
+  isWdoInspectionService,
+  wdoBookingPrice,
+  wdoCallBookingPrice,
+  wdoCallPriceBeforeBooking,
+  wdoCallPriceForBooking,
+  callBookingPriceNote,
+  wdoTableNote,
+};

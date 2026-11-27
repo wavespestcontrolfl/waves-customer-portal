@@ -1114,7 +1114,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book it at 2:30', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Quarterly Pest Control Service', undefined, undefined, '2:30 PM');
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Quarterly Pest Control Service', undefined, undefined, '2:30 PM', undefined);
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
       const secondCallMessages = mockMessagesCreate.mock.calls[1][0].messages;
@@ -1156,7 +1156,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a termite liquid treatment', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Termite Liquid Treatment Service', undefined, undefined, undefined, undefined);
       expect(mockCreatePendingAction).not.toHaveBeenCalled();
       expect(body.pendingActions).toEqual([]);
 
@@ -1196,7 +1196,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a re-service, ants back in the kitchen', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ', undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Pest Control Re-Service', undefined, '  ants back in the kitchen  ', undefined, undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.customer_request).toBe('ants back in the kitchen');
       expect(body.pendingActions).toHaveLength(1);
@@ -1293,13 +1293,34 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book flea control for $180', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'Flea Control Service', 180, undefined, undefined, undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params._booking_price).toBe(180);
       expect(stored.params._booking_service_id).toBeNull();
 
       expect(body.pendingActions).toHaveLength(1);
       expect(body.pendingActions[0].params.price).toBe('$180.00 (price you gave) — invoiced when the visit is completed');
+    });
+  });
+
+  test('create_appointment for a WDO inspection with no stated price: the card names the table price for the home, what it read and the office note (owner 2026-11-27)', async () => {
+    const PROPERTY = '7a1d2e90-4c5b-4d0e-8b21-9e0f3a6c5d77';
+    mockResolveCommsCustomer.mockResolvedValue({ id: 'c1', first_name: 'Testa', last_name: 'Alpha', phone: '+19415551234' });
+    mockIbBookingProposal.mockResolvedValueOnce({
+      price: 150, source: 'wdo_table', serviceId: 'svc-wdo', serviceName: 'WDO Inspection Service',
+      priceBasis: 'no home size on record, construction not verified', priceNote: 'No home size on record: priced as 2,000 sq ft.',
+    });
+    scriptModelTurns([
+      [{ type: 'tool_use', id: 'tu_1', name: 'create_appointment', input: { customer_id: 'c1', scheduled_date: '2099-01-05', service_type: 'WDO Inspection Service', property_id: PROPERTY } }],
+      [{ type: 'text', text: 'Proposed.' }],
+    ]);
+
+    await withServer(async (baseUrl) => {
+      const { body } = await postQuery(baseUrl, { prompt: 'book a WDO inspection', context: 'schedule' });
+      // The property the call names is the home the table price is read at.
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'WDO Inspection Service', undefined, undefined, undefined, PROPERTY);
+      expect(body.pendingActions).toHaveLength(1);
+      expect(body.pendingActions[0].params.price).toBe('$150.00 (table price by home size and construction: no home size on record, construction not verified) — invoiced when the visit is completed. No home size on record: priced as 2,000 sq ft.');
     });
   });
 
@@ -1315,7 +1336,7 @@ describe('proposal-time identity pinning (name-match fixes)', () => {
 
     await withServer(async (baseUrl) => {
       const { body } = await postQuery(baseUrl, { prompt: 'book a pre-slab termite treatment for $125', context: 'schedule' });
-      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'a pre-slab termite treatment', 125, undefined, undefined);
+      expect(mockIbBookingProposal).toHaveBeenCalledWith('c1', 'a pre-slab termite treatment', 125, undefined, undefined, undefined);
       const stored = mockCreatePendingAction.mock.calls[0][0];
       expect(stored.params.service_type).toBe('Slab Pre-Treat Termite Service');
       expect(stored.params._booking_service_id).toBe('svc-slab');

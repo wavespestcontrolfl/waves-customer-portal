@@ -287,10 +287,15 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
   const durationMinutes = v.durationMinutes || serviceRecord.default_duration_minutes || 60;
   const window = assertAdminAppointmentWindow({ windowStart: v.windowStart, windowEnd: null, durationMinutes });
   // Same base rule as buildAppointmentPricing for a line with no discount:
-  // a typed price wins, else the catalog base price.
-  const estimatedPrice = v.linePrice != null
-    ? v.linePrice
-    : (serviceRecord.base_price != null && Number.isFinite(Number(serviceRecord.base_price)) ? Number(serviceRecord.base_price) : null);
+  // a typed price wins, else the catalog base price — for a WDO inspection,
+  // the home size and construction table price at this address instead,
+  // read here, before the booking transaction (wdo-booking-price.js).
+  const { wdoCallBookingPrice, wdoTableNote } = require('../wdo-booking-price');
+  const priced = await wdoCallBookingPrice(v.linePrice != null
+    ? { price: v.linePrice, source: 'typed' }
+    : { price: (serviceRecord.base_price != null && Number.isFinite(Number(serviceRecord.base_price)) ? Number(serviceRecord.base_price) : null), source: 'catalog' },
+  { catalogRow: serviceRecord, linkage: { address: v.address }, conn });
+  const estimatedPrice = priced.price;
 
   return conn.transaction(async (trx) => {
     let callLogId = null;
@@ -362,7 +367,7 @@ async function bookNewCallerVisit({ input, zone = null, adminUserId = null, conn
       source_call_log_id: callLogId,
       // internal_notes, never notes: notes are customer-visible. The marker is
       // the provenance the call pagers already read (call-booking-miss-watchdog).
-      internal_notes: [callLogId ? `Booked for a new caller by address. Call ID: ${callLogId}.` : 'Booked for a new caller by address. No live call was found.', v.internalNotes]
+      internal_notes: [callLogId ? `Booked for a new caller by address. Call ID: ${callLogId}.` : 'Booked for a new caller by address. No live call was found.', wdoTableNote(priced.wdoTable), v.internalNotes]
         .filter(Boolean).join('\n'),
       create_invoice_on_complete: v.createInvoice,
     };
@@ -504,6 +509,8 @@ module.exports = {
   PICKABLE_ANSWERED_MINUTES,
   PICKABLE_ENDED_MINUTES,
   validateNewCallerInput,
+  // The address a Book saves, for the booking screen's WDO price of that address (admin-schedule /wdo-inspection-quote).
+  validateNewCallerAddress: validateAddress,
   toPickableCall,
   stillPickable,
   listPickableCalls,
