@@ -596,7 +596,7 @@ describe('the extraction prompt reads the agent-proposed shape only under the ga
     expect(extractionPromptVersion([], {})).toBe(PROMPT_HASH);
     // both stamps (the extractor's and the processor's per-call one) pass the block's own switch
     const src = fs.readFileSync(path.join(__dirname, '../services/call-recording-processor.js'), 'utf8');
-    expect(src).toContain('const promptVersion = extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout, provider: res.provider || CALL_EXTRACTION_ROUTE.primary.provider });');
+    expect(src).toContain('promptVersion: extractionPromptVersion(opts.bookableServiceNames, { agentProposedSlotCommitment: opts.agentProposedSlotCommitment === true, systemLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider })');
     expect(src).toContain('const v2PromptVersion = extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider });');
   });
 });
@@ -647,8 +647,8 @@ describe('codex #6046 round 2', () => {
     expect(src).toContain('extractionPromptVersion(bookableServiceNames, { agentProposedSlotCommitment: assessmentLaneActive, systemLayout: systemPromptLayout, provider: CALL_EXTRACTION_ROUTE.primary.provider })');
     expect(src).toContain('...(assessmentLaneActive ? { agentProposedSlotCommitment: true } : {}),');
     expect(src.match(/\}\), \{ captured: assessmentLaneActive \}, \[extracted, preAdoptionExtracted\]\),/g)).toHaveLength(2);
-    // every ai_extraction_prompt_version stamp in the pass uses the const's version (or the extractor's provider-scoped promptVersion)
-    expect(src.match(/ai_extraction_prompt_version: (?:v2Result\.promptVersion|v2PromptVersion),/g).length).toBeGreaterThanOrEqual(2);
+    // every ai_extraction_prompt_version stamp in the pass uses the const's version
+    expect(src.match(/ai_extraction_prompt_version: v2PromptVersion,/g).length).toBeGreaterThanOrEqual(2);
   });
 
   test('a captured value is handed back as is, whatever the gates say now', () => {
