@@ -350,6 +350,11 @@ it('a restored draft with an automatic row waits for the card answer before it c
   fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
   const waiting = await screen.findAllByRole('button', { name: /Loading protocol card/ });
   expect(waiting.every((button) => button.disabled)).toBe(true);
+  // Generate waits too: the card answer decides which actions the report may name.
+  const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+  await act(async () => fireEvent.click(await screen.findByRole('button', { name: /Generate AI Service Report/i })));
+  expect(alertSpy).toHaveBeenCalledWith('The protocol card is still loading. Try again in a moment.');
+  alertSpy.mockRestore();
   await act(async () => { answer(); await pending; });
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
   await waitFor(() => expect(screen.queryAllByRole('button', { name: /Loading protocol card/ })).toHaveLength(0));

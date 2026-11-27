@@ -17185,6 +17185,11 @@ export function CompletionPanel({
       alert(PHOTO_DESCRIPTION_OPEN_ALERT);
       return;
     }
+    // The card answer decides which actions the report may name (cardAnswerPending): wait for it, as the submit does.
+    if (cardAnswerPending) {
+      alert("The protocol card is still loading. Try again in a moment.");
+      return;
+    }
     if (promiseMarksPending) {
       alert(PROMISE_MARKS_LOADING_ALERT);
       return;
@@ -19750,6 +19755,8 @@ export function CompletionPanel({
       // a promise marked (or re-marked) after generation changes what the
       // report should say about it
       effectivePromiseSignature,
+      // a late no-card answer drops the card actions the report may already describe
+      noCardConfirmed,
     ]);
   }
   useEffect(() => {
@@ -19770,7 +19777,7 @@ export function CompletionPanel({
   }, [areasServiced, observationsText, recommendationsText,
     customerInteraction, customerConcern, clientPestRating,
     servicePhotos, typedPhotoSummary, generating, lawnAssessmentId, lawnAssessmentRevision,
-    aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature]);
+    aiReportIncludeComms, selectedProducts, serviceTypeForArea, effectivePromiseSignature, noCardConfirmed]);
   // The installed report was written with promise marks that no longer
   // hold (a restored draft whose promise was reworded since, which the
   // restore's fresh watcher baseline cannot see): an untouched report clears

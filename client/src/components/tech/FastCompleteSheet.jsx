@@ -437,11 +437,14 @@ function useShortFormWrapUp({ ctx, service, submission, request, rows, form, onC
 
 // The report flow takes visits the house mix is not for (an initial
 // cleanout), so it seeds only where the recap modal and the full form would;
-// a re-service sheet always starts with it.
-function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType }) {
+// a re-service sheet starts with it unless the server says the visit has no card.
+export function seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType, cardDefaults }) {
   // A lane visit (bed bug, fire ant, tick, …) is never the pest house mix,
   // a callback included.
   if (laneKey || typedType) return false;
+  // A visit with no protocol card (owner pick D18, the defaults read's no_protocol) is inspection only on either flow: a
+  // callback named "Courtesy Visit" with no key. A failed read (null) keeps the mix as before.
+  if (cardDefaults?.matchedVisit?.reason === 'no_protocol') return false;
   return !reportFlow || isPestDefaultMixVisit({ ...visit, serviceType: visit.serviceType || serviceType });
 }
 
@@ -515,7 +518,7 @@ function useFastCompleteContext({
         // A typed visit keeps its own activity (the completion ignores the
         // 1 to 5 rating on a typed form), so it asks for none.
         const rates = ratingContract?.allowed === true && !typedType;
-        const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType });
+        const houseMix = seedsHouseMix(visit, { serviceType, reportFlow, laneKey, typedType, cardDefaults });
         // Taurus SC's yearly label limit at this home, read by the server with this context; null (unknown) leaves it off the mix.
         const taurusYearly = taurusYearlyOf(data?.taurusYearly);
         setCtx({

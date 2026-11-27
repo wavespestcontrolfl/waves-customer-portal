@@ -79,3 +79,13 @@ describe('isPestDefaultMixVisit: a booked Waves Assessment', () => {
     expect(isPestDefaultMixVisit({ serviceType: 'Re-Service', serviceKey: 'lawn_inspection', isCallback: true })).toBe(false);
   });
 });
+
+describe('isPestDefaultMixVisit: the server keyless bare names, every spelling', () => {
+  it('keeps the mix for each whole bare name with no key, and none under another key', () => {
+    for (const name of ['Re-Service', 'Re Service Visit', 'Reservice', 'Callback', 'Callback Visit', 'Semi-Annual Service', 'Recurring Service', 'Recurring Visit']) {
+      expect(isPestDefaultMixVisit({ serviceType: name, isCallback: true })).toBe(true);
+      expect(isPestDefaultMixVisit({ serviceType: name, isCallback: true, serviceKey: 'mud_dauber_removal' })).toBe(false);
+    }
+    expect(isPestDefaultMixVisit({ serviceType: 'Courtesy Visit', isCallback: true })).toBe(false);
+  });
+});
