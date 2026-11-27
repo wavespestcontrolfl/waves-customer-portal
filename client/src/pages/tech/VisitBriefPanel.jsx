@@ -52,6 +52,7 @@ import {
 import { useVisitPrepPhotoUrls } from '../../hooks/useVisitPrepPhotoUrls';
 import PropertyFertilizerMap from '../../components/tech/PropertyFertilizerMap';
 import { detectServiceCategory } from '../../lib/service-colors';
+import HomeNoteSection, { homeNoteFor } from './HomeNoteSection';
 
 // Inside the field workspace (.tech-field, tech-field.css) these resolve to the
 // Waves Admin look; the fallbacks are the same light values, for a render
@@ -1325,6 +1326,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const loading = detail?.status === 'loading';
   const failed = detail?.status === 'error';
   const byService = detail?.byService || {};
+  const homeNote = homeNoteFor(stop.services, byService);
 
   // Per-member view of the two detail fetches. The endpoint serves briefs
   // of different SHAPES by type: the generic visit brief carries
@@ -1401,6 +1403,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         />
       )}
       {line && <SetTextsSection line={line} service={service} visitIds={stop.services.map((m) => m.id).filter(Boolean)} request={request} onBusyChange={setPresetBusy} />}
+      {request && homeNote && <HomeNoteSection request={request} path={`/admin/schedule/${homeNote.id}/home-note`} note={homeNote.note} onSaved={onRetry} />}
       <AccessFlagsSection members={accessFlags} grouped={stop.services.length > 1} request={request} onChanged={onRetry} />
       <AccessSection alerts={alerts} access={access} gate={gateVisit ? { visitId: gateVisit.id, request, onChanged: onGateChanged } : null} />
       {request && fertilizerVisits.map(member => <div key={member.id}>

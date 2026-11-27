@@ -80,6 +80,7 @@ import {
 } from "lucide-react";
 import { CustomerActionBar, customerEstimateHref } from "./StickyActionBar";
 import { ActiveCodeRow, AddCodeForm, FoundCodeCard } from "./AccessCodePanels";
+import HomeNoteSection from "../../pages/tech/HomeNoteSection";
 import Customer360Sections, { CUSTOMER_360_SECTIONS, CUSTOMER_WORKSPACE_SECTIONS } from "./Customer360Sections";
 import Customer360Activity from "./Customer360Activity";
 import CustomerEngagementTimeline from "./CustomerEngagementTimeline";
@@ -8218,6 +8219,7 @@ function AccessPreferencesSection({ customerId, isAdmin, prefs, onSaved, awayWat
     return (
       <>
         <AccessPrefsReadView p={prefs || {}} isAdmin={isAdmin} onEdit={openEdit} sodInfo={sodInfo} awayWatchEnabled={awayWatchEnabled} />
+        {isAdmin && <HomeNoteSection request={adminFetch} path={`/admin/customers/${customerId}/home-note`} />}
         {isAdmin && <CustomerNeighborhoodBlock customerId={customerId} />}
         {isAdmin && <CustomerAccessCodesBlock customerId={customerId} />}
       </>

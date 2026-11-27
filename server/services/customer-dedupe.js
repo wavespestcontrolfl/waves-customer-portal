@@ -2315,6 +2315,10 @@ const UNIQUE_COLLISION_HANDLERS = {
   // one profile no longer counts for the discount; familyMultiHomeEligible
   // requires 2+ live members).
   multi_home_family_members: repointRowwiseDropCollisions,
+  // UNIQUE(customer_id, property): both duplicate profiles holding an "About this home" note for the same home — the
+  // winner's note stays (it is the account the technicians now read), the loser's copy for that home drops; notes for
+  // homes only the loser had move across.
+  home_notes: repointRowwiseDropCollisions,
 };
 
 // Customer ids also hide behind polymorphic recipient columns the

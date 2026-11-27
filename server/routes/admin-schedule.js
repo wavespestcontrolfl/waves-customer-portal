@@ -442,7 +442,7 @@ router.use((req, res, next) => {
 // OWN assigned jobs server-side instead of trusting the client filter
 // (TechHomePage) to hide the rest of the organization. Admin requests stay
 // unscoped.
-const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter } = require('../services/technician-visit-scope');
+const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFilter, lockOwnedLiveVisit } = require('../services/technician-visit-scope');
 
 // Board/list scoping for technician tokens: the FULL current-assignment
 // predicate, not just technician_id — otherwise ?from=<years ago> or
@@ -24893,6 +24893,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       const accessFlags = await require('../services/visit-access-flags').accessFlagsFor(db, svc);
       return accessFlags && accessFlags.length ? { ...payload, accessFlags } : payload;
     };
+    // "About this home" (services/home-note.js): the home's one staff note rides every answer, so the tech's Visit Brief
+    // shows it at the top with no request of its own. `homeNote` is the note or null (no note yet); the key is left out when
+    // the visit has no customer or the read fails, so those answers are exactly as before. The read follows the one
+    // ownership-scoped fetch above; finalRecheck below withholds the whole answer when it runs.
+    const withHomeNote = async (payload) => {
+      try {
+        const out = await require('../services/home-note').readHomeNote(svc);
+        return out.editable ? { ...payload, homeNote: out.note } : payload;
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief home note failed for ${svc.id}: ${err.message}`);
+        return payload;
+      }
+    };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
@@ -24911,7 +24924,7 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
         return { brief: null };
       }
     };
-    const answer = async (payload) => res.json(await finalRecheck(await withAwayWatch(await withAccessFlags(await withFacts(payload)))));
+    const answer = async (payload) => res.json(await finalRecheck(await withHomeNote(await withAwayWatch(await withAccessFlags(await withFacts(payload))))));
     if (!svc.pre_service_brief) return answer({ brief: null });
     // The kill switch outranks persisted state: with GATE_PREVISIT_BRIEF
     // off, generic visit briefs cached while the gate was on are WITHDRAWN
@@ -24942,6 +24955,46 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     // live facts, not the cached copy.
     await answer(served);
   } catch (err) { next(err); }
+});
+
+// GET / PUT /api/admin/schedule/:id/home-note   body { body, expectedUpdatedAt }
+// "About this home" (services/home-note.js): the one short lasting staff note for the home this visit is at, read at the
+// top of the tech Visit Brief. Same assignment check as GET /:id/visit-brief (technicianCurrentVisitFilter): a technician
+// reaches only a visit assigned to them (403 otherwise, so a visit's existence is not told); an admin reaches any. The PUT
+// holds the visit row locked in its own transaction, so a reassignment landing during the save refuses it. A stale save
+// (the note changed since the editor read it) is 409 with the current note. Staff only: no customer, report or token
+// route reads this table.
+const HOME_NOTE_VISIT_COLUMNS = ['scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id'];
+const homeNoteVisitRefusal = (req, res) => (isTechnicianRequest(req)
+  ? res.status(403).json({ error: 'Not assigned to this service', code: 'service_not_assigned' })
+  : res.status(404).json({ error: 'Scheduled service not found' }));
+const isHomeNoteVisitId = (id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id));
+router.get('/:id/home-note', async (req, res, next) => {
+  try {
+    const HomeNote = require('../services/home-note');
+    if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
+    const svc = await db('scheduled_services')
+      .where({ 'scheduled_services.id': req.params.id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first(HOME_NOTE_VISIT_COLUMNS);
+    if (!svc) return homeNoteVisitRefusal(req, res);
+    HomeNote.sendHomeNote(res, await HomeNote.readHomeNote(svc));
+  } catch (err) { next(err); }
+});
+router.put('/:id/home-note', require('../services/home-note').homeNoteLimiter, async (req, res, next) => {
+  try {
+    const HomeNote = require('../services/home-note');
+    if (!isHomeNoteVisitId(req.params.id)) return res.status(404).json({ error: 'Scheduled service not found' });
+    const out = await db.transaction(async (trx) => {
+      const svc = await lockOwnedLiveVisit(trx, req, req.params.id, ['id', 'customer_id', 'property_id'], { allowCompleted: true });
+      return HomeNote.saveHomeNote(svc, { ...HomeNote.saveInput(req), actor: HomeNote.homeNoteActor(req) }, { conn: trx });
+    });
+    HomeNote.sendHomeNote(res, out);
+  } catch (err) {
+    if (err && err.code === 'service_not_assigned') return res.status(403).json({ error: err.message, code: err.code });
+    if (err && err.code === 'not_found') return res.status(404).json({ error: err.message });
+    next(err);
+  }
 });
 
 // POST /api/admin/schedule/:id/access-flags/:questionId   body { verdict: 'right' | 'wrong', evidenceId }
