@@ -596,6 +596,37 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         }
       });
 
+      test('a copied row stands only while the customer still lists the person: no list entry, no text and no link', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        expect(await otherRows()).toHaveLength(1);
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
+        // a row the call recorded directly does not need the list
+        expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
+      });
+
+      test('a customer merge folds a shared number: the winner keeps one row and a stop on either side stands', async () => {
+        const { UNIQUE_COLLISION_HANDLERS } = require('../services/customer-dedupe')._test;
+        const [{ id: loserId }] = await db('customers').insert({ first_name: 'Phyl', last_name: 'Roe', phone: phone(45) }).returning('id');
+        try {
+          const base = { phone_e164: BOB, phone_key: BOB.slice(-10), consent_version: 'x' };
+          await db('customer_reminder_contacts').insert([
+            { ...base, customer_id: loserId, stopped_at: new Date('2026-11-20T12:00:00Z'), stop_source: 'portal' },
+            { ...base, customer_id: loserId, phone_e164: phone(46), phone_key: phone(46).slice(-10) },
+          ]);
+          await UNIQUE_COLLISION_HANDLERS.customer_reminder_contacts(db, 'customer_reminder_contacts', 'customer_id', customerId, loserId);
+          const winner = await listed();
+          expect(winner.map((r) => r.phone_key).sort()).toEqual([BOB.slice(-10), phone(46).slice(-10)].sort());
+          expect(winner.find((r) => r.phone_key === BOB.slice(-10))).toMatchObject({ stop_source: 'portal' });
+          expect(winner.find((r) => r.phone_key === BOB.slice(-10)).stopped_at).not.toBeNull();
+          expect(await db('customer_reminder_contacts').where({ customer_id: loserId })).toHaveLength(0);
+        } finally {
+          await db('customers').where({ id: loserId }).del();
+        }
+      });
+
       test('a stopped person is never copied onto a new visit', async () => {
         await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ stopped_at: db.fn.now(), stop_source: 'portal' });
         await VisitRecipient.materializeForVisit(otherVisitId);

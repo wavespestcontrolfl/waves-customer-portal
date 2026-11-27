@@ -282,6 +282,11 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
   });
 }
 
+// The customer lists the number for every visit right now (a row, not stopped).
+async function listedNow(customerId, phoneKey, conn) {
+  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNull('stopped_at').first('id'));
+}
+
 /**
  * Has this person declined, by any existing route? Their own text choices as a service contact (this
  * purpose or texts altogether), a recipient_optin decline on the account, STOP or any active
@@ -347,6 +352,9 @@ function rowBelongsToVisitCustomer(row, visit) {
 // visit was reassigned) or to none, or a person who has declined.
 async function ownedContact(row, visit, kind, conn, taken) {
   if (taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit)) return null;
+  // A copy of the every-visit list stands only while the visit's CURRENT customer still lists the person (a merge undo can
+  // move the list entry away while the copy stays on the visit). A missing entry is no permission.
+  if (row.source === REMINDER_SOURCE && !(await listedNow(visit.customer_id, row.phone_key, conn))) return null;
   if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS[kind].purpose, conn })) return null;
   const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
   const scheduledDate = dateOnlyString(visit.scheduled_date);

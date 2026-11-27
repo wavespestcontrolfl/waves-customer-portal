@@ -2276,8 +2276,32 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
   return discarded.length;
 }
 
+// customer_reminder_contacts: UNIQUE (customer_id, phone_key), the customer's every-visit list of people a call named
+// (call-visit-recipient.js). Both duplicates listing the same number is one person listed twice: the winner keeps its
+// row, a STOP on either side stands (the earlier stop is kept), and the loser's copy is deleted. Numbers the winner does
+// not list move across whole. The undo refuses after a fold, as after every collision handler.
+async function foldReminderContacts(trx, table, column, winnerId, loserId) {
+  const loserRows = await trx(table).where(column, loserId).select('*');
+  let moved = 0;
+  let folded = 0;
+  for (const row of loserRows) {
+    const existing = await trx(table).where({ [column]: winnerId, phone_key: row.phone_key }).first();
+    if (!existing) {
+      await trx(table).where({ id: row.id }).update({ [column]: winnerId });
+      moved += 1;
+      continue;
+    }
+    const stops = [existing, row].filter((r) => r.stopped_at).sort((a, b) => new Date(a.stopped_at) - new Date(b.stopped_at));
+    if (stops.length) await trx(table).where({ id: existing.id }).update({ stopped_at: stops[0].stopped_at, stop_source: stops[0].stop_source });
+    await trx(table).where({ id: row.id }).del();
+    folded += 1;
+  }
+  return `moved ${moved}, folded ${folded} row(s) into the winner's (a stop on either side stands)`;
+}
+
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
+  customer_reminder_contacts: foldReminderContacts,
   service_contact_notification_prefs: foldContactNotificationPrefs,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
