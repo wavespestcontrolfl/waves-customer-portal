@@ -755,13 +755,9 @@ function withRecipientRow(query, hit, token) {
       });
     })
     // A stop on the customer's list (owner 2026-11-27) closes the link for every row of the number, in this same final read.
-    // A stop saved on a record merged into this customer counts too (call-visit-recipient.js stoppedOnList).
-    .whereNotExists(function notStopped() {
-      this.select(db.raw('1')).from('customer_reminder_contacts as st')
-        .whereRaw('st.phone_key = r.phone_key AND st.stopped_at IS NOT NULL AND st.customer_id IN ('
-          + 'WITH RECURSIVE lineage(id) AS (SELECT s.customer_id UNION SELECT j.loser_customer_id FROM customer_merge_journal j '
-          + 'JOIN lineage l ON j.winner_customer_id = l.id WHERE j.undone_at IS NULL) SELECT id FROM lineage)');
-    });
+    // A stop on the customer's list, or on a record merged into it, after the customer's own last Restart: the same rule
+    // the senders use (reminder-stop-sql.js), in this same final read.
+    .whereRaw(`NOT ${require('../services/reminder-stop-sql').stoppedSql('s.customer_id', 'r.phone_key')}`);
 }
 
 // A resolved recipient link names a visit, a row and a customer; anything less answers as an unknown token.

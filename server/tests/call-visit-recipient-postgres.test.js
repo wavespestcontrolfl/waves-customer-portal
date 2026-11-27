@@ -551,11 +551,19 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: db.fn.now(), undone_by: 'test' });
             expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(false);
             await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: null, undone_by: null });
-            // Restart on the survivor clears the stop it inherited.
+            // Restart on the survivor ends the stop there, and writes only the survivor's own row.
             expect(await VisitRecipient.setReminderContactStopped({ customerId: survivorId, id: survivorRow, stopped: false, by: 'customer' }))
               .toMatchObject({ stopped: false, changed: true });
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(false);
             const [old] = await listed();
-            expect(old.stopped_at).toBeNull();
+            expect(old.texts_stopped_at).not.toBeNull();
+            // Undo the merge: the old record's stop is as it was.
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: db.fn.now(), undone_by: 'test' });
+            expect(await VisitRecipient.declinedByRecipient({ customerId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(true);
+            // A stop on the old record saved AFTER the survivor's restart counts there again.
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: null, undone_by: null });
+            await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ texts_stopped_at: db.raw("now() + interval '1 minute'") });
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(true);
           } finally {
             await db('customer_reminder_contacts').where({ customer_id: survivorId }).del();
             await db('customer_merge_journal').where({ id: journalId }).del();
@@ -570,8 +578,8 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           await record({}, entry({ appointment_texts_scope: 'this_visit' }));
           await record();
           const [row] = await listed();
-          expect(row).toMatchObject({ stopped_by: 'staff' });
-          expect(row.stopped_at).not.toBeNull();
+          expect(row).toMatchObject({ texts_stopped_by: 'staff' });
+          expect(row.texts_stopped_at).not.toBeNull();
           expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toEqual([]);
         });
 
@@ -587,7 +595,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             expect(await VisitRecipient.setReminderContactStopped({ customerId: strangerId, id: first.id, stopped: false, by: 'customer' })).toBeNull();
             expect(await VisitRecipient.listReminderContacts(strangerId)).toEqual([]);
             const [row] = await listed();
-            expect(row.stopped_at).not.toBeNull();
+            expect(row.texts_stopped_at).not.toBeNull();
           } finally {
             await db('customers').where({ id: strangerId }).del();
           }
@@ -1603,7 +1611,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           },
           // last: a stop is sticky for the rest of the loop
           'the person stopped on the customer\'s list (a call-recorded row)': () => db('customer_reminder_contacts')
-            .where({ customer_id: customerId }).update({ stopped_at: new Date(), stopped_by: 'customer' }),
+            .where({ customer_id: customerId }).update({ texts_stopped_at: new Date(), texts_stopped_by: 'customer' }),
         };
         let spy;
         beforeEach(async () => {
