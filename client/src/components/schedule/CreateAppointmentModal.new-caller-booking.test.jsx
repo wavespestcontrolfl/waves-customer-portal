@@ -120,6 +120,33 @@ describe('new-caller Book helpers', () => {
 });
 
 describe('CreateAppointmentModal new-caller Book', () => {
+  it('a Book whose modal closes while the WDO price is re-read books nothing', async () => {
+    const WDO = { id: 'svc-wdo', service_key: 'wdo_inspection', name: 'WDO Inspection Service', billing_type: 'one_time', base_price: 250, default_duration_minutes: 60 };
+    const fetcher = installFetch({ catalog: [WDO] });
+    const base = fetcher.getMockImplementation();
+    let release;
+    let quoteReads = 0;
+    fetcher.mockImplementation((input, options = {}) => {
+      if (!String(input).endsWith('/admin/schedule/wdo-inspection-quote')) return base(input, options);
+      quoteReads += 1;
+      const answer = json({ price: 200, source: 'wdo_table', basis: '2,600 sq ft, wood frame', staffNote: null });
+      // The line's first read answers; the re-read at Book waits until the test releases it.
+      return quoteReads === 1 ? Promise.resolve(answer) : new Promise((resolve) => { release = () => resolve(answer); });
+    });
+    mount({ newCallerBooking: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    expect(await screen.findByText('This call')).toBeTruthy();
+    await addService('WDO', /WDO Inspection Service/i);
+    const book = await screen.findByRole('button', { name: 'Book' });
+    await waitFor(() => expect(book.disabled).toBe(false));
+    fireEvent.click(book);
+    await waitFor(() => expect(quoteReads).toBe(2));
+    cleanup();
+    release();
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(0);
+  });
+
   it('books the visit by address with the one live call, and adds no customer', async () => {
     const fetcher = installFetch();
     const { onCreated } = mount({ newCallerBooking: true });

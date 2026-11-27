@@ -1425,8 +1425,10 @@ export function wdoQuoteAnswer(key, response) {
 // home's record or the catalog may have changed while the form sat open). Resolves null to proceed, or the hold the form
 // applies: the toast and how long it stays, whether to ask again (`retry`), and the fresh answer the line must show
 // before the operator submits again (`refresh`). The fetch is injectable so the gate is testable without the form.
-export async function wdoSubmitGate({ needsPrice, quote, query, fetchQuote = adminFetch }) {
+export async function wdoSubmitGate({ needsPrice, quote, query, blankLines = 1, fetchQuote = adminFetch }) {
   if (!needsPrice) return null;
+  // One price question describes one WDO line: two blank WDO lines are typed (pre-push audit P1).
+  if (blankLines > 1) return { message: 'Two WDO lines are blank — type a price on each', holdMs: 3200, retry: false, refresh: null };
   if (!query || quote?.key !== query || quote?.status !== 'ready') {
     const failed = !!query && quote?.key === query && quote?.status === 'error';
     return {
@@ -1459,7 +1461,8 @@ export async function wdoSubmitGate({ needsPrice, quote, query, fetchQuote = adm
 }
 
 // The line under a blank WDO line: the price it books at and what the table read, or what it waits for.
-export function wdoLineHintText({ quote, query }) {
+export function wdoLineHintText({ quote, query, blankLines = 1 }) {
+  if (blankLines > 1) return 'Two WDO lines on this booking: type a price on each.';
   if (!query) return 'Priced by home size and construction once the customer and address are set.';
   if (quote?.key !== query) return 'Reading the price for this home…';
   if (quote.status === 'error') return 'Could not read the price for this home. Type a price, or retry.';
@@ -2763,13 +2766,15 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // The lines the server prices itself when left blank: blank, they post a null price; an entered 0 posts as 0.
   const lineIsServerPriced = (svc) => isOneTimeMosquitoLine(svc) || isWdoInspectionLine(svc);
   const lineIsBlankServerPriced = (svc) => lineIsServerPriced(svc) && !lineHasEnteredPrice(svc);
-  const hasBlankWdoLine = services.some(lineIsBlankWdo);
+  // One price question describes one WDO line: with two blank WDO lines nothing is asked, and the office types each.
+  const blankWdoLines = services.filter(lineIsBlankWdo).length;
+  const hasBlankWdoLine = blankWdoLines > 0;
   // The appointments this form saves (the grouping helpers below are hoisted). A WDO line that is the main line of an
   // appointment with other lines keeps the catalog price (the server's rule: the WDO filing's invoice could not carry
   // the table price), so the question says so. A WDO add-on line keeps the table price.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
   const wdoWithOtherLines = appointmentSubmitGroups.some((group) => group.lines.length > 1 && lineIsBlankWdo(group.lines[0]));
-  const wdoQuoteKey = hasBlankWdoLine ? wdoQuoteQuery({
+  const wdoQuoteKey = blankWdoLines === 1 ? wdoQuoteQuery({
     customerId: selectedCustomer?.id,
     propertySettled: ['ready', 'hidden', 'error'].includes(bookingPropertyState),
     propertyId: propertyPickerActive && selectedPropertyId ? selectedPropertyId : '',
@@ -4475,7 +4480,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         return;
       }
       // The same for a blank WDO line's table price (wdoSubmitGate).
-      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey });
+      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey, blankLines: blankWdoLines });
       assertSubmitCurrent();
       if (wdoHold) {
         applyWdoHold(wdoHold);
@@ -5425,10 +5430,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     setNewCallerSubmitting(true);
     try {
       // A blank WDO line books at the table price for this address: re-check it now, as Save does (wdoSubmitGate).
-      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey });
+      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey, blankLines: blankWdoLines });
+      // The modal closed, or a customer was picked, while the price was re-read: book nothing (pre-push audit P1; Save's
+      // assertSubmitCurrent).
+      if (!modalMountedRef.current || selectedCustomerIdRef.current) return;
       if (wdoHold) {
         applyWdoHold(wdoHold);
-        if (modalMountedRef.current) setNewCallerError(wdoHold.message);
+        setNewCallerError(wdoHold.message);
         return;
       }
       const result = await adminFetch('/admin/schedule/new-caller', {
@@ -6529,7 +6537,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
                     data-testid="wdo-table-price"
                     style={{ gridColumn: '1 / -1', fontSize: 14, lineHeight: 1.45, color: D.muted }}
                   >
-                    {wdoLineHintText({ quote: wdoQuote, query: wdoQuoteKey })}
+                    {wdoLineHintText({ quote: wdoQuote, query: wdoQuoteKey, blankLines: blankWdoLines })}
                     {wdoQuoteFailed && (
                       <button
                         type="button"

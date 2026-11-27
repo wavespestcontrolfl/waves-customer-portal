@@ -230,10 +230,22 @@ describe('the office booking keeps the price a person gives', () => {
     });
     expect((await withAddon(200)).addonLines[0].base).toBe(200);
     await expect(withAddon(250)).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
-    // A typed price, or a screen that showed no price (the Intelligence Bar, the preview), books without the check.
-    expect((await bookBlankWdo({ primaryLinePrice: 300, wdoExpectedPrice: 175 })).finalPrice).toBe(300);
+    // A screen that showed no price (the Intelligence Bar, the preview) books without the check.
     expect((await bookBlankWdo()).finalPrice).toBe(200);
     expect(touched.filter((table) => /scheduled_services|invoice/.test(table))).toEqual([]);
+  });
+
+  test('a shown price with no WDO line to check it against refuses: the catalog row failed to read, so the posted total would be booked', async () => {
+    const PEST = { id: 'svc-pest', service_key: 'one_time_pest', category: 'pest_control', base_price: '50.00' };
+    wireDb({ customer_properties: undefined, customers: HOME, services: (cond) => (cond.id === 'svc-pest' ? PEST : WDO) });
+    // The create route caught the failed read: no service row, and estimatedPrice is the group's $300 total.
+    await expect(buildAppointmentPricing({
+      serviceRecord: null, estimatedPrice: 300, primaryLinePrice: null, customer: HOME, wdoExpectedPrice: 250,
+      serviceAddons: [{ serviceId: 'svc-pest', name: 'One-Time Pest', basePrice: 50, price: 50 }],
+    })).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_UNCHECKED' });
+    // No line to check: a typed WDO price with a shown price refuses the same way (the screen sends a shown price only
+    // for a blank WDO line).
+    await expect(bookBlankWdo({ primaryLinePrice: 300, wdoExpectedPrice: 175 })).rejects.toMatchObject({ code: 'WDO_PRICE_UNCHECKED' });
   });
 
   test('the shown price is read from the request as a price, or refused', () => {
@@ -410,8 +422,10 @@ describe('phone bookings (the call pipeline, the voice agent, the new caller boo
       .rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
     expect(transaction).not.toHaveBeenCalled();
     await bookNewCallerVisit({ input: { ...input, wdoExpectedPrice: 200 }, conn });
-    // A typed price is not checked.
-    await bookNewCallerVisit({ input: { ...input, linePrice: 260, wdoExpectedPrice: 175 }, conn });
+    // A typed price books as typed; a shown price with no blank WDO line to check refuses.
+    await bookNewCallerVisit({ input: { ...input, linePrice: 260 }, conn });
+    await expect(bookNewCallerVisit({ input: { ...input, linePrice: 260, wdoExpectedPrice: 175 }, conn }))
+      .rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_UNCHECKED' });
     expect(transaction).toHaveBeenCalledTimes(2);
   });
 });

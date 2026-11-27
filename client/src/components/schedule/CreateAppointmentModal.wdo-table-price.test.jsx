@@ -117,6 +117,14 @@ describe('wdoSubmitGate (the check at the moment of booking)', () => {
     expect(failed).toMatchObject({ retry: true, refresh: null });
   });
 
+  it('two blank WDO lines hold without a read: one price question describes one line, so the office types each', async () => {
+    const fetchQuote = vi.fn();
+    expect(await wdoSubmitGate({ needsPrice: true, quote: shown, query: '', blankLines: 2, fetchQuote }))
+      .toMatchObject({ retry: false, refresh: null, message: 'Two WDO lines are blank — type a price on each' });
+    expect(fetchQuote).not.toHaveBeenCalled();
+    expect(wdoLineHintText({ quote: null, query: '', blankLines: 2 })).toBe('Two WDO lines on this booking: type a price on each.');
+  });
+
   it('a home with no price holds a blank line, even when both reads agree: the line asks for a typed price', async () => {
     const noPrice = { price: null, source: 'catalog_base', basis: null, staffNote: null };
     const hold = await wdoSubmitGate({ needsPrice: true, quote: wdoQuoteAnswer(query, noPrice), query, fetchQuote: async () => noPrice });
@@ -284,6 +292,24 @@ describe('a WDO line in the modal', () => {
     await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
     expect(quoteCalls(fetcher).length).toBe(asked + 1);
     expect(screen.queryByTestId('wdo-table-price-retry')).toBeNull();
+  });
+
+  it('two blank WDO lines ask nothing and say to type each; typing one prices the other again', async () => {
+    const note = 'Other services are booked on this WDO visit, so the WDO line keeps the catalog price.';
+    const fetcher = installFetch({
+      quote: (body) => (body.withOtherLines === '1' ? { price: 250, source: 'catalog_base', basis: null, staffNote: note } : FRAME_2600),
+    });
+    mount();
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+    const asked = quoteCalls(fetcher).length;
+    await addWdoLine();
+    await waitFor(() => expect(screen.getAllByTestId('wdo-table-price').map((el) => el.textContent))
+      .toEqual(['Two WDO lines on this booking: type a price on each.', 'Two WDO lines on this booking: type a price on each.']));
+    expect(quoteCalls(fetcher)).toHaveLength(asked);
+    // The second line typed: the first is now the main line of an appointment with another line.
+    fireEvent.change(screen.getAllByPlaceholderText('Auto (home size)')[1], { target: { value: '260' } });
+    await waitFor(() => expect(hint()?.textContent).toBe(`Catalog price: $250.00. ${note}`));
   });
 
   it('a WDO main line with another line asks for that, and the line shows the catalog price and why', async () => {

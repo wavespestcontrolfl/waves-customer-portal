@@ -3427,14 +3427,19 @@ async function ibBookingPricing({ customer, serviceType, statedPrice, propertyId
   // The Schedule modal's own pre-fill for a picked catalog line
   // (CreateAppointmentModal addServiceFromCatalog), sent as the line price:
   // blank for the one-time mosquito line, so the server's lot ladder prices
-  // it; the table price for a WDO inspection (blank on the modal, priced by
-  // the same read); otherwise the price range minimum, else the base price.
-  // A $0 default is no price here (unpriced is NULL, never $0), and the
-  // billable-amount gate below decides.
+  // it; for a WDO inspection (blank on the modal) the price the server sets
+  // there: the table price, else the base price (pre-push audit P1: never the
+  // price range minimum, which the Schedule server does not read); otherwise
+  // the price range minimum, else the base price. A $0 default is no price
+  // here (unpriced is NULL, never $0), and the billable-amount gate below
+  // decides.
   const table = stated ? null : await ibWdoTablePrice({ customer, catalogRow, propertyId, wdoTable, conn });
+  const listPrice = require('../wdo-booking-price').isWdoInspectionService(catalogRow)
+    ? catalogRow.base_price
+    : (catalogRow.price_range_min ?? catalogRow.base_price);
   const catalogDefault = catalogRow.service_key === 'mosquito_one_time'
     ? undefined
-    : (table?.price ?? catalogRow.price_range_min ?? catalogRow.base_price ?? undefined);
+    : (table?.price ?? listPrice ?? undefined);
   // Lazy: the route module is large and requires services that require this
   // module (same avoid-a-route-load-cycle pattern as schedule-tools).
   const { buildAppointmentPricing } = require('../../routes/admin-schedule');

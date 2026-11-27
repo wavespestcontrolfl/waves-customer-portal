@@ -15,7 +15,7 @@ const areaAddOnRows = require('../services/area-addon-visit-rows');
 const mistingRefill = require('../services/misting-refill');
 const { oneTimePestBookingPrice } = require('../services/one-time-pest-booking-price');
 const {
-  wdoBookingPrice, isWdoInspectionService, WDO_SERVICE_KEY, WDO_WITH_OTHER_LINES_NOTE, assertWdoPriceAsShown, wdoExpectedPriceFrom,
+  wdoBookingPrice, isWdoInspectionService, WDO_SERVICE_KEY, WDO_WITH_OTHER_LINES_NOTE, wdoPriceCheck, wdoExpectedPriceFrom,
 } = require('../services/wdo-booking-price');
 const { MISTING_SERVICE_CATALOG_KEY: MISTING_SERVICE_KEY, MISTING_REFILL_CATALOG_KEY: MISTING_REFILL_KEY } = require('../utils/mosquito-misting-system');
 const areaAddOnGovernedRate = require('../services/area-addon-governed-rate');
@@ -3400,15 +3400,16 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   // that already read the WDO table price (the Intelligence Bar, before its
   // transaction) passes it as `wdoTable` (null = none), so the builder never
   // reads it again. A booking screen that showed a blank WDO line's price
-  // passes it as `wdoExpectedPrice`: a different price refuses (409) before
-  // any write (assertWdoPriceAsShown).
+  // passes it as `wdoExpectedPrice`: a different price, or no WDO line to
+  // check it against, refuses (409) before any write (wdoPriceCheck).
   const serverPricing = { customer, recurringMembershipBooking, refillContext, conn, wdoTable };
+  const wdoCheck = wdoPriceCheck(wdoExpectedPrice);
   const mainLineWithAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
   const primaryServerPrice = primaryLinePrice == null ? await blankLineServerPrice(serviceRecord, serverPricing, { mainLineWithAddons }) : null;
   const primaryBaseFallback = primaryServerPrice != null
     ? primaryServerPrice
     : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
-  if (primaryLinePrice == null && isWdoInspectionService(serviceRecord)) assertWdoPriceAsShown(primaryBaseFallback, wdoExpectedPrice);
+  if (primaryLinePrice == null && isWdoInspectionService(serviceRecord)) wdoCheck.line(primaryBaseFallback);
   const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
   const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
     serviceKey: serviceRecord?.service_key,
@@ -3452,7 +3453,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     if (base == null && bookingLineIsServerPriced(addonService)) {
       const serverPrice = await blankLineServerPrice(addonService, serverPricing);
       const fallback = serverPrice != null ? serverPrice : (addonService.base_price != null ? Number(addonService.base_price) : null);
-      if (isWdoInspectionService(addonService)) assertWdoPriceAsShown(fallback, wdoExpectedPrice);
+      if (isWdoInspectionService(addonService)) wdoCheck.line(fallback);
       if (fallback != null) base = parseMoneyInput(fallback, `price for ${addon.name || addon.serviceName || 'add-on'}`);
     }
     const lineDiscount = await resolveLineDiscount(addon, base || 0, customer, {
@@ -3486,6 +3487,7 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       weekendShift: addon.weekendShift,
     });
   }
+  wdoCheck.done();
 
   const hasAnyPrice = primaryBase != null || addonLines.some((line) => line.price != null);
   // ONE result-assembly path (Codex pre-push audit P2, GitHub round 2 on
@@ -9055,6 +9057,8 @@ async function scheduleCreateHandler(req, res, next) {
       // The operator's explicit service address for a multi-property customer
       // (customer_properties.id). Absent → the sole-property anchor below.
       propertyId,
+      // The WDO price the screen showed for a blank WDO line (wdoPriceCheck in the pricing below).
+      wdoExpectedPrice,
     } = req.body;
     // Reassigned below when a residential lawn 9x series is written as rounds.
     let { recurringPattern, recurringIntervalDays } = req.body;
@@ -9752,7 +9756,7 @@ async function scheduleCreateHandler(req, res, next) {
       recurringMembershipBooking,
       refillContext: { propertyId: bookingProperty?.property_id || null, sourceEstimateId: linkedEstimateId, isRecurring: !!isRecurring },
       // The WDO price the screen showed for a blank WDO line: a different price at save refuses before any write.
-      wdoExpectedPrice: wdoExpectedPriceFrom(req.body?.wdoExpectedPrice),
+      wdoExpectedPrice: wdoExpectedPriceFrom(wdoExpectedPrice),
     });
 
     // GitHub round 5 P1 (Codex, on 3c7214fa45): two picks in the same

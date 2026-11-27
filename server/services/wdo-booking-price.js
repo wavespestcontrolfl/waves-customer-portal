@@ -214,7 +214,6 @@ function wdoExpectedPriceFrom(value) {
 // changes between the screen's check and the save must never book a price nobody saw. `price` is the line's price before
 // discounts as the save resolved it (table, else catalog).
 function assertWdoPriceAsShown(price, expected) {
-  if (expected === undefined) return;
   const known = price != null && Number.isFinite(Number(price));
   if (known && Math.round(Number(price) * 100) === Math.round(expected * 100)) return;
   throw operationalError(
@@ -224,11 +223,31 @@ function assertWdoPriceAsShown(price, expected) {
   );
 }
 
+// The check one save runs on the WDO price its screen showed (`expected`, from wdoExpectedPriceFrom; undefined = the
+// screen showed none, no check). line(price): a blank WDO line's resolved price must match. done(): a save that carried a
+// shown price must have matched it against a WDO line; one whose WDO line could not be resolved (its catalog row failed
+// to read, so the save would fall back to the posted total) refuses (pre-push audit P0). Used by the office save
+// (buildAppointmentPricing) and Book for a new caller.
+function wdoPriceCheck(expected) {
+  let checked = false;
+  return {
+    line(price) {
+      if (expected === undefined) return;
+      assertWdoPriceAsShown(price, expected);
+      checked = true;
+    },
+    done() {
+      if (expected === undefined || checked) return;
+      throw operationalError(409, 'Could not check the WDO price shown against this visit. This visit was not booked. Save again.', 'WDO_PRICE_UNCHECKED');
+    },
+  };
+}
+
 module.exports = {
   WDO_SERVICE_KEY,
   WDO_TABLE_SOURCE,
   WDO_WITH_OTHER_LINES_NOTE,
-  assertWdoPriceAsShown,
+  wdoPriceCheck,
   wdoExpectedPriceFrom,
   isWdoInspectionService,
   wdoBookingPrice,
