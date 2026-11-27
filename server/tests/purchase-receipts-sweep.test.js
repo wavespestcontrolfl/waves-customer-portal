@@ -370,6 +370,7 @@ describe('runPurchaseReceiptRestockSweep', () => {
     expect(reconcileFailedLineAlert).toHaveBeenCalledWith({
       failed: [expect.objectContaining({ emailId: 'e1', title: 'Taurus SC Termiticide 78 oz' })],
       settled: [{ key: 'amazon|900-1000001-1000001|e1|2', emailId: 'e1' }],
+      since: new Date('2026-09-26T05:49:45Z'), // PURCHASE_RECEIPT_SINCE, so the alert retires entries the count already includes
     });
     expect(result.unappliedFailedLines).toBe(1);
     expect(summarize(result)).toMatchObject({ errors: 1, unappliedFailedLines: 1 });
@@ -587,11 +588,11 @@ describe('SiteOne invoices in the sweep', () => {
     await run();
     expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({
       failed: [expect.objectContaining({ kind: 'email', key: 'email|siteone|s1', vendor: 'siteone', emailId: 's1', receivedAt: '2026-09-27T12:00:00.000Z' })],
-      settled: [],
+      settled: [], since: expect.any(Date),
     });
     mockState.siteOneInvoice = { pending: true };
     await run();
-    expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({ failed: [], settled: [{ key: 'email|siteone|s1', emailId: 's1' }] });
+    expect(reconcileFailedLineAlert).toHaveBeenLastCalledWith({ failed: [], settled: [{ key: 'email|siteone|s1', emailId: 's1' }], since: expect.any(Date) });
   });
 
   test.each([

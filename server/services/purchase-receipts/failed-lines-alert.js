@@ -61,7 +61,7 @@ function failedEmailEntry({ vendor, email }) {
 
 // A line's identity across copies of one invoice. The sweep keys a SiteOne invoice by its number whichever email
 // carries it (siteOneInvoiceLines: the first copy handled owns the shipment), so a row from ANY email under the same
-// vendor and shipment_key can be this line. The exact line number comes first. Product text is a one-to-one fallback
+// vendor and shipment_key can be this line. The exact line number (with the same product text) comes first. Product text is a one-to-one fallback
 // for a copy that numbered the lines differently, and clears an entry only when it is unambiguous: the entry's text
 // is the only failed entry with it on that invoice, exactly one row on the invoice has that text, that row came from
 // ANOTHER email (a sibling line of the failing email, even with identical text, is a different line) and its line
@@ -95,7 +95,9 @@ async function recordedKeys(entries, conn) {
     const id = `${entry.vendor}|${entry.shipmentKey}`;
     const rows = rowsByShipment.get(id) || [];
     const group = lines.filter((other) => `${other.vendor}|${other.shipmentKey}` === id);
-    if (rows.some((row) => Number(row.line_no) === Number(entry.lineNo)) || textClears(entry, rows, group)) recorded.add(entry.key);
+    // The same line number from a copy that ordered its lines differently can be another product: it clears only with the same text.
+    const sameLine = rows.some((row) => Number(row.line_no) === Number(entry.lineNo) && (!entry.titleKey || sameText(row, entry)));
+    if (sameLine || textClears(entry, rows, group)) recorded.add(entry.key);
   }
   const emails = entries.filter((entry) => entry.kind === 'email');
   if (emails.length) {
@@ -106,10 +108,13 @@ async function recordedKeys(entries, conn) {
 }
 
 // This run's failures plus the open alert's carried entries, minus those with positive evidence, oldest first.
-async function openFailedLines({ failed, settled, prior, conn }) {
+async function openFailedLines({ failed, settled, prior, since, conn }) {
   const settledKeys = new Set(settled.map((entry) => entry.key));
   const merged = new Map();
-  for (const entry of [...prior, ...failed]) merged.set(entry.key, entry);
+  // Received before the physical count at PURCHASE_RECEIPT_SINCE: the count already includes it (inventory-agent.js
+  // closeBeforeCutoff retires its lines by the same rule), so it is nothing to add by hand.
+  const atOrAfterCutoff = (entry) => !since || !(new Date(entry.receivedAt) < since);
+  for (const entry of [...prior, ...failed].filter(atOrAfterCutoff)) merged.set(entry.key, entry);
   // A key this run failed AND settled (two copies of one invoice) is judged by its row alone.
   const failedKeys = new Set(failed.map((entry) => entry.key));
   const candidates = [...merged.values()].filter((entry) => failedKeys.has(entry.key) || !settledKeys.has(entry.key));
@@ -150,30 +155,37 @@ function ringOnNewLine(keys) {
   };
 }
 
-// The open alert row for the key, newest first: its metadata and whether a person closed it (done_at set;
-// an auto-cleared row is a closed episode and carries nothing).
+// The newest alert row for the key. `prior` is what an open row carries (a cleared row is a closed episode and
+// carries none). `handled` survives a clear. `personDone`: a PERSON pressed Done (done_by a user id or claude); the
+// quiet 72-hour fall-off and other automatic closes are not "handled".
 async function standingAlert(conn) {
   const row = await conn('notifications').where({ recipient_type: 'admin' })
     .whereRaw("metadata->>'dedupeKey' = ?", [DEDUPE_KEY])
-    .whereRaw("metadata->>'autoCleared' IS DISTINCT FROM 'true'")
-    .orderBy('created_at', 'desc').first('metadata', 'done_at');
+    .orderBy('created_at', 'desc').first('metadata', 'done_at', 'done_by');
   const meta = (typeof row?.metadata === 'string' ? JSON.parse(row.metadata) : row?.metadata) || {};
-  return { prior: Array.isArray(meta.failedLines) ? meta.failedLines : [], handled: new Set((meta.handledKeys || []).map(String)), done: Boolean(row?.done_at) };
+  const cleared = meta.autoCleared === true;
+  const { isPersonDoneBy } = require('../notification-service')._private;
+  return {
+    prior: !cleared && Array.isArray(meta.failedLines) ? meta.failedLines : [],
+    handled: new Set((meta.handledKeys || []).map(String)),
+    cleared,
+    personDone: Boolean(row?.done_at) && isPersonDoneBy(row.done_by),
+  };
 }
 
 /**
- * @param {{failed: object[], settled: {key: string}[]}} params failed: this run's failedLines bucket;
- *   settled: keys this run recorded an outcome for without throwing
+ * @param {{failed: object[], settled: {key: string}[], since?: Date}} params failed: this run's failedLines bucket;
+ *   settled: keys this run recorded an outcome for without throwing; since: PURCHASE_RECEIPT_SINCE
  * @returns {Promise<number>} entries still unapplied
  */
-async function reconcileFailedLineAlert({ failed = [], settled = [] }, conn = db) {
+async function reconcileFailedLineAlert({ failed = [], settled = [], since = null }, conn = db) {
   const episodes = require('../admin-alert-episodes');
-  const { prior, handled, done } = await standingAlert(conn);
-  // Pressing Done says every entry the row held was dealt with: they are never listed again, even when a NEW entry
-  // reopens the row, so staff do not add the same stock twice.
-  if (done) prior.forEach((entry) => handled.add(entry.key));
+  const { prior, handled, cleared, personDone } = await standingAlert(conn);
+  // A person pressing Done says every entry the row held was dealt with: they are never listed again, even when a NEW
+  // entry reopens the row, so staff do not add the same stock twice.
+  if (personDone) prior.forEach((entry) => handled.add(entry.key));
   if (!failed.length && !prior.length) return 0;
-  const open = await openFailedLines({ failed, settled, prior, conn });
+  const open = await openFailedLines({ failed, settled, prior, since, conn });
   if (!open.length) {
     if (!prior.length) return 0;
     await conn.transaction((trx) => episodes.closeAdminAlertKeys(trx, [DEDUPE_KEY], 'count_zero', {
@@ -184,8 +196,16 @@ async function reconcileFailedLineAlert({ failed = [], settled = [] }, conn = db
   const keys = open.map((entry) => entry.key);
   const handledKeys = keys.filter((key) => handled.has(key));
   const active = open.filter((entry) => !handled.has(entry.key));
-  // Everything still open was handled by staff and nothing new failed: leave the row exactly as it is (done).
-  if (!active.length) return open.length;
+  if (!active.length) {
+    // Only entries staff already handled remain. A row a person left done stays as it is; a reopened row whose new
+    // entries resolved would otherwise keep its stale detail, so it resolves (the handled keys stay in its metadata).
+    if (!cleared && !personDone && prior.length) {
+      await conn.transaction((trx) => episodes.closeAdminAlertKeys(trx, [DEDUPE_KEY], 'count_zero', {
+        resolution: 'Cleared: only entries staff already handled remain',
+      }));
+    }
+    return open.length;
+  }
   const { alert, detail } = composeFailedLinesAlert(active);
   await episodes.raiseAdminAlertWithReopen('inventory', alert.headline, alert.why, {
     dedupeKey: DEDUPE_KEY,

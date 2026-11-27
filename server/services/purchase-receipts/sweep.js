@@ -477,7 +477,7 @@ async function runPurchaseReceiptRestockSweep({ notify: notifyAdmin } = {}) {
   // Last, after every line was recorded. job_health stays 'success' when single lines fail (the run worked), so the
   // alert carries them; if the alert cannot be saved the failures would be lost, so the error fails the run
   // (job_health 'failed' with last_error) and the next tick retries the lines and rewrites the alert.
-  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, settled: totals.settledLines });
+  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, settled: totals.settledLines, since });
   return totals;
 }
 
