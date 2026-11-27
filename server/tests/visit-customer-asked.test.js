@@ -919,6 +919,17 @@ describe('customerAskedFacts: repeated wording takes no slot before a source\'s 
     expect(facts.items.map((i) => i.text).sort()).toEqual(['Ask A', 'Ask B', 'Ask C', 'Ask D', 'Ask E', 'Brand new question']);
   });
 
+  test('Codex #8699: a copy cut by its own source cap does not hide the same words in a source with room', async () => {
+    // Six distinct requests: the oldest (Ask F) is past the five-request cap. A message repeating it must still show.
+    const rows = ['A', 'B', 'C', 'D', 'E', 'F'].map((x, n) => formRow({ subject: `Ask ${x}`, description: `Ask ${x}`, metadata: { writer: 'portal_form' }, created_at: `2026-11-1${9 - n}T10:00:00.000Z` }));
+    const messages = [{ body: 'Ask F', created_at: '2026-11-25T10:00:00.000Z' }];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ rows, messages }));
+    const shown = facts.items.map((i) => `${i.kind}:${i.text}`);
+    expect(shown.filter((x) => x.startsWith('portal_request:'))).toHaveLength(5);
+    expect(shown).toContain('portal_message:Ask F');
+    expect(shown).not.toContain('portal_request:Ask F');
+  });
+
   test('the return reason keeps its slot', async () => {
     mockGather.mockResolvedValue(asks([askItem({ id: 'booking:svc-1', source: 'request_form', at: '2026-11-01T15:00:00.000Z', text: 'Ants in the kitchen.' })]));
     const messages = Array.from({ length: 12 }, (_, n) => ({ body: `Message number ${'x'.repeat(n + 1)}`, created_at: `2026-11-2${n % 10}T15:00:00.000Z` }));

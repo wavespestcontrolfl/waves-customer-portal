@@ -452,18 +452,21 @@ async function customerAskedFacts(svc, dbh) {
   // re-service words, the portal requests, then the portal messages; inside one kind the newest first. An item about this
   // appointment (the return reason, the booking note, a reschedule note) is a different thing from the same words said
   // account-wide, so each scope dedupes alone. The return reason is never dropped: it ranks first.
+  // One pass: a duplicate never takes a slot from a distinct ask, and only a copy that is KEPT (not cut by its source's cap)
+  // blocks its repeats, so wording whose preferred copy is capped out still shows from a source with room.
   const seen = new Set();
   const rank = (item) => KIND_PRIORITY.indexOf(item.kind);
   const ordered = lists.flat().filter(Boolean).sort((a, b) => rank(a) - rank(b) || newestFirst(a, b));
-  const unique = ordered.filter((item) => {
-    const key = `${belongsToAppointment(item) ? 'appointment' : 'account'}|${wordsKey(item.text)}`;
-    if (!wordsKey(item.text) || seen.has(key)) return false;
+  const taken = { portal_request: 0, portal_message: 0 };
+  const items = ordered.filter((item) => {
+    const words = wordsKey(item.text);
+    const key = `${belongsToAppointment(item) ? 'appointment' : 'account'}|${words}`;
+    if (!words || seen.has(key)) return false;
+    if (item.kind in taken && taken[item.kind] >= PORTAL_ROW_LIMIT) return false;
+    if (item.kind in taken) taken[item.kind] += 1;
     seen.add(key);
     return true;
   });
-  // The per-source cap comes AFTER the repeats are gone, so a duplicate never takes a slot from a distinct ask.
-  const taken = { portal_request: 0, portal_message: 0 };
-  const items = unique.filter((item) => !(item.kind in taken) || (taken[item.kind] += 1) <= PORTAL_ROW_LIMIT);
   const picked = pickItems(items);
   return picked.length ? { items: picked } : null;
 }
