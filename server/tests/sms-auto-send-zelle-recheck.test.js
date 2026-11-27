@@ -72,7 +72,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   scopeBlockSpy = jest.spyOn(require('../services/payment-status-contract'), 'autoSendScopeBlock').mockReturnValue(null);
   const inbound = chain({ first: jest.fn(async () => ({
-    created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161',
+    created_at: new Date(), from_phone: '+12025550101', to_phone: '+19413529161', metadata: { media: [] },
   })) });
   const activeClaim = chain();
   decisions = chain();

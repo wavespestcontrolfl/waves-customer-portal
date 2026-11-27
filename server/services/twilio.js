@@ -2275,6 +2275,7 @@ const TwilioService = {
         await visitRecipients.notifyVisitRecipients({
           scheduledServiceId,
           kind: "en_route",
+          customerId,
           excludePhones: servedPhones,
           // The person's OWN map-only link (a token minted on their row), never the holder's tracker link: that one
           // opens the report, the invoice and the cards after the visit.

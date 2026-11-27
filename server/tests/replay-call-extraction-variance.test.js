@@ -970,6 +970,23 @@ describe('call extraction replay variance reporting', () => {
       expect(compareFlatFields({ [field]: before }, { [field]: after }, true).find((v) => v.field === field).severity).toBe('high');
       expect(compareFlatFields({ [field]: before }, { [field]: before }, true).filter((v) => v.field === field)).toEqual([]);
     });
+    test('a scope-only change (appointment_texts_scope, schema 1.32.0) on the singleton or on an array entry is a high-severity variance', () => {
+      const field = 'secondary_contacts_consent_signature';
+      const { flatView } = require('../utils/extraction-compat');
+      const contact = (scope) => ({
+        first_name: 'Bob', phone_e164: '+15550100123', role: 'spouse_partner', wants_notifications: true, wants_appointment_texts: true, on_site: false,
+        ...(scope === undefined ? {} : { appointment_texts_scope: scope }),
+      });
+      const view = (singleScope, arrayScope) => flatView({
+        meta: { schema_version: '1.32.0' }, caller: {}, secondary_contact: contact(singleScope), secondary_contacts: [contact(arrayScope)],
+      });
+      const high = (a, b) => compareFlatFields(a, b, true).filter((v) => v.field === field && v.severity === 'high');
+      expect(high(view(undefined, undefined), view('this_visit', undefined))).toHaveLength(1); // the singleton
+      expect(high(view(undefined, undefined), view(undefined, 'this_visit'))).toHaveLength(1); // an array entry
+      expect(high(view('ongoing', 'ongoing'), view('ongoing', 'this_visit'))).toHaveLength(1);
+      // garbage normalizes to "unspecified", the same as missing: no variance
+      expect(high(view(undefined, undefined), view('garbage', 'garbage'))).toEqual([]);
+    });
   });
 
   describe('consent.sms_declined variance coverage', () => {

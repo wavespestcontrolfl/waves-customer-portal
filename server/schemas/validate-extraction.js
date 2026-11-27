@@ -214,7 +214,12 @@ const persistedSchema = require('./call-extraction.persisted.schema.json');
 // call in the caller's own words and pinned with the caller's quote under
 // /service_request/estimate_response. Never consent to be charged. No consumer yet. Older payloads
 // still validate and read as "no answer".
-const SCHEMA_VERSION = '1.31.0';
+// 1.32.0: additive — secondary_contact(s).appointment_texts_scope (optional nullable enum "ongoing" |
+// "this_visit" | "unspecified" in both schemas, never `required`; prompt v36). Owner ruling
+// 2026-11-25: a person the caller names for the appointment texts gets them for EVERY visit of the
+// account unless the caller limited it to the booked visit ("this_visit"). Missing, null or unknown
+// reads as "unspecified" (every visit). Older payloads still validate.
+const SCHEMA_VERSION = '1.32.0';
 
 const ajv = new Ajv({ allErrors: true, strict: false });
 addFormats(ajv);

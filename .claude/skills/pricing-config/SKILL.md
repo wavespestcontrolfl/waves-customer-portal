@@ -96,6 +96,22 @@ environment that carries the row (prod does), **editing
   made before it keep the flat top (`pricingMetadata.legacyPestAboveTable`,
   an unstamped priced estimate reads the same). The `pest_footprint` row still
   ends at 5,500; editing it does not change the above-table step.
+- **Whole-home sizing** (owner 2026-11-26 "whole home", new quotes only; no
+  gate, ships live): the cockroach treatment bracket (`pest_initial_roach`,
+  stand-alone and plan-added), the bed bug size step and the rodent guarantee
+  tier read the home's TOTAL living area, as flea does, not the ground-floor
+  footprint (two-story 2,800 sq ft: cockroach $289, was $202.50). One-time
+  pest and the recurring pest plan stay on the footprint. No Settings row
+  changed: the brackets (`pest_base.initial_roach`, the bed bug size
+  modifiers, the guarantee tiers) are the same tables read with a larger
+  size. Quotes made before it keep the footprint
+  (`pricingMetadata.legacyWholeHomeSizing`; an unstamped priced estimate, or
+  inputs-only asking for one of the three, reads the same). Plan-wide stamp:
+  a service added to a legacy estimate stays on the footprint. A browser-priced
+  save naming a cockroach or guarantee row is always refused (409: the
+  browser's cockroach brackets are hard-coded, the server must price it). Homes only: a commercial property keeps the
+  footprint path for all three. An unmeasured rodent guarantee (2,000
+  fallback) goes to review.
 - **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
   Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
   estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps

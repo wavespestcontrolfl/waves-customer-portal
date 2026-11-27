@@ -6262,7 +6262,19 @@ site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
 review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
 (owner ruling 2026-09-03: the two-treatment package priced as one
-regular_standalone knockdown on the home footprint; species / severity /
+regular_standalone knockdown on the home footprint (since 2026-11-26, new quotes
+only: on the home's total living area, so a two-story home prices as a one-story
+home of the same size; a draft stored before that keeps its footprint price,
+estimate stamp `legacyWholeHomeSizing`; when the wizard keeps its 2,000 sq ft
+placeholder and the server's own lookup measured the home, the cockroach and bed
+bug treatments price on the measured living area, as flea does, and a
+customer-confirmed size still wins; a bed bug row held for inspection stores
+the same size fields, so a staff revision keeps the measured home; a
+commercial building is not a home and keeps its measured footprint; the
+measured home also satisfies the stand-alone package's "building size not
+measured" check, and a measured home above the 20,000 sq ft public ceiling
+that a line priced on parks the quote, `home_size_above_public_limit`, as a
+posted size above it does); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed
@@ -7943,7 +7955,7 @@ route or on site, else 0). It never returns `summary`, the report, invoice, prep
 or review tokens, photos, the offer and referral cards, `customer`,
 `cancellation`, `visitChange`, stops count or route progress, and the cards and
 summary reads do not run. The recipient path is strictly read-only (no
-geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token) and
+geocoder, no Bouncie fetch, no paid ETA, no write); the token resolves only while the recipient row is bound to the visit's CURRENT customer (`visit_text_recipients.customer_id` equal to `scheduled_services.customer_id`, re-checked on the token lookup, the final recheck and the route's own visit read; a reassigned visit or a null binding answers 404 like an unknown token; the route's FINAL read on all three routes, the GET's payload read and each POST's recheck, joins `visit_text_recipients` in the SAME query that returns the visit, on the resolved row's id AND `track_token` equal to the request token AND `scheduled_service_id` equal to the visit AND `r.customer_id = s.customer_id`, so a row deleted, replaced, given a new token, moved or rebound after the permission reads matches nothing and answers 404 like an unknown token), the row may also be a copy of the customer's every-visit list (`customer_reminder_contacts`, owner 2026-11-24 PM + 2026-11-26 "simpler": a person a call named, without a "just this visit" limit, is copied onto each live visit of that customer as an ordinary recipient row by `materializeForVisit` right before a send, so a later visit's en-route text can mint that person's own map-only token for THAT visit; a copy also needs the visit's CURRENT customer to list the number, checked in the resolver's permission read and again in the same final joined query on all three routes, so a copy a merge moved to an account that does not list the person answers 404 like an unknown token) and
 the plain permission reads pass (`recipientPermission`: gate, person on the
 visit, no decline, no callback-number hold on the visit or the person's number,
 no call do-not-contact or "no texts"; the choices row is read fail-closed and regardless of `GATE_CONTACT_LOGIN`), and only after the cheap lifetime check passes (a closed link answers 404 with no permission read; the visit is read again after the permission reads and must still be eligible). The live vehicle shows only while the visit is en route, `tech_status.current_job_id` exactly this visit's own id, decided in the same SELECT that returns the fix (no visit-group lookup: a grouped visit whose focus moved to a sibling shows no truck) and the cached fix was reported and received strictly after the visit's `en_route_at`; otherwise `vehicle` is null. The `tech_status` read is STRICT (`resolveFreshTechPosition` with `strict: true`, used only for this scope): a FAILED read answers 404 exactly like an unknown token (code-only log), while a successful read with no usable fix answers 200 with `vehicle: null`. The technician photo is presigned STRICT for this scope (`resolveTechPhotoUrl(..., { strict: true })`): a signing failure throws a code-only error and answers 404 like an unknown token, never a fallback photo (every other caller keeps its fallback; the helper logs the error code only, never the S3 key or the raw message). The GET makes no visit-change read: an eligible row is en route, on site or just completed, which carries no visit change. Its stops-ahead POST answers nulls and its view POST

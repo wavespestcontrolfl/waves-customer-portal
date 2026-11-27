@@ -134,6 +134,8 @@ async function amountsBlock({ decision, outgoingBody }) {
     zelleInvoiceId: snapshot?.zelle_invoice_id || null,
     inboundMessage: resolveInboundMessage(decision),
     paymentStatusSnapshot: snapshot?.payment_status_snapshot || null,
+    // the inbound text this decision answers: a copied PHOTO CHECK sentence is rechecked against that text's own photo reading
+    inboundSmsLogId: decision.sms_log_id || null,
     humanEditedBody: staffEdited,
     // A pre-v12 decision reaches here ONLY for its Zelle claim (above): its amount rules stay untouched.
     trustOwedAmounts: !realAnswers,
@@ -232,7 +234,7 @@ function blockReasonIsLabelInfrastructure(blockReason) {
   return Boolean(m) && isLabelRecheckInfrastructureFailure(m[1]);
 }
 // Codex round-64 P2: a BILLING recheck that could not read the billing / Stripe state says nothing about the message either.
-const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed', 'report_delivery_recheck_failed']);
+const BILLING_RECHECK_INFRASTRUCTURE_REASONS = new Set(['amount_recheck_failed', 'payment_status_recheck_failed', 'zelle_recheck_failed', 'report_delivery_recheck_failed', 'photo_check_recheck_failed']);
 function blockReasonIsBillingInfrastructure(blockReason) {
   const m = /^amount no longer authorized \(([a-z_]+)\)$/.exec(String(blockReason || ''));
   return Boolean(m) && BILLING_RECHECK_INFRASTRUCTURE_REASONS.has(m[1]);
