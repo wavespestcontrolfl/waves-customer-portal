@@ -8,15 +8,12 @@
 // It also links each big-tank sprayer to its gun in the equipment list (equipment_systems.gun_asset_id): tank #1 -> "LESCO Lawn
 // Spray Gun" (Chemlawn Spray Gun 007433), tank #2 -> "LESCO MAG1 Original Spray Gun" (MAG1 052979). Exact names, one row each, set
 // only while gun_asset_id is NULL; down() clears only a link this migration set.
-// Each row is locked (FOR UPDATE) and changed only while it still holds the carrier (and, for the FlowZone, the square feet) read
-// from production on 2026-11-27, and for tank #2 and the FlowZone only while it is not field verified (an admin's field test wins).
-// The checked values are in the write's own WHERE. A row an admin changed first is kept and logged; a second run changes nothing.
-// Tank #1 only loses its expiry, in place. Tank #2 and the FlowZone change number or status, so (as recording a calibration in the
-// admin does) the old row is retired and a copy with the new values becomes the active row: past visits and reports that point at
-// the old row keep the number and status they used. Each change writes one critical audit_log event.
+// Each row is locked (FOR UPDATE) and written only while it still holds the carrier (and, for the FlowZone, the square feet) read
+// from production on 2026-11-27: the checked values are in the UPDATE's own WHERE. A row an admin changed first is kept and
+// logged, and a second run changes nothing. Each changed row writes one critical audit_log event with its exact before values.
 //
-// down() undoes each change only while the row still holds exactly what up() wrote (an admin edit since then wins): tank #1 gets
-// its expiry back; a replacement is retired and the old row active again. It never throws: a failure is logged and the rows stay.
+// down() restores those before values from the audit events, only on a row that still holds exactly what up() wrote (an admin
+// edit since then wins). It never throws: a failure is logged and the rows stay.
 
 const MIGRATION = '20261127260000_sprayer_owner_estimates';
 const LOG = '[20261127260000]';
@@ -27,8 +24,11 @@ const TANK_1 = '110-Gallon Spray Tank #1';
 const TANK_2 = 'Udor KAPPA-18/12V-HP + 110-gal tank #2 - Lawn Gun';
 const FLOWZONE = 'FlowZone Typhoon 3.0 #1';
 
+// The columns this migration reads and may write.
+const COLUMNS = ['carrier_gal_per_1000', 'calibration_status', 'expires_at', 'verification_notes', 'estimated_sq_ft_per_4gal_tank', 'estimated_sq_ft_per_full_tank'];
+
 const CHANGES = [
-  { name: TANK_1, inPlace: true, live: { carrier_gal_per_1000: 2 }, after: { calibration_status: 'field_verified', expires_at: null } },
+  { name: TANK_1, live: { carrier_gal_per_1000: 2 }, after: { calibration_status: 'field_verified', expires_at: null } },
   {
     name: TANK_2,
     live: { carrier_gal_per_1000: 2 },
@@ -64,7 +64,7 @@ async function activeRow(knex, name) {
   const rows = await knex('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where({ 'es.name': name, 'ec.active': true })
-    .select('ec.*')
+    .select('ec.id', ...COLUMNS.map((column) => `ec.${column}`))
     .forUpdate('ec');
   if (rows.length !== 1) {
     console.log(`${LOG} "${name}": ${rows.length} active calibrations, need one: kept`);
@@ -75,7 +75,6 @@ async function activeRow(knex, name) {
 
 const sameNumber = (a, b) => a != null && Math.abs(Number(a) - Number(b)) < 1e-9;
 const holds = (row, values) => Object.entries(values).every(([column, value]) => (value == null ? row[column] == null : sameNumber(row[column], value)));
-const sameValue = (a, b) => (b == null ? a == null : String(a) === String(b) || sameNumber(a, b));
 // The WHERE that pins a row to the values checked: numbers by their numeric value, NULL by IS NULL, text by equality.
 function pinned(query, values) {
   for (const [column, value] of Object.entries(values)) {
@@ -85,41 +84,14 @@ function pinned(query, values) {
   }
   return query;
 }
-// An admin's field test on tank #2 or the FlowZone wins over the owner estimate.
-const notFieldVerified = (query) => query.where((q) => q.whereNull('calibration_status').orWhereNot('calibration_status', 'field_verified'));
 
-async function writeAudit(knex, id, name, metadata) {
+async function writeAudit(knex, row, name, before, after) {
   const { recordAuditEvent } = require('../../services/audit-log');
   await recordAuditEvent({
-    actor_type: 'system', action: ACTION, resource_type: 'equipment_calibrations', resource_id: String(id),
-    metadata: { migration: MIGRATION, system_name: name, ...metadata },
+    actor_type: 'system', action: ACTION, resource_type: 'equipment_calibrations', resource_id: String(row.id),
+    metadata: { migration: MIGRATION, system_name: name, before, after },
     critical: true, trx: knex,
   });
-}
-
-// Tank #1: the expiry goes, in place (its number and status stay).
-async function changeInPlace(knex, row, change) {
-  const before = Object.fromEntries(Object.keys(change.after).map((column) => [column, row[column] ?? null]));
-  const wrote = await pinned(knex('equipment_calibrations').where({ id: row.id, active: true }), change.live)
-    .update({ ...change.after, updated_at: knex.fn.now() });
-  if (wrote) await writeAudit(knex, row.id, change.name, { before, after: change.after });
-}
-
-// Tank #2 and the FlowZone: retire the old row, and a copy with the new values becomes the active one.
-async function replaceRow(knex, row, change) {
-  if (row.calibration_status === 'field_verified') {
-    console.log(`${LOG} "${change.name}" is field verified: kept`);
-    return;
-  }
-  const retired = await notFieldVerified(pinned(knex('equipment_calibrations').where({ id: row.id, active: true }), change.live))
-    .update({ active: false, updated_at: knex.fn.now() });
-  if (!retired) return;
-  const { id: _id, created_at: _created, updated_at: _updated, system_name: _name, ...copy } = row;
-  const [inserted] = await knex('equipment_calibrations')
-    .insert({ ...copy, ...change.after, active: true, updated_at: knex.fn.now() })
-    .returning('id');
-  const newId = inserted?.id ?? inserted;
-  await writeAudit(knex, newId, change.name, { replaced_id: row.id, after: change.after });
 }
 
 // The one row of the table with this exact name, or null (logged).
@@ -166,24 +138,19 @@ exports.up = async function up(knex) {
   await linkGuns(knex);
   for (const change of CHANGES) {
     const row = await activeRow(knex, change.name);
-    // Already done (a second run): nothing to change.
-    if (!row || Object.entries(change.after).every(([column, value]) => sameValue(row[column], value))) continue;
+    if (!row) continue;
     if (!holds(row, change.live)) {
       console.log(`${LOG} "${change.name}" no longer holds the values read on 2026-11-27 (${JSON.stringify(change.live)}): kept`);
       continue;
     }
-    await (change.inPlace ? changeInPlace : replaceRow)(knex, row, change);
+    const before = Object.fromEntries(Object.keys(change.after).map((column) => [column, row[column] ?? null]));
+    const unchanged = Object.entries(change.after).every(([column, value]) => (value == null ? row[column] == null : String(row[column]) === String(value) || sameNumber(row[column], value)));
+    if (unchanged) continue;
+    const wrote = await pinned(knex('equipment_calibrations').where({ id: row.id, active: true }), change.live)
+      .update({ ...change.after, updated_at: knex.fn.now() });
+    if (wrote) await writeAudit(knex, row, change.name, before, change.after);
   }
 };
-
-// Undo one calibration event: tank #1 gets its expiry back; a replacement is retired and the row it replaced is active again.
-async function undoCalibration(knex, event, metadata) {
-  const current = pinned(knex('equipment_calibrations').where({ id: event.resource_id, active: true }), metadata.after);
-  if (!metadata.replaced_id) return current.update({ ...metadata.before, updated_at: knex.fn.now() });
-  const retired = await current.update({ active: false, updated_at: knex.fn.now() });
-  if (!retired) return 0;
-  return knex('equipment_calibrations').where({ id: metadata.replaced_id, active: false }).update({ active: true, updated_at: knex.fn.now() });
-}
 
 exports.down = async function down(knex) {
   try {
@@ -193,9 +160,11 @@ exports.down = async function down(knex) {
     const done = new Set();
     for (const event of events) {
       const metadata = typeof event.metadata === 'string' ? JSON.parse(event.metadata) : event.metadata;
-      if (done.has(event.resource_id) || !metadata?.after) continue;
+      if (done.has(event.resource_id) || !metadata?.before || !metadata?.after) continue;
       done.add(event.resource_id);
-      if (!(await undoCalibration(knex, event, metadata))) console.log(`${LOG} down: calibration ${event.resource_id} changed since up(): kept`);
+      const wrote = await pinned(knex('equipment_calibrations').where({ id: event.resource_id }), metadata.after)
+        .update({ ...metadata.before, updated_at: knex.fn.now() });
+      if (!wrote) console.log(`${LOG} down: calibration ${event.resource_id} changed since up(): kept`);
     }
   } catch (err) {
     console.log(`${LOG} down failed, rows kept: ${err.message}`);

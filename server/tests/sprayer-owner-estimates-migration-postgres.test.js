@@ -25,9 +25,7 @@ jest.setTimeout(30000);
     await database.raw(`CREATE TABLE ??.equipment_calibrations (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), equipment_system_id uuid NOT NULL, active boolean NOT NULL DEFAULT true,
       carrier_gal_per_1000 numeric(6,3), calibration_status varchar(40), expires_at timestamptz, verification_notes text,
-      estimated_sq_ft_per_4gal_tank integer, estimated_sq_ft_per_full_tank integer, calibrated_at timestamptz,
-      created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz)`, [schema]);
-    await database.raw('CREATE UNIQUE INDEX ON ??.equipment_calibrations (equipment_system_id) WHERE active = true', [schema]);
+      estimated_sq_ft_per_4gal_tank integer, estimated_sq_ft_per_full_tank integer, updated_at timestamptz)`, [schema]);
     await database.raw(`CREATE TABLE ??.audit_log (
       id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type text, actor_id text, action varchar(96) NOT NULL, resource_type text,
       resource_id text, metadata jsonb, ip_address text, user_agent text, created_at timestamptz NOT NULL DEFAULT now())`, [schema]);
@@ -71,12 +69,8 @@ jest.setTimeout(30000);
     const events = await database('audit_log').where('action', 'like', '%:calibration').select('action', 'metadata');
     expect(events).toHaveLength(3);
     for (const event of events) expect(event.action.length).toBeLessThanOrEqual(96);
-    // Tank #1 changes in place; tank #2 and the FlowZone get a replacement row, and the old row (which past visits point at) keeps
-    // the number and status it had.
-    expect(events.find((event) => event.metadata.system_name === TANK_1).metadata.before).toEqual({ calibration_status: 'field_verified', expires_at: EXPIRES });
-    const replaced = events.find((event) => event.metadata.system_name === FLOWZONE).metadata.replaced_id;
-    expect(await database('equipment_calibrations').where({ id: replaced }).first()).toMatchObject({ active: false, carrier_gal_per_1000: '1.330', calibration_status: 'estimated', estimated_sq_ft_per_4gal_tank: 3000 });
-    expect(await database('equipment_calibrations').where({ active: false }).count('* as n').first()).toEqual({ n: '5' });
+    expect(events.find((event) => event.metadata.system_name === FLOWZONE).metadata.before).toMatchObject({ carrier_gal_per_1000: '1.330', estimated_sq_ft_per_4gal_tank: 3000 });
+    expect(await database('equipment_calibrations').where({ active: false }).pluck('carrier_gal_per_1000')).toEqual(['1.500', '1.500', '1.500']);
     await migration.up(database);
     expect(await database('audit_log').where('action', 'like', '%:calibration').count('* as n').first()).toEqual({ n: '3' });
   });
@@ -120,15 +114,6 @@ jest.setTimeout(30000);
     log.mockRestore();
     expect(await gunOf(TANK_1)).toEqual({ gun: 'Other gun' });
     expect(await database('audit_log').where('action', 'like', '%:gun').count('* as n').first()).toEqual({ n: '1' });
-  });
-
-  test('a row an admin field tested at the same number is kept', async () => {
-    await seed({ [TANK_2]: { calibration_status: 'field_verified', verification_notes: 'Admin field test.' } });
-    const log = jest.spyOn(console, 'log').mockImplementation(() => {});
-    await migration.up(database);
-    log.mockRestore();
-    expect(await active(TANK_2)).toMatchObject({ carrier_gal_per_1000: '2.000', calibration_status: 'field_verified', verification_notes: 'Admin field test.' });
-    expect((await active(TANK_2)).expires_at.toISOString()).toBe(EXPIRES);
   });
 
   test('a row an admin changed from the values read is kept and logged', async () => {
