@@ -15388,7 +15388,9 @@ export function CompletionPanel({
         cancelled = true;
       };
     const params = new URLSearchParams();
-    params.set("serviceType", service.serviceType);
+    // A non-lawn card matches on the booked name, as the defaults read does: the schedule shows a keyless "Callback Visit"
+    // as "Service Callback", and only the booked name carries the general pest card.
+    params.set("serviceType", isLawn ? service.serviceType : (service.serviceTypeRaw || service.serviceType));
     if (isLawn) {
       const track = protocolTrackForLawnType(service.lawnType);
       if (track) params.set("track", track);
@@ -15432,6 +15434,7 @@ export function CompletionPanel({
   }, [
     service.id,
     service.serviceType,
+    service.serviceTypeRaw,
     service.lawnType,
     service.scheduledDate,
     service.scheduled_date,
@@ -16402,6 +16405,13 @@ export function CompletionPanel({
       && 'generationLawnAssessmentId' in savedDraft
       && ((savedDraft.generationLawnAssessmentId ?? null) !== (lawnAssessmentId ?? null)
         || (savedDraft.generationLawnAssessmentRevision ?? null) !== (lawnAssessmentRevision ?? null))) {
+      restorePruned = true;
+    }
+    // A no-card visit (noCardConfirmed, already answered at Restore) submits no card action: a report written over the
+    // draft's card actions describes treatment the record will not hold, so it goes too.
+    if (generatedReportTextRef.current && noCardConfirmed
+      && ((Array.isArray(savedDraft.selectedProtocolActionLabels) && savedDraft.selectedProtocolActionLabels.length > 0)
+        || markerTexts(savedDraft.preGenerationNotes || "", PROTOCOL_MARKER_TAGS).length > 0)) {
       restorePruned = true;
     }
     const restoredFindings =

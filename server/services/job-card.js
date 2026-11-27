@@ -2401,6 +2401,8 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
 function primaryProgramKey(svc, protocols) {
   const identity = { serviceKey: svc.service_key, name: svc.service_type };
   if (isMistingDesignConsultation(identity) || isMistingSystemServiceUnconfigured(identity)) return null;
+  // A booked Waves Assessment (key lawn_inspection) is a walk with no product: no treatment line under any name or category.
+  if (svc.service_key === 'lawn_inspection') return null;
   if (!svc.service_category) {
     // A lawn name ("Fertilization", "Weed Control") keeps the lawn plan, as the card does (detectServiceLine): the matcher has
     // no lawn rule, so its no-card answer is for other names only.

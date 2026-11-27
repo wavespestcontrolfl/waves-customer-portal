@@ -366,6 +366,10 @@ describe('the job card tank lookup: a category-less lawn name keeps the lawn pla
     expect(primaryProgramKey({ service_type: 'Fertilization', service_key: 'lawn_fertilization', service_category: null }, protocols)).toBeUndefined();
     expect(primaryProgramKey({ service_type: 'Weed Control', service_key: null, service_category: null }, protocols)).toBeUndefined();
     expect(primaryProgramKey({ service_type: 'Service Visit', service_key: 'web_sweep', service_category: null }, protocols)).toBeNull();
+    // A booked assessment has no treatment line, with no category or under a lawn name.
+    expect(primaryProgramKey({ service_type: 'Waves Assessment', service_key: 'lawn_inspection', service_category: null }, protocols)).toBeNull();
+    expect(primaryProgramKey({ service_type: 'Lawn Inspection', service_key: 'lawn_inspection', service_category: null }, protocols)).toBeNull();
+    expect(primaryProgramKey({ service_type: 'Lawn Inspection', service_key: 'lawn_inspection', service_category: 'lawn_care' }, protocols)).toBeNull();
   });
 });
 

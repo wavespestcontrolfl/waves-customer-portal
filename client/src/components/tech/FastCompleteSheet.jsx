@@ -313,7 +313,10 @@ const isOutOfStockRow = (row) => stockHolds(row.product, submittedAmount(row.tot
 // (reason '' when none), and the product whose stock holds Complete when
 // that is what is missing. `stockAdvisory` (the
 // context's key): no product at 0 in stock holds, and `stockNotices` names each.
-function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}, stockAdvisory) {
+// A visit with no protocol card (owner pick D18) and no product is inspection only: the sheet records applications, so it
+// sends the tech to the Full form, which records the stop with no product ("Full form" in the hold opens it).
+export const NO_CARD_HOLD = 'This visit has no protocol card: inspection only, no product. Record it on the Full form.';
+export function missingRequirement(form, rows, ratingAllowed, dictationPending, openChecks = 0, voiceHolds = {}, stockAdvisory, noCard = false) {
   const active = rows.filter((row) => row.active);
   // The server refuses the whole visit when a tracked stock would go below
   // zero (unless the stock is advisory); a stock already at zero is named here instead.
@@ -325,7 +328,7 @@ function missingRequirement(form, rows, ratingAllowed, dictationPending, openChe
   const [, reason = '', stockRow = null] = [
     // A recorded clip still being taken or transcribed would miss the save.
     [dictationPending, 'Finish dictating before you complete.'],
-    [!active.length, 'Select at least one product.'],
+    [!active.length, noCard ? NO_CARD_HOLD : 'Select at least one product.'],
     [outOfStock, outOfStock && `${outOfStock.name} shows 0 in stock. Update inventory or remove it.`, outOfStock],
     [missingAmount, missingAmount && `Enter the amount for ${missingAmount.name}.`],
     [!form.pests.size, 'Select at least one pest.'],
@@ -543,6 +546,8 @@ function useFastCompleteContext({
           // re-service, never a lane or typed one: the visits the full form
           // shows the sweep box on (isRegularPestVisit in SchedulePage.jsx).
           houseMix,
+          // The server's no-card answer (owner pick D18): an empty product list then sends the tech to the Full form.
+          noCard: cardDefaults?.matchedVisit?.reason === 'no_protocol',
           visitIdentity: sheetVisitIdentity(visit, reportFlow, oneTapGateOf(data)),
           // A lane visit: whether its saved trace would show on the report
           // (an older server says nothing, so the trace holds stand).
@@ -847,7 +852,7 @@ function FastCompleteForm({ service, request, ctx, submission, locked, photos, d
     onPick: (product) => addProduct(product, form.method),
   });
 
-  const { reason: sheetReason, stockRow, stockNotices } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong }, ctx.stockAdvisory);
+  const { reason: sheetReason, stockRow, stockNotices } = missingRequirement(form, rows, ctx.rating.allowed, busy, voice.checks.length, { confirms: voice.confirms.length, officeNoteTooLong: voice.officeNoteTooLong }, ctx.stockAdvisory, ctx.noCard === true);
   const missingReason = withAsksHold(sheetReason, asks);
   // "Update inventory or remove it": once the stock is updated, the tech
   // re-reads it here rather than close the sheet and lose the visit.
@@ -1204,7 +1209,10 @@ const NO_PRODUCT_HOLDS = {
 // screen order, the product whose stock holds it, and the fix the hold
 // offers on the sheet ('remove_trace').
 // What an empty product list says for this record mode (null: no hold).
-const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mode] : 'Select at least one product.');
+export const noProductHold = (mode, noCard = false) => {
+  if (mode in NO_PRODUCT_HOLDS) return NO_PRODUCT_HOLDS[mode];
+  return noCard ? NO_CARD_HOLD : 'Select at least one product.';
+};
 
 // `productsFromNote` (voice fill, a note not yet read for products): Generate
 // reads the products out of the note first, so neither an empty list nor a row
@@ -1214,11 +1222,11 @@ const noProductHold = (mode) => (mode in NO_PRODUCT_HOLDS ? NO_PRODUCT_HOLDS[mod
 // lists every such product for the sheet to name.
 // `oneTap` (GATE_ONE_TAP_REPORT, owner 2026-10-17): the photo read holds nothing (photos are optional, shown when
 // saved; the body then omits photoCaptionsSeen until the read answers). A photo change still being saved still holds.
-function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, traceHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, ...sendInputs }) {
+function reportFlowMissing({ form, active, ratingAllowed, dictationPending, photoHold, traceHold, photosLoaded, photosFailed, promisesLoaded, stage, mode, voiceHolds, productsFromNote, stationHold, stockAdvisory, oneTap, noCard = false, ...sendInputs }) {
   const outOfStock = active.find(isOutOfStockRow);
   const unread = stage === 'generate' && productsFromNote;
   const missingAmount = unread ? null : active.find((row) => !hasAmount(row));
-  const noProduct = unread ? null : noProductHold(mode);
+  const noProduct = unread ? null : noProductHold(mode, noCard);
   const [, reason = '', stockRow = null, fix = null] = [
     [dictationPending, 'Finish dictating first.'],
     [photoHold, photoHold],
@@ -2050,6 +2058,7 @@ function ReportFlowForm({
     stationHold: recordState.stationGate.generate,
     stockAdvisory: ctx.stockAdvisory,
     oneTap,
+    noCard: ctx.noCard === true,
   };
   const noteText = form.note.trim();
   const generateMissing = reportFlowMissing({

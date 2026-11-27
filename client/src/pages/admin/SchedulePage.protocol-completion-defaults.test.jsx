@@ -361,6 +361,26 @@ it('a restored draft with an automatic row waits for the card answer before it c
   expect(onSubmit).not.toHaveBeenCalled();
 });
 
+it('a report restored over card actions on a no-card visit is cleared: the record will hold no card action', async () => {
+  const visit = cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null });
+  const report = 'WHAT WE DID:\nTreated the perimeter.\nWHAT WE FOUND:\nNo activity.';
+  stubFetchWithActions({ serviceType: 'Courtesy Visit', programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
+  localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
+    serviceId: visit.id,
+    savedAt: Date.now(),
+    notes: report, generatedReportText: report, aiReportUsed: true, chipLinesDetached: true,
+    preGenerationNotes: '[Protocol] Treated the perimeter\nCourtesy stop.',
+    selectedProtocolActionLabels: ['Treated the perimeter'],
+  }));
+  await act(async () => {
+    render(<CompletionPanel service={visit} products={cockroachCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  // The no-card answer lands before the Restore tap.
+  expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
+  fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+  expect(await screen.findByText(/the draft\s+was cleared/)).toBeTruthy();
+});
+
 it('an older draft with no seeded copy keeps its house-mix rows on a no-card visit: nothing proves them untouched', async () => {
   const visit = cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null });
   localStorage.setItem(`waves_completion_draft_${visit.id}`, JSON.stringify({
@@ -380,6 +400,16 @@ it('an older draft with no seeded copy keeps its house-mix rows on a no-card vis
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
   expect(screen.getByText('Taurus SC')).toBeTruthy();
+});
+
+it('the actions read asks for the card by the booked name, not the schedule display name', async () => {
+  stubFetchWithActions({ programKey: 'pest', programName: 'General Pest', visit: { visit: 1, month: 'Any' }, actions: [] });
+  await act(async () => {
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Service Callback', serviceTypeRaw: 'Callback Visit', completionProfile: null, findingsSchema: null })} products={cockroachCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  await waitFor(() => expect(fetch.mock.calls.some(([u]) => String(u).includes('/completion-actions'))).toBe(true));
+  const url = fetch.mock.calls.map(([u]) => String(u)).find((u) => u.includes('/completion-actions'));
+  expect(new URL(url, 'http://x').searchParams.get('serviceType')).toBe('Callback Visit');
 });
 
 it('a no-card answer from the defaults read alone shows the note and no action picker when the actions read fails', async () => {
