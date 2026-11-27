@@ -114,7 +114,8 @@ describe('who does NOT pass anyPromise', () => {
     expect(read('../services/day-replan/index.js')).not.toMatch(/anyPromise/);
   });
 
-  test('the only places that set the option are the auto-dispatch run and its apply guards', () => {
-    for (const rel of ['../services/auto-dispatch/index.js', '../services/auto-dispatch/apply.js']) expect(read(rel)).toMatch(/anyPromise: true/);
+  test('auto-dispatch index sets anyPromise: false (W20) while apply guards keep their explicit option', () => {
+    expect(read('../services/auto-dispatch/index.js')).toMatch(/anyPromise: false/);
+    expect(read('../services/auto-dispatch/apply.js')).toMatch(/anyPromise: true/);
   });
 });

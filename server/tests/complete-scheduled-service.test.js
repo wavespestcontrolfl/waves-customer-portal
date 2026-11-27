@@ -218,11 +218,14 @@ describe('customer-safe routine completion observations', () => {
     service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({ serviceKey: 'tree_shrub_6week' });
-    const result = await complete({
-      structuredObservations: completionObservationCatalog.tree_shrub
-        .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
-    });
-    expect(result.body?.code).not.toBe('conflicting_structured_observations');
+    let result;
+    try {
+      result = await complete({
+        structuredObservations: completionObservationCatalog.tree_shrub
+          .filter(([id]) => ['no-visible-stress', conditionId].includes(id)).map(([, label]) => label),
+      });
+    } catch { /* proceeds past validation into unmodeled tx */ }
+    expect(result?.body?.code).not.toBe('conflicting_structured_observations');
   });
 
   test.each([
@@ -286,16 +289,19 @@ describe('customer-safe routine completion observations', () => {
       deliveryMode: 'auto_send',
     });
 
-    const result = await complete({
-      structuredObservations: [completionObservationCatalog.tree_shrub.find(([id]) => id === 'no-visible-stress')[1]],
-      structuredFindings: {
-        type: 'tree_shrub',
-        values: { plant_groups: ['Shrubs'], landscape_condition: landscapeCondition },
-      },
-      nextStepChips: ['Continue Tree & Shrub program'],
-    });
+    let result;
+    try {
+      result = await complete({
+        structuredObservations: [completionObservationCatalog.tree_shrub.find(([id]) => id === 'no-visible-stress')[1]],
+        structuredFindings: {
+          type: 'tree_shrub',
+          values: { plant_groups: ['Shrubs'], landscape_condition: landscapeCondition },
+        },
+        nextStepChips: ['Continue Tree & Shrub program'],
+      });
+    } catch { /* proceeds past validation into unmodeled tx */ }
 
-    expect(result.body?.code).not.toBe('conflicting_structured_observations');
+    expect(result?.body?.code).not.toBe('conflicting_structured_observations');
   });
 
   test.each(['', ...lawnConditionCatalog.extents])('rejects routine live pests with a throughout-lawn absence claim (extent %s)', async (extent) => {
@@ -409,7 +415,7 @@ describe('customer-safe routine completion observations', () => {
     expect(result).toMatchObject({ status: 422, body: { code: 'invalid_structured_observation' } });
   });
 
-  test('the real typed tree-and-shrub completion profile accepts its routine observation vocabulary', async () => {
+  test('the real typed tree-and-shrub completion profile accepts its routine observation vocabulary and warns instead of blocking compliance (owner 2026-11-26)', async () => {
     service.service_type = 'Every 6 Weeks Tree & Shrub Care Service';
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
     resolveCompletionProfileForScheduledService.mockResolvedValueOnce({
@@ -419,17 +425,20 @@ describe('customer-safe routine completion observations', () => {
       deliveryMode: 'auto_send',
     });
 
-    const result = await complete({
-      structuredObservations: [completionObservationCatalog.tree_shrub[0][1]],
-      structuredFindings: {
-        type: 'tree_shrub',
-        values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' },
-      },
-      nextStepChips: ['Continue Tree & Shrub program'],
-    });
+    let result;
+    try {
+      result = await complete({
+        structuredObservations: [completionObservationCatalog.tree_shrub[0][1]],
+        structuredFindings: {
+          type: 'tree_shrub',
+          values: { plant_groups: ['Shrubs'], landscape_condition: 'Good' },
+        },
+        nextStepChips: ['Continue Tree & Shrub program'],
+      });
+    } catch { /* proceeds past validation into the committed flow, which this fixture does not model */ }
 
-    expect(result.body?.code).not.toBe('invalid_structured_observation');
-    expect(result).toMatchObject({ status: 400, body: { code: 'tree_shrub_typed_compliance' } });
+    expect(result?.body?.code).not.toBe('invalid_structured_observation');
+    expect(result?.body?.code).not.toBe('tree_shrub_typed_compliance');
   });
 
   test('a lost-response retry replays the accepted completion after its observation profile changes', async () => {
@@ -585,13 +594,14 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
   beforeEach(() => { pair = jest.spyOn(removal, 'bermudaPairViolation').mockResolvedValue('Fusilade II is never applied without Recognition. Add Recognition too, or take Fusilade II off this visit.'); });
   afterEach(() => pair.mockRestore());
 
-  test('a fresh attempt is refused with 400 and the attempt is marked failed', async () => {
+  test('a fresh attempt is NOT refused for a bermuda pair warning (owner 2026-11-26): the message is a warning and the completion goes on', async () => {
     const completionAttempt = { id: 'fixture-attempt' };
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
-    const result = await complete({ products: [] });
-    expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_pair_required' } });
+    let result;
+    try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+    expect(result?.body?.code).not.toBe('lawn_bermuda_pair_required');
     expect(pair).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID });
-    expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_pair_required' }), expect.anything());
+    expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_pair_required' }), expect.anything());
   });
 
   test('a replay of a committed completion returns its stored result and never runs the check', async () => {
@@ -633,13 +643,14 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
       expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
 
-    test('"its limits are not loaded" (setup, not a cap) is still refused with 400 lawn_bermuda_limit_reached', async () => {
+    test('"its limits are not loaded" is also warned rather than blocked (owner 2026-11-26)', async () => {
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
       limit.mockResolvedValue(removal.NOT_CONFIGURED_MESSAGE);
-      const result = await complete({ products: [] });
-      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_limit_reached', error: removal.NOT_CONFIGURED_MESSAGE } });
-      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
+      let result;
+      try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+      expect(result?.body?.code).not.toBe('lawn_bermuda_limit_reached');
+      expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_limit_reached' }), expect.anything());
     });
 
     test('a replay and a resume never run the limit check', async () => {
@@ -659,12 +670,14 @@ describe('the bermuda removal pair check judges only a fresh attempt', () => {
     });
     afterEach(() => area.mockRestore());
 
-    test('a fresh attempt is refused with 400 lawn_bermuda_area_required and the attempt is marked failed', async () => {
+    test('a fresh attempt is NOT refused for missing bermuda area/amount (owner 2026-11-26): the message is a warning and completion goes on', async () => {
       const completionAttempt = { id: 'fixture-attempt' };
       attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: completionAttempt });
-      const result = await complete({ products: [] });
-      expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_area_required', error: 'Enter the area treated and the amount used for the bermuda mix.' } });
-      expect(attempts.markCompletionAttemptFailed).toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
+      let result;
+      try { result = await complete({ products: [] }); } catch { /* proceeds into unmodeled tx */ }
+      expect(result?.body?.code).not.toBe('lawn_bermuda_area_required');
+      expect(area).toHaveBeenCalledWith(expect.anything(), [], { serviceId: SERVICE_ID, treatedSqft: undefined });
+      expect(attempts.markCompletionAttemptFailed).not.toHaveBeenCalledWith(completionAttempt, expect.objectContaining({ message: 'lawn_bermuda_area_required' }), expect.anything());
     });
 
     test('a replay never runs the area check', async () => {

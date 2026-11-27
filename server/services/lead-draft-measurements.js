@@ -102,7 +102,8 @@ function countyMeasurements(lookup) {
   const storiesKnown = (storiesVerified || (storiesSourceForPricing(facts) === 'lookup' && storyCountHasEvidence(propertyRecord)))
     && lookupDimensionIsTrustworthy(lookup.enriched, 'stories');
   const stories = storiesKnown ? statedStoryCount(propertyRecord.stories) : null;
-  return { homeSqFt, lotSqFt, ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
+  const propertyType = String(propertyRecord.propertyType || '').trim();
+  return { homeSqFt, lotSqFt, ...(propertyType ? { propertyType } : {}), ...(stories ? { stories } : {}), source: MEASUREMENTS_SOURCE };
 }
 
 // The draft builder's read: cache only, never spends, never throws.

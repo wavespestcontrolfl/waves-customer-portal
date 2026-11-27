@@ -624,12 +624,15 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit, deductions = [], shortfalls = false }) {
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit, treeShrub = [], deductions = [], shortfalls = false }) {
   return [
     ...[blackout, nLimit, manager, calibration, inventory, limit]
       .filter((record) => record && record.advisory)
       .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
       .map((block) => block && block.message)
+      .filter(Boolean),
+    ...(Array.isArray(treeShrub) ? treeShrub : [])
+      .map((w) => (typeof w === 'string' ? w : w?.message))
       .filter(Boolean),
     ...deductionAdvisoryMessages(deductions, { shortfalls }),
   ];
@@ -5541,12 +5544,42 @@ async function completeScheduledService(completionInput, packetContext = null) {
       lawnWarningFindings.push(...prohibited.map(lawnProhibited.lawnProhibitedProductFinding));
     }
 
-    // A row tagged to a chemical area add-on is that add-on's application record, so a fresh closeout must carry its rate,
-    // treated area and amount (a 400 otherwise; the total is filled from the rate and area when the client sent none). A replay or
-    // resume of a committed completion and an incomplete visit are left alone, as for the lawn square-feet rule.
-    await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
-    // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
-    await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
+    // Chemical area add-on actuals & coverage checks: owner ruling 2026-11-26
+    // ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW") —
+    // operational 400 gaps are recorded as non-blocking warnings; genuine 503
+    // DB-read failures still propagate so the attempt retries safely.
+    try {
+      await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
+    } catch (addOnErr) {
+      if (addOnErr?.code === areaAddOnGovernedRate.ACTUALS_CODE) {
+        logger.warn(`[dispatch] non-blocking add-on actuals warning for ${svc.id}: ${addOnErr.message}`);
+        lawnWarningFindings.push({
+          code: addOnErr.code,
+          limitType: addOnErr.code,
+          productId: null,
+          productName: addOnErr.addOnKey || 'Area add-on',
+          message: addOnErr.message,
+        });
+      } else {
+        throw addOnErr;
+      }
+    }
+    try {
+      await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
+    } catch (addOnErr) {
+      if (addOnErr?.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE) {
+        logger.warn(`[dispatch] non-blocking chemical add-on warning for ${svc.id}: ${addOnErr.message}`);
+        lawnWarningFindings.push({
+          code: addOnErr.code,
+          limitType: addOnErr.code,
+          productId: null,
+          productName: addOnErr.addOnKey || 'Area add-on',
+          message: addOnErr.message,
+        });
+      } else {
+        throw addOnErr;
+      }
+    }
 
     // A malformed amount (any role) is refused on a FRESH completion only, before the first service write (service_products, inventory,
     // FDACS ledger, cost, report). A same-key replay or resume of a committed completion is never judged. The claim is released as
@@ -5654,23 +5687,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
         throw err;
       }
+      // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+      // Bermuda removal pair, area, and limit checks warn on the visit and alert the office without hard-400 blocking.
       if (bermudaPairMessage) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
-        return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
+        logger.warn(`[dispatch] non-blocking bermuda pair warning for ${svc.id}: ${bermudaPairMessage}`);
+        lawnWarningFindings.push(bermudaStepFinding(bermudaPairMessage));
       }
-      // A recorded step spray states its treated area (or a rate): a spot mix has no catalog-derived amount.
       if (bermudaAreaMessage) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_area_required'), db);
-        return { status: 400, body: { error: bermudaAreaMessage, code: 'lawn_bermuda_area_required' } };
+        logger.warn(`[dispatch] non-blocking bermuda area warning for ${svc.id}: ${bermudaAreaMessage}`);
+        lawnWarningFindings.push(bermudaStepFinding(bermudaAreaMessage));
       }
-      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after the last one at that property),
-      // judged the way the plan judges them, are a WARNING (owner 2026-11-26): recorded on the visit and sent to the office.
-      // The pair and area checks above are data entry and stay refusals; so does "its limits are not loaded" (setup, not a cap).
-      if (bermudaLimitMessage === require('./lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
-        return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };
+      if (bermudaLimitMessage) {
+        logger.warn(`[dispatch] non-blocking bermuda limit warning for ${svc.id}: ${bermudaLimitMessage}`);
+        lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));
       }
-      if (bermudaLimitMessage) lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
         await CompletionAttempts.markCompletionAttemptFailed(
@@ -6049,19 +6079,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         customerRecap,
         technicianNotes,
       });
+      // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+      // surface Tree/Shrub closeout findings as non-blocking warnings instead of trapping techs with a 400 lockout.
       if (!treeShrubValidation.ok) {
-        const validationErr = new Error('Tree/Shrub closeout lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr, db);
-        return ({ status: 400, body: {
-          error: 'Tree/Shrub protocol closeout required',
-          code: 'tree_shrub_closeout_lockout',
-          details: treeShrubValidation.blocks.map((block) => block.message),
-          blocks: treeShrubValidation.blocks,
-          warnings: treeShrubValidation.warnings,
-        } });
+        logger.warn(`[dispatch] non-blocking Tree/Shrub closeout warnings for ${svc.id}: ${treeShrubValidation.blocks.map((b) => b.code).join(', ')}`);
       }
       treeShrubCloseoutSummary = treeShrubValidation.normalized;
-      treeShrubCloseoutWarnings = treeShrubValidation.warnings || [];
+      treeShrubCloseoutWarnings = [
+        ...(treeShrubValidation.blocks || []).map((block) => ({ ...block, advisory: true })),
+        ...(treeShrubValidation.warnings || []),
+      ];
     }
 
     // Typed Tree & Shrub completions replace the legacy closeout UX but keep
@@ -6174,18 +6201,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         completionPhotos,
         treeShrubReview: completionInput.body?.treeShrubReview,
       });
+      // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+      // surface typed Tree & Shrub compliance findings as non-blocking warnings instead of hard-400 blocking.
       if (!typedCompliance.ok) {
-        const complianceErr = new Error('tree_shrub_typed_compliance');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, complianceErr, db);
-        return ({ status: 400, body: {
-          error: 'Tree & Shrub compliance checks must pass before completion',
-          code: 'tree_shrub_typed_compliance',
-          details: typedCompliance.blocks.map((block) => block.message),
-          blocks: typedCompliance.blocks,
-          warnings: typedCompliance.warnings,
-        } });
+        logger.warn(`[dispatch] non-blocking typed Tree & Shrub compliance warnings for ${svc.id}: ${typedCompliance.blocks.map((b) => b.code).join(', ')}`);
       }
-      treeShrubCloseoutWarnings = typedCompliance.warnings || [];
+      treeShrubCloseoutWarnings = [
+        ...(typedCompliance.blocks || []).map((block) => ({ ...block, advisory: true })),
+        ...(typedCompliance.warnings || []),
+      ];
     }
 
     // GATE_LAWN_ACTUALS_LEDGER: every lawn visit gets the appointment plan
@@ -16942,6 +16966,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
         limit: applicationLimitAdvisory,
+        treeShrub: treeShrubCloseoutWarnings,
         deductions: inventoryDeductions,
         shortfalls: !isWaveGuardLawnCompletion(svc),
       }),
