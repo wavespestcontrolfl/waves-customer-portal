@@ -41,9 +41,10 @@ function calibrationStatusLabel(status) {
   }
   return status || "Unspecified";
 }
-// A standing number with no expiry (owner 2026-11-27: the owner's estimates, tank #1 from its tank counts) shows no expiry line and
-// is never prompted for a field test; any other row that is not field verified is.
-const promptsVerify = (calibration) => calibration.calibration_status !== "field_verified" && Boolean(calibration.expires_at);
+// A row with no expiry shows no expiry line. An owner estimate with no expiry (owner 2026-11-27) is never prompted for a field test;
+// any other row that is not field verified is (an estimate with no expiry still is: the tank sheet asks for its test).
+const standingEstimate = (calibration) => calibration.calibration_status === "owner_estimate" && !calibration.expires_at;
+const promptsVerify = (calibration) => calibration.calibration_status !== "field_verified" && !standingEstimate(calibration);
 function CalibrationExpiry({ expiresAt }) {
   if (!expiresAt) return null;
   return <div>

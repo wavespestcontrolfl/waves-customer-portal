@@ -71,17 +71,15 @@ function mixFields(row, percent) {
 
 // Each sprayer number that differs from a volume the program fixes (Arena at 4 gal per 1,000 sq ft on a sprayer at 2), with the use
 // it applies to (null = the whole line): the fill stays (it is sized on the label volume); the card says to mix one 1,000 sq ft dose
-// in the label volume and how to put it on (owner 2026-11-27: no pass counts). One check per use, volume and sprayer number.
+// in the label volume and how to put it on (owner 2026-11-27: no pass counts). One check per use and sprayer, with its name.
 const fixedVolumes = (lineCarrier, useFills) => [
   ...(lineCarrier ? [{ use: null, label: lineCarrier }] : []),
   ...useFills.map((entry) => ({ use: entry.use, label: entry.carrierGalPer1000 })),
 ];
 function volumeChecks(volumes, sprayers) {
-  const checks = volumes.flatMap(({ use, label }) => sprayers
+  return volumes.flatMap(({ use, label }) => sprayers
     .filter((sprayer) => rigCarrier(sprayer) > 0 && Math.abs(rigCarrier(sprayer) - label) > 1e-9)
-    .map((sprayer) => ({ use, labelGalPer1000: label, sprayerGalPer1000: rigCarrier(sprayer) })));
-  return checks.filter((check, index) => checks.findIndex((other) => other.use === check.use
-    && other.labelGalPer1000 === check.labelGalPer1000 && other.sprayerGalPer1000 === check.sprayerGalPer1000) === index);
+    .map((sprayer) => ({ use, sprayerName: sprayer.system_name || null, labelGalPer1000: label, sprayerGalPer1000: rigCarrier(sprayer) })));
 }
 
 const isTwoAndHalfGallonJug = (product) => /^\s*2\.5\s*-?\s*gal/i.test(String(product?.container_size || ''));

@@ -489,8 +489,9 @@ router.post('/calibrations/:id/verify', requireAdmin, async (req, res, next) => 
       });
     }
 
-    const expiresAt = expiryFor(body, 'field_verified', verifiedAt);
-    if (expiresAt && Number.isNaN(expiresAt.getTime())) {
+    // A field test always gets an expiry (no standing-number exemption: that is for owner estimates and tank counts).
+    const expiresAt = expiryFor(body, null, verifiedAt);
+    if (Number.isNaN(expiresAt.getTime())) {
       return res.status(400).json({
         error: 'Invalid calibration verification',
         details: ['expires_at must be a valid ISO date string'],

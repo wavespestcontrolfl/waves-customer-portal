@@ -43,3 +43,10 @@ it("an estimate with an expiry keeps the expiry line and the verify prompt", asy
   expect(await screen.findByText("expires:")).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Verify Calibration" })).toBeInTheDocument();
 });
+
+it("an ordinary estimate with no expiry shows no expiry line but keeps the verify prompt", async () => {
+  stubApi({ id: "cal-1", calibration_status: "estimated", carrier_gal_per_1000: "1.330", expires_at: null, calibrated_at: "2026-11-07T14:00:00Z" });
+  await openSystem();
+  expect(await screen.findByRole("button", { name: "Verify Calibration" })).toBeInTheDocument();
+  expect(screen.queryByText("expires:")).not.toBeInTheDocument();
+});

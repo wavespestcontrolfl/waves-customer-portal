@@ -212,12 +212,12 @@ describe("110-gallon tank reference", () => {
     }
   });
 
-  it("a backpack amount names the FlowZone unit whose test it used", () => {
+  it("a backpack amount names the FlowZone unit whose number it used, never calling an owner estimate a test", () => {
     const plan = fixture();
     plan.items[0].tankAmounts.backpack4Gal.sprayerName = "FlowZone Typhoon Backpack #2";
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
-      expect(within(surface).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent("0.12 oz (3.4 g) · FlowZone Typhoon Backpack #2 test");
+      expect(within(surface).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent(/^0\.12 oz \(3\.4 g\) · FlowZone Typhoon Backpack #2$/);
     }
   });
 
@@ -263,20 +263,29 @@ describe("110-gallon tank reference", () => {
   it("a program volume the sprayer number does not put out says how to put one 1,000 sq ft dose on, never a pass count", () => {
     const plan = fixture();
     plan.items[0].tankAmounts.volumeChecks = [
-      { use: null, labelGalPer1000: 4, sprayerGalPer1000: 2 },
-      // A second sprayer at another number below the label volume reads the same: one line.
-      { use: null, labelGalPer1000: 4, sprayerGalPer1000: 1.33 },
-      { use: null, labelGalPer1000: 1, sprayerGalPer1000: 2 },
-      { use: "mapped large patch", labelGalPer1000: 4, sprayerGalPer1000: 2 },
+      { use: null, sprayerName: "Fixture tank", labelGalPer1000: 4, sprayerGalPer1000: 2 },
+      // A second sprayer at another number below the label volume reads the same: one line, no names.
+      { use: null, sprayerName: "FlowZone fixture", labelGalPer1000: 4, sprayerGalPer1000: 1.33 },
+      { use: "mapped large patch", sprayerName: "Fixture tank", labelGalPer1000: 4, sprayerGalPer1000: 2 },
     ];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getAllByText("Label volume 4 gal per 1,000 sq ft: mix one 1,000 sq ft dose in 4 gal, and put it on 1,000 sq ft in two crossing passes.")).toHaveLength(1);
-      expect(within(surface).getByText("Label volume 1 gal per 1,000 sq ft: this sprayer puts down more. Mix one 1,000 sq ft dose in 1 gal and cover 1,000 sq ft.")).toBeInTheDocument();
       expect(within(surface).getByText("Mapped large patch: Label volume 4 gal per 1,000 sq ft: mix one 1,000 sq ft dose in 4 gal, and put it on 1,000 sq ft in two crossing passes.")).toBeInTheDocument();
       expect(within(surface).queryByText(/passes, or|Speed up|Slow down|tested at/)).not.toBeInTheDocument();
       expect(within(surface).getAllByText("12.5 oz / 110 gal").length).toBeGreaterThan(0);
     }
+  });
+
+  it("a sprayer on each side of the label volume: each line names its sprayer", () => {
+    const plan = fixture();
+    plan.items[0].tankAmounts.volumeChecks = [
+      { use: null, sprayerName: "Fixture tank", labelGalPer1000: 1, sprayerGalPer1000: 2 },
+      { use: null, sprayerName: "FlowZone fixture", labelGalPer1000: 1, sprayerGalPer1000: 0.5 },
+    ];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getByText("Label volume 1 gal per 1,000 sq ft: this sprayer puts down more. Mix one 1,000 sq ft dose in 1 gal and cover 1,000 sq ft. (Fixture tank)")).toBeInTheDocument();
+    expect(within(container).getByText("Label volume 1 gal per 1,000 sq ft: mix one 1,000 sq ft dose in 1 gal, and put it on 1,000 sq ft in two crossing passes. (FlowZone fixture)")).toBeInTheDocument();
   });
 
   it("a spot product's FlowZone fill at the label rate per gallon says so", () => {

@@ -14,8 +14,9 @@ const unitText = (unit) => String(unit || "").replaceAll("_", " ");
 const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 3 });
 // A per-gallon label band ("0.2-0.8 fl oz per gal") gives its 4 gal fill as a range.
 const fillText = (fill) => `${num(fill.amount)}${fill.amountMax ? ` to ${num(fill.amountMax)}` : ""} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
-// What a FlowZone fill is sized on: the label's per-gallon spot rate (owner 2026-11-27), or the sprayer number it names.
-const flowZoneBasis = (fill) => (fill.carrierSource === "label_per_gallon" ? " · label spot rate per gallon" : fill.sprayerName ? ` · ${fill.sprayerName} test` : "");
+// What a FlowZone fill is sized on: the label's per-gallon spot rate (owner 2026-11-27), or the sprayer whose number it uses (a
+// test or an owner estimate: the sheet's sprayer line says which).
+const flowZoneBasis = (fill) => (fill.carrierSource === "label_per_gallon" ? " · label spot rate per gallon" : fill.sprayerName ? ` · ${fill.sprayerName}` : "");
 const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
 const isSpreader = (item) => item.tankAmounts?.application === "spreader";
 const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
@@ -153,6 +154,21 @@ function volumeText({ use, labelGalPer1000: label, sprayerGalPer1000: sprayer })
     : `${volume}: this sprayer puts down more. Mix one 1,000 sq ft dose in ${num(label)} gal and cover 1,000 sq ft.`;
   return use ? `${sentenceCase(use)}: ${advice}` : advice;
 }
+// One line per distinct text. When one use gets two different lines (a sprayer on each side of the label volume), each line names
+// the sprayers it is for.
+function volumeLines(checks) {
+  const groups = new Map();
+  for (const check of checks) {
+    const text = volumeText(check);
+    groups.set(text, [...(groups.get(text) || []), check]);
+  }
+  const entries = [...groups];
+  return entries.map(([text, group]) => {
+    const split = entries.some(([other, rest]) => other !== text && rest[0].use === group[0].use);
+    const names = [...new Set(group.map((check) => check.sprayerName).filter(Boolean))];
+    return split && names.length ? `${text} (${names.join(", ")})` : text;
+  });
+}
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",
@@ -210,7 +226,7 @@ function productCautions(item, exclusions, products) {
     // The program's required notes for this product, selected or not (the sheet-wide warnings list only the selected ones).
     ...(item.gateNotes || []).filter((note) => note.severity === "required").map((note) => note.text),
     surfactantNote(item, products),
-    ...new Set((amounts?.volumeChecks || []).map(volumeText)),
+    ...volumeLines(amounts?.volumeChecks || []),
   ].filter(Boolean);
 }
 

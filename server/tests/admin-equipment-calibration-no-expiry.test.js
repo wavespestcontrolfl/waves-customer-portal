@@ -1,6 +1,6 @@
 // Owner 2026-11-27 ("I am not going to calibrate them. We will use the best guess."): a sprayer number with no expiry stays that
-// way. An explicit expires_at: null on create or verify is kept for field_verified and owner_estimate; every other status (and a
-// body with no expires_at) keeps the 30-day default.
+// way. An explicit expires_at: null on create is kept for field_verified and owner_estimate; every other status, a body with no
+// expires_at, and every field test (verify) keep the 30-day default.
 const writes = [];
 jest.mock('../models/db', () => {
   const builder = (table) => {
@@ -66,11 +66,9 @@ describe('creating a calibration', () => {
 
 describe('verifying a calibration', () => {
   const verify = (body) => post('/calibrations/cal-1/verify', { verified_test_area_sqft: 1000, verified_captured_gallons: 2, verified_at: '2026-11-27T15:00:00Z', ...body });
-  test('an explicit null expiry is kept; without it the 30-day default stands', async () => {
+  test('a field test always gets an expiry: an explicit null still takes the 30-day default', async () => {
     expect((await verify({ expires_at: null })).status).toBe(200);
-    expect(calibrationWrite('update')).toMatchObject({ calibration_status: 'field_verified', expires_at: null });
-    writes.length = 0;
-    await verify({});
+    expect(calibrationWrite('update')).toMatchObject({ calibration_status: 'field_verified' });
     expect(new Date(calibrationWrite('update').expires_at).toISOString()).toBe('2026-12-27T15:00:00.000Z');
   });
 });

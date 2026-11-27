@@ -72,7 +72,7 @@ describe('a several-use line and a hand-shaker bait', () => {
     expect(ref).toMatchObject({ fixedCarrierGalPer1000: null, backpack4Gal: { amount: 1.504, carrierGalPer1000: 1.33, carrierSource: 'calibration' } });
     expect(ref.useFills).toEqual([expect.objectContaining({ use: 'mapped large patch', carrierGalPer1000: 2, backpack4Gal: expect.objectContaining({ amount: 1, carrierSource: 'line' }) })]);
     // The volume check names the use it applies to; the general fill on the sprayer's own volume gets none.
-    expect(ref.volumeChecks).toEqual([{ use: 'mapped large patch', labelGalPer1000: 2, sprayerGalPer1000: 1.33 }]);
+    expect(ref.volumeChecks).toEqual([{ use: 'mapped large patch', sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 2, sprayerGalPer1000: 1.33 }]);
   });
   test('a one-use line keeps its volume for the whole line (Arena: the clause after it is a note)', () => {
     const arena = { name: 'Arena', default_rate_per_1000: 0.29, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
@@ -97,15 +97,13 @@ describe('a fixed volume the sprayer test does not put out, and the Celsius heat
   test('Arena at 4 gal per 1,000 sq ft on a tank at 2 and a FlowZone at 1.33: one check per sprayer number, no pass counts, the amounts stay', () => {
     const item = { raw: 'Arena 50 WDG — chinch, 0.147 oz per 1,000 sq ft in 4 gal per 1,000 sq ft', role: 'base', conditional: false };
     const ref = tankReference({ product: arena, item, rig: TANK, backpack: BACKPACK });
+    // One check per sprayer, with its name and number; never a pass count (owner 2026-11-27).
     expect(ref.volumeChecks).toEqual([
-      { use: null, labelGalPer1000: 4, sprayerGalPer1000: 2 },
-      { use: null, labelGalPer1000: 4, sprayerGalPer1000: 1.33 },
+      { use: null, sprayerName: 'Fixture tank', labelGalPer1000: 4, sprayerGalPer1000: 2 },
+      { use: null, sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 4, sprayerGalPer1000: 1.33 },
     ]);
-    // Two sprayers on the same number (owner 2026-11-27: both at 2) give one check, never a pass count or another sprayer's name.
-    expect(tankReference({ product: arena, item, rig: TANK, backpack: { ...BACKPACK, carrier_gal_per_1000: 2 } }).volumeChecks)
-      .toEqual([{ use: null, labelGalPer1000: 4, sprayerGalPer1000: 2 }]);
     expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft in 1 gal per 1,000 sq ft' }, rig: TANK }).volumeChecks)
-      .toEqual([{ use: null, labelGalPer1000: 1, sprayerGalPer1000: 2 }]);
+      .toEqual([{ use: null, sprayerName: 'Fixture tank', labelGalPer1000: 1, sprayerGalPer1000: 2 }]);
     expect(ref).toMatchObject({ per100Gal: { amount: 3.675, carrierSource: 'line' }, backpack4Gal: { amount: 0.147 } });
     // The sprayer's own volume needs no check; neither does a line volume the sprayer was tested at.
     expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft' }, rig: TANK, backpack: BACKPACK }).volumeChecks).toEqual([]);
