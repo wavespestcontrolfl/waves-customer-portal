@@ -47,7 +47,14 @@ wiki/              Dispatch/service protocols (seeded into the in-app knowledge 
 ## Development
 
 ```bash
-if [ -x "$HOME/.claude/bin/npm-ci-serial" ]; then "$HOME/.claude/bin/npm-ci-serial"; else npm ci; fi
+if [ -x "$HOME/.claude/bin/npm-ci-serial" ]; then
+  "$HOME/.claude/bin/npm-ci-serial"
+elif [ -d "$HOME/.claude" ] || [ "$(uname -s)" = "Darwin" ]; then
+  echo "ERROR: ~/.claude/bin/npm-ci-serial missing or not executable on shared Mac" >&2
+  exit 1
+else
+  npm ci
+fi
 npm run worktree:setup
 npm run dev:managed-client # assigned frontend port; no database needed
 ```

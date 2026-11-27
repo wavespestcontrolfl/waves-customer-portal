@@ -34,7 +34,7 @@ For coding work read `CLAUDE.md` first and load only relevant skills. For an aud
 
 ## Treat as P1
 
-- **Blind `content[0].text` on raw Anthropic responses.** Always-thinking models lead with a `thinking` block; read with `anthropicText()` / `stripThinkingBlocks` (`services/llm/deep.js`) or `llm/` helpers, never raw `content[0]`.
+- **Blind `content[0].text` on raw Anthropic responses.** Always-thinking models lead with a `thinking` block; read with `anthropicText()` (`server/services/llm/call.js`), `stripThinkingBlocks()` (`server/services/llm/deep.js`), or `llm/` helpers, never raw `content[0]`.
 - **America/New_York discipline.** Railway runs `TZ=UTC`; portal is Eastern-only. Use `server/utils/datetime-et.js` (`parseETDateTime`, `etParts`, `formatET*`). Flag `new Date(\`${ymd}T${hm}\`).get*()`, `toLocaleString` without `timeZone: 'America/New_York'` on wall-clock fields, and `node-cron` without `timezone: 'America/New_York'`.
 - **Near-today date literals in tests.** Compute relative dates for any freshness validator (e.g. Joi `.min(todayStartEt)` in `schedule-confirm-race.test.js`) so tests never rot past calendar midnight.
 - **PII in logs (non-card).** Never interpolate phone, email, street address, full inbound SMS bodies, or customer names into logs; log ids.
