@@ -5420,17 +5420,17 @@ function validateReplyPromises({ reply, context = null }) {
 // time-sensitive showed ({ signature: null }): a delay, passed window or missed
 // visit that appears while the card waits changes the live signature and refuses.
 // `schedule`: the SCHEDULE CHANGES the reply was written beside (visit-loops-facts scheduleChangesSignature; 'unread' when the read
-// failed): a move, skip or cancel recorded while the card waits changes it, and the send refuses. `scheduleVisits`: the listed visit ids.
+// failed): a move, skip or cancel recorded while the card waits changes it, and the send refuses. `scheduleVisits`: the listed visit slots.
 function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
   const facts = require('./visit-loops-facts');
   const v = context && context.visitLoops;
-  // scheduleVisits: the UPCOMING SERVICES visits the read was about, so the send-time rebuild asks about the same ones
-  const listed = (context && Array.isArray(context.upcomingServices) ? context.upcomingServices : []).filter((u) => u && u.date);
+  // scheduleVisits: the listed visits whose slot held ({ id, date, start }), so the send-time rebuild asks about the same ones
+  const sc = v && v.scheduleChanges;
   return {
     signature: facts.visitStatusSignature(v),
-    schedule: facts.scheduleChangesSignature(v && v.scheduleChanges),
-    scheduleVisits: facts.scheduleChangesVisitIds(listed),
+    schedule: facts.scheduleChangesSignature(sc),
+    scheduleVisits: sc && Array.isArray(sc.listed) ? sc.listed : [],
   };
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be

@@ -644,8 +644,11 @@ async function visitStatusReason(conn, status, customerId, refs) {
   const signature = status.signature || null;
   const withSchedule = typeof status.schedule === 'string';
   const facts = require('./visit-loops-facts');
-  // the same UPCOMING SERVICES visits the draft listed (their ids, in its order)
-  const upcomingServices = withSchedule ? [].concat(status.scheduleVisits || []).filter((id) => typeof id === 'string' && id).map((id) => ({ scheduledServiceId: id })) : [];
+  // the same UPCOMING SERVICES visits the draft listed, in its order, each with the slot the draft verified
+  const upcomingServices = withSchedule
+    ? [].concat(status.scheduleVisits || []).filter((e) => e && typeof e.id === 'string' && e.id)
+      .map((e) => ({ scheduledServiceId: e.id, date: e.date ?? null, start: e.start ?? null }))
+    : [];
   const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true, withScheduleChanges: withSchedule, upcomingServices });
   if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
   if (withSchedule && facts.scheduleChangesSignature(fresh.scheduleChanges) !== status.schedule) return 'schedule_changed';

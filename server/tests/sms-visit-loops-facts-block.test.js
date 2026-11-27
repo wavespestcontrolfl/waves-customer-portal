@@ -382,7 +382,7 @@ describe('visitLoopStatus', () => {
     expect(visitLoopStatus({ visitLoops: { weOwe: [{ id: 'c1' }] } }, WITH)).toEqual({ signature: null, schedule: 'unread', scheduleVisits: [] });
     expect(visitLoopStatus({}, WITH)).toEqual({ signature: null, schedule: 'unread', scheduleVisits: [] });
     // the SCHEDULE CHANGES the reply was written beside ride along ('' = read, none)
-    expect(visitLoopStatus({ visitLoops: { scheduleChanges: { moves: [], stopped: [] } } }, WITH)).toEqual({ signature: null, schedule: '', scheduleVisits: [] });
+    expect(visitLoopStatus({ visitLoops: { scheduleChanges: { moves: [], stopped: [], listed: [] } } }, WITH)).toEqual({ signature: null, schedule: '', scheduleVisits: [] });
   });
 });
 

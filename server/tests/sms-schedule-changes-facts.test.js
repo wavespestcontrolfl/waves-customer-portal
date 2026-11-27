@@ -47,13 +47,18 @@ const conn = (visits, logs) => fakeConn({
   scheduled_services: (ops) => { const ids = idsAsked(ops); return ids ? visits.filter((v) => ids.includes(v.id)) : visits; },
   reschedule_log: () => logs,
 });
-const read = (visits, logs, upcomingServices = [listed('v1')]) => facts.loadScheduleChanges({ conn: conn(visits, logs), customerId: 'c1', now: NOW, upcomingServices });
+// the aggregator's deriveWindow, by start (window_start first, as context-aggregator derives it)
+const deriveWindow = (row) => ({ '09:00:00': '9–11 AM', '13:00:00': '1–3 PM', '15:00:00': '3–5 PM' }[String(row.window_start)] || null);
+// a listed entry that agrees with its row: the row's day and its derived window
+const listedFor = (v, over = {}) => listed(v.id, { date: v.scheduled_date, window: deriveWindow(v), ...over });
+const read = (visits, logs, upcomingServices = visits.filter((v) => v.status === 'confirmed').slice(0, 1).map((v) => listedFor(v))) => facts.loadScheduleChanges({ conn: conn(visits, logs), customerId: 'c1', now: NOW, deriveWindow, upcomingServices });
 
 describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () => {
   test('the last logged move, when it is the slot the row holds now; the old slot by day only, the new window as listed', async () => {
     expect(await read([visit()], [move()])).toEqual({
-      moves: [{ logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, toWindow: '1–3 PM' }],
+      moves: [{ logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, listedDate: '2026-12-04', listedStart: '13:00:00', toWindow: '1–3 PM' }],
       stopped: [],
+      listed: [{ id: 'v1', date: '2026-12-04', start: '13:00:00' }],
     });
     // a day-only visit (UPCOMING SERVICES shows no hour) names no window
     const dayOnly = await read([visit()], [move()], [listed('v1', { window: 'texted the day before', windowDayOnly: true })]);
@@ -63,9 +68,30 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
   test('only the visits listed, in the listed order; a visit not listed is never named', async () => {
     const visits = ['v1', 'v2', 'v3', 'v4'].map((id, i) => visit({ id, scheduled_date: `2026-12-0${i + 4}` }));
     const logs = visits.map((v) => move({ id: `rl-${v.id}`, scheduled_service_id: v.id, new_date: v.scheduled_date }));
-    const out = await read(visits, logs, [listed('v3'), listed('v1')]);
+    const out = await read(visits, logs, [listedFor(visits[2]), listedFor(visits[0])]);
     expect(out.moves.map((m) => m.visitId)).toEqual(['v3', 'v1']);
     expect((await read(visits, logs, [])).moves).toEqual([]);
+  });
+
+  test('a move logged with the customer_noshow reason (a rain-out move) still counts: non-moves drop by slot, not reason', async () => {
+    const rain = move({ reason_code: 'customer_noshow' });
+    expect((await read([visit()], [rain])).moves.map((m) => m.logId)).toEqual(['rl-1']);
+  });
+
+  test('a visit moved between the UPCOMING SERVICES read and this one states no move (never the old window on the new day)', async () => {
+    const later = move({ id: 'rl-3', original_date: '2026-12-04', new_date: '2026-12-05', original_window: '13:00:00-14:00:00', new_window: '15:00:00-16:00:00', created_at: new Date('2026-11-26T16:59:00Z') });
+    const now = visit({ scheduled_date: '2026-12-05', window_start: '15:00:00' });
+    // UPCOMING SERVICES showed it on Dec 4, 1-3 PM: another day now
+    const staleDay = await read([now], [later, move()], [listed('v1', { date: '2026-12-04', window: '1–3 PM' })]);
+    expect(staleDay).toMatchObject({ moves: [], listed: [] });
+    // the same day, another window
+    const sameDayNow = visit({ window_start: '15:00:00' });
+    const staleWindow = await read([sameDayNow], [move({ new_window: '15:00:00-16:00:00' })], [listed('v1', { date: '2026-12-04', window: '1–3 PM' })]);
+    expect(staleWindow).toMatchObject({ moves: [], listed: [] });
+    // the send-time form carries the raw slot the draft verified: a row off it states no move
+    const rebuilt = (start) => facts.loadScheduleChanges({ conn: conn([visit()], [move()]), customerId: 'c1', now: NOW, upcomingServices: [{ scheduledServiceId: 'v1', date: '2026-12-04', start }] });
+    expect((await rebuilt('13:00:00')).moves).toHaveLength(1);
+    expect((await rebuilt('09:00:00')).moves).toEqual([]);
   });
 
   test('a technician-only row (same slot) is not a move: the move before it still speaks', async () => {
@@ -76,15 +102,19 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
   test('only the newest move counts, and only when the row still holds its slot (an unlogged edit since states nothing)', async () => {
     const later = move({ id: 'rl-3', original_date: '2026-12-04', new_date: '2026-12-05', original_window: '13:00:00-14:00:00', new_window: '15:00:00-16:00:00', created_at: new Date('2026-11-25T15:00:00Z') });
     expect((await read([visit({ scheduled_date: '2026-12-05', window_start: '15:00:00' })], [later, move()])).moves.map((m) => m.logId)).toEqual(['rl-3']);
-    expect((await read([visit({ scheduled_date: '2026-12-06', window_start: '15:00:00' })], [later, move()])).moves).toEqual([]);
-    expect((await read([visit({ window_start: '15:00:00' })], [move()])).moves).toEqual([]);
+    // below: the listed entry still shows Dec 4, 1-3 PM while the row moved without a log row
+    const v6 = visit({ scheduled_date: '2026-12-06', window_start: '15:00:00' });
+    expect((await read([v6], [later, move()], [listedFor(v6)])).moves).toEqual([]);
+    const v15 = visit({ window_start: '15:00:00' });
+    expect((await read([v15], [move()], [listedFor(v15)])).moves).toEqual([]);
     // a listed visit cancelled since states no move
-    expect((await read([visit({ status: 'cancelled' })], [move()])).moves).toEqual([]);
+    expect((await read([visit({ status: 'cancelled' })], [move()], [listedFor(visit())])).moves).toEqual([]);
   });
 
   test('a bare logged start (the day re-plan writes no end), a windowless move, and a same-day move', async () => {
     expect((await read([visit()], [move({ new_window: '13:00' })])).moves).toHaveLength(1);
-    expect((await read([visit({ window_start: null })], [move({ new_window: null, original_window: null })])).moves[0]).toMatchObject({ toStart: null });
+    const windowless = visit({ window_start: null });
+    expect((await read([windowless], [move({ new_window: null, original_window: null })], [listedFor(windowless, { window: null })])).moves[0]).toMatchObject({ toStart: null });
     expect((await read([visit()], [move({ original_date: '2026-12-04' })])).moves[0]).toMatchObject({ sameDay: true, toWindow: '1–3 PM' });
   });
 });
@@ -121,19 +151,20 @@ describe('loadVisitLoops wiring', () => {
     expect((await facts.loadVisitLoops({ customerId: 'c1', now: NOW, conn: down, upcomingServices: [listed('v1')] })).scheduleChanges).toBeNull();
     const quiet = fakeConn({});
     expect((await facts.loadVisitLoops({ customerId: 'c1', now: NOW, conn: quiet, strict: true })).scheduleChanges).toBeNull();
-    expect((await facts.loadVisitLoops({ customerId: 'c1', now: NOW, conn: quiet, strict: true, withScheduleChanges: true })).scheduleChanges).toEqual({ moves: [], stopped: [] });
+    expect((await facts.loadVisitLoops({ customerId: 'c1', now: NOW, conn: quiet, strict: true, withScheduleChanges: true })).scheduleChanges).toEqual({ moves: [], stopped: [], listed: [] });
     await expect(facts.loadVisitLoops({ customerId: 'c1', now: NOW, conn: down, strict: true, withScheduleChanges: true, upcomingServices: [{ scheduledServiceId: 'v1' }] })).rejects.toThrow('db down');
   });
 
   test('the signature keys on raw values (never the window label) and changes with a new move, skip or cancel', () => {
-    const m = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, toWindow: '1–3 PM' };
+    const m = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false, listedDate: '2026-12-04', listedStart: '13:00:00', toWindow: '1–3 PM' };
     const base = facts.scheduleChangesSignature({ moves: [m], stopped: [] });
     expect(facts.scheduleChangesSignature({ moves: [{ ...m, toWindow: null }], stopped: [] })).toBe(base);
+    // the listed slot is part of it
+    expect(facts.scheduleChangesSignature({ moves: [{ ...m, listedStart: '15:00:00' }], stopped: [] })).not.toBe(base);
     expect(facts.scheduleChangesSignature({ moves: [{ ...m, logId: 'rl-2' }], stopped: [] })).not.toBe(base);
     expect(facts.scheduleChangesSignature({ moves: [m], stopped: [{ visitIds: ['v2'], type: 'Lawn Care', status: 'skipped', date: '2026-12-10', lastDate: '2026-12-10', count: 1 }] })).not.toBe(base);
     expect(facts.scheduleChangesSignature({ moves: [], stopped: [] })).toBe('');
     expect(facts.scheduleChangesSignature(null)).toBe('unread');
-    expect(facts.scheduleChangesVisitIds([listed('v3'), listed('v1')])).toEqual(['v3', 'v1']);
   });
 });
 
@@ -198,11 +229,12 @@ describe('the SCHEDULE CHANGES section', () => {
     } finally { if (prev !== undefined) process.env[GATE] = prev; }
   });
 
-  test('the persisted status names the listed visits, so the send-time rebuild asks about the same ones', () => {
-    const block = withGate(() => drafter.buildFactsBlock(context({ ...facts.emptyVisitLoops(), scheduleChanges: sc }), { now: NOW }));
-    const status = drafter.visitLoopStatus(context({ ...facts.emptyVisitLoops(), scheduleChanges: sc }), block);
-    expect(status.scheduleVisits).toEqual(['v1']);
-    expect(status.schedule).toBe(facts.scheduleChangesSignature(sc));
+  test('the persisted status names the listed visit slots, so the send-time rebuild asks about the same ones', () => {
+    const withListed = { ...sc, listed: [{ id: 'v1', date: '2026-12-04', start: '13:00:00' }] };
+    const block = withGate(() => drafter.buildFactsBlock(context({ ...facts.emptyVisitLoops(), scheduleChanges: withListed }), { now: NOW }));
+    const status = drafter.visitLoopStatus(context({ ...facts.emptyVisitLoops(), scheduleChanges: withListed }), block);
+    expect(status.scheduleVisits).toEqual([{ id: 'v1', date: '2026-12-04', start: '13:00:00' }]);
+    expect(status.schedule).toBe(facts.scheduleChangesSignature(withListed));
   });
 
   test('gate-on system prompt: a move, skip or cancel only from a SCHEDULE CHANGES sentence; a request is not proof', () => {

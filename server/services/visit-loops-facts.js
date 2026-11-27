@@ -560,17 +560,30 @@ const listedId = (entry) => {
   const id = entry && (entry.scheduledServiceId ?? entry.id);
   return id == null ? null : String(id);
 };
-async function loadListedMoves(conn, customerId, upcomingServices) {
-  const listed = (Array.isArray(upcomingServices) ? upcomingServices : []).filter((e) => listedId(e));
-  if (!listed.length) return [];
-  const ids = [...new Set(listed.map(listedId))];
+// Does the freshly read row still hold the slot the listed entry showed? The context form
+// (UPCOMING SERVICES' own row) carries its date and window label: the label is re-derived
+// from the fresh row the same way (day only for a day-only visit). The persisted form (the
+// send-time rebuild) carries the raw date and start the draft verified. A visit moved
+// between the two reads would glue the listed window onto the new day: it states no move.
+function listedSlotHolds(entry, visit, deriveWindow) {
+  if (calendarDay(entry.date) !== calendarDay(visit.scheduled_date)) return false;
+  if ('start' in entry) return startMinutes(entry.start) === startMinutes(visit.window_start);
+  if (entry.windowDayOnly) return true;
+  if (typeof deriveWindow !== 'function') return false;
+  const norm = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return norm(deriveWindow(visit)) === norm(entry.window);
+}
+async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow) {
+  const entries = (Array.isArray(upcomingServices) ? upcomingServices : []).filter((e) => listedId(e));
+  if (!entries.length) return { moves: [], listed: [] };
+  const ids = [...new Set(entries.map(listedId))];
   const [rows, logs] = await Promise.all([
     conn('scheduled_services').where({ customer_id: customerId }).whereIn('id', ids)
-      .select('id', 'service_type', 'scheduled_date', 'status', 'window_start'),
+      .select('id', 'service_type', 'scheduled_date', 'status', 'window_start', 'window_display', 'time_window'),
     conn('reschedule_log')
       .whereIn('scheduled_service_id', ids)
-      // a nightly "not closed out" flag logs the old slot and no new one: not a move
-      .whereRaw("COALESCE(reason_code, '') <> 'customer_noshow'")
+      // non-moves are dropped by their slot, never their reason: a nightly "not closed
+      // out" flag logs no new day, while a rain-out move can carry customer_noshow
       .whereNotNull('new_date')
       .orderBy('created_at', 'desc').orderBy('id', 'desc')
       .limit(500)
@@ -579,15 +592,18 @@ async function loadListedMoves(conn, customerId, upcomingServices) {
   const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
   const byId = new Map((rows || []).map((r) => [String(r.id), r]));
   const moves = [];
-  for (const entry of listed) {
+  const listed = [];
+  for (const entry of entries) {
     const visit = byId.get(listedId(entry));
     // a listed visit that is gone or no longer live (cancelled since) states no move
-    if (!visit || !UPCOMING_SERVICE_STATUSES.includes(visit.status)) continue;
+    if (!visit || !UPCOMING_SERVICE_STATUSES.includes(visit.status) || !listedSlotHolds(entry, visit, deriveWindow)) continue;
+    const listedDate = calendarDay(visit.scheduled_date);
+    const listedStart = visit.window_start ?? null;
+    listed.push({ id: String(visit.id), date: listedDate, start: listedStart });
     const proof = provenLastMove(visit, logs || []);
     if (!proof) continue;
     const fromDate = calendarDay(proof.last.original_date);
     const toDay = calendarDay(proof.last.new_date);
-    const toWindow = listedWindow(entry);
     moves.push({
       logId: String(proof.last.id),
       visitId: String(visit.id),
@@ -597,10 +613,12 @@ async function loadListedMoves(conn, customerId, upcomingServices) {
       toDate: toDay,
       toStart: proof.toStart,
       sameDay: fromDate === toDay,
-      toWindow,
+      listedDate,
+      listedStart,
+      toWindow: listedWindow(entry),
     });
   }
-  return moves;
+  return { moves, listed };
 }
 // The rows one cancel stopped together are one fact: same status and service, and for
 // a cancel the same cancelled_at minute (a cancelled plan). A skip, or a cancel with no
@@ -638,17 +656,15 @@ async function loadStopped(conn, customerId, now) {
   const replaced = new Set(rows.filter((r) => UPCOMING_SERVICE_STATUSES.includes(r.status)).map(dayKey));
   return stoppedGroups(rows.filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(dayKey(r)))).slice(0, SCHEDULE_STOPPED_LIMIT);
 }
-async function loadScheduleChanges({ conn, customerId, now, upcomingServices = [] }) {
-  const [moves, stopped] = await Promise.all([
-    loadListedMoves(conn, customerId, upcomingServices),
+// `listed`: the listed visits whose slot held, as { id, date, start } in UPCOMING SERVICES'
+// order. The draft persists it, so the send-time rebuild asks about the same visits and
+// checks each still holds the slot the draft verified.
+async function loadScheduleChanges({ conn, customerId, now, deriveWindow = null, upcomingServices = [] }) {
+  const [{ moves, listed }, stopped] = await Promise.all([
+    loadListedMoves(conn, customerId, upcomingServices, deriveWindow),
     loadStopped(conn, customerId, now),
   ]);
-  return { moves, stopped };
-}
-// The visits a SCHEDULE CHANGES read listed (UPCOMING SERVICES' ids, in its order): the
-// draft persists them, so the send-time rebuild asks about the same visits.
-function scheduleChangesVisitIds(upcomingServices) {
-  return (Array.isArray(upcomingServices) ? upcomingServices : []).map(listedId).filter(Boolean);
+  return { moves, stopped, listed };
 }
 // The schedule facts as one comparable string ('' when there are none, 'unread' when
 // the read failed): the send boundary rebuilds them and refuses when this changed, so
@@ -657,7 +673,7 @@ function scheduleChangesVisitIds(upcomingServices) {
 function scheduleChangesSignature(scheduleChanges) {
   if (!scheduleChanges || typeof scheduleChanges !== 'object') return 'unread';
   const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
-  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`)}`);
+  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`, `${m.listedDate ?? ''}T${m.listedStart ?? ''}`)}`);
   const stopped = (scheduleChanges.stopped || []).map((g) => `stopped:${key(g.status, g.type, [].concat(g.visitIds || []).join(','), g.date, g.lastDate)}`);
   return [...moves, ...stopped].join('|');
 }
@@ -874,4 +890,4 @@ function visitStatusSignature(visitLoops) {
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, scheduleChangesSignature, scheduleChangesVisitIds, loadScheduleChanges, allOpenCallCommitments, allSmsLane };
+module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, scheduleChangesSignature, loadScheduleChanges, allOpenCallCommitments, allSmsLane };

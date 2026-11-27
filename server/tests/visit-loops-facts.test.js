@@ -90,7 +90,7 @@ describe('loadVisitLoops basics', () => {
     const conn = fakeConn({});
     const out = await loadVisitLoops({ customerId: 'c1', upcomingServices: [{ isToday: false, scheduledServiceId: 'x' }], now: NOW, conn });
     // SCHEDULE CHANGES were read (none): an empty list, not the unread null
-    expect(out).toEqual({ ...emptyVisitLoops(), scheduleChanges: { moves: [], stopped: [] } });
+    expect(out).toEqual({ ...emptyVisitLoops(), scheduleChanges: { moves: [], stopped: [], listed: [] } });
   });
 
   test('strict skips commitments unless withCommitments (the gratitude boundary needs them)', async () => {
