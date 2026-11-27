@@ -219,10 +219,8 @@ function sendChangeNotices({ customerId, before, after, changes }) {
   });
 }
 
-// After a confirmed email change (owner 11-27, "add both"): one office alert with the old and new address, and the
-// linked Stripe customer's email brought up to date. Both run after commit, fire-and-forget: a failure is logged by
-// code and never undoes the change. The alert is internal (the admin bell), so it carries the addresses; the office
-// checks the change looks right (a customer who says "this was not me" calls about it).
+// After a confirmed email change (owner 11-27): one office alert with the old and new address. The alert is internal
+// (the admin bell), so it carries the addresses; the office checks the change looks right.
 // One sentence of at most 110 characters (the alert rule); both addresses always ride the detail lines too.
 // A name or address the copy rules refuse (an underscore, a bracket, a date-like run) falls back to a fixed sentence.
 function emailChangeWhy(name, oldEmail, newEmail) {
@@ -234,27 +232,12 @@ function emailChangeWhy(name, oldEmail, newEmail) {
   return fits(short) ? short : 'A customer changed their email, and both addresses are in the details.';
 }
 
-// What the alert says about Stripe, from the sync's own answer.
-const STRIPE_LINES = {
-  updated: 'Stripe: updated to the new email.',
-  not_linked: 'Stripe: no Stripe profile yet; it will get the new email when one is made.',
-  no_email: 'Stripe: not changed (no email on the record).',
-  not_configured: 'Stripe: not changed (Stripe is not set up here).',
-  shared: 'Stripe: NOT changed. Another customer record uses the same Stripe profile, so update it by hand if right.',
-};
-
-// Sync first (its answer goes on the alert), then the alert; neither ever undoes the change.
+// The office alert after a confirmed email change: fire-and-forget after commit, like the change notices; a failure is
+// logged by code and never undoes the change.
 async function afterEmailChange({ customerId, before, after, requestId }) {
   const name = [after.first_name, after.last_name].filter(Boolean).join(' ') || 'A customer';
   const oldEmail = clean(before.email);
   const newEmail = clean(after.email);
-  let stripeLine;
-  try {
-    stripeLine = STRIPE_LINES[await require('../services/stripe').syncStripeCustomerEmail(customerId)] || 'Stripe: not changed.';
-  } catch (err) {
-    logger.warn(`[customer-profile] Stripe email sync failed for ${customerId}: ${err.code || err.type || err.name || 'sync_failed'}`);
-    stripeLine = 'Stripe: the update failed, so Stripe still has the old email. Update it by hand.';
-  }
   try {
     await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
       area: 'Customers',
@@ -268,7 +251,7 @@ async function afterEmailChange({ customerId, before, after, requestId }) {
     }, {
       bell: true,
       dedupeKey: `profile_email_change:${customerId}:${requestId}`,
-      detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.\n${stripeLine}`,
+      detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.`,
       metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
     });
   } catch (err) {
