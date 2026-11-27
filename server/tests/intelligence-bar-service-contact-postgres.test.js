@@ -49,24 +49,26 @@ const TOOL = 'set_customer_service_contact';
       service_contact_name: 'Ava Fixture', service_contact_phone: '+12025550162',
       service_contacts_consent_at: new Date('2026-11-01T12:00:00Z'), service_contacts_consent_source: 'fixture',
     });
-    const added = await run({ customer_id: id, action: 'add', name: 'Sam Fixture', phone: '(202) 555-0163', email: 'Sam.Fixture@Example.invalid' });
+    const added = await run({ customer_id: id, action: 'add', relationship: 'tenant', name: 'Sam Fixture', phone: '(202) 555-0163', email: 'Sam.Fixture@Example.invalid' });
     expect(added.success).toBe(true);
     let row = await db('customers').where({ id }).first();
     expect(row.service_contact2_name).toBe('Sam Fixture');
     expect(row.service_contact2_phone).toBe('+12025550163');
     expect(row.service_contact2_email).toBe('sam.fixture@example.invalid');
+    expect(row.service_contact2_role).toBe('tenant');
     expect(row.service_contacts_consent_at).toBeNull();
 
     const removed = await run({ customer_id: id, action: 'remove', slot: 1 });
     expect(removed.success).toBe(true);
     row = await db('customers').where({ id }).first();
     expect(row.service_contact_name).toBe('Sam Fixture');
+    expect(row.service_contact_role).toBe('tenant');
     expect(row.service_contact2_name).toBeNull();
   });
 
   test('a contact edit after the card refuses and writes nothing', async () => {
     const id = await customer();
-    const input = { customer_id: id, action: 'add', name: 'Lee Fixture', phone: '+12025550164' };
+    const input = { customer_id: id, action: 'add', relationship: 'family_member', name: 'Lee Fixture', phone: '+12025550164' };
     const card = await executeServiceContactTool(TOOL, input, ADMIN);
     await db('customers').where({ id }).update({ service_contact_name: 'Other Fixture', service_contact_phone: '+12025550165' });
     const result = await executeServiceContactTool(TOOL, { ...input, confirmed: true, _verified_service_contact_version: card._version }, ADMIN);

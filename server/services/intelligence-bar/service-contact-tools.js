@@ -14,6 +14,10 @@
  *                                  the route's own (normalizeChangedServiceContacts / compactServiceContactSlots, run
  *                                  here on the same inputs for the card).
  *
+ * The card also records who the person is to the account (relationship: spouse_partner, tenant, ...; the call
+ * pipeline's own list), stored as the slot's role through the handler's req.ibServiceContactRoles, because the report
+ * sender reads it: a tenant never gets service reports. The page's editor cannot set it.
+ *
  * What a contact gets, shown on the card: a contact's EMAIL gets this account's visit emails from the next one (the
  * email fan-out reads the slots with no consent step, appointment-email.js); a contact's TEXTS need the account's
  * contact consent stamp (customer-contact.js serviceContactsConsented), and a save that changes who is on the list
@@ -33,6 +37,11 @@ const logger = require('../logger');
 const { UUID_RE } = require('./task-context');
 
 const ACTIONS = ['add', 'change', 'remove'];
+// The person's relationship to the service, the call pipeline's own list (intake-normalize.js
+// SECONDARY_CONTACT_ROLES) minus 'unknown'. It is stored as the slot's role, which the report sender reads: a tenant
+// never gets service reports (customer-contact.js slotWithheldFromReports).
+const RELATIONSHIPS = [...require('../../utils/intake-normalize').SECONDARY_CONTACT_ROLES].filter((r) => r !== 'unknown');
+const relationshipLabel = (role) => String(role || '').replace(/_/g, ' ');
 // The page editor's body keys per slot, in slot order (admin-customers.js customerUpdateHandler `fields`).
 const BODY_KEYS = [
   ['serviceContactName', 'serviceContactPhone', 'serviceContactEmail'],
@@ -44,8 +53,8 @@ const SERVICE_CONTACT_TOOLS = [
   {
     name: 'set_customer_service_contact',
     description: `Add, change or remove ONE extra contact on a customer account: the customer page's "Service contacts" (up to three people besides the account holder, such as a spouse, a family member allowed to speak for the account, a tenant, or an on-site manager). The first call returns a PREVIEW and saves nothing; the operator approves it, and the approved run re-checks it and refuses if anything changed.
-action "add": name plus a phone or an email (both when known); goes in the first empty slot. action "change": slot (1-3) plus what changes. action "remove": slot (1-3). get_customer_detail shows the slots.
-Effects: a contact with an email gets this account's visit emails (confirmations, reminders, reports) from the next one. Texts to contacts need their consent in the app, and any change to who is listed clears that consent for all of them, so no contact is texted until they agree again. Nothing is sent now. Admin only.
+action "add": name, relationship, and a phone or an email (both when known); goes in the first empty slot. action "change": slot (1-3) plus what changes. action "remove": slot (1-3). Without a slot, the reply lists the numbered contacts on file.
+Effects: a contact with an email can get this account's appointment emails, and service reports unless they are a tenant, as the account's notification settings allow. Texts to contacts need their consent in the app; a change to who is listed clears it. Removing a contact or changing their phone ends their app sign-in. Nothing is sent now. Admin only.
 Not this tool: linking two customer profiles as one family for the multi-home discount (customer page "Same family"), a payer who receives the invoices (set_customer_bill_to), or the account holder's own name, phone or email.
 Use for: "add his wife as a contact", "add <name> as an authorized family member", "put the tenant on the account", "add a second contact", "change the contact's phone", "remove <name> from the account".`,
     input_schema: {
@@ -57,6 +66,7 @@ Use for: "add his wife as a contact", "add <name> as an authorized family member
         name: { type: 'string', description: 'The contact\'s name, e.g. "Maria Lopez" (required to add)' },
         phone: { type: 'string', description: 'The contact\'s phone number' },
         email: { type: 'string', description: 'The contact\'s email address' },
+        relationship: { type: 'string', enum: RELATIONSHIPS, description: 'Who the person is to the account (required to add; ask if unclear), e.g. spouse_partner, family_member, tenant' },
       },
       required: ['customer_id', 'action'],
     },
@@ -82,40 +92,49 @@ function storedSlots(customer) {
 const isFilled = (slot) => !!(slot.name || slot.phone || slot.email);
 
 function describe(slot) {
-  const parts = [slot.phone || null, slot.email || null].filter(Boolean);
+  const parts = [slot.role ? relationshipLabel(slot.role) : null, slot.phone || null, slot.email || null].filter(Boolean);
   return `${slot.name || 'No name'}${parts.length ? ` (${parts.join(', ')})` : ''}`;
 }
+
+// The numbered contacts on file, for a reply that needs the operator (or the model) to pick a slot.
+const contactList = (slots) => slots.map((s, i) => (isFilled(s) ? { slot: i + 1, contact: describe(s) } : null)).filter(Boolean);
 
 // The raw three-slot list the save sends: the stored slots with this one change applied.
 function requestedSlots(slots, input) {
   const action = text(input.action);
   if (!ACTIONS.includes(action)) return refusal('action must be add, change or remove.', 'invalid_input');
   const fields = ['name', 'phone', 'email'].filter((k) => input[k] !== undefined && input[k] !== null);
+  const relationship = text(input.relationship);
+  if (relationship && !RELATIONSHIPS.includes(relationship)) return refusal(`relationship must be one of: ${RELATIONSHIPS.join(', ')}.`, 'invalid_input');
   const next = slots.map((s) => ({ name: s.name, phone: s.phone, email: s.email }));
   if (action === 'add') {
     if (!text(input.name)) return refusal('Give the new contact\'s name.', 'invalid_input');
+    if (!relationship) return refusal('Ask who the new contact is to the account (spouse or partner, family member, tenant, and so on), then pass relationship.', 'invalid_input');
     if (!text(input.phone) && !text(input.email)) return refusal('Give the new contact\'s phone number or email (or both).', 'invalid_input');
     const index = slots.findIndex((s) => !isFilled(s));
     if (index < 0) return refusal('This account already has three contacts. Change or remove one first.', 'slots_full');
     next[index] = { name: text(input.name), phone: text(input.phone), email: text(input.email) };
-    return { action, index, next };
+    return { action, index, next, roles: { [index]: relationship } };
   }
   const index = Number(input.slot) - 1;
-  if (![0, 1, 2].includes(index)) return refusal('Give the slot (1, 2 or 3) of the contact to change or remove.', 'invalid_input');
-  if (!isFilled(slots[index])) return refusal(`Contact ${index + 1} is empty on this account. Read get_customer_detail for the contacts on file.`, 'slot_empty');
+  const listed = contactList(slots);
+  if (![0, 1, 2].includes(index)) {
+    return refusal(listed.length ? 'Give the slot (1, 2 or 3) of the contact to change or remove. The contacts on file are listed.' : 'This account has no extra contacts.', 'invalid_input', { contacts: listed });
+  }
+  if (!isFilled(slots[index])) return refusal(`Contact ${index + 1} is empty on this account. The contacts on file are listed.`, 'slot_empty', { contacts: listed });
   if (action === 'remove') {
     next[index] = { name: '', phone: '', email: '' };
-    return { action, index, next };
+    return { action, index, next, roles: {} };
   }
-  if (!fields.length) return refusal('Give the name, phone or email that changes.', 'invalid_input');
+  if (!fields.length && !relationship) return refusal('Give the name, phone, email or relationship that changes.', 'invalid_input');
   for (const k of fields) next[index][k] = text(input[k]);
   if (!isFilled(next[index])) return refusal('That would leave the contact empty. Use action "remove" instead.', 'invalid_input');
-  return { action, index, next };
+  return { action, index, next, roles: relationship ? { [index]: relationship } : {} };
 }
 
 // The columns the handler would write for this body, run through the route's own normalizer and compactor on the
 // same stored row, so the card shows exactly what the save stores.
-function plannedWrite(customer, next) {
+function plannedWrite(customer, next, roles) {
   const { SERVICE_CONTACT_SLOT_FIELDS, normalizeChangedServiceContacts, compactServiceContactSlots } = routePrivate();
   const updates = {};
   SERVICE_CONTACT_SLOT_FIELDS.forEach(([n, p, e], i) => {
@@ -125,8 +144,11 @@ function plannedWrite(customer, next) {
   });
   const problem = normalizeChangedServiceContacts(updates, customer);
   if (problem) return { problem };
-  // Each slot as the save formats it, before compaction moves anyone up.
-  const formatted = storedSlots(updates);
+  // The handler applies the card's roles the same way, before compaction (req.ibServiceContactRoles).
+  for (const [index, role] of Object.entries(roles)) updates[SERVICE_CONTACT_SLOT_FIELDS[index][3]] = role;
+  // Each slot as the save formats it, before compaction moves anyone up. A slot the card gives no role keeps the role
+  // its person had (the compactor's rule), shown from the stored row.
+  const formatted = storedSlots(updates).map((slot, i) => (roles[i] ? slot : { ...slot, role: text(customer[SERVICE_CONTACT_SLOT_FIELDS[i][3]]) || null }));
   compactServiceContactSlots(updates, customer);
   return { updates, formatted, after: storedSlots(updates) };
 }
@@ -142,7 +164,29 @@ function duplicateOf(customer, slots, index, person) {
   return other >= 0 ? `contact ${other + 1} (${slots[other].name || 'no name'})` : null;
 }
 
-function planEffects({ name, after, target, plan, consentOnFile, consentCleared }) {
+// What the contact gets by email, in the senders' own terms: appointment emails follow the account's notification
+// settings and the contact's own choices; service reports also skip a tenant (slotWithheldFromReports).
+function emailLine(customer, target) {
+  if (!target.email) return null;
+  const { slotWithheldFromReports } = require('../customer-contact');
+  const reports = slotWithheldFromReports(customer, { contactRole: target.role })
+    ? 'but no service reports (a tenant, or an account a property manager holds)'
+    : 'and service reports';
+  return { kind: 'comms', text: `${target.email} can get this account's appointment emails ${reports}, as the account's notification settings and the contact's own choices allow.` };
+}
+
+// Texts, by the senders' consent rule (customer-contact.js serviceContactsConsented, which its kill switch can turn off).
+function textLine({ plan, consentOnFile, consentCleared }) {
+  const { serviceContactsConsented } = require('../customer-contact');
+  if (serviceContactsConsented({ service_contacts_consent_at: null })) {
+    return { kind: 'comms', text: 'Texts to contacts follow the account\'s notification settings (the contact consent check is switched off).' };
+  }
+  if (consentCleared) return { kind: 'comms', text: 'Clears the texting consent on file for this account\'s contacts: no contact gets texts until they agree again in the app. The account holder\'s texts do not change.' };
+  if (!consentOnFile && plan.action !== 'remove') return { kind: 'comms', text: 'No contact gets texts until they agree to texts in the app. The account holder\'s texts do not change.' };
+  return null;
+}
+
+function planEffects({ customer, name, before, after, target, plan, consentOnFile, consentCleared }) {
   const listed = after.filter(isFilled);
   const lines = [
     { kind: 'operational', text: listed.length
@@ -150,14 +194,16 @@ function planEffects({ name, after, target, plan, consentOnFile, consentCleared 
       : `${name || 'This account'} has no extra contacts after this.` },
   ];
   if (plan.action === 'remove') {
-    lines.push({ kind: 'comms', text: `${target.name || 'This contact'} stops getting this account's visit emails and texts.` });
-  } else if (target.email) {
-    lines.push({ kind: 'comms', text: `${target.email} gets this account's visit emails (confirmations, reminders, reports) from the next one, like the account holder.` });
+    lines.push({ kind: 'comms', text: `${target.name || 'This contact'} stops getting this account's emails and texts.` });
+  } else {
+    lines.push(emailLine(customer, target));
   }
-  if (consentCleared) {
-    lines.push({ kind: 'comms', text: 'Clears the texting consent on file for this account\'s contacts: no contact gets texts until they agree again in the app. The account holder\'s texts do not change.' });
-  } else if (!consentOnFile && plan.action !== 'remove') {
-    lines.push({ kind: 'comms', text: 'No contact gets texts until they agree to texts in the app. The account holder\'s texts do not change.' });
+  lines.push(textLine({ plan, consentOnFile, consentCleared }));
+  // The handler prunes the removed phone's own notification choices and revokes its app sessions; a later re-add
+  // starts fresh.
+  const oldPhone = before[plan.index].phone;
+  if (oldPhone && (plan.action === 'remove' || phoneKey(oldPhone) !== phoneKey(target.phone))) {
+    lines.push({ kind: 'operational', text: `${before[plan.index].name || 'This contact'} on ${oldPhone} is signed out of the app, and their push alerts and own notification choices are removed. Adding them back later does not restore those.` });
   }
   lines.push({ kind: 'comms', text: 'Nothing is sent now: no text, email or call goes to anyone.' });
   lines.push({ kind: 'operational', text: 'To undo, edit the contacts on the customer page.' });
@@ -176,7 +222,7 @@ async function buildPlan(input, { database = db } = {}) {
     const dupe = duplicateOf(customer, before, plan.index, plan.next[plan.index]);
     if (dupe) return refusal(`That phone or email is already on this account as ${dupe}. Change that contact instead.`, 'already_on_account');
   }
-  const { problem, updates, formatted, after } = plannedWrite(customer, plan.next);
+  const { problem, updates, formatted, after } = plannedWrite(customer, plan.next, plan.roles);
   if (problem) return refusal(problem.error, 'invalid_contact');
   const name = customerName(customer);
   const consentOnFile = !!customer.service_contacts_consent_at;
@@ -194,10 +240,10 @@ async function buildPlan(input, { database = db } = {}) {
     summary: `${verb} contact${plan.action === 'add' ? '' : ` ${plan.index + 1}`}: ${describe(target)}`,
     contacts_before: before.filter(isFilled).map(describe),
     contacts_after: after.filter(isFilled).map(describe),
-    effects: planEffects({ name, after, target, plan, consentOnFile, consentCleared }),
+    effects: planEffects({ customer, name, before, after, target, plan, consentOnFile, consentCleared }).filter(Boolean),
     sends_to_customer: false,
     // What the confirm and the locked re-check compare: the customer, the stored slots, the stamp and the write.
-    _version: { customer_id: customer.id, customer_name: name, before, consent_on_file: consentOnFile, body, after },
+    _version: { customer_id: customer.id, customer_name: name, before, consent_on_file: consentOnFile, body, roles: plan.roles, after },
     note: 'PREVIEW ONLY — nothing was changed. Confirm saves exactly these contacts; if anything changed it refuses.',
   };
 }
@@ -225,8 +271,8 @@ function lockedPlanCheck(input, pinned) {
   };
 }
 
-const sameSlots = (a, b) => JSON.stringify(a.map(({ name, phone, email }) => [name, phone, email]))
-  === JSON.stringify(b.map(({ name, phone, email }) => [name, phone, email]));
+const sameSlots = (a, b) => JSON.stringify(a.map(({ name, phone, email, role }) => [name, phone, email, role]))
+  === JSON.stringify(b.map(({ name, phone, email, role }) => [name, phone, email, role]));
 
 async function commitContacts(input, actionContext) {
   const { plan, refusal: refused } = await verifiedPlan(input, input._verified_service_contact_version);
@@ -239,6 +285,7 @@ async function commitContacts(input, actionContext) {
     reply = await require('../../routes/admin-customers').setServiceContactsFromBar({
       customerId: plan.customer_id,
       slots: plan._version.body,
+      roles: plan._version.roles,
       verifyPlan: lockedPlanCheck(input, plan._version),
       actor: { technicianId: actionContext?.technicianId || null },
     });

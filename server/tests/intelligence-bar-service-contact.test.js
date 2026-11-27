@@ -60,29 +60,30 @@ describe('set_customer_service_contact preview', () => {
   test('add puts the person in the first empty slot and says who gets what', async () => {
     state.customer.service_contact_name = 'Ava Example';
     state.customer.service_contact_phone = '+19415550111';
-    const p = await preview({ action: 'add', name: 'Sam Example', phone: '(941) 555-0122', email: 'Sam@Example.invalid' });
+    const p = await preview({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '(941) 555-0122', email: 'Sam@Example.invalid' });
     expect(p.preview).toBe(true);
-    expect(p.contacts_after).toEqual(['Ava Example (+19415550111)', 'Sam Example (+19415550122, sam@example.invalid)']);
+    expect(p.contacts_after).toEqual(['Ava Example (+19415550111)', 'Sam Example (family member, +19415550122, sam@example.invalid)']);
     expect(p._version.body).toMatchObject({ serviceContact2Name: 'Sam Example', serviceContact2Phone: '(941) 555-0122', serviceContact3Name: '' });
     const lines = effectText(p);
-    expect(lines).toMatch(/sam@example\.invalid gets this account's visit emails/);
+    expect(lines).toMatch(/sam@example\.invalid can get this account's appointment emails and service reports, as the account's notification settings/);
     expect(lines).toMatch(/No contact gets texts until they agree/);
     expect(lines).toMatch(/Nothing is sent now/);
-    expect(cardLines('set_customer_service_contact', p)[0].text).toBe('Add contact: Sam Example (+19415550122, sam@example.invalid) on Robin Sample');
+    expect(cardLines('set_customer_service_contact', p)[0].text).toBe('Add contact: Sam Example (family member, +19415550122, sam@example.invalid) on Robin Sample');
     const contract = buildContract({ toolName: 'set_customer_service_contact', params: { customer_id: CUST }, displayParams: {}, preview: p, summary: 'x' });
-    expect(JSON.stringify(contract)).toMatch(/visit emails/);
+    expect(JSON.stringify(contract)).toMatch(/appointment emails and service reports/);
   });
 
   test('refuses a fourth contact, an empty slot, a number already on the account and a bad phone', async () => {
     expect((await preview({ action: 'remove', slot: 2 })).code).toBe('slot_empty');
-    expect((await preview({ action: 'add', name: 'Holder Twin', phone: '941-555-0100' })).code).toBe('already_on_account');
-    expect((await preview({ action: 'add', name: 'No Way' })).code).toBe('invalid_input');
-    expect((await preview({ action: 'add', name: 'Short Number', phone: '555' })).code).toBe('invalid_contact');
+    expect((await preview({ action: 'add', name: 'No Relation', phone: '+19415550155' })).code).toBe('invalid_input');
+    expect((await preview({ action: 'add', relationship: 'family_member', name: 'Holder Twin', phone: '941-555-0100' })).code).toBe('already_on_account');
+    expect((await preview({ action: 'add', relationship: 'family_member', name: 'No Way' })).code).toBe('invalid_input');
+    expect((await preview({ action: 'add', relationship: 'family_member', name: 'Short Number', phone: '555' })).code).toBe('invalid_contact');
     for (const [n, i] of [['', 1], ['2', 2], ['3', 3]]) {
       state.customer[`service_contact${n}_name`] = `Person ${i}`;
       state.customer[`service_contact${n}_phone`] = `+1941555013${i}`;
     }
-    expect((await preview({ action: 'add', name: 'Fourth Person', phone: '+19415550199' })).code).toBe('slots_full');
+    expect((await preview({ action: 'add', relationship: 'family_member', name: 'Fourth Person', phone: '+19415550199' })).code).toBe('slots_full');
   });
 
   test('remove compacts the list and says the stored texting consent is cleared', async () => {
@@ -97,58 +98,75 @@ describe('set_customer_service_contact preview', () => {
     const lines = effectText(p);
     expect(lines).toMatch(/Sam Example stops getting/);
     expect(lines).toMatch(/Clears the texting consent on file/);
+    expect(lines).toMatch(/Sam Example on \+19415550122 is signed out of the app/);
+  });
+
+  test('a tenant is recorded as a tenant and the card says they get no service reports', async () => {
+    const p = await preview({ action: 'add', relationship: 'tenant', name: 'Tess Tenant', email: 'tess@example.invalid' });
+    expect(p._version.roles).toEqual({ 0: 'tenant' });
+    expect(p.contacts_after).toEqual(['Tess Tenant (tenant, tess@example.invalid)']);
+    expect(effectText(p)).toMatch(/appointment emails but no service reports/);
+  });
+
+  test('without a slot, the reply lists the numbered contacts on file', async () => {
+    Object.assign(state.customer, { service_contact_name: 'Ava Example', service_contact_phone: '+19415550111', service_contact_role: 'spouse_partner' });
+    const r = await preview({ action: 'remove' });
+    expect(r.code).toBe('invalid_input');
+    expect(r.contacts).toEqual([{ slot: 1, contact: 'Ava Example (spouse partner, +19415550111)' }]);
   });
 });
 
 describe('set_customer_service_contact commit', () => {
   test('runs the page handler once with the card body and the locked re-check, then reads it back', async () => {
-    const p = await preview({ action: 'add', name: 'Sam Example', phone: '+19415550122' });
+    const p = await preview({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' });
     Customers.setServiceContactsFromBar.mockImplementation(async ({ verifyPlan }) => {
       await verifyPlan(db); // the locked re-check over the same row passes
       state.customer.service_contact_name = 'Sam Example';
       state.customer.service_contact_phone = '+19415550122';
+      state.customer.service_contact_role = 'family_member';
       return { status: 200, json: { success: true } };
     });
-    const r = await confirm({ action: 'add', name: 'Sam Example', phone: '+19415550122' }, p._version);
+    const r = await confirm({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, p._version);
     expect(r.success).toBe(true);
     expect(r.sent_to_customer).toBe(false);
     expect(Customers.setServiceContactsFromBar).toHaveBeenCalledTimes(1);
     const call = Customers.setServiceContactsFromBar.mock.calls[0][0];
     expect(call.customerId).toBe(CUST);
     expect(call.slots).toEqual(p._version.body);
+    expect(call.roles).toEqual({ 0: 'family_member' });
     expect(call.actor).toEqual({ technicianId: 'staff-1' });
   });
 
   test('refuses when the contacts changed after the card, without calling the handler', async () => {
-    const p = await preview({ action: 'add', name: 'Sam Example', phone: '+19415550122' });
+    const p = await preview({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' });
     state.customer.service_contact_name = 'Someone Else';
-    const r = await confirm({ action: 'add', name: 'Sam Example', phone: '+19415550122' }, p._version);
+    const r = await confirm({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, p._version);
     expect(r.code).toBe('preview_changed');
     expect(Customers.setServiceContactsFromBar).not.toHaveBeenCalled();
   });
 
   test('a change that lands inside the transaction refuses as preview_changed', async () => {
-    const p = await preview({ action: 'add', name: 'Sam Example', phone: '+19415550122' });
+    const p = await preview({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' });
     Customers.setServiceContactsFromBar.mockImplementation(async ({ verifyPlan }) => {
       state.customer.service_contact_email = 'late@example.invalid';
       await verifyPlan(db);
       return { status: 200, json: {} };
     });
-    const r = await confirm({ action: 'add', name: 'Sam Example', phone: '+19415550122' }, p._version);
+    const r = await confirm({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, p._version);
     expect(r.code).toBe('preview_changed');
   });
 
   test('reports the handler refusal and an unverified save', async () => {
-    const p = await preview({ action: 'add', name: 'Sam Example', phone: '+19415550122' });
+    const p = await preview({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' });
     Customers.setServiceContactsFromBar.mockResolvedValueOnce({ status: 400, json: { error: 'Service contact 1 name must be 100 characters or fewer.' } });
-    expect((await confirm({ action: 'add', name: 'Sam Example', phone: '+19415550122' }, p._version)).code).toBe('contact_refused');
+    expect((await confirm({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, p._version)).code).toBe('contact_refused');
     Customers.setServiceContactsFromBar.mockResolvedValueOnce({ status: 200, json: {} });
-    expect((await confirm({ action: 'add', name: 'Sam Example', phone: '+19415550122' }, p._version)).code).toBe('contact_unverified');
+    expect((await confirm({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, p._version)).code).toBe('contact_unverified');
   });
 
   test('admin only, and a confirmed run needs the card pin', async () => {
-    const tech = await executeServiceContactTool('set_customer_service_contact', { customer_id: CUST, action: 'add', name: 'Sam Example', phone: '+19415550122' }, { isAdmin: false });
+    const tech = await executeServiceContactTool('set_customer_service_contact', { customer_id: CUST, action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, { isAdmin: false });
     expect(tech.code).toBe('permission_denied');
-    expect((await confirm({ action: 'add', name: 'Sam Example', phone: '+19415550122' }, undefined)).code).toBe('approval_required');
+    expect((await confirm({ action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' }, undefined)).code).toBe('approval_required');
   });
 });

@@ -939,7 +939,7 @@ const UNCONFIRMED_CALLS = [
     }],
     // set_customer_service_contact's preview reads the customer only; it may not write without confirmed
     // (intelligence-bar-service-contact.test.js covers the card itself).
-    ['service-contact-tools', 'executeServiceContactTool', 'set_customer_service_contact', { customer_id: '00000000-0000-0000-0000-00000000c281', action: 'add', name: 'Sam Example', phone: '+12025550177' }, {
+    ['service-contact-tools', 'executeServiceContactTool', 'set_customer_service_contact', { customer_id: '00000000-0000-0000-0000-00000000c281', action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+12025550177' }, {
       customers: [{ id: '00000000-0000-0000-0000-00000000c281', first_name: 'Pat', last_name: 'Tester', phone: '+12025550100', deleted_at: null }],
     }],
     // Outside-service writes (IB scope expansion item 1) build their preview
