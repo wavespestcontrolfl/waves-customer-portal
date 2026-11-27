@@ -939,29 +939,32 @@ function dispatchWithHardDeadline(route, routePayload, legMs) {
   return Promise.race([attempt, timedOut]).finally(() => clearTimeout(timer));
 }
 
+// Literal provider keys (never dereference PROVIDER.* at module load time —
+// tests that mock config/models without PROVIDER load this module via llm/deep).
 const PROVIDER_CAN_SERVE = {
-  [PROVIDER.OPENAI]: () => Boolean(process.env.OPENAI_API_KEY),
-  [PROVIDER.GEMINI]: (p) => !p.documents?.length && Boolean(geminiKey()),
-  [PROVIDER.ANTHROPIC]: (p) => Boolean(p.anthropicClient || (Anthropic && process.env.ANTHROPIC_API_KEY)),
-  [PROVIDER.TYPESAFE]: (p) => Boolean(process.env.TYPESAFE_API_KEY && p.questions && typeof p.questions === 'object' && !p.images?.length),
-  [PROVIDER.CLOUDFLARE]: (p) => Boolean((process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN) && process.env.CF_ACCOUNT_ID && p.questions && typeof p.questions === 'object'),
+  openai: () => Boolean(process.env.OPENAI_API_KEY),
+  gemini: (p) => !p.documents?.length && Boolean(geminiKey()),
+  anthropic: (p) => Boolean(p.anthropicClient || (Anthropic && process.env.ANTHROPIC_API_KEY)),
+  typesafe: (p) => Boolean(process.env.TYPESAFE_API_KEY && p.questions && typeof p.questions === 'object' && !p.images?.length),
+  cloudflare: (p) => Boolean((process.env.CF_WORKERS_AI_TOKEN || process.env.CF_API_TOKEN) && process.env.CF_ACCOUNT_ID && p.questions && typeof p.questions === 'object'),
 };
 
 function modelSupportsPayload(route, payload) {
-  if (route.provider === PROVIDER.TYPESAFE && !TYPESAFE_PINNED_MODEL_RE.test(route.model)) return false;
-  if (route.provider === PROVIDER.CLOUDFLARE && !workersAiDecisionModel(route.model)) return false;
+  if (route.provider === 'typesafe' && !TYPESAFE_PINNED_MODEL_RE.test(route.model)) return false;
+  if (route.provider === 'cloudflare' && !workersAiDecisionModel(route.model)) return false;
+  // Require affirmative capability evidence from MODEL_CATALOG before short-circuiting
+  // an open primary onto a backup (ordinary fallback after a primary failure still runs).
   const entry = MODEL_CATALOG?.[route.model];
-  if (!entry) return true;
-  if (entry.provider && entry.provider !== route.provider) return false;
+  if (!entry || (entry.provider && entry.provider !== route.provider)) return false;
   const caps = Array.isArray(entry.caps) ? entry.caps : [];
-  if (payload.images?.length && !caps.includes('vision')) return false;
+  if ((payload.images?.length || payload.documents?.length) && !caps.includes('vision')) return false;
   return true;
 }
 
 function canRouteServePayload(route, payload = {}) {
   if (!route?.provider || !route.model) return false;
-  if (payload.audio && route.provider !== PROVIDER.GEMINI) return false;
-  if (payload.tools?.length && route.provider !== PROVIDER.ANTHROPIC) return false;
+  if (payload.audio && route.provider !== 'gemini') return false;
+  if (payload.tools?.length && route.provider !== 'anthropic') return false;
   if (!modelSupportsPayload(route, payload)) return false;
   const check = PROVIDER_CAN_SERVE[route.provider];
   return typeof check === 'function' ? check(payload) : false;

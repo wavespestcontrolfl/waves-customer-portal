@@ -399,8 +399,44 @@ describe('llm/circuit-breaker', () => {
       expect(rImg.provider).toBe('gemini');
       expect(global.fetch).toHaveBeenCalledTimes(5);
 
-      // When payload requires tools (Anthropic-only in dispatch()), OpenAI backup cannot serve it, so Anthropic primary is NOT skipped.
+      // Unknown backup model ID (no affirmative MODEL_CATALOG capability evidence) and
+      // text-only backup for PDF documents do NOT qualify to skip an open primary.
       process.env.ANTHROPIC_API_KEY = 'test-anthropic';
+      const unknownBackupPolicy = {
+        name: 'testUnknownBackupCircuit',
+        primary: { provider: 'openai', model: MODELS.OPENAI_FAST },
+        fallback: { provider: 'anthropic', model: 'unlisted-typo-model' },
+      };
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_unknown_backup', status: 'completed', output_text: '{"ok":true}', usage: { input_tokens: 5, output_tokens: 5 } }),
+      });
+      const rUnknownBackup = await llm.dispatchWithFallback(unknownBackupPolicy, { text: 'hi', jsonMode: true });
+      expect(rUnknownBackup.ok).toBe(true);
+      expect(rUnknownBackup.provider).toBe('openai');
+      expect(global.fetch).toHaveBeenCalledTimes(6);
+
+      // Text-only backup model (gpt-6-luna) also cannot serve PDF documents.
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
+      const pdfTextOnlyPolicy = {
+        name: 'testPdfTextOnlyBackup',
+        primary: { provider: 'anthropic', model: MODELS.WORKHORSE },
+        fallback: { provider: 'openai', model: 'gpt-6-luna' },
+      };
+      const rPdfTextOnly = await llm.dispatchWithFallback(pdfTextOnlyPolicy, {
+        text: 'read pdf',
+        documents: [{ mimeType: 'application/pdf', data: 'JVBERi0=' }],
+        jsonMode: true,
+      });
+      expect(rPdfTextOnly.ok).toBe(true);
+      expect(rPdfTextOnly.provider).toBe('anthropic');
+      cb.resetCircuitBreakers();
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
+
+      // When payload requires tools (Anthropic-only in dispatch()), OpenAI backup cannot serve it, so Anthropic primary is NOT skipped.
       cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
       cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529' });
       const toolsPolicy = {
@@ -415,14 +451,13 @@ describe('llm/circuit-breaker', () => {
       });
       expect(rTools.ok).toBe(true);
       expect(rTools.provider).toBe('anthropic');
-      expect(mockAnthropicCreate).toHaveBeenCalledTimes(4);
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(5);
       cb.resetCircuitBreakers();
       cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
       cb.afterAttempt('openai', { ok: false, reason: 'openai_503' });
 
       // When primary is skipped (circuit_open) and backup fails with a timeout,
       // the dispatch row keeps circuit_open in failure_reasons AND classifies error_class from the backup's timeout.
-      process.env.ANTHROPIC_API_KEY = 'test-anthropic';
       const timeoutErr = Object.assign(new Error('Request timed out'), { name: 'APIConnectionTimeoutError' });
       mockAnthropicCreate.mockRejectedValueOnce(timeoutErr);
       insertedRows.length = 0;
