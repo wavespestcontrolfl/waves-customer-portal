@@ -172,6 +172,26 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(visits[0].products).toEqual([{ name: 'Example Herbicide' }]);
   });
 
+  test('a price in a service label or a product name is removed; two long names that differ at the end both show', async () => {
+    const long = 'Example Granular Fertilizer With A Very Long Recorded Name For The Front And Side Lawn Areas Applied At The Label Rate Formula';
+    const rows = [rec('r1', '2026-11-10', 'Palm Treatment ($125)')];
+    const dbh = fakeDbh({ rows });
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, (table) => {
+      const q = dbh(table);
+      if (table === 'service_products as sp') {
+        q.select = async () => [
+          { service_record_id: 'r1', product_name: 'Example Potash 0-0-25 ($2.18)' },
+          { service_record_id: 'r1', product_name: `${long} A` },
+          { service_record_id: 'r1', product_name: `${long} B` },
+        ];
+      }
+      return q;
+    });
+    expect(JSON.stringify(visits)).not.toMatch(/\$|125|2\.18/);
+    expect(visits[0].type).toBe('Palm Treatment');
+    expect(visits[0].products.map((p) => p.name)).toEqual(['Example Potash 0-0-25', `${long} A`, `${long} B`]);
+  });
+
   test('an older stop never lists a later visit', async () => {
     const { past_visits: visits } = await deterministicVisitFacts({ ...SVC, scheduled_date: '2026-10-25' }, fakeDbh());
     expect(visits.map((v) => v.date)).toEqual(['2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01', '2026-06-01']);

@@ -137,13 +137,20 @@ function pastVisitNoteText(record) {
   if (!safe) return null;
   return redactAccessCodes(String(safe).replace(/\s+/g, ' ')).replace(NOTE_MONEY_RE, '[amount]');
 }
+// A recorded label (service or product name) with price tokens removed and whitespace folded.
+function pastVisitLabel(value, max) {
+  const { stripPriceTokensFromText } = require('./protocol-reader');
+  const text = stripPriceTokensFromText(String(value || '')).replace(/\(\s*\)/g, '').replace(/\s+/g, ' ').trim();
+  return cleanText(text, max);
+}
 // The product names recorded on that visit, as written that day (the catalog name only when none was
 // recorded), each once.
 function pastVisitProductNames(productRows) {
   const seen = new Set();
   const names = [];
   for (const row of productRows) {
-    const name = cleanText(row.product_name || row.catalog_name, 120);
+    // The full recorded name (the recap writer allows 150 characters), price tokens removed.
+    const name = pastVisitLabel(row.product_name || row.catalog_name, 150);
     const key = (name || '').toLowerCase();
     if (!key || seen.has(key)) continue;
     seen.add(key);
@@ -197,7 +204,7 @@ async function loadPastVisits(dbh, svc) {
     return rows.map((r) => ({
       date: calendarDay(r.service_date),
       // The label recorded for that visit, only its duration/price suffixes stripped: never re-labelled.
-      type: cleanText(briefServiceIdentity(r.service_type), 120),
+      type: pastVisitLabel(briefServiceIdentity(r.service_type), 120),
       // History spans the whole account: a code written in a note for another home is masked.
       notes: previewText(pastVisitNoteText(r)),
       products: pastVisitProductNames(productRows.filter((p) => String(p.service_record_id) === String(r.id))),
