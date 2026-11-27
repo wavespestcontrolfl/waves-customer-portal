@@ -2392,6 +2392,17 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   };
 }
 
+// The visit's own program for the tank search: null = no treatment (no card), undefined = no category (its name decides).
+// A categoryless misting-system visit (legacy/manual, no catalog row) is a non-treatment: null, never undefined (unknown
+// treatment), so the mix path never doses a searched product. So is a visit with no category whose name and key no rule
+// claims (the matcher's no_protocol: a bare "Barrier Treatment"): it has no card.
+function primaryProgramKey(svc, protocols) {
+  const identity = { serviceKey: svc.service_key, name: svc.service_type };
+  if (isMistingDesignConsultation(identity) || isMistingSystemServiceUnconfigured(identity)) return null;
+  if (!svc.service_category) return matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key }).reason === 'no_protocol' ? null : undefined;
+  return addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key);
+}
+
 /**
  * The non-lawn protocol line that names this product — the primary visit's
  * (by catalog identity, name for a legacy row: resolveVisitProducts' rule)
@@ -2407,17 +2418,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
  */
 async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDate, deps = {}) {
   const protocols = deps.protocols || require('../config/protocols.json');
-  // A categoryless misting-system visit (legacy/manual, no catalog row) is a
-  // non-treatment too: resolve it to null (no program) rather than undefined
-  // (unknown treatment), so the mix path never doses a searched product.
-  const mistingNonTreatment = isMistingDesignConsultation({ serviceKey: svc.service_key, name: svc.service_type })
-    || isMistingSystemServiceUnconfigured({ serviceKey: svc.service_key, name: svc.service_type });
-  // A visit with no category whose name and key no rule claims (the matcher's no_protocol: a bare "Barrier Treatment") has no card,
-  // so it is no treatment either: the search never doses a product on it.
-  const noCard = !svc.service_category && matchServiceProtocol(protocols, svc.service_type, { serviceKey: svc.service_key }).reason === 'no_protocol';
-  const primaryKey = mistingNonTreatment || noCard
-    ? null
-    : (svc.service_category ? addonProgramKey(svc.service_category, svc.service_type, protocols, svc.service_key) : undefined);
+  const primaryKey = primaryProgramKey(svc, protocols);
   const treatment = primaryKey !== null;
   const primaryIsLawn = treatment && (primaryKey === undefined ? detectServiceLine(svc.service_type) === 'lawn' : primaryKey === 'lawn');
   const addons = (await loadAddons(dbh, serviceId))

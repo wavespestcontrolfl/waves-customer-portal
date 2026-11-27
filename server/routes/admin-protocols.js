@@ -1336,7 +1336,7 @@ router.get('/completion-actions', async (req, res, next) => {
       const matched = await matchForBookedVisit(req, protocols, serviceType);
       programKey = matched.programKey;
       program = matched.program;
-      visit = matched.matchedVisit || program?.visits?.[0] || null;
+      visit = matched.matchedVisit || program?.visits?.[0];
       // A service with no card (owner pick D18) has no actions and no products to offer: the close-out says so.
       if (matched.reason === 'no_protocol') return res.json({ serviceType, programKey: null, programName: null, visit: null, actions: [], noProtocol: true, note: NO_CARD_NOTE });
     }
