@@ -1375,6 +1375,10 @@ describe('revertMerge', () => {
     expect(state.loserRestore.phone).toBe('5550000001');
     expect(state.loserRestore.email).toBe('loser.testcase@example.com');
     expect(state.loserRestore.stripe_customer_id).toBe('cus_only');
+    // The Stripe profile goes back to the restored customer, so a Stripe email sync job for them is queued in this
+    // undo transaction (the kept customer's email may sit on the profile now).
+    expect(state.rawCalls.some(([sql, bindings]) => String(sql).includes('INSERT INTO stripe_email_sync_jobs')
+      && Array.isArray(bindings) && bindings[1] === 'merge_undo')).toBe(true);
     // Financial rows verify under FOR UPDATE; history rows don't need the lock.
     expect(state.verified).toEqual(expect.arrayContaining([
       { table: 'invoices', forUpdate: true },

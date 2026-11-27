@@ -821,12 +821,13 @@ const StripeService = {
   // `database`: the caller's transaction handle when this runs under a
   // held row lock (standalone Auto Pay replacement) — the customer read
   // and the link-back write must not take a second pool connection.
-  // The one Stripe write of the email sync (services/stripe-email-sync.js), with a short per-request timeout because
-  // the caller holds the customer row lock through it. 'not_configured' when this process has no Stripe key.
-  async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000 } = {}) {
+  // The one Stripe write of the email sync (services/stripe-email-sync.js), with a short per-request timeout and NO SDK
+  // retries because the caller holds the customer row lock through it (the durable job retries after the lock is
+  // released). 'not_configured' when this process has no Stripe key.
+  async updateCustomerEmail(stripeCustomerId, email, { timeout = 10000, maxNetworkRetries = 0 } = {}) {
     const stripe = getStripe();
     if (!stripe) return 'not_configured';
-    await stripe.customers.update(stripeCustomerId, { email }, { timeout });
+    await stripe.customers.update(stripeCustomerId, { email }, { timeout, maxNetworkRetries });
     return 'updated';
   },
 

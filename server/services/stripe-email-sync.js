@@ -88,10 +88,14 @@ async function processJob(jobId) {
     if (!customer.stripe_customer_id) { await finish(trx, job, 'done', 'not_linked'); return 'not_linked'; }
     const email = String(customer.email || '').trim();
     if (!email) { await finish(trx, job, 'done', 'no_email'); return 'no_email'; }
-    // Lock every other row on the same Stripe id too: none may move it while we decide.
-    const others = await trx('customers').where({ stripe_customer_id: customer.stripe_customer_id })
-      .whereNot({ id: customer.id }).orderBy('id').forUpdate().select('id');
-    if (others.length) {
+    // Shared ownership, checked without locking other rows (locking them after our own row could invert a merge's
+    // sorted lock order): another customer row on the same Stripe id, or another customer's saved card on it (the
+    // merge code treats a card as ownership evidence). Either way the job is skipped and the office decides.
+    const otherRow = await trx('customers').where({ stripe_customer_id: customer.stripe_customer_id })
+      .whereNot({ id: customer.id }).first('id');
+    const otherCard = otherRow ? null : await trx('payment_methods').where({ stripe_customer_id: customer.stripe_customer_id })
+      .whereNot({ customer_id: customer.id }).first('id');
+    if (otherRow || otherCard) {
       await finish(trx, job, 'skipped', 'shared');
       await alertOffice(trx, job, customer, 'shared');
       return 'shared';
@@ -99,7 +103,7 @@ async function processJob(jobId) {
     const StripeService = require('./stripe');
     let outcome;
     try {
-      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email, { timeout: STRIPE_TIMEOUT_MS });
+      outcome = await StripeService.updateCustomerEmail(customer.stripe_customer_id, email, { timeout: STRIPE_TIMEOUT_MS, maxNetworkRetries: 0 });
     } catch (err) {
       const attempts = job.attempts + 1;
       const code = String(err.code || err.type || err.name || 'stripe_error').slice(0, 80);

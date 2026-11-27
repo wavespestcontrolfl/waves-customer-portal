@@ -7104,6 +7104,10 @@ async function revertMerge({ journalId, performedBy, performedById }) {
     // refusals above).
     if (stripeMovedBack) {
       restore.stripe_customer_id = transferredStripe;
+      // The Stripe email sync (stripe-email-sync.js) may have written the kept customer's email onto this profile
+      // while it sat on the winner. A durable sync job for the restored owner, in this undo transaction, puts the
+      // restored customer's own email back on it once the undo commits.
+      await require('./stripe-email-sync').enqueue(trx, loserId, 'merge_undo');
     } else if (!transferredStripe && snapshot.stripe_customer_id) {
       // SHARED-profile case: both rows named the SAME Stripe customer
       // pre-merge (a differing pair is refused at merge time), so nothing

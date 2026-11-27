@@ -11,6 +11,7 @@ describe('stripe-email-sync processJob', () => {
     state = {
       jobs: [{ id: 'job-1', customer_id: 'c1', status: 'pending', attempts: 0, due: true, ...job }],
       customers,
+      cards: [],
     };
     const builder = (table) => {
       const q = { conds: [], nots: [], locked: false, skip: false, dueOnly: false };
@@ -19,7 +20,7 @@ describe('stripe-email-sync processJob', () => {
       q.orderBy = () => q;
       q.forUpdate = () => { q.locked = true; return q; };
       q.skipLocked = () => { q.skip = true; return q; };
-      const rows = () => (table === 'stripe_email_sync_jobs' ? state.jobs : state.customers)
+      const rows = () => ({ stripe_email_sync_jobs: state.jobs, customers: state.customers, payment_methods: state.cards }[table])
         .filter((r) => q.conds.every((c) => Object.entries(c).every(([k, v]) => r[k] === v))
           && q.nots.every((c) => Object.entries(c).every(([k, v]) => r[k] !== v))
           && (!q.dueOnly || r.due)
@@ -50,24 +51,35 @@ describe('stripe-email-sync processJob', () => {
   test('updates Stripe with the email on file, holding the job and customer locks through the call', async () => {
     const sync = load({ customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
-    expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000 });
+    expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000, maxNetworkRetries: 0 });
     // Customer first, then the job: the same order as an email confirm (no deadlock).
     expect(locks).toEqual(['customers:c1', 'stripe_email_sync_jobs:job-1', 'stripe-call']);
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'updated' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
 
-  test('a Stripe id another customer row shares is never changed: skipped, both rows locked, office alerted', async () => {
+  test('a Stripe id another customer row shares is never changed: skipped (the other row is not locked), office alerted', async () => {
     const sync = load({ customers: [cust(), cust({ id: 'c2', email: 'other@example.test' })] });
     await expect(sync.processJob('job-1')).resolves.toBe('shared');
     expect(updateEmail).not.toHaveBeenCalled();
-    expect(locks).toContain('customers:c2');
+    expect(locks).not.toContain('customers:c2');
     expect(state.jobs[0]).toMatchObject({ status: 'skipped', result: 'shared' });
     expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
     const [, spec, opts] = raiseAdminAlert.mock.calls[0];
     expect(spec).toMatchObject({ area: 'Customers', severity: 'needs-you', subject: { type: 'customer', id: 'c1' } });
     expect(opts.dedupeKey).toBe('stripe_email_sync:job-1');
     expect(typeof opts.trx).toBe('function');
+  });
+
+  test("another customer's saved card on the same Stripe id counts as shared ownership", async () => {
+    const sync = load({ customers: [cust()] });
+    state.cards.push({ id: 'pm-9', customer_id: 'c2', stripe_customer_id: 'cus_1' });
+    await expect(sync.processJob('job-1')).resolves.toBe('shared');
+    expect(updateEmail).not.toHaveBeenCalled();
+    // Our own card on it is fine.
+    const own = load({ customers: [cust()] });
+    state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_1' });
+    await expect(own.processJob('job-1')).resolves.toBe('updated');
   });
 
   test('no link, no email, or a merged-away record finish without a Stripe call', async () => {
