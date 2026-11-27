@@ -3342,11 +3342,16 @@ function bookedServiceTypeFor(booking, serviceType) {
 // the Schedule screen's blank WDO line gets (wdo-booking-price.js) at the visit's property (`propertyId`; none named =
 // the customer's own home). It replaces the catalog default below; null = no table price, the catalog price applies.
 // The property record is read only on an unlocked pass (conn = db). The locked recheck passes the unlocked pass's
-// answer as `wdoTable` (null included), so the booking transaction never reads it.
+// answer as `wdoTable` (null included), so the booking transaction never reads it, and keeps that answer only for the
+// home it was read at: a customer address or saved property edited since is another home, so the booking refuses
+// (pre-push audit P0).
 async function ibWdoTablePrice({ customer, catalogRow, propertyId, wdoTable, conn }) {
-  const { isWdoInspectionService, wdoBookingPrice } = require('../wdo-booking-price');
+  const { isWdoInspectionService, wdoBookingPrice, wdoTableStillApplies } = require('../wdo-booking-price');
   if (!isWdoInspectionService(catalogRow)) return null;
-  if (wdoTable !== undefined) return wdoTable;
+  if (wdoTable !== undefined) {
+    if (await wdoTableStillApplies(wdoTable, { customer, propertyId: propertyId || null, conn })) return wdoTable;
+    throw Object.assign(new Error('booking_property_changed'), { bookingPropertyChanged: true });
+  }
   if (conn !== db) throw new Error('A WDO table price is read before the booking transaction opens');
   return wdoBookingPrice({ customer, propertyId: propertyId || null });
 }
@@ -4074,9 +4079,11 @@ async function createAppointment(input, actionContext = {}) {
     // through. The customer row stays locked through the insert, so both
     // hold for the row this booking writes against.
     // A WDO table price is the unlocked pass's read (this transaction never
-    // reads the property record); the card pinned that same price.
+    // reads the property record), kept only for the same home; the card
+    // pinned that same price.
     const lockedBooking = await ibBookingPricing({
-      customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, wdoTable: booking.wdoTable ?? null, conn: trx,
+      customer: lockedCustomer, serviceType: service_type, statedPrice: input.price, propertyId: input.property_id,
+      wdoTable: booking.wdoTable ?? null, conn: trx,
     });
     if (lockedBooking.error || !sameBookingPrice(lockedBooking.price, booking.price)
       || String(lockedBooking.catalogRow?.id || '') !== String(booking.catalogRow?.id || '')

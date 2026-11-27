@@ -1274,23 +1274,31 @@ describe('create_appointment — the visit carries a price like a Schedule-scree
       expect(strictCacheOnlyPropertyLookup).toHaveBeenCalledTimes(1);
     });
 
-    test('a WDO table price is read once, before the booking transaction: the locked pass reuses it and reads no property record', async () => {
+    test('a WDO table price is read once, before the booking transaction: the locked pass keeps it only for the same home and reads no property record', async () => {
       const { strictCacheOnlyPropertyLookup } = require('../services/service-report/start-offer-lookup');
       const { _ibBookingPricing: ibBookingPricing } = require('../services/intelligence-bar/tools');
       const wdo = { ...ONE_TIME_PEST, id: 'svc-wdo', name: 'WDO Inspection Service', service_key: 'wdo_inspection', base_price: '250.00', category: 'termite' };
+      const atHome = { ...MEMBER, address_line1: '100 Example Ln', city: 'Bradenton', state: 'FL', zip: '34201' };
       strictCacheOnlyPropertyLookup.mockClear();
-      wireDb({ services: [catalog([wdo])], scheduled_services: [chain()] });
+      // No home size on record: the first size step, $150.
+      strictCacheOnlyPropertyLookup.mockResolvedValueOnce({ enriched: {} });
+      // The customer's own home (no saved primary property) for the unlocked pass and both locked passes.
+      wireDb({ services: [catalog([wdo]), catalog([wdo]), catalog([wdo])], customer_properties: [chain(), chain(), chain()], scheduled_services: [chain()] });
+      const before = await ibBookingPricing({ customer: atHome, serviceType: 'WDO Inspection Service' });
+      expect(before).toMatchObject({ price: 150, source: 'wdo_table' });
       const trx = jest.fn((table) => db(table));
-      const table = { price: 150, basis: 'no home size on record, construction not verified', staffNote: 'No home size on record: priced as 2,000 sq ft.' };
-      const locked = await ibBookingPricing({ customer: MEMBER, serviceType: 'WDO Inspection Service', wdoTable: table, conn: trx });
-      expect(locked).toMatchObject({ price: 150, source: 'wdo_table', wdoTable: table });
-      expect(strictCacheOnlyPropertyLookup).not.toHaveBeenCalled();
-      expect(trx.mock.calls.map(([name]) => name)).not.toContain('customer_properties');
+      const locked = await ibBookingPricing({ customer: atHome, serviceType: 'WDO Inspection Service', wdoTable: before.wdoTable, conn: trx });
+      expect(locked).toMatchObject({ price: 150, source: 'wdo_table', wdoTable: before.wdoTable });
+      // The customer's address changed after the read: another home, so the locked pass refuses (pre-push audit P0).
+      await expect(ibBookingPricing({ customer: { ...atHome, address_line1: '300 Other St' }, serviceType: 'WDO Inspection Service', wdoTable: before.wdoTable, conn: trx }))
+        .rejects.toMatchObject({ bookingPropertyChanged: true });
+      // Neither locked pass read the property record.
+      expect(strictCacheOnlyPropertyLookup).toHaveBeenCalledTimes(1);
       // A locked pass handed no table price refuses to read one inside the transaction.
       wireDb({ services: [catalog([wdo])], scheduled_services: [chain()] });
       await expect(ibBookingPricing({ customer: MEMBER, serviceType: 'WDO Inspection Service', conn: trx }))
         .rejects.toThrow(/read before the booking transaction opens/);
-      expect(strictCacheOnlyPropertyLookup).not.toHaveBeenCalled();
+      expect(strictCacheOnlyPropertyLookup).toHaveBeenCalledTimes(1);
     });
 
     test('a recurring customer with no tier or rate qualifies through live recurring coverage (the "or recurring customers" half)', async () => {

@@ -154,7 +154,7 @@ function futureDate(days = 30) {
 const PEST_ONCE = { id: 'svc-pest1', service_key: 'one_time_pest', name: 'One-Time Pest Service', billing_type: 'one_time', base_price: 150, default_duration_minutes: 30 };
 
 // `quote(body)` answers the line's POST (read each time, so a test can change the answer); `save(body)` answers a save.
-function installFetch({ quote, save = () => json({ id: 'appt-1' }) }) {
+function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [WDO, PEST_ONCE] }) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.endsWith('/admin/schedule/wdo-inspection-quote') && options.method === 'POST') {
@@ -167,7 +167,7 @@ function installFetch({ quote, save = () => json({ id: 'appt-1' }) }) {
     }
     if (url.endsWith('/admin/schedule') && options.method === 'POST') return Promise.resolve(save(JSON.parse(options.body || '{}')));
     if (url.includes('/admin/triage?')) return Promise.resolve(json({ items: [] }));
-    if (url.includes('/admin/services?')) return Promise.resolve(json({ services: [WDO, PEST_ONCE] }));
+    if (url.includes('/admin/services?')) return Promise.resolve(json({ services: catalog }));
     if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates: [] }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
@@ -221,6 +221,59 @@ describe('a WDO line in the modal', () => {
     expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', primaryLinePrice: null, wdoExpectedPrice: 200 });
     // The price is read again at the moment of booking.
     expect(quoteCalls(fetcher)).toHaveLength(2);
+  });
+
+  it('a cleared line beside a blank WDO line books the $0 the total shows, never its catalog price', async () => {
+    const fetcher = installFetch({ quote: () => FRAME_2600 });
+    mount();
+    await addLine('Pest', /One-Time Pest Service/i);
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '' } });
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
+    expect(total()).toContain('$200');
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    // The pest line posts the $0 it showed (a null would book its $150 catalog price); the WDO line posts blank.
+    expect(schedulePosts(fetcher)[0]).toMatchObject({
+      serviceId: 'svc-pest1', primaryLinePrice: 0, estimatedPrice: 200, wdoExpectedPrice: 200,
+      serviceAddons: [expect.objectContaining({ serviceId: 'svc-wdo', basePrice: null })],
+    });
+  });
+
+  it('a retry after a partial save reads no price for a WDO line already booked, so a failed read never blocks the rest', async () => {
+    const FIRST = { id: 'svc-first', service_key: 'svc_first', name: 'First seasonal service', billing_type: 'recurring', frequency: 'seasonal_feb_oct', visits_per_year: 9, base_price: 40, default_duration_minutes: 30 };
+    const SECOND = { ...FIRST, id: 'svc-second', service_key: 'svc_second', name: 'Second seasonal service' };
+    let quoteFails = false;
+    let secondTries = 0;
+    const fetcher = installFetch({
+      catalog: [WDO, FIRST, SECOND],
+      quote: () => (quoteFails ? json({ error: 'read failed' }, { ok: false, status: 500 }) : FRAME_2600),
+      save: (body) => {
+        if (body.serviceId !== 'svc-second') return json({ id: 'appt-1' });
+        secondTries += 1;
+        return secondTries === 1 ? json({ error: 'failed' }, { ok: false, status: 500 }) : json({ id: 'appt-2' });
+      },
+    });
+    vi.spyOn(window, 'alert').mockImplementation(() => {});
+    mount();
+    await addLine('seasonal', /First seasonal service/i);
+    await addWdoLine();
+    await addLine('seasonal', /Second seasonal service/i);
+    await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    // The first appointment (the first seasonal line with the WDO line) books; the second fails.
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(2));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-first', wdoExpectedPrice: 200 });
+    const reads = quoteCalls(fetcher).length;
+    quoteFails = true;
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(3));
+    expect(schedulePosts(fetcher)[2]).toMatchObject({ serviceId: 'svc-second' });
+    expect(schedulePosts(fetcher)[2]).not.toHaveProperty('wdoExpectedPrice');
+    expect(quoteCalls(fetcher)).toHaveLength(reads);
   });
 
   it('a typed price overrides the table price: it totals and books as typed, and nothing is re-read', async () => {

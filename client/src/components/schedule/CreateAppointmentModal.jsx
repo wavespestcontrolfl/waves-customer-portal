@@ -2804,6 +2804,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const wdoQuoteShown = !!wdoQuoteKey && wdoQuote?.key === wdoQuoteKey && wdoQuote?.status === 'ready';
   const wdoAutoAmount = (svc) => (lineIsBlankWdo(svc) && wdoQuoteShown && wdoQuote.price != null ? wdoQuote.price : null);
   const wdoQuotePending = (svc) => lineIsBlankWdo(svc) && !wdoQuoteShown;
+  // A group of lines shows a price when one has an entered price or is a blank WDO line showing its price. Its blank
+  // main line then posts the $0 the total showed, never a catalog price the total left out (pre-push audit P0): before
+  // the table price, a WDO line came filled in with the catalog price, so such a group counted as priced.
+  const groupShowsPrice = (lines) => lines.some((s) => lineHasEnteredPrice(s) || wdoAutoAmount(s) != null);
   // A booking wdoSubmitGate held (Save and Book): ask again after a failed read, or show the changed price.
   const applyWdoHold = (hold) => {
     if (hold.retry) setWdoQuoteAttempt((n) => n + 1);
@@ -3783,6 +3787,9 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // pricing depends on the live gate (groupRegimeDependent) — a plain,
   // discount-free booking has nothing here to verify and this array stays
   // empty, so previewConfirming below never blocks it.
+  // An appointment an earlier try of this save already booked: the retry, the price preview and the WDO price check
+  // skip it.
+  const groupBookedThisSession = (group) => createdGroupKeysRef.current.has(groupKey(group)) || groupAlreadyCommitted(group);
   const previewGroupRequests = useMemo(() => {
     if (!selectedCustomer) return [];
     return appointmentSubmitGroups
@@ -3799,7 +3806,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // the form is read-only post-commit (partialCommitLocked) so the
         // two should never disagree in practice, but this is the line-
         // level check that stays correct even if they somehow did.
-        if (createdGroupKeysRef.current.has(key) || groupAlreadyCommitted(group)) return null;
+        if (groupBookedThisSession(group)) return null;
         const carriesDiscount = !!appointmentDiscount && !!appointmentDiscountGroup && key === appointmentDiscountGroup.key;
         if (!groupRegimeDependent(group, carriesDiscount)) return null;
         const [primary, ...extras] = group.lines;
@@ -3819,7 +3826,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // total than the preview showed and the server's own
         // PREPAY_TOTAL_DIVERGED check then rejected. Mirrors
         // appointmentGroupRequestBody's own formula exactly now.
-        const groupHasPrice = group.lines.some(lineHasEnteredPrice);
+        const groupHasPrice = groupShowsPrice(group.lines);
         return {
           key,
           customerId: selectedCustomer.id,
@@ -3868,7 +3875,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
     // `services`, so listing it (not just services) is what actually
     // catches a cadence-only edit with no discount change at all — same
     // reasoning as existingSelectionConflict's own dependency list above.
-  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay, committedGroupKeysVersion, propertyPickerActive, selectedPropertyId, linkedEstimate]);
+  }, [appointmentSubmitGroups, services, selectedCustomer, apptDate, appointmentDiscount, appointmentDiscountGroup, recurringCount, collectPrepay, committedGroupKeysVersion, propertyPickerActive, selectedPropertyId, linkedEstimate, wdoQuote, wdoQuoteKey]);
 
   // --- WaveGuard tier auto-preselect (owner ruling 2026-09-26: "auto-fill,
   // staff can remove it") — three real Silver customers were booked at full
@@ -4479,8 +4486,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setTimeout(() => setToast(''), mosquitoHold.holdMs);
         return;
       }
-      // The same for a blank WDO line's table price (wdoSubmitGate).
-      const wdoHold = await wdoSubmitGate({ needsPrice: hasBlankWdoLine, quote: wdoQuote, query: wdoQuoteKey, blankLines: blankWdoLines });
+      // The same for a blank WDO line's table price (wdoSubmitGate), in the appointments this save posts: a WDO line an
+      // earlier try already booked is not read again, so a failed read never blocks the rest (pre-push audit P1).
+      const unsavedBlankWdoLines = appointmentSubmitGroups.filter((group) => !groupBookedThisSession(group))
+        .flatMap((group) => group.lines).filter(lineIsBlankWdo).length;
+      const wdoHold = await wdoSubmitGate({ needsPrice: unsavedBlankWdoLines > 0, quote: wdoQuote, query: wdoQuoteKey, blankLines: unsavedBlankWdoLines });
       assertSubmitCurrent();
       if (wdoHold) {
         applyWdoHold(wdoHold);
@@ -4537,7 +4547,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         // should never drift out from under an uncommitted group post-
         // commit, but a retry must never re-derive "already done" from a
         // key string alone when a per-line identity check is available.
-        if (createdGroupKeysRef.current.has(key) || groupAlreadyCommitted(group)) continue;
+        if (groupBookedThisSession(group)) continue;
         assertSubmitCurrent();
         // Declared OUTSIDE the try block (Codex review round 2 P0 follow-up:
         // the catch's "recoverable" branch below also needs to read this to
@@ -4546,7 +4556,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         try {
           const [primary, ...extras] = group.lines;
           const groupSubtotal = group.lines.reduce((sum, s) => sum + lineEffectiveNetAmount(s), 0);
-          const groupHasPrice = group.lines.some(lineHasEnteredPrice);
+          const groupHasPrice = groupShowsPrice(group.lines);
           const groupDuration = group.lines.reduce((sum, s) => sum + (s.duration || s.default_duration_minutes || 30), 0);
           const addons = extras.map((s) => {
             const basePrice = lineBaseAmount(s);
@@ -5424,8 +5434,29 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       });
     return () => { cancelled = true; };
   }, [newCallerBookMode, newCallerCallsAttempt]);
+  // What Book posts, built from this render's form. Book builds it at the click and posts it only if the form still
+  // builds the same one after the WDO price re-read: another address picked, or a line, time or note edited meanwhile,
+  // books nothing (pre-push audit P1).
+  const newCallerBody = () => JSON.stringify(newCallerRequestBody({
+    serviceId: newCallerLine.id,
+    linePrice: lineHasEnteredPrice(newCallerLine) ? lineBaseAmount(newCallerLine) : null,
+    durationMinutes: newCallerLine.duration || newCallerLine.default_duration_minutes,
+    scheduledDate: apptDate,
+    windowStart,
+    techMode,
+    techId,
+    quickAdd,
+    quickAddTarget,
+    callLogId: newCallerCallId,
+    customerNotes,
+    internalNotes,
+    wdoExpectedPrice: wdoExpectedPriceFor([newCallerLine]),
+  }));
+  const newCallerBodyRef = useRef('');
+  newCallerBodyRef.current = newCallerBookMode && newCallerLine ? newCallerBody() : '';
   const bookNewCaller = async () => {
     if (!canBookNewCaller) return;
+    const body = newCallerBody();
     setNewCallerError('');
     setNewCallerSubmitting(true);
     try {
@@ -5439,24 +5470,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setNewCallerError(wdoHold.message);
         return;
       }
-      const result = await adminFetch('/admin/schedule/new-caller', {
-        method: 'POST',
-        body: JSON.stringify(newCallerRequestBody({
-          serviceId: newCallerLine.id,
-          linePrice: lineHasEnteredPrice(newCallerLine) ? lineBaseAmount(newCallerLine) : null,
-          durationMinutes: newCallerLine.duration || newCallerLine.default_duration_minutes,
-          scheduledDate: apptDate,
-          windowStart,
-          techMode,
-          techId,
-          quickAdd,
-          quickAddTarget,
-          callLogId: newCallerCallId,
-          customerNotes,
-          internalNotes,
-          wdoExpectedPrice: wdoExpectedPriceFor([newCallerLine]),
-        })),
-      });
+      if (newCallerBodyRef.current !== body) {
+        setNewCallerError('The booking changed while the WDO price was checked. Check it, then press Book again.');
+        return;
+      }
+      const result = await adminFetch('/admin/schedule/new-caller', { method: 'POST', body });
       const scheduledDate = String(apptDate || '').split('T')[0];
       if (Array.isArray(result?.warnings) && result.warnings.length) showScheduleSaveNotice(`Visit booked.\n\n${result.warnings.join('\n\n')}`);
       onCreated?.({ id: result?.id, scheduledDate });

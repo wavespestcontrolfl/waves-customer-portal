@@ -115,6 +115,10 @@ function staffNoteFor(line) {
  *   conn                   reads the customer and property rows. The property record itself is read on the shared pool, so
  *                          call this BEFORE a booking transaction opens, never inside one.
  */
+// The home each table price answer was read at (wdoBookingPrice), kept off the answer so the address never rides into a
+// response or a log line with it (wdoTableStillApplies).
+const pricedHomes = new WeakMap();
+
 async function wdoBookingPrice({ customer = null, customerId = null, propertyId = null, serviceAddress = null, conn = db } = {}) {
   const who = `customer ${customer?.id || customerId || 'none (booked by address)'}`;
   try {
@@ -125,11 +129,25 @@ async function wdoBookingPrice({ customer = null, customerId = null, propertyId 
     const line = wdoLineFor(lookup?.enriched);
     const price = Number(line?.price);
     if (!Number.isFinite(price) || price <= 0) return noTablePrice(who, 'the engine has no table price for this property');
-    return { price: Math.round(price * 100) / 100, basis: basisFor(line), staffNote: staffNoteFor(line) };
+    const table = { price: Math.round(price * 100) / 100, basis: basisFor(line), staffNote: staffNoteFor(line) };
+    pricedHomes.set(table, home.address);
+    return table;
   } catch (err) {
     // The error code only: a database error can quote the address it was reading.
     return noTablePrice(who, `the property record could not be read (${err.code || err.name || 'error'})`);
   }
+}
+
+/**
+ * Inside a booking transaction: whether a table price answer read before it (wdoBookingPrice) was read at the home the
+ * visit books at now. A customer address or saved property edited in between is another home, so the caller refuses
+ * rather than book that home's price (pre-push audit P0). Reads the customer's property rows on `conn`, never the
+ * property record. No answer (null: the catalog price) always holds.
+ */
+async function wdoTableStillApplies(table, { customer, propertyId = null, conn }) {
+  if (!table) return true;
+  const home = await bookedHome({ customer, propertyId, conn });
+  return !home.refusal && pricedHomes.has(table) && pricedHomes.get(table) === home.address;
 }
 
 // ── Phone bookings (the call pipeline, the voice agent, the new caller booked by address) ────────────────────────────────
@@ -251,6 +269,7 @@ module.exports = {
   wdoExpectedPriceFrom,
   isWdoInspectionService,
   wdoBookingPrice,
+  wdoTableStillApplies,
   wdoCallBookingPrice,
   wdoCallPriceBeforeBooking,
   wdoCallPriceForBooking,

@@ -12,6 +12,7 @@ vi.mock('../AddressAutocomplete', () => ({
     <>
       <input aria-label="quick-add address" value={value} readOnly />
       <button type="button" onClick={() => onSelect({ formatted: '100 Example Way, Bradenton, FL 34200', line1: '100 Example Way', city: 'Bradenton', state: 'FL', zip: '34200', lat: 27.5, lng: -82.5, source: 'suggestion' })}>pick suggestion</button>
+      <button type="button" onClick={() => onSelect({ formatted: '300 Sample Rd, Parrish, FL 34219', line1: '300 Sample Rd', city: 'Parrish', state: 'FL', zip: '34219', lat: 27.6, lng: -82.4, source: 'suggestion' })}>pick other suggestion</button>
     </>
   ),
 }));
@@ -144,6 +145,34 @@ describe('CreateAppointmentModal new-caller Book', () => {
     cleanup();
     release();
     await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(0);
+  });
+
+  it('a Book whose address changes while the WDO price is re-read books nothing, and says why', async () => {
+    const WDO = { id: 'svc-wdo', service_key: 'wdo_inspection', name: 'WDO Inspection Service', billing_type: 'one_time', base_price: 250, default_duration_minutes: 60 };
+    const fetcher = installFetch({ catalog: [WDO] });
+    const base = fetcher.getMockImplementation();
+    const held = [];
+    let quoteReads = 0;
+    fetcher.mockImplementation((input, options = {}) => {
+      if (!String(input).endsWith('/admin/schedule/wdo-inspection-quote')) return base(input, options);
+      quoteReads += 1;
+      const answer = json({ price: 200, source: 'wdo_table', basis: '2,600 sq ft, wood frame', staffNote: null });
+      // The line's first read answers; later reads wait until the test releases them.
+      return quoteReads === 1 ? Promise.resolve(answer) : new Promise((resolve) => { held.push(() => resolve(answer)); });
+    });
+    mount({ newCallerBooking: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    expect(await screen.findByText('This call')).toBeTruthy();
+    await addService('WDO', /WDO Inspection Service/i);
+    const book = await screen.findByRole('button', { name: 'Book' });
+    await waitFor(() => expect(book.disabled).toBe(false));
+    fireEvent.click(book);
+    await waitFor(() => expect(quoteReads).toBe(2));
+    // Another address is picked while Book re-reads the price.
+    fireEvent.click(screen.getByText('pick other suggestion'));
+    held.forEach((release) => release());
+    expect(await screen.findByText('The booking changed while the WDO price was checked. Check it, then press Book again.')).toBeTruthy();
     expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(0);
   });
 
