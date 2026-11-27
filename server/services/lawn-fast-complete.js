@@ -1484,22 +1484,15 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
   }
   const productIds = (Array.isArray(products) ? products : []).map((row) => row?.productId).filter(isUuid);
   const tetrino = productIds.length ? await knex('products_catalog').whereIn('id', productIds).where({ name: TETRINO_NAME }).first('id') : null;
+  // Tetrino without the May scout record, or at the high rate without high chinch pressure: a warning in the log, never a
+  // refusal (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"). The sheet still asks
+  // for the scout record; the visit completes either way.
   if (tetrino && await requiresTetrinoScoutEvidence(svc, knex, lawnFast?.tetrinoScout)) {
     const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
     const decision = require('./waveguard-plan-engine').tetrinoScoutDecision(scout);
-    if (!decision.eligible || !scout.tetrinoApplied) {
-      return { status: 400, payload: {
-        error: 'Record the May target and current observations before using Tetrino. Grubs also need local peak-flight or egg-hatch timing.',
-        code: 'tetrino_scout_evidence_required',
-      } };
-    }
     const applied = (products || []).find((row) => String(row?.productId).toLowerCase() === String(tetrino.id).toLowerCase());
-    if (Number(applied?.rate) > 0.367 && !decision.highRateEligible) {
-      return { status: 400, payload: {
-        error: 'The high Tetrino rate needs high current chinch pressure recorded on this visit.',
-        code: 'tetrino_high_pressure_required',
-      } };
-    }
+    if (!decision.eligible || !scout.tetrinoApplied) logger.warn(`[lawn-fast] Tetrino on ${svc.id} without the scout record (warning only)`);
+    else if (Number(applied?.rate) > 0.367 && !decision.highRateEligible) logger.warn(`[lawn-fast] high Tetrino rate on ${svc.id} without high chinch pressure (warning only)`);
   }
   // An empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:

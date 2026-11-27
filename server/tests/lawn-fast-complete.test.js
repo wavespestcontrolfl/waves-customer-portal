@@ -1849,7 +1849,7 @@ describe('preflightLawnFastCompletion', () => {
     expect(await run({ lawn_assessments: { id: ASSESSMENT, confirmed_by_tech: true }, lawn_assessment_photos: [] }, { lawnFast: { visitType: label === 'one-time' ? 'one_time' : 'recurring' } })).toBeNull();
   });
 
-  test('Tetrino evidence is required only for the resolved v13 May step; an off-round manual actual remains recordable', async () => {
+  test('Tetrino without the May scout record is a warning, never a refusal (owner 2026-11-26); an off-round manual actual is recordable too', async () => {
     const savedDefaults = process.env.GATE_LAWN_COMPLETION_DEFAULTS;
     const savedHistory = process.env.GATE_LAWN_PROPERTY_HISTORY;
     process.env.GATE_LAWN_COMPLETION_DEFAULTS = 'true';
@@ -1867,7 +1867,7 @@ describe('preflightLawnFastCompletion', () => {
     try {
       buildPlanForService.mockResolvedValueOnce(plan('May')).mockResolvedValueOnce(plan('Jun'));
       const actual = [{ productId: P_HERB, rate: 0.367 }];
-      expect(await run(confirmed, { products: actual })).toMatchObject({ status: 400, payload: { code: 'tetrino_scout_evidence_required' } });
+      expect(await run(confirmed, { products: actual })).toBeNull();
       expect(await run(confirmed, { products: actual })).toBeNull();
     } finally {
       installed.mockRestore();

@@ -585,7 +585,7 @@ function cardOwnedIds(guide, checks) {
 // cannot vouch for it), but it is released to the search (and, for a pick, the list) and a row of it
 // is neither dropped nor holds Complete, because the sheet has no Full form control: hiding it would
 // leave no way to record a real application. Completion records the visit and flags it to the office.
-const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', limitWarned: new Map(), weedOffered: new Set(), chinchOffered: new Set() };
+const NO_GOVERNANCE = { enabled: false, locked: false, governed: new Set(), offered: new Set(), hidden: new Set(), searchable: new Set(), waiting: new Set(), held: new Set(), takeAll: new Set(), unreadable: new Set(), unreadableNote: '', limitWarned: new Map(), weedOffered: new Set(), chinchOffered: new Set() };
 
 // Unreadable: what the guide reports (the answer), or what the context's decisions say (a failed read).
 function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
@@ -600,10 +600,11 @@ function unreadableIds({ guide, weedMix, chinch, weedGroup }) {
 }
 
 // The month's take-all fungicide ids (the fresh guide's, else the context's) and the ones the search may
-// reach: once the decision is in, all but those a limit that was READ forbids.
-function takeAllReach({ ctx, guide, settled, blocked }) {
+// reach: once the decision is in, every one of them. A held one (the Group 11 hold) carries HELD_ROW_NOTE:
+// owner 2026-11-26, "everything should only be warned, never blocked from using, for now".
+function takeAllReach({ ctx, guide, settled }) {
   const takeAll = lowerIds(guide?.takeAllProductIds ?? ctx.takeAllProductIds);
-  return { takeAll, searchOnly: settled ? takeAll.filter((id) => !blocked.includes(id)) : [] };
+  return { takeAll, searchOnly: settled ? takeAll : [] };
 }
 
 // The governed ids kept out of the add-ons list: not released to the generic list, or a card owns
@@ -654,25 +655,28 @@ const limitRowNote = (gov, productId) => {
   return words ? `${words} ${LIMIT_WARNING_TAIL}` : '';
 };
 
-// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches every governed product
-// that is not blocked, whether or not an entry or a card also offers it. A limit never blocks (owner 2026-10-30): a product at a
-// limit is listed, and its row carries the limit's words. The row it opens is a plain row; the entry and the card still add the
-// program's own rows. A blocked pick (a city hold, the Group 11 hold) and a product a check-only card holds (take-all found:
-// check, do not treat) stay out.
-function searchReach({ governed, settled, blockedPicks, cardHeld }) {
-  if (!settled) return [];
-  const forbidden = [...blockedPicks, ...cardHeld];
-  return governed.filter((id) => !forbidden.includes(id));
+// Every lawn product is in the search (owner 2026-10-09): once the decision is in, the search reaches every governed product,
+// whether or not an entry or a card also offers it. A limit never blocks (owner 2026-10-30), and neither does a hold (owner
+// 2026-11-26, "everything should only be warned, never blocked from using, for now"): a blocked pick (a city hold, the Group 11
+// hold, a label prohibition) and a product a check-only card holds are listed, and the row carries HELD_ROW_NOTE. The row it
+// opens is a plain row; the entry and the card still add the program's own rows. They are still never suggested.
+function searchReach({ governed, settled }) {
+  return settled ? governed : [];
 }
+
+// The products the latest decision holds (never suggested), lower-case: their rows carry HELD_ROW_NOTE.
+const HELD_ROW_NOTE = 'Not suggested for this lawn today. You can still use it and complete; the visit record keeps it.';
+const heldRowNote = (gov, productId) => (gov.held?.has(String(productId).toLowerCase()) ? HELD_ROW_NOTE : '');
 
 function guideGovernance({ ctx, guide, status, checks }) {
   if (!ctx.treatmentGuide) {
-    // The guide is off: no cards, no decision. The Group 11 rows the plan passed over are still held (out of the list and the search).
+    // The guide is off: no cards, no decision. The Group 11 rows the plan passed over stay off the add-ons list but are in the
+    // search with HELD_ROW_NOTE (owner 2026-11-26: a warning, never a block).
     const held = new Set(lowerIds(ctx.group11HeldProductIds));
     // A capped weed or chinch product is in the search with the guide off too; the context's own decisions give its warning.
     const limitWarned = limitWarnings({ guide: null, weedMix: ctx.weedMix, chinch: ctx.chinch });
     if (!held.size && !limitWarned.size) return NO_GOVERNANCE;
-    return { ...NO_GOVERNANCE, limitWarned, ...(held.size ? { governed: held, hidden: held } : {}) };
+    return { ...NO_GOVERNANCE, limitWarned, ...(held.size ? { governed: held, hidden: held, searchable: held, offered: held, held } : {}) };
   }
   const answered = status === 'answered' && !!guide;
   const settled = answered || status === 'failed';
@@ -696,7 +700,7 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // released to the plain list, and no tap offers it. Once the decision is in, it is reachable by the
   // search alone, the deliberate way to record it for a known mapped lawn, unless a limit that was READ
   // forbids it. The row it opens carries TAKE_ALL_ROW_NOTE.
-  const { takeAll, searchOnly } = takeAllReach({ ctx, guide: fresh, settled, blocked });
+  const { takeAll, searchOnly } = takeAllReach({ ctx, guide: fresh, settled });
   // Held from the generic list: a check-only card's product, and every take-all product.
   const cardHeld = lowerIds(cards.flatMap((card) => card.heldProductIds || []));
   const held = [...cardHeld, ...takeAll];
@@ -707,7 +711,7 @@ function guideGovernance({ ctx, guide, status, checks }) {
   // The answer's blocked list judges the picks only: for the weed group and the chinch rungs it follows one place and the entry's mode.
   const entryIds = [...weedGroup, ...lowerIds(chinch?.rungIds)];
   const blockedPicks = blocked.filter((id) => !entryIds.includes(id));
-  const searchable = [...searchReach({ governed, settled, blockedPicks, cardHeld }), ...searchOnly];
+  const searchable = [...searchReach({ governed, settled }), ...searchOnly];
   return {
     enabled: true,
     locked: !settled,
@@ -717,8 +721,10 @@ function guideGovernance({ ctx, guide, status, checks }) {
     hidden: new Set(hiddenIds({ governed, searchOnly, free, unreadable, owned })),
     // What the search lists of the governed products (searchReach).
     searchable: new Set(searchable),
-    // Before the decision: what the search lists held (the context's Group 11 holds stay out, as they will after it).
-    waiting: new Set(settled ? [] : governed.filter((id) => !blocked.includes(id))),
+    // Before the decision: what the search lists held, waiting for the guide.
+    waiting: new Set(settled ? [] : governed),
+    // Never suggested, but usable from the search with HELD_ROW_NOTE (owner 2026-11-26).
+    held: new Set(settled ? [...blockedPicks, ...cardHeld] : []),
     takeAll: new Set(takeAll),
     unreadable: new Set(unreadable),
     unreadableNote: answered ? guide.unreadableNote : '',
@@ -1995,9 +2001,9 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
 
   const { stockRow, checkingStock, checkStock } = useStockHold({ ctx, service, rows, products, request });
 
-  // Every lawn product is in the search (owner 2026-10-09). The search leaves out only a governed product that
-  // is blocked (a city hold, the Group 11 hold) and, before the guide has answered, every governed product:
-  // the taps wait, and so does the search. A yearly limit only warns (owner 2026-10-30).
+  // Every lawn product is in the search (owner 2026-10-09). Before the guide has answered the governed products
+  // wait (listed with CONFIRM_FIRST); after it, all are listed. A yearly limit and a hold only warn (owner 2026-10-30,
+  // 2026-11-26).
   const searchCatalog = useMemo(() => {
     const hidden = (product) => {
       const id = String(product.id).toLowerCase();
@@ -2206,6 +2212,7 @@ function ProductsSection({ ctx, newSod = null, weedMix, chinch, areas = null, on
               // A row on a place takes that place's verdict (a limit there is on the footer, limitWarningsOf); the guide's
               // lawn-wide words follow one place and are only for a row with no place yet.
               row.placeRule && row.place ? '' : limitRowNote(gov, row.productId),
+              heldRowNote(gov, row.productId),
             ].filter(Boolean).join(' ') || null}
             onChange={(patch) => updateRow(row.productId, patch)}
             onRemove={() => removeRow(row.productId)}
