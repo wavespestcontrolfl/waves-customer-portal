@@ -745,6 +745,31 @@ const isSetupFeeSentence = (t) => ESTIMATE_SETUP_KINDS.some((kind) => SHAPES[kin
 const isPrepayTotalSentence = (t) => SHAPES.estimate_prepay_total.test(t);
 const isEstimateTermsSentence = (t) => isSetupFeeSentence(t) || isPrepayTotalSentence(t);
 const owedNotEstimate = (inbound) => OWED_ASK_RE.test(inbound) && !NAMES_ESTIMATE_RE.test(inbound);
+// How the customer pays changes what is charged: a credit card adds the surcharge (stripe-pricing computeChargeAmount), and no rendered
+// estimate sentence carries a funding-aware quote. So an estimate sentence (a price, a setup fee, the pay-for-the-year total) never answers
+// a question that names a way to pay, or a charge on top of the price by any other name (a surcharge, a processing fee, "any other fees",
+// "anything extra"): a person answers. "Check" counts only as the thing paid with ("by check", "mail a check", "checks"), never as the
+// verb ("can you check the price?").
+const CHECK_TENDER_RE = /\b(?:a|the|my|by|via|with|using|paper|personal|business|company|certified|electronic|mail|send|write|takes?|accepts?|bring|drop)\s+che(?:ck|que)\b|\bchecks\b|\bcheques?\b/i;
+const OTHER_TENDER_RE = /\bcards\b|\bcc\b|\beft\b|\bauto-?\s?pay\b|\b(?:venmo|paypal|cash\s?app|crypto\w*|bitcoin)\b|\b(?:samsung|amazon|shop)\s*pay\b|\bwire[ds]?\b|\bmoney\s+orders?\b|\bfinanc\w*\b/i;
+// ...and a way to pay those lists do not know, by its grammar: a pay word, then "with", "using", "via" or "by" and the thing paid with
+// ("pay for the year with my HSA", "prepay by plastic"). "Pay by the year" is the year itself.
+const PAY_WITH_RE = /\b(?:pay|pays|paying|paid|pre-?pa(?:y|id|ying)\w*|payments?)\b[^.?!,;]{0,40}\b(?:with|using|via|by(?!\s+(?:the\s+|a\s+|one\s+)?(?:whole\s+|full\s+|entire\s+)?year\b))\s/i;
+const OTHER_FEE_RE = /\bsurcharg\w*|\bextra\b|\badditional\b|\b(?:added|other|hidden|any|more|processing|convenience|transaction|handling|late|cancell?ation)\s+(?:fees?|charges?)\b|\b(?:added|other|hidden)\s+costs?\b/i;
+const namesPayMethod = (inbound) => CARD_SUBTYPE_RE.test(inbound) || CHECK_TENDER_RE.test(inbound) || OTHER_TENDER_RE.test(inbound) || PAY_WITH_RE.test(inbound)
+  || OTHER_FEE_RE.test(inbound) || INBOUND_TENDER_RES.some(([tender, re]) => tender !== 'check' && re.test(inbound));
+// The total and the prepay waiver are for ONE YEAR paid at once. A question that names another span or a split of the payment ("prepay for
+// six months", "prepay the next visit", "two years up front", "half now", "in two payments") is answered by neither. Twelve months is
+// the year. Broad on purpose: a false hold goes to a person.
+const YEAR_AS_MONTHS_RE = /\b(?:12|twelve)[-\s]+months?\b/gi;
+const SPAN_SELECT = '\\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|couple(?:\\s+of)?|few|several|next|each|every|per|first|single';
+const OTHER_SPAN_RE = new RegExp('\\b(?:months?|weeks?|days|quarters?|seasons?|years)\\b'
+  + '|\\b(?:semi|bi)-?\\s?annual\\w*\\b|\\bhalf\\b|\\bpartial\\w*\\b|\\bpart\\s+of\\s+the\\s+year\\b|\\b(?:rest|remainder|remaining)\\b'
+  + '|\\bsplit\\w*\\b|\\binstall?ments?\\b|\\bpayment\\s+plans?\\b|\\b(?:\\d{1,2}|two|three|four|five|six|multiple|several|few)\\s+payments\\b'
+  + `|\\b(?:a|an|this|${SPAN_SELECT})\\s+(?:(?:more|extra|additional|other)\\s+)?(?:visits?|applications?|treatments?|appointments?)\\b`
+  + `|\\b(?:${SPAN_SELECT})\\s+(?:services?|sprays?|ones?)\\b`
+  + '|\\b(?:another|next|following|second|extra|additional)\\s+year\\b', 'i');
+const namesOtherSpan = (inbound) => OTHER_SPAN_RE.test(inbound.replace(YEAR_AS_MONTHS_RE, ' '));
 // The application line beside a question about another charge: held unless the copies carry the sentence that answers that charge.
 function otherChargeUnanswered(inbound, copied) {
   if (DEPOSIT_ASK_RE.test(inbound)) return true;
@@ -759,7 +784,8 @@ function otherChargeUnanswered(inbound, copied) {
 // total answers a prepay question. Each answers for the service it names: a sentence that names none answers only a question that names none.
 // The fee is the estimate's whatever cadence the customer names; the prepay waiver and the total are the default plan's alone, so a cadence
 // they cannot confirm holds them (in a prepay question "annual" means the payment, never one application a year). None answers what is owed,
-// an invoice or a past charge (unless the estimate is named), or a deposit.
+// an invoice or a past charge (unless the estimate is named), or a deposit. And the total and the prepay waiver answer a question about
+// paying for the YEAR: one that names another span or a split (namesOtherSpan) is held.
 function estimateTermsOffTarget(t, inbound) {
   if (DEPOSIT_ASK_RE.test(inbound)) return true;
   const prepayAsked = asksPrepay(inbound);
@@ -767,10 +793,22 @@ function estimateTermsOffTarget(t, inbound) {
   const prepayWaiver = SHAPES.estimate_setup_fee_prepay_waived.test(t);
   const asked = total ? prepayAsked : SETUP_FEE_ASK_RE.test(inbound) || (prepayWaiver && prepayAsked);
   const rest = withoutPrepayPayWords(inbound);
-  const cadences = total || prepayWaiver ? PLAN_CADENCES.filter(([, perYear]) => !(prepayAsked && perYear === 1)) : [];
+  const yearly = total || prepayWaiver;
+  if (yearly && prepayAsked && namesOtherSpan(inbound)) return true;
+  const cadences = yearly ? PLAN_CADENCES.filter(([, perYear]) => !(prepayAsked && perYear === 1)) : [];
   return !asked || owedNotEstimate(rest) || planServiceOffTarget(t, rest, cadences);
 }
 const ESTIMATE_ASK_RE = /\b(?:price|prices|pricing|priced|cost|costs|how much|estimate|quote|quoted|charge|charged|rate|per (?:visit|application|treatment))\b/i;
+// Two rules for the copies as a set, before each is judged on its own:
+// - a question that names the setup fee or paying for the year (the customer's own paid status aside) is answered by a setup-fee or
+//   pay-for-the-year sentence, so the copies must carry one: another true billing sentence alone ("Invoice 123 for $90.00 is paid.") would
+//   be read as that answer;
+// - no estimate sentence answers a question that names a way to pay or a charge on top of the price (namesPayMethod).
+function estimateCopiesOffTarget(copied, inbound) {
+  const terms = copied.some((t) => isEstimateTermsSentence(String(t)));
+  if (!terms && namesEstimateTerms(withoutPaidStatus(inbound))) return true;
+  return namesPayMethod(inbound) && (terms || copied.some((t) => SHAPES.estimate_application_price.test(String(t))));
+}
 function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   const inbound = String(inboundText || '');
   if (!inbound || !copied.length) return false;
@@ -778,6 +816,7 @@ function copiesOffTarget(copied, inboundText, { today = null } = {}) {
   if (asksCount(inbound) && !copied.some((t) => SHAPES.prepaid_visits_left.test(t))) return true;
   // ...and a prepaid count answers only a question about the plan's count or visit coverage, never a payment, receipt or invoice question (even one that says "prepaid")
   if (copied.some((t) => SHAPES.prepaid_visits_left.test(t)) && !asksCount(inbound)) return true;
+  if (estimateCopiesOffTarget(copied, inbound)) return true;
   const { invoiceNumbersNamed } = require('./zelle-target-invoice');
   const named = invoiceNumbersNamed(inbound);
   const stripZeros = (v) => String(v).replace(/^0+/, '') || '0';
@@ -1166,5 +1205,5 @@ module.exports = {
   claimsEstimateTerms,
   estimateTermsCopyNotAlone,
   // every module regex, for the adversarial-input timing test
-  REGEXES: { SETUP_FEE_ASK_RE, PREPAY_ASK_RE, PAID_STATUS_RE, TOTAL_ASK_RE, DEPOSIT_ASK_RE, WAIVE_WORD_RE, NO_FEE_RE, SETUP_NOUN_RE, SETUP_FREE_RE, PREPAY_TALK_RE, PREPAY_SAVING_RE, ESTIMATE_COUNT_RE, FEE_WAIVER_RE, PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
+  REGEXES: { SETUP_FEE_ASK_RE, PREPAY_ASK_RE, PAID_STATUS_RE, CHECK_TENDER_RE, OTHER_TENDER_RE, PAY_WITH_RE, OTHER_FEE_RE, YEAR_AS_MONTHS_RE, OTHER_SPAN_RE, TOTAL_ASK_RE, DEPOSIT_ASK_RE, WAIVE_WORD_RE, NO_FEE_RE, SETUP_NOUN_RE, SETUP_FREE_RE, PREPAY_TALK_RE, PREPAY_SAVING_RE, ESTIMATE_COUNT_RE, FEE_WAIVER_RE, PREPAID_COUNT_RE, COUNT_ASK_RE, COUNT_ANSWER_RE, TOPIC_RE, RECEIPT_SCOPE_RE, STATUS_RE, STATUS_WORDS_RE, PAYMENT_THING_RE, HOW_TO_PAY_RE, INTERROGATIVE_START_RE, GREETING_RE, CLAUSE_BREAK_RE, MODIFIER_FRAGMENT_RE, META_FRAME_RE, OWN_SENTENCE_START_RE, SENTENCE_GAP_RE, INERT_CLAUSE_BREAK_RE, ...SHAPES },
 };

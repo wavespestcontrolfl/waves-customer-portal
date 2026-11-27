@@ -882,6 +882,19 @@ describe('paymentStatusSendBlockReason - the estimate setup fee and pay-for-the-
     await expect(run(`Hi Dana, ${FEE_PREPAY}`, { sentences, inboundMessage: 'Is there a setup fee?' })).resolves.toBeNull();
   });
 
+  test('a copy that does not answer the question asked is unauthorized at send: another billing sentence for a terms question, an estimate sentence for a card or six-month question', async () => {
+    ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(PREPAY)));
+    const INVOICE = 'Invoice WPC-2026-0100 for $150.00 is paid.';
+    const sentences = [PRICE, FEE_PREPAY, TOTAL, INVOICE];
+    for (const [inboundMessage, body] of [['Is there a setup fee?', INVOICE], ['How much if I pay for the year up front?', `Hi Dana, ${INVOICE}`],
+      ['What will I pay if I prepay with my credit card?', TOTAL], ['Is there a setup fee if I pay by debit?', FEE_PREPAY], ['How much is it per visit with a credit card?', PRICE],
+      ['Can I prepay for six months?', TOTAL], ['How much to prepay the next visit?', TOTAL]]) {
+      expect({ body, r: await run(body, { sentences, inboundMessage }) }).toEqual({ body, r: 'payment_status_unauthorized' });
+    }
+    // the year itself, in other words, is still answered
+    await expect(run(TOTAL, { sentences, inboundMessage: 'How much if I prepay for one year?' })).resolves.toBeNull();
+  });
+
   test('a staff-edited body that keeps a waiver copy is still re-rendered', async () => {
     const stale = (body) => outgoingAmountsStale({ customerId: 'c1', body, promptVersion: V12, humanEditedBody: true, paymentStatusSnapshot: { customer_id: 'c1', sentences: [WAIVED] }, dbh: dbWithCustomer({ id: 'c1' }), trustOwedAmounts: true });
     ContextAggregator.getContextForCustomer.mockResolvedValue(ctx(facts(ON_RECORD)));

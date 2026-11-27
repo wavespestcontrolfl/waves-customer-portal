@@ -27,8 +27,8 @@ describe('billingFingerprint', () => {
       "FROM estimates t WHERE t.customer_id = ? AND t.status IN ('sent', 'viewed') AND t.archived_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())"]) expect(BILLING_FINGERPRINT_SQL).toContain(t);
     // every fragment hashes the row itself (md5(<alias>::text)), never a hand-picked column list
     expect(BILLING_FINGERPRINT_SQL).not.toMatch(/concat_ws\('\|'/);
-    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c|k|l|m|v)::text\)/g) || []).length).toBe(16);
-    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(21);
+    expect((BILLING_FINGERPRINT_SQL.match(/md5\((?:t|a|p|d|c|k|l|m|v|x)::text\)/g) || []).length).toBe(17);
+    expect((BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length).toBe(22);
   });
   // Owner 2026-11-26 (the texting AI answers call-drafted and new-home estimates): those estimates are on the customer's own page only while
   // the call-side verdict passes, so every row that verdict reads is hashed: a change to one refuses the send, like a change to the estimate.
@@ -57,10 +57,17 @@ describe('billingFingerprint', () => {
     expect(BILLING_FINGERPRINT_SQL).toContain(`(SELECT string_agg(md5(v::text), ',' ORDER BY v.id) FROM scheduled_services v WHERE v.customer_id = ? AND v.is_recurring IS TRUE `
       + `AND v.status NOT IN (${TERMINAL_STATUSES.map((status) => `'${status}'`).join(', ')}) AND EXISTS (SELECT 1 ${openEstimates}))`);
   });
+  // The pay-for-the-year total is stated only when the invoice module's dry run adds no tax, and for an account classed commercial that dry
+  // run reads the customer's exemption certificates (TaxCalculator.findVerifiedExemption): one revoked after the recheck refuses the send.
+  test('the tax exemption certificates a tax-free pay-for-the-year total stands on: every row of the customer, whole', () => {
+    expect(BILLING_FINGERPRINT_SQL).toContain("(SELECT string_agg(md5(x::text), ',' ORDER BY x.id) FROM tax_exemptions x WHERE x.customer_id = ?)");
+    // every certificate, not only the ones the calculator would honor now: one that stops (or starts) counting changes the hash either way
+    expect(BILLING_FINGERPRINT_SQL).not.toMatch(/tax_exemptions x WHERE x\.customer_id = \? AND/);
+  });
   test('reads through the given connection; null on no customer, a failed read, or no row', async () => {
     const dbh = { raw: jest.fn(async () => ({ rows: [{ fingerprint: 'abc' }] })) };
     expect(await billingFingerprint('c1', dbh)).toBe(FP);
-    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(21).fill('c1'));
+    expect(dbh.raw).toHaveBeenCalledWith(BILLING_FINGERPRINT_SQL, Array(22).fill('c1'));
     expect(await billingFingerprint(null, dbh)).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => { throw new Error('down'); } })).toBeNull();
     expect(await billingFingerprint('c1', { raw: async () => ({ rows: [] }) })).toBeNull();

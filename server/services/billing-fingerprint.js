@@ -9,9 +9,9 @@
 // landing, an invoice settling or being withdrawn, a plan, a payer assignment, account credit that would cover it, the dues authority:
 // billing mode / rate / tier, the saved methods a surcharge is computed from, annual-prepay terms, the visits of a prepaid plan: the rows its
 // "visits left" sentence counts, the customer's open estimates: the rows its price sentence is read from, the call, lead and move rows that
-// decide whether a call-drafted or new-home estimate is on the customer's own page, and the live plan an open estimate is priced and billed
-// against) refuses the send as RETRYABLE - the retry reruns the
-// full recheck on the new state. Content-based (md5 of the rows), so a write that does not bump updated_at still counts.
+// decide whether a call-drafted or new-home estimate is on the customer's own page, the live plan an open estimate is priced and billed
+// against, and the tax exemption certificates a tax-free pay-for-the-year total stands on) refuses the send as RETRYABLE - the retry
+// reruns the full recheck on the new state. Content-based (md5 of the rows), so a write that does not bump updated_at still counts.
 const db = require('../models/db');
 
 // Codex round-55 P1 - WHOLE ROWS, not a column list: every round named one more column the recheck reads (dues eligibility, pause /
@@ -32,6 +32,9 @@ const LINKED_CALL_IDS = `SELECT ${uuidOf("t.estimate_data #>> '{estimatorEngine,
 // customer with no live plan (estimate-manual-acceptance customerHasLiveRecurringPlan). A plan that starts, ends or changes refuses the send.
 const NOT_LIVE_STATUSES = require('./waveguard-existing-services').TERMINAL_STATUSES.map((status) => `'${status}'`).join(', ');
 const LIVE_PLAN_VISITS = `FROM scheduled_services v WHERE v.customer_id = ? AND v.is_recurring IS TRUE AND v.status NOT IN (${NOT_LIVE_STATUSES}) AND EXISTS (SELECT 1 ${OPEN_ESTIMATES})`;
+// The customer's tax exemption certificates: the pay-for-the-year total is stated only when the invoice module's dry run adds no tax
+// (sms-staff-facts prepayTotalFact, InvoiceService.previewInvoiceTotals), and for an account classed commercial that dry run reads these
+// rows (TaxCalculator.findVerifiedExemption). A certificate revoked, expired by an edit or unverified since the recheck refuses the send.
 const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
   (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM payments t WHERE t.customer_id = ?),
   (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM invoices t WHERE t.customer_id = ?),
@@ -55,7 +58,8 @@ const BILLING_FINGERPRINT_SQL = `SELECT md5(concat_ws('#',
    WHERE d.customer_id = ? OR d.estimate_id IN (SELECT id FROM estimates WHERE customer_id = ?)),
   (SELECT md5(c::text) FROM customers c WHERE c.id = ?),
   (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM payment_methods t WHERE t.customer_id = ?),
-  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM annual_prepay_terms t WHERE t.customer_id = ?)
+  (SELECT string_agg(md5(t::text), ',' ORDER BY t.id) FROM annual_prepay_terms t WHERE t.customer_id = ?),
+  (SELECT string_agg(md5(x::text), ',' ORDER BY x.id) FROM tax_exemptions x WHERE x.customer_id = ?)
 )) AS fingerprint`;
 
 const BILLING_FINGERPRINT_PARAMS = (BILLING_FINGERPRINT_SQL.match(/\?/g) || []).length;
