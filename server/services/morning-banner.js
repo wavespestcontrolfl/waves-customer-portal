@@ -28,11 +28,21 @@
 // Sends nothing to a customer and calls no paid API.
 
 const logger = require('./logger');
+const db = require('../models/db');
 const { takeSendClaim, releaseSendClaim } = require('./sms-send-claims');
 const { etDateString } = require('../utils/datetime-et');
 const { AREAS } = require('./admin-alert-compose');
+const { isFullAccessEmail } = require('./intelligence-bar/ib-access');
 
 const CLAIM_PREFIX = 'morning_banner:';
+
+function isOwnerOnlyRow(row) {
+  let meta = row?.metadata;
+  if (typeof meta === 'string') {
+    try { meta = JSON.parse(meta); } catch { return false; }
+  }
+  return Boolean(meta && typeof meta === 'object' && (meta.ownerOnly === true || meta.ownerOnly === 'true'));
+}
 
 // Open alert rows that wait for a person, as the bell's list judges them.
 function waitsForPerson(item) {
@@ -60,8 +70,11 @@ function summarize(items) {
 
 async function countWaiting() {
   const { openAlertRows, mapAlertRow } = require('./needs-me');
-  const rows = await openAlertRows('admin');
-  return summarize(rows.map(mapAlertRow));
+  const rows = await openAlertRows('admin', null, true);
+  const owner = summarize(rows.map(mapAlertRow));
+  const sharedRows = rows.filter((r) => !isOwnerOnlyRow(r));
+  const shared = sharedRows.length === rows.length ? owner : summarize(sharedRows.map(mapAlertRow));
+  return { ...owner, shared };
 }
 
 async function claimDay(day) {
@@ -76,8 +89,48 @@ async function releaseDay(day) {
   }
 }
 
+async function splitAdminIdsByOwnerAccess() {
+  const admins = await db('technicians')
+    .where({ active: true, role: 'admin' })
+    .select('id', 'email');
+  const ownerIds = [];
+  const otherAdminIds = [];
+  for (const admin of admins || []) {
+    if (isFullAccessEmail(admin.email)) ownerIds.push(admin.id);
+    else otherAdminIds.push(admin.id);
+  }
+  return { ownerIds, otherAdminIds };
+}
+
+function deliverySucceeded(result) {
+  return Boolean(result && !result.error && !result.prefsUnavailable);
+}
+
+async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
+  const { triggerNotification } = require('./notification-triggers');
+  const { ownerIds, otherAdminIds } = await splitAdminIdsByOwnerAccess();
+  const dispatches = [];
+  if (ownerIds.length > 0) {
+    dispatches.push(triggerNotification(
+      'waiting_summary',
+      { count: ownerSummary.count, total: ownerSummary.total, areas: ownerSummary.areas, day },
+      { pushOnly: true, onlyUserIds: ownerIds },
+    ));
+  }
+  if (sharedSummary.count > 0 && otherAdminIds.length > 0) {
+    dispatches.push(triggerNotification(
+      'waiting_summary',
+      { count: sharedSummary.count, total: sharedSummary.total, areas: sharedSummary.areas, day },
+      { pushOnly: true, onlyUserIds: otherAdminIds },
+    ));
+  }
+  if (dispatches.length === 0) return { skipped: 'no_recipients' };
+  const results = await Promise.all(dispatches);
+  return results.some(deliverySucceeded) ? { sent: true, result: results[0] } : { error: 'dispatch_failed' };
+}
+
 // The send for a day that has something waiting: claim the day, then the pushOnly banner. Never throws.
-async function claimAndSend(day, { count, total, areas }) {
+async function claimAndSend(day, { count, total, areas, shared }) {
   let claimed;
   try {
     claimed = await claimDay(day);
@@ -90,11 +143,24 @@ async function claimAndSend(day, { count, total, areas }) {
     return { count, sent: false, skipped: 'already_claimed' };
   }
   try {
+    const sharedSummary = shared || { count, total, areas };
+    const hasOwnerOnlyDelta = sharedSummary.count !== count || sharedSummary.total !== total;
+    if (hasOwnerOnlyDelta) {
+      const outcome = await dispatchScopedBanners(day, { count, total, areas }, sharedSummary);
+      if (!outcome.sent) {
+        await releaseDay(day);
+        return { count, sent: false, ...(outcome.skipped ? { skipped: outcome.skipped } : { error: outcome.error }) };
+      }
+      logger.info(`[morning-banner] ${day}: ${count} unread of ${total} waiting, banner sent`);
+      return { count, sent: true, result: outcome.result };
+    }
+
     const { triggerNotification } = require('./notification-triggers');
     const result = await triggerNotification('waiting_summary', { count, total, areas, day }, { pushOnly: true });
-    if (!result || result.error || result.prefsUnavailable) {
+    if (!deliverySucceeded(result)) {
       await releaseDay(day);
-      logger.error(`[morning-banner] ${day}: banner not sent (${result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result'})`);
+      const reason = result?.error ? 'dispatch error' : result?.prefsUnavailable ? 'preferences unavailable' : 'no result';
+      logger.error(`[morning-banner] ${day}: banner not sent (${reason})`);
       return { count, sent: false, error: 'dispatch_failed' };
     }
     logger.info(`[morning-banner] ${day}: ${count} unread of ${total} waiting, banner sent`);

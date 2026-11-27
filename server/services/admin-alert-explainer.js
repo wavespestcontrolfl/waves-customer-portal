@@ -166,7 +166,7 @@ function isOwnerOnlyMetadata(metadata) {
   if (typeof meta === 'string') {
     try { meta = JSON.parse(meta); } catch { meta = null; }
   }
-  return Boolean(meta && typeof meta === 'object' && meta.ownerOnly === true);
+  return Boolean(meta && typeof meta === 'object' && (meta.ownerOnly === true || meta.ownerOnly === 'true'));
 }
 
 // The bell's "What to do" for one admin row: { status, body }. 404 when the row is gone or out of the caller's scope.

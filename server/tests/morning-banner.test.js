@@ -63,7 +63,7 @@ describe('what counts as waiting', () => {
       row({ area: 'Estimates' }),
     ]);
     const result = await runMorningBanner({ now: MORNING });
-    expect(mockOpenRows).toHaveBeenCalledWith('admin');
+    expect(mockOpenRows).toHaveBeenCalledWith('admin', null, true);
     expect(result).toMatchObject({ count: 7, sent: true });
     expect(mockTrigger).toHaveBeenCalledTimes(1);
     expect(mockTrigger).toHaveBeenCalledWith('waiting_summary', {
@@ -187,5 +187,50 @@ describe('once per ET day', () => {
     await runMorningBanner({ now: MORNING });
     expect(logger.info).toHaveBeenCalledWith('[morning-banner] 2026-11-03: 4 unread of 4 waiting, banner sent');
     for (const [line] of [...logger.info.mock.calls, ...logger.error.mock.calls]) expect(line).not.toMatch(/Synthetic item/);
+  });
+
+  test('unread ownerOnly alerts ring only the owner and keep non-owner admin banners restricted', async () => {
+    const admins = [
+      { id: 1, email: 'contact@wavespestcontrol.com' },
+      { id: 2, email: 'office@wavespestcontrol.com' },
+    ];
+    mockDb.mockImplementation((table) => {
+      if (table === 'technicians') {
+        return { where: () => ({ select: async () => admins }) };
+      }
+      return { where: ({ claim_key: key }) => ({ del: async () => { claimed.delete(key); return 1; } }) };
+    });
+
+    // Only an ownerOnly cash-forecast alert is unread -> only the owner gets a banner.
+    mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
+    const ownerOnlyResult = await runMorningBanner({ now: MORNING });
+    expect(ownerOnlyResult).toMatchObject({ count: 1, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 1, total: 1, areas: [{ area: 'Billing', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [1] },
+    );
+
+    // Mix of ownerOnly + shared alerts -> owner gets 2, other admin gets 1.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockOpenRows.mockResolvedValue([
+      row({ area: 'Billing', ownerOnly: true }),
+      row({ area: 'Comms' }),
+    ]);
+    const mixedResult = await runMorningBanner({ now: MORNING });
+    expect(mixedResult).toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(2);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 2, total: 2, areas: [{ area: 'Comms', count: 1 }, { area: 'Billing', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [1] },
+    );
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 1, total: 1, areas: [{ area: 'Comms', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [2] },
+    );
   });
 });

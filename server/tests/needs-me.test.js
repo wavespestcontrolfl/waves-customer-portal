@@ -364,11 +364,16 @@ describe('GET /api/admin/needs-me', () => {
   });
 });
 
-test('executeNeedsMeTool filters ownerOnly rows unless actionContext.fullAccess is true', async () => {
+test('executeNeedsMeTool filters ownerOnly rows unless ownerAccess or fullAccess is true', async () => {
   const { executeNeedsMeTool } = require('../services/intelligence-bar/needs-me-tools');
   mockCalls.length = 0;
   await executeNeedsMeTool('needs_me', {});
   expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(true);
+  // Legacy Intelligence Bar (GATE_IB_PLATFORM off) passes fullAccess: false + ownerAccess: true
+  // for the owner login — needs_me must still include ownerOnly items for the owner.
+  mockCalls.length = 0;
+  await executeNeedsMeTool('needs_me', {}, { fullAccess: false, ownerAccess: true });
+  expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(false);
   mockCalls.length = 0;
   await executeNeedsMeTool('needs_me', {}, { fullAccess: true });
   expect(mockCalls.some(([name, sql]) => name === 'whereRaw' && /ownerOnly/.test(sql))).toBe(false);

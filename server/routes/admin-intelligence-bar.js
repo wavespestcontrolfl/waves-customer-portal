@@ -4292,7 +4292,7 @@ Write tools (creating/updating customers, scheduling, sending SMS, etc.) do NOT 
               // its loopback GET and it is persisted nowhere. Only the platform
               // contexts carry full access, so the tech and agent_estimate rails
               // refuse these reads even for a forced call.
-              fullAccess: platformEnabled && ibFullAccess(req), staffAuthorization: req.headers.authorization,
+              fullAccess: platformEnabled && ibFullAccess(req), ownerAccess: ibFullAccess(req), staffAuthorization: req.headers.authorization,
             });
             // Breaker: faults only. A coded refusal is a decision, not an outage;
             // `failed` below is unchanged (activity line, ledger, model view).

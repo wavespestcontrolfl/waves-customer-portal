@@ -71,7 +71,13 @@ async function needsMe(input = {}, actionContext = {}) {
     if (input.area != null && !AREAS.includes(input.area)) return { error: `area must be one of: ${AREAS.join(', ')}` };
     const after = input.after ? decodeCursor(input.after) : null;
     if (input.after && !after) return { error: 'after must be the next_cursor from a previous needs_me call' };
-    const result = await listNeedsMe({ who: input.who, area: input.area, limit, after, fullAccess: Boolean(actionContext?.fullAccess) });
+    const result = await listNeedsMe({
+      who: input.who,
+      area: input.area,
+      limit,
+      after,
+      fullAccess: Boolean(actionContext?.ownerAccess ?? actionContext?.fullAccess),
+    });
     return {
       generated_at: result.generatedAt,
       total_open: result.total,
