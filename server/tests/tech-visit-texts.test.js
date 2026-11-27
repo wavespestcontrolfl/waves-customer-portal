@@ -7,7 +7,7 @@ const { isPaymentScopedText } = require('../services/payment-status-contract');
 const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
 
 const inbound = (over = {}) => ({ direction: 'inbound', message_type: 'inbound', status: 'received', message_body: 'The gate code changed', metadata: null, ...over });
-const outbound = (over = {}) => ({ direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: null, ...over });
+const outbound = (over = {}) => ({ direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: { human_authored: true }, ...over });
 
 describe('textVerdict', () => {
   test('a plain customer reply and a plain office text show', () => {
@@ -98,7 +98,7 @@ describe('textVerdict', () => {
   });
 
   test.each([
-    'https://example.com/r/abc123', 'http://x.test/pick', 'www.example.com/pick', 'wavespestcontrol.com/reschedule/abc', 'tap bit.ly/3xyz to move your visit', 'go to example.co/r/1',
+    'https://example.com/r/abc123', 'http://x.test/pick', 'www.example.com/pick', 'wavespestcontrol.com/reschedule/abc', 'tap bit.ly/3xyz to move your visit', 'go to example.co/r/1', 'is.gd/abc', 'rb.gy/x1', 'tiny.cc/z9', 'tap v.gd/abc', 'cutt.ly/q', 'Pick a time: s.id/abc',
   ])('a text with a link is hidden, so no customer-action link reaches a technician: %s', (body) => {
     expect(hasLink(body)).toBe(true);
     expect(textVerdict(outbound({ message_type: 'appointment_rescheduled', message_body: body }))).toBe('hidden');
@@ -111,10 +111,12 @@ describe('textVerdict', () => {
     expect(textVerdict(outbound({ message_type: 'appointment_cancelled', from_phone: '+19415550100', message_body: 'Your visit moved to Thursday' }))).toBe('show');
   });
 
-  test('a manual text shows only when a staff member wrote it', () => {
-    expect(textVerdict(outbound({ message_type: 'manual', admin_user_id: null, message_body: 'Spring special for you' }))).toBe('hidden');
-    expect(textVerdict(outbound({ message_type: 'manual', message_body: 'We will be there Tuesday' }))).toBe('show');
-    expect(textVerdict(outbound({ message_type: 'ai_approved', admin_user_id: null, message_body: 'We will be there Tuesday' }))).toBe('show');
+  test('a manual text shows only with the composer\'s human_authored stamp; a staff id alone is skipped', () => {
+    expect(textVerdict(outbound({ message_body: 'We will be there Tuesday' }))).toBe('show');
+    expect(textVerdict(outbound({ admin_user_id: 'staff-1', metadata: null }))).toBe('skip');
+    expect(textVerdict(outbound({ admin_user_id: 'staff-1', metadata: { human_authored: 'true' } }))).toBe('skip');
+    expect(textVerdict(outbound({ admin_user_id: null, metadata: JSON.stringify({ human_authored: false }), message_body: 'Spring special for you' }))).toBe('skip');
+    expect(textVerdict(outbound({ message_type: 'ai_approved', admin_user_id: null, metadata: null }))).toBe('show');
   });
 
   test("a customer's handled reschedule reply (retyped by the webhook) shows", () => {
@@ -191,7 +193,7 @@ describe('visitTexts', () => {
     const db = fakeDb([
       row('before', '2026-11-19T04:59:59Z'),
       row('edge', '2026-11-19T05:00:00Z'),
-      row('mid', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent' }),
+      row('mid', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', metadata: { human_authored: true } }),
       row('money', '2026-11-23T15:00:00Z', { message_body: 'what is my balance' }),
       row('invoice', '2026-11-24T15:00:00Z', { direction: 'outbound', message_type: 'invoice', status: 'sent' }),
       row('late', '2026-11-27T12:00:01Z'),
@@ -234,8 +236,8 @@ describe('visitTexts', () => {
   });
 
   test('a scheduled send left as a queue parent and a provider row shows once', async () => {
-    const parent = row('parent', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday' });
-    const twin = row('twin', '2026-11-22T15:00:05Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: JSON.stringify({ scheduled_sms_log_id: 'parent' }) });
+    const parent = row('parent', '2026-11-22T15:00:00Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: { human_authored: true } });
+    const twin = row('twin', '2026-11-22T15:00:05Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: JSON.stringify({ human_authored: true, scheduled_sms_log_id: 'parent' }) });
     const out = await visitTexts(fakeDb([parent, twin]), SVC, { now: NOW });
     expect(out.texts.map((t) => t.id)).toEqual(['twin']);
   });

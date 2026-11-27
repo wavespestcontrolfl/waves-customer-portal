@@ -1432,7 +1432,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         onRefresh={onRetry}
       />
 
-      <VisitTextsSection serviceId={service.id} byService={byService} request={request} />
+      <VisitTextsSection service={service} byService={byService} request={request} />
 
       {memberBits.map((m) => (m.wdo ? (
         <div key={`wdo-${m.service.id}`}>

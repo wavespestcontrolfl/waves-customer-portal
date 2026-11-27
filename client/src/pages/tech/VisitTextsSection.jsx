@@ -45,8 +45,10 @@ function PhotoThumbs({ photos }) {
 // visit-prep photos do), so a tap never opens an expired link.
 const REFRESH_MS = 50 * 60 * 1000;
 
-function useVisitTexts(serviceId, enabled, request) {
-  const [state, setState] = useState({ id: null, data: null, failed: false, at: 0 });
+// `key` names the visit the texts belong to: its id, its customer and its date. A change of any of them (a merge, a reschedule
+// pushed to the open screen) clears what is shown at once and reads again.
+function useVisitTexts(serviceId, key, enabled, request) {
+  const [state, setState] = useState({ key: null, data: null, failed: false, at: 0 });
   const [tick, setTick] = useState(0);
   const atRef = useRef(0);
   atRef.current = state.at;
@@ -54,17 +56,17 @@ function useVisitTexts(serviceId, enabled, request) {
     if (!enabled || !serviceId || typeof request !== 'function') return undefined;
     let live = true;
     Promise.resolve(request(`/admin/schedule/${serviceId}/visit-texts`))
-      .then((data) => { if (live) setState({ id: serviceId, data, failed: false, at: Date.now() }); })
+      .then((data) => { if (live) setState({ key, data, failed: false, at: Date.now() }); })
       // 404 is the gate off or a visit that is not his: show nothing. Any other failure gets one muted line.
-      .catch((err) => { if (live) setState({ id: serviceId, data: null, failed: err?.status !== 404, at: Date.now() }); });
+      .catch((err) => { if (live) setState({ key, data: null, failed: err?.status !== 404, at: Date.now() }); });
     const refresh = setTimeout(() => setTick((n) => n + 1), REFRESH_MS);
     return () => { live = false; clearTimeout(refresh); };
-  }, [enabled, serviceId, request, tick]);
+  }, [enabled, serviceId, key, request, tick]);
   useEffect(() => {
     if (!enabled) return undefined;
     const onResume = () => {
       if (document.visibilityState === 'hidden' || !atRef.current || Date.now() - atRef.current < REFRESH_MS) return;
-      setState((prev) => ({ ...prev, id: null, data: null, at: 0 }));
+      setState((prev) => ({ ...prev, key: null, data: null, at: 0 }));
       setTick((n) => n + 1);
     };
     document.addEventListener('visibilitychange', onResume);
@@ -76,10 +78,13 @@ function useVisitTexts(serviceId, enabled, request) {
 
 // `byService` is the panel's per-visit brief map: the brief answer carries `visitTexts: true` while the gate is on, and
 // only then is the read made. The loaded answer is stored with the visit it was read for and shown only for that visit.
-export default function VisitTextsSection({ serviceId, byService, request }) {
+export default function VisitTextsSection({ service, byService, request }) {
+  const serviceId = service.id;
+  const key = [serviceId, service.customer_id || service.customerId || '', String(service.scheduledDate || service.scheduled_date || '').slice(0, 10)].join('|');
   const enabled = byService?.[serviceId]?.brief?.visitTexts === true;
-  const state = useVisitTexts(serviceId, enabled, request);
-  if (!enabled || state.id !== serviceId) return null;
+  const state = useVisitTexts(serviceId, key, enabled, request);
+
+  if (!enabled || state.key !== key) return null;
   if (state.failed) return <p style={{ ...mutedStyle, marginTop: 10 }}>Couldn't load texts</p>;
   const data = state.data;
   if (!data?.enabled) return null;

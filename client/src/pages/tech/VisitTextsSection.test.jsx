@@ -10,7 +10,8 @@ import VisitBriefPanel from './VisitBriefPanel';
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const ON = { 'svc-1': { brief: { brief: null, visitTexts: true } }, 'svc-2': { brief: { brief: null, visitTexts: true } } };
-const renderWith = (request, byService = ON) => render(<VisitTextsSection serviceId="svc-1" byService={byService} request={request} />);
+const SVC1 = { id: 'svc-1', customer_id: 'cust-1', scheduled_date: '2026-11-26' };
+const renderWith = (request, byService = ON, service = SVC1) => render(<VisitTextsSection service={service} byService={byService} request={request} />);
 const wait = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 describe('VisitTextsSection', () => {
@@ -81,9 +82,9 @@ describe('one visit at a time', () => {
       '/admin/schedule/svc-2/visit-texts': new Promise(() => {}),
     };
     const request = vi.fn((path) => (answers[path] instanceof Promise ? answers[path] : Promise.resolve(answers[path])));
-    const { rerender } = render(<VisitTextsSection serviceId="svc-1" byService={ON} request={request} />);
+    const { rerender } = render(<VisitTextsSection service={SVC1} byService={ON} request={request} />);
     expect(await screen.findByText('Visit one text')).toBeInTheDocument();
-    rerender(<VisitTextsSection serviceId="svc-2" byService={ON} request={request} />);
+    rerender(<VisitTextsSection service={{ id: 'svc-2', customer_id: 'cust-1', scheduled_date: '2026-11-26' }} byService={ON} request={request} />);
     expect(screen.queryByText('Visit one text')).toBeNull();
     expect(request).toHaveBeenCalledWith('/admin/schedule/svc-2/visit-texts');
   });
@@ -124,6 +125,23 @@ describe('signed photo links expire after an hour', () => {
       await act(async () => { vi.advanceTimersByTime(50 * 60 * 1000 + 10); });
       await screen.findByText('Read 2');
     } finally { vi.useRealTimers(); }
+  });
+});
+
+describe('the visit\'s customer and date', () => {
+  const texts = (body) => ({ enabled: true, hidden: 0, texts: [{ id: body, direction: 'inbound', at: '2026-11-20T15:00:00.000Z', body, photos: [] }] });
+
+  it('clears the shown texts at once and reads again when the customer or the date changes', async () => {
+    let n = 0;
+    const request = vi.fn(() => (++n === 1 ? Promise.resolve(texts('First customer text')) : new Promise(() => {})));
+    const { rerender } = render(<VisitTextsSection service={SVC1} byService={ON} request={request} />);
+    expect(await screen.findByText('First customer text')).toBeInTheDocument();
+    rerender(<VisitTextsSection service={{ ...SVC1, customer_id: 'cust-2' }} byService={ON} request={request} />);
+    expect(screen.queryByText('First customer text')).toBeNull();
+    expect(request).toHaveBeenCalledTimes(2);
+    rerender(<VisitTextsSection service={{ ...SVC1, customer_id: 'cust-2', scheduled_date: '2026-11-30' }} byService={ON} request={request} />);
+    expect(screen.queryByText('First customer text')).toBeNull();
+    expect(request).toHaveBeenCalledTimes(3);
   });
 });
 

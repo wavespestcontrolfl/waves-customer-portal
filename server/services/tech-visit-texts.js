@@ -16,6 +16,7 @@ const { isSmsReaction } = require('./sms-intent');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
 const { isPaymentScopedText } = require('./payment-status-contract');
+const { findShortenerHost } = require('./comms-lint');
 
 const WINDOW_DAYS = 7;
 const MAX_TEXTS = 40;
@@ -25,8 +26,6 @@ const MAX_PAGES = 5;
 const IMAGE_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'image/gif']);
 
 const SHOW_INBOUND_TYPES = new Set(['inbound', 'domain_lead', 'van_lead', 'reschedule_reply']);
-// 'manual' is also what marketing, retention and follow-up sends are stored as: it shows only when a staff member wrote it
-// (sms_log.admin_user_id set), so an automated send of that type stays hidden.
 const SHOW_OUTBOUND_TYPES = new Set([
   'manual', 'ai_approved', 'ai_revised', 'ai_autosent', 'ai_assistant_reply', 'auto_reply', 'customer_reply',
   'appointment_rescheduled', 'appointment_cancelled', 'reschedule_reply', 'reschedule_series_confirmation',
@@ -62,7 +61,9 @@ function hasMoneyWords(body) {
 
 // A card number (the repo's PAN detector, spoken and spaced forms included) or a labeled card / bank detail.
 function hasLink(body) {
-  return LINK.test(String(body || ''));
+  // A bare shortened link (is.gd/abc, rb.gy/x) has no scheme and may sit outside the list below: the repo's shortener recognizer
+  // (comms-lint.js: its host list plus the short-host fingerprint) covers the rest.
+  return LINK.test(String(body || '')) || Boolean(findShortenerHost(body));
 }
 
 function hasCardCredentials(body) {
@@ -104,17 +105,17 @@ function isNoise(row) {
   const inbound = row.direction === 'inbound';
   if (QUIET_TYPES.has(row.message_type || '') || isPushProof(row)) return true;
   if (inbound) return isSmsReaction(row.message_body) || isEnforcedSpam(row);
-  return !SENT_STATUSES.has(String(row.status || '').toLowerCase());
+  if (!SENT_STATUSES.has(String(row.status || '').toLowerCase())) return true;
+  // 'manual' is also what marketing, retention and follow-up sends are stored as: it counts as office-written only with the
+  // composer's metadata.human_authored stamp (as sms-gratitude-context.js reads it); an admin_user_id alone is not enough.
+  return (row.message_type || '') === 'manual' && parseMetadata(row.metadata).human_authored !== true;
 }
 
-// Held back and counted: a type off the allow-list, money, card or bank details, a link, or an unauthored `manual` send.
+// Held back and counted: a type off the allow-list, money, card or bank details, or a link.
 function isHeldBack(row) {
-  const inbound = row.direction === 'inbound';
-  const type = row.message_type || '';
-  if (!(inbound ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(type)) return true;
+  if (!(row.direction === 'inbound' ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(row.message_type || '')) return true;
   const body = row.message_body;
-  if (hasMoneyWords(body) || hasCardCredentials(body) || hasLink(body) || isPaymentScopedText(body)) return true;
-  return type === 'manual' && !inbound && !row.admin_user_id;
+  return hasMoneyWords(body) || hasCardCredentials(body) || hasLink(body) || isPaymentScopedText(body);
 }
 
 // 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
