@@ -23,9 +23,9 @@
   },
   "zone_b_monthly_pest_bermuda_premium": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1822.18,
-      "recurringMonthlyAfterDiscount": 151.85,
-      "year1Total": 1822.18
+      "recurringAnnualAfterDiscount": 1789.78,
+      "recurringMonthlyAfterDiscount": 149.15,
+      "year1Total": 1789.78
     },
     "waveGuard": {
       "tier": "silver",
@@ -38,16 +38,16 @@
         "monthly": 96.72
       },
       "lawn_care": {
-        "annual": 864,
-        "monthly": 72
+        "annual": 828,
+        "monthly": 69
       }
     }
   },
   "zone_c_bimonthly_pest_zoysia_standard_treeshrub": {
     "summary": {
-      "recurringAnnualAfterDiscount": 1840.05,
-      "recurringMonthlyAfterDiscount": 153.34,
-      "year1Total": 1840.05
+      "recurringAnnualAfterDiscount": 1819.65,
+      "recurringMonthlyAfterDiscount": 151.64,
+      "year1Total": 1819.65
     },
     "waveGuard": {
       "tier": "gold",
@@ -60,8 +60,8 @@
         "monthly": 51.48
       },
       "lawn_care": {
-        "annual": 756,
-        "monthly": 63
+        "annual": 732,
+        "monthly": 61
       },
       "tree_shrub": {
         "annual": 791,

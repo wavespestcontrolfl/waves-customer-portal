@@ -135,8 +135,48 @@ const KNOWN_BELOW_TARGET_EXPOSURE = [
   { track: 'zoysia', tier: 'premium', turfSqft: 20000, annual: 2088, annualCost: 1478.02, protocolMaterial: 934.02, margin: 0.2921 },
 ];
 
+// One lawn price lane (owner 2026-11-26 "make these one type of grass", new quotes only): a new bermuda or zoysia plan collects the
+// St. Augustine price while its cost stays its own grass's (zoysia carries the largest product budget). The ledger above is the
+// grid every quote saved before the rule keeps (legacyLawnOneLane). This one is new quotes, measured 2026-11-27 with the same cost
+// model. Against the ledger above: st_augustine and bahia unchanged; bermuda gains one cell (premium 20,000 sq ft, 0.3429);
+// zoysia gains one (enhanced 4,500 sq ft, 0.3491) and its large-lawn cells drop 1-4 points (worst SOLD cell premium 20,000 sq ft
+// 0.2625, was 0.2921; worst overall the unsold standard 20,000 sq ft anchor 0.2394, was 0.2714). Owner-acknowledged in the
+// one-lane PR; any further move needs its own acknowledgment.
+const KNOWN_BELOW_TARGET_EXPOSURE_ONE_LANE = [
+  { track: 'st_augustine', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 372.21, protocolMaterial: 179.71, margin: 0.3401 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 10000, annual: 648, annualCost: 434.64, protocolMaterial: 224.64, margin: 0.3293 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 12000, annual: 744, annualCost: 497.06, protocolMaterial: 269.56, margin: 0.3319 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 15000, annual: 876, annualCost: 590.7, protocolMaterial: 336.95, margin: 0.3257 },
+  { track: 'st_augustine', tier: 'standard', turfSqft: 20000, annual: 1092, annualCost: 746.77, protocolMaterial: 449.27, margin: 0.3161 },
+  { track: 'st_augustine', tier: 'enhanced', turfSqft: 20000, annual: 1572, annualCost: 1038.66, protocolMaterial: 617.91, margin: 0.3393 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 10000, annual: 1188, annualCost: 780.94, protocolMaterial: 411.94, margin: 0.3426 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 12000, annual: 1368, annualCost: 898.33, protocolMaterial: 494.33, margin: 0.3433 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 15000, annual: 1608, annualCost: 1074.41, protocolMaterial: 617.91, margin: 0.3318 },
+  { track: 'st_augustine', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1367.88, protocolMaterial: 823.88, margin: 0.3174 },
+  { track: 'bermuda', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1316.81, protocolMaterial: 772.81, margin: 0.3429 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 8000, annual: 564, annualCost: 405.75, protocolMaterial: 213.25, margin: 0.2806 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 10000, annual: 648, annualCost: 476.56, protocolMaterial: 266.56, margin: 0.2646 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 12000, annual: 744, annualCost: 547.38, protocolMaterial: 319.88, margin: 0.2643 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 15000, annual: 876, annualCost: 653.6, protocolMaterial: 399.85, margin: 0.2539 },
+  { track: 'zoysia', tier: 'standard', turfSqft: 20000, annual: 1092, annualCost: 830.63, protocolMaterial: 533.13, margin: 0.2394 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 4500, annual: 576, annualCost: 374.93, protocolMaterial: 157.62, margin: 0.3491 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 8000, annual: 804, annualCost: 543.46, protocolMaterial: 280.21, margin: 0.3241 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 10000, annual: 924, annualCost: 639.76, protocolMaterial: 350.26, margin: 0.3076 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 12000, annual: 1068, annualCost: 736.06, protocolMaterial: 420.31, margin: 0.3108 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 15000, annual: 1260, annualCost: 880.51, protocolMaterial: 525.39, margin: 0.3012 },
+  { track: 'zoysia', tier: 'enhanced', turfSqft: 20000, annual: 1572, annualCost: 1121.26, protocolMaterial: 700.51, margin: 0.2867 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 8000, annual: 1032, annualCost: 707.61, protocolMaterial: 373.61, margin: 0.3143 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 10000, annual: 1188, annualCost: 836.01, protocolMaterial: 467.01, margin: 0.2963 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 12000, annual: 1368, annualCost: 964.41, protocolMaterial: 560.41, margin: 0.295 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 15000, annual: 1608, annualCost: 1157.01, protocolMaterial: 700.51, margin: 0.2805 },
+  { track: 'zoysia', tier: 'premium', turfSqft: 20000, annual: 2004, annualCost: 1478.02, protocolMaterial: 934.02, margin: 0.2625 },
+];
+
 describe('WaveGuard lawn pricing exposure', () => {
-  it('prices every combination off the market bracket with the cost floor disarmed; below-target margins match the known-exposure ledger (owner 2026-07-17)', () => {
+  it.each([
+    ['quotes saved before the one lawn price lane', { legacyLawnOneLane: true }, KNOWN_BELOW_TARGET_EXPOSURE],
+    ['new quotes (one lawn price lane)', {}, KNOWN_BELOW_TARGET_EXPOSURE_ONE_LANE],
+  ])('%s: prices every combination off the market bracket with the cost floor disarmed; below-target margins match the known-exposure ledger (owner 2026-07-17)', (_rule, ruleOptions, ledger) => {
     const floorApplications = [];
     const bracketMismatches = [];
     const belowTarget = [];
@@ -146,7 +186,7 @@ describe('WaveGuard lawn pricing exposure', () => {
         for (const turfSqft of TURF_SIZES) {
           const priced = priceLawnCare(
             { turfSf: turfSqft, routeDensity: 'DENSE', features: {} },
-            { track, tier, includeHiddenTiers: true }
+            { track, tier, includeHiddenTiers: true, ...ruleOptions }
           );
           const selectedTier = priced.tiers.find((row) => row.tier === tier);
 
@@ -183,7 +223,7 @@ describe('WaveGuard lawn pricing exposure', () => {
     expect(bracketMismatches).toEqual([]);
     // Exposure ledger: any NEW combo dropping below target (or an existing one
     // getting worse) fails here and needs an owner-acknowledged ledger update.
-    expect(belowTarget).toEqual(KNOWN_BELOW_TARGET_EXPOSURE);
+    expect(belowTarget).toEqual(ledger);
   });
 
   it("engine's declared non-material cost components match the independent cost model", () => {

@@ -255,7 +255,7 @@ describe('fix 1: the palm per-visit minimum holds after the per-palm credit', ()
 
   test('adding a service to a palm estimate keeps the sold minimum (revision builder applies the saved signals)', () => {
     const request = require('fs').readFileSync(require('path').join(__dirname, '../services/estimate-add-service-request.js'), 'utf8');
-    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyWdoFlat', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'legacyWholeHomeSizing', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
+    expect(request).toContain("for (const key of ['legacyPricingRules', 'legacyTwoStoryRoof', 'legacyWdoFlat', 'legacyOneTimePestBuffer', 'legacyPestAboveTable', 'legacyWholeHomeSizing', 'legacyLawnOneLane', 'legacySpecialty1126', 'specialty1126CurrentServices', 'oneTimePestCurrentServices', 'currentRulesServices', 'palmMinPerVisitReplay'])");
   });
 
   test('an estimate priced before the fix keeps the credit it was quoted with', () => {
@@ -265,8 +265,10 @@ describe('fix 1: the palm per-visit minimum holds after the per-palm credit', ()
 });
 
 describe('fix 2: the one-time lawn price rises inside a flat stretch of the 6-visit column', () => {
+  // These quotes predate the one lawn price lane (2026-11-26): legacyLawnOneLane keeps them on the rows, multiple and factors the
+  // flat-stretch fix shipped with. The lane rule's own flat-stretch prices are pinned in the last test of this block.
   const price = (sq, track = 'st_augustine', treatmentType = 'weed', options = {}) => (
-    sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, ...options }).price
+    sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType, track, legacyLawnOneLane: true, ...options }).price
   );
 
   test('St. Augustine weed: 3,000 / 4,000 / 5,500 / 6,500 sq ft', () => {
@@ -274,6 +276,14 @@ describe('fix 2: the one-time lawn price rises inside a flat stretch of the 6-vi
     expect(price(4000)).toBe(189);
     expect(price(5500)).toBe(192);
     expect(price(6500)).toBe(197);
+  });
+
+  test('under the one lawn price lane the price still rises across the flat stretch, at one price for every grass', () => {
+    const lane = (sq, track = 'st_augustine') => sp.priceOneTimeLawn({ lawnSqFt: sq }, { treatmentType: 'weed', track }).price;
+    expect([3000, 4000, 5500, 6500].map((sq) => lane(sq))).toEqual([137, 138, 140, 144]);
+    for (const track of ['bermuda', 'zoysia', 'bahia']) {
+      for (const sq of [3000, 4000, 5500, 6500]) expect(lane(sq, track)).toBe(lane(sq));
+    }
   });
 
   test('the stretch start and every price outside a flat stretch are unchanged', () => {
@@ -322,9 +332,11 @@ describe('fix 2: the one-time lawn price rises inside a flat stretch of the 6-vi
     const { savedFloorReplaySignals } = require('../services/estimate-floor-signal-replay');
     const lawn = { oneTimeLawn: { treatmentType: 'weed', track: 'st_augustine' } };
     const priceOf = (e) => e.lineItems.find((line) => line.service === 'one_time_lawn').price;
-    const fresh = generateEstimate({ ...HOME, lawnSqFt: 5500, services: lawn });
+    // Priced before the one lawn price lane (its own stamp, legacyLawnOneLane), as every quote of the flat-stretch fix was.
+    const fresh = generateEstimate({ ...HOME, lawnSqFt: 5500, services: lawn, legacyLawnOneLane: true });
     expect(priceOf(fresh)).toBe(192);
     const signals = savedFloorReplaySignals({ engineResult: fresh, result: mapV1ToLegacyShape(fresh) });
+    expect(signals.legacyLawnOneLane).toBe(true);
     expect(priceOf(generateEstimate({ ...HOME, lawnSqFt: 5500, services: lawn, ...signals, savedEstimateReplay: true }))).toBe(192);
     const unstamped = { engineResult: { lineItems: [{ service: 'one_time_lawn', price: 187 }] } };
     const older = generateEstimate({ ...HOME, lawnSqFt: 5500, services: lawn, ...savedFloorReplaySignals(unstamped) });
@@ -338,6 +350,7 @@ describe('fix 2: the one-time lawn price rises inside a flat stretch of the 6-vi
       ...HOME,
       lawnSqFt: 5500,
       ...(legacy ? { legacyPricingRules: true } : {}),
+      legacyLawnOneLane: true,
       services: { oneTimeLawn: { treatmentType: 'weed', track: 'st_augustine' } },
     }).lineItems.find((line) => line.service === 'one_time_lawn').price;
     expect(quote(true)).toBe(187);
