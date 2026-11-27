@@ -515,3 +515,35 @@ it('immediately unsubscribes on logout without blocking on a slow registration, 
   expect(api.request.mock.calls[2][0]).toBe('/push/native-unsubscribe');
   expect(api.request.mock.calls[2][1].headers).toEqual({ Authorization: 'Bearer jwt-old-customer' });
 });
+
+it('blocks a fresh registration callback arriving during logout for the signing-out session and awaits late cleanup before a quick re-login', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => ({ channels: [] }));
+  localStorage.setItem('waves_token', 'jwt-session-a');
+
+  let resolveUnsubscribe;
+  api.request.mockImplementation((path) => {
+    if (path === '/push/native-unsubscribe') {
+      return new Promise((resolve) => { resolveUnsubscribe = resolve; });
+    }
+    return Promise.resolve({ ok: true, id: 'sub-1' });
+  });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  // Seed remembered token so deactivateNativePushToken sends /push/native-unsubscribe.
+  localStorage.setItem('waves_native_push_token', 'fcm-shared');
+
+  const logoutPromise = freshNativePush.deactivateNativePushToken();
+  await vi.waitFor(() => expect(resolveUnsubscribe).toBeTypeOf('function'));
+
+  // Registration callback arrives DURING logout while old JWT is still in localStorage.
+  const midLogoutReg = nativeMocks.state.listeners.registration({ value: 'fcm-shared' });
+  resolveUnsubscribe({ ok: true, deactivated: 1 });
+  await logoutPromise;
+  await midLogoutReg;
+
+  // Must NOT have called /push/native-subscribe for the signing-out session.
+  expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-unsubscribe']);
+});
