@@ -3725,7 +3725,15 @@ function buildLiveEtaSnapshot(context) {
       ...(Number.isFinite(g.fixAtMs) ? { fixAtMs: g.fixAtMs } : {}),
     }))
     .filter((g) => g.scheduledServiceIds.length);
-  return entries.length ? { entries } : null;
+  // TODAY ROUTE STATUS (gap 4): the stop count sentence(s) the facts carried, re-derived at send time by
+  // sms-eta-freshness (a changed count refuses the send). A context that opted in always persists the array,
+  // EMPTY when no sentence was given or the read failed, so route wording added later is refused at send
+  // (route_status_unbound). A context that did not opt in has no key: the snapshot is exactly as before.
+  if (!Array.isArray(context?.routeStatusGroups)) return entries.length ? { entries } : null;
+  const routeStatus = context.routeStatusGroups
+    .filter((g) => g && g.scheduledServiceId != null && typeof g.sentence === 'string' && g.sentence)
+    .map((g) => ({ scheduledServiceId: g.scheduledServiceId, scheduledServiceIds: (g.scheduledServiceIds || []).filter((id) => id != null), sentence: g.sentence, ...(g.stop ? { stop: g.stop } : {}) }));
+  return { entries, routeStatus };
 }
 
 // Deterministic backstop (independent review finding, PR #5334): today only
@@ -3801,6 +3809,9 @@ function validateLiveEtaMinutes({ reply: rawReply, factsBlock, liveEtaStopCount 
   // the same shared step the send-time check uses.
   const reply = normalizeGsmPunctuation(stripTrackLinks(rawReply));
   if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { ok: true, violations: [] };
+  // TODAY ROUTE STATUS (gap 4): a stop count only as a word-for-word copy of a ROUTE STATUS fact sentence.
+  const routeViolation = require('./sms-route-status').routeStatusDraftViolation(reply, factsBlock);
+  if (routeViolation) return liveEtaFail(routeViolation);
   const stateViolation = arrivalStateViolation(reply, factsBlock, techNames);
   if (stateViolation) return liveEtaFail(stateViolation);
   // Every LIVE ETA line, not only the first (audit P1): a customer with two distinct live stops has two
@@ -4844,8 +4855,9 @@ ${missedVisitRules}- Voice bans, on top of the house voice: never write "Good qu
   // resolveFreshTechPosition + calculateBoundedTrackingEta bounds the
   // customer tracking page uses). The model may state THAT number only —
   // never compute or invent one — and share the link with it.
+  // TODAY ROUTE STATUS (gap 4) rides the same gate-on clause: the stop count sentence, copied word for word.
   const liveEtaClause = realAnswersOn
-    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK.'
+    ? ' State a number of minutes away ONLY when that visit’s line also carries a LIVE ETA fact, using that EXACT number — never compute, round, or invent one — and you may share its TRACKING LINK. When TODAY\'s visit line carries ROUTE STATUS, you may answer where the tech is or whether they are still coming today with that one sentence, copied word for word — it is a count of stops, never a time: add no time, no minutes and nothing about where the tech is, and say nothing else about stops.'
     : '';
   // Round-34 P2: route wording is authorized by an EN-ROUTE fact only. An ON-SITE
   // fact authorizes arrived/on-site wording only — "on the way" beside it is false
@@ -5760,7 +5772,14 @@ function buildFactsBlock(context, extras = {}) {
               parts.push(`TRACKING LINK: ${stripSmsUrlScheme(s.liveEta.trackUrl)}`);
             }
           } else if (s.isToday && liveState === 'on_site') parts.push('LIVE STATUS: tech marked on site at this visit');
-          else if (s.isToday) parts.push('no live tech location known');
+          else if (s.isToday) {
+            parts.push('no live tech location known');
+            // TODAY ROUTE STATUS (gap 4): the tracker's stop count before the tech is en route, as one finished sentence.
+            // Only a real-answers context ever carries it (context-aggregator includeRouteStatus); gate-checked again here.
+            if (gateEnvValue('GATE_SMS_REAL_ANSWERS') && typeof s.routeStatus === 'string' && s.routeStatus) {
+              parts.push(`ROUTE STATUS (copy word for word): "${s.routeStatus}"`);
+            }
+          }
           return `- ${parts.join(', ')}`;
         })
         .join('\n')
@@ -6947,8 +6966,8 @@ async function draftShadowReply({ inboundMessage, fromPhone, customer, smsLogId,
     // the staff facts (prepaid visits left) are for a real-answers draft only; gate off adds no key, so the call stays byte-identical
     const staffFactsOption = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? { includeSmsStaffFacts: true } : {};
     const loadContext = (withLiveEta) => (customer
-      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) })
-      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(asOfDate ? { asOf: asOfDate } : {}) }));
+      ? ContextAggregator.getContextForCustomer(customer, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) })
+      : ContextAggregator.getFullCustomerContext(fromPhone, { includeLiveEta: withLiveEta, includeVisitLoops: true, ...staffFactsOption, ...(withLiveEta ? { includeRouteStatus: true } : {}), ...(asOfDate ? { asOf: asOfDate } : {}) }));
     // Unanswered-text lane (GATE_SMS_UNANSWERED_REPLY; null while it is off):
     // a fingerprint of this customer's facts that a delayed send re-derives
     // and compares (sms-unanswered-reply.factsFingerprintFor). Taken BEFORE
