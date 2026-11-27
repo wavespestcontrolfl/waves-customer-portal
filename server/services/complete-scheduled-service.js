@@ -75,7 +75,7 @@ const { shortenOrPassthrough, invoiceShortCodePrefix } = require('../services/sh
 const { customerOnAutopay } = require('../services/autopay-eligibility');
 const { refuseBillingLaneDriftInTrx, membershipDuesCoverVisit, completionInvoiceAmount, completionInvoiceIsMembershipDues, isMembershipTier, monthlyDuesCollected, resolveBillingLane, completionLaneFlags, combinedInvoiceVoidedWithoutLiveReplacement, isSiblingCoverageEligibleVisit, hasAuthoritativeZeroPrice } = require('../services/billing-lane');
 const { resolveAppointmentCardLane, resolveExtendedLane, resolvePerApplicationCharge, resolveCompletionChargeCap } = require('../services/completion-charge-verdict');
-const { lawnCloseoutProhibitedBlocks, lawnProhibitedProductsBlockPayload } = require('./lawn-prohibited-products');
+const lawnProhibited = require('./lawn-prohibited-products');
 const { detectServiceLine, getServiceLineConfig, getAdvisoryDefaults, isSprayApplicationMethod, isNonBaitPesticideProduct, isTermiteNoReentryServiceType } = require('../services/service-report/service-line-configs');
 const { runAndSwallowErrors: runPestPressureForServiceRecord } = require('../services/pest-pressure/orchestrate');
 const { loadActiveConfig: loadPestPressureConfig } = require('../services/pest-pressure/store');
@@ -595,18 +595,18 @@ function isWaveGuardLawnCompletion(svc) {
     && detectServiceLine(svc?.service_type) === 'lawn';
 }
 
-// Owner 2026-10-20, "dont block": a pest visit's completion treats stock as advisory too,
-// by the server's own service line (as WaveGuard lawn above); the pest sheet's context reads the same answer, so the
-// sheet never lets through what /complete refuses.
+// Owner 2026-10-20, "dont block", and owner 2026-11-26 for every visit type: a completion treats stock as advisory, so the
+// pest sheet's context reads the same answer as /complete and no sheet holds back what /complete accepts.
+ 
 function isPestStockAdvisoryCompletion(svc) {
-  return detectServiceLine(svc?.service_type) === 'pest';
+  return true;
 }
 
 // A lawn or tree & shrub visit (services/stock-advisory.js).
 const { isLawnTsStockAdvisoryCompletion } = require('./stock-advisory');
 
-// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing: a pest, lawn
-// (any tier, WaveGuard included) or tree & shrub visit.
+// A completion whose deduction may take stock below zero (the shortfall is recorded) instead of refusing: every visit type
+// (owner 2026-11-26).
 const isStockAdvisoryCompletion = (svc) => isPestStockAdvisoryCompletion(svc) || isLawnTsStockAdvisoryCompletion(svc);
 
 // Plan/approval-engine block messages predate the advisory policy and can
@@ -624,12 +624,29 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit }) {
-  return [blackout, nLimit, manager, calibration, inventory, limit]
-    .filter((record) => record && record.advisory)
-    .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
-    .map((block) => block && block.message)
-    .filter(Boolean);
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit, deductions = [], shortfalls = false }) {
+  return [
+    ...[blackout, nLimit, manager, calibration, inventory, limit]
+      .filter((record) => record && record.advisory)
+      .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
+      .map((block) => block && block.message)
+      .filter(Boolean),
+    ...deductionAdvisoryMessages(deductions, { shortfalls }),
+  ];
+}
+
+// What the committed deductions tell the technician (owner 2026-11-26: warned, never blocked): a line flagged over its product's
+// ceiling moved no stock (the lines of one product share one combined warning, shown once), and, `shortfalls` on a visit that
+// has no WaveGuard stock advisory of its own, stock that went below zero.
+function deductionAdvisoryMessages(deductions, { shortfalls = false } = {}) {
+  const messages = (Array.isArray(deductions) ? deductions : []).map((deduction) => {
+    if (deduction?.status === 'not_deducted_implausible') return deduction.warning;
+    if (shortfalls && deduction?.status === 'deducted_insufficient_stock') {
+      return `${deduction.productName} went to ${deduction.stockAfter} ${deduction.inventoryUnit} on hand after deducting ${deduction.deductedAmount} ${deduction.inventoryUnit}.`;
+    }
+    return null;
+  });
+  return [...new Set(messages.filter(Boolean))];
 }
 
 // Missing / ambiguous rig no longer blocks the plan (owner ruling
@@ -1748,17 +1765,26 @@ function exceedsVisitLimit(line) {
   return share.value > share.limit;
 }
 
-// A technician's completion is refused, before any service write, when a submitted line is over its product's ceiling
-// (the office keeps the advisory path in deductProductInventory: an admin entry is deliberate, so the line is recorded, stock
-// is left alone and the office is alerted). The line would otherwise reach service_products, the FDACS ledger, usage, limits
-// and the customer report.
-const IMPLAUSIBLE_PRODUCT_AMOUNT = 'IMPLAUSIBLE_PRODUCT_AMOUNT';
+// A line over its product's ceiling never stops a completion, for any role (owner 2026-11-26: "all alerts like this should
+// just be alerts, they should not stop the job from being completed or finished"). deductProductInventory records the
+// line, leaves stock alone and flags it not_deducted_implausible, and notifyOfficeOfStockShortfalls alerts the office.
+// vetProductAmounts marks the lines whose product total is over the ceiling here, so the deduction treats each of them as
+// over even when no single line is, and keeps the combined amount and the contributing lines for the warning. A WeakMap:
+// nothing is added to the submitted line, so nothing is saved or hashed. The decision is made ONCE per line (the products
+// loop in completeScheduledService); every derived sink (stock, movement, job cost, nutrient ledger) is skipped by it.
+const OVER_VISIT_LIMIT_LINES = new WeakMap();
+// A submitted line is over its ceiling when vetProductAmounts marked it (its product's lines together are over) or it is over alone.
+const isOverVisitLimit = (submittedLine, judged) => Number.isFinite(judged.amount) && judged.amount > 0
+  && (OVER_VISIT_LIMIT_LINES.has(submittedLine) || exceedsVisitLimit(judged));
 
 // The ONE parse of a submitted product amount. An absent or empty amount is "no amount" (null); a number or a plain
 // decimal string is that number; anything else ("99999junk", "1e3", a boolean, an object, a negative) is invalid (NaN).
 // parseFloat/Number on the raw value would each read it differently, and a sink that read "99999junk" as 99,999 would
 // store a number the preflight never judged. The pattern has no overlapping quantifiers (the fraction needs its dot)
 // and the string is length-capped first, so a long digit run fails in linear time.
+// NUMERIC(8,3) tops out at 99999.999; Postgres rounds to 3 places, so 99999.9995 and up overflows.
+const MAX_STORABLE_AMOUNT = 99999.9995;
+const MAX_STORABLE_AMOUNT_TEXT = '99,999.999';
 const PLAIN_DECIMAL = /^(?:\d+(?:\.\d*)?|\.\d+)$/;
 const MAX_AMOUNT_CHARS = 32;
 function strictProductAmount(raw) {
@@ -1793,22 +1819,12 @@ function visitLimitInput(submitted, catalogRow) {
   return { amount, amountUnit };
 }
 
-function implausibleRefusal(catalogRow, { amount, amountUnit }) {
-  return {
-    error: `${amount} ${String(amountUnit || '').replace(/_/g, ' ')} of ${catalogRow.name} is far more than one visit uses. Check the amount and submit again.`.replace(/\s{2,}/g, ' '),
-    code: IMPLAUSIBLE_PRODUCT_AMOUNT,
-    productId: catalogRow.id,
-    productName: catalogRow.name,
-    amount,
-    amountUnit,
-  };
-}
-
-// The first product whose lines TOGETHER are over its visit limit, as { catalogRow, amount, amountUnit } for the refusal, else null.
+// The products whose lines TOGETHER are over its visit limit, as key (product id + dimension bucket) -> { amount, amountUnit,
+// parts } for the warning: the combined amount (the submitted total when the lines share one unit, else the total in the
+// dimension's base unit) and each contributing line's own amount and unit.
 // Lines are grouped by canonical product id (a host row and an add-on row, or the same id repeated, are one product's use)
-// and by dimension, each line converted to the dimension's base unit from its own submitted unit. A group of one submitted
-// unit reports the submitted total; mixed units report the total in the dimension's base unit.
-function firstProductOverVisitLimit(lines, rowById) {
+// and by dimension, each line converted to the dimension's base unit from its own submitted unit.
+function overVisitLimitGroups(lines, rowById) {
   const groups = new Map();
   for (const line of lines) {
     const catalogRow = rowById.get(line.productId);
@@ -1816,35 +1832,97 @@ function firstProductOverVisitLimit(lines, rowById) {
     if (!judged) continue;
     const share = visitLimitShare(judged);
     const key = `${line.productId}|${share.bucket}`;
-    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), limit: share.limit, baseUnit: share.baseUnit };
+    const group = groups.get(key) || { catalogRow, value: 0, raw: 0, units: new Set(), parts: [], limit: share.limit, baseUnit: share.baseUnit };
+    group.parts.push({ amount: judged.amount, amountUnit: judged.amountUnit });
     group.value += share.value;
     group.raw += judged.amount;
     group.units.add(String(judged.amountUnit || '').trim().toLowerCase());
     groups.set(key, group);
   }
-  for (const group of groups.values()) {
+  const over = new Map();
+  for (const [key, group] of groups) {
     if (group.value <= group.limit) continue;
     const single = group.units.size === 1;
-    return { catalogRow: group.catalogRow, amount: Number((single ? group.raw : group.value).toFixed(4)), amountUnit: single ? [...group.units][0] : group.baseUnit };
+    over.set(key, {
+      amount: Number((single ? group.raw : group.value).toFixed(4)),
+      amountUnit: single ? [...group.units][0] : group.baseUnit,
+      parts: group.parts,
+    });
   }
-  return null;
+  return over;
 }
 
 // Vets every submitted product line before the first write. The ids are already canonical (canonicalizeProductLines ran at
-// intake), so spellings of one id are one product here and everywhere downstream. A malformed amount is a 400 for any role. A technician whose lines for one product add up to
-// more than its visit limit gets a 422 naming the product and the total (an admin's keeps the advisory path in
-// deductProductInventory). Returns { status, body } or null. One catalog read, no history read. `skip` is a replay, a
-// resume or a packet effects phase: nothing is judged or changed.
-async function vetProductAmounts(database, { actor, products, skip = false }) {
+// intake), so spellings of one id are one product here and everywhere downstream. A malformed amount is a 400 for any role:
+// it is unreadable input, not a product limit (owner 2026-11-26: a product ceiling only warns). Lines whose product total is over its visit
+// limit are marked for deductProductInventory (the same advisory path an admin entry takes) and never refused. Returns
+// { status, body } or null. One catalog read, no history read. `skip` is a replay, a resume or a packet effects phase:
+// nothing is judged or changed.
+async function vetProductAmounts(database, { products, skip = false, rowIdentity = (p) => p }) {
   if (skip || !Array.isArray(products)) return null;
   const lines = products.filter((p) => p?.productId && p.totalAmount != null && p.totalAmount !== '');
   const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
   const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
-  const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
-  if (invalid || actor?.techRole === 'admin') return invalid;
-  const over = firstProductOverVisitLimit(lines, rowById);
-  return over ? { status: 422, body: implausibleRefusal(over.catalogRow, over) } : null;
+  const nameOf = (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product';
+  const invalid = normalizeProductAmounts(lines, nameOf);
+  if (invalid) return invalid;
+  // The ceiling judges what the completion records: the products loop keeps the FIRST row of each product and add-on
+  // (rowIdentity, the same rule) and drops the rest, so a dropped duplicate is neither summed nor flagged. The default
+  // judges every line as its own row.
+  const seenRows = new Set();
+  const recorded = new Set(products.filter((p) => p?.productId && !seenRows.has(rowIdentity(p)) && seenRows.add(rowIdentity(p))));
+  const recordedLines = lines.filter((line) => recorded.has(line));
+  // service_products.total_amount and the FDACS ledger's quantity_applied are NUMERIC(8,3): an amount past it cannot be stored, so the
+  // insert would abort the whole completion. Like a malformed amount it is unreadable input, refused before any write, but only for
+  // a row that will be inserted (a discarded duplicate is never stored).
+  const tooLarge = recordedLines.find((line) => line.totalAmount >= MAX_STORABLE_AMOUNT);
+  if (tooLarge) {
+    return { status: 400, body: {
+      error: `The amount for ${nameOf(tooLarge)} is too large to record. The most one line can hold is ${MAX_STORABLE_AMOUNT_TEXT}. Check the amount and submit again.`,
+      code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: tooLarge.productId,
+    } };
+  }
+  const overGroups = overVisitLimitGroups(recordedLines, rowById);
+  if (overGroups.size) {
+    for (const line of recordedLines) {
+      const judged = visitLimitInput(line, rowById.get(line.productId));
+      const group = judged && overGroups.get(`${line.productId}|${visitLimitShare(judged).bucket}`);
+      if (group) OVER_VISIT_LIMIT_LINES.set(line, group);
+    }
+  }
+  return null;
+}
+
+// A line over its product's ceiling still completes, but it is flagged and moves no stock and no cost. No later path can
+// deduct it or stop the visit (untracked stock, a unit that will not convert, a visit before a physical count, the hard
+// lockout). The office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount. When the product's lines are over
+// TOGETHER, the flag carries the combined amount and each contributing line, so the warning names the total and the lines.
+// `overCeiling` is the one decision made for the line in the products loop (a caller that made none gets it decided here).
+// Null when the line is not over.
+function implausibleDeduction(snapshot, inventoryProduct, productInput, overCeiling) {
+  const { amount, amountUnit } = snapshot;
+  if (!(overCeiling ?? isOverVisitLimit(productInput, { amount, amountUnit }))) return null;
+  const unitText = (unit) => String(unit || '').replace(/_/g, ' ');
+  const onHand = inventoryProduct.inventory_on_hand != null ? Number(inventoryProduct.inventory_on_hand) : NaN;
+  const stockBefore = Number.isFinite(onHand) ? onHand : null;
+  const group = OVER_VISIT_LIMIT_LINES.get(productInput);
+  const together = group && group.parts.length > 1 ? group : null;
+  return {
+    ...snapshot,
+    status: 'not_deducted_implausible',
+    inventoryUnit: inventoryProduct.inventory_unit || amountUnit,
+    stockBefore,
+    remainingStock: stockBefore,
+    ...(together ? {
+      combinedAmount: together.amount,
+      combinedAmountUnit: together.amountUnit,
+      contributingLines: together.parts.map((part) => `${part.amount} ${unitText(part.amountUnit)}`.trim()),
+    } : {}),
+    warning: together
+      ? `${together.amount} ${unitText(together.amountUnit)} of ${inventoryProduct.name} across ${together.parts.length} lines is too much for one visit, so stock was not changed. Check the amounts.`
+      : `${amount} ${unitText(amountUnit)} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
+  };
 }
 
 async function deductProductInventory(trx, {
@@ -1853,7 +1931,7 @@ async function deductProductInventory(trx, {
   serviceProduct,
   serviceRecord,
   scheduledService,
-  allowNegative = false,
+  overCeiling,
 }) {
   const lockedProduct = await trx('products_catalog')
     .where({ id: product.id })
@@ -1867,11 +1945,17 @@ async function deductProductInventory(trx, {
   const snapshot = {
     productId: inventoryProduct.id,
     productName: inventoryProduct.name,
+    serviceProductId: serviceProduct.id,
     amount,
     amountUnit,
     status: 'not_deducted',
     warning: null,
   };
+
+  // Owner "dont block", and owner 2026-11-26 for every role ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED"): a line over
+  // its product's ceiling is judged first, before every other early return and the hard lockout, whatever the shelf holds.
+  const implausible = implausibleDeduction(snapshot, inventoryProduct, productInput, overCeiling);
+  if (implausible) return implausible;
 
   const notDeductibleWarning = notDeductibleInputWarning(inventoryProduct, amount, amountUnit);
   if (notDeductibleWarning) return { ...snapshot, warning: notDeductibleWarning };
@@ -1905,33 +1989,10 @@ async function deductProductInventory(trx, {
   }
   const stockAfter = Number((stockBefore - deductedAmount).toFixed(4));
   const insufficient = stockAfter < 0;
-  // allowNegative is passed ONLY for an advisory-stock completion
-  // (isStockAdvisoryCompletion): a lawn closeout (WaveGuard since the owner
-  // directive 2026-08-03), a pest or a tree & shrub visit (owner 2026-10-20). The deduction proceeds,
-  // inventory_on_hand goes negative, and the movement/snapshot below record the
-  // insufficient-stock state for audit (a shortfall also alerts the office:
-  // notifyOfficeOfStockShortfalls). Every other completion keeps the hard
-  // failure — this shared helper runs for palm/mosquito/termite/rodent visits
-  // too, which have no advisory lane to record the shortfall (codex P1 r1 on #3179).
-  if (insufficient && !allowNegative) {
-    const err = new Error(`${inventoryProduct.name} requires ${deductedAmount} ${inventoryUnit}, but only ${stockBefore} ${inventoryUnit} is on hand.`);
-    err.statusCode = 400;
-    err.isOperational = true;
-    err.code = 'waveguard_inventory_lockout';
-    throw err;
-  }
-  // Owner "dont block": the completion still succeeds, but an amount no visit uses moves no stock and no cost. The
-  // office hears of it (notifyOfficeOfStockShortfalls) and fixes the amount.
-  if (insufficient && exceedsVisitLimit({ amount, amountUnit })) {
-    return {
-      ...snapshot,
-      status: 'not_deducted_implausible',
-      inventoryUnit,
-      stockBefore,
-      remainingStock: stockBefore,
-      warning: `${amount} ${String(amountUnit).replace(/_/g, ' ')} of ${inventoryProduct.name} is too much for one visit, so stock was not changed. Check the amount.`,
-    };
-  }
+  // Stock below zero never stops a completion, on any visit type (owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER
+  // BLOCKED FROM USING, FOR NOW"; the lawn directive 2026-08-03 and the pest/tree & shrub ruling 2026-10-20 already did this for
+  // those visits): a stale stock count must not trap the tech. The deduction proceeds, inventory_on_hand goes negative, the
+  // movement and snapshot below record the shortfall, and notifyOfficeOfStockShortfalls alerts the office for any visit type.
   const { unitCost, costUsed } = calculateInventoryCost({
     product: inventoryProduct,
     deductedAmount,
@@ -2431,7 +2492,30 @@ for (const type of [areaAddOnGovernedRate.LIMIT_TYPE, 'min_interval_days', 'annu
   FINDING_DETAIL[type] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit and is over its ${FINDING_LIMIT_LABELS[type]} (${limitFigure(f)}). Review it and report it if needed.`;
 }
 
-const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || 'all'}:${finding.limitType || 'all'}`;
+// The lawn warnings a committed record carries (structured_notes.lawnWarningFindings), for a resume or a packet's effects phase.
+function savedLawnWarningFindings(record) {
+  let notes = record?.structured_notes;
+  if (typeof notes === 'string') { try { notes = JSON.parse(notes); } catch { notes = null; } }
+  return Array.isArray(notes?.lawnWarningFindings) ? notes.lawnWarningFindings : [];
+}
+
+// The two completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn, and a bermuda removal
+// step past its yearly or 42-day limit. Each is the application-limit finding shape, so it takes the same advisory line and office alert.
+const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
+const bermudaStepFinding = (message) => ({
+  code: 'application_limit_exceeded',
+  limitType: BERMUDA_STEP_LIMIT_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal went past its limit: ${message} The visit was recorded and the office was told.`,
+});
+FINDING_WHY[lawnProhibited.LIMIT_TYPE] = (name) => `${name} was recorded on a home lawn, and its label prohibits residential use.`;
+FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past its yearly or 42-day limit.';
+FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
+FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit past its limit: ${f.reason} The visit was recorded. Review it and report it if needed.`;
+
+// A product the catalog could not name (a free-text oxadiazon entry) keys on its name, so two of them do not share one alert.
+const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || (finding.limitType === lawnProhibited.LIMIT_TYPE && finding.productName) || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
@@ -2449,10 +2533,15 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
       const why = !over ? 'A visit was recorded, but its product limits could not be checked.'
         : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
       const dedupeKey = limitFindingDedupeKey(record, finding);
+      // A catalog name the alert rules refuse (a bracket tag, a code) falls back to plain words; the detail keeps it whole.
+      const labelWords = finding.limitType === lawnProhibited.LIMIT_TYPE
+        ? stockAlertWords(fullName, (n) => ({ action: `review ${n} label use`, why: FINDING_WHY[lawnProhibited.LIMIT_TYPE](n) }),
+          { action: 'review a product label use', why: 'A product was recorded on a home lawn, and its label prohibits residential use.' })
+        : null;
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
-        why,
+        action: labelWords ? labelWords.action : unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
+        why: labelWords ? labelWords.why : why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
@@ -2474,6 +2563,23 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   }
 }
 
+// What one flagged deduction says it entered: the combined amount and each contributing line when the product's lines are over
+// together, else its own amount.
+function flaggedAmountText(deduction) {
+  const unitText = (unit) => String(unit || '').replace(/_/g, ' ');
+  const parts = Array.isArray(deduction.contributingLines) ? deduction.contributingLines : [];
+  return parts.length > 1
+    ? `${deduction.combinedAmount} ${unitText(deduction.combinedAmountUnit)} across ${parts.length} lines (${parts.join(' + ')})`
+    : `${deduction.amount} ${unitText(deduction.amountUnit)}`;
+}
+function flaggedAmountDetail(fullName, visitLabel, flagged) {
+  const texts = [...new Set(flagged.map(flaggedAmountText))];
+  const tail = 'That is too much for one visit, so stock was not changed and no cost was recorded.';
+  if (texts.length > 1) return `${fullName}: ${texts.join('; ')} were entered on a ${visitLabel} visit. ${tail} Check the amounts entered, and fix the visit's product lines if they are wrong.`;
+  if (texts[0].includes(' across ')) return `${fullName}: ${texts[0].replace(' across ', ' was entered across ')} on a ${visitLabel} visit. ${tail} Check the amounts entered, and fix the visit's product lines if they are wrong.`;
+  return `${fullName}: ${texts[0]} was entered on a ${visitLabel} visit. ${tail} Check the amount entered, and fix the visit's product line if it is wrong.`;
+}
+
 const STOCK_ALERT_VISIT_LABELS = { pest: 'pest', lawn: 'lawn', tree_shrub: 'tree & shrub' };
 // The alert words with the product named, or plain words when the alert rules refuse the name (a code, a bracket, a
 // second sentence). The headline and the one-sentence why carry a short name; the detail keeps it whole.
@@ -2493,11 +2599,12 @@ function stockAlertWords(fullName, wordsFor, plain) {
 // back to zero or above gets none. Called after the record's transaction has committed, so no lock is held here.
 // Decided from the committed record: a pest, lawn (WaveGuard included) or tree & shrub record alerts for each
 // shortfall it holds.
-// A line refused for an implausible amount (deductProductInventory) moved no stock: the office checks the amount entered,
-// one open alert for each record and product, instead of restocking.
+// A line flagged for an implausible amount (deductProductInventory; technician or admin, owner 2026-11-26) moved no stock: the
+// office checks the amount entered, one open alert for each record and product, instead of restocking.
 async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
-  const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)];
-  if (!visitLabel) return;
+  // Every visit type may take stock below zero and every one alerts the office (owner 2026-11-26), so a type with no name of its
+  // own reads "service".
+  const visitLabel = STOCK_ALERT_VISIT_LABELS[detectServiceLine(svc?.service_type)] || 'service';
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
   const { stockShortfallKey } = require('../services/inventory-operations');
   let notes = record?.structured_notes || {};
@@ -2524,16 +2631,23 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
       });
     });
   };
+  // One alert for each product on the record: it names every flagged group of that product's lines (a host line over the weight
+  // ceiling and an add-on line over the volume ceiling are two groups), so staff can correct each.
   const sendAmount = async (deduction) => {
     const fullName = deduction.productName || 'A product';
     const words = stockAlertWords(fullName, (n) => ({ action: `check ${n} amount`, why: `${n} amount looks too big for a ${visitLabel} visit, so stock was not changed.` }),
       { action: 'check a product amount', why: `A product amount looks too big for a ${visitLabel} visit, so stock was not changed.` });
+    const flagged = lines.filter((line) => line?.status === 'not_deducted_implausible' && line.productId === deduction.productId);
     return raise(words, `stock-amount-check:${record.id}:${deduction.productId}`, {
       link: `/admin/customers?customerId=${svc.customer_id}`,
       doneWhen: 'amount_checked',
     }, {
-      detail: `${fullName}: ${deduction.amount} ${String(deduction.amountUnit || '').replace(/_/g, ' ')} was entered on a ${visitLabel} visit. That is too much for one visit, so stock was not changed and no cost was recorded. Check the amount entered, and fix the visit's product line if it is wrong.`,
-      metadata: { productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id, amount: deduction.amount, amountUnit: deduction.amountUnit },
+      detail: flaggedAmountDetail(fullName, visitLabel, flagged),
+      metadata: {
+        productId: deduction.productId, scheduledServiceId: svc.id, serviceRecordId: record.id,
+        amount: deduction.combinedAmount ?? deduction.amount, amountUnit: deduction.combinedAmountUnit ?? deduction.amountUnit,
+        flaggedLines: [...new Set(flagged.map(flaggedAmountText))],
+      },
     });
   };
   const kinds = [
@@ -2541,7 +2655,13 @@ async function notifyOfficeOfStockShortfalls({ svc, record, database = db }) {
     { status: 'not_deducted_implausible', label: 'amount', send: sendAmount },
   ];
   for (const { status, label, send } of kinds) {
+    const seenProducts = new Set();
     for (const deduction of lines.filter((line) => line?.status === status && line.productId)) {
+      // One amount alert for each product on the record: the lines of one product share one combined warning.
+      if (status === 'not_deducted_implausible') {
+        if (seenProducts.has(deduction.productId)) continue;
+        seenProducts.add(deduction.productId);
+      }
       try {
         if (!(await send(deduction))) logger.error(`[dispatch] stock ${label} alert NOT recorded for record ${record.id} (admin alert returned null)`);
       } catch (err) {
@@ -3753,6 +3873,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // crossed: an advisory in the response and one dispatch alert. The work is done;
     // the completion is never blocked.
     let applicationLimitAdvisory = null;
+    // Findings a fresh lawn closeout WARNS about instead of refusing (owner 2026-11-26): oxadiazon on a home lawn (the label
+    // prohibits residential use) and a bermuda removal step past its yearly or 42-day limit. Recorded on the visit's advisory
+    // and sent to the office with the other application-limit findings, after the record is saved.
+    const lawnWarningFindings = [];
     // The names of the products this completion submitted (the payload's own, then the catalog's once it is read inside the record
     // transaction): the only evidence of a 13-0-13 if the post-save read of the record's rows fails (tsOrnamental.flagOrnamentalFertilizer).
     let submittedProductNames = payloadProductNames(products);
@@ -5408,15 +5532,13 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return outcomeBlock;
       }
     }
-    // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed; judged on the visit's linked property): a fresh lawn closeout that lists one is refused
-    // before any write. A same-key replay or resume of a committed completion is left alone.
+    // Oxadiazon (Ronstar) is not for home lawns (commercial turf is allowed; judged on the visit's linked property). The label prohibits
+    // residential use, but the closeout only warns (owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING,
+    // FOR NOW"): the visit is recorded, flagged, and the office is alerted with the other limit findings below. A fresh closeout only.
     // Only while GATE_LAWN_V13 is on (the check reads the gate at call time).
     if (claim.action === 'proceed' && detectServiceLine(svc?.service_type) === 'lawn') {
-      const prohibited = await lawnCloseoutProhibitedBlocks(db, svc, products);
-      if (prohibited.length) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(prohibited[0].code), db);
-        return ({ status: 400, body: lawnProhibitedProductsBlockPayload(prohibited) });
-      }
+      const prohibited = await lawnProhibited.lawnCloseoutProhibitedBlocks(db, svc, products);
+      lawnWarningFindings.push(...prohibited.map(lawnProhibited.lawnProhibitedProductFinding));
     }
 
     // A row tagged to a chemical area add-on is that add-on's application record, so a fresh closeout must carry its rate,
@@ -5426,12 +5548,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
     await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
 
-    // A malformed amount (any role) and a technician's amount no visit uses are refused on a FRESH completion only, before the first service write
-    // (service_products, inventory, FDACS ledger, cost, report). A same-key replay or resume of a committed completion is
-    // never judged. The claim is released as failed, as for the other refusals above, so a corrected resubmit is not blocked. Admin keeps the
-    // advisory path in deductProductInventory.
+    // A malformed amount (any role) is refused on a FRESH completion only, before the first service write (service_products, inventory,
+    // FDACS ledger, cost, report). A same-key replay or resume of a committed completion is never judged. The claim is released as
+    // failed, as for the other refusals above, so a corrected resubmit is not blocked. An amount over its product's ceiling is
+    // never refused, for any role (owner 2026-11-26): vetProductAmounts marks it and deductProductInventory flags the line.
     const amountRefusal = await vetProductAmounts(db, {
-      actor: completionInput.actor, products, skip: claim.action !== 'proceed',
+      products, skip: claim.action !== 'proceed', rowIdentity: (p) => areaAddOnGovernedRate.productRowIdentity(addOnTags, p),
     });
     if (amountRefusal) {
       await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error(amountRefusal.body.code), db);
@@ -5537,16 +5659,18 @@ async function completeScheduledService(completionInput, packetContext = null) {
         return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
       }
       // A recorded step spray states its treated area (or a rate): a spot mix has no catalog-derived amount.
-      if (bermudaAreaMessage && !bermudaLimitMessage) {
+      if (bermudaAreaMessage) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_area_required'), db);
         return { status: 400, body: { error: bermudaAreaMessage, code: 'lawn_bermuda_area_required' } };
       }
-      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after
-      // the last one at that property), judged the way the plan judges them.
-      if (bermudaLimitMessage) {
+      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after the last one at that property),
+      // judged the way the plan judges them, are a WARNING (owner 2026-11-26): recorded on the visit and sent to the office.
+      // The pair and area checks above are data entry and stay refusals; so does "its limits are not loaded" (setup, not a cap).
+      if (bermudaLimitMessage === require('./lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
         return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };
       }
+      if (bermudaLimitMessage) lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
         await CompletionAttempts.markCompletionAttemptFailed(
@@ -6230,9 +6354,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const catalogById = new Map(catalogRows.map((row) => [String(row.id), row]));
           let actualVisitN = 0;
           const unquantifiedNProducts = [];
+          const projectedRows = new Set();
           for (const p of products) {
             const catalog = catalogById.get(String(p.productId));
             if (!catalog || Number(catalog.analysis_n || 0) <= 0) continue;
+            // Only what the completion records and counts: the products loop keeps the FIRST row of a product and add-on, and a
+            // line flagged over its ceiling writes no nutrient row (owner 2026-11-26), so neither adds to the annual projection.
+            const projectedRow = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);
+            if (projectedRows.has(projectedRow)) continue;
+            projectedRows.add(projectedRow);
+            if (isOverVisitLimit(p, { amount: Number(p.totalAmount), amountUnit: baseQuantityUnit(p.amountUnit || p.rateUnit || null) })) continue;
             // Same normalization the persistence path uses: a "/gal" unit is
             // a mix concentration whose total is concentrate amount.
             const pounds = amountToPounds(p.totalAmount, baseQuantityUnit(p.amountUnit || p.rateUnit || null));
@@ -6543,6 +6674,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       waveguardManagerApproval = resumedStructuredNotes.waveguardManagerApproval || null;
       waveguardCalibrationAdvisory = resumedStructuredNotes.waveguardCalibrationAdvisory || null;
       waveguardInventoryAdvisory = resumedStructuredNotes.waveguardInventoryAdvisory || null;
+      // The saved deductions carry the flagged-amount and shortfall warnings the success view shows (owner 2026-11-26).
+      if (Array.isArray(resumedStructuredNotes.inventoryDeductions)) inventoryDeductions = resumedStructuredNotes.inventoryDeductions;
       // "Customer asked for the link" was frozen with the record — a resumed
       // retry (possibly another operator, later) must not re-stamp who/when
       // (codex #4140 r2).
@@ -8972,6 +9105,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
               err.isOperational = true; err.statusCode = 400;
               throw err;
             }
+            // The ONE decision for this line (owner 2026-11-26): a line over its product's ceiling is recorded in service_products
+            // and the FDACS ledger as entered, and skipped by every derived sink: stock, movement, job cost and the nutrient ledger.
+            const overCeiling = isOverVisitLimit(p, { amount: appliedAmount, amountUnit: appliedAmountUnit });
             const serviceProductInsert = {
               service_record_id: record.id,
               product_name: product.name,
@@ -8999,7 +9135,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const [serviceProduct] = await trx('service_products').insert(serviceProductInsert).returning('*');
             insertedServiceProducts.push(serviceProduct);
 
-            await recordServiceProductNutrients(trx, {
+            if (!overCeiling) await recordServiceProductNutrients(trx, {
               customerId: svc.customer_id,
               turfProfile: lawnDefaultsEnabled ? {
                 ...turfProfile,
@@ -9018,9 +9154,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
               serviceProduct,
               serviceRecord: record,
               scheduledService: svc,
-              // Advisory inventory posture: a pest, lawn or tree & shrub visit
-              // (isStockAdvisoryCompletion).
-              allowNegative: isStockAdvisoryCompletion(svc),
+              overCeiling,
             });
             inventoryDeductions.push(deduction);
           }
@@ -9040,7 +9174,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // on this transaction, before the application rows are written (a fresh attempt
         // only; the preflight above cannot see a spray a concurrent completion commits).
         if (!resumingCommittedCompletion && insertedServiceProducts.length) {
-          await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+          // The cap re-check under the customer lock stays, but a breach is a warning (owner 2026-11-26), once per completion.
+          const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+          if (capWarning && !lawnWarningFindings.some((finding) => finding.limitType === BERMUDA_STEP_LIMIT_TYPE)) lawnWarningFindings.push(bermudaStepFinding(capWarning));
         }
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
@@ -9118,7 +9254,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           svc, record, lawnFast, isIncompleteVisit, resumingCommittedCompletion, appliedProducts: insertedServiceProducts,
         });
 
-        if (inventoryDeductions.length) {
+        // (A lawn warning with no deduction behind it, a free-text oxadiazon name, is saved too.)
+        if (inventoryDeductions.length || lawnWarningFindings.length) {
           // Reconcile the advisory with what the FOR UPDATE deduction actually
           // saw: two concurrent visits can both pass the unlocked preflight
           // read with the stock intact, so the later one can go negative
@@ -9136,13 +9273,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
             // authoritative counts — stock can move between the unlocked read
             // and the lock in either direction, so preflight numbers must
             // never survive a locked result (codex P2 r3+r4 on #3179).
+            // A line flagged over the ceiling (owner 2026-11-26) moved no stock, so a provisional shortfall for its product
+            // is refuted too; a genuine shortfall on another line of the product is added back from its own deduction below.
             // Non-stock blocks (inactive product) and preflight blocks for
             // products the deduction never quantified are kept.
             const keptBlocks = (waveguardInventoryAdvisory?.blocks || []).filter(
               (block) => !(
                 block.code === 'actual_inventory_insufficient_stock'
                 && block.productId != null
-                && ['deducted', 'deducted_insufficient_stock', 'not_deducted_counted'].includes(
+                && ['deducted', 'deducted_insufficient_stock', 'not_deducted_counted', 'not_deducted_implausible'].includes(
                   deductionStatusByProductId.get(String(block.productId)),
                 )
               ),
@@ -9177,6 +9316,9 @@ async function completeScheduledService(completionInput, packetContext = null) {
           record.structured_notes = {
             ...(record.structured_notes || {}),
             inventoryDeductions,
+            // The lawn warnings (oxadiazon on a home lawn, a bermuda step limit) ride with the record, so a packet's effects phase
+            // or a resume after the commit still records the advisory and alerts the office.
+            ...(lawnWarningFindings.length ? { lawnWarningFindings } : {}),
             // Explicit even when null: the initial insert may have committed
             // a preflight advisory this reconcile just refuted — a
             // conditional spread would leave the stale record in the notes.
@@ -10335,7 +10477,10 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (deduped per record, so a retry or a resume rings once). Never blocks.
     if (record?.id && !issuedInvoiceCloseout) {
       // addOnRows: false when no row of this closeout is tagged to an add-on (the duplicate-application read is then skipped); a tag read that failed (a replay or resume) is not "none", so the read runs; the audit never asks the gate.
-      const limitFindings = await recordedProductLimitFindings({ svc, record, database: db, addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags) });
+      const limitFindings = [
+        ...(lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record)),
+        ...await recordedProductLimitFindings({ svc, record, database: db, addOnRows: areaAddOnGovernedRate.mayHaveAddOnRows(addOnTags) }),
+      ];
       if (limitFindings.length) {
         applicationLimitAdvisory = withLimitAdvisoryBlocks(applicationLimitAdvisory, limitFindings.map((finding) => ({ code: finding.code, message: finding.message, productId: finding.productId })));
         await notifyOfficeOfLimitFindings({ svc, record, findings: limitFindings });
@@ -10814,6 +10959,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
           calibration: waveguardCalibrationAdvisory,
           inventory: waveguardInventoryAdvisory,
           limit: applicationLimitAdvisory,
+          deductions: inventoryDeductions,
+          shortfalls: !isWaveGuardLawnCompletion(svc),
         }),
         ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
         ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -16795,6 +16942,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
         limit: applicationLimitAdvisory,
+        deductions: inventoryDeductions,
+        shortfalls: !isWaveGuardLawnCompletion(svc),
       }),
       ...(completionTimerSync.corrected != null ? { timeEntryCorrected: completionTimerSync.corrected } : {}),
       ...(completionTimerSync.blocked ? { timeEntryCorrectionBlocked: completionTimerSync.blocked } : {}),
@@ -16930,5 +17079,7 @@ module.exports.isStockAdvisoryCompletion = isStockAdvisoryCompletion;
 module.exports.vetProductAmounts = vetProductAmounts;
 module.exports.canonicalizeProductLines = canonicalizeProductLines;
 module.exports.exceedsVisitLimit = exceedsVisitLimit;
+module.exports.deductionAdvisoryMessages = deductionAdvisoryMessages;
+module.exports.isOverVisitLimitLine = (line) => OVER_VISIT_LIMIT_LINES.has(line);
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

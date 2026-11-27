@@ -107,7 +107,7 @@ describe('GET tree-shrub/fast-context', () => {
     buildTreeShrubFastContext.mockResolvedValue({ ok: true, eligible: true, reason: null, service: { id: 'visit-1' }, products: [], monthProducts: [], lastVisit: null, warnings: [] });
     const res = await invoke('get', FAST, { params, actor: { techRole: 'technician', technicianId: 'tech-1' } });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, service: { id: 'visit-1' }, products: [], monthProducts: [], lastVisit: null, warnings: [] });
+    expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, service: { id: 'visit-1' }, products: [], monthProducts: [], lastVisit: null, warnings: [], stockAdvisory: true });
     expect(buildTreeShrubFastContext).toHaveBeenCalledWith('visit-1');
   });
 
@@ -125,7 +125,7 @@ describe('GET tree-shrub/fast-context', () => {
     buildTreeShrubFastContext.mockResolvedValue({ ok: true, eligible: false, reason: 'grouped_visit', service: { id: 'visit-1' } });
     const res = await invoke('get', FAST, { params });
     expect(res.statusCode).toBe(200);
-    expect(res.body).toEqual({ enabled: true, eligible: false, reason: 'grouped_visit', service: { id: 'visit-1' } });
+    expect(res.body).toEqual({ enabled: true, eligible: false, reason: 'grouped_visit', service: { id: 'visit-1' }, stockAdvisory: true });
   });
 
   test('gate on: a visit that disappears is 404', async () => {
@@ -196,9 +196,9 @@ describe('GET tree-shrub/fast-context carries the stock advisory', () => {
     expect(res.body).toEqual({ enabled: true, eligible: true, reason: null, service: CONTEXT.service, products: [], stockAdvisory: true });
   });
 
-  test('a visit /complete still refuses below zero (palm): no stockAdvisory key', async () => {
+  test('a palm visit: stockAdvisory is true too (owner 2026-11-26: stock never blocks any visit type)', async () => {
     buildTreeShrubFastContext.mockResolvedValue({ ...CONTEXT, service: { id: 'visit-1', serviceType: 'Palm Injection' } });
     const res = await invoke('get', FAST, { params });
-    expect(res.body).not.toHaveProperty('stockAdvisory');
+    expect(res.body.stockAdvisory).toBe(true);
   });
 });
