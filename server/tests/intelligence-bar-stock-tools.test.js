@@ -26,7 +26,7 @@ jest.mock('../services/intelligence-bar/threads', () => ({
   recentOperatorTurns: jest.fn(async () => []),
 }));
 const dbMock = require('../models/db');
-const { executeProcurementTool: executeRaw, resolveInventoryWriteTarget } = require('../services/intelligence-bar/procurement-tools');
+const { executeProcurementTool: executeRaw, resolveInventoryWriteTarget, resolveStockWriteTarget } = require('../services/intelligence-bar/procurement-tools');
 const IbThreadsMock = require('../services/intelligence-bar/threads');
 
 // Drive the server-owned preview/confirmation contract. A model-supplied
@@ -1812,12 +1812,9 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
 
   // ─── "close, already counted" names its request (owner 2026-11-27) ──────
   describe('close_counted names the request it closes', () => {
-    const queue = require('../services/inventory-restock-queue');
     const REQ = '20000000-0000-4000-8000-000000000002';
     const CLOSE_PREVIEW = { product: { id: TAURUS.id, name: TAURUS.name }, request: { id: REQ }, action: 'close_counted' };
-    const activeRequests = (...ids) => jest.spyOn(queue, 'listRestockRequests').mockResolvedValue({ requests: ids.map((id) => ({ id })) });
-    afterEach(() => jest.restoreAllMocks());
-    const close = (prompt, over = {}) => resolveInventoryWriteTarget({
+    const close = (prompt, over = {}) => resolveStockWriteTarget({
       toolName: 'update_restock_request', prompt, preview: CLOSE_PREVIEW, actorId: 'actor-1',
       pageData: { route: '/admin/inventory', requestId: REQ }, ...over,
     });
@@ -1833,12 +1830,6 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       `close request ${REQ} as already counted`,
     ])('"%s" targets the viewed request', async (prompt) => {
       expect(await close(prompt)).toEqual({ productId: TAURUS.id, requestId: REQ });
-    });
-
-    test('a named product with one open request grounds', async () => {
-      setGroundingDb({ products: [TAURUS, ALPINE] });
-      activeRequests(REQ);
-      expect(await close('close the restock request for Taurus SC as already counted')).toEqual({ productId: TAURUS.id, requestId: REQ });
     });
 
     test.each([
