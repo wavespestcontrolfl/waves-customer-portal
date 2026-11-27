@@ -20,7 +20,8 @@ const { resolveGeo } = require('./geo');
 const routeTiers = require('./route-tiers');
 const flexTier = require('./flex-tier');
 const moveLimit = require('./move-limit');
-const mowingDays = require('./mowing-days');
+const bounceGuard = require('./bounce-guard');
+const preferences = require('./preferences');
 const southDayKept = require('./south-day-kept');
 const { classifyServiceCategory } = require('./service-category');
 const { assertCapabilitiesActive } = require('../technician-capabilities');
@@ -364,12 +365,19 @@ function makeMoveGuard({ service, best, config = {} }) {
     // At most N automatic day moves per visit, counted on this transaction so a
     // move another run landed minutes ago is seen (move-limit.js).
     await moveLimit.assertUnderLimit(trx, [row], config, refuse);
+    // Anti-oscillation cooldown: refuse bouncing back onto a date auto-dispatch
+    // moved this visit off of recently (bounce-guard.js; conflict moves exempt).
+    await bounceGuard.assertNotBouncingBack(trx, [row], best.date, config, refuse);
+    // Serialize against in-flight 72h/24h reminder sends (appointment-reminders.js
+    // withReminderSendFence holds lockCustomerComms for the full delivery).
+    // Taken before assertStillApproved (customer-comms -> customers lock order).
+    await fenceCustomerCommsForMove(trx, row, refuse);
     // GATE_AUTO_DISPATCH_PROOFREADER: what the approval stood on still stands.
     await require('./proofreader/nightly').assertStillApproved(trx, service, config, refuse, row);
     await checkFlexOwnBounds(trx, row, best, config.guardMode, refuse, destination, true);
     await assertSourceConflictHolds(trx, service, config.sourceConflict, refuse, sourceCheck);
-    // The destination against the mowing rule as saved now.
-    await mowingDays.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
+    // The destination against the customer's blackout dates and mowing rule as saved now.
+    await preferences.assertDestinationClear(trx, row, best.date, refuse, [row.service_type]);
     const receiving = best.technician_id || technicianId || row.technician_id || null;
     // GATE_SOUTH_ZONE_DAY_FUNNEL: a visit outside the far-south zones never lands on a date holding a far-south stop.
     // With GATE_MULTI_TECH_CONFIRM, for a single visit: a stop of each technician it can sit with that day, or an
@@ -424,6 +432,19 @@ async function keepPlanTechnician(trx, rows, receiving) {
       .where(function notPinned() { this.whereNull('recurring_technician_override').orWhere({ recurring_technician_override: false }); })
       .update({ recurring_technician_id: trx.raw('COALESCE(recurring_technician_id, technician_id)'), recurring_technician_override: true });
   }
+}
+
+// Non-blocking per-customer comms fence inside the move transaction: closes
+// the race where checkAndSendReminders (withReminderSendFence) is mid-delivery
+// of a 72h/24h text/email for the old time while auto-dispatch checks
+// loadToldVisitIds and commits a move. Non-blocking because rebooker already
+// holds row/date locks; a busy comms lock refuses this move so the next run
+// re-checks after the send finishes.
+async function fenceCustomerCommsForMove(trx, row, refuse) {
+  if (!row || !row.customer_id || !trx || !trx.isTransaction || typeof trx.raw !== 'function') return;
+  const { tryLockCustomerComms } = require('../../utils/customer-comms-lock');
+  const locked = await tryLockCustomerComms(trx, row.customer_id);
+  if (!locked) throw refuse(row.id, 'has a customer reminder or comms send in progress (no move, fail closed)');
 }
 
 // Night told-lock (owner 2026-11-05, "D1 a"), the moving visit's own told-time check inside its move
@@ -602,8 +623,9 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
     await checkMemberEligibility(rows, best, eligCtx, trx, refuse);
     // REMINDERS-OFF LOCK: a grouped sibling whose 24-hour reminder will not go out holds the whole visit.
     await reminderOff.assertRemindersOn(trx, rows, refuse);
-    // A grouped unit moves only if every member is under the move limit.
+    // A grouped unit moves only if every member is under the move limit and clear of bounce cooldown.
     await moveLimit.assertUnderLimit(trx, rows, config, refuse);
+    await bounceGuard.assertNotBouncingBack(trx, rows, best.date, config, refuse);
     if (isWeekendDay(best.date)) {
       const weekend = rows.find((r) => r.skip_weekends === true);
       if (weekend) throw refuse(weekend.id, `skips weekends and ${best.date} is a ${isSaturday(best.date) ? 'Saturday' : 'Sunday'}`);
@@ -614,8 +636,8 @@ function makeMemberGuard({ service, best, config = {}, techChanged = false }) {
       await checkFlexSiblingBounds(trx, siblings, rows, best, today, refuse, targets, true);
     }
     await checkSameSeriesClash(trx, rows, best, memberIds, refuse);
-    // A Lawn Care Service member holds the unit to the mowing rule as saved now.
-    await mowingDays.assertDestinationClear(trx, service, best.date, refuse, rows.map((r) => r.service_type));
+    // Hold the unit to the customer's blackout dates and (when a Lawn Care Service member is present) mowing rule as saved now.
+    await preferences.assertUnitDestinationClear(trx, service, rows, best.date, refuse);
     // Every sibling against the receiving tech, committed rows, tech changed
     // or not (see assertCapabilitiesActive).
     await assertCapabilitiesActive(trx, best.technician_id || service.technician_id || null, rows, refuse);

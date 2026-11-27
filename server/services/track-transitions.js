@@ -561,10 +561,13 @@ async function claimAndSendEnRoute({ svc, serviceId, opts, staleFieldClears = {}
 // a hold that commits after the unlocked fast-path check is seen here and the flip is skipped
 // (returns null; otherwise the write's row count). The lock is raw so the CAS stays the only
 // builder call. No caller holds this row's lock when it calls the flips.
+const VISIT_ON_HOLD = 'visit_on_hold';
 async function flipUnlessStreetLevelHeld(serviceId, write) {
   return db.transaction(async (trx) => {
     await trx.raw('SELECT 1 FROM scheduled_services WHERE id = ? FOR UPDATE', [serviceId]);
     if (await require('./street-level-hold').isStreetLevelHoldVisit(serviceId, trx)) return null;
+    // GATE_VISIT_HOLD: a visit the customer asked us to hold never goes en route or on property; read under this same row lock.
+    if (await require('./visit-hold').isVisitHeld(serviceId, trx)) return VISIT_ON_HOLD;
     return write(trx);
   });
 }
@@ -783,6 +786,7 @@ async function markEnRouteCore(serviceId, opts = {}) {
     logger.info(`[track-transitions] markEnRoute skipped for ${serviceId}: street_level_hold`);
     return { ok: false, reason: 'street_level_hold' };
   }
+  if (updated === VISIT_ON_HOLD) return { ok: false, reason: VISIT_ON_HOLD };
 
   if (updated === 0) {
     // Someone else won the race. Re-read and report THEIR state — not a
@@ -1184,6 +1188,7 @@ async function markOnProperty(serviceId, opts = {}) {
       logger.info(`[track-transitions] markOnProperty skipped for ${serviceId}: street_level_hold`);
       return { ok: false, reason: 'street_level_hold' };
     }
+    if (updated === VISIT_ON_HOLD) return { ok: false, reason: VISIT_ON_HOLD };
     if (updated === 0) {
       // Lost the flip to a concurrent signal. We can't assume the winner owned
       // the send — a geofence drive-past wins with suppressArrivalSms and leaves

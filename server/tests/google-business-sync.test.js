@@ -2874,7 +2874,7 @@ describe('Google Business review sync', () => {
   });
 });
 
-describe('bad-review bell (GATE_REVIEW_ALERT): one pass after every review sync', () => {
+describe('bad-review bell: one pass after every review sync', () => {
   let db;
   let service;
   let syncLowRatingReviewAlerts;

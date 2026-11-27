@@ -462,6 +462,7 @@ async function buildReorderLimitSuggestions({ knex, options = {}, forecast } = {
 module.exports = {
   DEFAULTS,
   packInInventoryUnit,
+  packFor,
   packReorder,
   usageHistory,
   isBlackoutFertilizer,

@@ -190,6 +190,7 @@ const STATE_COPY = {
   // Staff are choosing the replacement slot; the old date/window on the row
   // is stale and deliberately not shown as booked.
   pending_rebook: { title: "We're finding you a new time", body: "Your reschedule request is in - our office is picking the new slot and we'll text you as soon as it's set." },
+  on_hold: { title: 'We will call to set a time', body: "This visit is on hold until we talk. Text or call and our team will help." },
   not_available: { title: "We can't show this appointment", body: 'This link may be out of date. Text or call and our team will help.' },
 };
 

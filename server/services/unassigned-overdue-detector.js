@@ -100,6 +100,7 @@ async function runInner() {
           -- A street-level address hold was never dispatched: no alert for it. tech-late-detector's tick
           -- resolves these alerts, so raising one here would create and resolve it again every 5 minutes.
           AND NOT EXISTS (${heldVisitSql('s')})
+          ${require('./visit-hold').heldSqlGuard('s')}
       )
       SELECT
         c.job_id,

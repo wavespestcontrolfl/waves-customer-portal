@@ -55,12 +55,12 @@ const whenWords = (row) => `${dayWords(row.scheduled_date)} at ${timeWords(row.w
 // The visits to report, soonest first. `conn` is the writing transaction.
 async function loadUnassignedTimedVisits(conn, todayET) {
   const { isInternalTestCustomerId } = require('./internal-test-customers');
-  const rows = await conn('scheduled_services as s')
+  const rows = await require('./visit-hold').excludeHeld(conn('scheduled_services as s')
     .leftJoin('customers as c', 'c.id', 's.customer_id')
     .whereBetween('s.scheduled_date', [addDays(todayET, DAYS_AHEAD_FIRST), addDays(todayET, DAYS_AHEAD_LAST)])
     .whereNotNull('s.window_start')
     .whereNull('s.technician_id')
-    .whereIn('s.status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES)
+    .whereIn('s.status', NONTERMINAL_SCHEDULED_SERVICE_STATUSES), 's')
     .whereNull('s.reservation_expires_at')
     // The combined-booking check (combined-booking-check.js) rings its own bell for a
     // booking whose visits lack a time or technician: do not ring those twice.

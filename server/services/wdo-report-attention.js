@@ -14,8 +14,7 @@
  * NEW item appears that no prior bell covered, or when the newest covering
  * bell is older than REMIND_DAYS (a stuck item shouldn't go silent forever).
  *
- * Gate: wdoReportAttention (GATE_WDO_REPORT_ATTENTION). Reads projects +
- * scheduled_services; writes nothing but admin notifications.
+ * Reads projects + scheduled_services; writes nothing but admin notifications.
  *
  * Rings (owner 2026-11-05): the category has no default under
  * GATE_ADMIN_BELL_POLICY, so the policy muted every ring (notifyAdmin returned
@@ -239,9 +238,6 @@ async function settleStandingRows(standing, { ids, now, items = null }) {
 }
 
 async function runWdoReportAttentionSweep({ now = new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('wdoReportAttention')) return { skipped: true, reason: 'gated_off' };
-
   // Read-then-notify with no unique constraint — serialize across replicas
   // and deploy overlap the same way the call-ingest watchdog does.
   const { runExclusive } = require('../utils/cron-lock');

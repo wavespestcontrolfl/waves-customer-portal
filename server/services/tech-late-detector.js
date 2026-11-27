@@ -116,6 +116,20 @@ async function resolveAlertsForHeldVisits() {
       .select('a.id');
     for (const { id } of open) await resolveAlert({ id, auto: true });
     if (open.length) logger.info(`[tech-late-detector] resolved ${open.length} late alert(s) for visits that are now address holds`);
+    // GATE_VISIT_HOLD: a visit put on hold ("customer will call") is off the route too, so its open late alert is moot.
+    // Same resolver; a separate read so the address-hold query above is untouched.
+    if (require('./visit-hold').visitHoldLive()) {
+      const onHold = await db('dispatch_alerts as a')
+        .whereIn('a.type', OVERDUE_ALERT_TYPES)
+        .whereNull('a.resolved_at')
+        .whereNotNull('a.job_id')
+        .whereExists(function heldByCustomer() {
+          this.select(1).from('scheduled_services as s').whereRaw('s.id = a.job_id').whereNotNull('s.held_at');
+        })
+        .select('a.id');
+      for (const { id } of onHold) await resolveAlert({ id, auto: true });
+      if (onHold.length) logger.info(`[tech-late-detector] resolved ${onHold.length} late alert(s) for visits now on hold`);
+    }
   } catch (err) {
     logger.warn(`[tech-late-detector] held-visit alert resolve failed: ${err.message}`);
   }
@@ -205,6 +219,7 @@ async function runInner() {
           AND s.window_start IS NOT NULL
           -- An uncleared street-level address hold was never dispatched: no late alert for it.
           AND NOT EXISTS (${heldVisitSql('s')})
+          ${require('./visit-hold').heldSqlGuard('s')}
       )
       SELECT
         c.job_id,

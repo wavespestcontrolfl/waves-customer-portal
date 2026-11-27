@@ -102,8 +102,7 @@ async function runPrepayRestampLeg(prepay, failedSteps = []) {
   }
 }
 
-// Office bell before a prepaid year ends (GATE_PREPAY_YEAR_END_BELL, dark by default;
-// the runner returns before any query while the gate is off). Office only: it texts,
+// Office bell before a prepaid year ends. Office only: it texts,
 // emails and charges nobody. Outside checkAndSend for the same complexity reason as the
 // legs above; never throws (a failure is added to failedSteps).
 async function runPrepayYearEndBellLeg(failedSteps = []) {
@@ -170,7 +169,7 @@ class RenewalReminder {
     // in this workflow.
     await runTermiteRenewalChargeLeg(failedSteps);
 
-    // Office bell before a prepaid year ends (dark behind GATE_PREPAY_YEAR_END_BELL).
+    // Office bell before a prepaid year ends.
     // Own try/catch inside the helper: a failure here must not silence the legs below.
     await runPrepayYearEndBellLeg(failedSteps);
 

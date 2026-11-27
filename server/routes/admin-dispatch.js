@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const NO_SHOW_OCCURRENCE_FIELDS = ['scheduled_date', 'window_start', 'window_end', 'service_type', 'service_id', 'property_id'];
 const router = express.Router();
 const db = require('../models/db');
+const visitHold = require('../services/visit-hold');
 const { techMoveRefusal, moveRefusalBody } = require('../services/scheduling/tech-move-permission');
 const { applyAssignable } = require('../services/technician-eligibility');
 const { seriesNoticeNameVars } = require('../services/placement-service-name');
@@ -1513,6 +1514,8 @@ router.get('/:date?', async (req, res, next) => {
       // and must never hand one tech another tech's customers, access codes,
       // rates or invoice totals for any day (ADMIN-BUG-R04).
       .modify((q) => technicianCurrentVisitFilter(req, q))
+      // GATE_VISIT_HOLD: a held visit is off the dispatch day feed (gate off: no clause).
+      .modify((q) => visitHold.excludeHeld(q, 'scheduled_services'))
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .leftJoin('technicians', 'scheduled_services.technician_id', 'technicians.id')
       .select(
@@ -6803,7 +6806,8 @@ async function moveVisitForStaff({ serviceId, newDate, newWindow, reasonCode, re
 // move before its own writes (a refusal then saves nothing) and runs it
 // after them.
 async function runPlannedVisitMove({ plan, serviceId, newDate, reasonCode, reasonText, notifyCustomer, actor }) {
-  const result = await SmartRebooker.reschedule(serviceId, newDate, plan.effectiveWindow, reasonCode || 'admin', 'admin', plan.rescheduleOptions);
+  // GATE_VISIT_HOLD: the office's own reschedule ends a hold; a technician's move of his held visit does not.
+  const result = await SmartRebooker.reschedule(serviceId, newDate, plan.effectiveWindow, reasonCode || 'admin', 'admin', { ...plan.rescheduleOptions, ...(visitHold.visitHoldLive() && actor?.techRole === 'admin' ? { releaseHold: true } : {}) });
   return applyVisitMoveEffects({ result, plan, serviceId, newDate, notifyCustomer, reasonText, actor });
 }
 
@@ -6879,6 +6883,7 @@ router.post('/:serviceId/reschedule', async (req, res, next) => {
       const qualityDates = new Set();
       const result = await SmartRebooker.rescheduleSeries(req.params.serviceId, newDate, newWindow, reasonCode || 'admin', 'admin', {
         allowLive: true,
+        ...(visitHold.visitHoldLive() && req.techRole === 'admin' ? { releaseHold: true } : {}),
         adminWindowRules: true,
         sourceSurface: 'dispatch_board',
         // GATE_DAY_ONLY_PROMISE: the office's "customer asked for this time" for the anchor's new slot, as the single move
@@ -7059,7 +7064,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
         FROM scheduled_services
         WHERE scheduled_date = ?
           AND technician_id IS NOT NULL
-          AND status NOT IN ('cancelled', 'rescheduled')
+          AND status NOT IN ('cancelled', 'rescheduled')${visitHold.heldSqlGuard('scheduled_services')}
         GROUP BY technician_id
       ) today_agg ON today_agg.technician_id = t.id
       WHERE t.role IN ('admin','technician')
@@ -7097,7 +7102,7 @@ router.get('/board', requireAdmin, async (req, res, next) => {
       FROM scheduled_services s
       INNER JOIN customers c ON c.id = s.customer_id
       WHERE s.scheduled_date = ?
-        AND s.status NOT IN ('cancelled', 'rescheduled')
+        AND s.status NOT IN ('cancelled', 'rescheduled')${visitHold.heldSqlGuard('s')}
       ORDER BY s.window_start NULLS LAST, c.last_name
       `,
       [today]

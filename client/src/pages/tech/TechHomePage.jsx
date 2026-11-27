@@ -501,6 +501,8 @@ export default function TechHomePage({ section = 'today' }) {
     return () => { timers.forEach(clearTimeout); timers.clear(); };
   }, []);
   // Today's NWS rain chance (0-100|null) — rides the schedule payload.
+  // GATE_VISIT_HOLD (the route feed's visitHold): the hold action shows on the visit sheet only while true.
+  const [visitHold, setVisitHold] = useState(false);
   const [rainChance, setRainChance] = useState(() => (initialSnapshot ? scheduleStateFromResponse(initialSnapshot.data).rainChance : null));
   // Per-stop session cache of the open visit's two detail fetches
   // (estimate-source + visit-brief), keyed by the stop's primary service id.
@@ -570,6 +572,7 @@ export default function TechHomePage({ section = 'today' }) {
         setRouteNotice('');
         setSchedule(next.rows);
         setRainChance(next.rainChance);
+        setVisitHold(result.data?.visitHold === true);
         // Keep only this tech's own stops on the device: the board payload
         // carries every tech's route, and the saved copy needs just the rows
         // this page would render for this login.
@@ -1412,6 +1415,8 @@ export default function TechHomePage({ section = 'today' }) {
           // Office-only controls stay hidden for a technician login: the
           // server refuses series cancels, whole-route moves and card sends.
           adminActions={staff?.role === 'admin'}
+          visitHold={visitHold}
+          onHoldChanged={() => { closeFastSheetsBehindDetails(); fetchSchedule(); }}
           // A move, cancel or billing change here lands on the route at once.
           // A move only refreshes: the sheet closes itself after a clean move
           // and keeps Quick Move open on a partial, not-texted or overlap

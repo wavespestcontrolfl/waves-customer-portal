@@ -275,10 +275,10 @@ async function movableVisits(conn, blocks) {
   const days = blocks.map((b) => b.day).sort();
   const from = shiftDateStr(days[0], 1);
   const to = shiftDateStr(days[days.length - 1], MOVE_UP_DAYS);
-  const rows = (await conn('scheduled_services').join('customers', 'customers.id', 'scheduled_services.customer_id')
+  const rows = (await require('../visit-hold').excludeHeld(conn('scheduled_services').join('customers', 'customers.id', 'scheduled_services.customer_id')
     .where('scheduled_services.is_recurring', true)
     .where((q) => q.whereNull('scheduled_services.is_callback').orWhere('scheduled_services.is_callback', false))
-    .whereIn('scheduled_services.status', ['pending', 'confirmed']).whereNull('scheduled_services.reservation_expires_at')
+    .whereIn('scheduled_services.status', ['pending', 'confirmed']).whereNull('scheduled_services.reservation_expires_at'), 'scheduled_services')
     .whereBetween('scheduled_services.scheduled_date', [from, to])
     .orderBy('scheduled_services.scheduled_date').orderBy('scheduled_services.window_start').orderBy('scheduled_services.id')
     .select('scheduled_services.id', 'scheduled_services.customer_id', 'scheduled_services.property_id', 'scheduled_services.scheduled_date',

@@ -1901,8 +1901,8 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
   // the same member predicate visitReminderCopyInputs uses. No visit ⇒
   // the historical exact-slot merge over reminder rows, unchanged.
   const rows = visitId
-    ? await conn('scheduled_services as ss')
-      .where('ss.visit_id', visitId)
+    ? await require('./visit-hold').excludeHeld(conn('scheduled_services as ss')
+      .where('ss.visit_id', visitId), 'ss')
       .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
       .whereNotNull('ss.window_start')
       .orderBy('ss.window_start', 'asc')
@@ -1913,7 +1913,10 @@ async function buildMergedServiceLabel(conn, { customerId, apptTime, nextLabel, 
       .where({ 'ar.customer_id': customerId, 'ar.cancelled': false, 'ar.windows_preclosed': false })
       .where('ar.appointment_time', apptTime)
       .andWhere(function liveServiceSendableOrLegacy() {
-        this.whereNull('ss.id').orWhereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+        this.whereNull('ss.id').orWhere(function sendableAndNotHeld() {
+          this.whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site']);
+          require('./visit-hold').excludeHeld(this, 'ss');
+        });
       })
       .orderBy('ar.created_at', 'asc')
       .select('ar.scheduled_service_id', conn.raw('coalesce(ss.service_type, ar.service_type) as label'));
@@ -2064,11 +2067,12 @@ async function visitReminderCopyInputs(visitId, row) {
     // earliest arrival — the visit effect would then bar the live
     // sibling from correcting it. Windowless pre-closed placeholders stay
     // out (they share 08:00 by convention only).
-    const rows = await db('scheduled_services as ss')
+    // GATE_VISIT_HOLD: a held member is never advertised, never sets the earliest arrival, never adds a fee line.
+    const rows = await require('./visit-hold').excludeHeld(db('scheduled_services as ss')
       .leftJoin('appointment_reminders as ar', function reminderRow() {
         this.on('ar.scheduled_service_id', 'ss.id').andOn('ar.cancelled', db.raw('false'));
       })
-      .where('ss.visit_id', visitId)
+      .where('ss.visit_id', visitId), 'ss')
       .whereIn('ss.status', ['pending', 'confirmed', 'en_route', 'on_site'])
       .whereNotNull('ss.window_start')
       .select('ss.id as scheduled_service_id', 'ss.scheduled_date', 'ss.window_start', 'ar.appointment_time', 'ar.windows_preclosed');
@@ -4689,8 +4693,10 @@ const AppointmentReminders = {
     try {
       // A visit booked by address only has no customer yet: nobody to text, and no reminder row exists
       // for it (registerAppointment skips it). A quiet no-op, not a "no reminder row" warning.
-      const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+      const visit = await db('scheduled_services').where({ id: scheduledServiceId }).first('customer_id', ...require('./visit-hold').heldColumn());
       if (visit && !visit.customer_id) return false;
+      // GATE_VISIT_HOLD: no confirmation text for a visit on hold. Nothing is marked sent; the recovery sweep sends it after the release.
+      if (require('./visit-hold').rowIsHeld(visit)) return false;
       const record = await db('appointment_reminders')
         .where({ scheduled_service_id: scheduledServiceId })
         .first();
@@ -4991,8 +4997,15 @@ const AppointmentReminders = {
           const svc = await db('scheduled_services')
             .where({ id: r.scheduled_service_id })
             .first('status', 'visit_id', 'customer_confirmed', 'source_action',
-              'customer_pick_by', 'last_auto_dispatch_at', 'window_start');
+              'customer_pick_by', 'last_auto_dispatch_at', 'window_start', ...require('./visit-hold').heldColumn());
           svcVisitId = svc?.visit_id || null;
+          // GATE_VISIT_HOLD (owner 2026-11-27): no 72h / 24h reminder for a visit on hold. The row stays armed and nothing is
+          // marked sent, so the sweep resumes on its own when the office releases the hold.
+          if (require('./visit-hold').rowIsHeld(svc)) {
+            logger.info(`[appt-remind] Holding reminders for ${r.scheduled_service_id} — visit on hold`);
+            results.skipped++;
+            continue;
+          }
           bookedAfterNoPick = isBookedAfterNoPick(svc);
           const svcStatus = String(svc?.status || '').toLowerCase();
           // Owner ruling 2026-09-30: no 72h/24h reminder for a street-level

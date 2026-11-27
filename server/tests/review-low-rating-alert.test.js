@@ -16,7 +16,6 @@ const { lowRatingAlertSpec, composeForReview, syncLowRatingReviewAlerts } = requ
 const R1 = '11111111-1111-4111-8111-111111111111';
 const R2 = '22222222-2222-4222-8222-222222222222';
 const base = { reviewId: R1, starRating: 2, reviewerName: 'Pat Example', customerId: null };
-const original = process.env.GATE_REVIEW_ALERT;
 const BOUNDARY = '2026-10-01T00:00:00.000Z';
 
 // A minimal knex stand-in: system_settings holds the boundary, google_reviews
@@ -65,13 +64,11 @@ function fakeConn({ reviews = [], boundary = BOUNDARY, recheck = null } = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  process.env.GATE_REVIEW_ALERT = 'true';
   mockEpisodes.raiseAdminAlertWithReopen.mockResolvedValue({ id: 'n1', rang: true });
   mockEpisodes.openAdminAlertKeys.mockResolvedValue([]);
   mockEpisodes.closeAdminAlertKeys.mockResolvedValue(0);
   mockEpisodes.openAdminAlertMetadata.mockResolvedValue([]);
 });
-afterAll(() => { if (original === undefined) delete process.env.GATE_REVIEW_ALERT; else process.env.GATE_REVIEW_ALERT = original; });
 
 describe('lowRatingAlertSpec', () => {
   test('1 to 4 stars (owner 2026-10-03); 5, 0 and junk are not', () => {
@@ -103,15 +100,6 @@ describe('lowRatingAlertSpec', () => {
 });
 
 describe('syncLowRatingReviewAlerts', () => {
-  test('gate off: nothing read, raised or closed', async () => {
-    delete process.env.GATE_REVIEW_ALERT;
-    const { conn, seen } = fakeConn();
-    expect(await syncLowRatingReviewAlerts({ conn })).toMatchObject({ skipped: 'gate_off' });
-    expect(seen.reviewWheres).toEqual([]);
-    expect(mockEpisodes.raiseAdminAlertWithReopen).not.toHaveBeenCalled();
-    expect(mockEpisodes.closeAdminAlertKeys).not.toHaveBeenCalled();
-  });
-
   test('reads only reviews that need an answer, written since the first live run', async () => {
     const { conn, seen } = fakeConn();
     await syncLowRatingReviewAlerts({ conn });
@@ -239,16 +227,11 @@ describe('syncLowRatingReviewAlerts', () => {
     await expect(syncLowRatingReviewAlerts({ conn })).resolves.toMatchObject({ raised: 1, failed: 0 });
   });
 
-  test('recordActivation: fixes the boundary while the gate is on, does nothing while it is off, never throws', async () => {
+  test('recordActivation: fixes the boundary, never throws', async () => {
     const { recordActivation } = require('../services/review-low-rating-alert');
     const on = fakeConn({ boundary: null });
     await recordActivation(on.conn);
     expect(on.seen.settingsInserts).toHaveLength(1);
-    delete process.env.GATE_REVIEW_ALERT;
-    const off = fakeConn({ boundary: null });
-    await expect(recordActivation(off.conn)).resolves.toBeNull();
-    expect(off.seen.settingsInserts).toHaveLength(0);
-    process.env.GATE_REVIEW_ALERT = 'true';
     const broken = () => { throw new Error('db down'); };
     await expect(recordActivation(broken)).resolves.toBeNull();
   });

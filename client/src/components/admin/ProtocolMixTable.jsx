@@ -1,9 +1,10 @@
 import React from "react";
 import { mixTable } from "../../lib/protocol-mix-amounts";
 
-// The card's mix amounts: one row per product, one column per sprayer the card uses.
-export default function ProtocolMixTable({ mixRates }) {
-  const { rows, columns } = mixTable(mixRates);
+// The card's mix amounts: one row per product, one column per sprayer the card uses. `sprayers`: the card's own tanks
+// (Tree & Shrub), else the pest cards' three. A row's `condition` is the visit's own "only if" line.
+export default function ProtocolMixTable({ mixRates, sprayers }) {
+  const { rows, columns } = mixTable(mixRates, sprayers);
   if (!rows.length) return null;
   return (
     <div className="mb-3 rounded-sm border-hairline border-zinc-200 overflow-hidden">
@@ -26,6 +27,7 @@ export default function ProtocolMixTable({ mixRates }) {
               <tr key={`${row.product}-${index}`} className="border-t border-hairline border-zinc-100 align-top">
                 <th scope="row" className="px-3 py-1.5 text-left font-normal">
                   <div className="font-medium">{row.product}</div>
+                  {row.condition ? <div>{row.condition}</div> : null}
                   <div className="text-ink-tertiary">{row.where}</div>
                 </th>
                 {columns.map((column) => (
@@ -34,7 +36,9 @@ export default function ProtocolMixTable({ mixRates }) {
                   </td>
                 ))}
                 <td className="px-3 py-1.5 text-ink-secondary">
+                  {row.labelRateMissing ? <div className="text-alert-fg">Label rate not on file</div> : null}
                   {row.dose ? <div>Dose, not a tank mix: <span className="font-mono u-nums">{row.dose}</span></div> : null}
+                  {row.note ? <div>{row.note}</div> : null}
                   {row.sprayVolume ? <div>{row.sprayVolume}</div> : null}
                   {row.limit ? <div className="text-ink-tertiary">{row.limit}</div> : null}
                 </td>

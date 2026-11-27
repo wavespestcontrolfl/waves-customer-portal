@@ -26,7 +26,7 @@ jest.mock('../services/intelligence-bar/threads', () => ({
   recentOperatorTurns: jest.fn(async () => []),
 }));
 const dbMock = require('../models/db');
-const { executeProcurementTool: executeRaw, resolveInventoryWriteTarget } = require('../services/intelligence-bar/procurement-tools');
+const { executeProcurementTool: executeRaw, resolveInventoryWriteTarget, resolveStockWriteTarget } = require('../services/intelligence-bar/procurement-tools');
 const IbThreadsMock = require('../services/intelligence-bar/threads');
 
 // Drive the server-owned preview/confirmation contract. A model-supplied
@@ -1807,6 +1807,57 @@ describe('resolveInventoryWriteTarget: operator-grounding fallback', () => {
       setGroundingDb({ products: [GUARD, OTHER] });
       const result = await resolveInventoryWriteTarget({ toolName: 'adjust_stock', prompt, preview: restock(GUARD) });
       expect(result).toMatchObject({ code: 'target_clarification_required' });
+    });
+  });
+
+  // ─── "close, already counted" names its request (owner 2026-11-27) ──────
+  describe('close_counted names the request it closes', () => {
+    const REQ = '20000000-0000-4000-8000-000000000002';
+    const CLOSE_PREVIEW = { product: { id: TAURUS.id, name: TAURUS.name }, request: { id: REQ }, action: 'close_counted' };
+    const close = (prompt, over = {}) => resolveStockWriteTarget({
+      toolName: 'update_restock_request', prompt, preview: CLOSE_PREVIEW, actorId: 'actor-1',
+      pageData: { route: '/admin/inventory', search: '?tab=restock', requestId: REQ }, ...over,
+    });
+    const ASK = { error: 'Choose the exact product or restock request for this action.', code: 'target_clarification_required' };
+
+    test.each([
+      'close this restock request as already counted',
+      'Close this request, already counted',
+      'close it, the invoice added it',
+      'mark this request already counted',
+      'Please close this request as counted.',
+      'the invoice already added it, close this request',
+      `close request ${REQ} as already counted`,
+    ])('"%s" targets the viewed request', async (prompt) => {
+      expect(await close(prompt)).toEqual({ productId: TAURUS.id, requestId: REQ });
+    });
+
+    test.each([
+      'close this request',
+      'close it',
+      'cancel this request',
+      'close this restock request as already counted and receive it',
+    ])('"%s" does not ground the close', async (prompt) => {
+      expect(await close(prompt)).toEqual(ASK);
+    });
+
+    test('a page-relative phrase asks unless the Restock tab is open on that request', async () => {
+      for (const pageData of [
+        { route: '/admin/inventory', requestId: REQ },
+        { route: '/admin/inventory', search: '?tab=products', requestId: REQ },
+        { route: '/admin/inventory', search: '?tab=restock' },
+        {},
+      ]) {
+        expect(await close('close this request as already counted', { pageData })).toEqual(ASK);
+      }
+      expect(await close('close this request as already counted', { pageData: { route: '/admin/inventory', search: `?tab=restock&requestId=${REQ}` } })).toEqual({ productId: TAURUS.id, requestId: REQ });
+      // A request id typed in the words needs no page.
+      expect(await close(`close request ${REQ} as already counted`, { pageData: {} })).toEqual({ productId: TAURUS.id, requestId: REQ });
+    });
+
+    test('another request id, or a page reference away from the Restock tab, asks', async () => {
+      expect(await close('close this request as already counted', { pageData: { route: '/admin/inventory', requestId: '20000000-0000-4000-8000-0000000000ff' } })).toEqual(ASK);
+      expect(await close('close this request as already counted', { pageData: { route: '/admin/customers', requestId: REQ } })).toEqual(ASK);
     });
   });
 

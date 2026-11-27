@@ -1480,6 +1480,16 @@ async function probeMoveOverlaps(trx, classified, dateStr) {
 // P1), the package visit 2 recheck, the area add-on limit, then the CAS
 // update (status + observed schedule fields + visit_id + tracker snapshot, no
 // FOR UPDATE; a miss aborts the batch).
+// The hold columns an office move through the bar writes: {} while GATE_VISIT_HOLD is off (the columns may be absent
+// from an older test schema, and nothing changes with the gate off).
+function ibMoveReleasesHold(trx) {
+  if (!require('../../config/feature-gates').visitHoldLive()) return {};
+  return {
+    held_at: null,
+    hold_released_at: trx.raw('CASE WHEN held_at IS NOT NULL THEN now() ELSE hold_released_at END'),
+  };
+}
+
 async function writeMovedStop(trx, c, dateStr, reason, customerAskedTime) {
   const { applyTrackLifecycleCas, singleMoveStamp } = require('../rebooker');
   const s = c.s;
@@ -1514,6 +1524,9 @@ async function writeMovedStop(trx, c, dateStr, reason, customerAskedTime) {
       // Old day's sequence number is meaningless on the new date — NULL
       // appends the stop after the target day's ordered run.
       route_order: null,
+      // GATE_VISIT_HOLD: the office's own move through the bar ends a hold, as the office reschedule routes do. Both
+      // right-hand sides read the row's old values, so hold_released_at is stamped only on a row that was held.
+      ...ibMoveReleasesHold(trx),
       notes: reason ? `${s.notes || ''}\nMoved from ${c.oldDate}: ${reason}`.trim() : s.notes,
       track_token_expires_at: scheduledServiceTrackTokenExpiry(db, dateStr, s.window_end),
       // LIVE_LIFECYCLE_RESET clears the tracker fields but not status — land a
@@ -2527,4 +2540,4 @@ async function cancelAndRescheduleFarOut(input) {
 }
 
 
-module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { allSkippedRefusal } };
+module.exports = { SCHEDULE_TOOLS, executeScheduleTool, _private: { allSkippedRefusal, writeMovedStop } };

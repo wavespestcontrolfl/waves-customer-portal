@@ -20,7 +20,8 @@ const STALE_CANDIDATE = Symbol('stale_candidate');
 const dateOnly = (v) => (v instanceof Date ? v.toISOString().slice(0, 10) : (v ? String(v).slice(0, 10) : null));
 // The nightly check's candidate, re-read under the visit lock: still open, same slot?
 function stillScannedCandidate(current, scanned) {
-  return ['pending', 'confirmed'].includes(current.status)
+  // GATE_VISIT_HOLD: a hold placed after the scan (read on the locked row) means the visit was never due.
+  return ['pending', 'confirmed'].includes(current.status) && !require('../visit-hold').rowIsHeld(current)
     && dateOnly(current.scheduled_date) === dateOnly(scanned.scheduled_date)
     && (current.window_start || null) === (scanned.window_start || null)
     && (current.window_end || null) === (scanned.window_end || null);

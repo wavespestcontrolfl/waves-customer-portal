@@ -7,8 +7,8 @@ Product rows expand in place. Granules offer LESCO 092807 / 1235445; soil delive
 uses the FlowZone attachment; foliar rows offer B&G 1 gal, FlowZone 4 gal, and
 110 gal rig. No unverified dial settings render.
 
-The field guide is always on. Existing `GATE_JOB_CARD` and
-`GATE_PROTOCOL_SOP` are required for the job's procedure view. Published text
+The field guide is always on. Existing `GATE_JOB_CARD` is required for the
+job's procedure view. Published text
 corrections and the migration are not gated: the approved palm products/chart replace the obsolete ones,
 and unsupported label recipes are withheld. No customer communications or
 application writes occur when a guide or completion drawer opens.

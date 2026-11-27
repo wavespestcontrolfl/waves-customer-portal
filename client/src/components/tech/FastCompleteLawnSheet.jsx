@@ -1621,7 +1621,7 @@ function waitingView(ctx, catalog, catalogError) {
 function SheetBody({ service, request, catalog, catalogError, ctx, propertyAreas, submission, locked, dictationPending, onDictationPending, onOverlay, onCompleted, onFullForm, isMobile, refreshPlaces, onWrapChecking, collectOnSheet }) {
   if (submission.done) {
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} response={submission.done.response} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         {collectOnSheet && <CollectPayment result={submission.done.response} />}
       </SavedView>
     );

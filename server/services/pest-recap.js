@@ -25,6 +25,7 @@ const db = require('../models/db');
 const { completionTierSnapshotFields } = require('./completion-tier-snapshot');
 const { resolveCloseoutRequirementsSnapshotForCompletion } = require('./service-closeout-requirements');
 const logger = require('./logger');
+const { notFlaggedLineSql } = require('./flagged-product-lines');
 const { VISIT_NO_CUSTOMER_CODE } = require('./invoice-helpers');
 const { isAreaAddOnCatalogKey } = require('./pricing-engine/constants');
 const { transitionJobStatus } = require('./job-status');
@@ -173,14 +174,7 @@ const COMMON_PRODUCTS_SQL = `
        -- An area add-on's product row rides its host's record: it is the add-on's work, never the host line's usual product.
        AND sp.area_addon_key IS NULL
        -- A line the completion flagged over its product's ceiling (owner 2026-11-26) is a recorded typo, never the usual amount or unit.
-       AND NOT EXISTS (
-         SELECT 1 FROM jsonb_array_elements(CASE WHEN jsonb_typeof(sr.structured_notes->'inventoryDeductions') = 'array' THEN sr.structured_notes->'inventoryDeductions' ELSE '[]'::jsonb END) AS d
-          WHERE d->>'status' = 'not_deducted_implausible'
-            AND (d->>'serviceProductId' = sp.id::text
-              -- a deduction saved before the service product id was kept: the same product, unit and amount at the stored decimal(8,3)
-              OR (d->>'serviceProductId' IS NULL AND d->>'productId' = sp.product_id::text
-                AND ROUND((d->>'amount')::numeric, 3) = sp.total_amount
-                AND LOWER(COALESCE(d->>'amountUnit', '')) = LOWER(COALESCE(sp.amount_unit, '')))))
+       AND ${notFlaggedLineSql('sp', 'sr')}
        AND sr.service_line = ?
        AND sr.service_date BETWEEN ?::date AND ?::date
   ),

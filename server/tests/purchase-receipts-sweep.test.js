@@ -222,8 +222,8 @@ describe('processReceiptEmail', () => {
     expect(body).toBe('Amazon delivery added Taurus SC; an open restock request may cover it.');
     expect(options).toMatchObject({
       bell: true, dedupeKey: 'purchase-receipt:line-1', trx: 'trx-stub', link: '/admin/inventory?tab=products',
-      // Cancel, never receive: receiving the request would add the delivery a second time.
-      detail: 'Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz) A restock request for Taurus SC is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.',
+      // Close as already counted, never receive: receiving the request would add the delivery a second time.
+      detail: 'Amazon delivery logged: Taurus SC +156 fl oz (2 × 78 fl oz) A restock request for Taurus SC is still open. If this delivery covers it, choose Close, already counted on the Restock tab (or ask the Intelligence Bar to close it as already counted); receiving it would add the stock again. Cancel it only if the vendor cancelled the order.',
       metadata: {
         emailId: 'e1', productId: 'p1', receivedQty: 156, receivedUnit: 'fl_oz', area: 'Inventory', severity: 'needs-you', who: 'person',
         subject: { type: 'check', id: 'purchase-receipt:line-1' }, doneWhen: 'restock_request_closed',

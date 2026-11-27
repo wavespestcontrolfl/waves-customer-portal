@@ -67,8 +67,7 @@
  * Alerting mirrors call-booking-miss-watchdog: one bell per subject, deduped
  * forever via the notifications metadata dedupeKey, with a per-run cap so
  * the first enable over the existing backlog rings loudly but readably —
- * dedupe keys make the remainder ring on subsequent ticks. Dark by default
- * behind GATE_SCHEDULE_INTEGRITY_WATCHDOG. Read-only against
+ * dedupe keys make the remainder ring on subsequent ticks. Read-only against
  * scheduled_services; writes nothing but admin notifications.
  *
  * ALERT EPISODES (ALERT_EPISODES, live unless killed — see feature-gates):
@@ -291,10 +290,6 @@ function etClock(date) {
 }
 
 async function runScheduleIntegrityWatchdog({ now = new Date() } = {}) {
-  const { isEnabled } = require('../config/feature-gates');
-  if (!isEnabled('scheduleIntegrityWatchdog')) {
-    return { skipped: true, reason: 'gated_off' };
-  }
   // notifyAdmin's dedupe takes its own per-key advisory lock, but a run's
   // classification pass (which rows are unpriced/etc.) is not itself locked
   // — serialize ticks so deploy overlap can't build two different alert sets
@@ -664,7 +659,7 @@ async function runInner({ now = new Date() } = {}) {
   const overdueUnpricedByRoot = new Map();
   const prepayGaps = [];
   const paidTermById = await loadPaidTerms(coverageCandidates);
-  // Lazy require, like isEnabled above; read at call time so the env is a live kill switch.
+  // Lazy require; read at call time so the env is a live kill switch.
   const episodes = require('../config/feature-gates').alertEpisodesLive();
   for (const row of coverageCandidates) {
     const { annualCovered, issues } = await judgePrepayGaps(row, paidTermById);

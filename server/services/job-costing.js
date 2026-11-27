@@ -63,6 +63,7 @@ const { isAlwaysFreeServiceType, isConsultationServiceType } = require('./no-cos
 const { hasAuthoritativeZeroPrice } = require('./billing-lane');
 const { baseQuantityUnit, convertInventoryQuantity } = require('./inventory-units');
 const { calculateInventoryCost } = require('./inventory-cost');
+const { storedThousandths } = require('./flagged-product-lines');
 // GATE_STAMPED_ZERO_FREE (owner ruling 2026-09-28): read at call time through
 // billing-lane's one resolver (lazy, so no require cycle).
 const stampedZeroFreeLive = () => require('./billing-lane').stampedZeroFreeLive();
@@ -586,18 +587,6 @@ async function calcLaborCost(db, scheduledServiceId, technicianId, startTime, en
 
   const hours = minutes / 60;
   return { laborMinutes: minutes, laborHours: hours, laborCost: round2(hours * rate), laborEstimated };
-}
-
-// The amount as decimal(8,3) stores it, in thousandths: the shortest decimal text of the number rounded half up ONCE, the way
-// PostgreSQL rounds the text it is sent (406.0005 stores as 406.001, 406.00049999999 as 406.000), never a binary double
-// scaled and rounded twice. A numeric column's own text ("406.001") reads the same way.
-function storedThousandths(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return null;
-  const text = /e/i.test(String(n)) ? n.toFixed(20) : String(n);
-  const [whole, fraction = ''] = text.replace(/^-/, '').split('.');
-  const padded = `${fraction}0000`;
-  return BigInt(whole + padded.slice(0, 3)) + (padded[3] >= '5' ? 1n : 0n);
 }
 
 // A flagged line (not_deducted_implausible) is skipped when the ledger row is the one it was recorded on (its service

@@ -47,7 +47,6 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
     'GATE_ROUTE_REORDER',
     'GATE_ROUTE_REORDER_REPAIR',
     'GATE_SCHEDULE_QUALITY_MEASUREMENTS',
-    'GATE_SCHEDULE_QUALITY_ALERTS',
   ];
   const savedGates = Object.fromEntries(gates.map(gate => [gate, process.env[gate]]));
 
@@ -104,7 +103,6 @@ postgres('geocoder quality recovery on isolated PostgreSQL', () => {
     process.env.GATE_ROUTE_REORDER = 'true';
     process.env.GATE_ROUTE_REORDER_REPAIR = 'true';
     process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     geocodeAddressWithStatus.mockResolvedValue({ location: PIN, permanent: false });
     mockConnection = await database.transaction();
     for (const table of [

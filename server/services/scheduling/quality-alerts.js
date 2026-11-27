@@ -11,7 +11,7 @@ const { createAlert, resolveAlert } = require('../dispatch-alerts');
 const { getScheduleQualityMeasurements } = require('./day-quality');
 
 const TYPE = 'schedule_route_quality';
-const enabled = () => ['GATE_SCHEDULE_QUALITY_MEASUREMENTS', 'GATE_SCHEDULE_QUALITY_ALERTS'].every(gateEnvValue);
+const enabled = () => gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS');
 
 // GET /api/admin/dispatch/alerts returns the newest 50 rows by default, and
 // this generator can see every technician on every future date it checks.
