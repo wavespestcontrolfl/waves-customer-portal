@@ -46,6 +46,32 @@ const googleSignin = require('../services/staff-google-signin');
 const analyticsMath = require('../services/time-tracking-analytics');
 const { validDateOnly } = require('../utils/date-only');
 const { recordAuditEvent } = require('../services/audit-log');
+const {
+  ALLOWED_DOC_CATEGORIES,
+  validateStaffPhotoUpload,
+  validateCompanyDocumentUpload,
+  safeDownloadFilename,
+} = require('../utils/staff-upload-validation');
+
+const UUID_PARAM_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.param('id', (req, res, next, id) => {
+  if (String(req.path || req.url || '').split('?')[0].endsWith('/voice-pin')) return next();
+  if (!UUID_PARAM_RE.test(String(id || ''))) {
+    return res.status(400).json({ error: 'Invalid ID' });
+  }
+  return next();
+});
+
+function dateFilterError(query) {
+  for (const field of ['startDate', 'endDate']) {
+    const value = query?.[field];
+    if (value !== undefined && value !== '' && !validDateOnly(value)) {
+      return `${field} must be a valid YYYY-MM-DD date`;
+    }
+  }
+  return null;
+}
 
 const STAFF_ENTRY_WORK_DATE_SQL = staffWorkDateSql('time_entries.clock_in');
 
@@ -392,15 +418,19 @@ router.get('/', requireTechOrAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.get('/entries', requireAdmin, async (req, res, next) => {
   try {
-    const { technicianId, startDate, endDate, entryType, status, limit, offset } = req.query;
+    const badDate = dateFilterError(req.query);
+    if (badDate) return res.status(400).json({ error: badDate });
+    const { technicianId, startDate, endDate, entryType, status } = req.query;
+    const rawLimit = Number.parseInt(req.query.limit, 10);
+    const rawOffset = Number.parseInt(req.query.offset, 10);
     const result = await timeTracking.getEntries({
       technicianId,
       startDate,
       endDate,
       entryType,
       status,
-      limit: parseInt(limit) || 50,
-      offset: parseInt(offset) || 0,
+      limit: Number.isInteger(rawLimit) && rawLimit >= 1 ? Math.min(rawLimit, 200) : 50,
+      offset: Number.isSafeInteger(rawOffset) && rawOffset >= 0 ? rawOffset : 0,
     });
     res.json(result);
   } catch (err) {
@@ -442,14 +472,16 @@ router.get('/entries/:id', requireAdmin, async (req, res, next) => {
 router.post('/entries', requireAdmin, async (req, res, next) => {
   try {
     const { technician_id, clock_in, clock_out, notes, edit_reason } = req.body || {};
-    if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
+    if (typeof edit_reason !== 'string' || !edit_reason.trim()) {
+      return res.status(400).json({ error: 'edit_reason is required' });
+    }
 
     const created = await timeTracking.adminAddEntry({
       technician_id,
       clock_in,
       clock_out,
       notes,
-      edit_reason,
+      edit_reason: edit_reason.trim(),
       edited_by: req.technicianId,
     });
     res.status(201).json(created);
@@ -463,15 +495,17 @@ router.post('/entries', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.put('/entries/:id', requireAdmin, async (req, res, next) => {
   try {
-    const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body;
-    if (!edit_reason) return res.status(400).json({ error: 'edit_reason is required' });
+    const { clock_in, clock_out, entry_type, notes, edit_reason } = req.body || {};
+    if (typeof edit_reason !== 'string' || !edit_reason.trim()) {
+      return res.status(400).json({ error: 'edit_reason is required' });
+    }
 
     const updated = await timeTracking.adminEditEntry(req.params.id, {
       clock_in,
       clock_out,
       entry_type,
       notes,
-      edit_reason,
+      edit_reason: edit_reason.trim(),
       edited_by: req.technicianId,
     });
     res.json(updated);
@@ -516,6 +550,8 @@ router.delete('/entries/:id', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.get('/daily', requireAdmin, async (req, res, next) => {
   try {
+    const badDate = dateFilterError(req.query);
+    if (badDate) return res.status(400).json({ error: badDate });
     const { technicianId, startDate, endDate, status } = req.query;
     const summaries = await timeTracking.getDailySummaries({ technicianId, startDate, endDate, status });
     res.json(summaries);
@@ -578,6 +614,8 @@ router.post('/daily/bulk-approve', requireAdmin, retiredDailyApproval);
 // ---------------------------------------------------------------------------
 router.get('/weekly', requireAdmin, async (req, res, next) => {
   try {
+    const badDate = dateFilterError(req.query);
+    if (badDate) return res.status(400).json({ error: badDate });
     const { technicianId, startDate, endDate } = req.query;
     const summaries = await timeTracking.getWeeklySummaries({ technicianId, startDate, endDate });
     res.json(summaries);
@@ -648,6 +686,8 @@ async function withVisitGroupMinutes(entryRows) {
 // ---------------------------------------------------------------------------
 router.get('/analytics', requireAdmin, async (req, res, next) => {
   try {
+    const badDate = dateFilterError(req.query);
+    if (badDate) return res.status(400).json({ error: badDate });
     const { startDate, endDate, technicianId } = req.query;
     const now = new Date();
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate }, now);
@@ -689,7 +729,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       .select(
         'technicians.name as tech_name',
         'time_weekly_summary.technician_id',
-        'time_weekly_summary.week_start',
+        db.raw("to_char(time_weekly_summary.week_start, 'YYYY-MM-DD') as week_start"),
         'time_weekly_summary.avg_rpmh',
         'time_weekly_summary.total_revenue',
         'time_weekly_summary.total_shift_minutes',
@@ -703,7 +743,7 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
       .leftJoin('technicians', 'time_weekly_summary.technician_id', 'technicians.id')
       .select(
         'technicians.name as tech_name',
-        'time_weekly_summary.week_start',
+        db.raw("to_char(time_weekly_summary.week_start, 'YYYY-MM-DD') as week_start"),
         'time_weekly_summary.overtime_minutes',
         'time_weekly_summary.utilization_pct',
       )
@@ -780,6 +820,8 @@ router.get('/analytics', requireAdmin, async (req, res, next) => {
 // ---------------------------------------------------------------------------
 router.get('/analytics/comparison', requireAdmin, async (req, res, next) => {
   try {
+    const badDate = dateFilterError(req.query);
+    if (badDate) return res.status(400).json({ error: badDate });
     const { startDate, endDate } = req.query;
     const { start, end } = staffAnalyticsDateRange({ startDate, endDate });
 
@@ -956,6 +998,37 @@ function hireDateError(body) {
   return body.hireDate != null && body.hireDate !== '' && !validDateOnly(body.hireDate) ? 'Hire date must be a valid YYYY-MM-DD date' : null;
 }
 
+function dobError(body) {
+  return body.dob != null && body.dob !== '' && !validDateOnly(body.dob) ? 'Date of birth must be a valid YYYY-MM-DD date' : null;
+}
+
+function employmentTypeError(body) {
+  const v = body.employmentType;
+  return v != null && v !== '' && !['w2', '1099'].includes(v) ? "Employment type must be 'w2' or '1099'" : null;
+}
+
+function jobTitleError(body) {
+  const v = body.jobTitle;
+  return v != null && v !== '' && (typeof v !== 'string' || v.length > 100) ? 'Job title must be 100 characters or fewer' : null;
+}
+
+function ssnLast4Error(body) {
+  const v = body.ssnLast4;
+  if (v == null || v === '') return null;
+  if (typeof v !== 'string' && typeof v !== 'number') return 'SSN last 4 must be 4 digits';
+  const digits = String(v).replace(/\D/g, '');
+  return digits.length === 4 ? null : 'SSN last 4 must be 4 digits';
+}
+
+function profileFieldError(body) {
+  if (body.name !== undefined && typeof body.name === 'string' && body.name.trim().length > 120) {
+    return 'Name must be 120 characters or fewer';
+  }
+  return [payRateError, hireDateError, dobError, employmentTypeError, jobTitleError, ssnLast4Error, supplyStoreError]
+    .map((check) => check(body))
+    .find(Boolean) || null;
+}
+
 // One audit row when a save changes the pay rate (the old and new rate only; no other pay data).
 async function auditPayRateChange(trx, req, target, updates) {
   if (!('pay_rate' in updates)) return;
@@ -1045,7 +1118,17 @@ async function outsideNewShiftReply(conn, before, tech) {
 
 // A staff row with any operational or pay history is a person, not a slot.
 async function technicianHasHistory(conn, technicianId) {
-  for (const table of ['scheduled_services', 'service_records', 'time_entries', 'review_incentive_payouts']) {
+  const tables = [
+    'scheduled_services',
+    'service_records',
+    'time_entries',
+    'review_incentive_payouts',
+    'payroll_checks',
+    'payroll_pay_lines',
+    'payroll_time_off',
+    'payroll_w4_elections',
+  ];
+  for (const table of tables) {
     if (await conn(table).where({ technician_id: technicianId }).first('id')) return true;
   }
   return false;
@@ -1159,8 +1242,8 @@ async function createTechnician(req, res, next) {
     if (workDays.error) return res.status(400).json({ error: workDays.error });
     const shiftHours = normalizeShiftHoursInput(body.shiftHours);
     if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
-    const badHireDate = hireDateError(body);
-    if (badHireDate) return res.status(400).json({ error: badHireDate });
+    const badProfile = profileFieldError(body);
+    if (badProfile) return res.status(400).json({ error: badProfile });
 
     const insertRow = {
       name: name.trim(),
@@ -1184,6 +1267,7 @@ async function createTechnician(req, res, next) {
     Object.assign(insertRow, techLine.patch);
     Object.assign(insertRow, workDays.patch);
     Object.assign(insertRow, shiftHours.patch);
+    Object.assign(insertRow, supplyStorePatch(body.supplyStore));
     applyPayrollProfileFields(insertRow, body);
 
     const outcome = await db.transaction(async (trx) => {
@@ -1193,6 +1277,9 @@ async function createTechnician(req, res, next) {
       }
       if (await techLineHeldByAnother(trx, insertRow.twilio_number)) return { lineTaken: true };
       const [tech] = await trx('technicians').insert(insertRow).returning('*');
+      if (insertRow.pay_rate != null) {
+        await auditPayRateChange(trx, req, { id: tech.id, pay_rate: null }, { pay_rate: insertRow.pay_rate });
+      }
       // Every hire starts able to take every service, pending review — the
       // Team tab's Capabilities editor is where a category becomes Qualified.
       await seedNewHireCapabilities(trx, tech.id);
@@ -1257,7 +1344,7 @@ async function updateTechnician(req, res, next) {
     if (workDays.error) return res.status(400).json({ error: workDays.error });
     const shiftHours = normalizeShiftHoursInput(body.shiftHours);
     if (shiftHours.error) return res.status(400).json({ error: shiftHours.error });
-    const badBody = [payRateError, hireDateError, supplyStoreError].map((check) => check(body)).find(Boolean);
+    const badBody = profileFieldError(body);
     if (badBody) return res.status(400).json({ error: badBody });
 
     const outcome = await db.transaction(async (trx) => {
@@ -1269,13 +1356,20 @@ async function updateTechnician(req, res, next) {
         .forUpdate()
         .first();
       if (!target) return { notFound: true };
+      const storedEmail = canonicalStaffEmail(target.email);
+      const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
+      if (emailChanged) {
+        const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: storedEmail, toEmail: normalizedEmail.value });
+        if (fullAccessEmailGuard) return { fullAccessEmailGuard };
+      }
+      // Protect EVERY field on the owner (full-access) row — pay rate, SSN, DOB,
+      // capabilities, dispatchable status, etc. — not just active/inactive changes.
+      const ownerRowGuard = ownerRowRefusal(req, target);
+      if (ownerRowGuard) return { ownerRowGuard };
       const currentStatus = target.employment_status || (target.active ? 'active' : 'inactive');
       const activeChanged = requestedStatus !== undefined && requestedStatus !== currentStatus;
-      const ownerRowGuard = activeChanged ? ownerRowRefusal(req, target) : null;
-      if (ownerRowGuard) return { ownerRowGuard };
       if (await techLineHeldByAnother(trx, techLine.patch.twilio_number, target.id)) return { lineTaken: true };
 
-      const storedEmail = canonicalStaffEmail(target.email);
       const resultingEmail = email === undefined ? storedEmail : normalizedEmail.value;
       const resultingActive = active === undefined ? Boolean(target.active) : active;
       if (resultingActive && !resultingEmail) return { missingEmail: true };
@@ -1320,21 +1414,6 @@ async function updateTechnician(req, res, next) {
       // Any transition that leaves `active` (→ inactive OR → prospective)
       // revokes sessions; entering active from prospective also rotates so a
       // token minted under the old state cannot carry over.
-      const emailChanged = email !== undefined && normalizedEmail.value !== storedEmail;
-      // Owner-only access model (owner ruling 2026-09-28): gated on an
-      // ACTUAL change (emailChanged), never on the edit form simply
-      // resending the row's existing, unchanged email — an ordinary edit
-      // of another field on the owner's own profile by a different admin
-      // must not be blocked just because the payload still carries it.
-      // Both directions covered: assigning a full-access email to this row
-      // (toEmail), and moving this row's CURRENT full-access email away to
-      // something else (fromEmail: storedEmail) — the latter would
-      // otherwise let a non-owner admin permanently strip the owner's own
-      // access with no in-product way to reassign it back.
-      if (emailChanged) {
-        const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: storedEmail, toEmail: normalizedEmail.value });
-        if (fullAccessEmailGuard) return { fullAccessEmailGuard };
-      }
       const credentialsChanged = activeChanged || emailChanged;
       if (credentialsChanged) {
         updates.auth_token_version = Number(target.auth_token_version || 0) + 1;
@@ -1443,6 +1522,9 @@ async function putTechnicianGoogleSignin(req, res, next) {
       await trx('technicians').where({ id: target.id }).update({
         google_email: parsed.value,
         google_sub: null,
+        // Clearing Google sign-in also clears google_only_login_at so the staff
+        // member can recover via Forgot password instead of being permanently locked out.
+        ...(parsed.value === null ? { google_only_login_at: null } : {}),
         ...(revoke ? { auth_token_version: Number(target.auth_token_version || 0) + 1 } : {}),
         updated_at: new Date(),
       });
@@ -1622,10 +1704,13 @@ async function hireTechnician(req, res, next) {
         auth_token_version: Number(target.auth_token_version || 0) + 1,
         updated_at: now,
       });
+      if ('pay_rate' in parsed.patch) {
+        await auditPayRateChange(trx, req, target, parsed.patch);
+      }
       await PushService.deactivateStaffUser(target.id, trx);
       // Ids only: no email, phone or pay in the audit row.
       await recordAuditEvent({
-        actor_type: 'technician',
+        actor_type: 'admin',
         actor_id: req.technicianId || null,
         action: 'staff.hired',
         resource_type: 'technician',
@@ -1634,6 +1719,21 @@ async function hireTechnician(req, res, next) {
         critical: true,
         trx,
       });
+      // Sync Recruiting's first-days checklist when this prospective hire came
+      // from a signed job offer (best-effort inside the transaction).
+      try {
+        const JobOffers = require('../services/job-offers');
+        if (typeof JobOffers.markOfferLoginActivated === 'function') {
+          await JobOffers.markOfferLoginActivated(
+            trx,
+            target.id,
+            { id: req.technicianId || null, name: (req.technician && req.technician.name) || null },
+            now,
+          );
+        }
+      } catch (syncErr) {
+        logger.warn(`[team] job-offer login checklist sync skipped for technician id=${target.id}: ${syncErr.code || syncErr.message}`);
+      }
       return { tech: await trx('technicians').where({ id: target.id }).first() };
     });
 
@@ -1692,8 +1792,10 @@ async function putTechnicianCapabilities(req, res, next) {
     let outcome;
     try {
       outcome = await db.transaction(async (trx) => {
-        const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id');
+        const target = await trx('technicians').where({ id: req.params.id }).forUpdate().first('id', 'email');
         if (!target) return { notFound: true };
+        const ownerRowGuard = ownerRowRefusal(req, target);
+        if (ownerRowGuard) return { ownerRowGuard };
         await writeCapabilities(trx, target.id, entries, req.technicianId);
         const turnedOff = new Set(entries.filter((e) => e.state === 'off').map((e) => e.service_category));
         let futureAssignedVisits = [];
@@ -1711,6 +1813,7 @@ async function putTechnicianCapabilities(req, res, next) {
       return res.status(409).json({ error: err.message, code: err.code, service_category: err.service_category });
     }
     if (outcome.notFound) return res.status(404).json({ error: 'Technician not found' });
+    if (outcome.ownerRowGuard) return res.status(403).json(outcome.ownerRowGuard);
 
     logger.info(`[team] Updated capabilities for technician id=${req.params.id} (${entries.map((e) => `${e.service_category}=${e.state}`).join(', ')}) by staff id=${req.technicianId}`);
     return res.json({
@@ -1990,6 +2093,9 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
     if (from > to) {
       return res.status(400).json({ error: 'from must be on or before to' });
     }
+    if (to > addCalendarDaysToYMD(from, 400)) {
+      return res.status(400).json({ error: 'Date range cannot exceed 400 days' });
+    }
 
     // Recompute the weekly summaries that overlap the window before
     // reading dailies. time_entry_daily_summary.overtime_minutes is
@@ -2023,7 +2129,8 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       return s + Math.max(0, shift - unpaid - parseFloat(r.overtime_minutes || 0));
     }, 0);
 
-    const rate = parseFloat(tech.pay_rate) > 0 ? parseFloat(tech.pay_rate) : 35;
+    const hasConfiguredRate = tech.pay_rate != null && tech.pay_rate !== '' && Number.isFinite(Number(tech.pay_rate));
+    const rate = hasConfiguredRate ? Number(tech.pay_rate) : 35;
     // Round line items to cents and reconcile gross from those rounded
     // components so the response is internally self-consistent — the
     // earnings modal renders reg + ot + gross side by side, and admins
@@ -2044,7 +2151,7 @@ router.get('/technicians/:id/earnings', requireAdmin, async (req, res, next) => 
       from,
       to,
       payRate: rate,
-      payRateSource: parseFloat(tech.pay_rate) > 0 ? 'tech' : 'default',
+      payRateSource: hasConfiguredRate ? 'tech' : 'default',
       regularMinutes: regMin,
       overtimeMinutes: otMin,
       totalMinutes: totalMin,
@@ -2099,19 +2206,26 @@ router.post(
   (req, res, next) => upload.single('photo')(req, res, next),
   async (req, res, next) => {
     try {
+      if (!UUID_PARAM_RE.test(String(req.params.id || ''))) {
+        return res.status(400).json({ error: 'Invalid ID' });
+      }
       if (!req.file) return res.status(400).json({ error: 'No file provided' });
+      const photoCheck = validateStaffPhotoUpload(req.file);
+      if (photoCheck.error) return res.status(400).json({ error: photoCheck.error });
       if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
 
-      const tech = await db('technicians').where({ id: req.params.id }).first('id', 'name');
+      const tech = await db('technicians').where({ id: req.params.id }).first('id', 'email');
       if (!tech) return res.status(404).json({ error: 'Technician not found' });
+      const ownerRowGuard = ownerRowRefusal(req, tech);
+      if (ownerRowGuard) return res.status(403).json(ownerRowGuard);
 
-      const safeName = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_');
-      const key = `${PHOTO_PREFIX}${tech.id}/${Date.now()}-${safeName}`;
+      const key = `${PHOTO_PREFIX}${tech.id}/${Date.now()}.${photoCheck.ext}`;
       await s3.send(new PutObjectCommand({
         Bucket: config.s3.bucket,
         Key: key,
         Body: req.file.buffer,
-        ContentType: req.file.mimetype,
+        ContentType: photoCheck.contentType,
+        ContentDisposition: 'attachment',
       }));
 
       await db('technicians').where({ id: tech.id }).update({
@@ -2119,7 +2233,7 @@ router.post(
         updated_at: new Date(),
       });
 
-      logger.info(`[team] Uploaded photo for ${tech.name}: ${key}`);
+      logger.info(`[team] Uploaded photo for technician id=${tech.id}`);
 
       // Return the row with avatar_url presigned from the new
       // photo_s3_key — same shape as GET /technicians, so the
@@ -2172,6 +2286,7 @@ async function deactivateTechnician(req, res, next) {
       if (wasOnStaff) {
         await trx('technicians').where({ id: target.id }).update({
           ...employmentPatch('inactive'),
+          twilio_number: null,
           auth_token_version: Number(target.auth_token_version || 0) + 1,
           password_reset_token_hash: null,
           password_reset_expires_at: null,
@@ -2179,6 +2294,7 @@ async function deactivateTechnician(req, res, next) {
           updated_at: new Date(),
         });
       }
+      await trx('tech_voice_pins').where({ technician_id: target.id }).del();
       await PushService.deactivateStaffUser(target.id, trx);
       const tech = wasOnStaff
         ? await trx('technicians').where({ id: target.id }).first()
@@ -2265,10 +2381,18 @@ async function ensureDocTable() {
 // license, cert expirations). Tech-role tokens must not be able to
 // list/read/upload/edit those, even their own — pre-existing tech
 // access to company-wide SOPs is acceptable collateral here.
+router.use('/documents', (_req, res, next) => {
+  res.set('Cache-Control', 'private, no-store');
+  next();
+});
+
 router.get('/documents', requireAdmin, async (req, res, next) => {
   try {
     await ensureDocTable();
     const { category, technicianId, archived } = req.query;
+    if (technicianId && technicianId !== 'company' && !UUID_PARAM_RE.test(String(technicianId))) {
+      return res.status(400).json({ error: 'technicianId must be a valid ID or "company"' });
+    }
     let query = db('company_documents')
       .leftJoin('technicians', 'company_documents.technician_id', 'technicians.id')
       .where('company_documents.is_archived', archived === 'only')
@@ -2288,34 +2412,105 @@ router.get('/documents', requireAdmin, async (req, res, next) => {
 // POST /documents/upload — upload a file. Optional binding:
 //   technicianId — bind to one tech (omit / empty for company-wide)
 //   expirationDate — YYYY-MM-DD for licenses, certs, I-9s with reverify dates
+function validateDocumentUploadBody(body, file) {
+  const { title, category, description, technicianId, expirationDate } = body || {};
+  const finalTitle = title !== undefined && String(title).trim()
+    ? String(title).trim()
+    : String(file.originalname || '').trim();
+  if (!finalTitle || finalTitle.length > 200) {
+    return { error: 'Title must be 1 to 200 characters' };
+  }
+  const finalCategory = category || 'general';
+  if (!ALLOWED_DOC_CATEGORIES.has(finalCategory)) {
+    return { error: 'Invalid document category' };
+  }
+  if (technicianId && !UUID_PARAM_RE.test(String(technicianId))) {
+    return { error: 'technicianId must be a valid ID' };
+  }
+  if (expirationDate && !validDateOnly(expirationDate)) {
+    return { error: 'expirationDate must be a valid YYYY-MM-DD date' };
+  }
+  return {
+    finalTitle,
+    finalCategory,
+    description: description || null,
+    technicianId: technicianId || null,
+    expirationDate: expirationDate || null,
+  };
+}
+
+function buildDocumentUpdatePatch(body) {
+  const { title, category, description, technicianId, expirationDate } = body || {};
+  const updates = { updated_at: new Date() };
+  if (title !== undefined) {
+    const trimmed = typeof title === 'string' ? title.trim() : '';
+    if (!trimmed || trimmed.length > 200) return { error: 'Title must be 1 to 200 characters' };
+    updates.title = trimmed;
+  }
+  if (category !== undefined) {
+    if (!ALLOWED_DOC_CATEGORIES.has(category)) return { error: 'Invalid document category' };
+    updates.category = category;
+  }
+  if (description !== undefined) updates.description = description;
+  if (technicianId !== undefined) {
+    if (technicianId !== '' && technicianId !== null && !UUID_PARAM_RE.test(String(technicianId))) {
+      return { error: 'technicianId must be a valid ID' };
+    }
+    updates.technician_id = technicianId === '' ? null : technicianId;
+  }
+  if (expirationDate !== undefined) {
+    if (expirationDate !== '' && expirationDate !== null && !validDateOnly(expirationDate)) {
+      return { error: 'expirationDate must be a valid YYYY-MM-DD date' };
+    }
+    updates.expiration_date = expirationDate === '' ? null : expirationDate;
+  }
+  return { updates };
+}
+
 router.post('/documents/upload', requireAdmin, upload.single('file'), async (req, res, next) => {
   try {
     await ensureDocTable();
     if (!req.file) return res.status(400).json({ error: 'No file provided' });
+    const fileCheck = validateCompanyDocumentUpload(req.file);
+    if (fileCheck.error) return res.status(400).json({ error: fileCheck.error });
 
-    const { title, category, description, technicianId, expirationDate } = req.body;
-    const ext = req.file.originalname.split('.').pop().toLowerCase();
-    const key = `${DOC_PREFIX}${Date.now()}-${req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const bodyCheck = validateDocumentUploadBody(req.body, req.file);
+    if (bodyCheck.error) return res.status(400).json({ error: bodyCheck.error });
+    if (!config.s3?.bucket) return res.status(500).json({ error: 'S3 not configured' });
+
+    const ext = fileCheck.ext;
+    const safeOrig = String(req.file.originalname || `document.${ext}`).replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120);
+    const key = `${DOC_PREFIX}${Date.now()}-${safeOrig}`;
 
     await s3.send(new PutObjectCommand({
       Bucket: config.s3.bucket,
       Key: key,
       Body: req.file.buffer,
-      ContentType: req.file.mimetype,
+      ContentType: fileCheck.contentType,
+      ContentDisposition: 'attachment',
     }));
 
     const [doc] = await db('company_documents').insert({
-      title: title || req.file.originalname,
-      category: category || 'general',
-      description: description || null,
-      file_name: req.file.originalname,
+      title: bodyCheck.finalTitle,
+      category: bodyCheck.finalCategory,
+      description: bodyCheck.description,
+      file_name: String(req.file.originalname || '').slice(0, 255),
       file_type: ext,
       file_size: req.file.size,
       s3_key: key,
       uploaded_by: req.technicianId || null,
-      technician_id: technicianId || null,
-      expiration_date: expirationDate || null,
+      technician_id: bodyCheck.technicianId,
+      expiration_date: bodyCheck.expirationDate,
     }).returning('*');
+
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: req.technicianId || null,
+      action: 'company_document.uploaded',
+      resource_type: 'company_documents',
+      resource_id: doc.id,
+      metadata: { category: doc.category, file_type: ext, technician_id: doc.technician_id || null },
+    });
 
     // Log structural metadata only — titles and filenames for HR
     // documents (W-4, I-9, licenses) commonly embed employee names
@@ -2328,17 +2523,22 @@ router.post('/documents/upload', requireAdmin, upload.single('file'), async (req
 // GET /documents/:id/download — get presigned download URL
 router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
   try {
+    if (!UUID_PARAM_RE.test(String(req.params.id || ''))) {
+      return res.status(400).json({ error: 'Invalid ID' });
+    }
     const doc = await db('company_documents').where({ id: req.params.id }).first();
     if (!doc) return res.status(404).json({ error: 'Document not found' });
 
+    const safeFile = safeDownloadFilename(doc.file_name);
     const url = await getSignedUrl(s3, new GetObjectCommand({
       Bucket: config.s3.bucket,
       Key: doc.s3_key,
+      ResponseContentDisposition: `attachment; filename="${safeFile}"`,
     }), { expiresIn: 3600 });
 
     await recordAuditEvent({
       actor_type: 'admin',
-      actor_id: req.technicianId,
+      actor_id: req.technicianId || null,
       action: 'hr_document.download_url_issued',
       resource_type: 'company_document',
       resource_id: doc.id,
@@ -2360,15 +2560,21 @@ router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
 // clear an expiration.
 router.put('/documents/:id', requireAdmin, async (req, res, next) => {
   try {
-    const { title, category, description, technicianId, expirationDate } = req.body;
-    const updates = { updated_at: new Date() };
-    if (title !== undefined) updates.title = title;
-    if (category !== undefined) updates.category = category;
-    if (description !== undefined) updates.description = description;
-    if (technicianId !== undefined) updates.technician_id = technicianId === '' ? null : technicianId;
-    if (expirationDate !== undefined) updates.expiration_date = expirationDate === '' ? null : expirationDate;
-    await db('company_documents').where({ id: req.params.id }).update(updates);
-    const doc = await db('company_documents').where({ id: req.params.id }).first();
+    if (!UUID_PARAM_RE.test(String(req.params.id || ''))) {
+      return res.status(400).json({ error: 'Invalid ID' });
+    }
+    const patch = buildDocumentUpdatePatch(req.body);
+    if (patch.error) return res.status(400).json({ error: patch.error });
+    const [doc] = await db('company_documents').where({ id: req.params.id }).update(patch.updates).returning('*');
+    if (!doc) return res.status(404).json({ error: 'Document not found' });
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: req.technicianId || null,
+      action: 'company_document.updated',
+      resource_type: 'company_documents',
+      resource_id: doc.id,
+      metadata: { category: doc.category, technician_id: doc.technician_id || null },
+    });
     res.json(doc);
   } catch (err) { next(err); }
 });
@@ -2376,7 +2582,22 @@ router.put('/documents/:id', requireAdmin, async (req, res, next) => {
 // DELETE /documents/:id — archive (soft delete)
 router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
   try {
-    await db('company_documents').where({ id: req.params.id }).update({ is_archived: true, updated_at: new Date() });
+    if (!UUID_PARAM_RE.test(String(req.params.id || ''))) {
+      return res.status(400).json({ error: 'Invalid ID' });
+    }
+    const [archived] = await db('company_documents')
+      .where({ id: req.params.id })
+      .update({ is_archived: true, updated_at: new Date() })
+      .returning('id');
+    if (!archived) return res.status(404).json({ error: 'Document not found' });
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: req.technicianId || null,
+      action: 'company_document.archived',
+      resource_type: 'company_documents',
+      resource_id: req.params.id,
+      metadata: {},
+    });
     logger.info(`[docs] Archived document: ${req.params.id}`);
     res.json({ success: true });
   } catch (err) { next(err); }
@@ -2387,11 +2608,22 @@ router.delete('/documents/:id', requireAdmin, async (req, res, next) => {
 // that is not archived is returned unchanged.
 router.post('/documents/:id/restore', requireAdmin, async (req, res, next) => {
   try {
+    if (!UUID_PARAM_RE.test(String(req.params.id || ''))) {
+      return res.status(400).json({ error: 'Invalid ID' });
+    }
     const [restored] = await db('company_documents')
       .where({ id: req.params.id, is_archived: true })
       .update({ is_archived: false, updated_at: new Date() })
       .returning('*');
     if (restored) {
+      await recordAuditEvent({
+        actor_type: 'admin',
+        actor_id: req.technicianId || null,
+        action: 'company_document.restored',
+        resource_type: 'company_documents',
+        resource_id: req.params.id,
+        metadata: {},
+      });
       logger.info(`[docs] Restored document: ${req.params.id}`);
       return res.json(restored);
     }

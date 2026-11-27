@@ -48,6 +48,10 @@ const mockDb = jest.fn((table) => {
       filtered = filtered.filter((r) => r[col] != null);
       return builder;
     },
+    whereNull(col) {
+      filtered = filtered.filter((r) => r[col] == null);
+      return builder;
+    },
     modify(fn) {
       fn(builder);
       return builder;
@@ -409,5 +413,48 @@ describe('the applicant\'s own booking stays selectable while editing', () => {
     const withSelf = await listInterviewSlots({ now: NOW });
     expect(without.map((s) => s.label)).toContain('Tue Mar 16, 4:00 PM');
     expect(withSelf.map((s) => s.label)).not.toContain('Tue Mar 16, 4:00 PM');
+  });
+});
+
+describe('owner route scoping and technician absences (Codex P1)', () => {
+  test('queries employment_status=active, scopes route conflicts to owner when >1 active field tech exists, and skips owner-absent days', async () => {
+    reset({
+      technicians: [
+        { id: 'owner-1', email: 'contact@wavespestcontrol.com', role: 'admin', employment_status: 'active', field_dispatchable: true },
+        { id: 'tech-2', email: 'tech2@wavespestcontrol.com', role: 'technician', employment_status: 'active', field_dispatchable: true },
+        { id: 'inactive-3', email: 'old@wavespestcontrol.com', role: 'technician', employment_status: 'inactive', field_dispatchable: true },
+      ],
+      technician_absences: [
+        { technician_id: 'owner-1', absence_date: WED, cleared_at: null },
+        { technician_id: 'owner-1', absence_date: SAT, cleared_at: '2027-03-15T12:00:00Z' },
+      ],
+      scheduled_services: [
+        // Another tech's job at 4:00 PM on Tue should NOT block the owner's interview slot
+        { scheduled_date: TODAY, status: 'scheduled', technician_id: 'tech-2', window_start: '16:00', window_end: '17:00' },
+        // Owner's own job at 5:00 PM on Tue SHOULD block 5:00 PM & 5:30 PM
+        { scheduled_date: TODAY, status: 'scheduled', technician_id: 'owner-1', window_start: '17:00', window_end: '18:00' },
+      ],
+    });
+    const slots = await listInterviewSlots({ now: NOW });
+    const labels = slots.map((s) => s.label);
+    // Tech-2's 4:00 PM stop does not block owner's 4:00 PM slot
+    expect(labels).toContain('Tue Mar 16, 4:00 PM');
+    // Owner's 5:00 PM stop blocks 5:00 PM
+    expect(labels).not.toContain('Tue Mar 16, 5:00 PM');
+    // Uncleared absence on Wed excludes all Wed slots
+    expect(slots.filter((s) => s.date === WED)).toHaveLength(0);
+    // Cleared absence on Sat leaves Sat slots open
+    expect(slots.filter((s) => s.date === SAT).length).toBeGreaterThan(0);
+  });
+
+  test('propagates real PostgreSQL SQLSTATE errors instead of swallowing them in a transaction', async () => {
+    const pgErr = Object.assign(new Error('column technicians.bad_col does not exist'), { code: '42703' });
+    const failingConn = jest.fn((table) => {
+      if (table === 'technicians') {
+        return { where: () => ({ select: async () => { throw pgErr; } }) };
+      }
+      return mockDb(table);
+    });
+    await expect(listInterviewSlots({ now: NOW, conn: failingConn })).rejects.toThrow('column technicians.bad_col does not exist');
   });
 });

@@ -141,9 +141,12 @@ function isInspectionPath(reqPath = '') {
 // (job_applications.interview_token) that books or withdraws the applicant's
 // interview and renders their first name + slot, so the shell must never be
 // indexed/archived and must not leak the token via Referer (matches the
-// /api/public/careers/interview headers in server/index.js).
+// /api/public/careers/interview headers in server/index.js). Matched the same
+// way react-router 6 matches /careers/interview/:token (decoded, case-
+// insensitive, extra trailing slashes, any token) so every document that opens
+// the page carries the headers, matching isCareersOfferPath.
 function isCareersInterviewPath(reqPath = '') {
-  return /^\/careers\/interview\/[a-f0-9]{64}\/?$/.test(String(reqPath || ''));
+  return /^\/careers\/interview\/[^/]+\/*$/i.test(routerDecodedPath(reqPath));
 }
 
 // The path as the browser router (react-router 6) matches it: each segment percent-decoded, an encoded slash kept

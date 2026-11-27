@@ -653,7 +653,10 @@ async function saveDraft(applicationId, input, actor, now = new Date()) {
     const base = draft ? inputOfRow(draft) : defaultsFor(now);
     const { value, errors } = validateOffer(mergeOfferInput(base, input), now);
     if (errors.length) throw new OfferError(400, 'INVALID_OFFER', errors[0].message, { errors });
-    const reportTo = ownerReportTo(await actorName(trx, actor));
+    const isNonOwnerAdmin = actor && actor.ownerAccount === false;
+    const reportTo = isNonOwnerAdmin
+      ? ((draft && draft.report_to) || ownerReportTo(UNNAMED_SIGNER))
+      : ownerReportTo(await actorName(trx, actor));
     const columns = columnsOf(value, reportTo);
     if (draft) {
       const [row] = await trx('job_offers').where({ id: draft.id }).update({ ...columns, updated_at: nextVersion(draft) }).returning('*');
@@ -1116,18 +1119,20 @@ function payloadFor(offer, now) {
   return openPayload(offer, state);
 }
 
-/** GET /:token — null for an unknown token. Stamps opened_at (first view) and last_viewed_at. */
+/** GET /:token — null for an unknown token. Stamps opened_at (first view) and last_viewed_at on live/answered offers only. */
 async function publicView(token, now = new Date()) {
   const offer = await loadByToken(db, token);
   if (!offer) return null;
   const payload = payloadFor(offer, now);
   if (!payload) return null;
-  try {
-    await db('job_offers').where({ id: offer.id }).update({
-      opened_at: db.raw('COALESCE(opened_at, ?)', [now]), last_viewed_at: now,
-    });
-  } catch (err) {
-    logger.warn(`[job-offers] view stamp failed (offer ${offer.id}): ${errTag(err)}`);
+  if (!['superseded', 'withdrawn', 'expired'].includes(payload.state)) {
+    try {
+      await db('job_offers').where({ id: offer.id }).update({
+        opened_at: db.raw('COALESCE(opened_at, ?)', [now]), last_viewed_at: now,
+      });
+    } catch (err) {
+      logger.warn(`[job-offers] view stamp failed (offer ${offer.id}): ${errTag(err)}`);
+    }
   }
   return payload;
 }
@@ -1228,9 +1233,15 @@ async function acceptOffer(token, { signedName, version, ip, userAgent }) {
     if (changedSince(offer, version)) return CHANGED;
     // A frozen offer missing a term it shows is never signed: the same 409 with no write, and the page's read of it
     // shows the load error.
-    if (!signableSnapshot(asObject(offer.snapshot))) {
+    const snapshot = asObject(offer.snapshot);
+    if (!signableSnapshot(snapshot)) {
       logger.warn(`[job-offers] signature refused: offer ${offer.id} lacks a term the page shows`);
       return CHANGED;
+    }
+    // Refuse signing once the offer's start date has arrived or passed in Eastern time so a delayed signature
+    // never binds a stale past start date; the applicant can still request a new start date.
+    if (snapshot.startDate && snapshot.startDate <= etDateString(found.now)) {
+      return { invalid: 'This offer start date has passed. Please ask for another start date.' };
     }
     return { body: await signOffer(trx, offer, { name, ip, userAgent, now: found.now }), forBell: offer };
   });
@@ -2084,6 +2095,47 @@ async function bell(kind, offer, extra) {
   }
 }
 
+/**
+ * Called from the Team tab's Google Hired activation (POST /technicians/:id/hire/google) inside its transaction:
+ * marks the linked accepted offer's `google_login` first-days checklist item done so Recruiting stays in sync
+ * with Team without requiring a second manual checkbox click.
+ */
+async function markOfferLoginActivated(trx, technicianId, actor, now = new Date()) {
+  if (!technicianId) return 0;
+  const linked = await trx('job_offers')
+    .where({ technician_id: technicianId, status: 'accepted' })
+    .forUpdate()
+    .select('id', 'application_id', 'status', 'signed_at', 'start_date', 'technician_id', 'checklist');
+  if (!linked.length) return 0;
+  let updated = 0;
+  const byApp = new Map();
+  for (const row of linked) {
+    if (!byApp.has(row.application_id)) byApp.set(row.application_id, []);
+    byApp.get(row.application_id).push(row);
+  }
+  const doneByName = (actor && actor.name) || null;
+  for (const [applicationId, rows] of byApp.entries()) {
+    const signed = newestSignedFirst(rows);
+    if (!signed.length) continue;
+    const marks = firstDaysMarks(signed);
+    if (marks[LOGIN_ITEM.key]) continue;
+    const nextMarks = {
+      ...marks,
+      [LOGIN_ITEM.key]: { at: now.toISOString(), by: (actor && actor.id) || null, by_name: doneByName },
+    };
+    await storeFirstDaysMarks(trx, signed, nextMarks);
+    const firstDay = await firstDayOf(trx, signed);
+    if (!dueFirstDaysItems(signed, nextMarks, firstDay, etDateString(now)).length) {
+      const all = firstDaysList().every((item) => nextMarks[item.key]);
+      await closeChecklistBell(trx, applicationId, now, all ? 'Every first-days item is marked done' : 'No first-days item is due today');
+    } else {
+      await forgetChecklistRingKeys(trx, applicationId, LOGIN_ITEM.key);
+    }
+    updated += 1;
+  }
+  return updated;
+}
+
 module.exports = {
   OfferError,
   TERMS_TEMPLATE_KEY,
@@ -2103,5 +2155,6 @@ module.exports = {
   closeExpiredOffers, sendDueReminders, makeDueStaffRecords, ringDueChecklists,
   // after signing
   setChecklistItem,
+  markOfferLoginActivated,
   makeStaffRecord,
 };

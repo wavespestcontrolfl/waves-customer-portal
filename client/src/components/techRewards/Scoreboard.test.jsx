@@ -209,4 +209,10 @@ describe('Admin scoreboard preview', () => {
     render(<ScoreboardPreview />);
     expect(await screen.findByRole('alert')).toHaveTextContent('Technician not found.');
   });
+
+  it('clarifies missing hire date on stay bonus instead of showing None left', async () => {
+    await showBoard({ ...BOARD, multiplier: { reason: 'no_hire_date' }, stayBonus: null });
+    expect(screen.getByText('Hire date not on file')).toBeInTheDocument();
+    expect(screen.queryByText('None left')).not.toBeInTheDocument();
+  });
 });

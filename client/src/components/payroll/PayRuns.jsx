@@ -714,7 +714,7 @@ export function RunDetail({ call, run, unverified, onChanged, onMessage, onRunsC
 // What the owner asked for while a new pay run is being made: no run id exists yet.
 const NEW_RUN = Symbol('new pay run');
 
-export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
+export default function PayRuns({ call, onRunsChanged, bankKey = '', settingsKey = 0 }) {
   const weeks = useMemo(() => {
     const last = lastFinishedWeekStart();
     return Array.from({ length: WEEK_CHOICES }, (_, n) => addStaffCalendarDays(last, -7 * n));
@@ -807,14 +807,16 @@ export default function PayRuns({ call, onRunsChanged, bankKey = '' }) {
     return refresh() || loadList();
   }, [open, loadList, refresh]);
 
-  // A yearly-hours setting changes what an open draft would pay. Read the run again, so a draft shows as
-  // out of date and Finalize waits for a Recompute.
+  // A yearly-hours, W-4, SIMPLE IRA, pay method, or rate-step setting changes what an open draft would pay.
+  // Read the run again, so a draft shows as out of date and Finalize waits for a Recompute.
   const bankKeySeen = useRef(bankKey);
+  const settingsKeySeen = useRef(settingsKey);
   useEffect(() => {
-    if (bankKeySeen.current === bankKey) return;
+    if (bankKeySeen.current === bankKey && settingsKeySeen.current === settingsKey) return;
     bankKeySeen.current = bankKey;
+    settingsKeySeen.current = settingsKey;
     refresh();
-  }, [bankKey, refresh]);
+  }, [bankKey, settingsKey, refresh]);
 
   function pickWeek(event) {
     setWeek(event.target.value);

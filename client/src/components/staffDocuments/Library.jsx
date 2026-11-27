@@ -24,19 +24,21 @@ export default function StaffDocumentLibrary({ manage = false }) {
   const setRequestError = (scope, message) => setErrors(previous => ({ ...previous, [scope]: message }));
   const [message, setMessage] = useState('');
   const [reload, setReload] = useState(0);
+  const [profileReload, setProfileReload] = useState(0);
+  const [startersReload, setStartersReload] = useState(0);
   const canManage = manage && profile?.can_manage;
 
   useEffect(() => {
     const controller = new AbortController();
     request('/people', undefined, controller.signal).then(result => { setProfile(result); setRequestError('profile', ''); }).catch(failure => { if (failure.name !== 'AbortError') setRequestError('profile', failure.message); });
     return () => controller.abort();
-  }, []);
+  }, [profileReload]);
   useEffect(() => {
     if (!canManage) return undefined;
     const controller = new AbortController();
     request('/starters', undefined, controller.signal).then(result => { setStarters(result.starters); setRequestError('starters', ''); }).catch(failure => { if (failure.name !== 'AbortError') setRequestError('starters', failure.message); });
     return () => controller.abort();
-  }, [canManage]);
+  }, [canManage, startersReload]);
   useEffect(() => {
     const controller = new AbortController();
     const timer = setTimeout(() => {
@@ -50,25 +52,31 @@ export default function StaffDocumentLibrary({ manage = false }) {
     if (!selected) return undefined;
     const controller = new AbortController();
     const query = new URLSearchParams(); if (selectedVersion) query.set('version', selectedVersion); if (at) query.set('at', at);
-    request(`/${selected}?${query}`, undefined, controller.signal).then(result => { setDetail(result); setRequestError('detail', ''); }).catch(failure => { if (failure.name !== 'AbortError') setRequestError('detail', failure.message); });
+    request(`/${encodeURIComponent(selected)}?${query}`, undefined, controller.signal).then(result => { setDetail(result); setRequestError('detail', ''); }).catch(failure => { if (failure.name !== 'AbortError') setRequestError('detail', failure.message); });
     return () => controller.abort();
   }, [selected, selectedVersion, at, reload]);
   function select(id, version) {
     const next = new URLSearchParams(params);
     if (id) next.set('document', id); else next.delete('document');
     if (version) next.set('version', version); else next.delete('version');
-    setParams(next); setEditing(null); setPolicyEditor(false); setRequestError('detail', '');
+    setParams(next); setEditing(null); setPolicyEditor(false); setMessage(''); setRequestError('detail', '');
   }
   function saved(text) { setMessage(text); setReload(value => value + 1); }
   function editCurrent() {
-    setEditing({ id: detail.document.id, base_version_id: detail.versions[0].id, kind: detail.document.staff_kind,
+    const latest = detail.versions[0];
+    if (latest && detail.version.id !== latest.id) {
+      setMessage(`Switch to the latest version (v${latest.number}) before creating a new revision.`);
+      return;
+    }
+    setMessage('');
+    setEditing({ id: detail.document.id, base_version_id: latest.id, kind: detail.document.staff_kind,
       source: { title: detail.version.title, body: detail.version.body, metadata: detail.version.staff_metadata } });
   }
   return <div style={{ color: D.text, fontSize: 14, fontFamily: 'Inter, sans-serif', lineHeight: 1.6, display: 'grid', gap: 18, minWidth: 0 }} data-testid="staff-document-library">
     <section style={{ ...box, borderLeft: `4px solid ${D.blue}` }}>
-      <div style={{ ...row, justifyContent: 'space-between' }}><div><h2 style={{ fontSize: 24, margin: 0, color: D.accent }}>Controlled documents</h2><p style={{ marginBottom: 0, color: D.muted }}>Waves Pest Control policies, working procedures and signed agreements.</p></div>{canManage && <div style={row}><button style={buttonStyle} onClick={() => { setPolicyEditor(true); setEditing(null); }}>Shared policy values</button><button style={primaryStyle} onClick={() => { setEditing(emptyDraft()); setPolicyEditor(false); }}>New document</button></div>}</div>
-      {message && <p role="status" style={{ padding: '10px 12px', background: D.successBg, border: `1px solid ${D.successBorder}`, color: D.successText, borderRadius: 6 }}>{message}</p>}{Object.entries(errors).filter(([, message]) => message).map(([scope, message]) => <p role="alert" key={scope} style={{ padding: '10px 12px', background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', borderRadius: 6 }}>{message}</p>)}
-      {canManage && <Field label="Start from a reviewed draft"><select style={{ ...inputStyle, marginTop: 8 }} value="" onChange={e => { const starter = starters.find(item => item.key === e.target.value); if (starter) { setEditing(structuredClone(starter)); setPolicyEditor(false); } }}><option value="">Choose a draft…</option>{starters.map(starter => <option key={starter.key} value={starter.key}>{starter.source.title}</option>)}</select></Field>}
+      <div style={{ ...row, justifyContent: 'space-between' }}><div><h2 style={{ fontSize: 24, margin: 0, color: D.accent }}>Controlled documents</h2><p style={{ marginBottom: 0, color: D.muted }}>Waves Pest Control policies, working procedures and signed agreements.</p></div>{canManage && <div style={row}><button style={buttonStyle} onClick={() => { setPolicyEditor(true); setEditing(null); setMessage(''); }}>Shared policy values</button><button style={primaryStyle} onClick={() => { setEditing(emptyDraft()); setPolicyEditor(false); setMessage(''); }}>New document</button></div>}</div>
+      {message && <p role="status" style={{ padding: '10px 12px', background: D.successBg, border: `1px solid ${D.successBorder}`, color: D.successText, borderRadius: 6 }}>{message}</p>}{Object.entries(errors).filter(([, errText]) => errText).map(([scope, errText]) => <div key={scope} style={{ ...row, marginTop: 8, padding: '10px 12px', background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', borderRadius: 6 }}><p role="alert" style={{ margin: 0, flex: 1 }}>{errText}</p><button type="button" style={buttonStyle} onClick={() => { setRequestError(scope, ''); if (scope === 'profile') setProfileReload(v => v + 1); else if (scope === 'starters') setStartersReload(v => v + 1); else setReload(v => v + 1); }}>Retry</button></div>)}
+      {canManage && <Field label="Start from a reviewed draft"><select style={{ ...inputStyle, marginTop: 8 }} value="" onChange={e => { const starter = starters.find(item => item.key === e.target.value); if (starter) { setEditing(structuredClone(starter)); setPolicyEditor(false); setMessage(''); } }}><option value="">Choose a draft…</option>{starters.map(starter => <option key={starter.key} value={starter.key}>{starter.source.title}</option>)}</select></Field>}
     </section>
     {editing ? <DocumentEditor key={`${editing.id || editing.key}-${editing.base_version_id || 'new'}`} initial={editing} onClose={() => setEditing(null)} onSaved={(id, version) => { select(id, version); saved('Draft revision saved.'); }} /> : policyEditor ? <PolicyValuesEditor onClose={() => setPolicyEditor(false)} onSaved={text => { setPolicyEditor(false); saved(text); }} /> : <>
       {selected ? <>
@@ -85,7 +93,7 @@ export default function StaffDocumentLibrary({ manage = false }) {
         </div>
         {errors.list ? null : !items ? <p>Loading documents…</p> : <div style={{ display: 'grid', gap: 12 }}>
           {!items.filter(item => kind === 'all' || item.staff_kind === kind).length && <p style={box}>{canManage ? 'No matching documents. Start a reviewed draft or create a document above.' : 'No issued documents are available for this view.'}</p>}
-          {items.filter(item => kind === 'all' || item.staff_kind === kind).map(item => <button key={item.id} style={{ ...box, borderLeft: `4px solid ${item.issued ? D.accent : D.gold}`, cursor: 'pointer', textAlign: 'left', width: '100%', color: D.text, fontSize: 14 }} onClick={() => select(item.id, item.version_id)}><div style={{ ...row, justifyContent: 'space-between' }}><strong style={{ fontSize: 18, color: D.accent }}>{item.title}</strong><span style={{ textTransform: 'capitalize', fontWeight: 600, color: item.issued ? D.accent : '#92400E', background: item.issued ? D.bg : D.warm, padding: '3px 10px', borderRadius: 999, border: `1px solid ${item.issued ? D.border : D.gold}` }}>{item.staff_kind} · v{item.version_number} · {item.issued ? 'Issued' : 'Draft'}{item.onboarding_required ? ' · Required at onboarding' : ''}</span></div><div style={{ marginTop: 8, color: D.muted }}>Owner role: {item.owner_role || 'Unassigned'} · Review: {reviewLabel(item.review_on)}</div></button>)}
+          {items.filter(item => kind === 'all' || item.staff_kind === kind).map(item => <button key={item.id} style={{ ...box, borderLeft: `4px solid ${item.issued ? D.accent : D.gold}`, cursor: 'pointer', textAlign: 'left', width: '100%', color: D.text, fontSize: 14 }} onClick={() => select(item.id, item.version_id)}><div style={{ ...row, justifyContent: 'space-between' }}><strong style={{ fontSize: 18, color: D.accent }}>{item.title}</strong><span style={{ textTransform: 'capitalize', fontWeight: 600, color: item.issued ? D.accent : '#92400E', background: item.issued ? D.bg : D.warm, padding: '3px 10px', borderRadius: 999, border: `1px solid ${item.issued ? D.border : D.gold}` }}>{item.staff_kind} · v{item.version_number} · {item.issued ? 'Issued' : 'Draft'}{item.staff_access === 'admin' ? ' · Admin only' : ''}{item.onboarding_required ? ' · Required at onboarding' : ''}</span></div><div style={{ marginTop: 8, color: D.muted }}>Owner role: {item.owner_role || 'Unassigned'} · Review: {reviewLabel(item.review_on)}</div></button>)}
         </div>}
       </>}
     </>}

@@ -2,7 +2,8 @@ const express = require('express');
 const Joi = require('joi');
 const db = require('../models/db');
 const { adminAuthenticate, requireTechOrAdmin, requireAdmin } = require('../middleware/admin-auth');
-const { parseETDateTime, etParts, etDateString } = require('../utils/datetime-et');
+const { requireFullAccess } = require('../services/intelligence-bar/ib-access');
+const { parseETDateTime, etParts, etDateString, etWallClockOccurrences } = require('../utils/datetime-et');
 const { validate, reject } = require('../services/staff-document-source');
 const documents = require('../services/staff-documents');
 const onboarding = require('../services/staff-onboarding');
@@ -38,6 +39,24 @@ const handle = fn => async (req, res, next) => {
   }
 };
 
+const PDF_RATE_WINDOW_MS = 60000;
+const PDF_RATE_MAX = 15;
+const pdfExportBuckets = new Map();
+
+function enforcePdfRateLimit(actorId) {
+  const now = Date.now();
+  const key = String(actorId || 'anon');
+  const recent = (pdfExportBuckets.get(key) || []).filter(ts => now - ts < PDF_RATE_WINDOW_MS);
+  if (recent.length >= PDF_RATE_MAX) reject('Too many PDF exports. Wait a moment and try again.', 429);
+  recent.push(now);
+  pdfExportBuckets.set(key, recent);
+  if (pdfExportBuckets.size > 500) {
+    for (const [k, list] of pdfExportBuckets) {
+      if (!list.some(ts => now - ts < PDF_RATE_WINDOW_MS)) pdfExportBuckets.delete(k);
+    }
+  }
+}
+
 function instant(value, future = false) {
   validate(Joi.string().pattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/).required(), value);
   const parsed = parseETDateTime(value);
@@ -45,6 +64,7 @@ function instant(value, future = false) {
   const parts = etParts(parsed);
   const roundTrip = `${etDateString(parsed)}T${String(parts.hour).padStart(2, '0')}:${String(parts.minute).padStart(2, '0')}`;
   if (roundTrip !== value) reject('Enter a real Eastern date and time, outside the daylight-saving gap.');
+  if (etWallClockOccurrences(parsed) > 1) reject('That Eastern time occurs twice during the daylight-saving fall-back change. Choose a time outside 1:00–1:59 AM on that date.');
   if (future && parsed.getTime() < Date.now() - 60000) reject('Effective dates cannot be backdated.');
   return future ? new Date(Math.max(parsed.getTime(), Date.now())) : parsed;
 }
@@ -70,7 +90,7 @@ router.get('/onboarding/team', requireAdmin, handle(async (req, res) => {
 router.get('/policy-values', requireAdmin, handle(async (req, res) => {
   res.json({ revisions: await db('policy_values').orderBy('revision', 'desc') });
 }));
-router.post('/policy-values', requireAdmin, handle(async (req, res) => {
+router.post('/policy-values', requireAdmin, requireFullAccess, handle(async (req, res) => {
   validate(Joi.object({ base_revision_id: uuid.allow(null).required(), values: Joi.object().required(), effective_at: Joi.string().required() }), req.body);
   res.status(201).json(await documents.updatePolicy(req.body, instant(req.body.effective_at, true), actor(req)));
 }));
@@ -97,7 +117,7 @@ router.post('/:id/preview', requireAdmin, handle(async (req, res) => {
   validate(Joi.object({ version_id: uuid.required(), effective_at: Joi.string().required() }), req.body);
   res.json(await documents.preview(req.params.id, req.body.version_id, instant(req.body.effective_at, true), actor(req)));
 }));
-router.post('/:id/issue', requireAdmin, handle(async (req, res) => {
+router.post('/:id/issue', requireAdmin, requireFullAccess, handle(async (req, res) => {
   validate(uuid.required(), req.params.id);
   validate(Joi.object({ version_id: uuid.required(), effective_at: Joi.string().required(), preview_hash: Joi.string().hex().length(64).required() }), req.body);
   res.json({ version: await documents.publish(req.params.id, req.body.version_id, instant(req.body.effective_at, true), req.body.preview_hash, actor(req)) });
@@ -120,6 +140,7 @@ router.get('/versions/:id/prefill', handle(async (req, res) => {
   res.json(await documents.prefillAnswers(req.params.id, req.query.owner_id, actor(req)));
 }));
 router.get('/:id/pdf', handle(async (req, res) => {
+  enforcePdfRateLimit(req.technicianId);
   validate(uuid.required(), req.params.id);
   validate(uuid.required(), req.query.version);
   const detail = await documents.detail(req.params.id, actor(req), req.query.version);

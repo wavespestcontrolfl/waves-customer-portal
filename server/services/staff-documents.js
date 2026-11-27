@@ -83,14 +83,37 @@ async function issueVersion(trx, document, version, policy, at, actor) {
   }).returning('*');
   if (!issued) reject('This version has already been issued.', 409);
   await trx('document_templates').where({ id: document.id }).update({
-    status: 'active', requires_signature: versionRequiresSignature(document, version), updated_at: trx.fn.now(), updated_by: actor.id,
+    name: rendered.title, status: 'active', requires_signature: versionRequiresSignature(document, version), updated_at: trx.fn.now(), updated_by: actor.id,
   });
   await audit(trx, actor, 'issued', document.id, { version_id: issued.id, hash: issued.content_hash, policy_values_id: issued.policy_values_id });
   return issued;
 }
 
+function normalizeSourceInput(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const trimStr = v => (typeof v === 'string' ? v.trim() : v);
+  const meta = raw.metadata && typeof raw.metadata === 'object' ? {
+    ...raw.metadata,
+    owner_role: trimStr(raw.metadata.owner_role),
+  } : raw.metadata;
+  return { ...raw, title: trimStr(raw.title), metadata: meta };
+}
+
+function normalizePolicyInput(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const trimStr = v => (typeof v === 'string' ? v.trim() : v);
+  const trimList = list => (Array.isArray(list) ? list.map(trimStr) : list);
+  return {
+    ...raw,
+    pay_schedule: trimStr(raw.pay_schedule),
+    paid_holidays: trimList(raw.paid_holidays),
+    unpaid_holidays: trimList(raw.unpaid_holidays),
+    equipment_deduction_terms: trimStr(raw.equipment_deduction_terms),
+  };
+}
+
 async function saveDraft(input, actor) {
-  const source = validate(sourceSchema, input.source);
+  const source = validate(sourceSchema, normalizeSourceInput(input.source));
   renderSource(source, null);
   return db.transaction(async trx => {
     await lockLibrary(trx);
@@ -99,6 +122,7 @@ async function saveDraft(input, actor) {
       document = await loadDocument(trx, input.id, actor);
       const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('id');
       if (latest.id !== input.base_version_id) reject('The document changed. Reload before saving.', 409);
+      await trx('document_templates').where({ id: document.id }).update({ updated_at: trx.fn.now(), updated_by: actor.id });
     } else {
       if (!['policy', 'procedure', 'form'].includes(input.kind) || !['staff', 'admin'].includes(input.access)) reject('Choose a document type and access scope.');
       if (!/^[a-z][a-z0-9-]{2,79}$/.test(input.key || '')) reject('Use a stable lowercase document key.');
@@ -150,7 +174,7 @@ async function setOnboardingRequired(id, required, actor) {
 }
 
 async function updatePolicy(input, at, actor) {
-  const values = validate(policySchema, input.values);
+  const values = validate(policySchema, normalizePolicyInput(input.values));
   if (values.paid_holidays.some(name => values.unpaid_holidays.includes(name))) reject('A holiday cannot be both paid and unpaid.');
   return db.transaction(async trx => {
     await lockLibrary(trx);
@@ -172,7 +196,12 @@ async function updatePolicy(input, at, actor) {
       const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('published_at');
       if (!latest.published_at) reject(`Issue the pending draft of ${document.name} before changing shared policy values.`, 409);
       const draft = await insertVersion(trx, document, sourceOf(version), actor);
-      revised.push(await issueVersion(trx, document, draft, policy, at, actor));
+      try {
+        revised.push(await issueVersion(trx, document, draft, policy, at, actor));
+      } catch (err) {
+        if (err.status) reject(`${document.name}: ${err.message}`, err.status);
+        throw err;
+      }
     }
     await audit(trx, actor, 'policy_values_issued', policy.id, { previous_id: previous?.id || null, hash: policy.content_hash, versions: revised.map(v => v.id) });
     return { policy, revised_version_ids: revised.map(v => v.id) };
@@ -293,10 +322,14 @@ function enforceSignatureAnswers(fields, answers, { complete, forOtherOwner }) {
 
 function recordAnswers(version, input, { forOtherOwner = false } = {}) {
   const fields = version.staff_metadata.fields;
-  const rawAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers) ? { ...input.answers } : input.answers;
-  if (hasSignatureField(fields) && rawAnswers && typeof rawAnswers['signed-name'] === 'string') {
-    rawAnswers['signed-name'] = rawAnswers['signed-name'].trim();
-  }
+  const fieldById = new Map(fields.map(field => [field.id, field]));
+  const rawAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers)
+    ? Object.fromEntries(Object.entries(input.answers).map(([key, val]) => {
+      const f = fieldById.get(key);
+      if (typeof val === 'string' && f && (f.type === 'text' || f.type === 'textarea' || f.type === 'date')) return [key, val.trim()];
+      return [key, val];
+    }))
+    : input.answers;
   const answers = validate(answerSchema(fields, input.complete), rawAnswers);
   enforceSignatureAnswers(fields, answers, { complete: input.complete, forOtherOwner });
   const ids = version.content_snapshot.sections.map(section => section.id);

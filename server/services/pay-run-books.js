@@ -32,20 +32,28 @@ async function payRunTotals(db, startDate, endDate) {
   const rows = await loadFinalizedW2Checks(db, startDate, endDate);
   let wagesCents = 0;
   let employerTaxesCents = 0;
+  let hsaEmployerCents = 0;
+  let simpleEmployerCents = 0;
   for (const r of rows) {
     wagesCents += toCents(r.gross_cents);
     employerTaxesCents += toCents(r.employer_social_security_cents)
       + toCents(r.employer_medicare_cents)
       + toCents(r.futa_cents)
       + toCents(r.fl_reemployment_cents);
+    hsaEmployerCents += toCents(r.hsa_employer_cents);
+    simpleEmployerCents += toCents(r.simple_employer_cents);
   }
   return {
     checks: rows.length,
     wagesCents,
     employerTaxesCents,
+    hsaEmployerCents,
+    simpleEmployerCents,
     wages: dollars(wagesCents),
     employerTaxes: dollars(employerTaxesCents),
-    total: dollars(wagesCents + employerTaxesCents),
+    employeeBenefits: dollars(hsaEmployerCents),
+    retirementContributions: dollars(simpleEmployerCents),
+    total: dollars(wagesCents + employerTaxesCents + hsaEmployerCents + simpleEmployerCents),
   };
 }
 
