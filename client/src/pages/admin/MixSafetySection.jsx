@@ -58,7 +58,8 @@ export function sourceLabel(source) {
   if (!technical) return text;
   if (/^Catalog row/i.test(text)) return "Catalog";
   if (/field-guide\.json .* limits:/i.test(text)) return "Field guide";
-  if (/\blabel\b/i.test(text)) return "Label";
+  // Only a quote that states what the label says reads "Label"; a mere mention ("not on the label") is a Waves rule.
+  if (/\b(the label (says|states|bars|bans|requires)|specimen label|label:)/i.test(text)) return "Label";
   return "Waves rule";
 }
 
