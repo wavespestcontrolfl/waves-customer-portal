@@ -12,6 +12,7 @@
  */
 const db = require('../models/db');
 const logger = require('./logger');
+const { flaggedDeductionsOf, isFlaggedLine } = require('./flagged-product-lines');
 const { resolveEligibility, recapServiceIdentity, loadRecapCatalogProducts } = require('./pest-recap');
 const { detectServiceLine } = require('./service-report/service-line-configs');
 const { pestLabels } = require('./reservice-request');
@@ -133,12 +134,21 @@ async function findLastLawnRecord(svc, knex, visitDate) {
       .orderBy('sr.id', 'desc')
       .offset(offset)
       .limit(HISTORY_PAGE_SIZE)
-      .select('sr.id', 'sr.service_type', 'sr.service_line', 'sr.service_date');
+      .select('sr.id', 'sr.service_type', 'sr.service_line', 'sr.service_date', 'sr.structured_notes');
     const found = rows.find((row) => (String(row.service_line || '').trim() || detectServiceLine(row.service_type)) === 'lawn');
     if (found) return found;
     if (rows.length < HISTORY_PAGE_SIZE) break;
   }
   return null;
+}
+
+// A line the completion flagged over its product's ceiling (owner 2026-11-26) is a recorded typo, never a default: the product
+// stays listed, but its amount, unit, area and rate are blanked so the sheet never offers them again. A product entered twice
+// keeps its good line (the flagged one sorts last, so it only stands when it is the only one).
+function linesGoodFirst(rows, flagged) {
+  const typo = rows.filter((row) => isFlaggedLine(row, flagged));
+  const blank = (row) => ({ ...row, total_amount: null, amount_unit: null, area_value: null, area_unit: null, application_rate: null, rate_unit: null });
+  return [...rows.filter((row) => !typo.includes(row)), ...typo.map(blank)];
 }
 
 /**
@@ -150,11 +160,11 @@ async function findLastLawnRecord(svc, knex, visitDate) {
 async function loadLastVisit(svc, knex, visitDate, catalogIds, methodValues = new Set()) {
   const record = await findLastLawnRecord(svc, knex, visitDate);
   if (!record) return null;
-  const rows = await knex('service_products')
+  const rows = linesGoodFirst(await knex('service_products')
     .where('service_record_id', record.id)
     .orderBy('created_at')
-    .select('product_id', 'product_name', 'total_amount', 'amount_unit', 'application_method', 'area_value', 'area_unit',
-      'application_rate', 'rate_unit');
+    .select('id', 'product_id', 'product_name', 'total_amount', 'amount_unit', 'application_method', 'area_value', 'area_unit',
+      'application_rate', 'rate_unit'), flaggedDeductionsOf(record.structured_notes));
   const seen = new Set();
   const products = [];
   for (const row of rows) {

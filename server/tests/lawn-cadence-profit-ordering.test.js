@@ -55,14 +55,16 @@ const SAG_ENVELOPE = {
 };
 const TRACKS = Object.keys(SAG_ENVELOPE);
 
-function profitsAt(track, lawnSqFt) {
+// legacy: the grid a quote saved before the one lawn price lane (2026-11-26) was sold on, each grass's own rows. The envelopes
+// above were measured on it and still pin it. New quotes are pinned in the last block of this file.
+function profitsAt(track, lawnSqFt, { legacy = true } = {}) {
   // track rides the OPTIONS object — priceLawnCare ignores grassType on the
   // property (codex #3274 r2: passing it there measured the default
   // St. Augustine curve for every "track").
   // includeHiddenTiers: the envelope spans the full 6/9/12 ladder — the 6x
   // leg is hidden for new sales (owner directive 2026-09-24) but remains the
   // cadence-discount anchor this ordering is measured against.
-  const result = priceLawnCare({ lawnSqFt }, { tier: 'standard', track, includeHiddenTiers: true });
+  const result = priceLawnCare({ lawnSqFt }, { tier: 'standard', track, includeHiddenTiers: true, legacyLawnOneLane: legacy });
   const byVisits = {};
   for (const tier of result.tiers) {
     byVisits[tier.visits] = tier.annual - tier.costFloorDetails.annualCost;
@@ -115,6 +117,74 @@ describe('lawn cadence frequency discount — profit ordering envelope', () => {
     for (let sqft = TABLE_MAX_SQFT + 1; sqft <= SWEEP_MAX_SQFT; sqft += 13) {
       const p = profitsAt(track, sqft);
       expect(p[6] - p[9]).toBeLessThanOrEqual(extrapolatedMax);
+    }
+  });
+});
+
+// One lawn price lane (owner 2026-11-26 "make these one type of grass", new quotes only): a new bermuda or zoysia plan prices from
+// the St. Augustine rows while its cost stays its own grass's (the products differ). Measured 2026-11-27 on the shipped grid + DENSE
+// default cost model, sampled every 13 sq ft (bounds carry small headroom over the sampled maxima):
+// - bermuda: 9x earns at most $4.08 a year under 6x at 18,076-19,896 sq ft (6x is the hidden anchor, not sold), and 12x earns at
+//   most $2.17 a year under 9x at 2,216-2,346 sq ft (both sold). Nowhere else.
+// - zoysia: 9x earns at most $12.92 a year under 6x at 16,113-20,000 sq ft (6x not sold), the 20,000 cell by $3.25; 12x never
+//   earns under 9x.
+// - st_augustine and bahia read their own rows as before: the envelopes above stand for them unchanged.
+// - Above the table (20,000 sq ft) every track keeps zero sag.
+// Owner-acknowledged with the margin ledger of waveguard-pricing-exposure.test.js. Re-measure deliberately; never loosen to go green.
+const NEW_QUOTE_ENVELOPE = {
+  st_augustine: { exemptCells: [], twelveUnderNine: { max: 0, ranges: [] }, table: SAG_ENVELOPE.st_augustine.table },
+  bermuda: { exemptCells: [], twelveUnderNine: { max: 2.25, ranges: [[2200, 2350]] }, table: { max: 4.25, ranges: [[18000, TABLE_MAX_SQFT]] } },
+  zoysia: { exemptCells: [20000], twelveUnderNine: { max: 0, ranges: [] }, table: { max: 13, ranges: [[16000, TABLE_MAX_SQFT]] } },
+  bahia: { exemptCells: [], twelveUnderNine: { max: 0, ranges: [] }, table: SAG_ENVELOPE.bahia.table },
+};
+const NEW_QUOTE = { legacy: false };
+
+describe('lawn cadence profit ordering — new quotes on the one lawn price lane', () => {
+  it.each(TRACKS)('%s: 12x earns over 9x at every binding cell; 9x over 6x outside the measured exemptions', (track) => {
+    const exempt = new Set(NEW_QUOTE_ENVELOPE[track].exemptCells);
+    for (const sqft of BINDING_CELL_SIZES) {
+      const p = profitsAt(track, sqft, NEW_QUOTE);
+      expect(p[12]).toBeGreaterThan(p[9]);
+      if (!exempt.has(sqft)) expect(p[9]).toBeGreaterThan(p[6]);
+    }
+  });
+
+  it.each(TRACKS)('%s: 12x earns under 9x only inside the measured envelope', (track) => {
+    const { max, ranges } = NEW_QUOTE_ENVELOPE[track].twelveUnderNine;
+    for (let sqft = 500; sqft <= SWEEP_MAX_SQFT; sqft += 13) {
+      const p = profitsAt(track, sqft, NEW_QUOTE);
+      const gap = p[9] - p[12];
+      if (gap <= 0) continue;
+      expect(gap).toBeLessThanOrEqual(max);
+      expect(ranges.some(([lo, hi]) => sqft >= lo && sqft <= hi)).toBe(true);
+    }
+  });
+
+  it.each(TRACKS)('%s: 9x sag inside the table stays inside the measured envelope', (track) => {
+    const { max, ranges } = NEW_QUOTE_ENVELOPE[track].table;
+    for (let sqft = 5500; sqft <= TABLE_MAX_SQFT; sqft += 13) {
+      const p = profitsAt(track, sqft, NEW_QUOTE);
+      const sag = p[6] - p[9];
+      if (sag <= 0) continue;
+      expect(sag).toBeLessThanOrEqual(max);
+      expect(ranges.some(([lo, hi]) => sqft >= lo && sqft <= hi)).toBe(true);
+    }
+  });
+
+  it.each(TRACKS)('%s: no 9x sag above the table', (track) => {
+    for (let sqft = TABLE_MAX_SQFT + 1; sqft <= SWEEP_MAX_SQFT; sqft += 13) {
+      const p = profitsAt(track, sqft, NEW_QUOTE);
+      expect(p[6] - p[9]).toBeLessThanOrEqual(0);
+    }
+  });
+
+  it('a new bermuda or zoysia plan collects the St. Augustine price; its cost stays its own grass', () => {
+    for (const sqft of [3000, 8000, 12000]) {
+      const plan = (track) => priceLawnCare({ lawnSqFt: sqft }, { tier: 'enhanced', track });
+      for (const track of ['bermuda', 'zoysia']) {
+        expect(plan(track).annual).toBe(plan('st_augustine').annual);
+        expect(plan(track).track).toBe(track);
+      }
     }
   });
 });

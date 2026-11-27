@@ -1,0 +1,321 @@
+// "Close, already counted" and the Receive warning on a restock request, against PostgreSQL
+// (CI's DB-gated pass; locally set DATABASE_URL to a migrated scratch database). Fixture tables are
+// LIKE copies in a unique schema that is dropped after the suite. The real updateRestockRequest and
+// order-dispatch settle code run. Fixtures are synthetic.
+const SKIP = !process.env.DATABASE_URL;
+const knex = require('knex');
+const { randomUUID } = require('crypto');
+
+let mockConn;
+jest.mock('../models/db', () => {
+  const proxy = (...args) => mockConn(...args);
+  proxy.raw = (...args) => mockConn.raw(...args);
+  proxy.transaction = (...args) => mockConn.transaction(...args);
+  proxy.schema = { hasTable: (...args) => mockConn.schema.hasTable(...args) };
+  return proxy;
+});
+jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+const inventory = require('../services/inventory-operations');
+
+const TABLES = ['products_catalog', 'product_restock_requests', 'vendor_orders', 'product_inventory_movements', 'notifications'];
+const DAY = 24 * 60 * 60 * 1000;
+
+jest.setTimeout(30000);
+(SKIP ? describe.skip : describe)('restock close counted on PostgreSQL', () => {
+  const schema = `restock_close_${randomUUID().replaceAll('-', '')}`;
+  let product;
+
+  beforeAll(async () => {
+    mockConn = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema, 'public'], pool: { min: 0, max: 4 } });
+    await mockConn.raw('CREATE SCHEMA ??', [schema]);
+    for (const table of TABLES) await mockConn.raw('CREATE TABLE ??.?? (LIKE public.?? INCLUDING ALL)', [schema, table, table]);
+  });
+  beforeEach(async () => {
+    [product] = await mockConn('products_catalog').insert({
+      name: 'Synthetic SC', active: true, container_size: '1 gal', inventory_unit: 'gal', inventory_on_hand: 4,
+    }).returning('*');
+  });
+  afterEach(async () => {
+    for (const table of TABLES) await mockConn.raw('TRUNCATE TABLE ??.??', [schema, table]);
+  });
+  afterAll(async () => {
+    await mockConn.raw('DROP SCHEMA ?? CASCADE', [schema]);
+    await mockConn.destroy();
+  });
+
+  const request = (overrides = {}) => mockConn('product_restock_requests').insert({
+    product_id: product.id, status: 'ordered', requested_quantity: 4, unit: 'gal', source: 'auto_reorder',
+    created_at: new Date(Date.now() - 3 * DAY), ...overrides,
+  }).returning('*').then(([row]) => row);
+  const ledger = (requestId, overrides = {}) => mockConn('vendor_orders').insert({
+    restock_request_id: requestId, adapter: 'siteone', status: 'placed', amount_cents: 12000,
+    placed_at: new Date(Date.now() - 2 * DAY), ...overrides,
+  }).returning('*').then(([row]) => row);
+  const invoiceMovement = (quantity, daysAgo, source = 'siteone_invoice', unit = 'gal') => mockConn('product_inventory_movements').insert({
+    product_id: product.id, movement_type: 'restock', quantity, unit, stock_before: 0, stock_after: quantity,
+    metadata: { source }, created_at: new Date(Date.now() - daysAgo * DAY),
+  }).returning('*').then(([row]) => row);
+  const bell = (ledgerId) => mockConn('notifications').insert({
+    recipient_type: 'admin', category: 'operations', title: 'Order parked', metadata: { dedupeKey: `auto-order:${ledgerId}` },
+  }).returning('*').then(([row]) => row);
+  const stock = async () => Number((await mockConn('products_catalog').where({ id: product.id }).first()).inventory_on_hand);
+  const movements = () => mockConn('product_inventory_movements').where({ product_id: product.id });
+  const reload = (id) => mockConn('product_restock_requests').where({ id }).first();
+
+  test.each(['open', 'ordered'])('closes a %s request as received and changes no stock', async (status) => {
+    const req = await request({ status });
+    const result = await inventory.updateRestockRequest(req.id, { action: 'close_counted', note: 'invoice counted it' }, { actorId: null });
+    expect(result.request.status).toBe('received');
+    expect(result.movement).toBeUndefined();
+    expect(await stock()).toBe(4);
+    expect(await movements()).toHaveLength(0);
+    const saved = await reload(req.id);
+    expect(saved.closed_at).not.toBeNull();
+    expect(saved.metadata).toMatchObject({ lastManualAction: { action: 'close_counted', note: 'invoice counted it' } });
+  });
+
+  test('a placed order settles: the request is received, the order bell is retired, and the order stays on the monthly cap', async () => {
+    const req = await request();
+    const order = await ledger(req.id);
+    const note = await bell(order.id);
+    await inventory.updateRestockRequest(req.id, { action: 'close_counted' }, { actorId: null });
+    const row = await mockConn('vendor_orders').where({ id: order.id }).first();
+    expect(row.status).toBe('placed');
+    expect(row.placed_at).not.toBeNull();
+    expect(row.evidence.revokedAt).toBeUndefined();
+    expect((await mockConn('notifications').where({ id: note.id }).first()).done_at).not.toBeNull();
+    const dispatch = require('../services/procurement/order-dispatch');
+    expect(await dispatch.findLiveAutoOrder(mockConn, product.id)).toBeUndefined();
+    expect(await dispatch.monthlySpentCents(mockConn)).toBe(12000);
+  });
+
+  test('closes a parked request (post-submit needs_review order) the same way', async () => {
+    const req = await request();
+    const order = await ledger(req.id, { status: 'needs_review', error: 'ambiguous_after_submit' });
+    await inventory.updateRestockRequest(req.id, { action: 'close_counted' }, { actorId: null });
+    expect((await reload(req.id)).status).toBe('received');
+    expect(await require('../services/procurement/order-dispatch').findLiveAutoOrder(mockConn, product.id)).toBeUndefined();
+    expect((await mockConn('vendor_orders').where({ id: order.id }).first()).status).toBe('needs_review');
+  });
+
+  test('refuses a request that is received or cancelled, and one whose order is still being placed', async () => {
+    for (const status of ['received', 'cancelled']) {
+      const req = await request({ status });
+      await expect(inventory.updateRestockRequest(req.id, { action: 'close_counted' }, {})).rejects.toMatchObject({ statusCode: 409, code: 'request_closed' });
+    }
+    const req = await request();
+    await ledger(req.id, { status: 'placing', placed_at: null });
+    await expect(inventory.updateRestockRequest(req.id, { action: 'close_counted' }, {})).rejects.toMatchObject({ statusCode: 409, code: 'auto_order_placing' });
+    expect((await reload(req.id)).status).toBe('ordered');
+  });
+
+  test('Receive is refused with the quantity and date an invoice already added', async () => {
+    const req = await request();
+    await invoiceMovement(4, 1);
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({
+      statusCode: 409, code: 'already_counted_by_receipt',
+      message: expect.stringMatching(/^An invoice already added 4 gal on [A-Z][a-z]+ \d{1,2}\. Receive again only if this is a second delivery\.$/),
+      details: { alreadyAdded: [{ quantity: 4, unit: 'gal' }] },
+    });
+    expect(await stock()).toBe(4);
+    expect((await reload(req.id)).status).toBe('ordered');
+  });
+
+  test('Receive anyway (confirm) adds the stock; a hand entry or an older invoice never triggers the warning', async () => {
+    const req = await request();
+    await invoiceMovement(2, 1, 'admin_manual_adjustment');
+    await invoiceMovement(3, 10);
+    const plain = await inventory.updateRestockRequest(req.id, { action: 'receive' }, {});
+    expect(plain.request.status).toBe('received');
+    expect(await stock()).toBe(8);
+
+    const second = await request();
+    await invoiceMovement(1, 0.5, 'amazon_delivery');
+    await expect(inventory.updateRestockRequest(second.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    const refused = await warningFor(second.id);
+    const confirmed = await inventory.updateRestockRequest(second.id, { action: 'receive', confirm: true, confirmFingerprint: refused.details.receiptFingerprint }, {});
+    expect(confirmed.request.status).toBe('received');
+    expect(await stock()).toBe(12);
+  });
+
+  test('only receipts since the request existed count; the preview refuses the same way', async () => {
+    const req = await request();
+    await invoiceMovement(4, 4); // before the request was raised (3 days ago)
+    expect((await inventory.previewRestockAction(req.id, { action: 'receive' })).new_status).toBe('received');
+    await invoiceMovement(4, 0.2);
+    await expect(inventory.previewRestockAction(req.id, { action: 'receive' })).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+  });
+
+  test('a receipt stamped minutes before the request (its transaction began first) still counts; much older does not', async () => {
+    const req = await request({ created_at: new Date(Date.now() - 3 * DAY) });
+    await invoiceMovement(4, 3 * 1 + 5 / (24 * 60)); // 5 minutes before the request
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    const older = await request({ created_at: new Date(Date.now() - 3 * DAY), source: 'test_fixture' });
+    await mockConn('product_inventory_movements').where({ product_id: product.id }).del();
+    await invoiceMovement(4, 3 + 3 / 24); // 3 hours before the request
+    expect((await inventory.updateRestockRequest(older.id, { action: 'receive' }, {})).request.status).toBe('received');
+  });
+
+  test('an invoice that posted before the vendor confirmation (a late placed_at) still counts', async () => {
+    const req = await request();
+    await ledger(req.id, { placed_at: new Date(Date.now() - 0.1 * DAY), created_at: new Date(Date.now() - 2 * DAY) });
+    await invoiceMovement(4, 1);
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+  });
+
+  test('confirm is not accepted on other actions', async () => {
+    const req = await request();
+    await expect(inventory.updateRestockRequest(req.id, { action: 'close_counted', confirm: true }, {})).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  const WARNING = /already added (.+)\. Receive again only if this is a second delivery\.$/;
+  const warningFor = async (id) => (await inventory.updateRestockRequest(id, { action: 'receive' }, {}).catch((err) => err));
+
+  test('several invoices are listed one by one, not summed; units stay apart; a long list ends "and N more"', async () => {
+    const req = await request();
+    await invoiceMovement(2, 2.5);
+    await invoiceMovement(1, 1.5);
+    const two = await warningFor(req.id);
+    expect(two.message).toMatch(/^Invoices already added 2 gal on [A-Z][a-z]+ \d+ and 1 gal on [A-Z][a-z]+ \d+\. /);
+    expect(two.message).not.toMatch(/3 gal/);
+    await invoiceMovement(5, 1.2, 'amazon_delivery', 'lb');
+    const mixed = await warningFor(req.id);
+    expect(mixed.message.match(WARNING)[1]).toMatch(/gal on .*; 5 lb on /);
+    await invoiceMovement(1, 1.1);
+    await invoiceMovement(1, 1.0);
+    const many = await warningFor(req.id);
+    expect(many.message.match(WARNING)[1]).toMatch(/^2 gal on [A-Z][a-z]+ \d+, 1 gal on [A-Z][a-z]+ \d+, 1 gal on [A-Z][a-z]+ \d+ and 1 more; 5 lb on /);
+    expect(many.details.alreadyAdded).toHaveLength(5);
+  });
+
+  test('a receipt the inventory-agent undo reversed does not trigger the warning', async () => {
+    const req = await request();
+    const original = await invoiceMovement(4, 1);
+    await mockConn('product_inventory_movements').insert({
+      product_id: product.id, movement_type: 'correction', quantity: -4, unit: 'gal', stock_before: 4, stock_after: 0,
+      metadata: { source: 'inventory_agent_undo', undoOfMovementId: original.id },
+    });
+    const received = await inventory.updateRestockRequest(req.id, { action: 'receive' }, {});
+    expect(received.request.status).toBe('received');
+    // An undone receipt does not hide a different, live one.
+    const second = await request();
+    await invoiceMovement(2, 0.5);
+    await expect(inventory.updateRestockRequest(second.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt', message: expect.stringContaining('2 gal') });
+  });
+
+  test('Receive anyway counts only the receipts the dialog listed: the same set passes, a changed set is refused with the new list', async () => {
+    const req = await request();
+    await invoiceMovement(2, 1);
+    const shown = await warningFor(req.id);
+    expect(shown.details.receiptFingerprint).toEqual(expect.any(String));
+    // A receipt posts while the dialog is open.
+    await invoiceMovement(3, 0.1);
+    const changed = await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {}).catch((err) => err);
+    expect(changed).toMatchObject({ statusCode: 409, code: 'already_counted_by_receipt' });
+    expect(changed.details.alreadyAdded).toHaveLength(2);
+    expect(changed.details.receiptFingerprint).not.toBe(shown.details.receiptFingerprint);
+    expect(await stock()).toBe(4);
+    expect((await reload(req.id)).status).toBe('ordered');
+    // The dialog shows the new list; confirming that set goes through.
+    const done = await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: changed.details.receiptFingerprint }, {});
+    expect(done.request.status).toBe('received');
+    expect(await stock()).toBe(8);
+  });
+
+  test('confirm without a fingerprint, or with another request\'s, is refused; an undone receipt leaves the set', async () => {
+    const req = await request();
+    const original = await invoiceMovement(2, 1);
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    await expect(inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: 'stale' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+    const shown = await warningFor(req.id);
+    await mockConn('product_inventory_movements').insert({
+      product_id: product.id, movement_type: 'correction', quantity: -2, unit: 'gal', stock_before: 4, stock_after: 2,
+      metadata: { source: 'inventory_agent_undo', undoOfMovementId: original.id },
+    });
+    // The only receipt was undone: the set is empty, so a plain receive passes.
+    expect((await inventory.updateRestockRequest(req.id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {})).request.status).toBe('received');
+  });
+
+  test('Close, already counted from the dialog sends the fingerprint: the same set closes, a changed or undone set is refused', async () => {
+    const req = await request();
+    const first = await invoiceMovement(2, 1);
+    const shown = await warningFor(req.id);
+    const late = await invoiceMovement(1, 0.1);
+    const changed = await inventory.updateRestockRequest(req.id, { action: 'close_counted', confirmFingerprint: shown.details.receiptFingerprint }, {}).catch((err) => err);
+    expect(changed).toMatchObject({ statusCode: 409, code: 'already_counted_by_receipt' });
+    expect(changed.details.alreadyAdded).toHaveLength(2);
+    expect((await reload(req.id)).status).toBe('ordered');
+    const closed = await inventory.updateRestockRequest(req.id, { action: 'close_counted', confirmFingerprint: changed.details.receiptFingerprint }, {});
+    expect(closed.request.status).toBe('received');
+    expect(await stock()).toBe(4);
+
+    // Every listed receipt undone: closing "already counted" would lose that stock, so it asks again.
+    const second = await request();
+    const undone = await invoiceMovement(5, 0.5);
+    const listed = await warningFor(second.id);
+    for (const row of [first, late, undone]) {
+      await mockConn('product_inventory_movements').insert({ product_id: product.id, movement_type: 'correction', quantity: -1, unit: 'gal', stock_before: 4, stock_after: 3,
+        metadata: { source: 'inventory_agent_undo', undoOfMovementId: row.id } });
+    }
+    await expect(inventory.updateRestockRequest(second.id, { action: 'close_counted', confirmFingerprint: listed.details.receiptFingerprint }, {})).rejects.toMatchObject({ code: 'receipts_changed' });
+    // The plain button has no list to check.
+    expect((await inventory.updateRestockRequest(second.id, { action: 'close_counted' }, {})).request.status).toBe('received');
+  });
+
+  test('the fingerprint binds the request and its order: another request, a changed request or a changed order refuses a stale confirm', async () => {
+    const req = await request();
+    const order = await ledger(req.id);
+    await invoiceMovement(2, 1);
+    const shown = await warningFor(req.id);
+    const stale = (id) => inventory.updateRestockRequest(id, { action: 'receive', confirm: true, confirmFingerprint: shown.details.receiptFingerprint }, {}).catch((err) => err);
+
+    // A different request on the same product sees the same receipts but another fingerprint.
+    const other = await request({ source: 'test_fixture' });
+    const otherShown = await warningFor(other.id);
+    expect(otherShown.details.receiptFingerprint).not.toBe(shown.details.receiptFingerprint);
+    expect((await stale(other.id)).code).toBe('already_counted_by_receipt');
+
+    // The order changes (late-order marker) after the dialog opened.
+    await mockConn('vendor_orders').where({ id: order.id }).update({ evidence: { landedAfterReceive: new Date().toISOString() } });
+    expect((await stale(req.id)).code).toBe('already_counted_by_receipt');
+    expect(await stock()).toBe(4);
+    await mockConn('vendor_orders').where({ id: order.id }).update({ evidence: {} });
+    expect((await warningFor(req.id)).details.receiptFingerprint).toBe(shown.details.receiptFingerprint);
+
+    // The request itself changes (another action touched it).
+    await mockConn('product_restock_requests').where({ id: req.id }).update({ updated_at: new Date(Date.now() + 1000) });
+    expect((await stale(req.id)).code).toBe('already_counted_by_receipt');
+    expect(await stock()).toBe(4);
+  });
+
+  describe('a late automatic order after the request was received', () => {
+    const lateRequest = async () => {
+      const req = await request({ status: 'received', closed_at: new Date() });
+      const order = await ledger(req.id, { evidence: { landedAfterReceive: new Date().toISOString() } });
+      return { req, order };
+    };
+
+    test('an invoice since the late placement refuses Receive; Close, already counted settles it with no stock change', async () => {
+      const { req, order } = await lateRequest();
+      await invoiceMovement(4, 1);
+      await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+      expect(await stock()).toBe(4);
+      const closed = await inventory.updateRestockRequest(req.id, { action: 'close_counted' }, {});
+      expect(closed.request.status).toBe('received');
+      expect(await stock()).toBe(4);
+      const row = await mockConn('vendor_orders').where({ id: order.id }).first();
+      expect(row.evidence.landedAfterReceive).toBeUndefined();
+      expect(row.evidence.secondReceiveAt).toBeDefined();
+      expect(await require('../services/procurement/order-dispatch').findLiveAutoOrder(mockConn, product.id)).toBeUndefined();
+    });
+
+    test('with no invoice the second receive still works; a plain received request cannot close_counted', async () => {
+      const { req } = await lateRequest();
+      await inventory.updateRestockRequest(req.id, { action: 'receive' }, {});
+      expect(await stock()).toBe(8);
+      const plain = await request({ status: 'received' });
+      await expect(inventory.updateRestockRequest(plain.id, { action: 'close_counted' }, {})).rejects.toMatchObject({ code: 'request_closed' });
+    });
+  });
+});

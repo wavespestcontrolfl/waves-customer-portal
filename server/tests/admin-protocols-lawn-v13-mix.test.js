@@ -72,6 +72,7 @@ function readQuery(rows) {
   for (const method of ['where', 'orWhereNull', 'whereIn', 'join', 'select', 'orderByRaw', 'orderBy']) query[method] = jest.fn(() => query);
   query.first = jest.fn(async () => rows[0] || null);
   query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
+  query.then = (onFulfilled, onRejected) => Promise.resolve(rows).then(onFulfilled, onRejected);
   return query;
 }
 
@@ -609,6 +610,35 @@ describe('the spring pre-emergent catch-up on the tank sheet', () => {
     expect(codes(body)).not.toContain('lawn_rounds_catchup_unavailable');
   });
 
+  test('no sprayer picked and the big tanks differ: the catch-up hose pass keeps its own 1 gal per 1,000, no tank\'s', async () => {
+    const tanks = [
+      { id: 'cal-1', equipment_system_id: 'tank1', system_name: '110-Gallon Spray Tank #1', system_type: 'tank', carrier_gal_per_1000: 2, tank_capacity_gal: 110, calibration_status: 'field_verified', expires_at: null },
+      { id: 'cal-2', equipment_system_id: 'tank2', system_name: 'Udor tank #2', system_type: 'tank', carrier_gal_per_1000: 4, tank_capacity_gal: 110, calibration_status: 'owner_estimate', expires_at: null },
+    ];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'equipment_calibrations as ec' ? readQuery(tanks) : base(table)));
+    const body = await sheet();
+    expect(body.equipment.tankOptions).toHaveLength(2);
+    expect(itemFor(body, DIM_2EW).jobMix).toMatchObject({ amount: 5, carrierGallons: 10 });
+    expect(itemFor(body, DIM_2EW)).not.toHaveProperty('carrierFromRig');
+    // Each tank's full tank at the hose pass's 1 gal per 1,000: 110,000 sq ft, 55 fl oz on either tank.
+    expect(itemFor(body, DIM_2EW).tankAmounts.tankOptions.map((option) => option.fullTank.amount)).toEqual([55, 55]);
+    // Picking a tank keeps that amount: its full tank is sized at the line's own volume, not the tank's 2.0.
+    const picked = await lawnMix({ month: '3', track: 'st_augustine', scheduledServiceId: VISIT, equipmentSystemId: 'tank1' });
+    expect(itemFor(picked, DIM_2EW).fullTankMix).toMatchObject({ amount: 55 });
+    // A visit with its own assigned rig sizes on it: no "No sprayer picked", no per-tank lines.
+    const assigned = await sheet('2027-03-20', { assigned_equipment_system_id: 'tank1' });
+    expect(assigned.equipment).toMatchObject({ systemName: '110-Gallon Spray Tank #1', carrierGalPer1000: 2 });
+    expect(assigned.equipment.tankOptions).toBeUndefined();
+    expect(itemFor(assigned, DIM_2EW).tankAmounts.tankOptions).toBeUndefined();
+    // A visit assigned by calibration only resolves that calibration's sprayer the same way.
+    const withTanks = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'equipment_calibrations' ? readQuery([{ equipment_system_id: 'tank1' }]) : withTanks(table)));
+    const byCalibration = await sheet('2027-03-20', { assigned_calibration_id: 'cal-1' });
+    expect(byCalibration.equipment.tankOptions).toBeUndefined();
+    expect(db).toHaveBeenCalledWith('equipment_calibrations');
+  });
+
   test('a pre-emergent on the ledger this year: no catch-up, and the window read asks for none', async () => {
     ledger = [{ id: 'h1' }];
     const body = await sheet();
@@ -689,8 +719,8 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       // The label-rate row states no rate: the recipe line's 0.147 oz, never the catalog's 0.29 oz.
       ratePer1000: 0.147, rateSource: 'recipe_line_rate',
       backpack4Gal: { amount: 0.147, amountUnit: 'oz', metricAmount: 4.2, metricUnit: 'g', carrierGalPer1000: 4, carrierSource: 'line' },
-      // The FlowZone was tested at 1.33, not the line's 4 gal: the card warns; the spot row needs no big-tank check.
-      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3, otherSprayerName: null }],
+      // The FlowZone puts out 1.33, not the line's 4 gal: the card says how to put the dose on; the spot row needs no big-tank check.
+      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, sprayerGalPer1000: 1.33 }],
     });
     expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
       ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
@@ -703,6 +733,58 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       code: 'backpack_calibration_overdue_or_estimated',
       message: 'Sprayer not field tested: FlowZone Typhoon Backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
     }));
+  });
+
+  test('no sprayer picked and the big tanks differ (owner 2026-11-27: 2.0 and 4.0): a named amount per tank and each tank\'s line', async () => {
+    const tanks = [
+      { id: 'cal-1', equipment_system_id: 'tank1', system_name: '110-Gallon Spray Tank #1', system_type: 'tank', carrier_gal_per_1000: 2, tank_capacity_gal: 110, calibration_status: 'field_verified', expires_at: null, verification_notes: 'Tank counts.' },
+      { id: 'cal-2', equipment_system_id: 'tank2', system_name: 'Udor tank #2', system_type: 'tank', carrier_gal_per_1000: 4, tank_capacity_gal: 110, calibration_status: 'owner_estimate', expires_at: null },
+    ];
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => (table === 'equipment_calibrations as ec' ? readQuery(tanks) : base(table)));
+    const body = await lawnMix({ month: '5' });
+    const { tankOptions } = itemFor(body, TETRINO).tankAmounts;
+    expect(tankOptions.map((option) => [option.sprayerName, option.fullTank.amount])).toEqual([['110-Gallon Spray Tank #1', 20.185], ['Udor tank #2', 10.092]]);
+    expect(body.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'sprayer_number', message: '110-Gallon Spray Tank #1: 2 gal per 1,000 sq ft, from tank counts.' }),
+      expect.objectContaining({ code: 'other_tank_sprayer_number', message: 'Udor tank #2: 4 gal per 1,000 sq ft, owner estimate.' }),
+    ]));
+    // No single coverage or full-tank mix: each tank's coverage, named.
+    expect(body.equipment).toMatchObject({ tankCoverageSqft: null, carrierGalPer1000: null, equipmentSystemId: null, systemName: 'No sprayer picked: 110-Gallon Spray Tank #1 or Udor tank #2' });
+    // An area mix keeps its product amount, not the first tank's spray volume.
+    const january = await lawnMix({ month: '1' });
+    expect(itemFor(january, NUTRA).jobMix).toMatchObject({ amount: 60, carrierGallons: null });
+    expect(body.equipment.tankOptions.map((option) => [option.systemName, option.tankCoverageSqft])).toEqual([['110-Gallon Spray Tank #1', 55000], ['Udor tank #2', 27500]]);
+    expect(itemFor(body, TETRINO)).toMatchObject({ fullTankMix: null, plannedFullTankMix: null });
+    // A failed tank list read fails the sheet, never one tank's number alone.
+    db.mockImplementation((table) => {
+      if (table !== 'equipment_calibrations as ec') return base(table);
+      const query = readQuery(tanks);
+      query.then = (onFulfilled, onRejected) => Promise.reject(new Error('read failed')).then(onFulfilled, onRejected);
+      return query;
+    });
+    const res = { json: jest.fn(), status: jest.fn() };
+    const next = jest.fn();
+    await handler({ query: { track: 'bermuda', lawnSqft: '10000', month: '5' } }, res, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'read failed' }));
+    db.mockImplementation((table) => (table === 'equipment_calibrations as ec' ? readQuery(tanks) : base(table)));
+    // A picked sprayer: its own amount only.
+    const picked = await lawnMix({ month: '5', equipmentSystemId: 'tank1' });
+    expect(itemFor(picked, TETRINO).tankAmounts.tankOptions).toBeUndefined();
+    expect(picked.warnings.map((warning) => warning.code)).not.toContain('other_tank_sprayer_number');
+    expect(picked.equipment.tankOptions).toBeUndefined();
+  });
+
+  test('the FlowZone on the owner\'s standing number (no expiry, owner 2026-11-27) gets a neutral note, not a test prompt', async () => {
+    Object.assign(BACKPACK, { carrier_gal_per_1000: 2, calibration_status: 'owner_estimate', expires_at: null });
+    try {
+      const body = await lawnMix({ month: '5' });
+      expect(body.warnings).toContainEqual({ code: 'backpack_sprayer_number', severity: 'note', equipmentSystemId: 'backpack', message: 'FlowZone Typhoon Backpack: 2 gal per 1,000 sq ft, owner estimate.' });
+      expect(body.warnings.filter((warning) => /FlowZone/.test(warning.message)).map((warning) => warning.code)).toEqual(['backpack_sprayer_number']);
+      expect(itemFor(body, 'Celsius WG').tankAmounts.backpack4Gal).toMatchObject({ amount: 0.17, carrierGalPer1000: 2, carrierSource: 'calibration' });
+    } finally {
+      Object.assign(BACKPACK, { carrier_gal_per_1000: 1.33, calibration_status: 'estimated', expires_at: '2099-01-01T00:00:00Z' });
+    }
   });
 
   test('a granular bag is a spreader line: its rate, no tank amount', async () => {

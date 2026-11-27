@@ -123,10 +123,7 @@ describe('pricing engine one-time treatment rules', () => {
     // priceOneTimeLawn reads it.
     const lawn = priceLawnCare(p, { track: 'st_augustine', tier: 'standard', lawnFreq: 6, includeHiddenTiers: true, useLawnCostFloor: false, applyProgramMinimum: false });
     expect(lawn.tier).toBe('standard');
-    const base = Math.max(115, Math.round(lawn.perApp * 2.20));
-    const treated = Math.max(115, Math.round(base * 1.38));
-    const expected = Math.max(115, Math.round(treated * 1.50 * 0.85));
-    const result = priceOneTimeLawn(p, {
+    const options = {
       treatmentType: 'fungicide',
       urgency: 'URGENT',
       afterHours: false,
@@ -134,13 +131,25 @@ describe('pricing engine one-time treatment rules', () => {
       track: 'st_augustine',
       tier: 'enhanced',
       lawnFreq: 6,
-    });
+    };
+    // New quotes (one lawn price lane, owner 2026-11-26): 1.8 x the anchor, +20% for fungus work.
+    const base = Math.max(115, Math.round(lawn.perApp * 1.80));
+    const treated = Math.max(115, Math.round(base * 1.20));
+    const expected = Math.max(115, Math.round(treated * 1.50 * 0.85));
+    const result = priceOneTimeLawn(p, options);
 
     expect(result.baselinePerApp).toBe(lawn.perApp);
-    expect(result.treatmentMultiplier).toBe(1.38);
+    expect(result.treatmentMultiplier).toBe(1.2);
     expect(result.urgencyMultiplier).toBe(1.5);
     expect(result.recurringCustomerDiscountRate).toBe(0.15);
     expect(result.price).toBe(expected);
+
+    // A quote saved before the rule keeps the Settings multiple (2.2) and treatment factor (1.38).
+    const legacyBase = Math.max(115, Math.round(lawn.perApp * 2.20));
+    const legacyTreated = Math.max(115, Math.round(legacyBase * 1.38));
+    const legacy = priceOneTimeLawn(p, { ...options, legacyLawnOneLane: true });
+    expect(legacy.treatmentMultiplier).toBe(1.38);
+    expect(legacy.price).toBe(Math.max(115, Math.round(legacyTreated * 1.50 * 0.85)));
   });
 
   test('one-time mosquito uses mosquito treatable area for SMALL bucket', () => {
