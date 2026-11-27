@@ -9,7 +9,8 @@ const mixRules = require('../services/product-mix-rules');
 router.use(adminAuthenticate, requireTechOrAdmin);
 
 function sendError(res, next, err) {
-  if (err && [400, 404, 409].includes(err.statusCode)) return res.status(err.statusCode).json({ error: err.message });
+  // A 409 from Add rule carries the target's current rule, so the screen can offer Edit.
+  if (err && [400, 404, 409].includes(err.statusCode)) return res.status(err.statusCode).json({ error: err.message, ...(err.rule ? { rule: err.rule } : {}) });
   return next(err);
 }
 
@@ -33,7 +34,7 @@ router.get('/check', async (req, res, next) => {
   } catch (err) { return sendError(res, next, err); }
 });
 
-// POST /api/admin/product-mix-rules — add a rule (or update the pair's existing row).
+// POST /api/admin/product-mix-rules — add a rule (or bring a removed one back). An active rule on the target: 409 + rule.
 router.post('/', requireAdmin, async (req, res, next) => {
   try {
     res.status(201).json({ rule: await mixRules.upsertRule(req.body || {}, { actorId: req.technicianId }) });

@@ -25,6 +25,8 @@ const mockAudit = [];
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async (event) => { mockAudit.push(event); }) }));
 
 const mockWrites = [];
+// The row a create's locked read finds (none by default).
+let mockFirst;
 const A = '00000000-0000-4000-8000-000000000001';
 const B = '00000000-0000-4000-8000-000000000002';
 jest.mock('../models/db', () => {
@@ -39,7 +41,7 @@ jest.mock('../models/db', () => {
     const q = {
       leftJoin: () => q, select: () => q, orderBy: () => q, where: () => q, andWhere: () => q, whereNot: () => q, forUpdate: () => q,
       whereIn: (col, values) => { if (col === 'id') ids = values; return q; },
-      first: async () => undefined,
+      first: async () => mockFirst,
       insert: (row) => { mockWrites.push(['insert', table, row]); return { returning: async () => [{ id: 'r1', ...row }] }; },
       update: (row) => { mockWrites.push(['update', table, row]); return { returning: async () => [{ id: 'r1', ...row }] }; },
       then: (resolve, reject) => Promise.resolve((rows[table] || []).filter((r) => !ids || ids.includes(r.id))).then(resolve, reject),
@@ -80,7 +82,7 @@ async function call(method, url, body) {
 
 const good = { productAId: A, productBId: B, verdict: 'caution', reason: 'Approved weed mix.' };
 
-beforeEach(() => { mockRole = 'admin'; mockWrites.length = 0; mockAudit.length = 0; });
+beforeEach(() => { mockRole = 'admin'; mockWrites.length = 0; mockAudit.length = 0; mockFirst = undefined; });
 
 describe('a technician', () => {
   beforeEach(() => { mockRole = 'technician'; });
@@ -119,6 +121,20 @@ describe('an admin', () => {
     expect(sql).toMatch(/ON CONFLICT \(product_a_id, product_b_id\) WHERE product_b_id IS NOT NULL\s+DO UPDATE SET/);
     expect(bindings.slice(0, 4)).toEqual([A, B, null, 'caution']);
     expect(mockAudit).toEqual([expect.objectContaining({ action: 'product_mix_rules.created', critical: true, trx: expect.objectContaining({ isTestTrx: true }) })]);
+  });
+
+  test('Add rule on a pair with an active rule is a 409 with that rule; nothing is written', async () => {
+    mockFirst = { id: 'r9', product_a_id: A, product_b_id: B, verdict: 'never', reason: 'Owner said no.', active: true, version: 3 };
+    const res = await call('post', '/api/admin/product-mix-rules', good);
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ error: 'A rule for this pair already exists. Edit that one.', rule: { id: 'r9', verdict: 'never', version: 3 } });
+    expect(mockWrites).toEqual([]);
+    expect(mockAudit).toEqual([]);
+  });
+
+  test('a create only brings back a removed row on conflict: the upsert updates where active = false', async () => {
+    await call('post', '/api/admin/product-mix-rules', good);
+    expect(mockWrites[0][1]).toMatch(/DO UPDATE SET[\s\S]*WHERE product_mix_rules\.active = false/);
   });
 
   test('a product + group rule upserts on the group index', async () => {

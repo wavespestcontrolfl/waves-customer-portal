@@ -47,7 +47,7 @@ const EMPTY_FORM = {
 
 async function readJson(response) {
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "Request failed");
+  if (!response.ok) throw Object.assign(new Error(data.error || "Request failed"), { status: response.status, data });
   return data;
 }
 
@@ -161,13 +161,15 @@ function TankCheck({ products }) {
     const key = selectionKey;
     setChecking(true);
     setError("");
+    // An answer from an earlier check never stays on screen while this one runs or after it fails.
+    setResult(null);
     try {
       const ids = [...new Set(chosen)].join(",");
       const data = await readJson(await adminFetch(`/admin/product-mix-rules/check?productIds=${encodeURIComponent(ids)}`));
       // A later request, or a changed selection, wins over this answer.
       if (lastRequest.current === request) setResult({ key, data });
-    } catch (err) {
-      if (lastRequest.current === request) setError(err.message || "Could not check the tank");
+    } catch {
+      if (lastRequest.current === request) setError("Check failed. Try again.");
     } finally {
       if (lastRequest.current === request) setChecking(false);
     }
@@ -239,6 +241,8 @@ export default function MixSafetySection() {
   const [notice, setNotice] = useState("");
   const [form, setForm] = useState(null);
   const [saving, setSaving] = useState(false);
+  // Add rule on a pair that already has an active rule: the server answers 409 with that rule; offer to edit it.
+  const [existing, setExisting] = useState(null);
 
   async function loadRules() {
     setLoading(true);
@@ -260,6 +264,7 @@ export default function MixSafetySection() {
   async function saveRule() {
     setSaving(true);
     setError("");
+    setExisting(null);
     const body = {
       productAId: form.productAId,
       productBId: form.mode === "product" ? form.productBId : null,
@@ -281,6 +286,7 @@ export default function MixSafetySection() {
       await loadRules();
     } catch (err) {
       setError(err.message || "Could not save the rule");
+      if (!form.id && err.status === 409 && err.data?.rule) setExisting(err.data.rule);
     } finally {
       setSaving(false);
     }
@@ -297,7 +303,7 @@ export default function MixSafetySection() {
     }
   }
 
-  const editRule = (rule) => setForm({
+  const editRule = (rule) => { setExisting(null); setError(""); setForm({
     id: rule.id,
     productAId: rule.productAId,
     mode: rule.productBId ? "product" : "group",
@@ -308,7 +314,7 @@ export default function MixSafetySection() {
     source: rule.source || "",
     jarTestRequired: rule.jarTestRequired,
     version: rule.version,
-  });
+  }); };
 
   return (
     <div className="grid gap-4">
@@ -322,6 +328,12 @@ export default function MixSafetySection() {
             Can these products go in the same tank? Each answer is a warning for the tech. It never blocks a product.
           </p>
           {error && <ActionFeedback error>{error}</ActionFeedback>}
+          {existing && (
+            <div className="flex flex-wrap items-center gap-2 text-14">
+              <span>Current rule: {VERDICT_TEXT[existing.verdict]?.label || existing.verdict}. {existing.reason}</span>
+              <Button variant="secondary" onClick={() => editRule(existing)}>Edit that rule</Button>
+            </div>
+          )}
           {notice && <ActionFeedback>{notice}</ActionFeedback>}
           {loading ? (
             <ActionFeedback>Loading mix rules…</ActionFeedback>
@@ -373,7 +385,7 @@ export default function MixSafetySection() {
           groups={groups}
           saving={saving}
           onSave={saveRule}
-          onCancel={() => setForm(null)}
+          onCancel={() => { setForm(null); setExisting(null); }}
         />
       )}
       {!loading && <TankCheck products={products} />}

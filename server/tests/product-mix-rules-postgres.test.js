@@ -125,15 +125,20 @@ const mix = require('../services/product-mix-rules');
     expect(pair(ids.typed, ids.oil)).toMatchObject({ verdict: 'never', reason: 'No oil and pyrethroid in the same tank.' });
   });
 
-  test('two creates for the same new target leave one row; the second is recorded as an update', async () => {
+  test('a second create for an active target is a 409 with the current rule and changes nothing', async () => {
     const first = await mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'caution', reason: 'First.' });
-    const second = await mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'never', reason: 'Second.' });
-    expect(second.id).toBe(first.id);
+    await expect(mix.upsertRule({ productAId: ids.copper, groupB: 'fertilizer', verdict: 'ok', reason: 'Second.' }))
+      .rejects.toMatchObject({ statusCode: 409, code: 'RULE_EXISTS', rule: { id: first.id, verdict: 'caution', version: 1 } });
     const rows = await mockTrx('product_mix_rules').where({ product_a_id: ids.copper, group_b: 'fertilizer' });
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ verdict: 'never', reason: 'Second.' });
-    expect(mockAudit.events.map((e) => [e.action, e.critical])).toEqual([['product_mix_rules.created', true], ['product_mix_rules.updated', true]]);
-    expect(mockAudit.events[1].metadata.before).toMatchObject({ verdict: 'caution', reason: 'First.' });
+    expect(rows[0]).toMatchObject({ verdict: 'caution', reason: 'First.', version: 1 });
+    expect(mockAudit.events.map((e) => [e.action, e.critical])).toEqual([['product_mix_rules.created', true]]);
+    // The atomic insert itself refuses an active row (a create that raced past the locked read).
+    const { rows: raced } = await mockTrx.raw(
+      `INSERT INTO product_mix_rules (product_a_id, group_b, verdict, reason) VALUES (?, 'fertilizer', 'ok', 'Raced.')
+       ON CONFLICT (product_a_id, group_b) WHERE group_b IS NOT NULL DO UPDATE SET verdict = EXCLUDED.verdict
+       WHERE product_mix_rules.active = false RETURNING id`, [ids.copper]);
+    expect(raced).toEqual([]);
   });
 
   test('a lost audit event rolls the rule change back (create, edit and remove)', async () => {
@@ -223,6 +228,21 @@ const mix = require('../services/product-mix-rules');
     await mockTrx('product_mix_rules').where({ product_a_id: a, product_b_id: b }).update({ reason: 'Owner wording.' });
     await heat.up(mockTrx);
     expect(await pairRow()).toMatchObject({ reason: 'Owner wording.' });
+  });
+
+  test('migration 20261127190000 adds Reliant + fertilizer caution with a jar test once; down() removes it', async () => {
+    const reliantFix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    mockAudit.events = [];
+    const [reliant] = await mockTrx('products_catalog').insert({ name: 'Reliant Systemic Fungicide', category: 'fungicide' }).returning('id');
+    await reliantFix.up(mockTrx);
+    await reliantFix.up(mockTrx);
+    const rows = await mockTrx('product_mix_rules').where({ product_a_id: reliant.id, group_b: 'fertilizer' });
+    expect(rows).toEqual([expect.objectContaining({ verdict: 'caution', reason: 'Jar test and plant test first.', jar_test_required: true })]);
+    expect((await mix.checkMix([ids.fert, reliant.id])).pairs[0]).toMatchObject({ verdict: 'caution', reason: 'Jar test and plant test first.', jarTestRequired: true });
+    expect(mockAudit.events.map((e) => e.action)).toEqual(['migration:20261127190000_reliant_fertilizer_test:up']);
+    await reliantFix.down(mockTrx);
+    expect(await mockTrx('product_mix_rules').where({ product_a_id: reliant.id, group_b: 'fertilizer' })).toHaveLength(0);
   });
 
   test('migration 20261127160000 makes Certainty + 90/10 caution once, keeps an admin edit, and down() reverses it', async () => {

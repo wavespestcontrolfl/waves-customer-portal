@@ -23,8 +23,8 @@ const CHECK = {
   }],
 };
 
-function respond(body, ok = true) {
-  return { ok, json: async () => body };
+function respond(body, ok = true, status = ok ? 200 : 400) {
+  return { ok, status, json: async () => body };
 }
 
 describe("MixSafetySection", () => {
@@ -134,6 +134,48 @@ describe("MixSafetySection", () => {
     fireEvent.click(screen.getByRole("button", { name: "Check" }));
     const result = await screen.findByRole("list", { name: "Tank check result" });
     expect(within(result).getByText("Catalog note (older): Celsius WG label note: Requires NIS surfactant.")).toBeInTheDocument();
+  });
+
+  it("a failed re-check clears the old answer and says the check failed", async () => {
+    let fail = false;
+    fetch.mockImplementation(async (url) => {
+      if (!String(url).includes("/check?")) return respond(LIST);
+      return fail ? respond({ error: "Server error" }, false, 500) : respond(CHECK);
+    });
+    render(<MixSafetySection />);
+    await screen.findByRole("table", { name: "Mix safety rules" });
+    fireEvent.change(screen.getByLabelText("Tank product 1"), { target: { value: CELSIUS.id } });
+    fireEvent.change(screen.getByLabelText("Tank product 2"), { target: { value: CERTAINTY.id } });
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    await screen.findByRole("list", { name: "Tank check result" });
+    fail = true;
+    fireEvent.click(screen.getByRole("button", { name: "Check" }));
+    await waitFor(() => expect(screen.getByText("Check failed. Try again.")).toBeInTheDocument());
+    expect(screen.queryByRole("list", { name: "Tank check result" })).not.toBeInTheDocument();
+  });
+
+  it("Add rule on a pair with an active rule shows that rule and offers Edit, which saves with its version", async () => {
+    const current = { ...LIST.rules[1], version: 4 };
+    fetch.mockImplementation(async (url, opts = {}) => {
+      if (opts.method === "POST") return respond({ error: "A rule for this pair already exists. Edit that one.", rule: current }, false, 409);
+      if (opts.method === "PUT") return respond({ rule: current });
+      return respond(LIST);
+    });
+    render(<MixSafetySection />);
+    await screen.findByRole("table", { name: "Mix safety rules" });
+    fireEvent.click(screen.getByRole("button", { name: "Add rule" }));
+    fireEvent.change(screen.getByLabelText("Product"), { target: { value: CELSIUS.id } });
+    fireEvent.change(screen.getByLabelText("Second product"), { target: { value: CERTAINTY.id } });
+    fireEvent.change(screen.getByLabelText(/Reason/), { target: { value: "Short reason." } });
+    fireEvent.click(screen.getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(screen.getByText("A rule for this pair already exists. Edit that one.")).toBeInTheDocument());
+    expect(screen.getByText("Current rule: Caution. Approved weed mix.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit that rule" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(fetch.mock.calls.some(([, opts]) => opts?.method === "PUT")).toBe(true));
+    const put = fetch.mock.calls.find(([, opts]) => opts?.method === "PUT");
+    expect(put[0]).toBe("/api/admin/product-mix-rules/r2");
+    expect(JSON.parse(put[1].body)).toMatchObject({ version: 4, productBId: CERTAINTY.id, reason: "Approved weed mix." });
   });
 
   it("allows up to 5 tank products", async () => {

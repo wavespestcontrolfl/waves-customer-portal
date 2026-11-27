@@ -1,6 +1,6 @@
 /**
- * services/product-mix-rules.js without a database: checkMix's precedence (pair rule, then group rules, then the
- * catalog's free text, else unknown), order independence, inactive rules, unknown ids, and the write validation.
+ * services/product-mix-rules.js without a database: checkMix's precedence (the strictest entry wins, whatever its
+ * source; none reads unknown), order independence, inactive rules, unknown ids, and the write validation.
  * The same reads run on real Postgres in product-mix-rules-postgres.test.js (CI server-db job).
  */
 const mockTables = { products_catalog: [], product_mix_rules: [] };
@@ -313,4 +313,54 @@ describe('normalizeRuleInput', () => {
 test('the service groups and verdicts match the migration check lists', () => {
   expect(mix.GROUP_KEYS).toEqual(migration._GROUPS);
   expect(mix.VERDICTS).toEqual(migration._VERDICTS);
+});
+
+// One precedence for every source: the strictest verdict leads (never > caution > unknown > ok), whatever set it.
+describe('headline precedence over every source x verdict', () => {
+  const HERB = id(40);
+  const WET = id(41);
+  const SEVERITY = { ok: 1, caution: 3, never: 4 };
+  // Each source, the verdicts it can carry, and how it is set up on the pair herbicide + surfactant.
+  const SOURCES = {
+    pair: { verdicts: ['ok', 'caution', 'never'], apply: (v, t) => t.rules.push(rule(40, { product_a_id: HERB, product_b_id: WET, verdict: v, reason: `pair ${v}` })) },
+    group: { verdicts: ['ok', 'caution', 'never'], apply: (v, t) => t.rules.push(rule(41, { product_a_id: HERB, group_b: 'surfactant', verdict: v, reason: `group ${v}` })) },
+    applyAlone: { verdicts: ['ok', 'caution', 'never'], apply: (v, t) => t.rules.push(rule(42, { product_a_id: WET, group_b: 'any', verdict: v, reason: `applyAlone ${v}` })) },
+    catalogDoNotMix: { verdicts: ['caution'], apply: (v, t) => { t.wet.do_not_tank_mix_with = ['acid water']; } },
+    labelRestriction: { verdicts: ['never'], apply: (v, t) => { t.herb.allows_surfactant = false; } },
+  };
+  const names = Object.keys(SOURCES);
+  const cases = [];
+  names.forEach((first, i) => {
+    for (const v1 of SOURCES[first].verdicts) {
+      cases.push([[[first, v1]]]);
+      for (const second of names.slice(i + 1)) for (const v2 of SOURCES[second].verdicts) cases.push([[[first, v1], [second, v2]]]);
+    }
+  });
+
+  test.each(cases)('%j', async (setup) => {
+    const t = { herb: { id: HERB, name: 'Herb X', category: 'herbicide' }, wet: { id: WET, name: 'Wet Y', category: 'adjuvant' }, rules: [] };
+    for (const [source, verdict] of setup) SOURCES[source].apply(verdict, t);
+    mockTables.products_catalog = [t.herb, t.wet];
+    mockTables.product_mix_rules = t.rules;
+    const expected = setup.map(([, v]) => v).reduce((a, b) => (SEVERITY[b] > SEVERITY[a] ? b : a));
+    for (const order of [[HERB, WET], [WET, HERB]]) {
+      const pair = (await mix.checkMix(order)).pairs[0];
+      expect(pair.verdict).toBe(expected);
+      expect(pair.entries[0].verdict).toBe(expected);
+      expect(pair.entries).toHaveLength(setup.length);
+    }
+  });
+
+  test('no entry reads unknown, and a catalog do-not-mix beats a group Yes and a pair Yes together', async () => {
+    mockTables.products_catalog = [{ id: HERB, name: 'Herb X', category: 'herbicide' }, { id: WET, name: 'Wet Y', category: 'adjuvant', do_not_tank_mix_with: ['acid water'] }];
+    mockTables.product_mix_rules = [];
+    expect((await mix.checkMix([HERB, id(998)])).pairs[0].verdict).toBe('unknown');
+    mockTables.product_mix_rules = [
+      rule(40, { product_a_id: HERB, product_b_id: WET, verdict: 'ok', reason: 'pair ok' }),
+      rule(41, { product_a_id: HERB, group_b: 'surfactant', verdict: 'ok', reason: 'group ok' }),
+    ];
+    const pair = (await mix.checkMix([HERB, WET])).pairs[0];
+    expect(pair).toMatchObject({ verdict: 'caution', reason: 'Wet Y label: do not tank mix with acid water' });
+    expect(pair.entries.map((e) => e.reason)).toEqual(['Wet Y label: do not tank mix with acid water', 'pair ok', 'group ok']);
+  });
 });

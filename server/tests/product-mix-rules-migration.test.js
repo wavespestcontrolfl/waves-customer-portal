@@ -201,3 +201,26 @@ describe('20261127180000_celsius_surfactant_heat', () => {
     expect(knex.raw).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127190000_reliant_fertilizer_test', () => {
+  const fix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
+
+  test('the rule quotes the Reliant card line word for word', () => {
+    const guide = fs.readFileSync(path.join(__dirname, '..', 'config', 'tree-shrub-field-guide.json'), 'utf8');
+    const line = 'Do not tank mix with copper. Jar test and small plant test before a mix with foliar fertilizer.';
+    expect(guide).toContain(`"${line}"`);
+    expect(fix._RULE).toMatchObject({ group_b: 'fertilizer', verdict: 'caution', reason: 'Jar test and plant test first.', jar_test_required: true });
+    expect(fix._RULE.source).toContain(`"${line}"`);
+    expect(`migration:${fix._MIGRATION}:down`.length).toBeLessThanOrEqual(96);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    knex.raw = jest.fn();
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+});

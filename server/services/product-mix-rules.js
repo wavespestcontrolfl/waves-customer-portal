@@ -55,7 +55,8 @@ const GROUPS = [
 ];
 const GROUP_KEYS = GROUPS.map((g) => g.key);
 const GROUP_BY_KEY = new Map(GROUPS.map((g) => [g.key, g]));
-const SEVERITY = { never: 3, caution: 2, ok: 1 };
+// The one precedence for a pair's headline, whatever the source: never > caution > unknown > ok.
+const SEVERITY = { never: 4, caution: 3, unknown: 2, ok: 1 };
 
 const PRODUCT_COLUMNS = ['id', 'name', 'category', 'subcategory', 'active_ingredient', 'moa_group', 'irac_group', 'formulation', 'application_method', 'mixing_order_category', 'requires_surfactant', 'allows_surfactant', 'do_not_tank_mix_with', 'compatibility_notes'];
 
@@ -224,25 +225,37 @@ const CONFLICT_TARGET = {
 };
 const UPSERT_COLUMNS = ['verdict', 'reason', 'source', 'jar_test_required', 'active', 'updated_by'];
 
-// One statement, so two creates for the same new target cannot both insert: the second updates the first's row.
-// `inserted` (xmax = 0) tells a new row from an updated one.
-async function insertOrUpdate(trx, row) {
+// One statement, so two creates for the same new target cannot both insert. On a conflict it only brings a removed
+// (inactive) row back; an active row is left as it is and no row returns. `inserted` (xmax = 0) tells a new row from a
+// reactivated one.
+async function insertOrReactivate(trx, row) {
   const columns = Object.keys(row);
   const target = row.product_b_id ? CONFLICT_TARGET.pair : CONFLICT_TARGET.group;
   const result = await trx.raw(
     `INSERT INTO product_mix_rules (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})
      ON CONFLICT ${target}
      DO UPDATE SET ${UPSERT_COLUMNS.map((c) => `${c} = EXCLUDED.${c}`).join(', ')}, updated_at = now(), version = product_mix_rules.version + 1
+     WHERE product_mix_rules.active = false
      RETURNING *, (xmax = 0) AS inserted`,
     columns.map((c) => row[c]),
   );
-  return result.rows[0];
+  return result.rows[0] || null;
+}
+
+// Add rule on a target that already has an active rule: a 409 that carries the current row, so the screen can offer
+// Edit. Only an edit with the loaded version changes an active rule.
+function ruleExists(row) {
+  return Object.assign(httpError(409, TARGET_TAKEN), { code: 'RULE_EXISTS', rule: row ? presentRule(row) : null });
 }
 
 async function createRule(trx, fields, actorId) {
-  // Read (and lock) the row a create would update, only to record its old values in the audit event.
+  // Read (and lock) the row a create would land on: an active one is a 409; a removed one is recorded as before values.
   const prior = await trx('product_mix_rules').where(keyOf(fields)).forUpdate().first();
-  const { inserted, ...row } = await insertOrUpdate(trx, { ...fields, active: true, created_by: actorId, updated_by: actorId });
+  if (prior && prior.active !== false) throw ruleExists(prior);
+  const written = await insertOrReactivate(trx, { ...fields, active: true, created_by: actorId, updated_by: actorId });
+  // Another create for the same new target committed first: its row is active now.
+  if (!written) throw ruleExists(await trx('product_mix_rules').where(keyOf(fields)).first());
+  const { inserted, ...row } = written;
   await audit(trx, inserted ? 'product_mix_rules.created' : 'product_mix_rules.updated', row, actorId,
     prior ? { before: { verdict: prior.verdict, reason: prior.reason, active: prior.active } } : {});
   return row;
@@ -286,8 +299,9 @@ async function editRule(trx, id, fields, actorId, version) {
   return row;
 }
 
-// Create (no id) or edit (id). A create for a pair or product + group that already has a row updates that row and
-// makes it active again, so a pair always has one row. An edit that would land on another row's target is a 409.
+// Create (no id) or edit (id). A create for a pair or product + group whose row was removed brings that row back, so a
+// pair always has one row; a create on an active row is a 409 with that row. An edit that would land on another row's
+// target is a 409.
 // The change and its audit event commit together or not at all.
 async function upsertRule(input, { id = null, actorId = null } = {}) {
   const fields = normalizeRuleInput(input);
@@ -309,10 +323,6 @@ async function deactivateRule(id, { actorId = null, version } = {}) {
   });
 }
 
-function worst(entries) {
-  return entries.reduce((best, entry) => (!best || SEVERITY[entry.verdict] > SEVERITY[best.verdict] ? entry : best), null);
-}
-
 function ruleEntry(rule, kind) {
   return {
     ruleId: rule.id, kind, verdict: rule.verdict, reason: rule.reason, source: rule.source || null,
@@ -320,11 +330,8 @@ function ruleEntry(rule, kind) {
   };
 }
 
-// One pair's answer. The headline: the pair's own rule (the owner named both products), else the worst group rule,
-// else the worst catalog note. A Never from a group rule (an apply-alone rule included) or from a label restriction
-// (allows_surfactant = false) always leads: a pair's own Yes or Caution never hides a prohibition, it stays listed.
-// A catalog do-not-mix item (do_not_tank_mix_with) stays a Caution under a pair rule and raises a pair's Yes to it.
-// entries lists the headline first, then every other match once.
+// One pair's answer: every matching entry (the pair's own rule, group rules with apply-alone, label restrictions,
+// catalog do-not-mix items and notes), then headline() picks the verdict.
 function evaluatePair(x, y, rules, notesById) {
   const xid = String(x.id).toLowerCase();
   const yid = String(y.id).toLowerCase();
@@ -334,22 +341,19 @@ function evaluatePair(x, y, rules, notesById) {
     (String(r.product_a_id).toLowerCase() === xid && inGroup(y, r.group_b))
     || (String(r.product_a_id).toLowerCase() === yid && inGroup(x, r.group_b))));
   const restrictions = [surfactantRestriction(x, y), surfactantRestriction(y, x), surfactantConflict(x, y)].filter(Boolean);
-  // Under a pair rule the catalog's free text (compatibility_notes) is background only: listed as an older note, never
-  // as a second verdict. A do-not-mix item stays a Caution entry.
+  // Under a pair rule the catalog's free text (compatibility_notes) is background only: listed as an older note with
+  // no verdict. A do-not-mix item (do_not_tank_mix_with) always keeps its Caution.
   const catalog = [...notesById.get(xid), ...notesById.get(yid)].map((note) => (pairRule && note.field === 'compatibility_notes'
     ? { ...note, kind: 'catalog_note', ruleId: null, jarTestRequired: false, verdict: null, reason: `Catalog note (older): ${note.reason}` }
     : { kind: 'catalog', ruleId: null, jarTestRequired: false, ...note }));
-  const groupEntries = groupRules.map((r) => ruleEntry(r, 'group'));
-  const entries = [...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupEntries, ...restrictions, ...catalog];
-  let lead = (pairRule && entries[0]) || worst(groupEntries) || worst([...restrictions, ...catalog]);
-  const doNotMix = worst(catalog.filter((e) => e.kind === 'catalog'));
-  if (pairRule && doNotMix && SEVERITY[doNotMix.verdict] > SEVERITY[lead.verdict]) lead = doNotMix;
-  const prohibition = [...groupEntries, ...restrictions].find((e) => e.verdict === 'never');
-  if (prohibition && lead.verdict !== 'never') lead = prohibition;
-  return headline(lead, entries);
+  return headline([...(pairRule ? [ruleEntry(pairRule, 'pair')] : []), ...groupRules.map((r) => ruleEntry(r, 'group')), ...restrictions, ...catalog]);
 }
 
-function headline(lead, entries) {
+// The only place a headline is picked: the strictest verdict among the entries wins (SEVERITY: never > caution >
+// unknown > ok), whatever its source. On a tie the earlier entry leads: the pair's own rule, then group rules, label
+// restrictions, catalog items. No entry with a verdict reads unknown. entries lists the headline first, then the rest.
+function headline(entries) {
+  const lead = entries.filter((e) => SEVERITY[e.verdict]).reduce((best, e) => (!best || SEVERITY[e.verdict] > SEVERITY[best.verdict] ? e : best), null);
   if (!lead) return { ...UNKNOWN, source: null, jarTestRequired: false, entries };
   return {
     verdict: lead.verdict, reason: lead.reason, source: lead.source,
@@ -363,11 +367,10 @@ function headline(lead, entries) {
 function applyAloneOnly(known, rules) {
   const kid = known ? String(known.id).toLowerCase() : null;
   const entries = kid ? rules.filter((r) => r.group_b === 'any' && r.verdict === 'never' && String(r.product_a_id).toLowerCase() === kid).map((r) => ruleEntry(r, 'group')) : [];
-  return headline(worst(entries), entries);
+  return headline(entries);
 }
 
-// For every pair in the list: the pair's own rule first (it wins: the owner named both products), then the group
-// rules (the worst one), then the catalog's free text (caution). No entry at all: unknown. Never throws for an id
+// For every pair in the list: the strictest matching entry (headline()). No entry at all: unknown. Never throws for an id
 // that is not a product: that product is listed with found=false and its pairs read unknown.
 async function checkMix(productIds = []) {
   const ids = [...new Set((Array.isArray(productIds) ? productIds : []).map((v) => String(v || '').trim().toLowerCase()).filter(Boolean))].slice(0, MAX_CHECK);
