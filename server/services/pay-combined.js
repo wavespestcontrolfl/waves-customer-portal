@@ -45,13 +45,9 @@ const logger = require('./logger');
 const { isEnabled } = require('../config/feature-gates');
 const { openBalanceInvoices } = require('./open-balance');
 const { dunningStoppedInvoiceIds } = require('./completion-balance-sweep');
-const invoiceHelpers = require('./invoice-helpers');
-const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = invoiceHelpers;
-const invoiceHeldForChemicalReview = (invoice) => (
-  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
-    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
-    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
-);
+const {
+  invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview,
+} = require('./invoice-helpers');
 
 // Stripe metadata values cap at 500 chars. The compact `${id}:${cents}`
 // encoding spends ~44 chars per sibling, so 8 siblings stay comfortably

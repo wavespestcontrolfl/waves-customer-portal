@@ -22,6 +22,7 @@
 
 const logger = require('./logger');
 const { etOffsetIso, etParts, etDateString, parseETDateTime } = require('../utils/datetime-et');
+const { heatIndexF } = require('./heat-index');
 
 const NWS_BASE = 'https://api.weather.gov';
 const USER_AGENT = '(wavespestcontrol.com, contact@wavespestcontrol.com)';
@@ -484,16 +485,6 @@ function alertOverlapsWindow(alert, startMs, endMs) {
   return start < endMs && end > startMs;
 }
 
-// Approximate NOAA heat index (°F) when temp >= 80°F and relative humidity >= 40%.
-function heatIndexF(tempF, rh) {
-  if (!Number.isFinite(tempF) || !Number.isFinite(rh) || tempF < 80 || rh < 40) return tempF ?? null;
-  return Math.round(
-    -42.379 + 2.04901523 * tempF + 10.14333127 * rh - 0.22475541 * tempF * rh
-    - 6.83783e-3 * tempF * tempF - 5.481717e-2 * rh * rh + 1.22874e-3 * tempF * tempF * rh
-    + 8.5282e-4 * tempF * rh * rh - 1.99e-6 * tempF * tempF * rh * rh,
-  );
-}
-
 const maxFinite = (cur, val) => (Number.isFinite(val) && (cur == null || val > cur) ? val : cur);
 
 function selectHazardWindow(hours, { day, startMin, endMin, afterHours, now }) {
@@ -558,8 +549,9 @@ function classifyWeatherHazard(hours, alerts, options) {
 
   // Synthesize alert-only advisory banners for extreme heat/wind even if NWS has no formal advisory posted.
   const categories = new Set(allAdvisories.map((a) => a.category));
-  if (!categories.has('heat_advisory') && peakHeatIndex >= 105) {
-    allAdvisories.push({ event: `High Heat (${peakHeatIndex}°F heat index)`, category: 'heat_advisory', moveTrigger: false });
+  const roundedHeatIndex = peakHeatIndex != null ? Math.round(peakHeatIndex) : null;
+  if (!categories.has('heat_advisory') && roundedHeatIndex != null && roundedHeatIndex >= 105) {
+    allAdvisories.push({ event: `High Heat (${roundedHeatIndex}°F heat index)`, category: 'heat_advisory', moveTrigger: false });
   }
   if (!categories.has('wind_advisory') && (peakWindGust >= 30 || peakWind >= 25)) {
     const mph = peakWindGust >= 30 ? `${peakWindGust} mph gusts` : `${peakWind} mph wind`;

@@ -27,16 +27,9 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const invoiceHelpers = require('./invoice-helpers');
-const { invoiceAmountDue } = invoiceHelpers;
+const { invoiceAmountDue, invoiceHeldForChemicalReview } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
 const { invoiceOverdueSql } = require('./collections/account-anchor');
-
-const invoiceHeldForChemicalReview = (invoice) => (
-  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
-    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
-    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
-);
 
 // Safety valve, not display pagination: high enough that every real
 // customer's full balance fits (prod max open invoices per customer is

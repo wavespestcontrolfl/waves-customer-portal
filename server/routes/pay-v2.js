@@ -19,13 +19,10 @@ const {
   CONSENT_VERSION_METADATA_KEY, consentVersionStaleResponse, renderedConsentVersionIsCurrent,
 } = require('../services/payment-method-consent-text');
 const logger = require('../services/logger');
-const invoiceHelpers = require('../services/invoice-helpers');
-const { assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer, isInvoiceCollectibleStatus, invoiceAmountDue } = invoiceHelpers;
-const invoiceHeldForChemicalReview = (invoice) => (
-  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
-    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
-    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
-);
+const {
+  assertInvoiceCollectible, assertInvoiceNotWithdrawnFromCustomer, invoiceWithdrawnFromCustomer,
+  isInvoiceCollectibleStatus, invoiceAmountDue, invoiceHeldForChemicalReview,
+} = require('../services/invoice-helpers');
 const ReceiptDeliveryQueue = require('../services/receipt-delivery-queue');
 const BillPaymentErrorAlerts = require('../services/bill-payment-error-alerts');
 const { shouldSkipClientPaymentErrorAlert, manualPayOptionsFromEnv } = require('./pay-v2-helpers');

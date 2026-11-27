@@ -1219,12 +1219,14 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
     const holdDeclAt = source.indexOf('const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))');
     const existingAssignAt = source.indexOf('if (existingCompletionInvoice) {');
-    const existingHoldAt = source.indexOf('if (holdExistingUnpaid) {', existingAssignAt);
-    const existingInvoiceAssignAt = source.indexOf('invoice = existingCompletionInvoice;', existingAssignAt);
+    const existingHoldAt = source.indexOf('if (holdExistingUnpaid && !recapReviewOnly) {', existingAssignAt);
+    const existingHoldBlock = source.slice(existingHoldAt, existingHoldAt + 700);
     expect(holdDeclAt).toBeGreaterThan(-1);
     expect(existingAssignAt).toBeGreaterThan(holdDeclAt);
     expect(existingHoldAt).toBeGreaterThan(existingAssignAt);
-    expect(existingInvoiceAssignAt).toBeGreaterThan(existingHoldAt);
+    expect(existingHoldBlock).toContain('invoice = null;');
+    expect(existingHoldBlock).toContain('payUrl = null;');
+    expect(existingHoldBlock).toContain('invoiceCreated = false;');
 
     expect(source).toContain('dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`');
     expect(source).toContain("code: 'chemical_addon_billing_alert_failed'");
@@ -1365,7 +1367,8 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     // P1-1 (r7): releasing a chemical hold resumes ONLY chemical-review paused follow-up sequences.
     const followupsSrc = require('fs').readFileSync(require.resolve('../services/invoice-followups'), 'utf8');
     expect(followupsSrc).toContain('function isChemicalReviewPause(existing)');
-    expect(followupsSrc).toContain('if (isChemicalReviewPause(existing))');
+    expect(followupsSrc).toContain('function rearmSourceFor(existing)');
+    expect(followupsSrc).toContain('const chemicalPause = isChemicalReviewPause(existing);');
     // P1-2: add-on warning logs must never interpolate caller-supplied product text.
     expect(source).not.toContain('add-on actuals warning for ${svc.id}: ${addOnErr.message}');
     expect(source).not.toContain('chemical add-on warning for ${svc.id}: ${item.message}');

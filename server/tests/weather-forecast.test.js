@@ -252,4 +252,25 @@ describe('NWS active alerts & unified weather hazard classification (owner 2026-
     expect(tropical.moveTrigger).toBe(true);
     expect(tropical.reasons).toContain('tropical_storm');
   });
+
+  test('classifyWeatherHazard reuses services/heat-index.js (no raw-temp fallback when humidity is missing)', () => {
+    const { heatIndexF } = require('../services/heat-index');
+    expect(wf._test.heatIndexF).toBe(heatIndexF);
+    const day = '2026-09-10';
+    // Missing humidity: heat-index.js returns null — must NOT substitute 106°F air temp as a heat index.
+    const missingHumidity = wf.classifyWeatherHazard([
+      { startTime: `${day}T13:00:00-04:00`, rainChance: 0, shortForecast: 'Sunny', temperatureF: 106, relativeHumidity: null },
+    ], [], { day, startMin: 13 * 60, endMin: 14 * 60 });
+    expect(missingHumidity.moveTrigger).toBe(false);
+    expect(missingHumidity.advisories).toEqual([]);
+
+    // Humid afternoon: heat index uses heat-index.js (including humidity adjustments) and stays alert-only.
+    const humidHeat = wf.classifyWeatherHazard([
+      { startTime: `${day}T13:00:00-04:00`, rainChance: 0, shortForecast: 'Sunny', temperatureF: 94, relativeHumidity: 65 },
+    ], [], { day, startMin: 13 * 60, endMin: 14 * 60 });
+    expect(humidHeat.moveTrigger).toBe(false);
+    expect(humidHeat.advisories).toEqual([
+      { event: `High Heat (${Math.round(heatIndexF(94, 65))}°F heat index)`, category: 'heat_advisory', moveTrigger: false },
+    ]);
+  });
 });

@@ -28,16 +28,8 @@ const { billingLegDeliveryState, billingLegContactTime, originalBillingContactAr
 
 const db = require('../models/db');
 const invoiceHelpers = require('./invoice-helpers');
-const { invoiceWithdrawnFromCustomer } = invoiceHelpers;
-// Partial mocks of invoice-helpers in legacy unit suites may omit newer exports;
-// fall back to the same stamp predicate so neither production nor mocks break.
-const invoiceHeldForChemicalReview = (invoice) => (
-  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
-    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
-    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
-);
+const { invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview, invoiceAmountDue } = invoiceHelpers;
 const logger = require('./logger');
-const { invoiceAmountDue } = require('./invoice-helpers');
 const smsTemplatesRouter = require('../routes/admin-sms-templates');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { gates } = require('../config/feature-gates');
@@ -136,6 +128,11 @@ function isChemicalReviewPause(existing) {
     && existing.status === 'paused'
     && String(existing.paused_reason || '') === CHEMICAL_REVIEW_PAUSE_REASON
     && !existing.paused_by_admin_id;
+}
+
+function rearmSourceFor(existing) {
+  if (!isChemicalReviewPause(existing)) return existing;
+  return { ...existing, paused_reason: null, paused_by_admin_id: null, paused_until: null };
 }
 
 // A sequence the SYSTEM stopped for a void (no admin id): the resend re-arms it.
@@ -710,41 +707,26 @@ function rearmPatch(decision, now) {
 // a PAUSED row carries the ':prev=paused' suffix so a metadata-less legacy pause survives the round-trip, and
 // 'invoice_terminal_status:void' is the same system stop stamped by the 20260601000012 backfill migration (Codex #3493 r12 P0).
 async function reconcileExistingSequence(trx, invoice, existing, steps) {
-  if (isChemicalReviewPause(existing)) {
-    const decision = await rearmDecisionFor(trx, invoice, {
-      ...existing,
-      paused_reason: null,
-      paused_by_admin_id: null,
-      paused_until: null,
-    }, { steps });
-    if (decision.kind === 'payment_plan') return existing;
-    const [written] = await trx('invoice_followup_sequences')
-      .where({ id: existing.id, status: 'paused', paused_reason: CHEMICAL_REVIEW_PAUSE_REASON })
-      .whereNull('paused_by_admin_id')
-      .update({
-        ...rearmPatch(decision, trx.fn.now()),
-        paused_reason: null,
-        paused_until: null,
-        paused_by_admin_id: null,
-      })
-      .returning('*');
-    return written || existing;
-  }
-  if (!isSystemVoidStop(existing)) return existing;
-  const voidStopStamp = String(existing.stopped_reason || '');
+  const chemicalPause = isChemicalReviewPause(existing);
+  if (!chemicalPause && !isSystemVoidStop(existing)) return existing;
   // Every check is rearmDecisionFor's (shared with the Intelligence Bar's planner); this only writes the decision. Never
   // re-arm under an ACTIVE payment plan (Codex #3493 r6), restore a retained PAUSE rather than active dunning (r3/r8, and the
   // legacy migration stamp unconditionally, r14 P0), and hold an Auto Pay customer (r7 + r12: the retained held marker AND
   // live enrollment must agree; a read error keeps the hold, r16). The cadence anchors on when the invoice went out, NOT the
-  // due date (r4); a shifted anchor_at wins. The write stays conditional on the exact system stop, so a racing admin
+  // due date (r4); a shifted anchor_at wins. The write stays conditional on the exact system stop/pause, so a racing admin
   // pause/stop wins.
-  const decision = await rearmDecisionFor(trx, invoice, existing, { steps });
+  const decision = await rearmDecisionFor(trx, invoice, rearmSourceFor(existing), { steps });
   if (decision.kind === 'payment_plan') return existing;
-  const [written] = await trx('invoice_followup_sequences')
-    .where({ id: existing.id, status: 'stopped', stopped_reason: voidStopStamp })
-    .whereNull('stopped_by_admin_id')
-    .update(rearmPatch(decision, trx.fn.now()))
-    .returning('*');
+  const patch = chemicalPause
+    ? { ...rearmPatch(decision, trx.fn.now()), paused_reason: null, paused_until: null, paused_by_admin_id: null }
+    : rearmPatch(decision, trx.fn.now());
+  const q = trx('invoice_followup_sequences').where({ id: existing.id });
+  if (chemicalPause) {
+    q.where({ status: 'paused', paused_reason: CHEMICAL_REVIEW_PAUSE_REASON }).whereNull('paused_by_admin_id');
+  } else {
+    q.where({ status: 'stopped', stopped_reason: String(existing.stopped_reason || '') }).whereNull('stopped_by_admin_id');
+  }
+  const [written] = await q.update(patch).returning('*');
   return written || existing;
 }
 
@@ -954,19 +936,9 @@ async function planFollowupSequence(invoice, database = db, knownCustomer = null
   if (block) return { arms: false, state: block, cadence };
   const existing = await database('invoice_followup_sequences').where({ invoice_id: invoice.id }).first();
   if (existing) {
-    if (isChemicalReviewPause(existing)) {
-      const decision = await rearmDecisionFor(database, invoice, {
-        ...existing,
-        paused_reason: null,
-        paused_by_admin_id: null,
-        paused_until: null,
-      }, { knownCustomer });
-      const REARM_STATE = { payment_plan: 'payment_plan', paused: 'paused', autopay_hold: 'autopay_hold', active: 'rearm', completed: 'completed' };
-      return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence, nextTouchAt: decision.nextTouchAt || null };
-    }
-    if (!isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
-    // The same decision scheduleForInvoice makes for a void-stopped sequence (rearmDecisionFor, from voidStopRearmAnchor).
-    const decision = await rearmDecisionFor(database, invoice, existing, { knownCustomer });
+    if (!isChemicalReviewPause(existing) && !isSystemVoidStop(existing)) return { arms: false, state: `existing:${existing.status}`, cadence };
+    // The same decision scheduleForInvoice makes for a void-stopped or chemical-paused sequence (rearmDecisionFor, from voidStopRearmAnchor).
+    const decision = await rearmDecisionFor(database, invoice, rearmSourceFor(existing), { knownCustomer });
     const REARM_STATE = { payment_plan: 'payment_plan', paused: 'paused', autopay_hold: 'autopay_hold', active: 'rearm', completed: 'completed' };
     return { arms: ['active', 'autopay_hold'].includes(decision.kind), state: REARM_STATE[decision.kind], cadence, nextTouchAt: decision.nextTouchAt || null };
   }

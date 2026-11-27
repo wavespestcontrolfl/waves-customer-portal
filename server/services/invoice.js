@@ -4200,9 +4200,7 @@ function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, override
   if (isStaleClaimReviewHold(current) && !overridesReviewHold) {
     throw staleClaimReviewHoldError(invoiceId);
   }
-  const invoiceHelpers = require("./invoice-helpers");
-  if (typeof invoiceHelpers.invoiceHeldForChemicalReview === "function"
-    && invoiceHelpers.invoiceHeldForChemicalReview(current) && !overridesReviewHold) {
+  if (require("./invoice-helpers").invoiceHeldForChemicalReview(current) && !overridesReviewHold) {
     const e = new Error(`Invoice ${invoiceId} is held for office billing review of a chemical area add-on`);
     e.code = "INVOICE_CHEMICAL_ADDON_HOLD";
     throw e;
@@ -5139,12 +5137,7 @@ async function claimAlreadyHeld(invoiceId, current, { claimToken, firstDeliveryO
 }
 
 function isReleasingChemicalReviewHold(current, overridesReviewHold) {
-  const invoiceHelpers = require("./invoice-helpers");
-  return Boolean(
-    overridesReviewHold
-    && typeof invoiceHelpers.invoiceHeldForChemicalReview === "function"
-    && invoiceHelpers.invoiceHeldForChemicalReview(current),
-  );
+  return Boolean(overridesReviewHold && require("./invoice-helpers").invoiceHeldForChemicalReview(current));
 }
 
 // The claim's own UPDATE. The guards evaluated before it saw a snapshot; the flip carries them as predicates too, so a
@@ -5217,6 +5210,20 @@ async function firstSendAfterSummaryRefusal({ invoiceId, invoice, current, datab
   return started ? invoiceAlreadyDeliveredError(invoice) : null;
 }
 
+function claimFlipUpdatePatch(database, token, releasingChemicalHold) {
+  return {
+    status: "sending",
+    send_claim_token: token,
+    updated_at: new Date(),
+    // An explicit office override atomically clears the exact reviewed chemical hold stamp
+    // in the claim flip so selfPayAtDispatch allows this authorized send, while any newer
+    // hold stamped after the flip still blocks delivery and survives finalization.
+    ...(releasingChemicalHold ? { scheduled_send_error: null } : {}),
+    // A first delivery after the bill's due day takes the send day, before the text, email and PDF are built (invoice-helpers.js).
+    due_date: require("./invoice-helpers").firstDeliveryDueDate(database, etDateString()),
+  };
+}
+
 async function claimInvoiceForSend(invoiceId, {
   allowClaimed = false,
   claimToken = null,
@@ -5242,15 +5249,7 @@ async function claimInvoiceForSend(invoiceId, {
   const releasingChemicalHold = isReleasingChemicalReviewHold(current, overridesReviewHold);
   const token = crypto.randomUUID();
   const [invoice] = await buildClaimFlip(database, invoiceId, current, options)
-    .update({
-      status: "sending", send_claim_token: token, updated_at: new Date(),
-      // An explicit office override atomically clears the exact reviewed chemical hold stamp
-      // in the claim flip so selfPayAtDispatch allows this authorized send, while any newer
-      // hold stamped after the flip still blocks delivery and survives finalization.
-      ...(releasingChemicalHold ? { scheduled_send_error: null } : {}),
-      // A first delivery after the bill's due day takes the send day, before the text, email and PDF are built (invoice-helpers.js).
-      due_date: require("./invoice-helpers").firstDeliveryDueDate(database, etDateString()),
-    })
+    .update(claimFlipUpdatePatch(database, token, releasingChemicalHold))
     .returning("*");
   if (!invoice) await refuseFailedClaim(invoiceId, current, database, options);
   invoice.send_claim_token = token;
@@ -10567,12 +10566,12 @@ const InvoiceService = {
         logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} delivered Text/App but could not persist its timestamp — claim retained for review`);
         continue;
       }
-      const invoiceHelpersForHold = require("./invoice-helpers");
+      const { invoiceHeldForChemicalReview } = require("./invoice-helpers");
       const heldForChemicalAddon = result.code === "INVOICE_CHEMICAL_ADDON_HOLD"
         || result.sms?.code === "INVOICE_CHEMICAL_ADDON_HOLD"
         || result.email?.code === "INVOICE_CHEMICAL_ADDON_HOLD"
-        || (typeof invoiceHelpersForHold.invoiceHeldForChemicalReview === "function"
-          && (invoiceHelpersForHold.invoiceHeldForChemicalReview(inv) || invoiceHelpersForHold.invoiceHeldForChemicalReview(claimed)));
+        || invoiceHeldForChemicalReview(inv)
+        || invoiceHeldForChemicalReview(claimed);
       if (heldForChemicalAddon) {
         held += 1;
         const parkedHold = await restoreClaimedInvoice(

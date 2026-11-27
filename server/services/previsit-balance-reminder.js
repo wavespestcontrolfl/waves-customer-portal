@@ -33,13 +33,9 @@ const { toE164 } = require('../utils/phone');
 const { withSmsConsentLock } = require('../utils/customer-comms-lock');
 const { runExclusive } = require('../utils/cron-lock');
 const { resolveBillingLane, monthlyDuesCollected } = require('./billing-lane');
-const invoiceHelpers = require('./invoice-helpers');
-const { invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer } = invoiceHelpers;
-const invoiceHeldForChemicalReview = (invoice) => (
-  typeof invoiceHelpers.invoiceHeldForChemicalReview === 'function'
-    ? invoiceHelpers.invoiceHeldForChemicalReview(invoice)
-    : Boolean(invoice && typeof invoice === 'object' && /^chemical_addon_review:/.test(String(invoice.scheduled_send_error || '')))
-);
+const {
+  invoiceAmountDue, isInvoiceCollectibleStatus, invoiceWithdrawnFromCustomer, invoiceHeldForChemicalReview,
+} = require('./invoice-helpers');
 const { sendCustomerMessage } = require('./messaging/send-customer-message');
 const { renderSmsTemplate } = require('./sms-template-renderer');
 const { collectionsChannelVerdict } = require('./collections/rail-guard');

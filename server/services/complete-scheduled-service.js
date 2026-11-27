@@ -11397,32 +11397,34 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
           }
         }
+        const holdExistingUnpaid = Boolean(existingCompletionInvoice) && !packetEffects && unrecordedChemicalAddOnHold
+          && !['paid', 'prepaid'].includes(existingCompletionInvoice.status);
         if (existingCompletionInvoice) {
-          const existingIsPaid = ['paid', 'prepaid'].includes(existingCompletionInvoice.status);
-          const holdExistingUnpaid = !packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly && !existingIsPaid;
-          if (holdExistingUnpaid) {
+          invoice = existingCompletionInvoice;
+          if (!recapReviewOnly) {
+            payUrl = (!holdExistingUnpaid && existingCompletionInvoice.token)
+              ? await shortenOrPassthrough(
+                  `${publicPortalUrl()}/pay/${existingCompletionInvoice.token}`,
+                  {
+                    kind: 'invoice',
+                    entityType: 'invoices',
+                    entityId: existingCompletionInvoice.id,
+                    customerId: existingCompletionInvoice.customer_id,
+                    codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
+                  }
+                )
+              : null;
+            if (['paid', 'prepaid'].includes(existingCompletionInvoice.status)) alreadyPaid = true;
+            else invoiceCreated = true;
+          }
+          if (holdExistingUnpaid && !recapReviewOnly) {
             // Unverified chemical add-on hold: keep existingCompletionInvoice for
             // dedupe and office alert context, but do NOT expose it to account credit,
             // autopay, card-hold capture, or pay-link delivery until office review.
             logger.warn(`[dispatch] visit ${svc.id}: held collection/delivery on existing unpaid invoice ${existingCompletionInvoice.id} pending chemical add-on billing review`);
-          } else {
-            invoice = existingCompletionInvoice;
-            if (!recapReviewOnly) {
-              payUrl = existingCompletionInvoice.token
-                ? await shortenOrPassthrough(
-                    `${publicPortalUrl()}/pay/${existingCompletionInvoice.token}`,
-                    {
-                      kind: 'invoice',
-                      entityType: 'invoices',
-                      entityId: existingCompletionInvoice.id,
-                      customerId: existingCompletionInvoice.customer_id,
-                      codePrefix: invoiceShortCodePrefix(existingCompletionInvoice),
-                    }
-                  )
-                : null;
-              if (existingIsPaid) alreadyPaid = true;
-              else invoiceCreated = true;
-            }
+            invoice = null;
+            payUrl = null;
+            invoiceCreated = false;
           }
         }
       } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
@@ -11862,6 +11864,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       isBackfillCompletion,
       annualPrepayCovered,
     };
+    const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     let stampedHeldInvoiceIds = [];
     if (!packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly) {
       // Lock and hold EVERY non-terminal, non-payer-billed invoice linked to this visit or
@@ -11873,7 +11876,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status) ? preMintedInvoice.id : null,
       ].filter(Boolean))];
       try {
-        const { chemicalAddonHoldStamp } = require('../services/invoice-helpers');
+        const { chemicalAddonHoldStamp, invoiceWithdrawnFromCustomer } = require('../services/invoice-helpers');
         const invoicesToNeutralize = [];
         await db.transaction(async (trx) => {
           const visitInvoices = await trx('invoices')
@@ -11883,15 +11886,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               if (knownHeldIds.length) q.orWhereIn('id', knownHeldIds);
             })
             .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
             .orderBy('id', 'asc')
             .forUpdate()
-            .select('id', 'invoice_number', 'status', 'stripe_payment_intent_id');
+            .select('id', 'invoice_number', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
           for (const heldInv of visitInvoices) {
+            // Skip third-party-billed invoices via the single withdrawal authority (row is already FOR UPDATE locked).
+            if (invoiceWithdrawnFromCustomer(heldInv)) continue;
             const stamped = await trx('invoices')
               .where({ id: heldInv.id })
               .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-              .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
               .update({
                 scheduled_send_at: null,
                 scheduled_send_error: chemicalAddonHoldStamp(svc.id),
@@ -11949,7 +11952,6 @@ async function completeScheduledService(completionInput, packetContext = null) {
       }
     }
     const anyUnpaidHeldOnVisit = unpaidExistingOnChemicalHold || stampedHeldInvoiceIds.length > 0;
-    const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
     // Annual-prepay covered visits route their add-on billing hold and held-invoice
     // office alert through reconcileCoveredVisitInvoice below; all other visits raise
     // the fail-closed billing review alert here. Using the counterfactual

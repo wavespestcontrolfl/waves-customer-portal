@@ -35,6 +35,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
   // Real cents-based math — the amount-due > 0 filter is real production
   // logic, not something this suite should reimplement.
   invoiceAmountDue: (invoice) => {
