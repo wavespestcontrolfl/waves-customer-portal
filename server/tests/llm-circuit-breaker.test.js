@@ -475,4 +475,74 @@ describe('llm/circuit-breaker', () => {
       jest.resetModules();
     }
   });
+
+  test('half-open probe closes on confirmed model response (refusal/incomplete/empty_json) while 400 only releases the probe', () => {
+    process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
+    process.env.LLM_CIRCUIT_COOLDOWN_MS = '10000';
+    const cb = require('../services/llm/circuit-breaker');
+
+    for (const reason of ['openai_refusal', 'openai_incomplete', 'empty_json', 'empty_text']) {
+      cb.resetCircuitBreakers();
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1000 });
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1100 });
+      expect(cb.getCircuitBreakerSnapshot(1200).openai.state).toBe('open');
+
+      const probe = cb.beforeAttempt('openai', { hasBackup: true, now: 12000 });
+      expect(probe.allow).toBe(true);
+      expect(probe.isProbe).toBe(true);
+
+      // A confirmed model response closes the circuit (proving the provider answered)
+      // while the individual call still returns ok: false and falls back normally.
+      cb.afterAttempt('openai', { ok: false, reason, probeId: probe.probeId, generation: probe.generation, now: 12100 });
+      expect(cb.getCircuitBreakerSnapshot(12200).openai).toMatchObject({
+        state: 'closed',
+        recentFailures: 0,
+        probeInFlight: false,
+      });
+    }
+
+    // By contrast, a 400/no_key error does NOT prove healthy model responses: it releases the probe slot only.
+    cb.resetCircuitBreakers();
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1000 });
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1100 });
+    const probe400 = cb.beforeAttempt('openai', { hasBackup: true, now: 12000 });
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_400', probeId: probe400.probeId, generation: probe400.generation, now: 12100 });
+    expect(cb.getCircuitBreakerSnapshot(12200).openai).toMatchObject({
+      state: 'half_open',
+      probeInFlight: false,
+    });
+  });
+
+  test('backups with recent 401/403 credential failures are temporarily excluded without tripping provider outage counting', () => {
+    process.env.LLM_CIRCUIT_FAILURE_THRESHOLD = '2';
+    process.env.LLM_CIRCUIT_COOLDOWN_MS = '10000';
+    process.env.ANTHROPIC_API_KEY = 'bad-key-1';
+    const cb = require('../services/llm/circuit-breaker');
+    cb.resetCircuitBreakers();
+
+    // Trip OpenAI (primary) at t=1100 (cooldown expires at t=11100).
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1000 });
+    cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: 1100 });
+    expect(cb.getCircuitBreakerSnapshot(1200).openai.state).toBe('open');
+
+    // Anthropic backup returns 401: excluded temporarily from backup selection,
+    // while its outage breaker stays closed with zero outage failures.
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 1500 });
+    expect(cb.getCircuitBreakerSnapshot(1600).anthropic).toMatchObject({ state: 'closed', recentFailures: 0 });
+    expect(cb.isAvailable('anthropic', { now: 1600 })).toBe(false);
+    expect(cb.beforeAttempt('openai', { backupProviders: ['anthropic'], now: 1600 }).allow).toBe(true);
+
+    // Rotating the credential clears the exclusion immediately even inside cooldown,
+    // so OpenAI (still cooling down at t=2600) now skips cleanly to Anthropic.
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_403', now: 2000 });
+    expect(cb.isAvailable('anthropic', { now: 2500 })).toBe(false);
+    process.env.ANTHROPIC_API_KEY = 'rotated-key-2';
+    expect(cb.isAvailable('anthropic', { now: 2600 })).toBe(true);
+    expect(cb.beforeAttempt('openai', { backupProviders: ['anthropic'], now: 2600 }).allow).toBe(false);
+
+    // After auth cooldown expires without key rotation, Anthropic is eligible again.
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 3000 });
+    expect(cb.isAvailable('anthropic', { now: 12999 })).toBe(false);
+    expect(cb.isAvailable('anthropic', { now: 13000 })).toBe(true);
+  });
 });

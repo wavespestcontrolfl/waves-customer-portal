@@ -102,12 +102,12 @@ class CircuitBreaker {
     }
   }
 
-  _settleProbe({ ok, outage, aborted, now, cooldownMs }) {
+  _settleProbe({ ok, providerResponded = false, outage, aborted, now, cooldownMs }) {
     if (aborted) {
       this.activeProbeId = null;
       return;
     }
-    if (ok) {
+    if (ok || providerResponded) {
       this.state = 'closed';
       this.failures = [];
       this.openedAt = 0;
@@ -148,7 +148,14 @@ class CircuitBreaker {
     const cooldownMs = opts.cooldownMs ?? this.cooldownMs;
     if (this.state !== 'closed') {
       if (this.state === 'half_open' && this.activeProbeId !== null && opts.probeId === this.activeProbeId) {
-        this._settleProbe({ ok: Boolean(opts.ok), outage: Boolean(opts.outage), aborted: Boolean(opts.aborted), now, cooldownMs });
+        this._settleProbe({
+          ok: Boolean(opts.ok),
+          providerResponded: Boolean(opts.providerResponded),
+          outage: Boolean(opts.outage),
+          aborted: Boolean(opts.aborted),
+          now,
+          cooldownMs,
+        });
       }
       return;
     }

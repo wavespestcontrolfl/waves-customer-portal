@@ -43,6 +43,47 @@ const windowMs = () => positiveIntEnv('LLM_CIRCUIT_WINDOW_MS', DEFAULT_WINDOW_MS
 const cooldownMs = () => positiveIntEnv('LLM_CIRCUIT_COOLDOWN_MS', DEFAULT_COOLDOWN_MS);
 
 const breakers = new Map();
+// Temporary backup-selection exclusion for providers whose current credential
+// recently failed auth (401/403). Kept strictly separate from provider-wide
+// outage counting so an auth failure never trips the outage breaker.
+const authFailures = new Map();
+
+function providerCredential(provider) {
+  if (provider === 'openai') return process.env.OPENAI_API_KEY || '';
+  if (provider === 'anthropic') return process.env.ANTHROPIC_API_KEY || '';
+  if (provider === 'gemini') return process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || '';
+  if (provider === 'typesafe') return process.env.TYPESAFE_API_KEY || '';
+  if (provider === 'cloudflare') return `${process.env.CLOUDFLARE_ACCOUNT_ID || ''}:${process.env.CLOUDFLARE_API_TOKEN || ''}`;
+  return '';
+}
+
+function isCredentialFailureReason(provider, reason) {
+  if (!provider || typeof reason !== 'string') return false;
+  return reason === `${provider}_401` || reason === `${provider}_403`;
+}
+
+// Non-ok outcomes that nonetheless came back from a live model response
+// (refusal, max-token truncation, empty/unparseable output, non-stop finish).
+// Proves the provider answered during a half-open recovery probe while letting
+// the individual call still fail over normally.
+function isModelResponseReason(provider, reason) {
+  if (!provider || typeof reason !== 'string') return false;
+  if (reason === 'empty_text' || reason === 'empty_json') return true;
+  const prefix = `${provider}_`;
+  if (!reason.startsWith(prefix)) return false;
+  const suffix = reason.slice(prefix.length);
+  return suffix === 'refusal' || suffix === 'incomplete' || suffix.startsWith('finish_');
+}
+
+function isAuthCoolingDown(provider, now) {
+  const entry = authFailures.get(provider);
+  if (!entry) return false;
+  if (now >= entry.expiresAt || entry.credential !== providerCredential(provider)) {
+    authFailures.delete(provider);
+    return false;
+  }
+  return true;
+}
 
 function breakerFor(provider) {
   if (!breakers.has(provider)) {
@@ -81,9 +122,11 @@ function isProviderOutageReason(provider, reason, { legMs = null } = {}) {
  */
 function isAvailable(provider, { now = null } = {}) {
   if (!llmCircuitBreakerLive() || !provider) return true;
+  const ts = now ?? Date.now();
+  if (isAuthCoolingDown(provider, ts)) return false;
   const breaker = breakers.get(provider);
   if (!breaker || breaker.state === 'closed') return true;
-  return breaker.isAvailable(now ?? Date.now(), { cooldownMs: cooldownMs() });
+  return breaker.isAvailable(ts, { cooldownMs: cooldownMs() });
 }
 
 /**
@@ -91,15 +134,19 @@ function isAvailable(provider, { now = null } = {}) {
  * A closed backup needs no probe reservation; an open/half-open backup whose
  * cooldown elapsed has its single recovery probe claimed atomically so
  * concurrent chains cannot all skip their primary onto the same backup.
+ * Backups whose current credential recently returned 401/403 are excluded
+ * temporarily so an open primary is not skipped onto a broken key.
  */
 function reserveBackup(providers = [], { now = null } = {}) {
+  const ts = now ?? Date.now();
   for (const provider of providers) {
     if (!provider) continue;
+    if (isAuthCoolingDown(provider, ts)) continue;
     const breaker = breakers.get(provider);
     if (!breaker || breaker.state === 'closed') {
       return { available: true, reservation: null };
     }
-    const gate = breaker.admitAttempt(now ?? Date.now(), { cooldownMs: cooldownMs() });
+    const gate = breaker.admitAttempt(ts, { cooldownMs: cooldownMs() });
     if (gate.allow) {
       return { available: true, reservation: { provider, gate } };
     }
@@ -145,6 +192,24 @@ function beforeAttempt(provider, { hasBackup = false, backupProviders = null, no
   return gate;
 }
 
+function releaseDisabledProbe(provider, probeId) {
+  if (probeId === null) return;
+  const existing = breakers.get(provider);
+  if (existing) existing.releaseProbe(probeId);
+}
+
+function recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts }) {
+  if (authFailed) {
+    authFailures.set(provider, { expiresAt: ts + cooldownMs(), credential: providerCredential(provider) });
+  } else if (ok || providerResponded) {
+    authFailures.delete(provider);
+  }
+}
+
+function isActiveProbe(breaker, probeId) {
+  return breaker.state === 'half_open' && probeId !== null && breaker.activeProbeId === probeId;
+}
+
 /**
  * Record the outcome of an attempted provider call.
  * Callers must pass `aborted: true` when the caller's own AbortSignal fired so
@@ -160,23 +225,25 @@ function afterAttempt(provider, {
   if (!llmCircuitBreakerLive()) {
     // Release a matching in-flight probe even after the gate turns off so
     // re-enabling the gate in the same process never leaves recovery wedged.
-    if (probeId !== null) {
-      const existing = breakers.get(provider);
-      if (existing) existing.releaseProbe(probeId);
-    }
+    releaseDisabledProbe(provider, probeId);
     return;
   }
   const breaker = breakerFor(provider);
   const outage = !ok && isProviderOutageReason(provider, reason, { legMs });
+  const providerResponded = !ok && !aborted && isModelResponseReason(provider, reason);
+  const authFailed = !ok && !aborted && isCredentialFailureReason(provider, reason);
   // Avoid calling Date.now() when nothing needs a timestamp.
-  const needsClock = outage || (breaker.state === 'half_open' && probeId !== null && breaker.activeProbeId === probeId);
+  const needsClock = outage || authFailed || isActiveProbe(breaker, probeId);
+  const ts = needsClock ? (now ?? Date.now()) : 0;
+  recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts });
   breaker.settleAttempt({
     ok,
+    providerResponded,
     outage,
     aborted,
     probeId,
     generation,
-    now: needsClock ? (now ?? Date.now()) : 0,
+    now: ts,
     failureThreshold: failureThreshold(),
     windowMs: windowMs(),
     cooldownMs: cooldownMs(),
@@ -194,6 +261,7 @@ function getCircuitBreakerSnapshot(now = Date.now()) {
 
 function resetCircuitBreakers() {
   breakers.clear();
+  authFailures.clear();
 }
 
 module.exports = {
@@ -203,6 +271,8 @@ module.exports = {
   beforeAttempt,
   afterAttempt,
   isProviderOutageReason,
+  isModelResponseReason,
+  isCredentialFailureReason,
   getCircuitBreakerSnapshot,
   resetCircuitBreakers,
   DEFAULT_FAILURE_THRESHOLD,
