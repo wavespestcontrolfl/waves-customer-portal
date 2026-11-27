@@ -415,7 +415,7 @@ describe('the context\'s stockAdvisory (the server\'s own classifier)', () => {
   test('a lawn visit is advisory, whatever the customer\'s tier', async () => {
     expect((await build()).stockAdvisory).toBe(true);
   });
-  test('a visit that is not a lawn or tree & shrub visit keeps the hold', async () => {
-    expect((await build({ service_type: 'Mosquito Control' })).stockAdvisory).toBe(false);
+  test('a visit that is not a lawn or tree & shrub visit is advisory too (owner 2026-11-26): no stock hold on any visit type', async () => {
+    expect((await build({ service_type: 'Mosquito Control' })).stockAdvisory).toBe(true);
   });
 });

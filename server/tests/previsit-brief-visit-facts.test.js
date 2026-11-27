@@ -20,6 +20,9 @@ jest.mock('../services/llm/call', () => ({
   dispatchWithFallback: jest.fn(),
 }));
 
+const mockCustomerAsked = jest.fn();
+jest.mock('../services/visit-customer-asked', () => ({ customerAskedFacts: (...args) => mockCustomerAsked(...args) }));
+
 const { deterministicVisitFacts } = require('../services/previsit-brief');
 
 const SVC = {
@@ -127,5 +130,30 @@ describe('deterministicVisitFacts', () => {
       products: [],
     }));
     expect(facts.last_visit).toBeNull();
+  });
+});
+
+describe('deterministicVisitFacts: customer_asked is opt-in', () => {
+  beforeEach(() => mockCustomerAsked.mockReset());
+
+  test('other callers pay no queries and see no key', async () => {
+    const facts = await deterministicVisitFacts(SVC, fakeDbh());
+    expect(mockCustomerAsked).not.toHaveBeenCalled();
+    expect(facts.customer_asked).toBeUndefined();
+  });
+
+  test('the Visit Brief route asks, and the key rides the facts', async () => {
+    mockCustomerAsked.mockResolvedValue({ items: [{ kind: 'booking_note', at: '2026-11-20T15:00:00.000Z', text: 'Text first' }] });
+    const dbh = fakeDbh();
+    const facts = await deterministicVisitFacts(SVC, dbh, { customerAsked: true });
+    expect(mockCustomerAsked).toHaveBeenCalledWith(SVC, dbh);
+    expect(facts.customer_asked.items[0].text).toBe('Text first');
+  });
+
+  test('a failed or empty read omits the key', async () => {
+    mockCustomerAsked.mockRejectedValue(new Error('down'));
+    expect((await deterministicVisitFacts(SVC, fakeDbh(), { customerAsked: true })).customer_asked).toBeUndefined();
+    mockCustomerAsked.mockResolvedValue(null);
+    expect((await deterministicVisitFacts(SVC, fakeDbh(), { customerAsked: true })).customer_asked).toBeUndefined();
   });
 });

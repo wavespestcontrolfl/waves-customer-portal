@@ -1,7 +1,8 @@
 /**
- * A technician's product amount no visit uses is refused (422 IMPLAUSIBLE_PRODUCT_AMOUNT) on a FRESH completion only, before
- * the first service write, against a FIXED per-dimension limit (no usage history is read). A malformed amount is a 400 for every
- * role. A same-key replay of a committed completion is never judged again and replays the success.
+ * Owner 2026-11-26: a product amount no visit uses (a FIXED per-dimension limit, no usage history read) never stops a completion,
+ * for a technician or an admin: the line is recorded, stock is left alone, the saved line is flagged not_deducted_implausible and
+ * the office is alerted. A malformed amount is still a 400 for every role. A same-key replay of a committed completion is never
+ * judged again and replays the success.
  * Runs the real completeScheduledService against a private migrated clone (wiring copied from
  * complete-scheduled-service-first-visit-rating-default-postgres.test.js).
  */
@@ -69,7 +70,7 @@ const postgres = SKIP ? describe.skip : describe;
 let mockPg;
 jest.setTimeout(90000);
 
-async function seedPestVisit({ addOnKey = null, productName = null, category = 'herbicide', inventoryUnit = 'lb' } = {}) {
+async function seedPestVisit({ addOnKey = null, productName = null, category = 'herbicide', inventoryUnit = 'lb', analysisN = null, lawnSqft = null } = {}) {
   const { etDateString } = require('../utils/datetime-et');
   const f = { customerId: randomUUID(), techId: randomUUID(), catalogId: randomUUID(), serviceId: randomUUID(), productId: randomUUID(),
     serviceKey: `fixture_pest_${randomUUID().slice(0, 8)}` };
@@ -78,7 +79,8 @@ async function seedPestVisit({ addOnKey = null, productName = null, category = '
   await mockPg('technicians').insert({ id: f.techId, name: 'Fixture Technician', role: 'technician', active: true });
   await mockPg('services').insert({ id: f.catalogId, name: `Fixture General Pest Control ${f.serviceKey}`, service_key: f.serviceKey, is_active: true });
   await mockPg('products_catalog').insert({ id: f.productId, name: productName || `Fixture Celsius WG ${f.serviceKey}`, category, active: true,
-    inventory_on_hand: 500, inventory_unit: inventoryUnit });
+    inventory_on_hand: 500, inventory_unit: inventoryUnit, ...(analysisN != null ? { analysis_n: analysisN } : {}) });
+  if (lawnSqft != null) await mockPg('customer_turf_profiles').insert({ customer_id: f.customerId, grass_type: 'st_augustine', county: 'Sarasota', active: true, lawn_sqft: lawnSqft });
   await mockPg('scheduled_services').insert({ id: f.serviceId, customer_id: f.customerId, technician_id: f.techId, service_id: f.catalogId,
     service_type: `Fixture General Pest Control ${f.serviceKey}`, scheduled_date: etDateString(), window_start: '09:00', window_end: '10:00', status: 'confirmed',
     estimated_price: 0, estimated_duration_minutes: 60, create_invoice_on_complete: false,
@@ -87,6 +89,8 @@ async function seedPestVisit({ addOnKey = null, productName = null, category = '
 }
 
 async function cleanup(f) {
+  await mockPg('property_nutrient_ledger').where({ customer_id: f.customerId }).del().catch(() => {});
+  await mockPg('customer_turf_profiles').where({ customer_id: f.customerId }).del().catch(() => {});
   await mockPg('product_inventory_movements').where('product_id', f.productId).del().catch(() => {});
   await mockPg('service_completion_attempts').where('service_id', f.serviceId).del().catch(() => {});
   const records = await mockPg('service_records').where({ customer_id: f.customerId }).select('id').catch(() => []);
@@ -127,18 +131,19 @@ postgres('technician implausible product amount', () => {
   });
   afterAll(async () => { if (mockPg) await mockPg.destroy(); });
 
-  test('a fresh technician over-ceiling submit answers 422 and writes nothing; the claim is released', async () => {
+  const savedDeductions = async (f) => {
+    const notes = (await mockPg('service_records').where({ customer_id: f.customerId }).first('structured_notes')).structured_notes;
+    return (typeof notes === 'string' ? JSON.parse(notes) : notes).inventoryDeductions;
+  };
+
+  test('a technician over-ceiling submit completes (owner 2026-11-26): line recorded, stock untouched, line flagged', async () => {
     const f = await seedPestVisit();
     try {
+      // 406 lb against 500 on hand: over the 100 lb ceiling although the shelf could cover it. Flagged all the same.
       const out = await complete(f, { role: 'technician', totalAmount: 406 });
-      expect(out.status).toBe(422);
-      expect(out.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', error: expect.stringMatching(/^406 lb of Fixture Celsius WG .* is far more than one visit uses\. Check the amount and submit again\.$/) });
-      expect(await writesFor(f)).toEqual({ records: 0, serviceProducts: 0, ownMovements: 0, allMovements: 0, stock: 500 });
-      const attempts = await mockPg('service_completion_attempts').where('service_id', f.serviceId);
-      expect(attempts.every((a) => a.status === 'failed')).toBe(true);
-      // The corrected amount then goes through.
-      expect((await complete(f, { role: 'technician', totalAmount: 4 })).status).toBe(200);
-      expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 1, stock: 496 });
+      expect(out.status).toBe(200);
+      expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
+      expect(await savedDeductions(f)).toEqual([expect.objectContaining({ productId: f.productId, amount: 406, amountUnit: 'lb', status: 'not_deducted_implausible' })]);
     } finally { await cleanup(f); }
   });
 
@@ -150,20 +155,93 @@ postgres('technician implausible product amount', () => {
     } finally { await cleanup(f); }
   });
 
+  const nutrientRows = async (f) => Number((await mockPg('property_nutrient_ledger').where({ customer_id: f.customerId }).count('* as n').first()).n);
+
+  test('50,000 lb of a 20% N product on 1,000 sq ft (10,000 lb N per 1,000) completes flagged and writes no nutrient row', async () => {
+    const f = await seedPestVisit({ analysisN: 20, lawnSqft: 1000 });
+    try {
+      const out = await complete(f, { role: 'technician', totalAmount: 50000 });
+      expect(out.status).toBe(200);
+      expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
+      expect(await nutrientRows(f)).toBe(0);
+      expect(await savedDeductions(f)).toEqual([expect.objectContaining({ status: 'not_deducted_implausible', amount: 50000 })]);
+      // The annual nutrient fallback (service products with no ledger row) must not count the flagged line as 10,000 lb N.
+      const { calculateNutrientLedger } = require('../services/waveguard-plan-engine');
+      const catalogRows = await mockPg('products_catalog').where({ id: f.productId }).select('*');
+      const annual = await calculateNutrientLedger(mockPg, f.customerId, catalogRows, 1000, new Date(), { strict: true });
+      expect(annual).toMatchObject({ totalN: 0, nApplied: 0 });
+    } finally { await cleanup(f); }
+  });
+
+  test('an UNflagged line whose per-1,000 rate cannot be stored (50 lb of a 20% N product on a 1 sq ft lawn) completes without a nutrient row, never a rollback', async () => {
+    const f = await seedPestVisit({ analysisN: 20, lawnSqft: 1 });
+    try {
+      const out = await complete(f, { role: 'technician', totalAmount: 50 });
+      expect(out.status).toBe(200);
+      expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 1, stock: 450 });
+      expect(await nutrientRows(f)).toBe(0);
+    } finally { await cleanup(f); }
+  });
+
+  // service_products.total_amount (and the FDACS ledger's quantity_applied) is NUMERIC(8,3): 99999.999 is the most it stores.
+  test('the column maximum 99999.999 lb completes flagged for a technician; 100000 lb is a 400 with nothing written and the claim released', async () => {
+    const f = await seedPestVisit();
+    try {
+      const over = await complete(f, { role: 'technician', totalAmount: 100000 });
+      expect(over.status).toBe(400);
+      expect(over.body).toMatchObject({ code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: f.productId });
+      expect(await writesFor(f)).toEqual({ records: 0, serviceProducts: 0, ownMovements: 0, allMovements: 0, stock: 500 });
+      const attempts = await mockPg('service_completion_attempts').where('service_id', f.serviceId);
+      expect(attempts.every((a) => a.status === 'failed')).toBe(true);
+      const atMax = await complete(f, { role: 'technician', totalAmount: 99999.999 });
+      expect(atMax.status).toBe(200);
+      expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
+      expect(await savedDeductions(f)).toEqual([expect.objectContaining({ amount: 99999.999, status: 'not_deducted_implausible' })]);
+      // The flagged line carries the service product it was recorded on: job costing skips it by that id, never by a rounded amount.
+      const sp = await mockPg('service_products as sp').join('service_records as sr', 'sr.id', 'sp.service_record_id').where('sr.customer_id', f.customerId).first('sp.id');
+      expect((await savedDeductions(f))[0].serviceProductId).toBe(sp.id);
+    } finally { await cleanup(f); }
+  });
+
+  test('406.0005 lb is stored as 406.001 and its flagged line costs nothing: job costing skips it by service product', async () => {
+    const f = await seedPestVisit();
+    try {
+      const out = await complete(f, { role: 'technician', totalAmount: 406.0005 });
+      expect(out.status).toBe(200);
+      const record = await mockPg('service_records').where({ customer_id: f.customerId }).first('id', 'structured_notes');
+      const ledger = await mockPg('property_application_history').where({ service_record_id: record.id }).first('quantity_applied');
+      expect(Number(ledger.quantity_applied)).toBe(406.001);
+      const { calcProductsCost } = require('../services/job-costing');
+      expect((await calcProductsCost(mockPg, record.id, record.structured_notes)).productsCost).toBe(0);
+    } finally { await cleanup(f); }
+  });
+
+  test('a technician and an admin over the ceiling take the same path: the same flagged line and the same untouched stock', async () => {
+    const saved = {};
+    for (const role of ['technician', 'admin']) {
+      const f = await seedPestVisit();
+      try {
+        expect((await complete(f, { role, totalAmount: 600 })).status).toBe(200);
+        saved[role] = { writes: await writesFor(f), lines: (await savedDeductions(f)).map(({ status, amount, amountUnit }) => ({ status, amount, amountUnit })) };
+      } finally { await cleanup(f); }
+    }
+    expect(saved.technician).toEqual(saved.admin);
+  });
+
   test('an admin over-ceiling submit keeps the advisory path: line recorded, stock untouched', async () => {
     const f = await seedPestVisit();
     try {
       const out = await complete(f, { role: 'admin', totalAmount: 600 });
       expect(out.status).toBe(200);
       expect(await writesFor(f)).toMatchObject({ records: 1, serviceProducts: 1, allMovements: 0, stock: 500 });
-      // The refusal is saved with the amount it refused: job costing binds its exclusion to exactly that product, amount and unit.
+      // The flagged line is saved with its amount: job costing binds its exclusion to exactly that product, amount and unit.
       const notes = (await mockPg('service_records').where({ customer_id: f.customerId }).first('structured_notes')).structured_notes;
       const saved = typeof notes === 'string' ? JSON.parse(notes) : notes;
       expect(saved.inventoryDeductions).toEqual([expect.objectContaining({ productId: f.productId, amount: 600, amountUnit: 'lb', status: 'not_deducted_implausible' })]);
     } finally { await cleanup(f); }
   });
 
-  test('200 spellings of one product id at 100 lb each are refused for a technician: 422, nothing written', async () => {
+  test('200 spellings of one product id at 100 lb each complete for a technician (never refused), and stock never goes below zero', async () => {
     const f = await seedPestVisit();
     try {
       const { completeScheduledService } = require('../services/complete-scheduled-service');
@@ -172,9 +250,8 @@ postgres('technician implausible product amount', () => {
       const out = await completeScheduledService({ serviceId: f.serviceId, idempotencyKey: randomUUID(),
         actor: { techRole: 'technician', technicianId: f.techId, technician: null },
         body: { ...bodyFor(f, 1), products } });
-      expect(out.status).toBe(422);
-      expect(out.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 20000 });
-      expect(await writesFor(f)).toEqual({ records: 0, serviceProducts: 0, ownMovements: 0, allMovements: 0, stock: 500 });
+      expect(out.status).toBe(200);
+      expect((await writesFor(f)).stock).toBeGreaterThanOrEqual(0);
     } finally { await cleanup(f); }
   });
 
@@ -192,7 +269,7 @@ postgres('technician implausible product amount', () => {
     } finally { await cleanup(f); }
   });
 
-  test('a blank stock unit does not split a product: 60 lb + 960 oz (120 lb) is a 422 with nothing written; 50 lb + 800 oz passes', async () => {
+  test('a blank stock unit does not split a product: 60 lb + 960 oz (120 lb) completes for a technician and stock never goes below zero', async () => {
     const f = await seedPestVisit({ inventoryUnit: null });
     try {
       const { completeScheduledService } = require('../services/complete-scheduled-service');
@@ -200,10 +277,8 @@ postgres('technician implausible product amount', () => {
         actor: { techRole: 'technician', technicianId: f.techId, technician: null },
         body: { ...bodyFor(f, 1), products: lines.map(([totalAmount, amountUnit], i) => ({ productId: i ? f.productId.toUpperCase() : f.productId, totalAmount, amountUnit })) } });
       const over = await send([[60, 'lb'], [960, 'oz']]);
-      expect(over.status).toBe(422);
-      expect(over.body).toMatchObject({ code: 'IMPLAUSIBLE_PRODUCT_AMOUNT', amount: 120, amountUnit: 'lb' });
-      expect(await writesFor(f)).toMatchObject({ records: 0, serviceProducts: 0, allMovements: 0, stock: 500 });
-      expect((await send([[50, 'lb'], [800, 'oz']])).status).toBe(200);
+      expect(over.status).toBe(200);
+      expect((await writesFor(f)).stock).toBeGreaterThanOrEqual(0);
     } finally { await cleanup(f); }
   });
 

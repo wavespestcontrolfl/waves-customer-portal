@@ -110,6 +110,8 @@ beforeEach(() => {
 });
 afterAll(() => { for (const k of Object.keys(ENV)) delete process.env[k]; });
 
+// The real SiteOne bot is never in the server's registry (SITEONE_ORDER_RUNNER mac / office only), so the login-driven path of canAutoOrder is exercised with an injected adapter.
+const loginAdapter = () => ({ key: 'siteone', quotesAtPlace: true, packagedQuantity: true, loginRequired: true, loginConfigured: (c) => !!(c && c.password && c.accountNumber), place: jest.fn() });
 const run = (adapter, opts = {}) => dispatch.dispatchRestockOrder('req-1', { notify, adapters: { stickermule: adapter, siteone: adapter }, ...opts });
 // The last ledger write with a status: the bellAt stamp that follows a bell is a separate evidence-only update.
 const lastLedgerPatch = () => mockState.updates.filter((u) => u.table === 'vendor_orders' && u.row.status).pop().row;
@@ -729,14 +731,23 @@ test('master gate off: the run still re-rings pending bells and recovers stale p
 test('canAutoOrder PROPAGATES a throwing credential lookup — an infrastructure failure is not "unconfigured" (no "order manually" bell beside a possible placement; Codex #3853 r17 P1)', async () => {
   const { getVendorLoginCredentials } = require('../services/vendor-credentials');
   getVendorLoginCredentials.mockRejectedValueOnce(new Error('ECONNRESET'));
-  await expect(dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).rejects.toThrow(/credential lookup for SiteOne failed: ECONNRESET/);
+  await expect(dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true }, adapters: { siteone: loginAdapter() } })).rejects.toThrow(/credential lookup for SiteOne failed: ECONNRESET/);
 });
 
 test('canAutoOrder mirrors gates + adapter map + loaded module + vendor active', async () => {
   expect(await dispatch.canAutoOrder({ vendor: stickerMule })).toBe(true);
   expect(await dispatch.canAutoOrder({ vendor: { id: 'g', name: 'Gemplers', code: 24 } })).toBe(false);
-  // PR 3 ships the SiteOne module: with its gate set the vendor auto-orders.
-  expect(await dispatch.canAutoOrder({ vendor: { id: 's1', name: 'SiteOne', code: 1, active: true } })).toBe(true);
+  // SiteOne: the server never runs its own bot. Only SITEONE_ORDER_RUNNER=mac (the Mac's marker) reads it as automatic;
+  // unset, empty or a typo = the office orders it by hand (the sweep rings "order manually").
+  const siteoneRow = { id: 's1', name: 'SiteOne', code: 1, active: true };
+  for (const runner of [undefined, '', 'server', 'macc']) {
+    if (runner === undefined) delete process.env.SITEONE_ORDER_RUNNER; else process.env.SITEONE_ORDER_RUNNER = runner;
+    expect(await dispatch.canAutoOrder({ vendor: siteoneRow })).toBe(false);
+  }
+  process.env.SITEONE_ORDER_RUNNER = 'mac';
+  expect(await dispatch.canAutoOrder({ vendor: siteoneRow })).toBe(true);
+  delete process.env.SITEONE_ORDER_RUNNER;
+  expect(await dispatch.canAutoOrder({ vendor: siteoneRow, adapters: { siteone: loginAdapter() } })).toBe(true); // a login-driven adapter with its stored login
   expect(await dispatch.canAutoOrder({ vendor: { ...stickerMule, active: false } })).toBe(false);
   mockState.vendor = { ...stickerMule, active: false };
   expect(await dispatch.canAutoOrder({ vendorId: 'vend-sm' })).toBe(false);
@@ -1199,8 +1210,8 @@ test('a login-required vendor without its stored login is handed back before any
   expect(mockState.ledgerRows).toHaveLength(0);
   // canAutoOrder makes the same call, so the sweep never stands down its bell for that vendor
   getVendorLoginCredentials.mockResolvedValueOnce(null);
-  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(false);
-  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor })).toBe(true); // the default mock login is complete
+  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor, adapters: { siteone: loginAdapter() } })).toBe(false);
+  expect(await dispatch.canAutoOrder({ vendor: mockState.vendor, adapters: { siteone: loginAdapter() } })).toBe(true); // the default mock login is complete
 });
 
 test('a vendor row that changed between the login prefetch and the locked claim is not claimed on the stale login — skipped, no bell, no ledger row (Codex #3853 r15 P1)', async () => {

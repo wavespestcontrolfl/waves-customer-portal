@@ -224,6 +224,12 @@ const DEFAULTS = Object.freeze({
   DEAL_END_DATE: 'claude-haiku-5-5',
   // Alert clear-up agent (owner 2026-11-26: a larger model on the paid API, this lane only): Sonnet 5.5, the ROUTINE id.
   ALERT_CLEAR: 'claude-sonnet-5-5',
+  // Inbound email classification (email/email-classifier.js). Owner
+  // 2026-11-27 ("yes", about $10-20 a month more): a replay on 286 real
+  // emails with a blind referee on the 92 where three models differed found
+  // this model right on 58, the stored labels on 33 (26 "spam" labels were
+  // really "other"). Override with MODEL_EMAIL_CLASSIFY.
+  EMAIL_CLASSIFY: 'claude-opus-5-5',
   CALL_RESEARCH_ANTHROPIC: 'claude-opus-4-8',
   CALL_EXTRACTION_ANTHROPIC: 'claude-opus-4-8',
   VOICE_JUDGE: 'claude-opus-4-8',
@@ -389,6 +395,8 @@ const DEAL_END_DATE = process.env.MODEL_DEAL_END_DATE || DEFAULTS.DEAL_END_DATE;
 // text, email, voicemail or missed call is answered. Pinned here, not on a tier: the owner chose a Sonnet-class model on the paid API
 // for this one lane (2026-11-26), and nobody reads the output (code checks the proof it names). Override via MODEL_ALERT_CLEAR.
 const ALERT_CLEAR = process.env.MODEL_ALERT_CLEAR || DEFAULTS.ALERT_CLEAR;
+// Inbound email classification (owner 2026-11-27): its own selector, off OPENAI_FAST.
+const EMAIL_CLASSIFY = process.env.MODEL_EMAIL_CLASSIFY || DEFAULTS.EMAIL_CLASSIFY;
 
 // Call-research miner's Anthropic leg (fallback by default). Pinned here per
 // the registry convention rather than riding FLAGSHIP: extraction-model
@@ -744,6 +752,14 @@ const TEXT_POLICIES = Object.freeze({
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: ADS_ADVISOR, effort: 'high' }),
     fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
   }),
+  // Inbound email classification (owner 2026-11-27): its own model first; the
+  // fast OpenAI model that sorted email before stays as the backup. No effort
+  // override, so it thinks at the global MODEL_ANTHROPIC_EFFORT, as in the replay.
+  emailClassify: Object.freeze({
+    name: 'emailClassify',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: EMAIL_CLASSIFY }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
+  }),
   fastStructured: Object.freeze({
     name: 'fastStructured',
     primary: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_FAST }),
@@ -956,6 +972,7 @@ module.exports = {
   LIVE_CALL,
   DEAL_END_DATE,
   ALERT_CLEAR,
+  EMAIL_CLASSIFY,
   CALL_RESEARCH_ANTHROPIC,
   CALL_EXTRACTION_ANTHROPIC,
   VOICE_JUDGE,

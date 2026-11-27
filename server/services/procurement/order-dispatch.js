@@ -138,15 +138,11 @@ const VENDOR_GATE = { siteone: 'GATE_AUTO_ORDER_SITEONE', stickermule: 'GATE_AUT
 const REMOTE_RUNNER = 'mac';
 const siteoneRunsOnMac = (env = process.env) => String(env.SITEONE_ORDER_RUNNER || '').trim().toLowerCase() === REMOTE_RUNNER;
 const MAC_RUNNER_MARKER = Object.freeze({ remoteRunner: REMOTE_RUNNER });
-// Any other non-empty value is a typo, never the server's own adapter (which can submit for real):
-// its SiteOne requests go to the office with the "order manually" bell.
-const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true });
-const siteoneSlot = (env) => {
-  if (siteoneRunsOnMac(env)) return MAC_RUNNER_MARKER;
-  // Only an absent or empty value keeps the server's own adapter; anything else (spaces included) is invalid.
-  if (env.SITEONE_ORDER_RUNNER != null && env.SITEONE_ORDER_RUNNER !== '') return INVALID_RUNNER_MARKER;
-  return require('./adapters/siteone');
-};
+// Any value but 'mac' (unset, empty, a typo) is never the server's own SiteOne adapter, which signs in
+// with the stored login, empties the cart and submits for real from a server SiteOne blocks (owner
+// 2026-11-27): its SiteOne requests go to the office with the "order manually" bell.
+const INVALID_RUNNER_MARKER = Object.freeze({ invalidRunner: true, configured: () => false }); // never configured: canAutoOrder reads it as manual
+const siteoneSlot = (env) => (siteoneRunsOnMac(env) ? MAC_RUNNER_MARKER : INVALID_RUNNER_MARKER);
 
 function loadAdapters(env = process.env) {
   return {
@@ -190,13 +186,12 @@ const num = (v) => { const n = Number(v); return v == null || v === '' || !Numbe
  * vendor check so the sweep never suppresses its manual bell for a request
  * the dispatcher will then refuse (Codex r1 P2).
  */
-async function canAutoOrder({ conn = db, vendorId, vendor = null } = {}) {
+async function canAutoOrder({ conn = db, vendorId, vendor = null, adapters = null } = {}) {
   if (!gateEnvValue(GATE)) return false;
   const row = vendor || (vendorId ? await conn('vendors').where({ id: vendorId }).first('id', 'name', 'code', 'active') : null);
   if (!row || row.active === false) return false;
   const key = adapterKeyFor(row);
-  const adapter = key ? loadAdapters()[key] : null;
-  if (adapter && adapter.invalidRunner) return false; // a SITEONE_ORDER_RUNNER typo: the sweep's manual bell stays
+  const adapter = key ? (adapters || loadAdapters())[key] : null;
   // An adapter without its credential must not own requests: the sweep would
   // stand down its manual bell and the dispatcher would park every claim as
   // "no prior order" — a misleading, non-reclaimable needs_review (Codex r20

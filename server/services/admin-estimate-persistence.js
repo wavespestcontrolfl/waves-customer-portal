@@ -1595,6 +1595,8 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   assertSpecialtyClientFallbackSave(estimateData);
   stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData });
   stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
+  // A cockroach treatment or rodent guarantee row is refused too: the browser cannot set either price (see the function).
+  guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -2180,21 +2182,24 @@ const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$
 // server's own result with none of the three services hold none of the words in a string, and no block under such a key
 // (specialty-prices-20261126.test.js prices both and checks).
 const specialtyKeyHoldsRows = (value) => !!value && typeof value === 'object' && Object.keys(value).length > 0;
-function saveHoldsSpecialtyRow(estimateData) {
+// The walk itself, for any set of row words (the whole-home sizing check below reads the same way). browserRowKey: a key the
+// browser estimator files such rows under without naming them (the mosquito tier rows under `mq`).
+function saveHoldsRowNamed(estimateData, words, browserRowKey = null) {
   const seen = new Set();
   const walk = (node) => {
-    if (typeof node === 'string') return SPECIALTY_ROW_WORDS.test(node);
+    if (typeof node === 'string') return words.test(node);
     if (!node || typeof node !== 'object' || seen.has(node)) return false;
     seen.add(node);
     if (Array.isArray(node)) return node.some(walk);
     return Object.entries(node).some(([key, value]) => {
       if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
-      if ((key === 'mq' || SPECIALTY_ROW_WORDS.test(key)) && specialtyKeyHoldsRows(value)) return true;
+      if ((key === browserRowKey || words.test(key)) && specialtyKeyHoldsRows(value)) return true;
       return walk(value);
     });
   };
   return walk(estimateData);
 }
+const saveHoldsSpecialtyRow = (estimateData) => saveHoldsRowNamed(estimateData, SPECIALTY_ROW_WORDS, 'mq');
 
 // Every posted shape is read: the revise route takes any object, a list included, and a list is walked like any other node.
 function assertSpecialtyClientFallbackSave(estimateData) {
@@ -2219,6 +2224,33 @@ function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData =
       const { legacySpecialty1126: _flag, specialty1126CurrentServices: _list, ...rest } = container.routingMetadata;
       container.routingMetadata = rest;
     }
+  }
+}
+
+// Cockroach treatment and rodent guarantee rows on a save the server could not price (the CLIENT_FALLBACK authority). The browser
+// cannot set either price: its cockroach brackets are hard-coded dollars (a Settings change to pest_base.initial_roach never reaches
+// it), a page cached before the whole-home rule (owner 2026-11-26) prices the ground-floor footprint, and it has no rodent guarantee
+// price at all. A rule stamp posted by the browser proves none of that. So, the same rule as the specialty rows above: such a save
+// is refused (409, reload and let the server price it) when it NAMES a cockroach treatment (stand-alone or added by a pest plan) or
+// a rodent guarantee anywhere outside its inputs, whatever stamp it posts, new or re-saved, changed or not.
+// "roach" is read as a word or a camelCase part (pest_initial_roach, Cockroach Treatment, pestInitialRoach), never inside "approach".
+const WHOLE_HOME_SIZING_ROW_WORDS = {
+  test: (text) => /cockroach|(?<![a-z])roach|rodent[ _-]?guarantee/i.test(text) || /[a-z]Roach/.test(text),
+};
+// The whole-home rule stamp of a browser-priced save that passed the refusal (it holds none of the three rows: bed bug is refused by
+// the specialty check) is the server's reading, never the browser's: a revision keeps the stored estimate's stamp, so one of the
+// three added later by the server stays on the basis the estimate was sold on; a first save is new. Written on every result
+// container, so the reader finds it whichever one it picks.
+function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (saveHoldsRowNamed(estimateData, WHOLE_HOME_SIZING_ROW_WORDS)) {
+    throw errorWithStatus('This estimate has a cockroach treatment or rodent guarantee price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
+  }
+  if (!isPlainRecord(estimateData)) return;
+  const legacy = !!storedEstimateData
+    && require('./estimate-floor-signal-replay').savedLegacyWholeHomeSizingSignal(storedEstimateData).legacyWholeHomeSizing === true;
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyWholeHomeSizing: legacy };
   }
 }
 
@@ -4313,6 +4345,7 @@ module.exports = {
   stampPestAboveTableOnClientFallbackSave,
   assertSpecialtyClientFallbackSave,
   stampSpecialtyOnClientFallbackSave,
+  guardWholeHomeSizingOnClientFallbackSave,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,
