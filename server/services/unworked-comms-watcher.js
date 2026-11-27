@@ -27,12 +27,11 @@ const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
-const { firstDeliveryEvidenceSql, deliveryInstantSql } = require('./self-serve-estimates');
+const { deliveryInstantSql } = require('./self-serve-estimates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
-const {
-  judgeLeads, openLeadIdentities, usablePhoneKey, leadEmail,
-} = require('./lead-contact-sync');
+const { judgeLeads } = require('./lead-contact-sync');
+const { estimateSends, estimateItems } = require('./lead-reach-stats');
 
 const DIGITAL_LEAD_TYPES = Object.freeze(['form_submission', 'email_inquiry', 'voicemail', 'quote_wizard']);
 const DIGITAL_LEAD_LABELS = Object.freeze({
@@ -573,53 +572,19 @@ function loadDigitalLeadCandidatesPage(cutoff, includeExpired, after = null) {
   );
 }
 
-function estimateOwnerIds(row) {
-  return Array.isArray(row.owner_lead_ids) ? row.owner_lead_ids.filter(Boolean).map(String) : [];
-}
-
-async function loadDeliveredEstimateClearSet(leads, owners) {
+async function loadStaffEstimateClearSet(leads) {
   if (!leads.length) return new Set();
-  const estIds = [...new Set(leads.map((l) => l.estimate_id).filter(Boolean))];
-  const clearableCustIds = [...new Set(
-    leads
-      .filter((l) => l.customer_id && (owners.get(`customer:${l.customer_id}`)?.size || 0) <= 1)
-      .map((l) => l.customer_id),
-  )];
-  if (!estIds.length && !clearableCustIds.length) return new Set();
-  const minFirstAt = new Date(Math.min(...leads.map((l) => new Date(l.first_contact_at).getTime())));
-  const deliveredAtExpr = `GREATEST(${firstDeliveryEvidenceSql('fe')}, ${deliveryInstantSql('fe', 'lastDeliveredAt')})`;
-  const rows = await db('estimates as fe')
-    .whereNull('fe.archived_at')
-    .whereRaw(`${deliveredAtExpr} > ?`, [minFirstAt])
-    .where((q) => {
-      if (estIds.length) q.orWhereIn('fe.id', estIds);
-      if (clearableCustIds.length) q.orWhereIn('fe.customer_id', clearableCustIds);
-    })
-    .select(
-      'fe.id', 'fe.customer_id',
-      db.raw(`${deliveredAtExpr} AS delivered_at`),
-      db.raw('ARRAY(SELECT ol.id::text FROM leads ol WHERE ol.estimate_id = fe.id AND ol.deleted_at IS NULL) AS owner_lead_ids'),
-    );
-  const byEstId = new Map();
-  const byUnownedCustId = new Map();
-  for (const r of rows) {
-    const ms = new Date(r.delivered_at).getTime();
-    if (!Number.isFinite(ms)) continue;
-    byEstId.set(String(r.id), Math.max(byEstId.get(String(r.id)) || 0, ms));
-    // Respect explicit estimate ownership (lead-estimate-link.js): an estimate
-    // linked to another lead (even a closed one) never clears this customer's
-    // open inquiry via the customer fallback.
-    if (r.customer_id && estimateOwnerIds(r).length === 0) {
-      byUnownedCustId.set(String(r.customer_id), Math.max(byUnownedCustId.get(String(r.customer_id)) || 0, ms));
-    }
-  }
+  const sends = await estimateSends(db, leads);
+  const firstById = new Map(leads.map((l) => [String(l.id), new Date(l.first_contact_at).getTime()]));
   const cleared = new Set();
-  for (const l of leads) {
-    const firstMs = new Date(l.first_contact_at).getTime();
-    const directMs = l.estimate_id ? (byEstId.get(String(l.estimate_id)) || 0) : 0;
-    const custAllowed = Boolean(l.customer_id) && (owners.get(`customer:${l.customer_id}`)?.size || 0) <= 1;
-    const custMs = custAllowed ? (byUnownedCustId.get(String(l.customer_id)) || 0) : 0;
-    if (directMs > firstMs || custMs > firstMs) cleared.add(String(l.id));
+  for (const send of sends) {
+    const firstAt = firstById.get(String(send.leadId));
+    if (!Number.isFinite(firstAt)) continue;
+    // Only a proven human staff send (latest != null) clears the lead —
+    // automated autoSend/moveAutoSend deliveries and uncertain resends do not.
+    if (estimateItems(send, firstAt).some((item) => item.latest != null)) {
+      cleared.add(String(send.leadId));
+    }
   }
   return cleared;
 }
@@ -631,11 +596,10 @@ async function filterUnworkedDigitalLeadPage(candidates) {
     return !verdict || Boolean(verdict.skip);
   });
   if (!uncontacted.length) return [];
-  const peers = [...new Set(uncontacted.map((l) => usablePhoneKey(l.phone)).filter(Boolean))];
-  const emails = [...new Set(uncontacted.map((l) => leadEmail(l.email)).filter(Boolean))];
-  const customerIds = [...new Set(uncontacted.map((l) => l.customer_id).filter(Boolean))];
-  const owners = await openLeadIdentities(db, { peers, emails, customerIds });
-  const estCleared = await loadDeliveredEstimateClearSet(uncontacted, owners);
+  // Preserve a staff member's manual reopen: reopened_by_person leads are never
+  // cleared by prior estimate deliveries.
+  const eligibleForEst = uncontacted.filter((lead) => verdicts.get(String(lead.id))?.skip !== 'reopened_by_person');
+  const estCleared = await loadStaffEstimateClearSet(eligibleForEst);
   return uncontacted.filter((lead) => !estCleared.has(String(lead.id)));
 }
 
