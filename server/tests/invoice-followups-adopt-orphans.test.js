@@ -35,6 +35,7 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/invoice-helpers', () => ({
+  ...jest.requireActual('../services/invoice-helpers'),
   // Real cents-based math — the amount-due > 0 filter is real production
   // logic, not something this suite should reimplement.
   invoiceAmountDue: (invoice) => {
@@ -276,10 +277,13 @@ describe('selectAdoptionCandidates (dry run)', () => {
     // actually delivered to the customer) — the same whitelist
     // the retired late-payment checker's candidate query used.
     expect(orphanQuery.recorded.whereIn).toEqual(['i.status', ['sent', 'viewed', 'overdue']]);
-    // "withdrawn to a payer" (payer_billed: stamp), same shape as runPending's own exclusion.
+    // "withdrawn to a payer" (payer_billed: stamp) and chemical add-on billing holds
+    // (chemical_addon_review: stamp), same shape as runPending's own exclusions.
     expect(orphanQuery.recorded.withdrawnClause).toEqual([
       ['whereNull', 'i.scheduled_send_error'],
       ['orWhereNot', 'i.scheduled_send_error', 'like', 'payer_billed:%'],
+      ['whereNull', 'i.scheduled_send_error'],
+      ['orWhereNot', 'i.scheduled_send_error', 'like', 'chemical_addon_review:%'],
     ]);
     // "active payment plan" — same guard scheduleForInvoice applies.
     expect(orphanQuery.recorded.notExistsCalled).toBe(true);

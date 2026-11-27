@@ -95,15 +95,16 @@ describe('completion: protocol actions get the entry-code screen', () => {
     builder.then = (resolve, reject) => Promise.resolve([]).then(resolve, reject);
     db.mockImplementation(() => builder);
     attempts.claimCompletionAttempt.mockResolvedValue({ action: 'proceed', attempt: { id: 'fixture-attempt' } });
-    // The first refusal after the screen: a completion that reaches it got
-    // past the entry-code check.
-    jest.spyOn(bermuda, 'bermudaPairViolation').mockResolvedValue('Fixture: past the copy screens.');
+    // The first check after the copy screens: a completion that reaches it got
+    // past the entry-code check (bermuda checks warn rather than 400-block, so
+    // reject with a sentinel to stop before DB persistence).
+    jest.spyOn(bermuda, 'bermudaPairViolation').mockRejectedValue(Object.assign(new Error('Fixture: past the copy screens.'), { code: 'fixture_past_copy_screens' }));
   });
   afterEach(() => { jest.restoreAllMocks(); });
 
   const complete = (body) => completeScheduledService({ serviceId: SERVICE_ID, body: { products: [], ...body }, actor });
   const refused = (result) => expect(result).toMatchObject({ status: 422, body: { code: 'completion_access_code' } });
-  const pastTheScreen = (result) => expect(result).toMatchObject({ status: 400, body: { code: 'lawn_bermuda_pair_required' } });
+  const pastTheScreen = (promise) => expect(promise).rejects.toMatchObject({ code: 'fixture_past_copy_screens' });
 
   test.each([
     ['an [Action] note line', { technicianNotes: '[Action] Side gate code is 4417' }],
@@ -116,7 +117,7 @@ describe('completion: protocol actions get the entry-code screen', () => {
   });
 
   test('untyped: ordinary gate-visit work in the same places still completes', async () => {
-    pastTheScreen(await complete({
+    await pastTheScreen(complete({
       technicianNotes: '[Action] Treated along the side gate\n[Protocol] Web sweep',
       protocolActionsCompleted: ['Granular bait in beds'],
     }));
@@ -138,7 +139,7 @@ describe('completion: protocol actions get the entry-code screen', () => {
     });
 
     test('ordinary actions still complete', async () => {
-      pastTheScreen(await complete({ structuredFindings, technicianNotes: '[Action] Checked the stations by the side gate' }));
+      await pastTheScreen(complete({ structuredFindings, technicianNotes: '[Action] Checked the stations by the side gate' }));
     });
   });
 });

@@ -225,7 +225,7 @@ function planMissingVendorLinks(unlinkedProducts, eligibleVendorRows, { scoreVen
   return planned;
 }
 
-const MULTIPACK_CONTAINER_RE = /\b(?:case|pack|box|kit|carton|flat|tray)\b|\b(?:[2-9]|\d{2,})\s*x\b|\b(?:[2-9]|\d{2,})\s+(?:bottles?|jugs?|gallons?|gal|quarts?|qt|pints?|pt|containers?|cans?)\b/i;
+const MULTIPACK_CONTAINER_RE = /\b(?:case|pack|box|kit|carton|flat|tray)\b|\b(?:[2-9]|\d{2,})\s*x\s*\d|\b(?:[2-9]|\d{2,})\s*x\b|\b(?:[2-9]|\d{2,})\s+(?:bottles?|jugs?|gallons?|gal|quarts?|qt|pints?|pt|containers?|cans?)\b/i;
 
 function isMultipackContainer(containerSize) {
   const raw = String(containerSize || '').trim();
@@ -292,7 +292,7 @@ async function buildCleanupPlan(dbc, helpers = {}) {
     dbc('products_catalog')
       .where('active', true)
       .whereNull('best_vendor_pricing_id')
-      .select('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit', 'best_vendor_pricing_id'),
+      .select('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'cost_unit', 'best_vendor_pricing_id'),
     dbc('service_product_usage')
       .join('products_catalog', 'service_product_usage.product_id', 'products_catalog.id')
       .select(
@@ -353,7 +353,7 @@ async function applyMissingVendorLink(trx, link, { recalcBestPrice, scoreVendorR
   const fresh = await trx('products_catalog')
     .where({ id: link.productId })
     .forUpdate()
-    .first('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'cost_unit', 'best_vendor_pricing_id');
+    .first('id', 'name', 'active', 'best_price', 'unit_size_oz', 'container_size', 'inventory_unit', 'cost_unit', 'best_vendor_pricing_id');
   if (!fresh || fresh.active === false || fresh.best_vendor_pricing_id) return 0;
   // Revalidate eligible vendor rows & package compatibility under the lock BEFORE calling recalcBestPrice,
   // so an expired last quote can never trigger recalcBestPrice to clear an existing best_price.

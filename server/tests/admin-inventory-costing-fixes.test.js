@@ -263,8 +263,8 @@ describe('POST /restock-requests/:id/action', () => {
 
   test.each([
     ['cancel', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: { revokedAt: '2026-09-03T10:00:00Z' } }, 'cancelled'],
-    ['mark_ordered', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: {} }, 'ordered'],
-  ])('%s proceeds once the order is revoked / when it only confirms the order — and retires the ledger bell it resolves (Codex r28 P2)', async (action, ledger, expected) => {
+    ['mark_ordered', { id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: { revokedAt: '2026-09-03T10:00:00Z' } }, 'ordered'],
+  ])('%s proceeds once the order is revoked — and retires the ledger bell it resolves (Codex r28 P2)', async (action, ledger, expected) => {
     const { statusUpdates, bellRetires } = wireRestock({ id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger });
     await withServer(async (baseUrl) => {
       const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
@@ -275,6 +275,21 @@ describe('POST /restock-requests/:id/action', () => {
       expect(bellRetires).toHaveLength(1); // the parked row's "order manually" bell must not outlive the action
       // Closed as done (read is not done): done_at / done_by / resolution keep-existing writes, never a bare read_at.
       expect(bellRetires[0]).toEqual(expect.objectContaining({ done_at: expect.anything(), done_by: expect.anything(), resolution: expect.anything() }));
+    });
+  });
+
+  test.each([
+    [{ id: 'vo-7', status: 'needs_review', placed_at: new Date(), evidence: {} }],
+    [{ id: 'vo-7', status: 'needs_review', placed_at: null, error: 'ambiguous_after_submit: unknown', evidence: {} }],
+  ])('mark_ordered while an unrevoked order may be out (placed_at set, or a post-submit reason alone) → 409 and nothing changes', async (ledger) => {
+    const { statusUpdates } = wireRestock({ id: 'req-1', product_id: 'prod-1', status: 'open', requested_quantity: 2, unit: 'gal', ledger });
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/admin/inventory/restock-requests/req-1/action`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'mark_ordered' }),
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).code).toBe('auto_order_out');
+      expect(statusUpdates).toHaveLength(0);
     });
   });
 

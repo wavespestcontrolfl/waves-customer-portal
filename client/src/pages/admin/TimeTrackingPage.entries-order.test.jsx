@@ -5,7 +5,7 @@ import React from "react";
 import "@testing-library/jest-dom/vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { EntriesTab } from "./TimeTrackingPage";
+import { EntriesTab } from "./staff/EntriesTab";
 
 const response = (data, status = 200) => ({ ok: status < 400, status, json: async () => data });
 const row = (id, tech_name) => ({ id, tech_name, entry_type: "shift", status: "completed", duration_minutes: 480 });

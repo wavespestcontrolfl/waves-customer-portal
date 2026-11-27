@@ -822,8 +822,21 @@ describe('triggerNotification bell outcome', () => {
     await triggerNotification('new_lead', { ...text, twilioSid: `SM${'fedcba9876543210'.repeat(2)}`, message: 'Third text' },
       { dedupeKey: 'sms-tracking-thread:abc', refreshOnDedupe: true, bumpOnRefresh: true });
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    // A plain dedupe hit on any keyed trigger skips pushing again by default
+    // (including relay_unbooked_call and keyed new_lead), unless pushOnDedupe: true
+    // is explicitly passed by a retry caller that fences push delivery itself.
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'keyed-lead-row', deduped: true });
-    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' });
+    expect(await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc' }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'unbooked-bell', deduped: true });
+    expect(await triggerNotification('relay_unbooked_call', { callSid: 'CA-unbooked-1' }, { dedupeKey: 'relay-unbooked:CA-unbooked-1' }))
+      .toMatchObject({ bellWritten: true, deduped: true, push: null });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+
+    NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'retry-bell', deduped: true });
+    await triggerNotification('new_lead', text, { dedupeKey: 'some-other-lead-key:abc', pushOnDedupe: true });
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
   });
 
@@ -1684,5 +1697,457 @@ describe('registry labels on the bell row', () => {
     expect(options.metadata).toMatchObject({ contact: true, severity: 'needs-you', who: 'person' });
     expect(stats.policySilenced).toBeUndefined();
     expect(PushService.sendToAdminUsers.mock.calls.length).toBe(1);
+  });
+
+  // Helper: in-memory sms_send_claims stand-in supporting owner-scoped push
+  // leases and per-device partial-delivery markers.
+  function makePushLeaseStore() {
+    const store = new Map(); // key -> { id, outcome, stale }
+    db.raw = jest.fn(async (sql, params) => {
+      if (/INSERT INTO sms_send_claims/i.test(sql)) {
+        const key = params[0];
+        const outcome = params.length > 1 ? params[1] : 'delivered';
+        if (store.has(key)) return { rows: [] };
+        const id = store.size + 1;
+        store.set(key, { id, outcome, stale: false });
+        return { rows: [{ id }] };
+      }
+      if (/UPDATE sms_send_claims/i.test(sql)) {
+        const [ownerToken, key] = params;
+        const row = store.get(key);
+        if (row && (row.outcome === 'pending' || String(row.outcome).startsWith('pending:')) && row.stale) {
+          row.outcome = ownerToken;
+          row.stale = false;
+          return { rows: [{ id: row.id }] };
+        }
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+    const claimsTable = () => ({
+      where: (cond) => ({
+        first: async () => {
+          const row = store.get(cond.claim_key);
+          if (!row) return null;
+          if (cond.outcome !== undefined && row.outcome !== cond.outcome) return null;
+          return row;
+        },
+        update: async (patch) => {
+          const row = store.get(cond.claim_key);
+          if (!row || (cond.outcome !== undefined && row.outcome !== cond.outcome)) return 0;
+          if (patch.outcome) row.outcome = patch.outcome;
+          row.stale = false;
+          return 1;
+        },
+        del: async () => {
+          const row = store.get(cond.claim_key);
+          if (!row || (cond.outcome !== undefined && row.outcome !== cond.outcome)) return 0;
+          store.delete(cond.claim_key);
+          return 1;
+        },
+      }),
+      whereIn: (_col, keys) => ({
+        select: async () => keys.filter((k) => store.has(k)).map((claim_key) => ({ claim_key })),
+      }),
+    });
+    return { store, claimsTable };
+  }
+
+  test('keyed push deduplicates across bell preference changes and returns confirmed delivery evidence on replay', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const { store, claimsTable } = makePushLeaseStore();
+    let bellEnabled = false;
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: bellEnabled, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'sms_send_claims') return claimsTable();
+      return tableMock([]);
+    });
+    NotificationService.notifyAdmin.mockClear();
+    NotificationService.notifyAdmin.mockResolvedValue({ id: 'n-bell-later', deduped: false });
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers.mockResolvedValue({ sent: 1, failed: 0, subscriptions: 1 });
+
+    // Attempt 1: bells disabled -> pushes once and marks claim outcome='delivered'.
+    const first = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-pushonly-1' },
+      { dedupeKey: 'relay-unbooked:CA-pushonly-1' },
+    );
+    expect(first.bellWritten).toBe(false);
+    expect(first.deduped).toBeUndefined();
+    expect(NotificationService.notifyAdmin).not.toHaveBeenCalled();
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-pushonly-1')?.outcome).toBe('delivered');
+
+    // Attempt 2: replay with bells still disabled -> deduped WITH push.sent > 0 so retry callers settle.
+    const replay = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-pushonly-1' },
+      { dedupeKey: 'relay-unbooked:CA-pushonly-1' },
+    );
+    expect(replay.deduped).toBe(true);
+    expect(replay.push).toEqual({ sent: 1, deduped: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+
+    // Attempt 3: admin turns bells ON -> writes bell row, but push stays deduped via shared delivery claim.
+    bellEnabled = true;
+    const afterBellOn = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-pushonly-1' },
+      { dedupeKey: 'relay-unbooked:CA-pushonly-1' },
+    );
+    expect(afterBellOn.bellWritten).toBe(true);
+    expect(afterBellOn.deduped).toBe(true);
+    expect(afterBellOn.push).toEqual({ sent: 1, deduped: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+  });
+
+  test('push-only prefs: distinct SMS thread messages push separately by twilioSid while replay of the second is deduped', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const { claimsTable } = makePushLeaseStore();
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'sms_reply', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'sms_send_claims') return claimsTable();
+      return tableMock([]);
+    });
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers.mockResolvedValue({ sent: 1, failed: 0, subscriptions: 1 });
+
+    await triggerNotification(
+      'sms_reply',
+      { customerName: 'Alex', customerId: 'cust-1', message: 'First text', twilioSid: 'SM-thread-1' },
+      { dedupeKey: 'inbound-sms:cust-1', refreshOnDedupe: true },
+    );
+    await triggerNotification(
+      'sms_reply',
+      { customerName: 'Alex', customerId: 'cust-1', message: 'Second text', twilioSid: 'SM-thread-2' },
+      { dedupeKey: 'inbound-sms:cust-1', refreshOnDedupe: true },
+    );
+    const replaySecond = await triggerNotification(
+      'sms_reply',
+      { customerName: 'Alex', customerId: 'cust-1', message: 'Second text', twilioSid: 'SM-thread-2' },
+      { dedupeKey: 'inbound-sms:cust-1', refreshOnDedupe: true },
+    );
+
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    expect(replaySecond.deduped).toBe(true);
+    expect(replaySecond.push).toEqual({ sent: 1, deduped: true });
+  });
+
+  test('push lease releases on zero delivery (failed, skipped/unconfigured, empty), reclaims abandoned leases, and tracks partial delivery', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const { store, claimsTable } = makePushLeaseStore();
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'push_subscriptions') {
+        const subs = [{ id: 'sub-1' }, { id: 'sub-2' }];
+        return { whereIn: () => ({ where: () => ({ select: async () => subs }) }) };
+      }
+      if (table === 'sms_send_claims') return claimsTable();
+      return tableMock([]);
+    });
+
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers
+      .mockResolvedValueOnce({ sent: 0, failed: 1, subscriptions: 1 })
+      .mockResolvedValueOnce({ sent: 0, failed: 0, skipped: 1, subscriptions: 1 })
+      .mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+        opts?.onDelivered?.({ id: 'sub-1' });
+        return { sent: 1, failed: 1, subscriptions: 2 };
+      })
+      .mockResolvedValueOnce({ sent: 1, failed: 0, subscriptions: 2 })
+      .mockResolvedValueOnce({ sent: 1, failed: 0, subscriptions: 1 });
+
+    // 1. All devices failed -> lease released so retry runs.
+    const failedAll = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1' },
+    );
+    expect(failedAll.retryable).toBe(true);
+    expect(store.size).toBe(0);
+
+    // 2. Skipped / unconfigured transport (sent=0, failed=0, skipped=1) -> lease released so retry runs after recovery.
+    await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1' },
+    );
+    expect(store.size).toBe(0);
+
+    // 3. Partial delivery (sub-1 ok, sub-2 failed) -> persists sub-1, releases
+    // pending lease (NOT marked delivered yet), and stays retryable.
+    const partial = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1' },
+    );
+    expect(partial.retryable).toBe(true);
+    expect(partial.deliveredSubscriptionIds).toEqual(['sub-1']);
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-retry-1')).toBeUndefined();
+
+    // 4. Retry WITHOUT caller-supplied deliveredSubscriptionIds loads persisted
+    // sub-1 automatically, delivers remaining sub-2, and ONLY THEN marks delivered.
+    const finished = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1' },
+    );
+    expect(finished.deduped).toBeUndefined();
+    expect(PushService.sendToAdminUsers.mock.calls[3][2]).toMatchObject({
+      deliveredSubscriptionIds: ['sub-1'],
+    });
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-retry-1')?.outcome).toBe('delivered');
+
+    // 5. Abandoned pending lease (crashed worker >5 min ago) is reclaimed and delivers cleanly.
+    store.set('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-abandoned', { id: 99, outcome: 'pending:oldowner00000001', stale: true });
+    const recovered = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-abandoned' },
+      { dedupeKey: 'relay-unbooked:CA-abandoned' },
+    );
+    expect(recovered.deduped).toBeUndefined();
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-abandoned')?.outcome).toBe('delivered');
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(5);
+  });
+
+  test('saved bell does not block push recovery after failed pushes, in-flight stays retryable, and lost lease halts fan-out', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const { store, claimsTable } = makePushLeaseStore();
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: true, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'sms_send_claims') return claimsTable();
+      return tableMock([]);
+    });
+
+    // Bell writes on attempt 1, dedupes on attempt 2 and 3.
+    NotificationService.notifyAdmin.mockReset();
+    NotificationService.notifyAdmin
+      .mockResolvedValueOnce({ id: 'n-bell-1', deduped: false })
+      .mockResolvedValue({ id: 'n-bell-1', deduped: true, refreshed: false });
+    PushService.sendToAdminUsers.mockReset();
+    PushService.sendToAdminUsers
+      .mockResolvedValueOnce({ sent: 0, failed: 1, subscriptions: 1 })
+      .mockResolvedValueOnce({ sent: 1, failed: 0, subscriptions: 1 });
+
+    // Attempt 1: bell written, all pushes fail -> lease released.
+    const first = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-bell-retry' },
+      { dedupeKey: 'relay-unbooked:CA-bell-retry' },
+    );
+    expect(first.bellWritten).toBe(true);
+    expect(first.retryable).toBe(true);
+    expect(store.size).toBe(0);
+
+    // Attempt 2: bell dedupes, but push lease recovers and delivers the push!
+    const retry = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-bell-retry' },
+      { dedupeKey: 'relay-unbooked:CA-bell-retry' },
+    );
+    expect(retry.bellWritten).toBe(true);
+    expect(retry.deduped).toBeUndefined();
+    expect(retry.push).toMatchObject({ sent: 1, failed: 0 });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+
+    // Attempt 3: both bell and delivered push lease dedupe cleanly.
+    const settled = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-bell-retry' },
+      { dedupeKey: 'relay-unbooked:CA-bell-retry' },
+    );
+    expect(settled.deduped).toBe(true);
+    expect(settled.push).toEqual({ sent: 1, deduped: true });
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+
+    // In-flight lease held by another worker returns inFlight+retryable, NEVER deduped.
+    store.set('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-inflight', { id: 50, outcome: 'pending:activeworker1234', stale: false });
+    const inFlight = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-inflight' },
+      { dedupeKey: 'relay-unbooked:CA-inflight' },
+    );
+    expect(inFlight.inFlight).toBe(true);
+    expect(inFlight.retryable).toBe(true);
+    expect(inFlight.deduped).toBeUndefined();
+    expect(inFlight.push).toBeNull();
+
+    // Expired lease reclaimed mid-fan-out: beforeHandoff returns false and stale owner leaves replacement lease intact.
+    const claimKey = 'notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-stolen';
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      // Simulate replacement worker reclaiming the lease before device handoff.
+      store.set(claimKey, { id: 60, outcome: 'pending:replacement00001', stale: false });
+      const canContinue = await opts.beforeHandoff();
+      expect(canContinue).toBe(false);
+      return { sent: 0, failed: 0, superseded: true, subscriptions: 1 };
+    });
+    const staleOutcome = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-stolen' },
+      { dedupeKey: 'relay-unbooked:CA-stolen' },
+    );
+    expect(staleOutcome.inFlight).toBe(true);
+    expect(staleOutcome.retryable).toBe(true);
+    expect(store.get(claimKey)?.outcome).toBe('pending:replacement00001');
+
+    // Mixed sent + unconfigured-transport skipped stays retryable and preserves accepted device ID.
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      opts?.onDelivered?.({ id: 'sub-ios-1' });
+      return { sent: 1, failed: 0, skipped: 1, subscriptions: 2 };
+    });
+    const skippedPartial = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-partial-skip' },
+      { dedupeKey: 'relay-unbooked:CA-partial-skip' },
+    );
+    expect(skippedPartial.retryable).toBe(true);
+    expect(skippedPartial.deliveredSubscriptionIds).toEqual(['sub-ios-1']);
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-partial-skip')).toBeUndefined();
+
+    // Failed lease renewal during beforeHandoff returns retryable pushFailed instead of superseded_before_push.
+    const dbErrKey = 'notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-lease-err';
+    const baseClaimsTable = claimsTable;
+    let failOwnerRenew = false;
+    let failSubList = false;
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'push_subscriptions') {
+        const subs = [{ id: 'sub-1' }, { id: 'sub-2' }];
+        return { whereIn: () => ({ where: () => ({ select: async () => subs }) }) };
+      }
+      if (table === 'sms_send_claims') {
+        const base = baseClaimsTable();
+        return {
+          ...base,
+          where: (cond) => {
+            const w = base.where(cond);
+            return {
+              ...w,
+              first: async () => {
+                if (failSubList && String(cond.claim_key || '').startsWith('notif_push_partial:')) {
+                  throw Object.assign(new Error('sub list lost'), { code: '57P01' });
+                }
+                return w.first();
+              },
+              update: async (patch) => {
+                if (failOwnerRenew && cond.outcome && !patch.outcome) {
+                  throw Object.assign(new Error('owner renew lost'), { code: '57P01' });
+                }
+                return w.update(patch);
+              },
+            };
+          },
+        };
+      }
+      return tableMock([]);
+    });
+
+    failOwnerRenew = true;
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      const ok = await opts.beforeHandoff();
+      expect(ok).toBe(false);
+      return { sent: 0, failed: 0, superseded: true, subscriptions: 1 };
+    });
+    const ownerErrRes = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-lease-err' },
+      { dedupeKey: 'relay-unbooked:CA-lease-err' },
+    );
+    expect(ownerErrRes.retryable).toBe(true);
+    expect(ownerErrRes.pushFailed).toBe('before_handoff');
+    expect(ownerErrRes.push?.skipped).not.toBe('superseded_before_push');
+    expect(store.get(dbErrKey)).toBeUndefined();
+    failOwnerRenew = false;
+
+    // Failed persisted delivery-history lookup aborts before send, releases lease, and returns retryable.
+    failSubList = true;
+    const callsBeforeSubErr = PushService.sendToAdminUsers.mock.calls.length;
+    const subErrRes = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-sub-err' },
+      { dedupeKey: 'relay-unbooked:CA-sub-err' },
+    );
+    expect(PushService.sendToAdminUsers.mock.calls.length).toBe(callsBeforeSubErr);
+    expect(subErrRes.retryable).toBe(true);
+    expect(subErrRes.pushFailed).toBe('before_handoff');
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-sub-err')).toBeUndefined();
+    failSubList = false;
+
+    // If a delivered device's marker write fails during partial delivery (and retry confirm also fails),
+    // retain the pending lease rather than releasing it and letting an immediate retry double-push.
+    const markerFailKey = 'notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-marker-fail';
+    const rawImpl = db.raw.getMockImplementation();
+    db.raw.mockImplementation(async (sql, params) => {
+      if (String(params?.[0] || '').startsWith('notif_push_sub:')) {
+        throw Object.assign(new Error('marker write down'), { code: '57P01' });
+      }
+      return rawImpl(sql, params);
+    });
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      opts?.onDelivered?.({ id: 'sub-1' });
+      return { sent: 1, failed: 1, subscriptions: 2 };
+    });
+    const markerFailRes = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-marker-fail' },
+      { dedupeKey: 'relay-unbooked:CA-marker-fail' },
+    );
+    expect(markerFailRes.retryable).toBe(true);
+    expect(store.get(markerFailKey)?.outcome).toMatch(/^pending:/);
+    db.raw.mockImplementation(rawImpl);
+  });
+
+  test('sandy_transfer_no_context pushOnly banner sends committed row words with waves-missed-call.caf sound', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(true);
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }]) : tableMock([])
+    ));
+    PushService.sendToAdminUsers.mockClear();
+
+    await triggerNotification('sandy_transfer_no_context', {
+      alertRowId: 'n-tx-1',
+      alertTitle: 'Jennifer transfer without context',
+      alertBody: 'A caller from ***-0199 was transferred — ask the caller to recap.',
+      alertLink: '/admin/communications#tab=calls&call=99',
+    }, { pushOnly: true, adminOnly: true, bellAuthorized: true });
+
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
+    const [, payloadFor] = PushService.sendToAdminUsers.mock.calls[0];
+    expect(payloadFor('admin-1')).toMatchObject({
+      title: 'Jennifer transfer without context',
+      body: 'A caller from ***-0199 was transferred — ask the caller to recap.',
+      url: '/admin/communications#tab=calls&call=99',
+      sound: 'waves-missed-call.caf',
+    });
   });
 });

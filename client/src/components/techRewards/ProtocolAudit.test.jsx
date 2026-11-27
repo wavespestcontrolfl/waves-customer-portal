@@ -139,4 +139,17 @@ describe('Protocol audit tab, a save that returns after the month changed', () =
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(screen.getByText(/No completed lawn or tree & shrub visits this month/)).toBeInTheDocument();
   });
+
+  it('uses generic Protocol label for tree_shrub, shows prior mark on needsRecheck, and shows photo truncation notice', async () => {
+    adminFetch.mockImplementation(() => reply(BOARD([VISIT({
+      serviceLine: 'tree_shrub',
+      counts: { products: 2, photos: 15, photosByType: { before: 15 } },
+      needsRecheck: true,
+      priorAudit: { result: 'mismatch', note: 'Missing photo', auditedAt: '2026-04-14T10:00:00Z' },
+    })])));
+    render(<ProtocolAudit />);
+    expect(await screen.findByText('Protocol: version 2026.10-v13 · window April take-all')).toBeInTheDocument();
+    expect(screen.getByText(/Previous mark \(no longer counted\): mismatch — Missing photo/)).toBeInTheDocument();
+    expect(screen.getByText(/Showing first 2 of 15 photos\./)).toBeInTheDocument();
+  });
 });

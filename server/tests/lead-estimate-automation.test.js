@@ -303,6 +303,34 @@ describe('lead estimate automation gate', () => {
     expect(draft.monthly).toBeGreaterThan(0);
   });
 
+  test('county-verified Single Family propertyType resolves property_type_unresolved under unit-scope guardrails', async () => {
+    const prev = process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+    process.env.GATE_UNIT_SCOPE_GUARDRAILS = 'true';
+    try {
+      const readiness = evaluateLeadEstimateAutomationReadiness({
+        phone: '+19415550199',
+        intake: {
+          email: 'lead@example.com',
+          serviceInterest: 'Recurring Pest Control',
+          normalizedAddress: { line1: '123 Main St', city: 'Venice', state: 'FL', zip: '34285' },
+        },
+      });
+      const draft = await buildAutomatedLeadDraftEstimate({
+        readiness,
+        intake: { serviceInterest: 'Recurring Pest Control', fullAddress: '123 Main St, Venice, FL 34285' },
+        body: {},
+        measurements: { homeSqFt: 2100, lotSqFt: 8500, propertyType: 'Single Family', source: 'county_assessed' },
+      });
+      expect(draft.automation.review).not.toContain('property_type_unresolved');
+      expect(draft.quoteRequired).toBe(false);
+      expect(draft.automation.quoteRequiredReason).toBeNull();
+      expect(draft.monthly).toBeGreaterThan(0);
+    } finally {
+      if (prev === undefined) delete process.env.GATE_UNIT_SCOPE_GUARDRAILS;
+      else process.env.GATE_UNIT_SCOPE_GUARDRAILS = prev;
+    }
+  });
+
   test('spoke-domain termite treatment payload stays draft manual review', async () => {
     const intake = buildLeadWebhookIntake({
       name: 'Terry Termite',

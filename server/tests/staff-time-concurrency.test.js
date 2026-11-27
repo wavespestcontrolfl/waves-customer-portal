@@ -383,6 +383,7 @@ describe('Staff active timer serialization', () => {
     const specs = [
       { table: 'time_entries', label: 'shiftLock', firstValue: { id: 'shift-1' } },
       { table: 'time_entries', label: 'breakCheck', firstValue: undefined },
+      { table: 'time_entries', label: 'jobClose', thenValue: 0 },
       {
         table: 'time_entries',
         label: 'breakInsert',
@@ -397,10 +398,11 @@ describe('Staff active timer serialization', () => {
       'shiftLock.forUpdate',
       'shiftLock.first',
       'breakCheck.first',
+      'jobClose.update',
       'breakInsert.insert',
       'transaction.commit',
     ]);
-    expect(specs[2].insertPayload.staff_write_generation).toBe(ACTIVE_WRITE_GENERATION);
+    expect(specs[3].insertPayload.staff_write_generation).toBe(ACTIVE_WRITE_GENERATION);
   });
 
   test('keeps job replacement rollback-safe when the generation-fenced insert fails', async () => {
@@ -702,6 +704,7 @@ describe('Staff active timer serialization', () => {
       { table: 'payroll_runs as r', label: 'closedWeek', firstValue: undefined },
       { table: 'time_weekly_summary', label: 'approvedWeek', firstValue: undefined },
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
+      { table: 'audit_log', label: 'editAudit', returningValue: [{ id: 'audit-1' }] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
       { table: 'time_entry_daily_summary', label: 'dailyUpsert', returningValue: [daily] },
       { table: 'time_entry_daily_summary', label: 'weeklyDailies', thenValue: [daily] },
@@ -779,6 +782,7 @@ describe('Staff active timer serialization', () => {
       { table: 'time_entries', label: 'entryUpdate', returningValue: [saved] },
       { table: 'time_entries', label: 'remainingDispute', firstValue: undefined },
       { table: 'time_entry_daily_summary', label: 'dayResolve', thenValue: 1 },
+      { table: 'audit_log', label: 'editAudit', returningValue: [{ id: 'audit-1' }] },
       { table: 'time_entries', label: 'dailyEntries', thenValue: [saved] },
       { table: 'time_entry_daily_summary', label: 'dailyUpsert', returningValue: [daily] },
       { table: 'time_entry_daily_summary', label: 'weeklyDailies', thenValue: [daily] },
@@ -1127,5 +1131,25 @@ describe('Admin adds a missed shift', () => {
   test('refuses a technician id that is not a uuid without querying', async () => {
     installTransaction([], []);
     await expect(timeTracking.adminAddEntry(request({ technician_id: 'tech-1' }))).rejects.toMatchObject({ statusCode: 404 });
+  });
+});
+
+describe('adminEditEntry entry_type validation (Codex P2)', () => {
+  test('accepts admin_time and rejects unknown entry_type with 400 before querying', async () => {
+    jest.clearAllMocks();
+    await expect(timeTracking.adminEditEntry('entry-1', {
+      entry_type: 'bogus_type',
+      edit_reason: 'Fix typo',
+      edited_by: 'admin-1',
+    })).rejects.toMatchObject({ statusCode: 400 });
+    expect(db.transaction).not.toHaveBeenCalled();
+
+    installTransaction([{ label: 'entry', table: 'time_entries', firstValue: undefined }], []);
+    await expect(timeTracking.adminEditEntry('entry-1', {
+      entry_type: 'admin_time',
+      edit_reason: 'Fix office hours',
+      edited_by: 'admin-1',
+    })).rejects.toThrow('Entry not found.');
+    expect(db.transaction).toHaveBeenCalledTimes(1);
   });
 });

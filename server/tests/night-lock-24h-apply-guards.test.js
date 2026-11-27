@@ -153,7 +153,7 @@ describe('checkFlexSiblingBounds with lock24h', () => {
     const trx = seriesTrx({ p1: rows });
     routeTiers.loadReminderFreeze.mockResolvedValue({ failed: false, frozen: new Set() });
     await expect(checkFlexSiblingBounds(trx, rows, rows, BEST, TODAY, refuseFactory(), targetsOf(rows), true)).resolves.toBeUndefined();
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: true });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: false });
     await expect(checkFlexSiblingBounds(seriesTrx({ p1: rows }), rows, rows, BEST, TODAY, refuseFactory(), targetsOf(rows)))
       .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('73 hours') });
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(expect.anything(), ['s2'], expect.any(Date), 73);

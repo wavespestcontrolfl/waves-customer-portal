@@ -271,6 +271,7 @@ describe('GET /interview/:token', () => {
     const body = await res.json();
     expect(body).toEqual({
       first_name: 'Jane',
+      language: 'en',
       status: 'open',
       mode_options: ['phone', 'in_person'],
       in_person_address: expect.any(String),

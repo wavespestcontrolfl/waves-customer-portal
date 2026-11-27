@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../components/AddressAutocomplete', () => ({ default: () => <div /> }));
 
-import { TeamTab } from './TimeTrackingPage';
+import { TeamTab } from './staff/TeamTab';
 
 const BASE_TECH = {
   id: 'tech-1', name: 'River Tech', email: 'river@example.com', role: 'technician',

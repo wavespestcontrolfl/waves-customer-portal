@@ -292,7 +292,10 @@ describe('lsaSummary', () => {
       ad_service_attribution: { booked: '2', recurring: '1' },
     };
     const out = await lsaSummary(campaigns, { since: '2026-10-24', until: '2026-11-23' });
-    expect(out).toEqual({ leads: 4, charged: 3, matched: 3, booked: 2, recurring: 1, spend: 100.01, costPerWon: 50.01 });
+    expect(out).toEqual({
+      leads: 4, charged: 3, matched: 3, calls: 0, messages: 0, bookings: 0,
+      booked: 2, recurring: 1, spend: 100.01, costPerWon: 50.01,
+    });
     const created = ops('lsa_leads', 'where').map((o) => o.args);
     expect(created[0][0]).toBe('lead_created_at');
     expect(created[0][2].toISOString()).toBe('2026-10-24T04:00:00.000Z');
@@ -320,6 +323,18 @@ describe('lsaSummary', () => {
     const out = await lsaSummary(campaigns, { since: '2026-10-24', until: '2026-11-23' });
     expect(out.booked).toBe(0);
     expect(out.costPerWon).toBeNull();
+  });
+
+  test('P1-4: when metadata.performance_max_present is true on an LSA campaign, costPerWon is nulled and flagged', async () => {
+    mockDb.schema.hasTable.mockResolvedValue(true);
+    mockState.first = { lsa_leads: { leads: '4', charged: '3', matched: '3' }, ad_service_attribution: { booked: '2', recurring: '1' } };
+    const pmaxCampaigns = [
+      { campaign_type: 'google_lsa', last30d: { spend: 100 }, metadata: { lsa_customer_id: '7636809139', performance_max_present: true } },
+    ];
+    const out = await lsaSummary(pmaxCampaigns, { since: '2026-10-24', until: '2026-11-23' });
+    expect(out.costPerWon).toBeNull();
+    expect(out.performanceMaxPresent).toBe(true);
+    expect(out.cplUnavailableReason).toMatch(/Performance Max/i);
   });
 
   test('a missing table returns null and a failed read returns null without a row value in the log', async () => {

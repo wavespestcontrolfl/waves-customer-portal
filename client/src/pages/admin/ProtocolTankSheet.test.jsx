@@ -74,7 +74,7 @@ describe("110-gallon tank reference", () => {
     for (const surface of [screenDocument, printDocument]) {
       expect(within(surface).getByRole("heading", { level: 1, name: "110-gallon tank mixing reference" })).toBeInTheDocument();
       expect(within(surface).getByText("Controlled staff document")).toBeInTheDocument();
-      expect(surface.querySelector("img")).toBeNull();
+      expect(surface.querySelector('img[alt="Waves Pest Control"]')).not.toBeNull();
       expect(surface.querySelector('a[href^="tel:"], a[href^="mailto:"]')).toBeNull();
     }
     expect(within(container).getByText("12.5 oz / 110 gal")).toBeInTheDocument();

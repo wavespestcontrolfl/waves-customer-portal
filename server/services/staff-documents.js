@@ -1,16 +1,27 @@
 const db = require('../models/db');
 const Joi = require('joi');
 const { recordAuditEvent } = require('./audit-log');
-const { sourceSchema, policySchema, validate, reject, hash, renderSource, checkRelease } = require('./staff-document-source');
+const { sourceSchema, policySchema, validate, reject, hash, renderSource, checkRelease, parseSignedName, hasSignatureField } = require('./staff-document-source');
 const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 
-const ACKNOWLEDGMENT = 'I have read this policy version and acknowledge receipt. I intend my typed name to serve as my electronic signature for this acknowledgment.';
+const ACKNOWLEDGMENT = 'I have read this policy version and acknowledge receipt. I intend my typed name to serve as my electronic signature for this acknowledgment (Florida Statutes 668.50).';
 const sourceOf = version => ({ title: version.title, body: version.body, metadata: version.staff_metadata });
 const isAdmin = actor => actor.role === 'admin';
+const versionRequiresSignature = (doc, version) => doc.staff_kind === 'policy' || hasSignatureField(version?.staff_metadata?.fields);
 
-async function audit(trx, actor, action, resourceId, metadata = {}) {
+function cleanEvidence(evidence) {
+  if (!evidence || typeof evidence !== 'object') return {};
+  const out = {};
+  if (evidence.ip) out.ip = String(evidence.ip).slice(0, 64);
+  if (evidence.user_agent) out.user_agent = String(evidence.user_agent).slice(0, 255);
+  return out;
+}
+
+async function audit(trx, actor, action, resourceId, metadata = {}, evidence = {}) {
+  const ev = cleanEvidence(evidence);
   await recordAuditEvent({ actor_type: isAdmin(actor) ? 'admin' : 'technician', actor_id: actor.id,
     action: `staff_document.${action}`, resource_type: 'staff_document', resource_id: resourceId,
+    ip_address: ev.ip || null, user_agent: ev.user_agent || null,
     metadata, critical: true, trx });
 }
 
@@ -71,13 +82,38 @@ async function issueVersion(trx, document, version, policy, at, actor) {
     published_at: trx.fn.now(), approved_by: actor.id, policy_values_id: rendered.used_variables.length ? policy.id : null,
   }).returning('*');
   if (!issued) reject('This version has already been issued.', 409);
-  await trx('document_templates').where({ id: document.id }).update({ status: 'active', updated_at: trx.fn.now(), updated_by: actor.id });
+  await trx('document_templates').where({ id: document.id }).update({
+    name: rendered.title, status: 'active', requires_signature: versionRequiresSignature(document, version), updated_at: trx.fn.now(), updated_by: actor.id,
+  });
   await audit(trx, actor, 'issued', document.id, { version_id: issued.id, hash: issued.content_hash, policy_values_id: issued.policy_values_id });
   return issued;
 }
 
+function normalizeSourceInput(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const trimStr = v => (typeof v === 'string' ? v.trim() : v);
+  const meta = raw.metadata && typeof raw.metadata === 'object' ? {
+    ...raw.metadata,
+    owner_role: trimStr(raw.metadata.owner_role),
+  } : raw.metadata;
+  return { ...raw, title: trimStr(raw.title), metadata: meta };
+}
+
+function normalizePolicyInput(raw) {
+  if (!raw || typeof raw !== 'object') return raw;
+  const trimStr = v => (typeof v === 'string' ? v.trim() : v);
+  const trimList = list => (Array.isArray(list) ? list.map(trimStr) : list);
+  return {
+    ...raw,
+    pay_schedule: trimStr(raw.pay_schedule),
+    paid_holidays: trimList(raw.paid_holidays),
+    unpaid_holidays: trimList(raw.unpaid_holidays),
+    equipment_deduction_terms: trimStr(raw.equipment_deduction_terms),
+  };
+}
+
 async function saveDraft(input, actor) {
-  const source = validate(sourceSchema, input.source);
+  const source = validate(sourceSchema, normalizeSourceInput(input.source));
   renderSource(source, null);
   return db.transaction(async trx => {
     await lockLibrary(trx);
@@ -86,6 +122,7 @@ async function saveDraft(input, actor) {
       document = await loadDocument(trx, input.id, actor);
       const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('id');
       if (latest.id !== input.base_version_id) reject('The document changed. Reload before saving.', 409);
+      await trx('document_templates').where({ id: document.id }).update({ updated_at: trx.fn.now(), updated_by: actor.id });
     } else {
       if (!['policy', 'procedure', 'form'].includes(input.kind) || !['staff', 'admin'].includes(input.access)) reject('Choose a document type and access scope.');
       if (!/^[a-z][a-z0-9-]{2,79}$/.test(input.key || '')) reject('Use a stable lowercase document key.');
@@ -93,7 +130,7 @@ async function saveDraft(input, actor) {
       [document] = await trx('document_templates').insert({
         template_key: `staff.${input.key}`, name: source.title, category: 'staff', document_type: input.kind,
         audience: 'staff', staff_kind: input.kind, staff_access: input.access, status: 'draft',
-        requires_signature: input.kind === 'policy', created_by: actor.id, updated_by: actor.id,
+        requires_signature: input.kind === 'policy' || hasSignatureField(source.metadata.fields), created_by: actor.id, updated_by: actor.id,
         legacy_company_document_id: input.legacy_company_document_id || null,
       }).returning('*');
     }
@@ -137,7 +174,7 @@ async function setOnboardingRequired(id, required, actor) {
 }
 
 async function updatePolicy(input, at, actor) {
-  const values = validate(policySchema, input.values);
+  const values = validate(policySchema, normalizePolicyInput(input.values));
   if (values.paid_holidays.some(name => values.unpaid_holidays.includes(name))) reject('A holiday cannot be both paid and unpaid.');
   return db.transaction(async trx => {
     await lockLibrary(trx);
@@ -159,7 +196,12 @@ async function updatePolicy(input, at, actor) {
       const latest = await trx('document_template_versions').where({ template_id: document.id }).orderBy('version_number', 'desc').first('published_at');
       if (!latest.published_at) reject(`Issue the pending draft of ${document.name} before changing shared policy values.`, 409);
       const draft = await insertVersion(trx, document, sourceOf(version), actor);
-      revised.push(await issueVersion(trx, document, draft, policy, at, actor));
+      try {
+        revised.push(await issueVersion(trx, document, draft, policy, at, actor));
+      } catch (err) {
+        if (err.status) reject(`${document.name}: ${err.message}`, err.status);
+        throw err;
+      }
     }
     await audit(trx, actor, 'policy_values_issued', policy.id, { previous_id: previous?.id || null, hash: policy.content_hash, versions: revised.map(v => v.id) });
     return { policy, revised_version_ids: revised.map(v => v.id) };
@@ -183,7 +225,8 @@ async function list(actor, { at = new Date(), search = '', asOf = false } = {}) 
     if (!version) continue;
     const title = version.content_snapshot?.title || version.title;
     if (search && !`${title} ${version.content_snapshot?.body || version.body}`.toLowerCase().includes(search.toLowerCase())) continue;
-    result.push({ ...document, version_id: version.id, title, version_number: version.version_number,
+    result.push({ ...document, requires_signature: versionRequiresSignature(document, version),
+      version_id: version.id, title, version_number: version.version_number,
       effective_at: version.effective_at, review_on: version.staff_metadata.review_on, owner_role: version.staff_metadata.owner_role,
       issued: !!version.published_at });
   }
@@ -202,9 +245,16 @@ async function detail(id, actor, versionId = null, at = null) {
   const rendered = version.content_snapshot || renderSource(sourceOf(version), policy?.values);
   const acknowledgments = await db('staff_document_acknowledgments').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('technician_id', actor.id); });
   const records = await db('staff_document_records').where({ version_id: version.id }).modify(q => { if (!isAdmin(actor)) q.where('owner_id', actor.id); }).orderBy('created_at', 'desc');
+  const staffIds = [...new Set([...acknowledgments.map(a => a.technician_id), ...records.map(r => r.owner_id)].filter(Boolean))];
+  const namesById = staffIds.length
+    ? new Map((await db('technicians').whereIn('id', staffIds).select('id', 'name')).map(row => [row.id, row.name]))
+    : new Map();
   const currentVersion = versions.find(v => v.published_at && new Date(v.effective_at) <= new Date());
-  return { document, version, rendered, current_version_id: currentVersion?.id || null,
-    versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })), acknowledgments, records };
+  return { document: { ...document, requires_signature: versionRequiresSignature(document, version) },
+    version, rendered, current_version_id: currentVersion?.id || null,
+    versions: versions.map(v => ({ id: v.id, number: v.version_number, effective_at: v.effective_at, hash: v.content_hash, issued: !!v.published_at })),
+    acknowledgments: acknowledgments.map(a => ({ ...a, technician_name: namesById.get(a.technician_id) || null })),
+    records: records.map(r => ({ ...r, owner_name: namesById.get(r.owner_id) || null })) };
 }
 
 async function recordableVersion(trx, id, actor, kind, { lock = true } = {}) {
@@ -221,37 +271,74 @@ async function recordableVersion(trx, id, actor, kind, { lock = true } = {}) {
   return version;
 }
 
-async function acknowledge(versionId, input, actor) {
-  if (input.accepted !== true || typeof input.signed_name !== 'string' || !input.signed_name.trim() || input.signed_name.length > 180) reject('Enter your name and confirm the acknowledgment.');
+async function acknowledge(versionId, input, actor, evidence = {}) {
+  const signedName = parseSignedName(input.signed_name);
+  if (input.accepted !== true || !signedName) reject('Type your full name (first and last) and confirm the acknowledgment.');
   return db.transaction(async trx => {
     const version = await recordableVersion(trx, versionId, actor, 'acknowledgment');
     if (input.content_hash !== version.content_hash) reject('The displayed hash does not match this version.', 409);
     const [row] = await trx('staff_document_acknowledgments').insert({ version_id: version.id, technician_id: actor.id,
-      content_hash: version.content_hash, signed_name: input.signed_name.trim(), statement: version.content_snapshot.acknowledgment_statement,
+      content_hash: version.content_hash, signed_name: signedName, statement: version.content_snapshot.acknowledgment_statement,
     }).onConflict(['version_id', 'technician_id']).ignore().returning('*');
-    if (row) await audit(trx, actor, 'acknowledged', version.template_id, { acknowledgment_id: row.id, version_id: version.id, hash: version.content_hash });
+    if (row) {
+      await audit(trx, actor, 'acknowledged', version.template_id, {
+        acknowledgment_id: row.id, version_id: version.id, hash: version.content_hash,
+      }, evidence);
+    }
     return row || trx('staff_document_acknowledgments').where({ version_id: version.id, technician_id: actor.id }).first();
   });
 }
 
-function recordAnswers(version, input) {
-  const fields = version.staff_metadata.fields;
-  const types = { text: Joi.string().max(8000).allow(''), textarea: Joi.string().max(8000).allow(''),
-    date: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(''), checkbox: Joi.boolean() };
+const ANSWER_FIELD_TYPES = {
+  text: Joi.string().max(8000).allow(''),
+  textarea: Joi.string().max(8000).allow(''),
+  date: Joi.string().isoDate().pattern(/^\d{4}-\d{2}-\d{2}$/).allow(''),
+  checkbox: Joi.boolean(),
+};
+
+function answerSchema(fields, complete) {
   const shape = {};
   for (const field of fields) {
-    let rule = types[field.type].label(field.label);
-    if (input.complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').trim().required();
+    let rule = ANSWER_FIELD_TYPES[field.type].label(field.label);
+    if (complete && field.required) rule = field.type === 'checkbox' ? rule.valid(true).required() : rule.invalid('').trim().required();
     shape[field.id] = rule;
   }
-  const answers = validate(Joi.object(shape).required(), input.answers);
+  return Joi.object(shape).required();
+}
+
+function enforceSignatureAnswers(fields, answers, { complete, forOtherOwner }) {
+  if (!hasSignatureField(fields)) return;
+  if (forOtherOwner) {
+    const hasPrefilledSig = Boolean(String(answers['signed-name'] || '').trim());
+    const hasCheckedBox = fields.some(field => field.type === 'checkbox' && answers[field.id] === true);
+    if (hasPrefilledSig || hasCheckedBox) reject('Leave signature and agreement boxes blank when saving a draft for another staff member.');
+  }
+  if (complete) {
+    const parsedName = parseSignedName(answers['signed-name']);
+    if (!parsedName) reject('Type your full name (first and last) to sign this agreement.');
+    answers['signed-name'] = parsedName;
+  }
+}
+
+function recordAnswers(version, input, { forOtherOwner = false } = {}) {
+  const fields = version.staff_metadata.fields;
+  const fieldById = new Map(fields.map(field => [field.id, field]));
+  const rawAnswers = input.answers && typeof input.answers === 'object' && !Array.isArray(input.answers)
+    ? Object.fromEntries(Object.entries(input.answers).map(([key, val]) => {
+      const f = fieldById.get(key);
+      if (typeof val === 'string' && f && (f.type === 'text' || f.type === 'textarea' || f.type === 'date')) return [key, val.trim()];
+      return [key, val];
+    }))
+    : input.answers;
+  const answers = validate(answerSchema(fields, input.complete), rawAnswers);
+  enforceSignatureAnswers(fields, answers, { complete: input.complete, forOtherOwner });
   const ids = version.content_snapshot.sections.map(section => section.id);
   const steps = validate(Joi.array().items(Joi.string().valid(...ids)).unique().required(), input.completed_steps);
   if (input.complete && version.content_snapshot.kind === 'procedure' && steps.length !== ids.length) reject('Complete every procedure step.');
   return { answers: JSON.stringify(answers), completed_steps: JSON.stringify(steps) };
 }
 
-async function saveRecord(versionId, input, actor) {
+async function saveRecord(versionId, input, actor, evidence = {}) {
   return db.transaction(async trx => {
     const version = await recordableVersion(trx, versionId, actor, 'record');
     if (input.content_hash !== version.content_hash) reject('The displayed hash does not match this version.', 409);
@@ -259,7 +346,7 @@ async function saveRecord(versionId, input, actor) {
     await loadDocument(trx, version.template_id, owner);
     if (!isAdmin(actor) && input.owner_id !== actor.id) reject('Only an admin may assign a record to another staff member.', 403);
     if (input.complete && input.owner_id !== actor.id) reject('Only the assigned owner may complete this record.', 403);
-    const values = { ...recordAnswers(version, input), owner_id: input.owner_id, due_at: input.due_at,
+    const values = { ...recordAnswers(version, input, { forOtherOwner: input.owner_id !== actor.id }), owner_id: input.owner_id, due_at: input.due_at,
       updated_at: trx.fn.now(), completed_at: input.complete ? trx.fn.now() : null };
     let row;
     if (input.id) {
@@ -271,7 +358,9 @@ async function saveRecord(versionId, input, actor) {
     } else {
       [row] = await trx('staff_document_records').insert({ ...values, version_id: versionId, content_hash: version.content_hash, created_by: actor.id }).returning('*');
     }
-    await audit(trx, actor, input.complete ? 'record_completed' : 'record_saved', version.template_id, { record_id: row.id, version_id: version.id, owner_id: row.owner_id, due_at: row.due_at });
+    await audit(trx, actor, input.complete ? 'record_completed' : 'record_saved', version.template_id, {
+      record_id: row.id, version_id: version.id, owner_id: row.owner_id, due_at: row.due_at,
+    }, input.complete ? evidence : {});
     return row;
   });
 }
@@ -312,4 +401,4 @@ function prefillValues(map, fields, source) {
   return { answers, fields: Object.keys(answers) };
 }
 
-module.exports = { saveDraft, preview, publish, setOnboardingRequired, updatePolicy, list, detail, acknowledge, saveRecord, prefillAnswers, prefillValues, recordAnswers, ACKNOWLEDGMENT };
+module.exports = { saveDraft, preview, publish, setOnboardingRequired, updatePolicy, list, detail, acknowledge, saveRecord, prefillAnswers, prefillValues, recordAnswers, parseSignedName, hasSignatureField, ACKNOWLEDGMENT };

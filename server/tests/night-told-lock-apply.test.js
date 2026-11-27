@@ -12,7 +12,7 @@ jest.mock('../services/auto-dispatch/route-tiers', () => ({
   loadReminderFreeze: jest.fn(),
 }));
 
-jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn() }));
+jest.mock('../services/auto-dispatch/told-visits', () => ({ loadToldVisitIds: jest.fn(), NIGHT_FREEZE_ANY_PROMISE: false }));
 
 const routeTiers = require('../services/auto-dispatch/route-tiers');
 const toldVisits = require('../services/auto-dispatch/told-visits');
@@ -28,12 +28,12 @@ const FROZEN = { failed: false, frozen: new Set(['s2']) };
 beforeEach(() => { jest.clearAllMocks(); });
 
 describe('checkTiersSiblingBounds', () => {
-  test('passes { lock24h, toldLock, anyPromise } and refuses a frozen sibling with a text that says the customer was already told', async () => {
+  test('passes { lock24h, toldLock, anyPromise: false } (W20) and refuses a frozen sibling with a text that says the customer was already told', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
     await expect(checkTiersSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, true))
       .rejects.toMatchObject({ id: 's2', why: expect.stringContaining('already told its time') });
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: true });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), undefined, { lock24h: true, toldLock: true, anyPromise: false });
   });
 
   test('without lock24h the call is the plain 72-hour one', async () => {
@@ -46,12 +46,12 @@ describe('checkTiersSiblingBounds', () => {
 });
 
 describe('checkFlexSiblingBounds', () => {
-  test('25 h band with { lock24h, toldLock, anyPromise }; without lock24h the plain 73 h call', async () => {
+  test('25 h band with { lock24h, toldLock, anyPromise: false }; without lock24h the plain 73 h call', async () => {
     routeTiers.loadReminderFreeze.mockResolvedValue(FROZEN);
     const trx = jest.fn();
     await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [], true))
       .rejects.toMatchObject({ id: 's2' });
-    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: true });
+    expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 25, { lock24h: true, toldLock: true, anyPromise: false });
     await expect(checkFlexSiblingBounds(trx, [sib], [sib], { date: dayOffset(6) }, TODAY, refuse, [])).rejects.toBeTruthy();
     expect(routeTiers.loadReminderFreeze).toHaveBeenLastCalledWith(trx, ['s2'], expect.any(Date), 73);
   });
@@ -67,7 +67,7 @@ describe('assertNotToldOnMove (the primary visit, on the move transaction)', () 
     const trx = jest.fn();
     await expect(assertNotToldOnMove(trx, row, refuse))
       .rejects.toMatchObject({ id: 'v1', why: 'has a time the customer was already told (frozen)' });
-    expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date), { anyPromise: true });
+    expect(toldVisits.loadToldVisitIds).toHaveBeenCalledWith(trx, ['v1'], expect.any(Date), { anyPromise: false });
   });
 
   test('no promise with a known slot lets the move go on', async () => {

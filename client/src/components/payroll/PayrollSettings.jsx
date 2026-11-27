@@ -396,7 +396,16 @@ function FamilyCell({ technician, onSaved }) {
         type="button" variant="secondary" disabled={busy || !current}
         onClick={event => send(event, { relationship: null }, `Family employee setting cleared for ${technician.name}.`)}
       >Clear</Button>
-      <Button type="button" variant="secondary" disabled={busy} onClick={() => setEditing(false)}>Cancel</Button>
+      <Button
+        type="button" variant="secondary" disabled={busy}
+        onClick={() => {
+          setRelationship(current?.relationship || 'parent');
+          setEntity(current?.entity || 'single_member_llc');
+          setExemptFrom(current?.exemptFrom || '');
+          setError('');
+          setEditing(false);
+        }}
+      >Cancel</Button>
     </div>
     {error && <span role="alert" className="text-ui-caption text-alert-fg">{error}</span>}
   </form>;
@@ -453,6 +462,8 @@ export default function PayrollSettings() {
   const [dialog, setDialog] = useState(null);
   // Bumped when a pay run is finalized or voided, so the tax form figures refetch.
   const [formsVersion, setFormsVersion] = useState(0);
+  // Bumped whenever any employee payroll setting (W-4, SIMPLE IRA, pay method, rate steps, coverage, family, Mercury) saves.
+  const [settingsVersion, setSettingsVersion] = useState(0);
 
   const load = useCallback(async () => {
     try {
@@ -463,7 +474,12 @@ export default function PayrollSettings() {
   useEffect(() => { load(); }, [load]);
 
   const close = () => setDialog(null);
-  const saved = text => { setDialog(null); setMessage(text); load(); };
+  const saved = async text => {
+    setDialog(null);
+    setMessage(text);
+    await load();
+    setSettingsVersion(v => v + 1);
+  };
   // Present only when the server has GATE_PAYROLL_TIME_OFF on.
   const showAllowance = hasField(technicians, 'ptoHoursPerYear');
   // The yearly hours and the minimum paid week of every employee as one text: the open draft and the time-off
@@ -504,7 +520,11 @@ export default function PayrollSettings() {
               {/* Listed while a minimum paid week is set, so it can be cleared after the last week is paid. */}
               {tech.notW2
                 ? <span className="block text-ui-caption text-ink-secondary">Not W-2 now: clear the minimum</span>
-                : tech.employmentStatus === 'inactive' && <span className="block text-ui-caption text-ink-secondary">Left: type the last day</span>}
+                : tech.employmentStatus === 'inactive' && (
+                  <span className="block text-ui-caption text-ink-secondary">
+                    {tech.paidWeekMinimumHours != null && !tech.paidWeekMinimumLastDay ? 'Left: type the last day' : 'Left'}
+                  </span>
+                )}
             </TD>
             <TD nums>{tech.payRate != null ? `${dollars(tech.payRate)}/hr` : 'Not set'}</TD>
             <TD>{payMethodLabel(tech)}</TD>
@@ -530,7 +550,7 @@ export default function PayrollSettings() {
       </Table>
     </Card>}
     <ProductionSharePanel call={call} technicians={technicians} />
-    <PayRuns call={call} bankKey={bankKey} onRunsChanged={() => setFormsVersion(v => v + 1)} />
+    <PayRuns call={call} bankKey={bankKey} settingsKey={settingsVersion} onRunsChanged={() => setFormsVersion(v => v + 1)} />
     <PayrollForms call={call} refreshKey={formsVersion} />
     {dialog?.kind === 'w4' && <W4Dialog technician={dialog.tech} onClose={close} onSaved={saved} />}
     {dialog?.kind === 'pay' && <PayMethodDialog technician={dialog.tech} onClose={close} onSaved={saved} />}

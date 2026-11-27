@@ -27,7 +27,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { invoiceAmountDue } = require('./invoice-helpers');
+const { invoiceAmountDue, invoiceHeldForChemicalReview } = require('./invoice-helpers');
 const { etDateString } = require('../utils/datetime-et');
 const { invoiceOverdueSql } = require('./collections/account-anchor');
 
@@ -70,6 +70,7 @@ function applyOpenSelfPayPredicates(query) {
     // another billed member of the same packet. Left in, the row rides a
     // sibling's combined payment and the homeowner pays payer-owned debt.
     .whereRaw("COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+    .whereRaw("COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
     .whereRaw('GREATEST(invoices.total - COALESCE(invoices.credit_applied, 0) - COALESCE(invoices.amount_paid, 0), 0) > 0');
 }
 
@@ -126,6 +127,7 @@ async function openSelfPayInvoicesByAmountDue(amountCents, { toleranceCents = 0,
 // individually (email note, sweep) are unchanged.
 async function rowIsSelfPayDue(customerId, row, { onResolveFailure = null, database = db } = {}) {
   if (!(invoiceAmountDue(row) > 0)) return false;
+  if (invoiceHeldForChemicalReview(row)) return false;
   const PayerService = require('./payer');
   try {
     const resolved = await PayerService.resolveForInvoice({
@@ -190,6 +192,7 @@ async function openBalanceExists(customerId, { excludeInvoiceId = null, database
     // Same withdrawal exclusion as the full read (pre-push P0) — this boolean
     // is SPOKEN to the customer, and payer-owned debt is not their balance.
     .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+    .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
     .whereRaw('(ROUND(total * 100) - ROUND(COALESCE(credit_applied, 0) * 100) - ROUND(COALESCE(amount_paid, 0) * 100)) > 0')
     .orderBy('created_at', 'asc')
     .limit(MAX_OPEN_INVOICES)

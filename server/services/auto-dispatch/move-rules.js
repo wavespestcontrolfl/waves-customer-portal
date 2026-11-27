@@ -127,15 +127,21 @@ function ownPreferenceScore(score) {
 // The rule needs the road check (GATE_AUTO_DISPATCH_ROAD_CHECK) and the
 // ordinary drive floor on (> 0): without both, road-check.js measures nothing,
 // and a minutes-only move must be confirmed on real roads.
-function minutesRuleOk({ service, current, cand, currentScore, candScore, gain, config }) {
+// Uses explicit non-regression on customer preference, technician capability,
+// and day workload rather than synthetic total-score `gain > 0`, so real
+// road-confirmed 10+ min (15+ min on re-move) savings are not vetoed by
+// stabilityPenalty, cross-tech continuity (-5), clusterShare dilution, or
+// DETOUR_CAP_MIN saturation on far lone stops.
+function minutesRuleOk({ service, current, cand, currentScore, candScore, config }) {
   const floor = minutesRuleFloor(service, config);
   if (floor <= 0 || config.roadCheckEnabled !== true || !((config.minDayMoveDriveSavingMinutes || 0) > 0)) return false;
   // A grouped visit moves with its siblings, whose own move counts this row
   // cannot see: it keeps the score bar (candidate-slots.js groupFields).
-  if (!current || !cand || !isDayMove(current, cand) || current.grouped || current.detour_group_blind || !(gain > 0)) return false;
+  if (!current || !cand || !isDayMove(current, cand) || current.grouped || current.detour_group_blind) return false;
   return driveSavingMinutes(current, cand) >= floor
     && ownPreferenceScore(candScore) >= ownPreferenceScore(currentScore)
-    && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0);
+    && (Number(candScore.technician_score) || 0) >= (Number(currentScore.technician_score) || 0)
+    && (Number(candScore.workload_score) || 0) >= (Number(currentScore.workload_score) || 0);
 }
 
 // A visit that must leave its slot whatever the score says.
@@ -235,25 +241,31 @@ function rankCandidates({ service, current, currentScore, scored, threshold, con
   };
 }
 
-// Order of qualifying slots: Sunday last (owner 2026-10-24); then a slot that clears
-// the score bar before a minutes-rule slot (key `flag`); minutes-rule slots by
-// the bigger drive saving; then `rest`.
-function byBarThenSaving(a, b, flag, rest) {
+// Order of qualifying slots (strict weak ordering — transitive across every
+// permutation): Sunday last (owner 2026-10-24); then bigger modeled drive
+// saving first; then `rest` (gain, encounter order).
+function byBarThenSaving(a, b, _flag, rest) {
   return Number(a.sunday) - Number(b.sunday)
-    || Number(a[flag]) - Number(b[flag])
-    || (a[flag] && b[flag] ? b.saving - a.saving : 0)
+    || b.saving - a.saving
     || rest(a, b);
 }
 
 function normalBestOf(conflict, rows, service, config) {
   if (!conflict) return {};
   // A past_cap slot is in the list only for the conflict repair (legacyCap).
-  // Ranked like an ordinary move: Sunday last, bar before minutes rule.
-  const top = rows.filter((r) => r.normalOk && !r.cand.past_cap)
-    .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index))[0];
+  // Ranked like an ordinary move: Sunday last, bigger drive saving first.
+  const sorted = rows.filter((r) => r.normalOk && !r.cand.past_cap)
+    .sort((a, b) => byBarThenSaving(a, b, 'minutesOk', (x, y) => y.gain - x.gain || x.index - y.index));
+  const top = sorted[0];
   if (!top) return {};
   // The road floor the projected move must keep (road-check.js withProjectionChecked).
-  return { normalBest: top.cand, normalBestScore: top.sc, ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}) };
+  return {
+    normalBest: top.cand,
+    normalBestScore: top.sc,
+    normalRankedRows: sorted.map((r) => ({ cand: r.cand, sc: r.sc, gain: r.gain, byMinutes: r.minutesOk })),
+    ...(top.minutesOk ? { normalBestMinutesFloor: minutesRuleFloor(service, config) } : {}),
+    ...(top.minutesOk && !(top.gain > 0) ? { normalBestNeedsRoad: true } : {}),
+  };
 }
 
 module.exports = {

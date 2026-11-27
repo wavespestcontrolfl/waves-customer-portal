@@ -145,6 +145,20 @@ router.use((req, res, next) => {
   return next();
 });
 
+// Single capability read so the Payroll UI does not have to fire 404-generating probes for every dark sub-gate.
+router.get('/capabilities', (req, res) => {
+  const on = (fn) => typeof fn === 'function' && fn();
+  res.json({
+    forms: on(payrollFormFiguresLive),
+    timeOff: on(payrollTimeOffLive),
+    payLines: on(payrollPayLinesLive),
+    familyEmployee: on(payrollFamilyEmployeeLive),
+    mercuryStatus: on(payrollMercuryStatusLive),
+    mercuryPay: on(payrollMercuryPayLive),
+    productionShare: on(payrollProductionShareLive),
+  });
+});
+
 // Ids and error codes only: a database error can carry the bound values.
 function fail(res, what, err) {
   if (err && err.name === 'PayrollError') return res.status(err.status).json({ error: err.message });
@@ -180,25 +194,25 @@ router.get('/time-off', timeOffOnly, async (req, res) => {
   } catch (err) { fail(res, 'list time off', err); }
 });
 
-router.post('/time-off', timeOffOnly, async (req, res) => {
+router.post('/time-off', timeOffOnly, requireFullAccess, async (req, res) => {
   try {
     res.status(201).json(await payrollTimeOff.createTimeOff(req.body, req.technicianId));
   } catch (err) { fail(res, 'record time off', err); }
 });
 
-router.put('/time-off/:id', timeOffOnly, async (req, res) => {
+router.put('/time-off/:id', timeOffOnly, requireFullAccess, async (req, res) => {
   try {
     res.json(await payrollTimeOff.updateTimeOff(req.params.id, req.body, req.technicianId));
   } catch (err) { fail(res, 'change time off', err); }
 });
 
-router.delete('/time-off/:id', timeOffOnly, async (req, res) => {
+router.delete('/time-off/:id', timeOffOnly, requireFullAccess, async (req, res) => {
   try {
     res.json(await payrollTimeOff.deleteTimeOff(req.params.id, req.technicianId));
   } catch (err) { fail(res, 'remove time off', err); }
 });
 
-router.put('/technicians/:id/pto-allowance', timeOffOnly, async (req, res) => {
+router.put('/technicians/:id/pto-allowance', timeOffOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ technician: await payrollTimeOff.setPtoAllowance(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set time off allowance', err); }
@@ -278,13 +292,13 @@ router.get('/pay-lines/technicians', payLinesOnly, async (req, res) => {
   } catch (err) { fail(res, 'list pay line employees', err); }
 });
 
-router.post('/pay-lines', payLinesOnly, async (req, res) => {
+router.post('/pay-lines', payLinesOnly, requireFullAccess, async (req, res) => {
   try {
     res.status(201).json({ payLine: await payrollPayLines.createPayLine(req.body, req.technicianId) });
   } catch (err) { fail(res, 'add pay line', err); }
 });
 
-router.delete('/pay-lines/:id', payLinesOnly, async (req, res) => {
+router.delete('/pay-lines/:id', payLinesOnly, requireFullAccess, async (req, res) => {
   try {
     res.json(await payrollPayLines.deletePayLine(req.params.id, req.technicianId));
   } catch (err) { fail(res, 'remove pay line', err); }
@@ -298,7 +312,7 @@ const coverageOnly = (req, res, next) => {
   return next();
 };
 
-router.put('/technicians/:id/flsa-coverage', coverageOnly, async (req, res) => {
+router.put('/technicians/:id/flsa-coverage', coverageOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ technician: await payrollPayLines.setFlsaCoverage(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set overtime coverage', err); }
@@ -310,7 +324,7 @@ const familyEmployeeOnly = (req, res, next) => {
   return next();
 };
 
-router.put('/technicians/:id/family-employment', familyEmployeeOnly, async (req, res) => {
+router.put('/technicians/:id/family-employment', familyEmployeeOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ technician: await payrollFamilyEmployee.setFamilyEmployment(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set family employee', err); }
@@ -326,7 +340,7 @@ const mercuryPayOnly = (req, res, next) => {
   return next();
 };
 
-router.put('/technicians/:id/mercury-recipient', mercuryStatusOnly, async (req, res) => {
+router.put('/technicians/:id/mercury-recipient', mercuryStatusOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ technician: await payrollMercury.setMercuryRecipient(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set Mercury recipient', err); }
@@ -338,7 +352,7 @@ router.get('/runs/:id/send-preview', mercuryStatusOnly, async (req, res) => {
   } catch (err) { fail(res, 'read Mercury send preview', err); }
 });
 
-router.post('/runs/:id/send', mercuryPayOnly, async (req, res) => {
+router.post('/runs/:id/send', mercuryPayOnly, requireFullAccess, async (req, res) => {
   try {
     const results = await payrollMercury.sendRun(req.params.id, req.technicianId);
     // The requests are made and saved. A failed re-read must not hide what happened.
@@ -347,19 +361,19 @@ router.post('/runs/:id/send', mercuryPayOnly, async (req, res) => {
   } catch (err) { fail(res, 'send pay run to Mercury', err); }
 });
 
-router.post('/checks/:id/send-again', mercuryPayOnly, async (req, res) => {
+router.post('/checks/:id/send-again', mercuryPayOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ result: await payrollMercury.sendAgain(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'send paycheck to Mercury again', err); }
 });
 
-router.post('/payments/:id/link-request', mercuryStatusOnly, async (req, res) => {
+router.post('/payments/:id/link-request', mercuryStatusOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ result: await payrollMercury.linkRequest(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'link Mercury request', err); }
 });
 
-router.post('/checks/:id/paper', mercuryStatusOnly, async (req, res) => {
+router.post('/checks/:id/paper', mercuryStatusOnly, requireFullAccess, async (req, res) => {
   try {
     res.json({ result: await payrollMercury.recordPaper(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'record paper check', err); }
@@ -380,7 +394,7 @@ router.get('/technicians/:id/w4', async (req, res) => {
   } catch (err) { fail(res, 'list W-4', err); }
 });
 
-router.post('/technicians/:id/w4', async (req, res) => {
+router.post('/technicians/:id/w4', requireFullAccess, async (req, res) => {
   try {
     const election = await payrollW4.recordW4(req.params.id, req.body, req.technicianId);
     res.status(201).json({ election });
@@ -393,7 +407,7 @@ router.get('/technicians/:id/simple-ira', async (req, res) => {
   } catch (err) { fail(res, 'list SIMPLE IRA', err); }
 });
 
-router.post('/technicians/:id/simple-ira', async (req, res) => {
+router.post('/technicians/:id/simple-ira', requireFullAccess, async (req, res) => {
   try {
     const election = await payrollSimple.recordSimple(req.params.id, req.body, req.technicianId);
     res.status(201).json({ election });
@@ -406,20 +420,20 @@ router.get('/technicians/:id/rate-steps', async (req, res) => {
   } catch (err) { fail(res, 'list pay rate steps', err); }
 });
 
-router.post('/technicians/:id/rate-steps', async (req, res) => {
+router.post('/technicians/:id/rate-steps', requireFullAccess, async (req, res) => {
   try {
     const step = await payrollRateSteps.createStep(req.params.id, req.body, req.technicianId);
     res.status(201).json({ step });
   } catch (err) { fail(res, 'record pay rate step', err); }
 });
 
-router.delete('/rate-steps/:stepId', async (req, res) => {
+router.delete('/rate-steps/:stepId', requireFullAccess, async (req, res) => {
   try {
     res.json({ step: await payrollRateSteps.cancelStep(req.params.stepId, req.technicianId) });
   } catch (err) { fail(res, 'cancel pay rate step', err); }
 });
 
-router.put('/technicians/:id/pay-method', async (req, res) => {
+router.put('/technicians/:id/pay-method', requireFullAccess, async (req, res) => {
   try {
     res.json({ technician: await payrollW4.setPayMethod(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set pay method', err); }
@@ -431,7 +445,7 @@ router.get('/runs', async (req, res) => {
   } catch (err) { fail(res, 'list pay runs', err); }
 });
 
-router.post('/runs', async (req, res) => {
+router.post('/runs', requireFullAccess, async (req, res) => {
   try {
     res.status(201).json({ run: await payrollRuns.draftRun(req.body, req.technicianId) });
   } catch (err) { fail(res, 'draft pay run', err); }
@@ -443,19 +457,19 @@ router.get('/runs/:id', async (req, res) => {
   } catch (err) { fail(res, 'read pay run', err); }
 });
 
-router.post('/runs/:id/recompute', async (req, res) => {
+router.post('/runs/:id/recompute', requireFullAccess, async (req, res) => {
   try {
     res.json({ run: await payrollRuns.recomputeRun(req.params.id, req.technicianId) });
   } catch (err) { fail(res, 'recompute pay run', err); }
 });
 
-router.post('/runs/:id/finalize', async (req, res) => {
+router.post('/runs/:id/finalize', requireFullAccess, async (req, res) => {
   try {
     res.json({ run: await payrollRuns.finalizeRun(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'finalize pay run', err); }
 });
 
-router.post('/runs/:id/void', async (req, res) => {
+router.post('/runs/:id/void', requireFullAccess, async (req, res) => {
   try {
     res.json({ run: await payrollRuns.voidRun(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'void pay run', err); }
@@ -470,7 +484,7 @@ router.get('/runs/:id/export.csv', async (req, res) => {
   } catch (err) { fail(res, 'export pay run', err); }
 });
 
-router.put('/checks/:id/check-number', async (req, res) => {
+router.put('/checks/:id/check-number', requireFullAccess, async (req, res) => {
   try {
     res.json({ check: await payrollRuns.setCheckNumber(req.params.id, req.body, req.technicianId) });
   } catch (err) { fail(res, 'set check number', err); }

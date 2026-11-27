@@ -79,7 +79,9 @@ postgres('payroll minimum paid week', () => {
     await trx.raw('ROLLBACK TO SAVEPOINT attempt');
     return error;
   };
-  const api = async (method, path, { body, email, raw = false } = {}) => {
+  const api = async (method, path, opts = {}) => {
+    const { body, raw = false } = opts;
+    const email = 'email' in opts ? opts.email : 'contact@wavespestcontrol.com';
     const response = await fetch(`${baseUrl}${path}`, {
       method,
       headers: { 'content-type': 'application/json', 'x-test-admin': ADMIN_ID, ...(email ? { 'x-test-email': email } : {}) },
@@ -395,6 +397,12 @@ postgres('payroll minimum paid week', () => {
     expect(await changes()).toEqual([{ from_week: thisWeek, hours: null }]);
     const audit = await trx('audit_log').where({ action: 'payroll.week_minimum_changed', resource_id: id }).count('* as n').first();
     expect(Number(audit.n)).toBe(3);
+
+    // An explicit fromWeek applies even when the submitted hours match the current technician-level minimum.
+    expect((await put({ hours: '32' })).status).toBe(200);
+    expect((await put({ hours: '32', fromWeek: W1 })).status).toBe(200);
+    const backdated = (await api('POST', `/runs/${late.id}/recompute`)).body.run;
+    expect(byName(backdated, 'Sample Alpha')).toMatchObject({ regularHours: '30.00', minimumWeekHours: '2.00' });
   });
 
   it('a draft read before a last-day change goes stale', async () => {

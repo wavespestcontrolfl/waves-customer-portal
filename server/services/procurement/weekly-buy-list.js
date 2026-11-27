@@ -52,7 +52,7 @@ const { appliesToLine, noKitReason, serviceLinesInvalid, INSPECTION_SERVICE_RE }
 const { detectServiceLine } = require('../service-report/service-line-configs');
 const { isPestHouseMixVisit, resolveHouseMix, PEST_HOUSE_MIX } = require('./pest-house-mix');
 const { projectTaurusEligibility } = require('../taurus-yearly-count');
-const { RECEIVED_SETTLES_SQL } = require('./order-dispatch');
+const { RECEIVED_SETTLES_SQL, liveOrderSql } = require('./order-dispatch');
 
 // The forecast reads at most this many lawn visits (its own cap).
 const FORECAST_VISIT_LIMIT = 300;
@@ -493,8 +493,7 @@ async function readOnOrder(knex, ids) {
   return knex('product_restock_requests as prr')
     .leftJoin('vendor_orders as vo', function liveOrder() {
       this.on('vo.restock_request_id', 'prr.id')
-        .andOn(knex.raw("NULLIF(vo.evidence->>'revokedAt', '') IS NULL"))
-        .andOn(knex.raw("(vo.status = 'placing' OR vo.placed_at IS NOT NULL)"));
+        .andOn(knex.raw(liveOrderSql('vo')));
     })
     .whereIn('prr.product_id', ids)
     .where((q) => q.where('prr.status', 'ordered').orWhere((live) => live.whereNotNull('vo.id').whereRaw(RECEIVED_SETTLES_SQL)))

@@ -289,6 +289,36 @@ describe('Google Ads campaign sync', () => {
     expect(mockMutateResources).not.toHaveBeenCalled();
   });
 
+  test('P0-1: updateBudget with requireDirection refuses before mutateResources if live Google budget moved wrong-way or is unreadable', async () => {
+    // Live Google dropped from $40 to $20 after sync; advisor decrease to $30 would raise spend -> refuse!
+    mockCustomerQuery.mockResolvedValueOnce([{
+      campaign: { id: '22594274874', campaign_budget: 'customers/3393936713/campaignBudgets/987654321' },
+      campaign_budget: { amount_micros: '20000000' },
+    }]);
+    await expect(GoogleAds.updateBudget('22594274874', 30, { requireDirection: 'decrease' }))
+      .rejects.toMatchObject({ code: 'budget_direction_invalid' });
+    expect(mockMutateResources).not.toHaveBeenCalled();
+
+    // Unreadable/missing live amount_micros -> refuse before mutating!
+    mockCustomerQuery.mockResolvedValueOnce([{
+      campaign: { id: '22594274874', campaign_budget: 'customers/3393936713/campaignBudgets/987654321' },
+      campaign_budget: { amount_micros: null },
+    }]);
+    await expect(GoogleAds.updateBudget('22594274874', 30, { requireDirection: 'decrease' }))
+      .rejects.toMatchObject({ code: 'budget_direction_invalid' });
+    expect(mockMutateResources).not.toHaveBeenCalled();
+
+    // Valid decrease ($40 live -> $30) proceeds and mutates Google Ads.
+    mockCustomerQuery.mockResolvedValueOnce([{
+      campaign: { id: '22594274874', campaign_budget: 'customers/3393936713/campaignBudgets/987654321' },
+      campaign_budget: { amount_micros: '40000000' },
+    }]);
+    mockMutateResources.mockResolvedValueOnce({});
+    const ok = await GoogleAds.updateBudget('22594274874', 30, { requireDirection: 'decrease' });
+    expect(ok).toMatchObject({ success: true, dailyBudget: 30, previousDailyBudget: 40 });
+    expect(mockMutateResources).toHaveBeenCalledTimes(1);
+  });
+
   test('gaqlDateRange returns a finite, dashed YYYY-MM-DD range', () => {
     const { since, until } = GoogleAds._private.gaqlDateRange(7, new Date('2026-06-27T12:00:00Z'));
     expect(since).toBe('2026-06-20');

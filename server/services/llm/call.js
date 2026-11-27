@@ -665,6 +665,15 @@ function geminiVerdict(data, candidate, maxTokens) {
   return code;
 }
 
+function geminiEnvelopeError(data, maxTokens = null) {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return 'invalid_response';
+  if (data.candidates !== undefined && !Array.isArray(data.candidates)) return 'invalid_response';
+  const verdict = geminiVerdict(data, data.candidates?.[0] || {}, maxTokens);
+  if (verdict) return verdict;
+  try { geminiText(data); } catch { return 'invalid_response'; }
+  return null;
+}
+
 async function callGemini({ model, system, text, images = [], audio = [], jsonMode = true, jsonSchema, maxTokens = 2048, temperature = 0.2, thinkingLevel, timeoutMs, signal, laneId, promptVersion, policyLabel } = {}) {
   const key = geminiKey();
   if (!key) return { ok: false, reason: 'no_key' };
@@ -1058,6 +1067,9 @@ module.exports = {
   dispatch,
   dispatchWithFallback,
   extractOpenAIText,
+  openAIVerdict,
+  geminiVerdict,
+  geminiEnvelopeError,
   parseLooseJson,
   providerErrorReason,
   OPENAI_RESPONSES_API,

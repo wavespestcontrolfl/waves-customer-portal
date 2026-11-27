@@ -168,7 +168,7 @@ async function nextWorkDay(day, ctx) {
  * span could not be judged for want of an hour's reading. No next work day = no target, not unread. Travel time between
  * proposed moves is not checked.
  */
-async function dryDayFor(row, hourly, ctx) {
+async function dryDayFor(row, hourly, ctx, alerts = null) {
   const { day, taken, occupied } = ctx;
   const length = row.visit.reach.endMin - row.visit.reach.startMin;
   const date = await nextWorkDay(day, ctx);
@@ -178,10 +178,10 @@ async function dryDayFor(row, hourly, ctx) {
   let unread = false;
   for (let start = DAY_OPEN; start + length <= DAY_CLOSE; start += 60) {
     if (occupied(row.visit, date, start, start + length) || clashes(taken, techOf(row), date, start, start + length)) continue;
-    const rain = rainPass.spanRain(hourly, date, start, start + length);
-    if (rain.complete && rain.peak < DRY_PCT) return { target: { date, start: toHHMM(start), end: start + length, startMin: start }, unread: false, date };
-    // A reading at or above DRY_PCT settles the hour as not dry; only a missing hour leaves it undecided.
-    if (!rain.complete && !(rain.peak >= DRY_PCT)) unread = true;
+    const storm = rainPass.spanStorm(hourly, date, start, start + length, alerts, { thunderMinPct: rainPass.THUNDER_DRY_PCT });
+    if (storm.complete && storm.peak < DRY_PCT && !storm.wetByStorm) return { target: { date, start: toHHMM(start), end: start + length, startMin: start }, unread: false, date };
+    // A reading at or above DRY_PCT (or an active storm/thunder slot) settles the hour as not dry; only a missing hour leaves it undecided.
+    if (!storm.complete && !(storm.peak >= DRY_PCT) && !storm.wetByStorm) unread = true;
   }
   return { target: null, unread, date };
 }
@@ -191,17 +191,16 @@ async function dryDayFor(row, hourly, ctx) {
  * on `hourly` (the visit's one forecast snapshot), that is open and not held by an earlier proposal. null when none is left;
  * the visit then goes on to the next work day or the call list.
  */
-async function reorderStart(row, ctx, hourly) {
+async function reorderStart(row, ctx, hourly, alerts = null) {
   const { day, taken } = ctx;
   // Owner 2026-11-26: a rain text moves a visit to LATER the same day only (morning rain: afternoon). rain-pass's own proposal
   // is not used: it was judged on an earlier read and may be an earlier hour; the search below walks later starts on the
   // visit's one snapshot, so the whole decision reads the same hours.
   if (!Array.isArray(hourly)) return null;
-  // The nearest later start whose own hours and drying hours read fully below DRY_PCT and are free (the earliest, as every
-  // candidate is later than the visit's own start).
+  // The nearest later start whose own hours and drying hours read fully below DRY_PCT (with no thunder/severe alert) and are free.
   for (const c of laterStarts(row, ctx)) {
-    const rain = rainPass.spanRain(hourly, day, c.start, c.end);
-    if (rain.complete && rain.peak < DRY_PCT && !ctx.occupied(row.visit, day, c.start, c.end) && !clashes(taken, techOf(row), day, c.start, c.end)) return c.own;
+    const storm = rainPass.spanStorm(hourly, day, c.start, c.end, alerts, { thunderMinPct: rainPass.THUNDER_DRY_PCT });
+    if (storm.complete && storm.peak < DRY_PCT && !storm.wetByStorm && !ctx.occupied(row.visit, day, c.start, c.end) && !clashes(taken, techOf(row), day, c.start, c.end)) return c.own;
   }
   return null;
 }
@@ -221,12 +220,12 @@ function laterStarts(row, ctx) {
  * True when a later same-day start that is free for the visit has an hour with no reading and no hour read wet: the day
  * could not be called without a dry hour. (A reading at or above DRY_PCT settles that start as not dry.)
  */
-function laterHourUnread(row, hourly, ctx) {
+function laterHourUnread(row, hourly, ctx, alerts = []) {
   const { day, taken } = ctx;
   return laterStarts(row, ctx).some((c) => {
     if (ctx.occupied(row.visit, day, c.start, c.end) || clashes(taken, techOf(row), day, c.start, c.end)) return false;
-    const rain = rainPass.spanRain(hourly, day, c.start, c.end);
-    return !rain.complete && !(rain.peak >= DRY_PCT);
+    const storm = rainPass.spanStorm(hourly, day, c.start, c.end, alerts, { thunderMinPct: rainPass.THUNDER_DRY_PCT });
+    return !storm.complete && !storm.wetByStorm && !(storm.peak >= DRY_PCT);
   });
 }
 
@@ -248,33 +247,32 @@ function baseOf(row) {
 async function proposeFor(row, ctx) {
   const { day, read, open, taken } = ctx;
   const base = baseOf(row);
-  if (['no_point', 'no_forecast', 'error'].includes(row.reason)) {
-    return { ...base, decision: 'none', reason: row.reason === 'no_forecast' ? 'unread_forecast' : row.reason };
+  const earlyReason = { no_point: 'no_point', no_forecast: 'unread_forecast', error: 'error' }[row.reason];
+  if (earlyReason) return { ...base, decision: 'none', reason: earlyReason };
+  Object.assign(base, Object.fromEntries([
+    ['advisories', row.advisories],
+    ['storm_hazard', row.stormLabel],
+    ['severe_alerts', row.severeAlerts],
+  ].filter(([, v]) => (Array.isArray(v) ? v.length > 0 : Boolean(v)))));
+  // ONE forecast snapshot for this visit's whole decision AND its verdict: the reader keeps one read per visit point for the
+  // run, so rain-pass's wet verdict and these alternatives judge the same hours.
+  const hourly = row.visit.point ? await read(row.visit.point.lat, row.visit.point.lng) : null;
+  if (Array.isArray(hourly)) {
+    base.span_chances = workHours.spanChances(hourly, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
   }
   if (!row.wet) {
     // A visit the forecast reads dry is stored too, as none/forecast_dry: a rain the forecast missed scores as a miss.
     // Only a span read in full is dry; an hour with no reading is unread. The peak is kept for the replay.
     if (row.peak != null) base.peak = row.peak;
-    // The hours behind that verdict: the run's one snapshot of the visit's point (the same read rain-pass judged), as read.
-    const seen = row.visit.point ? await read(row.visit.point.lat, row.visit.point.lng) : null;
-    if (Array.isArray(seen)) base.span_chances = workHours.spanChances(seen, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
     return { ...base, decision: 'none', reason: row.dry === true ? 'forecast_dry' : 'unread_forecast' };
   }
   base.peak = row.peak;
+  if (Array.isArray(hourly)) base.day_chances = workHours.dayChances(hourly, day, RAIN_AFTER_HOURS);
   const { reach } = row.visit;
   const length = reach.endMin - reach.startMin;
-  // ONE forecast snapshot for this visit's whole decision AND its verdict: the reader keeps one read per visit point for the
-  // run, so rain-pass's wet verdict and these alternatives judge the same hours.
-  const hourly = await read(row.visit.point.lat, row.visit.point.lng);
-  // The hours this decision used, raw: the visit's span plus its drying hours (compact, from the hour its work starts).
-  if (Array.isArray(hourly)) {
-    base.span_chances = workHours.spanChances(hourly, day, base.span[0], base.span[1], RAIN_AFTER_HOURS);
-    // Every same-day hour a later slot could use (work hours plus drying after close, from 8 AM): a reorder's own span
-    // and the hours that rejected the others are all inside it, so the reorder can be replayed.
-    base.day_chances = workHours.dayChances(hourly, day, RAIN_AFTER_HOURS);
-  }
+  const alerts = ctx.readAlerts && row.visit.point ? await ctx.readAlerts(row.visit.point.lat, row.visit.point.lng) : [];
   // A hour already taken by an earlier proposal is never offered, over the cap or not.
-  const own = await reorderStart(row, ctx, hourly);
+  const own = await reorderStart(row, ctx, hourly, alerts);
   if (own != null) {
     if (!open) return { ...base, decision: 'cap', would: 'reorder', to_start: toHHMM(own) };
     const start = own - (reach.ownStartMin - reach.startMin);
@@ -285,10 +283,11 @@ async function proposeFor(row, ctx) {
   // then the office call list, whatever the rest of the day reads (the 'wholly wet day' gate of plan v2 is gone). The point's
   // own hours are the snapshot read above. The move is checked against the accepted targets before the cap is named: a stop
   // over the cap is `cap` only when a valid move exists, else it keeps its true reason.
-  if (!Array.isArray(hourly)) return { ...base, decision: 'none', reason: 'unread_forecast' };
   // A later hour with no reading could still have been dry: unread, never a move or a call.
-  if (laterHourUnread(row, hourly, ctx)) return { ...base, decision: 'none', reason: 'unread_forecast' };
-  const { target, unread, exhausted, date } = await dryDayFor(row, hourly, ctx);
+  if (!Array.isArray(hourly) || laterHourUnread(row, hourly, ctx, alerts)) {
+    return { ...base, decision: 'none', reason: 'unread_forecast' };
+  }
+  const { target, unread, exhausted, date } = await dryDayFor(row, hourly, ctx, alerts);
   // A scan with no work day in it is unresolved, never a call list: the day is not frozen on it (see planDay).
   if (exhausted) return { ...base, decision: 'none', reason: 'no_work_day_in_scan' };
   // The next work day's work hours the search judged, raw, beside the decision that used them.
@@ -373,10 +372,23 @@ async function planDay({ now, conn, day, today, read, deps }) {
       throw err;
     }
   };
+  // One free NWS active alerts reader per point for the run (shared with rain-pass, fail-open).
+  const wf = require('../weather-forecast');
+  const alertSnapshots = new Map();
+  const readAlerts = (lat, lng) => {
+    const key = `${lat},${lng}`;
+    if (!alertSnapshots.has(key)) {
+      const fn = deps.activeAlerts || (typeof wf.getNwsActiveAlerts === 'function'
+        ? (la, ln) => wf.getNwsActiveAlerts(la, ln, { fetchTimeoutMs: wf.NWS_PATIENT_WAIT_MS || 10000 })
+        : null);
+      alertSnapshots.set(key, fn ? Promise.resolve().then(() => fn(lat, lng)).catch(() => null).then((a) => (Array.isArray(a) ? a : [])) : Promise.resolve([]));
+    }
+    return alertSnapshots.get(key);
+  };
   // No notice to lead here: a stop that starts within 2 hours (a 6 AM recheck of an 8 AM visit) still has its rain read.
   const rows = (await rainPass.planRainPass({
     now, db: conn,
-    deps: { ...deps, rainOut, leadMinutes: 0, catalogGate: null, withCatalogKeys: catalogKeys, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng) },
+    deps: { ...deps, rainOut, leadMinutes: 0, catalogGate: null, withCatalogKeys: catalogKeys, loadStops: stopsFor, hourlyRain: (lat, lng) => readHourly(lat, lng), activeAlerts: readAlerts },
   })).filter((row) => row.date === day);
   if (catalogFailure) throw catalogFailure;
   // rain-pass reads a failed occupancy snapshot as "every hour is taken": a day decided on it would freeze a move while a
@@ -396,7 +408,7 @@ async function planDay({ now, conn, day, today, read, deps }) {
     return seriesRead;
   };
   const decided = await decideDay(rows, {
-    day, today, read: readHourly, occupied, blackouts: closedDays(conn, deps), seriesRows,
+    day, today, read: readHourly, readAlerts, occupied, blackouts: closedDays(conn, deps), seriesRows,
     dayHours: rainPass.serviceDay(deps),
     earliestMin: day === today ? parts.hour * 60 + parts.minute : 0,
   });

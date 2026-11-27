@@ -21,7 +21,7 @@ const mockLedgerCallRejected = jest.fn();
 jest.mock('../services/llm-dispatch-metrics', () => ({ ledgerCall: mockLedgerCall, ledgerCallRejected: mockLedgerCallRejected }));
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 
-const { runDiagnosis, runNarrative, runChallenge } = require('../services/lawn-diagnostic-prompt');
+const { runDiagnosis, runNarrative, runChallenge, runWriter } = require('../services/lawn-diagnostic-prompt');
 const ledgerCall = mockLedgerCall;
 const ledgerCallRejected = mockLedgerCallRejected;
 
@@ -124,5 +124,103 @@ describe('runChallenge (Stage 2, live) — drops malformed findings but still fa
     const out = await runChallenge(perception, {});
     expect(out.ok).toBe(true);
     expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+});
+
+describe('runWriter (Stage 3, OpenAI primary) — ledgerCall + empty-summary rejection', () => {
+  const origKey = process.env.OPENAI_API_KEY;
+  const origFetch = global.fetch;
+
+  beforeEach(() => {
+    process.env.OPENAI_API_KEY = 'test-openai-key';
+  });
+
+  afterEach(() => {
+    if (origKey === undefined) delete process.env.OPENAI_API_KEY;
+    else process.env.OPENAI_API_KEY = origKey;
+    global.fetch = origFetch;
+  });
+
+  test('runs OpenAI writer inside ledgerCall under laneId lawn_diag_writer', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        model: 'gpt-5.5',
+        output_text: JSON.stringify({ customer_summary: 'Clear lawn summary.' }),
+        usage: { input_tokens: 80, output_tokens: 20 },
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toMatchObject({ ok: true, customer_summary: 'Clear lawn summary.' });
+    expect(ledgerCall).toHaveBeenCalledWith('openai', expect.any(String), expect.any(Function), { laneId: 'lawn_diag_writer' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('blank customer_summary flips the OpenAI writer ledger row as invalid_output', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        model: 'gpt-5.5',
+        output_text: JSON.stringify({ customer_summary: '   ' }),
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'empty_summary' });
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.anything(), 'invalid_output');
+  });
+
+  test('HTTP 500 records through ledgerCall and returns openai_500 without throwing', async () => {
+    global.fetch = jest.fn(async () => ({ ok: false, status: 500, statusText: 'Server Error' }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'openai_500' });
+    expect(ledgerCall).toHaveBeenCalledWith('openai', expect.any(String), expect.any(Function), { laneId: 'lawn_diag_writer' });
+  });
+
+  test('OpenAI status incomplete fails with openai_incomplete even when output_text parses', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'resp_1',
+        status: 'incomplete',
+        incomplete_details: { reason: 'max_output_tokens' },
+        output_text: JSON.stringify({ customer_summary: 'Truncated text' }),
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'openai_incomplete' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('OpenAI refusal fails with openai_refusal without misclassifying as invalid_json', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'resp_2',
+        status: 'completed',
+        output: [{ content: [{ type: 'refusal', refusal: 'Declined' }] }],
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'openai_refusal' });
+    expect(ledgerCallRejected).not.toHaveBeenCalled();
+  });
+
+  test('blank completed OpenAI reply rejects the ledger row as empty_text, not invalid_json', async () => {
+    global.fetch = jest.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'resp_empty',
+        status: 'completed',
+        output_text: '   ',
+      }),
+    }));
+    const out = await runWriter({}, {});
+    expect(out).toEqual({ ok: false, reason: 'empty_summary' });
+    expect(ledgerCallRejected).toHaveBeenCalledWith(expect.objectContaining({ id: 'resp_empty' }), 'empty_text');
   });
 });

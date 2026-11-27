@@ -238,11 +238,23 @@ describe('GET /:id/stage-preview', () => {
     expect(mockDb.__rows()[0].interview_token).toBeNull(); // never minted by preview
   });
 
-  test('interview status with an existing token -> real interview_url', async () => {
+  test('interview status with an existing token -> real interview_url for owner, redacted for non-owner admin', async () => {
     mockDb.__setRows([appRow({ interview_token: 'a'.repeat(64) })]);
-    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001/stage-preview?status=interview`);
-    const body = await res.json();
-    expect(body.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'a'.repeat(64)}`);
+    mockStaffEmail = null;
+    const nonOwnerRes = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001/stage-preview?status=interview`);
+    const nonOwnerBody = await nonOwnerRes.json();
+    expect(nonOwnerBody.interview_url).toBeNull();
+    expect(nonOwnerBody.has_interview_link).toBe(true);
+
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    try {
+      const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001/stage-preview?status=interview`);
+      const body = await res.json();
+      expect(body.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'a'.repeat(64)}`);
+      expect(body.has_interview_link).toBe(true);
+    } finally {
+      mockStaffEmail = null;
+    }
   });
 
   test('sending_enabled reflects the gate', async () => {
@@ -266,25 +278,31 @@ describe('PATCH /:id/status', () => {
 
   test('status change to interview with notify mints a token once; response never carries the raw token', async () => {
     mockDb.__setRows([appRow({ status: 'reviewed' })]);
-    const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
-      status: 'interview',
-      notify: { sms: true, email: true },
-    });
-    expect(status).toBe(200);
-    expect(body.application.interview_token).toBeUndefined();
-    expect(body.application.interview_url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/careers\/interview\/[0-9a-f]{64}$/);
-    expect(body.sent).toEqual({ sms: 'sent', email: 'sent' });
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    try {
+      const { status, body } = await patch('aaaaaaaa-0000-4000-8000-000000000001', {
+        status: 'interview',
+        notify: { sms: true, email: true },
+      });
+      expect(status).toBe(200);
+      expect(body.application.interview_token).toBeUndefined();
+      expect(body.application.has_interview_link).toBe(true);
+      expect(body.application.interview_url).toMatch(/^https:\/\/portal\.wavespestcontrol\.com\/careers\/interview\/[0-9a-f]{64}$/);
+      expect(body.sent).toEqual({ sms: 'sent', email: 'sent' });
 
-    const row = mockDb.__rows()[0];
-    expect(row.status).toBe('interview');
-    expect(row.status_history).toHaveLength(1);
-    expect(row.interview_token).toMatch(/^[0-9a-f]{64}$/);
-    const firstToken = row.interview_token;
+      const row = mockDb.__rows()[0];
+      expect(row.status).toBe('interview');
+      expect(row.status_history).toHaveLength(1);
+      expect(row.interview_token).toMatch(/^[0-9a-f]{64}$/);
+      const firstToken = row.interview_token;
 
-    // A SECOND patch (e.g. a note-only edit) must reuse the same token, not mint again.
-    const second = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'still interviewing' });
-    expect(second.status).toBe(200);
-    expect(mockDb.__rows()[0].interview_token).toBe(firstToken);
+      // A SECOND patch (e.g. a note-only edit) must reuse the same token, not mint again.
+      const second = await patch('aaaaaaaa-0000-4000-8000-000000000001', { status: 'interview', note: 'still interviewing' });
+      expect(second.status).toBe(200);
+      expect(mockDb.__rows()[0].interview_token).toBe(firstToken);
+    } finally {
+      mockStaffEmail = null;
+    }
   });
 
   test('resend:true on an already-interview application sends without a new status_history entry', async () => {
@@ -652,12 +670,25 @@ describe('GET /:id detail never exposes the raw token', () => {
     spy.mockRestore();
   });
 
-  test('detail carries interview_url, not interview_token', async () => {
+  test('detail carries interview_url for owner only (not interview_token) and redacts url for non-owner admin', async () => {
     mockDb.__setRows([appRow({ interview_token: 'd'.repeat(64), status: 'interview' })]);
-    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
-    const body = await res.json();
-    expect(body.application.interview_token).toBeUndefined();
-    expect(body.application.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'d'.repeat(64)}`);
+    mockStaffEmail = null;
+    const nonOwnerRes = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
+    const nonOwnerBody = await nonOwnerRes.json();
+    expect(nonOwnerBody.application.interview_token).toBeUndefined();
+    expect(nonOwnerBody.application.interview_url).toBeNull();
+    expect(nonOwnerBody.application.has_interview_link).toBe(true);
+
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    try {
+      const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
+      const body = await res.json();
+      expect(body.application.interview_token).toBeUndefined();
+      expect(body.application.has_interview_link).toBe(true);
+      expect(body.application.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'d'.repeat(64)}`);
+    } finally {
+      mockStaffEmail = null;
+    }
   });
 
   test('no token yet -> interview_url null', async () => {
@@ -965,5 +996,69 @@ describe('PATCH /:id/status — an offer the applicant holds is withdrawn only b
     mockDb.__setHeldOffers([]);
     expect((await patch(APP_ID, { status: 'rejected' })).status).toBe(200);
     expect(mockDb.__rows()[0].status).toBe('rejected');
+  });
+});
+
+describe('Interview link redaction & contact-change handoff invalidation', () => {
+  const APP_ID = 'aaaaaaaa-0000-4000-8000-000000000001';
+  const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90';
+  afterEach(() => { mockStaffEmail = null; });
+
+  test('non-owner detail responses redact interview URLs and tokens from comms_history while owner keeps them', async () => {
+    const url = `https://portal.wavespestcontrol.com/careers/interview/${TOKEN}`;
+    mockDb.__setRows([appRow({
+      status: 'interview',
+      interview_token: TOKEN,
+      comms_history: [
+        { id: 'c1', stage: 'interview_invite', channel: 'sms', outcome: 'sent', body: `Pick a time here: ${url}` },
+        { id: 'c2', stage: 'interview_invite', channel: 'email', outcome: 'sent', subject: 'Interview invite', body: `Link: ${url} (${TOKEN})` },
+      ],
+    })]);
+
+    // Non-owner admin gets null interview_url and redacted comms_history.
+    mockStaffEmail = null;
+    const nonOwnerRes = await fetch(`${base}/api/admin/careers/${APP_ID}`);
+    const nonOwnerBody = await nonOwnerRes.json();
+    expect(nonOwnerRes.status).toBe(200);
+    expect(nonOwnerBody.application.interview_url).toBeNull();
+    expect(nonOwnerBody.application.has_interview_link).toBe(true);
+    expect(JSON.stringify(nonOwnerBody.application.comms_history)).not.toContain(TOKEN);
+    expect(nonOwnerBody.application.comms_history[0].body).toContain('/careers/interview/[link hidden]');
+    expect(nonOwnerBody.application.comms_history[1].body).toContain('/careers/interview/[link hidden]');
+
+    // Owner account keeps the full interview_url and unredacted history; stored DB row was never mutated.
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    const ownerRes = await fetch(`${base}/api/admin/careers/${APP_ID}`);
+    const ownerBody = await ownerRes.json();
+    expect(ownerRes.status).toBe(200);
+    expect(ownerBody.application.interview_url).toBe(url);
+    expect(ownerBody.application.comms_history[0].body).toContain(TOKEN);
+  });
+
+  test('changing applicant email or phone via PATCH /:id/contact invalidates pending interview invite handoff', async () => {
+    mockDb.__setRows([appRow({
+      status: 'reviewed',
+      contact_snapshot: { name: 'Jane Doe', phone: '9415550142', email: 'typo@example.com', city: 'Sarasota' },
+    })]);
+
+    let eligibilityBeforeEdit = null;
+    let eligibilityAfterEmailEdit = null;
+    mockSendStageComms.mockImplementationOnce(async (_app, _stage, opts) => {
+      eligibilityBeforeEdit = await opts.stillEligible();
+      // Simulate admin correcting the applicant's email before provider handoff completes.
+      const patchRes = await fetch(`${base}/api/admin/careers/${APP_ID}/contact`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: 'Jane Doe', phone: '9415550142', email: 'fixed@example.com', city: 'Sarasota' }),
+      });
+      expect(patchRes.status).toBe(200);
+      eligibilityAfterEmailEdit = await opts.stillEligible();
+      return { sms: 'sent', email: 'stale' };
+    });
+
+    const res = await patch(APP_ID, { status: 'interview', notify: { sms: true, email: true } });
+    expect(res.status).toBe(200);
+    expect(eligibilityBeforeEdit).toBe(true);
+    expect(eligibilityAfterEmailEdit).toBe(false);
   });
 });
