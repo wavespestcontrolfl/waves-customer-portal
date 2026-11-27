@@ -285,9 +285,12 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     }
   });
 
-  test('source pin: all 4 combined-refund sites share one stable per-refund dedupeKey across settlement and no-show hold sites use raiseAdminAlert with bell:true', () => {
+  test('source pin: all 4 combined-refund sites share one stable per-refund dedupeKey, link to live billing pages, and run after lifecycle work', () => {
     const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
-    expect(stripeSrc).toMatch(/await emitCombinedRefundAlerts\(combinedRefundAlerts\);/);
+    const syncIdx = stripeSrc.indexOf('syncTermForRefundedPayment(');
+    const emitIdx = stripeSrc.indexOf('await emitCombinedRefundAlerts(combinedRefundAlerts);');
+    expect(syncIdx).toBeGreaterThan(-1);
+    expect(emitIdx).toBeGreaterThan(syncIdx);
     expect(stripeSrc).toMatch(/async function emitCombinedRefundAlerts\(alerts\)[\s\S]*?const res = await raiseAdminAlert\('billing', spec, opts\);\s*if \(!res\) \{\s*throw new Error/);
     const refundKeyMatches = stripeSrc.match(/dedupeKey:\s*`combined-refund:\$\{chargeId\}:\$\{refundId \|\| 'unknown'\}`/g) || [];
     expect(refundKeyMatches).toHaveLength(4);
@@ -302,6 +305,8 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
       const snippet = stripeSrc.slice(Math.max(0, idx - 200), idx + 1100);
       expect(snippet).toMatch(/bell:\s*true/);
       expect(snippet).toMatch(/refreshOnDedupe:\s*true/);
+      expect(snippet).toMatch(/link:\s*combinedRefundAlertLink\(/);
+      expect(snippet).not.toMatch(/\/admin\/revenue/);
       expect(snippet).toMatch(/dedupeKey:\s*`combined-refund:\$\{chargeId\}:\$\{refundId \|\| 'unknown'\}`/);
       expect(snippet).not.toMatch(/await\s+raiseAdminAlert\(/);
     }
