@@ -295,6 +295,44 @@ describe('May Tetrino scouting', () => {
     expect(body.products).toEqual([]);
     expect(body.lawnFast.tetrinoScout).toMatchObject({ target: 'none', tetrinoApplied: false });
   });
+
+  // Owner 2026-11-26, "everything should only be warned, never blocked from using, for now": the server accepts Tetrino without the
+  // scout record, so the sheet keeps asking for it as a warning line and never holds Complete.
+  const footerWarnings = () => [...document.querySelectorAll('.tech-visit-footer .tech-visit-status--warn')].map((node) => node.textContent);
+
+  test('Tetrino added through Search with no scout record: the scout prompt stays, a warning shows, Complete is on and the visit submits without a scout record', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: PLANNED, tetrinoScout: offer } });
+    // The search lists lawn products: the catalog entry carries its service line.
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    expect(screen.getByRole('button', { name: 'Record scout-only decision' })).toBeTruthy();
+    await addProductByName('Tetrino Insecticide');
+    await analyze();
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    expect(footerNote()).toBe('Record the May insect scouting decision. You can still complete.');
+    expect(footerWarnings()).toEqual(['Record the May insect scouting decision. You can still complete.']);
+    await submit();
+    const body = completeCalls().at(-1).body;
+    expect(body.products.find((row) => row.productId === P_TETRINO)).toBeTruthy();
+    expect(body.lawnFast.tetrinoScout).toBeUndefined();
+  });
+
+  test('a recorded Tetrino decision whose product the tech then removed warns and still completes', async () => {
+    const ctx = (path) => path.includes('tetrinoTarget=chinch')
+      ? context({ plannedProducts: { source: 'plan', items: [...PLANNED, plannedTetrino(0.735)], tetrinoScout: { ...offer, selected: true, ratePer1000: 0.735 } } })
+      : context({ plannedProducts: { source: 'plan', items: PLANNED, tetrinoScout: offer } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Chinch bugs' }));
+    fireEvent.change(screen.getByPlaceholderText(/Counts at the damaged edge/), { target: { value: '14 counted at the south damaged edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'High' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this decision in the plan' }));
+    fireEvent.click(within(await screen.findByRole('group', { name: 'Tetrino Insecticide' })).getByRole('button', { name: 'Remove' }));
+    await analyze();
+    await waitFor(() => expect(footerWarnings()).toEqual(['Update the plan with the recorded Tetrino decision. You can still complete.']));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    await submit();
+    expect(completeCalls().at(-1).body.lawnFast.tetrinoScout).toMatchObject({ target: 'chinch' });
+  });
 });
 
 describe('opening the sheet', () => {

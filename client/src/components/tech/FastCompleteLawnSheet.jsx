@@ -1223,6 +1223,19 @@ function limitWarningsOf(rows) {
   return [...new Set(lines)];
 }
 
+// A place the maps do not take for a row (a take-all card row on an unmapped place) is a warning too (owner 2026-11-26): one line
+// per row, naming the places picked, above the Complete button. The visit keeps the place the tech recorded.
+const HELD_PLACE_TAIL = 'You can still complete. The visit record keeps the place.';
+const TETRINO_WARNING_TAIL = 'You can still complete.';
+function heldPlaceWarningsOf(rows) {
+  const lines = [];
+  for (const row of rows.filter((other) => other.placeRule && other.placeBlock)) {
+    const labels = (row.places || []).filter((id) => row.placeHolds?.[id]).map((id) => areaLabelOf(row, id));
+    lines.push(`${row.name}, ${labels.join(', ')}: ${row.placeBlock} ${HELD_PLACE_TAIL}`);
+  }
+  return [...new Set(lines)];
+}
+
 // The server flags a visit whose planned products are ALL held by the new sod; only then may the
 // sheet complete with no product (the server re-derives it at completion). Everything else Complete asks for still applies.
 const noProductOkOf = (newSod) => newSod?.noProductAllowed === true && typeof newSod.noProductNote === 'string' && !!newSod.noProductNote;
@@ -1233,14 +1246,13 @@ const noProductNoteJoined = (note, rows, newSod) => {
   return text.includes(newSod.noProductNote) ? text : [text, newSod.noProductNote].filter(Boolean).join(' ');
 };
 
-function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, tetrinoHold = '', lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
+function missingRequirement({ sodWait = '', noProductOk = false, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos, assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow }) {
   // A method that needs an area needs a positive one, from the plan.
   // Linear feet are optional (owner 2026-10-22): only a square-foot requirement holds the sheet.
   const missingArea = rows.find((row) => requirementOf(row)?.unit === 'sqft' && !(areaOf(row, lawnSqft) > 0));
   const missingSpot = rows.find((row) => row.spotRule && !row.spotExempt && !(row.spotArea > 0) && !hasAmount(row));
-  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. Only a hold on the place (a take-all row on an unmapped place) closes
-  // it here; a yearly limit is a warning on the footer (limitWarningsOf).
-  const closedPlace = rows.find((row) => row.placeRule && (row.placeBlock || row.placeNowhere));
+  // GATE_LAWN_TROUBLE_AREAS: a spot row names its place. A missing place holds Complete; a place the maps do not take (a take-all
+  // card row on an unmapped place) and a yearly limit are warnings on the footer (heldPlaceWarningsOf, limitWarningsOf).
   const missingPlace = rows.find((row) => row.placeRule && !row.places?.length);
   const [, reason = ''] = [
     // The rooted tick is being saved, or the holds could not be read again after it.
@@ -1252,16 +1264,14 @@ function missingRequirement({ sodWait = '', noProductOk = false, form, rows, gui
     [!assessmentId && !assessed && photos === 0, ADD_PHOTO],
     [!assessmentId && !assessed, ANALYZE_PHOTOS],
     [!assessmentId, CONFIRM_ASSESSMENT],
-    [tetrinoHold, tetrinoHold],
     // The server says the new sod holds every planned product, so an empty list is honest.
     [!rows.length && !noProductOk, ADD_PRODUCTS],
-    // The guide is still reading, or a row on the sheet is not offered for this lawn right now.
+    // The guide is still reading.
     [guideHold, guideHold],
     [areaHold, areaHold],
     [missingArea, missingArea && `The lawn area is not on file for ${missingArea.name}. Tell the office.`],
     // A spot row needs the amount used, or the area sprayed (which figures it) (spot rules).
     [missingSpot, missingSpot && `Enter the amount used for ${missingSpot.name}.`],
-    [closedPlace, closedPlace && (closedPlace.placeBlock ? `${closedPlace.name} cannot go on ${areaLabelOf(closedPlace, closedPlace.placeBlockPlace)}. ${closedPlace.placeBlock}` : `Remove ${closedPlace.name}: ${closedPlace.placeNowhere}`)],
     [missingPlace, missingPlace && `Pick where on the lawn ${missingPlace.name} went.`],
     [ctx.turfHeightCapture && heightProblem(gaugeHeightIn), `Lawn length must be between ${MIN_HEIGHT_IN} and ${MAX_HEIGHT_IN} inches.`],
     [stockRow, stockRow && `${stockRow.name} shows 0 in stock. Update inventory, then tap Check stock.`],
@@ -2022,13 +2032,15 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const tetrinoRecorded = !sheetCtx.tetrinoScout || tetrinoScoutSaved === tetrinoScoutSignature;
   const tetrinoOnSheet = !sheetCtx.tetrinoScout || rows.some((row) => sameId(row.productId, sheetCtx.tetrinoScout.productId));
   const tetrinoScoutOnly = tetrinoRecorded && tetrinoScout.target === 'none';
-  const tetrinoHold = !sheetCtx.tetrinoScout ? ''
-    : !tetrinoRecorded ? 'Record the May insect scouting decision.'
-      : tetrinoScout.target !== 'none' && !tetrinoOnSheet ? 'Update the plan with the recorded Tetrino decision.' : '';
+  // The May scout record only warns (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"):
+  // the prompt stays, the server accepts Tetrino without it, and Complete is not held.
+  const tetrinoWarning = !sheetCtx.tetrinoScout ? ''
+    : !tetrinoRecorded ? `Record the May insect scouting decision. ${TETRINO_WARNING_TAIL}`
+      : tetrinoScout.target !== 'none' && !tetrinoOnSheet ? `Update the plan with the recorded Tetrino decision. ${TETRINO_WARNING_TAIL}` : '';
   // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
-  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, tetrinoHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
+  const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
-  const limitWarnings = limitWarningsOf(rows);
+  const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...(tetrinoWarning ? [tetrinoWarning] : [])];
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   usePrepareRecommendations({ base, request, ctx: sheetCtx, missingReason, locked, assessmentId, rows });
   const submit = async () => {
@@ -2150,7 +2162,7 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
         submission={wrapUp.lock(submission)}
         {...footerFor({ barAction, missingReason, submission, submit })}
         warn={!!stockRow}
-        warnings={limitWarnings}
+        warnings={footerWarnings}
         coverProps={picker.coverProps}
       >
         {(stockRow || submission.error === STOCK_LOCKOUT_MESSAGE) && !locked && (
