@@ -190,13 +190,16 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source');
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source', 'deliveries');
       // A list copy the customer no longer lists (its entry stayed on another account in a merge) grants nothing, so a fresh
       // call replaces it like any ineligible row.
       const deadCopy = existing && existing.source === REMINDER_SOURCE && !(await listedNow(visit.customer_id, entry.phoneKey, trx));
       if (existing && !deadCopy && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
       if (existing) await trx(TABLE).where({ id: existing.id }).del();
-      await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
+      // A replaced dead copy of THIS customer keeps its delivery claims (a text it already sent is not sent again); the new id
+      // still voids its tracker token and anything queued under the old id.
+      const keepClaims = deadCopy && String(existing.customer_id || '') === String(visit.customer_id);
+      await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id, ...(keepClaims ? { deliveries: JSON.stringify(existing.deliveries || {}) } : {}) });
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
       // CREATES this visit's row for the number may list them: a reprocess of any call, or a second call about the same visit,
       // finds the row and lists nobody, so no replay order can widen a "just this visit" answer (the cost: a later call that
@@ -248,12 +251,12 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
  * per-visit advisory lock. Throws on a database error (the sender treats it like an unreadable recipient list).
  */
 async function materializeForVisit(scheduledServiceId, conn = db) {
-  if (!scheduledServiceId) return;
-  await conn.transaction(async (trx) => {
+  if (!scheduledServiceId) return null;
+  return conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
     // ONE read of the visit's customer; both statements below are pinned to it, and it is checked again after them.
     const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
-    if (!visit || !visit.customer_id) return;
+    if (!visit || !visit.customer_id) return null;
     const owner = String(visit.customer_id);
     // A row for a listed number that is NOT bound to the visit's current customer (never bound, or left over from a customer the
     // visit was moved away from) would hold the unique key and block the copy: delete it first, so the copy is a fresh row with a
@@ -281,6 +284,7 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
     if (!again || String(again.customer_id || '') !== owner) {
       throw Object.assign(new Error('visit customer changed during the every-visit copy'), { code: 'VISIT_CUSTOMER_CHANGED' });
     }
+    return owner;
   });
 }
 
@@ -319,12 +323,13 @@ const KINDS_BY_PURPOSE = {
  * texts, anything in `excludePhones`, and anyone who has declined (declinedByRecipient). Fails closed: a
  * read error answers nobody (`throwOnError` re-throws it for the replay, which retries instead).
  */
-async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false, anyVisitStatus = false } = {}) {
+async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], conn = db, throwOnError = false, anyVisitStatus = false, copiedFor = null } = {}) {
   if (!scheduledServiceId || !KINDS[kind]) return [];
   try {
     const visit = await conn('scheduled_services').where({ id: scheduledServiceId }).first('id', 'status', 'scheduled_date', 'window_start', 'customer_id', 'service_type');
     // `anyVisitStatus`: the tracker link also serves a visit that is on site or just completed (its own lifetime rule limits it); a send never does.
     if (!visit || (!anyVisitStatus && !LIVE_STATUSES.includes(String(visit.status)))) return [];
+    assertStillCopiedFor(visit, copiedFor);
     const rows = await conn(TABLE).where({ scheduled_service_id: scheduledServiceId }).orderBy('created_at', 'asc');
     if (!rows.length) return [];
     const holder = await conn('customers').where({ id: visit.customer_id }).first('phone');
@@ -339,6 +344,14 @@ async function contactsForVisit(scheduledServiceId, kind, { excludePhones = [], 
     if (throwOnError) throw err;
     logger.warn(`[call-visit-recipient] recipients unreadable for visit ${scheduledServiceId}: ${err.code || err.name || 'db_error'}`);
     return [];
+  }
+}
+
+// `copiedFor`: the customer whose list the sender just copied. A visit that moved since is a failed read (one staff bell),
+// never a silent empty answer.
+function assertStillCopiedFor(visit, copiedFor) {
+  if (copiedFor && String(visit.customer_id || '') !== String(copiedFor)) {
+    throw Object.assign(new Error('visit customer changed after the every-visit copy'), { code: 'VISIT_CUSTOMER_CHANGED' });
   }
 }
 
@@ -512,8 +525,8 @@ async function notifyVisitRecipients({ scheduledServiceId, kind, excludePhones =
   if (!gateLive() || !KINDS[kind] || !scheduledServiceId) return true;
   let contacts;
   try {
-    await materializeForVisit(scheduledServiceId, conn);
-    contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true });
+    const copiedFor = await materializeForVisit(scheduledServiceId, conn);
+    contacts = await contactsForVisit(scheduledServiceId, kind, { excludePhones, conn, throwOnError: true, copiedFor });
   } catch (err) {
     // A lookup that throws is NOT "nobody is owed": the person named on the call may have been left without a text. No retry
     // (a late retry cannot prove it is still for the same slot); ONE admin bell per visit and notice, so someone can text them.

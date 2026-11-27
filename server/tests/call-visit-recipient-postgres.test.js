@@ -607,6 +607,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         const [row] = await otherRows();
         expect(row.id).not.toBe(copy.id);
         expect(row.source).toBe('call_caller_provided');
+        expect(row.deliveries).toEqual(copy.deliveries);
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
       });
 
