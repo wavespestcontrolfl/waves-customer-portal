@@ -404,6 +404,10 @@ async function callClaudeVision(base64Image, mimeType) {
         ],
       }],
     }), { laneId: 'tree_shrub' });
+    if (response?.stop_reason === 'refusal' || response?.stop_reason === 'max_tokens') {
+      logger.warn(`[tree-shrub-assessment] Claude stopped with ${response.stop_reason}`);
+      return null;
+    }
     const text = anthropicText(response);
     if (!text) {
       ledgerCallRejected(response, 'empty_text');

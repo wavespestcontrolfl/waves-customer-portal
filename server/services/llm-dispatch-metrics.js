@@ -591,6 +591,7 @@ function openAIResponseErrorCode(value) {
 }
 
 function providerResponseErrorCode(provider, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'invalid_response';
   if (provider === 'anthropic') return anthropicResponseErrorCode(value);
   if (provider === 'gemini') return geminiResponseErrorCode(value);
   if (provider === 'openai') return openAIResponseErrorCode(value);

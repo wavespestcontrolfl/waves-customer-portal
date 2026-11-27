@@ -408,15 +408,62 @@ describe('customer_visible direct_sdk ledger closure', () => {
       }), { laneId: 'lawn_diag_writer' });
       ledgerCallRejected(oaiRefusal, 'invalid_json');
 
+      // Non-object HTTP 200 envelopes (e.g. JSON null) cannot be tracked in ledgerCallIdOf
+      // and must be recorded as failed rows immediately.
+      await ledgerCall('gemini', 'gemini-3.8-flash', async () => null, { laneId: 'pest_id' });
+      await ledgerCall('openai', 'gpt-5.5', async () => null, { laneId: 'lawn_diag_writer' });
+
       await new Promise((r) => setImmediate(r));
       expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code, provider_ref: r.provider_ref }))).toEqual([
         { ok: false, error_code: 'gemini_refusal', provider_ref: 'gem_resp_blocked' },
         { ok: false, error_code: 'gemini_incomplete', provider_ref: 'gem_resp_trunc' },
         { ok: false, error_code: 'openai_incomplete', provider_ref: 'resp_inc' },
         { ok: false, error_code: 'openai_refusal', provider_ref: 'resp_ref' },
+        { ok: false, error_code: 'invalid_response', provider_ref: null },
+        { ok: false, error_code: 'invalid_response', provider_ref: null },
       ]);
       // None of the already-classified provider failures should be overwritten by ledgerCallRejected.
       expect(updated).toEqual([]);
+    });
+
+    test('Claude stop_reason max_tokens is rejected in lawn_assess and tree_shrub even with schema-valid JSON', async () => {
+      delete process.env.GEMINI_API_KEY;
+      process.env.ANTHROPIC_API_KEY = 'test-anth';
+      jest.resetModules();
+      const mockLedgerCall = jest.fn((p, m, fn) => fn());
+      const mockLedgerCallRejected = jest.fn();
+      const validPayload = JSON.stringify({
+        turf_density: 82,
+        weed_coverage: 6,
+        color_health: 8,
+        fungal_activity: 'none',
+        insect_damage: 'none',
+        drought_stress: 'none',
+        mechanical_damage: 'none',
+        thatch_visibility: 'low',
+        grass_type: 'st_augustine',
+        overwatering_signal: false,
+        foliage_fullness: 85,
+        leaf_color_vigor: 80,
+        pest_signals: 'none',
+        disease_signals: 'none',
+        water_heat_stress: 'none',
+        pruning_mechanical: 'none',
+        observations: 'Healthy turf and foliage with no visible stress.',
+      });
+      const mockCreate = jest.fn().mockResolvedValue({
+        content: [{ type: 'text', text: validPayload }],
+        stop_reason: 'max_tokens',
+      });
+      jest.doMock('@anthropic-ai/sdk', () => jest.fn().mockImplementation(() => ({ messages: { create: mockCreate } })));
+      jest.doMock('../services/llm-dispatch-metrics', () => ({ ledgerCall: mockLedgerCall, ledgerCallRejected: mockLedgerCallRejected }));
+      jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
+
+      const lawn = require('../services/lawn-assessment');
+      const ts = require('../services/tree-shrub-assessment');
+      expect(await lawn.analyzePhoto('AA==', 'image/jpeg')).toBeNull();
+      expect(await ts.analyzePhoto('AA==', 'image/jpeg')).toBeNull();
+      expect(mockLedgerCallRejected).not.toHaveBeenCalled();
     });
   });
 });

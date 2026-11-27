@@ -222,6 +222,10 @@ async function callClaudeVision(base64Image, mimeType, context = {}, deadline = 
       }],
     }, budget ? { timeout: budget, maxRetries: 0 } : undefined), { laneId: 'lawn_assess' });
 
+    if (response?.stop_reason === 'refusal' || response?.stop_reason === 'max_tokens') {
+      logger.warn(`[lawn-assessment] Claude stopped with ${response.stop_reason}`);
+      return null;
+    }
     const text = anthropicText(response);
     if (!text) {
       ledgerCallRejected(response, 'empty_text');
