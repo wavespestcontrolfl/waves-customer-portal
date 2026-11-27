@@ -255,3 +255,32 @@ describe('20261127200000_mix_rules_spray_fert_miticide', () => {
     expect(knex.raw).not.toHaveBeenCalled();
   });
 });
+
+describe('20261127210000_tritek_mix_limits', () => {
+  const fix = require('../models/migrations/20261127210000_tritek_mix_limits');
+  const before = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+
+  test('adds four groups to the previous list and quotes the TriTek card line on every rule', () => {
+    expect(fix._GROUPS_BEFORE).toEqual(before._GROUPS);
+    expect(fix._GROUPS).toEqual([...before._GROUPS, 'sulfur', 'captan', 'carbaryl', 'dimethoate']);
+    const guide = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'config', 'tree-shrub-field-guide.json'), 'utf8'));
+    expect(guide.products.tritek.limits).toContain(fix._CARD_LINE);
+    expect(fix._RULES.map((r) => r.group_b)).toEqual(['spray_fertilizer', 'sulfur', 'captan', 'carbaryl', 'dimethoate']);
+    for (const rule of fix._RULES) {
+      expect(rule).toMatchObject({ verdict: 'never', jar_test_required: false });
+      expect(rule.source).toContain(`"${fix._CARD_LINE}"`);
+      expect(rule.reason.length).toBeLessThanOrEqual(200);
+    }
+    for (const g of fix._GROUPS) expect(g.length).toBeLessThanOrEqual(30);
+  });
+
+  test('a missing table changes nothing and does not fail', async () => {
+    const knex = jest.fn();
+    knex.schema = { hasTable: jest.fn(async () => false) };
+    knex.raw = jest.fn();
+    await expect(fix.up(knex)).resolves.toBeUndefined();
+    await expect(fix.down(knex)).resolves.toBeUndefined();
+    expect(knex).not.toHaveBeenCalled();
+    expect(knex.raw).not.toHaveBeenCalled();
+  });
+});

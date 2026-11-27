@@ -44,6 +44,8 @@ const { isLaterPackageVisit } = require('../services/protocol-package-stage');
 const { activeProtocolProducts } = require('../services/lawn-protocol-retired');
 const { fertilizerSafetyRules } = require('../services/lawn-fertilizer-safety');
 const jobCard = require('../services/job-card');
+const mixRules = require('../services/product-mix-rules');
+const logger = require('../services/logger');
 const featureGates = require('../config/feature-gates');
 
 const { gateEnvValue } = featureGates;
@@ -1072,7 +1074,27 @@ function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipa
 // ProtocolReferenceTabV2.jsx rendered the now-absent materialCostSummary as "0/N lines priced", a
 // stripped-for-role response looking identical to a genuinely-unpriced one; viewerRole lets the
 // client tell the difference and hide the Material Cost card and column instead of a fabricated zero).
-function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck, mixable = () => true, mixInput = null, bermudaOrder = {}, extraBlocks = [] }) {
+// The mix safety table's answer for every pair of sprayed products on the sheet (services/product-mix-rules.js checkMix:
+// one headline per pair). The sheet's one mix-line helper (ProtocolTankSheet.jsx applicationMethod) decides which products
+// share a tank and shows the pairs of that tank. A warning only: it never hides or holds a product or an amount (owner
+// 2026-11-26), and a failed check is left out (logged) so the sheet still renders.
+async function sheetMixCheck(items) {
+  const ids = [...new Set(items.filter((item) => item.product && item.tankAmounts?.application !== 'spreader').map((item) => String(item.product.id)))];
+  if (ids.length < 2) return null;
+  try {
+    const { pairs } = await mixRules.checkMix(ids, { max: ids.length });
+    return {
+      pairs: pairs.map(({ productAId, productAName, productBId, productBName, verdict, reason, jarTestRequired }) => ({
+        productAId, productAName, productBId, productBName, verdict, reason, jarTestRequired,
+      })),
+    };
+  } catch (err) {
+    logger.warn(`[admin-protocols] lawn-mix mix check failed: ${err.message}`);
+    return null;
+  }
+}
+
+function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck, mixable = () => true, mixInput = null, bermudaOrder = {}, extraBlocks = [], mixCheck = null }) {
   const view = seesPricing ? (list) => list : (list) => list.map(stripLawnMixItemPricing);
   const payload = {
     track: { key: trackKey, name: track.name },
@@ -1097,6 +1119,7 @@ function lawnMixResponse({ seesPricing, trackKey, track, month, visit, equipment
     ...bermudaOrder,
     warnings,
     blocks: [...blocks, ...limitCheck.blocks, ...extraBlocks],
+    mixCheck,
   };
   return seesPricing ? payload : deepStripPriceTokens(payload);
 }
@@ -1318,6 +1341,7 @@ router.get('/lawn-mix', async (req, res, next) => {
       trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck,
       // The bermuda step: its lines stay out of the base mixing order, its own order and its blocks ride beside.
       mixable: bermuda.mixable, mixInput, bermudaOrder: bermuda.mixOrderField(items.map(mixInput), blocks.length > 0), extraBlocks: settled.blocks,
+      mixCheck: await sheetMixCheck(items),
     }));
   } catch (err) { next(err); }
 });

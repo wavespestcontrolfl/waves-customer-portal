@@ -306,6 +306,58 @@ describe("110-gallon tank reference", () => {
     }
   });
 
+  // The mix safety table's answer (server /lawn-mix mixCheck): one pair per two products, shown under each shared tank line.
+  const weedMixPlan = (pairs) => {
+    const plan = fixture();
+    const item = (id, name, extra) => ({ selected: true, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "dry_wg_wdg_wp_df" },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
+    plan.items = [item("cel", "Celsius WG", {}), item("nis", "Synthetic surfactant", { mixWith: "Celsius WG" })];
+    plan.mixCheck = pairs === undefined ? undefined : { pairs };
+    return plan;
+  };
+  const pair = (verdict, reason) => ({ productAId: "cel", productAName: "Celsius WG", productBId: "nis", productBName: "Synthetic surfactant", verdict, reason });
+
+  it.each([
+    ["caution", "Approved weed mix.", "Caution: Approved weed mix."],
+    ["never", "Label: no surfactant.", "Do not mix: Label: no surfactant."],
+    ["unknown", "No rule on file. Read both labels; jar test first.", "No rule on file"],
+  ])("a %s pair shows its line under both cards' tank lines, on screen and in print, and the amounts stay", (verdict, reason, text) => {
+    const { container } = render(<ProtocolTankSheet plan={weedMixPlan([pair(verdict, reason)])} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Tank with: Synthetic surfactant")).toBeInTheDocument();
+      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).getAllByText(text)).toHaveLength(2);
+      // A warning only: both products keep their names and amounts.
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(2);
+    }
+  });
+
+  it("a Yes pair, no check (a failed check) or a product with no shared tank shows no mix safety line", () => {
+    for (const plan of [weedMixPlan([pair("ok", "Owner checked.")]), weedMixPlan(undefined), weedMixPlan(null)]) {
+      const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
+      expect(within(container).queryByText(/^Caution: |^Do not mix: |^No rule on file$/)).not.toBeInTheDocument();
+      expect(within(container).getByText("Tank with: Synthetic surfactant")).toBeInTheDocument();
+      unmount();
+    }
+    // Not in the same tank (the partner is unselected): no line, even with a Never pair on the sheet.
+    const apart = weedMixPlan([pair("never", "Label: no surfactant.")]);
+    apart.items[1].selected = false;
+    const { container } = render(<ProtocolTankSheet plan={apart} />);
+    expect(within(container).queryByText(/^Do not mix: /)).not.toBeInTheDocument();
+  });
+
+  it("a shared tank of three names each pair; only pairs inside the tank show", () => {
+    const plan = bermudaPlan();
+    plan.mixCheck = { pairs: [
+      { productAId: "REC", productAName: "Recognition", productBId: "fus", productBName: "Fusilade II", verdict: "caution", reason: "Jar test first." },
+      { productAId: "fus", productAName: "Fusilade II", productBId: "nis", productBName: "Synthetic surfactant", verdict: "ok", reason: "Fine." },
+      { productAId: "rec", productAName: "Recognition", productBId: "other", productBName: "Not in this tank", verdict: "never", reason: "Elsewhere." },
+    ] };
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getAllByText("Caution: Jar test first. (Recognition + Fusilade II)")).toHaveLength(3);
+    expect(within(container).queryByText(/Elsewhere/)).not.toBeInTheDocument();
+  });
+
   it("a blocked Bermuda removal step gives no mix line on any card, and the amounts stay", () => {
     const unavailable = { unavailable: { reason: "Synthetic limit reached." } };
     const blocked = { ...bermudaPlan({ rec: { ...unavailable, tankAmounts: { ...tankAmounts(), planState: "capped" } }, fus: unavailable, nis: unavailable }), bermudaMixingOrder: undefined };

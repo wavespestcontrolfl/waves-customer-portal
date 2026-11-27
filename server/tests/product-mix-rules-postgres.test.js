@@ -245,6 +245,54 @@ const mix = require('../services/product-mix-rules');
     expect(await mockTrx('product_mix_rules').where({ product_a_id: reliant.id, group_b: 'fertilizer' })).toHaveLength(0);
   });
 
+  test('migration 20261127210000 adds the TriTek card prohibitions once; down() keeps removed rules and refuses active ones', async () => {
+    const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+    const tritekFix = require('../models/migrations/20261127210000_tritek_mix_limits');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    await groupsFix.up(mockTrx);
+    mockAudit.events = [];
+    const [sulfur] = await mockTrx('products_catalog').insert({ name: 'Micro Sulf', category: 'fungicide', active_ingredient: 'Sulfur' }).returning('id');
+    await tritekFix.up(mockTrx);
+    await tritekFix.up(mockTrx);
+    const tritekRows = await mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', ['spray_fertilizer', 'sulfur', 'captan', 'carbaryl', 'dimethoate']);
+    expect(tritekRows.map((r) => r.group_b).sort()).toEqual(['captan', 'carbaryl', 'dimethoate', 'spray_fertilizer', 'sulfur']);
+    expect(mockAudit.events).toHaveLength(5);
+    expect((await mix.checkMix([ids.fert, ids.oil])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not mix TriTek with NPK foliar fertilizer.' });
+    expect((await mix.checkMix([sulfur.id, ids.oil])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'Do not mix TriTek with sulfur.' });
+    // An admin's active rule on a new group blocks down(); once removed (soft), down() runs and the removed row stays.
+    const owner = await mix.upsertRule({ productAId: ids.copper, groupB: 'captan', verdict: 'caution', reason: 'Owner rule.' });
+    await mockTrx.raw('SAVEPOINT refuse');
+    await expect(tritekFix.down(mockTrx)).rejects.toThrow(/active rule\(s\) still use/);
+    await mockTrx.raw('ROLLBACK TO SAVEPOINT refuse');
+    await mix.deactivateRule(owner.id, { version: owner.version });
+    await tritekFix.down(mockTrx);
+    expect(await mockTrx('product_mix_rules').where({ product_a_id: ids.oil }).whereIn('group_b', ['sulfur', 'captan'])).toHaveLength(0);
+    expect(await mockTrx('product_mix_rules').where({ id: owner.id }).first()).toMatchObject({ group_b: 'captan', active: false });
+    await mockTrx.raw('SAVEPOINT old_check');
+    await expect(mockTrx('product_mix_rules').insert({ product_a_id: ids.tetrino, group_b: 'captan', verdict: 'ok', reason: 'x' })).rejects.toMatchObject({ constraint: 'product_mix_rules_group_check' });
+    await mockTrx.raw('ROLLBACK TO SAVEPOINT old_check');
+  });
+
+  // Why rolling back 20261127200000 then 20261127190000 is safe although it leaves the Reliant row: both moves add 1 to
+  // version, so 190000's down() (version 1 only, so it never deletes an admin's edit) skips it. What stays is the
+  // caution "Jar test and plant test first." on fertilizer: a warning only (owner 2026-11-26, a safety alert never
+  // blocks), audited, and one Remove on the Mix safety screen takes it out.
+  test('rolling back 20261127200000 then 20261127190000 leaves the Reliant caution as a warning-only row, never a block', async () => {
+    const reliantFix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
+    const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
+    await mockTrx.raw('CREATE TABLE audit_log (id serial PRIMARY KEY)');
+    const [reliant] = await mockTrx('products_catalog').insert({ name: 'Reliant Systemic Fungicide', category: 'fungicide' }).returning('id');
+    await reliantFix.up(mockTrx);
+    await groupsFix.up(mockTrx);
+    await groupsFix.down(mockTrx);
+    await reliantFix.down(mockTrx);
+    const left = await mockTrx('product_mix_rules').where({ product_a_id: reliant.id });
+    expect(left).toEqual([expect.objectContaining({ group_b: 'fertilizer', verdict: 'caution', reason: 'Jar test and plant test first.', active: true, version: 3 })]);
+    expect(mix.VERDICTS).not.toContain('block');
+    const removed = await mix.deactivateRule(left[0].id, { version: 3 });
+    expect(removed).toMatchObject({ active: false });
+  });
+
   test('migration 20261127200000 widens the groups, scopes Reliant to sprayed fertilizer, adds Sequestar + miticide; down() reverses', async () => {
     const reliantFix = require('../models/migrations/20261127190000_reliant_fertilizer_test');
     const groupsFix = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');

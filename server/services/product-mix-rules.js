@@ -19,7 +19,12 @@ const NEONICS = /imidacloprid|dinotefuran|thiamethoxam|clothianidin|acetamiprid/
 // Herbicide actives, so a weed-and-feed row filed under fertilizer (LESCO Stonewall prodiamine, Dimension dithiopyr)
 // is a herbicide too.
 const HERBICIDE_ACTIVES = /dithiopyr|prodiamine|pendimethalin|oxadiazon|indaziflam|isoxaben|oryzalin|atrazine|simazine|2,4-d|dicamba|mecoprop|mcpp|metsulfuron|sulfentrazone|quinclorac|trifloxysulfuron|halosulfuron|imazaquin|carfentrazone|triclopyr|fluroxypyr|glyphosate/;
-const MITICIDES = /miticide|acaricide|bifenazate|hexythiazox|etoxazole|acequinocyl|fenpyroximate|clofentezine|spiromesifen/;
+// Whole words only: "termiticide" is not a miticide. Abamectin (Avid) is labeled for mites.
+const MITICIDES = /\b(miticides?|acaricides?|bifenazate|hexythiazox|etoxazole|acequinocyl|fenpyroximate|clofentezine|spiromesifen|abamectin)\b/;
+// A product class named as a whole word in the category, so a compound category ("Insecticide/Miticide", "Insecticide +
+// Fungicide", "termiticide / insecticide", "insecticide_miticide") is in each class it names.
+const words = (value) => lower(value).replace(/[^a-z0-9,-]+/g, ' ');
+const categoryNames = (p, word) => new RegExp(`\\b${word}\\b`).test(words(p.category));
 // moa_group is shared by fungicides (FRAC) and herbicides (HRAC): "Group 3" on a fungicide is not a pyrethroid. Only
 // irac_group, or moa_group on a product that is not a fungicide or herbicide, is read as an IRAC code.
 const NON_IRAC_CATEGORIES = new Set(['fungicide', 'herbicide', 'fertilizer', 'liquid_fertilizer', 'adjuvant', 'soil_surfactant', 'pgr', 'soil_amendment']);
@@ -58,12 +63,16 @@ const GROUPS = [
   { key: 'neonic', label: 'Neonic (imidacloprid and others)', test: (p) => ['4', '4a'].some((code) => iracCodes(p).has(code)) || NEONICS.test(text(p)) },
   { key: 'granular', label: 'Granular product (spreader)', test: (p) => isSpreaderGranule(p) },
   // A combination row (weed and feed) is a herbicide as well as a fertilizer.
-  { key: 'herbicide', label: 'Herbicide', test: (p) => lower(p.category) === 'herbicide' || /herbicide|pre-?emergent|weed/.test(lower(p.subcategory)) || HERBICIDE_ACTIVES.test(lower(p.active_ingredient)) },
-  { key: 'insecticide', label: 'Insecticide', test: (p) => lower(p.category) === 'insecticide' },
-  { key: 'fungicide', label: 'Fungicide', test: (p) => lower(p.category) === 'fungicide' },
+  { key: 'herbicide', label: 'Herbicide', test: (p) => categoryNames(p, 'herbicide') || /herbicide|pre-?emergent|weed/.test(lower(p.subcategory)) || HERBICIDE_ACTIVES.test(lower(p.active_ingredient)) },
+  { key: 'insecticide', label: 'Insecticide', test: (p) => categoryNames(p, 'insecticide') },
+  { key: 'fungicide', label: 'Fungicide', test: (p) => categoryNames(p, 'fungicide') },
   // Migration 20261127200000. A fertilizer that goes in a spray tank: liquid or soluble, not a dry spreader granule.
   { key: 'spray_fertilizer', label: 'Sprayed fertilizer (liquid or soluble)', test: (p) => isFertilizer(p) && !isSpreaderGranule(p) },
-  { key: 'miticide', label: 'Miticide', test: (p) => MITICIDES.test(`${text(p)} ${lower(p.category)} ${lower(p.subcategory)}`) },
+  { key: 'miticide', label: 'Miticide', test: (p) => MITICIDES.test(words([p.name, p.active_ingredient, p.category, p.subcategory].map(lower).join(' '))) },
+  // Migration 20261127210000: the actives TriTek's label bars from its tank, named in the active ingredient.
+  ...['sulfur', 'captan', 'carbaryl', 'dimethoate'].map((key) => ({
+    key, label: `${key.charAt(0).toUpperCase()}${key.slice(1)} (active ingredient)`, test: (p) => new RegExp(`\\b${key}\\b`).test(words(p.active_ingredient)),
+  })),
 ];
 const GROUP_KEYS = GROUPS.map((g) => g.key);
 const GROUP_BY_KEY = new Map(GROUPS.map((g) => [g.key, g]));
@@ -109,7 +118,8 @@ const SPRAY_GRANULE = /\b(wsg|wdg|wg|sg|df|soluble|dispersible|dry flowable)\b/;
 function isSpreaderGranule(p) {
   const formulation = lower(p.formulation).trim();
   if (SPRAY_GRANULE.test(formulation)) return false;
-  if (/^(granular|granules?|g|gr)( bait)?$/.test(formulation)) return true;
+  // The catalog's descriptive formulations: "Granular", "Granule", "Spreadable granule", "G", "GR", "granular bait".
+  if (/\bgranul/.test(formulation) || /^(g|gr)( bait)?$/.test(formulation)) return true;
   if (lower(p.application_method) === 'granular_broadcast') return true;
   return !formulation && /\bgranul/.test(lower(p.name)) && !SPRAY_GRANULE.test(lower(p.name));
 }
@@ -394,8 +404,9 @@ function applyAloneOnly(known, rules) {
 
 // For every pair in the list: the strictest matching entry (headline()). No entry at all: unknown. Never throws for an id
 // that is not a product: that product is listed with found=false and its pairs read unknown.
-async function checkMix(productIds = []) {
-  const ids = [...new Set((Array.isArray(productIds) ? productIds : []).map((v) => String(v || '').trim().toLowerCase()).filter(Boolean))].slice(0, MAX_CHECK);
+// `max` caps the list (the tank check route keeps MAX_CHECK; the lawn tank sheet checks every sprayed product on it).
+async function checkMix(productIds = [], { max = MAX_CHECK } = {}) {
+  const ids = [...new Set((Array.isArray(productIds) ? productIds : []).map((v) => String(v || '').trim().toLowerCase()).filter(Boolean))].slice(0, max);
   const validIds = ids.filter((v) => UUID_RE.test(v));
   const productRows = validIds.length ? await db('products_catalog').whereIn('id', validIds).select(PRODUCT_COLUMNS) : [];
   const byId = new Map(productRows.map((row) => [String(row.id).toLowerCase(), row]));
