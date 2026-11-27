@@ -236,6 +236,11 @@ describeOrSkip('recap context common products on PostgreSQL', () => {
     await db('service_records').where({ id: flaggedRecord }).update({
       structured_notes: JSON.stringify({ inventoryDeductions: [{ productId: celsius, serviceProductId: flaggedLine.id, status: 'not_deducted_implausible', amount: 406, amountUnit: 'oz' }] }),
     });
+    // A deduction saved before the service product id was kept matches on product, unit and amount.
+    const legacyRecord = await record('2026-09-12', [{ id: celsius, amount: 9000, unit: 'oz' }]);
+    await db('service_records').where({ id: legacyRecord }).update({
+      structured_notes: JSON.stringify({ inventoryDeductions: [{ productId: celsius, status: 'not_deducted_implausible', amount: 9000, amountUnit: 'oz' }] }),
+    });
     const pestVisit = await visit('Quarterly Pest Control');
     jest.useFakeTimers(FAKE_DATE_ONLY);
     const result = await buildRecapContext(pestVisit, db, { includeCommonProducts: true });
