@@ -118,6 +118,13 @@ describe('deterministicVisitFacts past_visits', () => {
     expect(JSON.stringify(visits)).not.toContain('Another home');
   });
 
+  test('an access code in an old note is masked; the treatment words stay', async () => {
+    const rows = [rec('code', '2026-11-12', 'Pest Control Service', { technician_notes: 'Treated the lanai for ants. Gate code 4471, lockbox 9902.' }), ...ROWS];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(visits[0].notes).toContain('Treated the lanai for ants.');
+    expect(visits[0].notes).not.toMatch(/4471|9902/);
+  });
+
   test('an older stop never lists a later visit', async () => {
     const { past_visits: visits } = await deterministicVisitFacts({ ...SVC, scheduled_date: '2026-10-25' }, fakeDbh());
     expect(visits.map((v) => v.date)).toEqual(['2026-10-20', '2026-09-01', '2026-08-01', '2026-07-01', '2026-06-01']);

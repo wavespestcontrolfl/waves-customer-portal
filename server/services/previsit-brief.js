@@ -173,7 +173,8 @@ async function loadPastVisits(dbh, svc) {
     return rows.map((r) => ({
       date: calendarDay(r.service_date),
       type: cleanText(normalizeServiceType(r.service_type) || r.service_type, 120),
-      notes: previewText(r.technician_notes),
+      // History spans the whole account: a code written in a note for another home is masked.
+      notes: previewText(redactAccessCodes(r.technician_notes || '')),
       // Every distinct product name of that visit: no cap here (the cap of 8 is for the brief's guidance).
       products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)), Infinity)
         .map((p) => ({ name: p.name })),
