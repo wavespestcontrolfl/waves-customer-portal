@@ -232,14 +232,15 @@ function emailChangeWhy(name, oldEmail, newEmail) {
   return fits(short) ? short : 'A customer changed their email, and both addresses are in the details.';
 }
 
-// The office alert after a confirmed email change: fire-and-forget after commit, like the change notices; a failure is
-// logged by code and never undoes the change.
-async function afterEmailChange({ customerId, before, after, requestId }) {
+// The office alert after a confirmed email change, written in the SAME transaction as the change (a restart after
+// commit cannot lose it; a retry of the spent code cannot re-raise it). It runs in a savepoint: a bell write that fails
+// rolls back only itself, is logged by code, and never undoes the change.
+async function raiseEmailChangeAlert(trx, { customerId, before, after, requestId }) {
   const name = [after.first_name, after.last_name].filter(Boolean).join(' ') || 'A customer';
   const oldEmail = clean(before.email);
   const newEmail = clean(after.email);
   try {
-    await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
+    await trx.transaction((sp) => require('../services/admin-alert-compose').raiseAdminAlert('customer', {
       area: 'Customers',
       action: 'Email changed in the app',
       why: emailChangeWhy(name, oldEmail, newEmail),
@@ -249,11 +250,12 @@ async function afterEmailChange({ customerId, before, after, requestId }) {
       doneWhen: 'email_change_reviewed',
       who: 'person',
     }, {
+      trx: sp,
       bell: true,
       dedupeKey: `profile_email_change:${customerId}:${requestId}`,
       detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.`,
       metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
-    });
+    }));
   } catch (err) {
     logger.warn(`[customer-profile] office email-change alert failed for ${customerId}: ${err.code || err.name || 'alert_failed'}`);
   }
@@ -393,7 +395,9 @@ async function confirmInTransaction(trx, { customerId, code, email, req }) {
   if (result.outcome === 'unchanged') return { edit: { before: result.before, after: result.before, changes: {}, emailSync: null } };
   const changes = { email: request.new_email };
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
-  return { edit: { before: result.before, after: { ...result.before, ...changes }, changes, emailSync: result.emailSync, requestId: request.id } };
+  const after = { ...result.before, ...changes };
+  await raiseEmailChangeAlert(trx, { customerId, before: result.before, after, requestId: request.id });
+  return { edit: { before: result.before, after, changes, emailSync: result.emailSync } };
 }
 
 router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res, next) => {
@@ -412,10 +416,9 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
       return res.status(status).json({ error: message, code, ...(outcome.refused.attemptsLeft !== undefined ? { attemptsLeft: outcome.refused.attemptsLeft } : {}) });
     }
 
-    const { before, after, changes, emailSync, requestId } = outcome.edit;
+    const { before, after, changes, emailSync } = outcome.edit;
     runPostCommitFanout(emailSync, customerId);
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
-    if (changes.email !== undefined) void afterEmailChange({ customerId, before, after, requestId });
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {
     if (err.profileStatus) return sendProfileError(res, err);

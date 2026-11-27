@@ -51,7 +51,13 @@ const mockNameFanout = jest.fn(async () => { mockOrder.push('nameFanout'); });
 jest.mock('../services/customer-contact-fanout', () => ({ propagateCustomerNameChange: (...a) => mockNameFanout(...a) }));
 const mockApplyEmail = jest.fn();
 jest.mock('../services/customer-email-write', () => ({ applyOperatorCustomerEmail: (...a) => mockApplyEmail(...a) }));
-const mockDb = { transaction: jest.fn(async (fn) => fn(Object.assign((table) => mockTrxBuilder(table), { fn: { now: () => 'NOW' }, raw: (sql) => sql }))) };
+// A savepoint (trx.transaction) runs on the same mock handle, flagged so a test can see the alert used it.
+const mockMakeTrx = () => {
+  const trx = Object.assign((table) => mockTrxBuilder(table), { fn: { now: () => 'NOW' }, raw: (sql) => sql });
+  trx.transaction = jest.fn(async (fn) => fn(Object.assign((table) => mockTrxBuilder(table), { fn: trx.fn, raw: trx.raw, isSavepoint: true })));
+  return trx;
+};
+const mockDb = { transaction: jest.fn(async (fn) => fn(mockMakeTrx())) };
 jest.mock('../models/db', () => mockDb);
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() }));
 const mockAudit = jest.fn(async () => 1);
@@ -522,6 +528,8 @@ describe('POST /api/customer/profile/confirm-email', () => {
       dedupeKey: `profile_email_change:${CUSTOMER_ID}:req-1`,
       metadata: expect.objectContaining({ oldEmail: OLD_EMAIL, newEmail: NEW_EMAIL, severity: 'needs-you', doneWhen: 'email_change_reviewed' }),
     });
+    // Written in the change's own transaction (a savepoint of it), so a restart after commit cannot lose it.
+    expect(opts.trx && opts.trx.isSavepoint).toBe(true);
     expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
     expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
   });
