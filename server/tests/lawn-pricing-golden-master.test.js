@@ -38,7 +38,9 @@ describe('lawn pricing golden master', () => {
     // 2026-09-24) but stays the internal bracket anchor — without the flag a
     // standard request falls back to enhanced and the 6x cells would read 9x.
     // The flag never changes an enhanced/premium result (only the tiers list).
-    const r = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true });
+    // legacyLawnOneLane: the fixture is the grid every quote saved before the one lawn price lane (2026-11-26) was sold on, and
+    // such a quote must replay it to the cent. New quotes are pinned against it in the next block.
+    const r = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true, legacyLawnOneLane: true });
     const actual = {};
     for (const k of PINNED) actual[k] = r[k] === undefined ? r.frequency : r[k];
     // freq is exposed as `frequency` on the result root
@@ -46,6 +48,22 @@ describe('lawn pricing golden master', () => {
     for (const k of PINNED) {
       expect({ [k]: actual[k] }).toEqual({ [k]: c.out[k] });
     }
+  });
+
+  // One lawn price lane (owner 2026-11-26, new quotes only): a new bermuda or zoysia plan prices from the St. Augustine rows, so
+  // its price fields equal the St. Augustine case of the same size, tier and route density; the line still reports its own grass.
+  // St. Augustine and bahia new quotes price exactly as the fixture.
+  const LANE_PRICE_FIELDS = ['perApp', 'annual', 'monthly', 'tier', 'pricingBasis', 'pricingSource', 'pricingVersion',
+    'customQuoteFlag', 'marketMonthly', 'marketAnnual'];
+  const stAugustineTwin = (c) => cases.find((o) => o.in.options.track === 'st_augustine'
+    && o.label === c.label.replace(/^(bermuda|zoysia)\//, 'st_augustine/'));
+  it.each(cases.map((c) => [c.label, c]))('new quote: %s', (_label, c) => {
+    const r = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true });
+    const track = c.in.options.track;
+    const expected = ['bermuda', 'zoysia'].includes(track) ? stAugustineTwin(c).out : c.out;
+    for (const k of LANE_PRICE_FIELDS) expect({ [k]: r[k] }).toEqual({ [k]: expected[k] });
+    expect(r.frequency).toBe(expected.freq);
+    expect(r.track).toBe(c.out.track);
   });
 
   // standard/6x retired for new sales (owner directive 2026-09-24): hidden,
@@ -59,19 +77,21 @@ describe('lawn pricing golden master', () => {
     expect(standardCases.length).toBeGreaterThanOrEqual(10);
   });
   it.each(standardCases.map((c) => [c.label, c]))('retired 6x: %s requested without includeHiddenTiers prices as enhanced/9x', (_label, c) => {
-    const r = priceLawnCare(c.in.property, c.in.options);
+    // The fixture's own grid (a quote saved before the one lawn price lane), as in the block above.
+    const legacy = { legacyLawnOneLane: true };
+    const r = priceLawnCare(c.in.property, { ...c.in.options, ...legacy });
     expect(r.tiers.map((t) => t.tier)).toEqual(['enhanced', 'premium']);
     expect(r.tier).toBe('enhanced');
     expect(r.frequency).toBe(9);
-    const enhanced = priceLawnCare(c.in.property, { ...c.in.options, tier: 'enhanced' });
+    const enhanced = priceLawnCare(c.in.property, { ...c.in.options, tier: 'enhanced', ...legacy });
     expect({ perApp: r.perApp, annual: r.annual, monthly: r.monthly })
       .toEqual({ perApp: enhanced.perApp, annual: enhanced.annual, monthly: enhanced.monthly });
     // lawnFreq: 6 resolves the same way.
-    const byFreq = priceLawnCare(c.in.property, { track: c.in.options.track, lawnFreq: 6 });
+    const byFreq = priceLawnCare(c.in.property, { track: c.in.options.track, lawnFreq: 6, ...legacy });
     expect(byFreq.tier).toBe('enhanced');
     expect(byFreq.annual).toBe(enhanced.annual);
     // The anchor cell itself is untouched and still reachable internally.
-    const anchor = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true });
+    const anchor = priceLawnCare(c.in.property, { ...c.in.options, includeHiddenTiers: true, ...legacy });
     expect(anchor.tier).toBe('standard');
     expect(anchor.frequency).toBe(6);
     expect(anchor.annual).toBe(c.out.annual);

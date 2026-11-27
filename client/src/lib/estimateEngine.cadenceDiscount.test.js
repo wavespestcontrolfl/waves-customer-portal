@@ -219,11 +219,13 @@ describe("one-time lawn anchors on the undiscounted 6x column — client mirror 
 
   // Owner 2026-11-26: inside a flat stretch of the 6x column the one-time price rises with turf area (server
   // coverage and the sent-quote replay guard: server/tests/pricing-seven-small-faults.test.js, same numbers).
+  // One lawn price lane (owner 2026-11-26, new quotes): 1.8 x the St. Augustine anchor for every grass, weed at the fertilizer
+  // price. The server pins the same numbers (pricing-seven-small-faults.test.js, "under the one lawn price lane").
   it("St. Augustine weed rises across the 3,000-5,500 sq ft plateau and matches the server", () => {
     const priceAt = (sf) => otLawnItem(calculateEstimate(otLawnInput({ measuredTurfSf: sf }))).price;
-    expect(priceAt(3000)).toBe(187);
-    expect(priceAt(4000)).toBe(189);
-    expect(priceAt(5500)).toBe(192);
-    expect(priceAt(6500)).toBe(197);
+    expect(priceAt(3000)).toBe(137);
+    expect(priceAt(4000)).toBe(138);
+    expect(priceAt(5500)).toBe(140);
+    expect(priceAt(6500)).toBe(144);
   });
 });

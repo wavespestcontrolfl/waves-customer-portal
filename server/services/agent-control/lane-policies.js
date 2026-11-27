@@ -26,8 +26,9 @@
  * `maturity`: only where the lane's own code makes it obvious (an approval
  *   queue = M2, a shadow-only lane = M0, auto-apply with an audit trail = M3).
  *
- * Invariants (tested): stall_after_ms >= 2 x heartbeat_interval_ms and
- * hard_timeout_ms >= expected_duration_ms for every merged policy.
+ * Invariants (tested): stall_after_ms >= 2 x heartbeat_interval_ms,
+ * hard_timeout_ms >= expected_duration_ms and hard_timeout_ms >= stall_after_ms
+ * for every merged policy.
  */
 
 const LEDGER = Object.freeze(['call', 'session', 'unrecordable']);
@@ -474,7 +475,7 @@ const LANE_RUNTIME = {
   // SiteOne deals bell end date (GATE_SITEONE_DEAL_AI_END_DATE): one Haiku read per deal email on the Monday run; the answer is a
   // line in the admin bell. offline: no second provider; a miss keeps the bell's date-pattern line.
   // Alert clear-up agent (GATE_ALERT_CLEAR_AGENT=shadow): one Sonnet read per open alert about a customer contact; the verdict goes in alert_clear_verdicts and nothing else changes. offline: no second provider; an error records still_owed.
-  alert_clear_agent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', expected_duration_ms: 15_000, stall_after_ms: 90_000, hard_timeout_ms: 60_000 },
+  alert_clear_agent: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'classification', maturity: 'M0', expected_duration_ms: 15_000, stall_after_ms: 60_000, hard_timeout_ms: 120_000 },
   siteone_deal_end_date: { side_effect_class: 'internal_write', ledger: 'call', fallback_class: 'offline', eval_family: 'structured_extraction', expected_duration_ms: 10_000, stall_after_ms: 60_000, hard_timeout_ms: 60_000 },
 };
 

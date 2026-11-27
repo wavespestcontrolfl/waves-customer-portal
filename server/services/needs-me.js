@@ -220,15 +220,19 @@ function mapStanding(alert) {
 // link, metadata, times), so every open row joins ONE global order; the long
 // body/detail text is read afterwards for the returned page alone (withText).
 const LIGHT_COLUMNS = ['id', 'category', 'title', 'link', 'metadata', 'created_at', 'read_at'];
-async function openAlertRows(role, technicianId = null) {
+async function openAlertRows(role, technicianId = null, fullAccess = false) {
   // Activity-only rows (feed 'activity': engineering findings, quiet standing digests) are
   // included on purpose: the bell never shows them, but they are open work, and the
   // engineering ones are the Claude work. Each carries activityOnly: true.
+  // Owner-only rows (metadata.ownerOnly: cash-forecast alerts, owner Claude ideas/copies)
+  // are visible only when `fullAccess` is explicitly true (fail-closed, matching the bell
+  // and Activity feeds).
   const rows = [];
   let after = null;
   for (;;) {
     const query = NotificationService.scopeAdminFeedToRole(db('notifications').where({ recipient_type: 'admin' }), role, technicianId);
     if (after) query.whereRaw('(created_at, id) < (?::timestamptz, ?::uuid)', [after.at, after.id]);
+    if (!fullAccess) query.whereRaw("COALESCE(metadata->>'ownerOnly', '') <> 'true'");
     // The cron's persisted dashboard_alert rows echo the standing conditions below.
     // A digest its check already resolved (metadata.resolved, stamped before done_at
     // existed) is closed even when no done_at was ever written for it.
@@ -301,7 +305,7 @@ function decodeCursor(raw) {
   } catch { return null; }
 }
 
-async function listNeedsMe({ who, area, limit, role, technicianId = null, after = null } = {}) {
+async function listNeedsMe({ who, area, limit, role, technicianId = null, after = null, fullAccess = false } = {}) {
   const generatedAt = new Date();
   const rowsById = new Map();
   const warnings = [];
@@ -313,7 +317,7 @@ async function listNeedsMe({ who, area, limit, role, technicianId = null, after 
     }
   };
   await attempt('notifications', async () => {
-    const rows = await openAlertRows(role, technicianId);
+    const rows = await openAlertRows(role, technicianId, fullAccess);
     for (const r of rows) rowsById.set(String(r.id), r);
     return rows.map(mapAlertRow);
   });

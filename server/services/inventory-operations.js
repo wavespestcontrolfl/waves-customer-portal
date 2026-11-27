@@ -72,7 +72,12 @@ const requestSchema = Joi.object({
   projectedRemaining: numeric.allow(null), firstShortDate: calendarDate,
 });
 const actionSchema = Joi.object({
-  action: Joi.string().valid('mark_ordered', 'receive', 'cancel').required(),
+  action: Joi.string().valid('mark_ordered', 'receive', 'cancel', 'close_counted').required(),
+  // Receive only: the operator saw "an invoice already added this" and receives again anyway.
+  // The fingerprint of the receipts the warning listed: confirm counts only while that set is unchanged.
+  confirm: Joi.boolean().when('action', { is: 'receive', then: Joi.boolean(), otherwise: Joi.forbidden() }),
+  // Close, already counted from that dialog sends the same fingerprint, so a changed set is refused too.
+  confirmFingerprint: Joi.string().max(100).when('action', { is: Joi.valid('receive', 'close_counted'), then: Joi.string(), otherwise: Joi.forbidden() }),
   quantity: numeric.positive().when('action', { is: 'receive', then: Joi.number(), otherwise: Joi.forbidden() }),
   unit: Joi.string().trim().max(50).when('action', { is: 'receive', then: Joi.string(), otherwise: Joi.forbidden() }),
   note: optionalText,
@@ -469,14 +474,85 @@ async function loadRequest(requestId, conn = db, lock = false) {
 
 function validateTransition(request, action, guard) {
   const status = String(request.status || '').toLowerCase();
-  const secondReceive = action === 'receive' && status === 'received' && !!guard.landedAfterReceive;
-  if (!['open', 'ordered'].includes(status) && !secondReceive) throw inventoryError(`Restock request is already ${status}; refresh the list`, 409, 'request_closed');
+  // A received request whose automatic order landed after that receipt admits ONE more receive, or a
+  // no-stock close when an invoice already counted that late order.
+  const secondReceive = ['receive', 'close_counted'].includes(action) && status === 'received' && !!guard.landedAfterReceive;
+  // A CANCELLED request whose automatic order may be out (the one outstanding-order rule): when the goods arrive staff
+  // receive them, or close it as already counted. The request becomes received, which settles the order.
+  const cancelledOrderArrived = ['receive', 'close_counted'].includes(action) && status === 'cancelled' && !!guard.outstanding;
+  if (!['open', 'ordered'].includes(status) && !secondReceive && !cancelledOrderArrived) throw inventoryError(`Restock request is already ${status}; refresh the list`, 409, 'request_closed');
   if (action === 'mark_ordered' && status !== 'open') throw inventoryError(`Only an open request can be marked ordered (this one is ${status})`, 409, 'request_not_open');
   return secondReceive;
 }
 
+// Stock the invoice / delivery-email lane (purchase-receipts) already added for this product since the request
+// existed. The window opens at the request's creation (or its ledger row's, if that is earlier), never at the
+// ledger's placed_at: the vendor's confirmation can arrive after the invoice has posted, and that invoice is the
+// very delivery the request is waiting for. Receiving the request then would count the delivery twice. A receipt
+// the inventory-agent undo reversed (a correction carrying undoOfMovementId) no longer counts. Oldest first.
+// A movement's created_at is its transaction's start, so a receipt whose transaction began just before the request
+// was created can post after it and still be stamped earlier. The window opens this long before the earliest
+// creation to catch that interleave; the warning only asks, and Receive anyway stays.
+const RECEIPT_WINDOW_MARGIN_MS = 60 * 60 * 1000;
+
+async function receiptStockAddedSince(conn, request, order) {
+  const { SOURCES } = require('./purchase-receipts/receipt-processor');
+  const earliest = order?.created_at && new Date(order.created_at) < new Date(request.created_at) ? order.created_at : request.created_at;
+  const since = new Date(new Date(earliest).getTime() - RECEIPT_WINDOW_MARGIN_MS);
+  const movements = 'product_inventory_movements';
+  return conn(movements)
+    .where({ [`${movements}.product_id`]: request.product_id, [`${movements}.movement_type`]: 'restock' })
+    .whereIn(conn.raw(`${movements}.metadata->>'source'`), Object.values(SOURCES))
+    .where(`${movements}.created_at`, '>=', since)
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM ${movements} u WHERE u.product_id = ${movements}.product_id AND u.metadata->>'undoOfMovementId' = ${movements}.id::text)`)
+    .orderBy(`${movements}.created_at`, 'asc').select('id', 'quantity', 'unit', 'created_at');
+}
+
+const MOST_LISTED_RECEIPTS = 3;
+
+// "4 gal on November 24", or for several in one unit "2 gal on November 20, 1 gal on November 22 and 1 gal on
+// November 24" (the first three, then "and N more"). One sentence part per unit: units never add together.
+function describeReceiptsInUnit(rows, formatDay) {
+  const each = rows.map((row) => `${round4(Number(row.quantity))} ${String(row.unit || '').replaceAll('_', ' ')} on ${formatDay(new Date(row.created_at))}`);
+  if (each.length <= MOST_LISTED_RECEIPTS) return each.length === 1 ? each[0] : `${each.slice(0, -1).join(', ')} and ${each.at(-1)}`;
+  const more = each.length - MOST_LISTED_RECEIPTS;
+  return `${each.slice(0, MOST_LISTED_RECEIPTS).join(', ')} and ${more} more`;
+}
+
+// What the operator was shown: the receipts, the request (id and row version) and its automatic order (id, status and
+// the late-order marker). A confirm from a dialog that is stale on any of these is refused with a fresh warning.
+const receiptFingerprint = (rows, request, order) => crypto.createHash('sha256').update(JSON.stringify([
+  rows.map((row) => row.id).sort(), request.id, request.row_version,
+  order ? [order.id, order.status, !!restockMeta(order.evidence).landedAfterReceive] : null,
+])).digest('base64url');
+
+// Run under the product row lock (the receipt lane writes under the same lock), so the set cannot change
+// between this read and the write that follows. Receive anyway, and Close, already counted from the warning
+// dialog, pass only for the exact set the dialog listed. The plain Close button has no dialog and no list: it
+// is the operator's own call and sends no fingerprint.
+async function assertNotAlreadyCounted(conn, request, input) {
+  const closing = input.action === 'close_counted';
+  if (closing && !input.confirmFingerprint) return;
+  const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('id', 'status', 'created_at', 'evidence');
+  const rows = await receiptStockAddedSince(conn, request, order);
+  const fingerprint = rows.length ? receiptFingerprint(rows, request, order) : null;
+  if (closing ? fingerprint === input.confirmFingerprint : (!rows.length || (input.confirm && input.confirmFingerprint === fingerprint))) return;
+  // The listed receipt was undone: closing "already counted" would now lose that stock.
+  if (!rows.length) throw inventoryError('The receipts for this product changed while you looked. Reload the Restock tab.', 409, 'receipts_changed');
+  const { formatETDate } = require('../utils/datetime-et');
+  const byUnit = new Map();
+  for (const row of rows) byUnit.set(row.unit, [...(byUnit.get(row.unit) || []), row]);
+  const parts = [...byUnit.values()].map((group) => describeReceiptsInUnit(group, formatETDate)).join('; ');
+  throw Object.assign(inventoryError(
+    `${rows.length === 1 ? 'An invoice' : 'Invoices'} already added ${parts}. Receive again only if this is a second delivery.`,
+    409, 'already_counted_by_receipt'), {
+    details: { receiptFingerprint: fingerprint, alreadyAdded: rows.map((row) => ({ quantity: round4(Number(row.quantity)), unit: row.unit, addedAt: new Date(row.created_at).toISOString() })) },
+  });
+}
+
 async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
+  if (['receive', 'close_counted'].includes(input.action)) await assertNotAlreadyCounted(conn, request, input);
   if (input.action !== 'receive') return { secondReceive };
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
@@ -494,10 +570,11 @@ function actionPreview(request, product, input, plan) {
     request: { id: request.id, product_id: product.id, product: product.name, status: request.status,
       requested_quantity: numberOrNull(request.requested_quantity), unit: request.unit },
     product: productIdentity(product), action: input.action, note: input.note || null,
-    new_status: { mark_ordered: 'ordered', receive: 'received', cancel: 'cancelled' }[input.action],
+    new_status: { mark_ordered: 'ordered', receive: 'received', cancel: 'cancelled', close_counted: 'received' }[input.action],
     effects: { mark_ordered: 'Records that staff already placed an order. Does not submit an order or increase stock.',
       receive: 'Records physically received stock, a movement and the request receipt.',
-      cancel: 'Closes this restock request. Does not cancel a vendor order.' }[input.action],
+      cancel: 'Closes this restock request. Does not cancel a vendor order.',
+      close_counted: 'Closes this restock request as received without changing stock: an invoice or hand entry already counted it.' }[input.action],
     ...(input.action === 'receive' ? { stock_before: plan.stockBefore, adds: plan.adds, stock_after: plan.stockAfter,
       unit: plan.inventoryUnit, entered_quantity: plan.quantity, entered_unit: plan.enteredUnit,
       conversion_confidence: plan.conversionConfidence, second_receive: plan.secondReceive } : {}),
@@ -540,8 +617,8 @@ async function updateRestockRequest(requestId, raw, options = {}) {
         throw inventoryError('Saved stock did not match the receipt', 409, 'verification_failed');
       }
       await clearStockShortfallAlert(trx, product.id, plan.stockAfter, plan.inventoryUnit);
-      if (plan.secondReceive) await dispatch.settleLandedAfterReceive(trx, requestId);
     }
+    if (plan.secondReceive) await dispatch.settleLandedAfterReceive(trx, requestId);
     const [updated] = await trx('product_restock_requests').where({ id: requestId }).update({
       status: preview.new_status, updated_at: new Date(),
       metadata: { ...restockMeta(request.metadata), ...options.metadataPatch, lastManualAction: {

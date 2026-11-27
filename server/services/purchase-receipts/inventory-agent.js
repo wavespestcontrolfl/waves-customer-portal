@@ -1229,7 +1229,7 @@ const AGENT_BELL_PARTS = {
 };
 
 // A logged line is information only, unless a live restock request may cover it: then a person
-// must cancel that request or the stock is added twice. `by` names who logged it.
+// must close that request as already counted or the stock is added twice. `by` names who logged it.
 function loggedBellParts(openRequest, by) {
   return openRequest
     ? { action: 'check the restock request for a logged purchase', why: `The ${by} added stock; an open restock request may cover it.`, severity: 'needs-you', doneWhen: 'restock_request_closed' }

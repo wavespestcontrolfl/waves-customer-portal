@@ -4766,72 +4766,6 @@ function prettySignalValue(value) {
     .replace(/\b\w/g, (ch) => ch.toUpperCase());
 }
 
-function formatLawnTurfType(value) {
-  if (value && typeof value === 'object') {
-    const fields = ['track', 'grassType', 'turfType', 'type', 'name'];
-    for (const field of fields) {
-      const formatted = formatLawnTurfType(value[field]);
-      if (formatted) return formatted;
-    }
-    return null;
-  }
-  if (typeof value === 'boolean' || value == null) return null;
-  const raw = String(value).trim();
-  if (!raw) return null;
-  const key = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  if (['unknown', 'n_a', 'na', 'none', 'null'].includes(key)) return null;
-  const labels = {
-    st_augustine: 'St. Augustine',
-    st_augustine_grass: 'St. Augustine',
-    saint_augustine: 'St. Augustine',
-    floratam: 'Floratam',
-    bermuda: 'Bermuda',
-    bahia: 'Bahia',
-    bahiagrass: 'Bahia',
-    zoysia: 'Zoysia',
-    empire_zoysia: 'Empire Zoysia',
-    centipede: 'Centipede',
-    mixed: 'Mixed',
-  };
-  return labels[key] || prettySignalValue(raw);
-}
-
-function lawnTurfTypeMetricValue({ inputs = {}, engineInputs = {}, property = {}, parsedData = {}, estResult = {} } = {}) {
-  const inputServices = inputs.services || {};
-  const engineServices = engineInputs.services || {};
-  const candidates = [
-    inputServices.lawn?.track,
-    inputServices.lawn?.grassType,
-    inputServices.lawn?.turfType,
-    engineServices.lawn?.track,
-    engineServices.lawn?.grassType,
-    engineServices.lawn?.turfType,
-    inputs.lawnTrack,
-    inputs.grassType,
-    inputs.turfType,
-    inputs.turf_type,
-    inputs.lawnGrassType,
-    engineInputs.lawnTrack,
-    engineInputs.grassType,
-    engineInputs.turfType,
-    engineInputs.turf_type,
-    engineInputs.lawnGrassType,
-    property.grassType,
-    property.turfType,
-    property.turfProfile?.grassType,
-    property.turfProfile?.turfType,
-    parsedData.turfProfile?.grassType,
-    parsedData.turfProfile?.turfType,
-    estResult.turfProfile?.grassType,
-    estResult.turfProfile?.turfType,
-  ];
-  for (const candidate of candidates) {
-    const formatted = formatLawnTurfType(candidate);
-    if (formatted) return formatted;
-  }
-  return null;
-}
-
 function firstPresentValue(...values) {
   for (const value of values) {
     if (value !== null && value !== undefined && value !== '') return value;
@@ -5145,7 +5079,6 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     ? mosquitoProgramMetricValue({ resultStats, mosquitoInputs, engineMosquitoInputs, inputs })
     : null;
   const mosquitoPressure = isMosquitoOnly ? mosquitoPressureMetricValue(resultStats) : null;
-  const turfType = isLawnOnly ? lawnTurfTypeMetricValue({ inputs, engineInputs, property, parsedData, estResult }) : null;
   const aiAnalysis = parsedData.aiAnalysis || estResult.aiAnalysis || {};
   const inputFeatures = inputs.features || parsedData.features || {};
   const propertyFeatures = property.features || {};
@@ -5299,7 +5232,6 @@ function buildWaveGuardIntelligencePayload(estimate = {}, estData = {}, opts = {
     treeShrubBedArea ? { label: 'Ornamental beds', value: `${Math.round(treeShrubBedArea).toLocaleString()} sq ft` } : null,
     treeShrubProfile ? { label: 'Trees/Shrubs', value: treeShrubProfile } : null,
     lawnSqFt ? { label: 'Treatable lawn', value: `${Math.round(lawnSqFt).toLocaleString()} sq ft` } : null,
-    turfType ? { label: 'Grass type', value: turfType } : null,
     termitePerimeterFt ? { label: 'Termite perimeter', value: `${Math.round(termitePerimeterFt).toLocaleString()} linear ft` } : null,
     complexity ? { label: 'Complexity', value: complexity } : null,
   ]);
@@ -25827,7 +25759,7 @@ function lawnFrequenciesFromRows(rows = [], estData = {}, manualDiscountOverride
           {
             key: 'lawn_care_treatments',
             label: 'Fertilization and weed-control treatments',
-            detail: 'Turf treatments matched to your grass type and the season',
+            detail: 'Turf treatments matched to your lawn and the season',
             includedAtThisFrequency: true,
           },
         ],

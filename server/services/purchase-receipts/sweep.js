@@ -54,6 +54,7 @@ const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-de
 const { processReceiptLine, parseMultipack, PACK_CLAIM_RE } = require('./receipt-processor');
 const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('./undelivered-shipments');
 const siteOne = require('./siteone-invoices');
+const { reconcileFailedLineAlert, failedLineEntry, failedEmailEntry, lineKey, emailKey } = require('./failed-lines-alert');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { raiserFor } = require('../admin-alert-injected');
@@ -116,7 +117,9 @@ const heldDoneWhen = (status) => HELD_DONE_WHEN[status] || 'line_logged_by_hand'
 // array is always truthy, so runPurchaseReceiptRestockSweep's
 // `if (result.skipped)` would swallow every processed email.
 function emptySummary() {
-  const summary = { alreadyProcessed: [], errors: [] };
+  // failedLines: the lines in `errors` that threw, with what the failed-lines alert needs to carry them past the lookback.
+  // settledLines: keys that got an outcome without throwing, the alert's only evidence that a failed one is resolved.
+  const summary = { alreadyProcessed: [], errors: [], failedLines: [], settledLines: [] };
   for (const bucket of Object.values(SUMMARY_BUCKETS)) summary[bucket] = [];
   return summary;
 }
@@ -125,7 +128,10 @@ function emptySummary() {
 function summarize(result) {
   const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => !['logged', 'unmatched', 'agentPending'].includes(bucket))
     .reduce((sum, bucket) => sum + result[bucket].length, result.undelivered.length);
-  return { logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length };
+  return {
+    logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length,
+    unappliedFailedLines: result.unappliedFailedLines || 0,
+  };
 }
 
 function displayUnit(unit) {
@@ -137,16 +143,17 @@ function round(value) {
 }
 
 // The logged bell's warning when a live restock request may cover the
-// delivery (shared with inventory-agent.js): cancel is the stock-neutral
-// close, since receiving the request would add this stock again.
+// delivery (shared with inventory-agent.js): "Close, already counted" is the
+// stock-neutral close, since receiving the request would add this stock again.
+// Cancel stays for an order the vendor really cancelled.
 function openRestockRequestNote(productName) {
-  return `A restock request for ${productName} is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.`;
+  return `A restock request for ${productName} is still open. If this delivery covers it, choose Close, already counted on the Restock tab (or ask the Intelligence Bar to close it as already counted); receiving it would add the stock again. Cancel it only if the vendor cancelled the order.`;
 }
 
 // A logged line is information only: the stock change lives in
 // purchase_receipt_lines and the stock movement, so it writes nothing (the
 // FYI rule, docs/admin-notifications.md). Only a live restock request makes
-// it actionable: cancel that request or the stock is added twice. Read-only
+// it actionable: close that request as already counted or the stock is added twice. Read-only
 // note: this lane never writes a restock request (see receipt-processor.js's
 // header); a person decides whether this delivery covers it.
 const RESTOCK_HEADLINE_NAME_CHARS = 18;
@@ -260,8 +267,10 @@ async function recordLineOutcome({ receipt, email, orderNumber, shipmentKey, ite
   } catch (err) {
     logger.error(`[purchase-receipts] item "${item.title}" on email ${email.id} failed: ${err.message}`);
     summary.errors.push({ title: item.title, message: err.message });
+    summary.failedLines.push(failedLineEntry({ receipt, email, orderNumber, shipmentKey, lineNo, item, err }));
     return;
   }
+  summary.settledLines.push({ key: lineKey({ vendor: receipt.vendor, orderNumber, shipmentKey, lineNo }) });
   const bucket = SUMMARY_BUCKETS[outcome.status];
   if (!bucket) {
     summary.alreadyProcessed.push({ title: item.title, reason: outcome.reason || null });
@@ -382,8 +391,11 @@ async function processSiteOneInvoices({ floor, since, now, notifyAdmin, totals }
       // One invoice that can't be read never stops the others.
       logger.error(`[purchase-receipts] SiteOne invoice email ${email.id} failed: ${err.message}`);
       totals.errors.push({ title: email.subject, message: err.message, emailId: email.id });
+      totals.failedLines.push({ ...failedEmailEntry({ vendor: siteOne.VENDOR, email }), emailId: email.id });
       continue;
     }
+    // Read without throwing (even to "pending" or "another copy owns it"): an earlier failed read of this email is over.
+    totals.settledLines.push({ key: emailKey(siteOne.VENDOR, email.id), emailId: email.id });
     if (!found) continue;
     const receipt = { vendor: siteOne.VENDOR, noun: 'SiteOne invoice', label: `SiteOne invoice ${found.invoice.number}` };
     const summary = emptySummary();
@@ -462,6 +474,10 @@ async function runPurchaseReceiptRestockSweep({ notify: notifyAdmin } = {}) {
   await processSiteOneInvoices({ floor, since, now, notifyAdmin, totals });
   await closeLoggedDeliveryBells().catch((err) => logger.warn(`[purchase-receipts] close pass failed: ${err.message}`));
   await closeDeliveredUndeliveredBells().catch((err) => logger.warn(`[purchase-receipts] undelivered close pass failed: ${err.message}`));
+  // Last, after every line was recorded. job_health stays 'success' when single lines fail (the run worked), so the
+  // alert carries them; if the alert cannot be saved the failures would be lost, so the error fails the run
+  // (job_health 'failed' with last_error) and the next tick retries the lines and rewrites the alert.
+  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, settled: totals.settledLines, since });
   return totals;
 }
 
