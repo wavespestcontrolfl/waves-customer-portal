@@ -7,6 +7,12 @@ const CONFIDENCE_RANK = {
 const MIN_AUTOMATION_CONFIDENCE = 'medium';
 const DEFAULT_HOME_SQFT = 2000;
 const DEFAULT_LOT_SQFT = 8000;
+// The website quote's residential home bound (public-quote.js HOME_CAP) and its hold reason. A lead that states a bigger home is
+// never priced automatically: pest keeps rising with the footprint above 5,500 sq ft (owner 2026-11-26), and the webhook body is
+// unauthenticated, so a typo or a junk post (a home of 1e12 sq ft) would price a premium that overflows estimates.annual_total,
+// where the flat top read $128. The draft parks for a hand price instead, as the website quote does.
+const LEAD_HOME_SQFT_LIMIT = 20000;
+const HOME_SIZE_ABOVE_LIMIT_REASON = 'home_size_above_public_limit';
 
 const { generateEstimate } = require('./pricing-engine');
 const { withTrustedCatalogPricing } = require('./pricing-engine/trusted-catalog-pricing');
@@ -310,12 +316,14 @@ function mapServiceInterestToEstimateServices(serviceInterest) {
 }
 
 function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services = {}, measurements = null } = {}) {
+  // customers.property_sqft is TREATED LAWN AREA by schema contract (initial_schema 20260401000001), never the home size, so it is
+  // not read here: a 2,000 sq ft house with 20,000 sq ft of lawn was priced as a 20,000 sq ft building. Pest keeps rising with the
+  // footprint above 5,500 sq ft (owner 2026-11-26), so that wrong size is no longer hidden by a flat top.
   const statedHomeSqFt = numberOrNull(
     body.homeSqFt,
     body.home_sqft,
     body.squareFootage,
     body.square_footage,
-    customer.property_sqft,
     customer.home_sqft
   );
   const statedLotSqFt = numberOrNull(
@@ -331,10 +339,25 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   const county = !statedHomeSqFt && !statedLotSqFt && measurements?.homeSqFt && measurements?.lotSqFt
     ? measurements
     : null;
-  const homeSqFt = statedHomeSqFt || county?.homeSqFt || null;
+  // A stated home above the residential bound parks the draft (see LEAD_HOME_SQFT_LIMIT). The size kept for staff is bounded at ten
+  // times the limit, as on the website quote, so the provisional figure stays a number a column can hold.
+  const homeSizeAboveLimit = !!statedHomeSqFt && statedHomeSqFt > LEAD_HOME_SQFT_LIMIT;
+  const homeSqFt = (homeSizeAboveLimit ? Math.min(statedHomeSqFt, LEAD_HOME_SQFT_LIMIT * 10) : statedHomeSqFt) || county?.homeSqFt || null;
   const lotSqFt = statedLotSqFt || county?.lotSqFt || null;
+  // The story count: the lead's or the customer row's own, else the county record's own count when that record gave the home size
+  // (a county count is never mixed with a stated size). A count is a number or a numeric string from 1 to 3 (1.5 is a split
+  // level); 12, true, [2] or text is no count. Pest prices on the footprint (living area over the stories). Above the 5,500 sq ft
+  // table that sets the price, so a big home with no known count is not priced as one floor: storiesSource 'default' puts the
+  // engine's own stories_estimated review on the line and the draft waits for a person (the phone price tool asks the caller).
+  // Only a draft that prices a footprint pest line (recurring or one-time pest) takes the mark. Termite bait reads the same source
+  // for a staff note, and this module parks a draft on any line note, so a bait-only draft is left as it was.
+  const { statedStoryCount } = require('./voice-agent/story-count');
+  const stories = [body.stories, customer.stories, county?.stories].map(statedStoryCount).find((count) => count !== null) || null;
+  const storiesUnknownAboveTable = !stories && !!(services.pest || services.oneTimePest)
+    && (homeSqFt || 0) > Number(require('./pricing-engine/constants').PEST.aboveTableStartSqFt);
   const review = [];
   if (!homeSqFt || !lotSqFt) review.push(DEFAULTED_REVIEW);
+  if (homeSizeAboveLimit) review.push(HOME_SIZE_ABOVE_LIMIT_REASON);
   // A review reason like any other: the auto-send lane parks the draft
   // until LEAD_ESTIMATE_AUTO_SEND_ALLOWED_REVIEW_REASONS names it.
   if (county) review.push(FROM_COUNTY_REVIEW);
@@ -378,7 +401,8 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       // bed shrunk by an inflated homeSqFt (Codex #6398 security r15; same
       // contract as the public quote).
       treeShrubFootprintTrusted: false,
-      stories: numberOrNull(body.stories, customer.stories) || 1,
+      stories: stories || 1,
+      ...(storiesUnknownAboveTable ? { storiesSource: 'default' } : {}),
       propertyType: resolvedPropertyType || (unitScopeGuardrailsEnabled() ? 'unknown' : 'Single Family'),
       category: body.category || null,
       isCommercial: false,
@@ -395,6 +419,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
       address: leadDraftAddress({ intake, customer }),
     },
     review,
+    homeSizeAboveLimit,
     // 'lead': the form or the customer row gave a size; 'county_assessed':
     // both from the county record; 'default': neither, so both defaults.
     sizeSource: county ? MEASUREMENTS_SOURCE : (statedHomeSqFt || statedLotSqFt ? 'lead' : 'default'),
@@ -440,6 +465,7 @@ function compactLineItem(item = {}) {
     ...(typeof item.legacyPricingRules === 'boolean' ? { legacyPricingRules: item.legacyPricingRules } : {}),
     ...(typeof item.legacyTwoStoryRoof === 'boolean' ? { legacyTwoStoryRoof: item.legacyTwoStoryRoof } : {}),
     ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
+    ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
     ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),
     annual: item.annualAfterDiscount ?? item.annual ?? null,
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
@@ -595,7 +621,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
   // size instead, so staff never read "default size" on a real one.
   let gateRecord = readiness;
   if (engineInput.sizeSource === MEASUREMENTS_SOURCE) {
-    automation.measurements = { source: MEASUREMENTS_SOURCE, homeSqFt: county.homeSqFt, lotSqFt: county.lotSqFt };
+    automation.measurements = {
+      source: MEASUREMENTS_SOURCE, homeSqFt: county.homeSqFt, lotSqFt: county.lotSqFt, ...(county.stories ? { stories: county.stories } : {}),
+    };
     gateRecord = {
       ...readiness,
       review: [...new Set((readiness.review || []).map((reason) => (reason === DEFAULTED_REVIEW ? FROM_COUNTY_REVIEW : reason)))],
@@ -616,7 +644,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
     const trustedInput = await withTrustedCatalogPricing(engineInput.input);
     const estimate = generateEstimate(trustedInput);
     const manualQuoteLines = (estimate?.lineItems || []).filter(lineRequiresReview);
-    const quoteRequired = manualQuoteLines.length > 0;
+    // A stated home above the residential bound is a hand price whatever the lead asks for (see LEAD_HOME_SQFT_LIMIT): the saved
+    // totals are zero and the draft is never auto-sendable.
+    const quoteRequired = manualQuoteLines.length > 0 || engineInput.homeSizeAboveLimit;
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);
     const oneTimeTotal = quoteRequired ? 0 : (
@@ -660,7 +690,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
           + Number(estimate?.summary?.specialtyTotal || 0),
       };
     }
-    automation.quoteRequiredReason = manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
+    // The size bound names the hold first: a line's own review reason on that draft (an unknown story count) is the lesser fact.
+    automation.quoteRequiredReason = (engineInput.homeSizeAboveLimit ? HOME_SIZE_ABOVE_LIMIT_REASON : null)
+      || manualQuoteLines[0]?.reason || manualQuoteLines[0]?.manualReviewReasons?.[0]
       || (typeUnresolved ? 'property_type_unresolved' : null)
       || (fieldVerifyRequired ? parkingFieldVerifyFlags[0] : null);
 
@@ -689,6 +721,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
                 : {}),
               ...(typeof estimate.pricingMetadata.legacyOneTimePestBuffer === 'boolean'
                 ? { legacyOneTimePestBuffer: estimate.pricingMetadata.legacyOneTimePestBuffer }
+                : {}),
+              ...(typeof estimate.pricingMetadata.legacyPestAboveTable === 'boolean'
+                ? { legacyPestAboveTable: estimate.pricingMetadata.legacyPestAboveTable }
                 : {}),
               ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
                 ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }
@@ -811,7 +846,12 @@ function evaluateLeadEstimateAutomationReadiness({
 
   if (!address.city && !address.zip) review.push('city_or_zip_missing');
   if (!firstNonEmpty(intake.email, customer.email)) review.push('email_missing_sms_only');
-  if (!numberOrNull(customer.property_sqft, intake.homeSqFt, intake.squareFootage)) {
+  // The home size only: the customer row's property_sqft is treated lawn area (see buildLeadEngineInput), not a home measurement.
+  // A size the form itself states (the raw body) is deliberately NOT read here, as on main: the intake record never carried one, so
+  // this reason is already on every lead whose records hold no home size, and a draft that carries it is never auto-sent. Reading
+  // the body here would make a draft priced on a form-typed size eligible for the automatic send: a send-policy change, not part
+  // of a price change.
+  if (!numberOrNull(customer.home_sqft, intake.homeSqFt, intake.squareFootage)) {
     review.push('property_measurements_defaulted');
   }
 

@@ -56,6 +56,8 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'legacyTwoStoryRoof',
   // One-time pest rule (new quotes only, 2026-11-26): server-derived from its own stamp, same rule.
   'legacyOneTimePestBuffer',
+  // Pest above the 5,500 sq ft table (new quotes only, 2026-11-26): server-derived from its own stamp, same rule.
+  'legacyPestAboveTable',
   // Specialty prices stamp (bed bug rooms, mosquito above 2 acres, wasp level; 2026-11-26): server-derived from its own stamp, same rule.
   'legacySpecialty1126',
   'specialty1126CurrentServices',

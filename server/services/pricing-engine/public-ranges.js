@@ -148,7 +148,7 @@ function buildRows() {
       TYPICAL_FOOTPRINTS.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.pricePestControl({ footprint: f, propertyType: 'single_family', ...p.property }, { frequency: 'quarterly' }),
       (r) => (r.tiers || []).map((t) => t.perApp)),
-    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher. WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
+    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher (a footprint above 5,500 sq ft adds $${Math.round(constants.PEST.aboveTablePer1000)} per application on the quarterly plan for each additional 1,000 sq ft; bi-monthly and monthly plans follow their cadence multipliers, about $${(constants.PEST.aboveTablePer1000 * constants.PEST.frequencyDiscounts.v2.bimonthly).toFixed(2)} and $${(constants.PEST.aboveTablePer1000 * constants.PEST.frequencyDiscounts.v2.monthly).toFixed(2)} per application). WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
   }));
 
   add('cockroach_treatment', () => rangeRow({

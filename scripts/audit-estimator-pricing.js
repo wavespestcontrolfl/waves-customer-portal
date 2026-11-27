@@ -213,7 +213,11 @@ function pestAgeAdjOf() {
 function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', frequency = 'quarterly', yearBuilt = null }) {
   const { PEST, PROPERTY_TYPE_ADJ } = constants;
   const footprint = footprintOf(homeSqFt, stories);
-  const footprintAdj = Math.round(interp(footprint, PEST.footprintBrackets.map((b) => [b.sqft, b.adj])));
+  const pestBrackets = PEST.footprintBrackets.map((b) => [b.sqft, b.adj]);
+  // The live table price, plus the new-quote premium above PEST.aboveTableStartSqFt (owner 2026-11-26): PEST.aboveTablePer1000 per
+  // 1,000 sq ft, pro-rated, no cap; one rounding at the end, as the engine does.
+  const footprintAdj = Math.round(interp(footprint, pestBrackets)
+    + PEST.aboveTablePer1000 * Math.max(0, footprint - PEST.aboveTableStartSqFt) / 1000);
   const a = PEST.additionalAdjustments;
   let featureAdj = 0;
   if (features.indoor) featureAdj += a.indoor;

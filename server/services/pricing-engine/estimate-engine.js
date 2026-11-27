@@ -1068,6 +1068,16 @@ function legacyOneTimePestBuffer(input, serviceKey = null) {
     && !(serviceKey && [input.addedServiceKeys, input.oneTimePestCurrentServices].some((list) => Array.isArray(list) && list.includes(serviceKey)));
 }
 
+// Pest above the 5,500 sq ft footprint table (owner 2026-11-26: +$8 per visit at quarterly for each 1,000 sq ft above it, no cap),
+// new quotes only. Its own stamp (pricingMetadata.legacyPestAboveTable), same replay mechanism: input.legacyPestAboveTable is derived
+// from the estimate's own stamp (estimate-floor-signal-replay.js savedLegacyPestAboveTableSignal), a priced estimate with no stamp
+// predates the rule, and a legacy quote runs the existing flat code unchanged. A fresh quote never sets it. Plan-wide (no per-service
+// marker): a pest service added to a legacy estimate stays on the old rule, so a replay never raises a sold price.
+const PEST_ABOVE_TABLE_SERVICES = new Set(['pest_control', 'one_time_pest']);
+function legacyPestAboveTable(input) {
+  return input?.legacyPestAboveTable === true;
+}
+
 // The plan line's quarterly per-app rate without its home-age step (a new one-time visit has none): the one shared helper
 // (one-time-pest-home-age.js quarterlyPerAppWithoutHomeAge), also used by the estimate page, with the quote-time floor.
 function ageFreeQuarterly(planLine, floor) {
@@ -1345,6 +1355,8 @@ function generateEstimate(input) {
     legacyTwoStoryRoof: legacyTwoStoryRoof(input),
     // One-time pest stamp (see legacyOneTimePestBuffer above): true = priced before the rule (2.2 multiple, plan age step).
     legacyOneTimePestBuffer: legacyOneTimePestBuffer(input),
+    // Pest-above-table stamp (see legacyPestAboveTable above): true = priced before the rule (flat above 5,500 sq ft).
+    legacyPestAboveTable: legacyPestAboveTable(input),
     // Specialty prices stamp (see legacySpecialty1126 above): true = priced before them (old room curve, hand-priced lots above 2
     // acres, $250 wasp level).
     legacySpecialty1126: legacySpecialty1126(input),
@@ -1508,6 +1520,7 @@ function generateEstimate(input) {
         modifiers,
         // A quote priced before the one-time pest rule keeps the home-age step it was sold with.
         legacyOneTimePestBuffer: legacyOneTimePestBuffer(input, 'pest_control'),
+        legacyPestAboveTable: legacyPestAboveTable(input),
         pestProgramFloorArmed,
         pestProgramFloorPerVisit: pestProgramFloorPerVisitResolved,
       });
@@ -2135,6 +2148,8 @@ function generateEstimate(input) {
         // A quote priced before the rule keeps the 2.2 multiple (the existing path, unchanged). A bedroom-band plan's one-time visit
         // is never on the new rule: it keeps the existing band-anchored path whatever the stamp says (new rule = footprint-priced only).
         legacyOneTimePestBuffer: legacyOneTimePestBuffer(input, 'one_time_pest') || planPestLine?.pricingBasis === 'caller_stated_bedroom_count',
+        // Only read when the visit prices its own quarterly baseline (no plan on the quote); with a plan it anchors on the plan line.
+        legacyPestAboveTable: legacyPestAboveTable(input),
       });
       lineItems.push(result);
     }
@@ -3579,6 +3594,7 @@ function generateEstimate(input) {
     if (line && TWO_STORY_ROOF_SERVICES.has(line.service)) line.legacyTwoStoryRoof = legacyTwoStoryRoof(input, line.service);
     if (line && SPECIALTY_1126_SERVICES.has(line.service)) line.legacySpecialty1126 = legacySpecialty1126(input, line.service);
     if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
+    if (line && PEST_ABOVE_TABLE_SERVICES.has(line.service)) line.legacyPestAboveTable = legacyPestAboveTable(input);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
   }
 

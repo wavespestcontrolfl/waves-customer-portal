@@ -86,6 +86,16 @@ environment that carries the row (prod does), **editing
   `floor` and `multiplier` now price only quotes made before 11-26 and
   apartment/condo (bedroom-priced) quotes; new house quotes use a fixed
   $199 / 1.8x / 10% minimum.
+- **Pest above the 5,500 sq ft footprint table** (owner 2026-11-26, new quotes
+  only): +$8 per visit at quarterly for each 1,000 sq ft above 5,500,
+  pro-rated, no cap (8,000 = $148, 10,000 = $164); bi-monthly, monthly and
+  one-time pest follow the quarterly price. The $8 and the 5,500 start
+  point are CODE constants (`PEST.aboveTablePer1000`, `PEST.aboveTableStartSqFt`),
+  not Settings rows, so an edit of the `pest_footprint` table never moves the
+  premium on a sent quote; a change of it is a new code rule with its own stamp. Quotes
+  made before it keep the flat top (`pricingMetadata.legacyPestAboveTable`,
+  an unstamped priced estimate reads the same). The `pest_footprint` row still
+  ends at 5,500; editing it does not change the above-table step.
 - **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
   Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
   estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps

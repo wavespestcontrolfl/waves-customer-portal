@@ -969,6 +969,7 @@ const KnowledgeBaseService = {
         '',
         'Footprint modifiers (interpolated):',
         (PEST.footprintBrackets || []).map((b) => `${b.sqft.toLocaleString()}sf: ${signed(b.adj)}`).join(' | '),
+        `Above ${PEST.aboveTableStartSqFt.toLocaleString()}sf (new quotes): +$${PEST.aboveTablePer1000}/visit per 1,000 sf on the quarterly price, pro-rated, no cap`,
         '',
         'Property features:',
         `Pool cage: small ${signed(adj.poolCageSmall)} | medium ${signed(adj.poolCageMedium)} | large ${signed(adj.poolCageLarge)} | oversized ${signed(adj.poolCageOversized)} | Pool (no cage): ${signed(adj.poolNoCage)}`,

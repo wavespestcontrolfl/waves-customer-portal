@@ -203,6 +203,9 @@ function lookupFeatureModifiers(enriched) {
   };
 }
 
+// The source families a story count may be attributed to (the lookup's source classifier names them).
+const KNOWN_STORY_SOURCE_TYPES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder', 'listing', 'aggregator']);
+
 // Story provenance → the pricing engine's storiesSource vocabulary.
 // 'estimated' fires the stories_estimated manual-review reason in the
 // story-sensitive pricers (pest per-story, termite bait linear feet).
@@ -222,7 +225,6 @@ function storiesSourceForPricing(propertyFacts) {
       const parsed = new URL(evidence.sourceUrl);
       urlOk = parsed.protocol === 'http:' || parsed.protocol === 'https:';
     } catch { /* not a URL — fail closed */ }
-    const KNOWN_STORY_SOURCE_TYPES = new Set(['verified', 'county', 'cadastral', 'permit', 'builder', 'listing', 'aggregator']);
     const direct = evidence.basis === 'direct'
       && evidence.confidence !== 'low'
       && urlOk
@@ -230,6 +232,18 @@ function storiesSourceForPricing(propertyFacts) {
     return direct ? 'lookup' : 'estimated';
   }
   return 'lookup';
+}
+
+// Does a lookup record's story count name where it came from? Either the AI stories fallback's own evidence (graded above), or
+// the record search's field evidence for the count: a known source family with no verify mark. A count with neither is nobody's
+// finding. Pest above the 5,500 sq ft table reads this before a looked-up count sets a price no person has seen (the website
+// quote and the lead draft); the grader above keeps its own rule for every other reader.
+function storyCountHasEvidence(propertyRecord) {
+  if (propertyRecord?._storiesEvidence) return true;
+  const entry = propertyRecord?._fieldEvidence?.stories;
+  const evidence = Array.isArray(entry) ? entry[0] : entry;
+  return !!evidence && evidence.fieldVerify !== true
+    && KNOWN_STORY_SOURCE_TYPES.has(String(evidence.sourceType || '').toLowerCase());
 }
 
 // Palm count for the Tree & Shrub service line (owner ruling 2026-10-05:
@@ -1702,6 +1716,7 @@ module.exports = {
   // grades its lookup stories through the same evidence test so a
   // low-confidence AI inference prices as 'estimated' on both paths.
   storiesSourceForPricing,
+  storyCountHasEvidence,
   stampPestCurveVersion,
   deriveTotals,
   compsBand,
