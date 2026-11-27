@@ -509,21 +509,23 @@ async function loadMissedVisit({ conn, customerId, now, deriveWindow }) {
 // "you moved me" while UPCOMING SERVICES says something else, and the drafter could
 // not tell which was true. Two facts only, each one a finished sentence the drafter
 // renders (sms-shadow-drafter scheduleChangesSection):
-//  - moves: each listed visit's LAST move in reschedule_log (every writer that moves
-//    a visit logs it there: the rebooker for staff, the customer pages, auto-dispatch
-//    and scripted moves, the day re-plan and the bulk move). Stated only when the
-//    record proves it is the visit's current slot: the move's new day (and new start,
-//    when it logged one) must equal the row's schedule now. A row edited since by a
-//    writer that logs nothing, or a series sibling that moved with its anchor and has
-//    no row of its own, states nothing.
+//  - moves: the LAST move in reschedule_log of each visit UPCOMING SERVICES lists
+//    (the same rows in the same order: `upcomingServices`, the context's own list),
+//    so the two sections never name different visits. Every writer that moves a
+//    visit logs there: the rebooker for staff, the customer pages, auto-dispatch and
+//    scripted moves, the day re-plan and the bulk move. Stated only when the record
+//    proves it is the visit's current slot: the move's new day (and new start, when it
+//    logged one) must equal the row's schedule now. A row edited since by a writer
+//    that logs nothing, or a series sibling that moved with its anchor and has no row
+//    of its own, states nothing. The OLD slot is named by its day only (a logged hour
+//    may never have been told to the customer); the new window is UPCOMING SERVICES'
+//    own window for the visit, and a day-only visit names none. A same-day move is
+//    stated only for a visit whose window UPCOMING SERVICES shows.
 //  - stopped: a coming visit whose own row says skipped or cancelled. A skip or cancel
 //    the customer only ASKED for is not here (the row is still live), so the draft
-//    has nothing to say it was done.
-// The listed visits are the first UPCOMING_LIMIT live rows from today on, in date
-// order, as UPCOMING SERVICES lists them. A day-only visit (the customer was told the
-// day, not the hour: day-only-ai-context) names no hour, and a same-day window change
-// on one says nothing. Never a reason, never a note, never a new time.
-const SCHEDULE_UPCOMING_LIMIT = 3;
+//    has nothing to say it was done. The rows one cancel stopped together (same
+//    service, cancelled the same minute: a cancelled plan) are one fact.
+// Never a reason, never a note, never a new time.
 const SCHEDULE_STOPPED_LIMIT = 3;
 const SCHEDULE_HORIZON_DAYS = 60;
 const STOPPED_STATUSES = ['skipped', 'cancelled'];
@@ -540,96 +542,123 @@ function logMovedSlot(row) {
   if (!from || !to) return false;
   return from !== to || startMinutes(loggedStart(row.original_window)) !== startMinutes(loggedStart(row.new_window));
 }
-// The day-only verdict for the moved visits. strict (the send-time rebuild): a failed
-// read throws, so an outage refuses retryably instead of flipping the sentence;
-// otherwise the AI-context rule (a failed read = day-only: never leak an hour).
-async function dayOnlyVerdicts(conn, rows, now, strict) {
-  if (!rows.length) return () => true;
-  if (!strict) return require('./day-only-ai-context').loadDayOnlyCheck(conn, rows, now);
-  const display = await require('./time-promise').loadTimeDisplay(conn, rows, now);
-  return (row) => {
-    const verdict = display.get(row.id);
-    if (!verdict || verdict.failed === true) throw new Error(`day-only read failed for visit ${row.id}`);
-    return verdict.showHour === false;
-  };
-}
 // The visit's newest slot-changing log row, when it is the slot the row holds now
-// ({ visit, last, movedAt, toStart }); null when there is none or it is not proven.
+// ({ last, movedAt, toStart }); null when there is none or it is not proven.
 function provenLastMove(visit, logs) {
   const last = logs.find((l) => String(l.scheduled_service_id) === String(visit.id) && logMovedSlot(l));
   if (!last || calendarDay(last.new_date) !== calendarDay(visit.scheduled_date)) return null;
   const toStart = loggedStart(last.new_window);
   const sameStart = toStart == null ? visit.window_start == null : startMinutes(toStart) === startMinutes(visit.window_start);
   const movedAt = toDate(last.created_at);
-  return sameStart && movedAt ? { visit, last, movedAt, toStart } : null;
+  return sameStart && movedAt ? { last, movedAt, toStart } : null;
 }
-async function loadScheduleChanges({ conn, customerId, now, deriveWindow, strict = false }) {
-  const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
-  const today = etDateString(now);
-  const horizon = etDateString(addETDays(now, SCHEDULE_HORIZON_DAYS));
-  const rows = (await conn('scheduled_services')
-    .where({ customer_id: customerId })
-    .where('scheduled_date', '>=', today).where('scheduled_date', '<=', horizon)
-    .whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES])
-    .orderBy('scheduled_date').orderBy('window_start').orderBy('id')
-    // one customer's next two months: a backstop, far above a real account
-    .limit(200)
-    .select('id', 'visit_id', 'service_type', 'scheduled_date', 'status', 'window_start', 'window_end', 'window_display', 'time_window')) || [];
-  const live = rows.filter((r) => UPCOMING_SERVICE_STATUSES.includes(r.status));
-  const listed = live.slice(0, SCHEDULE_UPCOMING_LIMIT);
-
-  const moves = [];
-  if (listed.length) {
-    const logs = (await conn('reschedule_log')
-      .whereIn('scheduled_service_id', listed.map((r) => r.id))
+// UPCOMING SERVICES' window for a listed visit, as it shows it: null for a day-only
+// visit or one with no window (the send-time rebuild lists ids only, so null there:
+// the window is not part of the signature, UPCOMING SERVICES owns it).
+const listedWindow = (entry) => (entry && !entry.windowDayOnly && typeof entry.window === 'string' && entry.window.trim() ? entry.window.trim() : null);
+const listedId = (entry) => {
+  const id = entry && (entry.scheduledServiceId ?? entry.id);
+  return id == null ? null : String(id);
+};
+async function loadListedMoves(conn, customerId, upcomingServices) {
+  const listed = (Array.isArray(upcomingServices) ? upcomingServices : []).filter((e) => listedId(e));
+  if (!listed.length) return [];
+  const ids = [...new Set(listed.map(listedId))];
+  const [rows, logs] = await Promise.all([
+    conn('scheduled_services').where({ customer_id: customerId }).whereIn('id', ids)
+      .select('id', 'service_type', 'scheduled_date', 'status', 'window_start'),
+    conn('reschedule_log')
+      .whereIn('scheduled_service_id', ids)
       // a nightly "not closed out" flag logs the old slot and no new one: not a move
       .whereRaw("COALESCE(reason_code, '') <> 'customer_noshow'")
       .whereNotNull('new_date')
       .orderBy('created_at', 'desc').orderBy('id', 'desc')
       .limit(500)
-      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at')) || [];
-    const proven = listed.map((visit) => provenLastMove(visit, logs)).filter(Boolean);
-    const dayOnly = await dayOnlyVerdicts(conn, proven.map((p) => p.visit), now, strict);
-    for (const { visit, last, movedAt, toStart } of proven) {
-      const hidden = dayOnly(visit) === true;
-      const fromDate = calendarDay(last.original_date);
-      const toDay = calendarDay(last.new_date);
-      // a same-day window change on a visit told only the day changed nothing the customer heard
-      if (hidden && fromDate === toDay) continue;
-      const fromStart = loggedStart(last.original_window);
-      moves.push({
-        logId: String(last.id),
-        visitId: String(visit.id),
-        type: visit.service_type || null,
-        movedOn: etDateString(movedAt),
-        fromDate,
-        fromStart: hidden ? null : fromStart,
-        toDate: toDay,
-        toStart: hidden ? null : toStart,
-        dayOnly: hidden,
-        fromWindow: !hidden && fromStart ? windowLabel({ window_start: fromStart }, deriveWindow) : null,
-        toWindow: !hidden && toStart ? windowLabel({ window_start: toStart }, deriveWindow) : null,
-      });
-    }
+      .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'created_at'),
+  ]);
+  const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+  const byId = new Map((rows || []).map((r) => [String(r.id), r]));
+  const moves = [];
+  for (const entry of listed) {
+    const visit = byId.get(listedId(entry));
+    // a listed visit that is gone or no longer live (cancelled since) states no move
+    if (!visit || !UPCOMING_SERVICE_STATUSES.includes(visit.status)) continue;
+    const proof = provenLastMove(visit, logs || []);
+    if (!proof) continue;
+    const fromDate = calendarDay(proof.last.original_date);
+    const toDay = calendarDay(proof.last.new_date);
+    const toWindow = listedWindow(entry);
+    moves.push({
+      logId: String(proof.last.id),
+      visitId: String(visit.id),
+      type: visit.service_type || null,
+      movedOn: etDateString(proof.movedAt),
+      fromDate,
+      toDate: toDay,
+      toStart: proof.toStart,
+      sameDay: fromDate === toDay,
+      toWindow,
+    });
   }
-
+  return moves;
+}
+// The rows one cancel stopped together are one fact: same status and service, and for
+// a cancel the same cancelled_at minute (a cancelled plan). A skip, or a cancel with no
+// stamp, stands alone. Groups in date order (the rows come date-ordered).
+function stoppedGroups(rows) {
+  const groups = new Map();
+  for (const r of rows) {
+    const at = r.status === 'cancelled' ? toDate(r.cancelled_at) : null;
+    const key = at ? `cancelled|${r.service_type || ''}|${Math.floor(at.getTime() / 60000)}` : `row|${r.id}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+  return [...groups.values()].map((members) => ({
+    visitIds: members.map((m) => String(m.id)),
+    type: members[0].service_type || null,
+    status: members[0].status,
+    date: calendarDay(members[0].scheduled_date),
+    lastDate: calendarDay(members[members.length - 1].scheduled_date),
+    count: members.length,
+  }));
+}
+async function loadStopped(conn, customerId, now) {
+  const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+  const rows = (await conn('scheduled_services')
+    .where({ customer_id: customerId })
+    .where('scheduled_date', '>=', etDateString(now)).where('scheduled_date', '<=', etDateString(addETDays(now, SCHEDULE_HORIZON_DAYS)))
+    .whereIn('status', [...UPCOMING_SERVICE_STATUSES, ...STOPPED_STATUSES])
+    .orderBy('scheduled_date').orderBy('window_start').orderBy('id')
+    // one customer's next two months: a backstop, far above a real account
+    .limit(200)
+    .select('id', 'service_type', 'scheduled_date', 'status', 'cancelled_at')) || [];
   // A skipped or cancelled row the schedule replaced (a live row of the same service on
   // the same day) is not news: the live visit is in UPCOMING SERVICES.
-  const replaced = new Set(live.map((r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`));
-  const stopped = rows
-    .filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(`${calendarDay(r.scheduled_date)}|${r.service_type || ''}`))
-    .slice(0, SCHEDULE_STOPPED_LIMIT)
-    .map((r) => ({ visitId: String(r.id), type: r.service_type || null, date: calendarDay(r.scheduled_date), status: r.status }));
+  const dayKey = (r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`;
+  const replaced = new Set(rows.filter((r) => UPCOMING_SERVICE_STATUSES.includes(r.status)).map(dayKey));
+  return stoppedGroups(rows.filter((r) => STOPPED_STATUSES.includes(r.status) && !replaced.has(dayKey(r)))).slice(0, SCHEDULE_STOPPED_LIMIT);
+}
+async function loadScheduleChanges({ conn, customerId, now, upcomingServices = [] }) {
+  const [moves, stopped] = await Promise.all([
+    loadListedMoves(conn, customerId, upcomingServices),
+    loadStopped(conn, customerId, now),
+  ]);
   return { moves, stopped };
+}
+// The visits a SCHEDULE CHANGES read listed (UPCOMING SERVICES' ids, in its order): the
+// draft persists them, so the send-time rebuild asks about the same visits.
+function scheduleChangesVisitIds(upcomingServices) {
+  return (Array.isArray(upcomingServices) ? upcomingServices : []).map(listedId).filter(Boolean);
 }
 // The schedule facts as one comparable string ('' when there are none, 'unread' when
 // the read failed): the send boundary rebuilds them and refuses when this changed, so
-// a later move, skip or cancel retires a reply written before it. Raw values only.
+// a later move, skip or cancel retires a reply written before it. Raw values only (the
+// window label belongs to UPCOMING SERVICES).
 function scheduleChangesSignature(scheduleChanges) {
   if (!scheduleChanges || typeof scheduleChanges !== 'object') return 'unread';
   const key = (...parts) => parts.map((x) => (x == null ? '' : String(x))).join(':');
-  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, `${m.fromDate}T${m.fromStart ?? ''}`, `${m.toDate}T${m.toStart ?? ''}`, m.dayOnly === true)}`);
-  const stopped = (scheduleChanges.stopped || []).map((s) => `stopped:${key(s.visitId, s.type, s.date, s.status)}`);
+  const moves = (scheduleChanges.moves || []).map((m) => `moved:${key(m.logId, m.visitId, m.type, m.movedOn, m.fromDate, `${m.toDate}T${m.toStart ?? ''}`)}`);
+  const stopped = (scheduleChanges.stopped || []).map((g) => `stopped:${key(g.status, g.type, [].concat(g.visitIds || []).join(','), g.date, g.lastDate)}`);
   return [...moves, ...stopped].join('|');
 }
 
@@ -791,7 +820,9 @@ async function loadCommitments({ conn, customerId, now, strict, asOf = null }) {
 // withScheduleChanges: read SCHEDULE CHANGES (default: every drafting read; a strict
 // rebuild reads it only when the draft it checks showed it). A late draft (asOf) reads
 // it as it is now, like the window and delay facts: the reply goes out now.
-async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false, asOf = null, withScheduleChanges = !strict } = {}) {
+// upcomingServices: the visits UPCOMING SERVICES lists (the context's own rows; at send,
+// the ids the draft persisted), so SCHEDULE CHANGES names the same visits.
+async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = null, conn = db, strict = false, withCommitments = false, asOf = null, withScheduleChanges = !strict, upcomingServices = [] } = {}) {
   const out = emptyVisitLoops();
   if (!customerId) return out;
   const ctx = { conn, now, deriveWindow, customerId, strict, asOf };
@@ -807,7 +838,7 @@ async function loadVisitLoops({ customerId, now = new Date(), deriveWindow = nul
     strict && !withCommitments
       ? { weOwe: [], customerWaiting: [] }
       : read('commitments', { weOwe: [], customerWaiting: [] }, () => loadCommitments(ctx)),
-    withScheduleChanges ? read('schedule changes', null, () => loadScheduleChanges(ctx)) : null,
+    withScheduleChanges ? read('schedule changes', null, () => loadScheduleChanges({ ...ctx, upcomingServices })) : null,
   ]);
 
   // A confirmed miss leaves the row unstarted, so the same occurrence could also read
@@ -843,4 +874,4 @@ function visitStatusSignature(visitLoops) {
   return parts.length ? parts.join('|') : null;
 }
 
-module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, scheduleChangesSignature, loadScheduleChanges, allOpenCallCommitments, allSmsLane };
+module.exports = { loadVisitLoops, emptyVisitLoops, MISSED_VISIT_SCOPE_LINE, commitmentRevision, visitStatusSignature, scheduleChangesSignature, scheduleChangesVisitIds, loadScheduleChanges, allOpenCallCommitments, allSmsLane };

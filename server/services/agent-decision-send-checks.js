@@ -644,7 +644,9 @@ async function visitStatusReason(conn, status, customerId, refs) {
   const signature = status.signature || null;
   const withSchedule = typeof status.schedule === 'string';
   const facts = require('./visit-loops-facts');
-  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true, withScheduleChanges: withSchedule });
+  // the same UPCOMING SERVICES visits the draft listed (their ids, in its order)
+  const upcomingServices = withSchedule ? [].concat(status.scheduleVisits || []).filter((id) => typeof id === 'string' && id).map((id) => ({ scheduledServiceId: id })) : [];
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true, withScheduleChanges: withSchedule, upcomingServices });
   if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
   if (withSchedule && facts.scheduleChangesSignature(fresh.scheduleChanges) !== status.schedule) return 'schedule_changed';
   // the displayed commitments, from this same rebuild (a second read could miss one

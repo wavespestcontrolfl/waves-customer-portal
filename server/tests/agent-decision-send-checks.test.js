@@ -976,16 +976,17 @@ describe('open-loop commitments recheck', () => {
     });
 
     test('SCHEDULE CHANGES: a draft carrying `schedule` is rebuilt with them; a move, skip or cancel recorded since refuses', async () => {
-      const move = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', fromStart: '09:00:00', toDate: '2026-12-04', toStart: '13:00:00', dayOnly: false };
+      const move = { logId: 'rl-1', visitId: 'v1', type: 'Pest Control', movedOn: '2026-11-24', fromDate: '2026-12-02', toDate: '2026-12-04', toStart: '13:00:00', sameDay: false };
       const drew = { moves: [move], stopped: [] };
-      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: facts.scheduleChangesSignature(drew) } }) });
+      const d = decision({ input_snapshot: JSON.stringify({ ...SNAP, visit_loop_status: { signature, schedule: facts.scheduleChangesSignature(drew), scheduleVisits: ['v1', 'v2'] } }) });
       nowFacts({ ...drafted, scheduleChanges: drew });
       await expect(openLoopsBlockReason({ decision: d })).resolves.toBeNull();
-      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true, withScheduleChanges: true }));
+      // the rebuild asks about the same listed visits, in the same order
+      expect(spy).toHaveBeenCalledWith(expect.objectContaining({ strict: true, withScheduleChanges: true, upcomingServices: [{ scheduledServiceId: 'v1' }, { scheduledServiceId: 'v2' }] }));
       for (const changed of [
         { moves: [], stopped: [] },
         { moves: [{ ...move, logId: 'rl-2', toDate: '2026-12-05' }], stopped: [] },
-        { moves: [move], stopped: [{ visitId: 'v2', type: 'Lawn Care', date: '2026-12-10', status: 'skipped' }] },
+        { moves: [move], stopped: [{ visitIds: ['v2'], type: 'Lawn Care', date: '2026-12-10', lastDate: '2026-12-10', status: 'skipped', count: 1 }] },
       ]) {
         spy.mockRestore();
         nowFacts({ ...drafted, scheduleChanges: changed });

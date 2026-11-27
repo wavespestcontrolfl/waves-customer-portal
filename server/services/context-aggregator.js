@@ -1828,7 +1828,8 @@ class ContextAggregator {
     // email replies, briefs and assistant snapshots never read it.
     if (includeVisitLoops && gateEnvValue('GATE_SMS_REAL_ANSWERS')) {
       try {
-        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), ...(asOfDate ? { asOf: asOfDate } : {}) });
+        // upcomingServices: SCHEDULE CHANGES names exactly the visits UPCOMING SERVICES lists (the rows it renders: those with a date)
+        visitLoops = await loadVisitLoops({ customerId: customer.id, deriveWindow: (row) => this.deriveWindow(row), upcomingServices: context.upcomingServices.filter((s) => s && s.date), ...(asOfDate ? { asOf: asOfDate } : {}) });
       } catch (err) {
         logger.warn(`[context-aggregator] visitLoops unavailable: ${err?.message || err}`);
         visitLoops = emptyVisitLoops();

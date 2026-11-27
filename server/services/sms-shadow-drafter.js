@@ -5420,12 +5420,18 @@ function validateReplyPromises({ reply, context = null }) {
 // time-sensitive showed ({ signature: null }): a delay, passed window or missed
 // visit that appears while the card waits changes the live signature and refuses.
 // `schedule`: the SCHEDULE CHANGES the reply was written beside (visit-loops-facts scheduleChangesSignature; 'unread' when the read
-// failed): a move, skip or cancel recorded while the card waits changes it, and the send refuses.
+// failed): a move, skip or cancel recorded while the card waits changes it, and the send refuses. `scheduleVisits`: the listed visit ids.
 function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
   const facts = require('./visit-loops-facts');
   const v = context && context.visitLoops;
-  return { signature: facts.visitStatusSignature(v), schedule: facts.scheduleChangesSignature(v && v.scheduleChanges) };
+  // scheduleVisits: the UPCOMING SERVICES visits the read was about, so the send-time rebuild asks about the same ones
+  const listed = (context && Array.isArray(context.upcomingServices) ? context.upcomingServices : []).filter((u) => u && u.date);
+  return {
+    signature: facts.visitStatusSignature(v),
+    schedule: facts.scheduleChangesSignature(v && v.scheduleChanges),
+    scheduleVisits: facts.scheduleChangesVisitIds(listed),
+  };
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
@@ -5453,38 +5459,44 @@ function renderVisitLoopsSection(visitLoops) {
 }
 
 // SCHEDULE CHANGES (texting AI gap 3): what the schedule records prove (visit-loops-facts loadScheduleChanges), as finished sentences:
-// a listed visit's last move ("Your Pest Control visit was moved on Monday, Nov 24 from Tuesday, Dec 2, 9–11 AM to Thursday, Dec 4,
-// 1–3 PM.") and a coming visit whose row says skipped or cancelled. '' gate-off, when there is none, or when the read failed.
+// the last move of a visit UPCOMING SERVICES lists, its old slot by day only and its new window as UPCOMING SERVICES shows it ("Your Pest
+// Control visit was moved on Tuesday, Nov 24 from Wednesday, Dec 2 to Friday, Dec 4, 1–3 PM."), and a coming visit (or the visits one cancel
+// stopped together) whose row says skipped or cancelled. '' gate-off, when there is none, or when the read failed.
 const SCHEDULE_CHANGES_HEADER = 'SCHEDULE CHANGES (from our schedule records; to say a visit was moved, skipped or cancelled, copy one of these sentences word for word; for a visit not named here, say nothing about a move, skip or cancel):';
+function scheduleMoveLine(m, day, visit) {
+  const on = day(m.movedOn);
+  const to = day(m.toDate);
+  const win = visitLoopText(m.toWindow, 40);
+  if (!on || !to) return null;
+  // a same-day move names no old hour (it may never have been told): only the window UPCOMING SERVICES shows now
+  if (m.sameDay) return win ? `- ${visit(m.type)} on ${to} was moved to a new time on ${on}; its window is now ${win}.` : null;
+  const from = day(m.fromDate);
+  return from ? `- ${visit(m.type)} was moved on ${on} from ${from} to ${to}${win ? `, ${win}` : ''}.` : null;
+}
+function scheduleStoppedLine(g, day, visit) {
+  const d = day(g.date);
+  const word = { skipped: 'marked skipped', cancelled: 'cancelled' }[g.status];
+  if (!d || !word) return null;
+  const count = Number(g.count) || 1;
+  const last = day(g.lastDate);
+  if (count > 1 && last) {
+    const t = visitLoopText(g.type, 60);
+    return `- Your ${count} ${t ? `${t} ` : ''}visits from ${d} through ${last} are ${word} on our schedule.`;
+  }
+  return `- ${visit(g.type)} on ${d} is ${word} on our schedule.`;
+}
 function scheduleChangesLines(scheduleChanges) {
   const sc = scheduleChanges && typeof scheduleChanges === 'object' ? scheduleChanges : {};
   const day = (value) => visitLoopText(formatEtDate(value), 40);
-  const slot = (date, win) => {
-    const d = day(date);
-    if (!d) return '';
-    const w = visitLoopText(win, 40);
-    return w ? `${d}, ${w}` : d;
-  };
   const visit = (type) => {
     const t = visitLoopText(type, 60);
     return t ? `Your ${t} visit` : 'Your visit';
   };
-  const lines = [];
-  for (const m of Array.isArray(sc.moves) ? sc.moves : []) {
-    if (!m || typeof m !== 'object') continue;
-    const on = day(m.movedOn);
-    const from = slot(m.fromDate, m.fromWindow);
-    const to = slot(m.toDate, m.toWindow);
-    if (!on || !from || !to) continue;
-    lines.push(`- ${visit(m.type)} was moved on ${on} from ${from} to ${to}.`);
-  }
-  for (const st of Array.isArray(sc.stopped) ? sc.stopped : []) {
-    if (!st || typeof st !== 'object') continue;
-    const d = day(st.date);
-    if (!d) continue;
-    if (st.status === 'skipped') lines.push(`- ${visit(st.type)} on ${d} is marked skipped on our schedule.`);
-    else if (st.status === 'cancelled') lines.push(`- ${visit(st.type)} on ${d} is cancelled on our schedule.`);
-  }
+  const objects = (list) => (Array.isArray(list) ? list : []).filter((x) => x && typeof x === 'object');
+  const lines = [
+    ...objects(sc.moves).map((m) => scheduleMoveLine(m, day, visit)),
+    ...objects(sc.stopped).map((g) => scheduleStoppedLine(g, day, visit)),
+  ].filter(Boolean);
   return [...new Set(lines)];
 }
 function scheduleChangesSection(visitLoops) {
