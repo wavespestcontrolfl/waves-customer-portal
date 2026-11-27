@@ -685,7 +685,7 @@ describe('the tank sheet fill amounts on the v13 program', () => {
     const arena = itemFor(body, 'Arena 50 WDG');
     expect(arena.jobMix).toBeNull();
     expect(arena.tankAmounts).toMatchObject({
-      planState: 'spot', bigTank: false, per100Gal: null, lineCarrierGalPer1000: 4,
+      planState: 'spot', bigTank: false, per100Gal: null, fixedCarrierGalPer1000: 4, fixedCarrierSource: 'line',
       backpack4Gal: { amount: 0.29, amountUnit: 'oz', carrierGalPer1000: 4, carrierSource: 'line' },
     });
     expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
@@ -696,7 +696,7 @@ describe('the tank sheet fill amounts on the v13 program', () => {
     });
     expect(body.warnings).toContainEqual(expect.objectContaining({
       code: 'backpack_calibration_overdue_or_estimated',
-      message: 'Sprayer not field tested: FlowZone Typhoon Backpack is estimated at 1.33 gal per 1,000 sq ft. Amounts below assume that. Test the sprayer.',
+      message: 'Sprayer not field tested: FlowZone Typhoon Backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
     }));
   });
 

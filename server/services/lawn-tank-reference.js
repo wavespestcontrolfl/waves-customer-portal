@@ -6,8 +6,8 @@
  *   fullTank      a full tank of the selected rig when it is not 100 gal (the 110 gal tank),
  *   backpack4Gal  the 4 gal FlowZone backpack (every sprayed product: spot work, or a top-up).
  * amount = rate per 1,000 sq ft x (tank gallons / carrier gal per 1,000 sq ft), sized by calculateProductAmount over the area one
- * fill covers. The carrier is the protocol line's own spray volume when the line states one ("in 4 gal per 1,000 sq ft"), else the
- * last calibration of that sprayer. A percent-of-spray product (surfactant, 0.25% v/v) is that share of the fill. A spreader
+ * fill covers. The carrier is the staged program row's own carrier where the job calculation uses it (the spring catch-up, a spot row
+ * with its own rate), else the protocol line's stated spray volume ("in 4 gal per 1,000 sq ft"), else the last calibration of that sprayer. A percent-of-spray product (surfactant, 0.25% v/v) is that share of the fill. A spreader
  * product has no tank amount, only its rate per 1,000 sq ft.
  *
  * Reference only (owner 2026-11-26: every safety or limit alert is a warning, never hides an amount): an overdue or estimated
@@ -16,6 +16,7 @@
  */
 const { calculateProductAmount, v13RateOptions } = require('./waveguard-plan-engine');
 const { etDateString } = require('../utils/datetime-et');
+const roundsCatchUp = require('./lawn-rounds-catchup');
 
 const BIG_TANK_GAL = 100;
 const BACKPACK_GAL = 4;
@@ -78,6 +79,19 @@ function fill({ gallons, carrier, carrierSource, rateArgs, percent }) {
 
 const rigCarrier = (calibration) => Number(calibration?.carrier_gal_per_1000 || 0);
 
+// The spray volume a line's amount is stated over, read as the job calculation reads it, so the sheet and the job card agree:
+//   'row'   the staged row's own carrier: the spring catch-up's hose pass (roundsCatchUp.carrierFor, as the plan sizes it), or a spot
+//           row that states its own rate (job-card.js sizes that dose on the row's carrier, never the rig's);
+//   'line'  the volume the protocol line's text states ("in 4 gal per 1,000 sq ft");
+// else [null, null]: each sprayer's own calibration.
+function fixedCarrier(item, row, planState) {
+  const rowCarrier = roundsCatchUp.carrierFor(item, row, null)
+    || (planState === 'spot' && Number(row?.ratePer1000) > 0 && Number(row?.carrierGalPer1000) > 0 ? Number(row.carrierGalPer1000) : null);
+  if (rowCarrier) return [rowCarrier, 'row'];
+  const stated = lineCarrierGalPer1000(item.raw);
+  return stated ? [stated, 'line'] : [null, null];
+}
+
 // The big tank: a 2.5 gal jug, or a whole-lawn line (a staged row that is not a spot row; with no staged row, a base line).
 function goesInBigTank(product, item, row) {
   if (isTwoAndHalfGallonJug(product)) return true;
@@ -94,14 +108,14 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   const rateArgs = { product, ...nutrientTargets, ...v13RateOptions(row) };
   const rate = calculateProductAmount({ ...rateArgs, lawnSqft: 1000, carrierGalPer1000: 0 });
   const percent = concentrationPercent(row, item.raw);
-  const none = { bigTank: false, lineCarrierGalPer1000: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false };
+  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false };
   const base = { ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: rate.rateSource, concentrationPercent: percent, planState: planState || null, ...none };
   if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader' };
-  const lineCarrier = lineCarrierGalPer1000(item.raw);
+  const [lineCarrier, lineSource] = fixedCarrier(item, row, planState);
   // A backpack picked as the rig is not the big tank.
   const tankRig = rig?.system_type === 'backpack' ? null : rig;
   const sized = (gallons, calibration) => fill({
-    gallons, carrier: lineCarrier || rigCarrier(calibration), carrierSource: lineCarrier ? 'line' : 'calibration', rateArgs, percent,
+    gallons, carrier: lineCarrier || rigCarrier(calibration), carrierSource: lineSource || 'calibration', rateArgs, percent,
   });
   const bigTank = goesInBigTank(product, item, row);
   const fullGallons = Number(tankRig?.tank_capacity_gal || 0);
@@ -110,7 +124,8 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     ...base,
     application: 'spray',
     bigTank,
-    lineCarrierGalPer1000: lineCarrier,
+    fixedCarrierGalPer1000: lineCarrier,
+    fixedCarrierSource: lineSource,
     per100Gal: bigTank ? sized(BIG_TANK_GAL, tankRig) : null,
     fullTank: bigTank && fullGallons > 0 && fullGallons !== BIG_TANK_GAL ? sized(fullGallons, tankRig) : null,
     backpack4Gal,
@@ -119,19 +134,22 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   };
 }
 
-// The sheet warning for a sprayer whose test is overdue or was never field tested. The amounts stay; this line says what they assume.
+// Why a calibration is not a field test: an estimated (or any other non-verified) status, or no status on file at all.
+const notFieldTested = (status) => (status == null ? 'field test not on file' : status !== 'field_verified' ? 'estimated, not field tested' : null);
+
+// The sheet warning for a sprayer whose test is overdue or is not a field test. The amounts stay; this line says what they assume.
 function sprayerTestWarning(calibration, { code, now = new Date() } = {}) {
   const carrier = rigCarrier(calibration);
   if (!calibration || !(carrier > 0)) return null;
   const overdue = Boolean(calibration.expires_at) && new Date(calibration.expires_at) <= now;
-  const estimated = calibration.calibration_status != null && calibration.calibration_status !== 'field_verified';
-  if (!overdue && !estimated) return null;
+  const untested = notFieldTested(calibration.calibration_status);
+  if (!overdue && !untested) return null;
   const name = calibration.system_name || 'The selected sprayer';
   const at = `${carrier} gal per 1,000 sq ft`;
   const testedOn = calibration.calibrated_at ? ` last tested ${etDateString(new Date(calibration.calibrated_at))}` : '';
   const message = overdue
-    ? `Sprayer test overdue: ${name}${testedOn} at ${at}${estimated ? ' (estimated, not field tested)' : ''}. Amounts below assume that. Test the sprayer again.`
-    : `Sprayer not field tested: ${name} is estimated at ${at}. Amounts below assume that. Test the sprayer.`;
+    ? `Sprayer test overdue: ${name}${testedOn} at ${at}${untested ? ` (${untested})` : ''}. Amounts below assume that. Test the sprayer again.`
+    : `Sprayer not field tested: ${name} at ${at} (${untested}). Amounts below assume that. Test the sprayer.`;
   return { code, severity: 'warning', equipmentSystemId: calibration.equipment_system_id || null, message };
 }
 

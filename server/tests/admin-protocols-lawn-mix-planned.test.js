@@ -88,7 +88,7 @@ function calibrationQuery() {
   const query = readQuery([]);
   let backpackOnly = false;
   query.where = jest.fn((key, value) => { if (key === 'es.system_type' && value === 'backpack') backpackOnly = true; return query; });
-  const rows = () => [backpackOnly ? backpackCalibration : calibration].filter(Boolean);
+  const rows = () => [].concat(backpackOnly ? backpackCalibration : calibration).filter(Boolean);
   query.first = jest.fn(async () => rows()[0] || null);
   query.catch = (onRejected) => Promise.resolve(rows()).catch(onRejected);
   return query;
@@ -101,7 +101,7 @@ beforeEach(() => {
     id: 'calibration-fixture', equipment_system_id: 'tank-fixture',
     system_name: 'Fixture tank', system_type: 'tank',
     carrier_gal_per_1000: 2, tank_capacity_gal: 40,
-    expires_at: '2030-07-16T16:00:00Z',
+    expires_at: '2030-07-16T16:00:00Z', calibration_status: 'field_verified',
   };
   backpackCalibration = null;
   visit = {
@@ -194,20 +194,20 @@ describe('lawn-mix response for optional products', () => {
     expect(body.equipment).toMatchObject({ calibrationStatus: 'estimated' });
     expect(body.warnings).toEqual([expect.objectContaining({
       code: 'calibration_overdue_or_estimated',
-      message: 'Sprayer not field tested: Fixture tank is estimated at 2 gal per 1,000 sq ft. Amounts below assume that. Test the sprayer.',
+      message: 'Sprayer not field tested: Fixture tank at 2 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
     })]);
   });
 
   test('tank amounts: the base liquid per 100 gal and per full tank; every sprayed product, unselected or not, per 4 gal FlowZone', async () => {
     backpackCalibration = {
-      id: 'calibration-backpack', equipment_system_id: 'backpack-fixture', system_name: 'Fixture backpack', system_type: 'backpack',
+      id: 'calibration-backpack', equipment_system_id: 'backpack-fixture', system_name: 'FlowZone fixture backpack', system_type: 'backpack',
       carrier_gal_per_1000: 1.33, tank_capacity_gal: 4, calibration_status: 'estimated', expires_at: '2030-08-01T00:00:00Z',
     };
     const body = await lawnMix();
     const [base, rescue, premium] = body.items;
     // amount = rate per 1,000 sq ft x (tank gallons / carrier gal per 1,000 sq ft)
     expect(base.tankAmounts).toMatchObject({
-      application: 'spray', bigTank: true, ratePer1000: 3, rateUnit: 'fl_oz', lineCarrierGalPer1000: null,
+      application: 'spray', bigTank: true, ratePer1000: 3, rateUnit: 'fl_oz', fixedCarrierGalPer1000: null,
       per100Gal: { gallons: 100, amount: 150, carrierGalPer1000: 2, carrierSource: 'calibration' },
       fullTank: { gallons: 40, amount: 60 },
       backpack4Gal: { gallons: 4, amount: 9.023, amountUnit: 'fl_oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
@@ -217,7 +217,34 @@ describe('lawn-mix response for optional products', () => {
     expect(premium.tankAmounts).toMatchObject({ bigTank: false, backpack4Gal: { amount: 27.068 } });
     expect(body.warnings).toEqual([expect.objectContaining({
       code: 'backpack_calibration_overdue_or_estimated',
-      message: 'Sprayer not field tested: Fixture backpack is estimated at 1.33 gal per 1,000 sq ft. Amounts below assume that. Test the sprayer.',
+      message: 'Sprayer not field tested: FlowZone fixture backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
+    })]);
+  });
+
+  test('the FlowZone is found by what it is (4 gal backpack named FlowZone): a field-verified test first, then the newest test', async () => {
+    const flowZone = (id, name, status, calibratedAt, carrier) => ({
+      id, equipment_system_id: `${id}-system`, system_name: name, system_type: 'backpack', tank_capacity_gal: 4,
+      carrier_gal_per_1000: carrier, calibration_status: status, calibrated_at: calibratedAt, expires_at: '2030-08-01T00:00:00Z',
+    });
+    const other = { ...flowZone('alpha', 'Alpha 3 gal backpack', 'field_verified', '2030-07-10T12:00:00Z', 1), tank_capacity_gal: 3 };
+    const estimated = flowZone('fz-new', 'FlowZone Typhoon Backpack #2', 'estimated', '2030-07-01T12:00:00Z', 1.33);
+    const verified = flowZone('fz-old', 'FlowZone Typhoon Backpack #1', 'field_verified', '2030-06-20T12:00:00Z', 1.6);
+    backpackCalibration = [other, estimated, verified];
+    const kflowFill = async () => (await lawnMix()).items.find((item) => item.product?.id === 'kflow').tankAmounts.backpack4Gal;
+    expect(await kflowFill()).toMatchObject({ carrierGalPer1000: 1.6 });
+    backpackCalibration = [other, { ...verified, calibration_status: 'estimated' }, estimated];
+    expect(await kflowFill()).toMatchObject({ carrierGalPer1000: 1.33 });
+    const body = await lawnMix();
+    expect(body.warnings).toContainEqual(expect.objectContaining({ code: 'backpack_calibration_overdue_or_estimated', message: expect.stringContaining('FlowZone Typhoon Backpack #2') }));
+  });
+
+  test('a sprayer with no test status on file warns that its field test is not on file, and keeps its amounts', async () => {
+    calibration.calibration_status = null;
+    const body = await lawnMix();
+    expect(body.items.find(item => item.product?.id === 'kflow').tankAmounts.per100Gal).toMatchObject({ amount: 150 });
+    expect(body.warnings).toEqual([expect.objectContaining({
+      code: 'calibration_overdue_or_estimated',
+      message: 'Sprayer not field tested: Fixture tank at 2 gal per 1,000 sq ft (field test not on file). Amounts below assume that. Test the sprayer.',
     })]);
   });
 
@@ -226,7 +253,7 @@ describe('lawn-mix response for optional products', () => {
     calibration = null;
     const body = await lawnMix();
     const arena = body.items.find((item) => item.product?.id === 'arena');
-    expect(arena.tankAmounts).toMatchObject({ lineCarrierGalPer1000: 4, backpack4Gal: { amount: 0.29, carrierGalPer1000: 4, carrierSource: 'line' } });
+    expect(arena.tankAmounts).toMatchObject({ fixedCarrierGalPer1000: 4, fixedCarrierSource: 'line', backpack4Gal: { amount: 0.29, carrierGalPer1000: 4, carrierSource: 'line' } });
   });
 
   test.each([

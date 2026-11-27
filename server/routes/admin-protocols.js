@@ -747,17 +747,23 @@ async function getActiveCalibration(equipmentSystemId) {
   return query.first().catch(() => null);
 }
 
-// The FlowZone backpack's active calibration, for the tank sheet's 4 gal amounts (lawn-tank-reference.js). null when none is on file.
+// The 4 gal FlowZone backpack's active calibration, for the tank sheet's "FlowZone 4 gal" amounts (lawn-tank-reference.js): the
+// sprayer is found by what it is (an active backpack system, 4 gal, named FlowZone), never by name order. With more than one, a field
+// verified test first, then the newest test. null when none is on file.
+const isFlowZone4Gal = (row) => row.system_type === 'backpack' && Number(row.tank_capacity_gal) === 4 && /flow\s*zone/i.test(row.system_name || '');
+const newestTestFirst = (a, b) => (b.calibration_status === 'field_verified') - (a.calibration_status === 'field_verified')
+  || new Date(b.calibrated_at || 0) - new Date(a.calibrated_at || 0);
 async function getBackpackCalibration() {
   const rows = await db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
     .where('ec.active', true)
     .where('es.active', true)
     .where('es.system_type', 'backpack')
+    .where('es.tank_capacity_gal', 4)
+    .where('es.name', 'ilike', '%flow%zone%')
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
-    .orderBy('es.name', 'asc')
     .catch(() => []);
-  return (rows || []).find((row) => row.system_type === 'backpack') || null;
+  return (rows || []).filter(isFlowZone4Gal).sort(newestTestFirst)[0] || null;
 }
 
 // GET /api/admin/protocols/photos/relevant — context-aware photo references

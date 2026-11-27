@@ -93,7 +93,7 @@ describe("110-gallon tank reference", () => {
 
   it("lists every fill: 100 gal, the full tank, the FlowZone with a small amount also in grams, and a line's own spray volume", () => {
     const plan = fixture();
-    plan.items[0].tankAmounts.lineCarrierGalPer1000 = 4;
+    Object.assign(plan.items[0].tankAmounts, { fixedCarrierGalPer1000: 4, fixedCarrierSource: "line" });
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("0.227 oz per 1,000 sq ft")).toBeInTheDocument();
@@ -112,7 +112,7 @@ describe("110-gallon tank reference", () => {
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     expect(within(container).getByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toBeInTheDocument();
     expect(within(container).getByText("3.125 lb / 1,000 sq ft")).toBeInTheDocument();
-    expect(within(container).getByText("Spreader").nextSibling).toHaveTextContent("3.125 lb per 1,000 sq ft");
+    expect(within(container).getByText("3.125 lb per 1,000 sq ft")).toBeInTheDocument();
     expect(within(container).queryByText("Tank mixing not set in the app. Check the label.")).not.toBeInTheDocument();
   });
 
@@ -124,6 +124,25 @@ describe("110-gallon tank reference", () => {
     expect(within(container).getByText(/Sprayer test overdue: Test tank last tested 2026-09-07/)).toBeInTheDocument();
     expect(within(container).getByText("12.5 oz / 110 gal")).toBeInTheDocument();
     expect(within(container).queryByText(/Tank quantities are unavailable/)).not.toBeInTheDocument();
+  });
+
+  it("a granular product is a spreader card, on screen and in print: no single-product tank, and the tank sentence names sprayed products", () => {
+    const plan = fixture();
+    plan.items = [{ selected: true, product: { id: "bag", name: "Synthetic granular", labelVerifiedAt: "2026-01-01" },
+      tankAmounts: { application: "spreader", ratePer1000: 3.125, rateUnit: "lb", per100Gal: null, fullTank: null, backpack4Gal: null } }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Spreader")).toBeInTheDocument();
+      expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
+      expect(within(surface).queryByText(/requires a separate single-product tank/)).not.toBeInTheDocument();
+    }
+  });
+
+  it("a carrier taken from the program row is labeled so", () => {
+    const plan = fixture();
+    Object.assign(plan.items[0].tankAmounts, { fixedCarrierGalPer1000: 2, fixedCarrierSource: "row" });
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getByText("2 gal per 1,000 sq ft (from the program row)")).toBeInTheDocument();
   });
 
   it("a FlowZone with no sprayer test says so in place of its amount", () => {
@@ -162,7 +181,7 @@ describe("110-gallon tank reference", () => {
     plan.items[0].tankAmounts = { application: "spray", ratePer1000: 0.227, rateUnit: "oz", per100Gal: null, fullTank: null, backpack4Gal: null };
     plan.warnings = [{ code: "missing_calibration", message: "No sprayer test on file for the selected tank, so tank amounts are not shown. Test the sprayer." }];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
-    expect(within(container).getByText(/Do not combine the listed products in one tank/)).toBeInTheDocument();
+    expect(within(container).getByText(/Each sprayed product below requires a separate single-product tank. Do not combine the listed products in one tank/)).toBeInTheDocument();
     expect(within(container).getByText("No amount")).toBeInTheDocument();
     expect(within(container).getByText(/No sprayer test on file for the selected tank/)).toBeInTheDocument();
   });

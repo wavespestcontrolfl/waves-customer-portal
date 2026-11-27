@@ -13,6 +13,8 @@ const TANK_MIX_CATEGORIES = new Set([
 const unitText = (unit) => String(unit || "").replaceAll("_", " ");
 const num = (value) => Number(value).toLocaleString("en-US", { maximumFractionDigits: 3 });
 const fillText = (fill) => `${num(fill.amount)} ${unitText(fill.amountUnit)}${fill.metricAmount ? ` (${num(fill.metricAmount)} ${fill.metricUnit})` : ""}`;
+const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
+const isSpreader = (item) => item.tankAmounts?.application === "spreader";
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",
@@ -24,14 +26,14 @@ function amountRows(amounts) {
   if (!amounts) return { rows: [], heading: "No amount" };
   const rate = amounts.ratePer1000 ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} per 1,000 sq ft` : null;
   if (amounts.application === "spreader") {
-    return { rows: [["Spreader", rate || "Rate not on file. Use the label rate."]], heading: rate ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} / 1,000 sq ft` : "No amount" };
+    return { rows: [["Rate", rate || "Rate not on file. Use the label rate."]], heading: rate ? `${num(amounts.ratePer1000)} ${unitText(amounts.rateUnit)} / 1,000 sq ft` : "No amount" };
   }
   const rows = [["Rate", amounts.concentrationPercent ? `${num(amounts.concentrationPercent)}% of the spray volume` : rate || "Not on file. Use the label rate."]];
   if (amounts.per100Gal) rows.push(["100 gal tank", fillText(amounts.per100Gal)]);
   if (amounts.fullTank) rows.push([`Full ${num(amounts.fullTank.gallons)} gal tank`, fillText(amounts.fullTank)]);
   if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", fillText(amounts.backpack4Gal)]);
   else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
-  if (amounts.lineCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.lineCarrierGalPer1000)} gal per 1,000 sq ft (protocol line)`]);
+  if (amounts.fixedCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.fixedCarrierGalPer1000)} gal per 1,000 sq ft (${CARRIER_SOURCE[amounts.fixedCarrierSource]})`]);
   const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
   return { rows, heading: main ? `${fillText(main)} / ${num(main.gallons)} gal${main === amounts.backpack4Gal ? " FlowZone" : ""}` : "No amount" };
 }
@@ -56,6 +58,7 @@ function productCautions(item, exclusions) {
 export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
   const equipment = plan.equipment;
   const products = (plan.items || []).filter((item) => item.product);
+  const sprayed = products.some((item) => !isSpreader(item));
   const sheet = (
     <>
       <FieldMasthead variant="staff" />
@@ -71,7 +74,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             Reference sheet, not a pesticide container label or approval to combine every product.
             Follow each product label for mixing, PPE, application restrictions and re-entry.
           </p>
-          <p className="mt-2">Each product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>
+          {sprayed && <p className="mt-2">Each sprayed product below requires a separate single-product tank. Do not combine the listed products in one tank.</p>}
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
         {equipment?.carrierGalPer1000 > 0 && (
@@ -111,7 +114,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
               <h3>{product.name}</h3>
               <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            <p className="mt-2 font-medium">Separate single-product tank</p>
+            <p className="mt-2 font-medium">{isSpreader(item) ? "Spreader" : "Separate single-product tank"}</p>
             <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
