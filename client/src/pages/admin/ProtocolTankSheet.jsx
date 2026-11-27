@@ -41,6 +41,19 @@ function sharedTank(item, products, order) {
 // A base product and every ready product added to its mix: one shared tank.
 const baseTank = (base, products) => [base, ...products.filter((other) => mixReady(other) && mixesInto(other, base))].map((tankItem) => String(tankItem.product.id));
 
+// A card's tank: its mix line's tank plus every mixing order (base, Bermuda) the product is a step of, so a pair the base order
+// combines warns on its cards with no mixWith mark too.
+function cardTankIds(item, method, plan) {
+  const ids = new Set(method.tankIds || []);
+  if (mixReady(item)) {
+    for (const order of [plan.mixingOrder, plan.bermudaMixingOrder]) {
+      const steps = mixOrderIds(order);
+      if (steps.includes(String(item.product.id))) steps.forEach((id) => ids.add(id));
+    }
+  }
+  return [...ids];
+}
+
 // The one mix-line helper: the line's text, and the product ids it puts in the same tank (tankIds; null for no shared tank).
 function applicationMethod(item, products, order) {
   const amounts = item.tankAmounts || {};
@@ -61,7 +74,9 @@ function applicationMethod(item, products, order) {
 // ("Do not mix: <reason>"): no card tells staff to combine the pair. Every other answer shows under the line. Never in place of a product or an amount
 // (owner 2026-11-26). No check on the sheet (a failed check): nothing.
 const MIX_CHECK_TEXT = { caution: (pair) => `Caution: ${pair.reason}`, never: (pair) => `Do not mix: ${pair.reason}`, unknown: (pair) => pair.reason || "No rule on file" };
-function tankMixWarnings(tankIds, mixCheck) {
+// The one verdict path: every place that tells staff to combine products (card mix lines, printed cards, the base and Bermuda
+// mixing orders, their step text) takes its warnings from here.
+export function tankMixWarnings(tankIds, mixCheck) {
   if (!tankIds || tankIds.length < 2 || !Array.isArray(mixCheck?.pairs)) return [];
   const inTank = new Set(tankIds.map((id) => id.toLowerCase()));
   const lines = mixCheck.pairs
@@ -71,20 +86,30 @@ function tankMixWarnings(tankIds, mixCheck) {
       const names = inTank.size > 2 ? ` (${pair.productAName} + ${pair.productBName})` : "";
       return [
         MIX_CHECK_TEXT[pair.verdict] && {
-          verdict: pair.verdict, text: `${MIX_CHECK_TEXT[pair.verdict](pair)}${names}`,
+          verdict: pair.verdict, pair, text: `${MIX_CHECK_TEXT[pair.verdict](pair)}${names}`,
           // A Never pair in the tank: the line takes the mix line's place on every card of the tank.
           replacesLine: pair.verdict === "never",
         },
         // A rule can ask for a jar test whatever its verdict, a Yes included.
-        pair.jarTestRequired && { verdict: "caution", text: `Jar test first${names}` },
+        pair.jarTestRequired && { verdict: "caution", pair, text: `Jar test first${names}` },
       ].filter(Boolean);
     });
   return lines.filter((entry, index) => lines.findIndex((other) => other.text === entry.text) === index);
 }
 
-// The "Do not mix" lines for the products of one tank (a card's tank, a mixing order's steps): empty when no pair is Never.
-export const neverMixLines = (productIds, mixCheck) => tankMixWarnings(productIds, mixCheck)
-  .filter((warning) => warning.replacesLine).map((warning) => warning.text);
+// The product ids of a mixing order (base or Bermuda): one tank.
+export const mixOrderIds = (order) => (order || []).filter((step) => step.productId).map((step) => String(step.productId));
+
+// The Never lines that belong directly under one direction (a mixing-order step, a card's mixing directions): each Never pair
+// that has this product, or a product the text names. The text itself is never rewritten.
+export function neverLinesFor(warnings, { productId, text }) {
+  const said = String(text || "").toLowerCase();
+  const own = productId == null ? null : String(productId).toLowerCase();
+  return warnings.filter((warning) => warning.replacesLine && [
+    [warning.pair.productAId, warning.pair.productAName], [warning.pair.productBId, warning.pair.productBName],
+  ].some(([id, name]) => String(id).toLowerCase() === own || (name && said.includes(String(name).toLowerCase()))))
+    .map((warning) => warning.text);
+}
 // The protocol's own line on a card in a Never tank: it stays, marked so its mix words are not followed.
 export const NEVER_PROTOCOL_PREFIX = "Do not mix as this protocol line says (see Do not mix above):";
 
@@ -215,7 +240,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         const exclusions = product.excludedTurfSpecies || [];
         const cautions = productCautions(item, exclusions, products);
         const method = applicationMethod(item, products, plan.bermudaMixingOrder);
-        const tankWarnings = tankMixWarnings(method.tankIds, plan.mixCheck);
+        const tankWarnings = tankMixWarnings(cardTankIds(item, method, plan), plan.mixCheck);
         const neverLines = tankWarnings.filter((warning) => warning.replacesLine);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
@@ -247,6 +272,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
             <p className="mt-2">{product.mixingInstructions || "Mixing directions are not on file. Consult the product label."}</p>
+            {product.mixingInstructions && neverLinesFor(tankWarnings, { productId: product.id, text: product.mixingInstructions }).map((text) => <p key={text} className="mt-1 font-medium text-alert-fg">{text}</p>)}
             {exclusions.length > 0 && <p className="mt-2 text-alert-fg">Excluded turf: {exclusions.join(", ")}</p>}
             <dl className="protocol-tank-meta mt-3 grid gap-3 md:grid-cols-2">{safety.map(([label, value]) => <div key={label}><dt className="font-medium">{label}</dt><dd>{String(value)}</dd></div>)}</dl>
             <div className="protocol-tank-meta mt-3 flex flex-wrap gap-4">

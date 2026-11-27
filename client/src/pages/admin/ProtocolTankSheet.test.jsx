@@ -367,6 +367,21 @@ describe("110-gallon tank reference", () => {
     }
   });
 
+  it("a Never pair the base mixing order combines warns on both cards with no mixWith mark, on screen and in print", () => {
+    const plan = weedMixPlan([pair("never", "Label: no surfactant.")]);
+    delete plan.items[1].tankAmounts.mixWith;
+    plan.items[0].product.mixingInstructions = "Mix Celsius WG first, then add Synthetic surfactant.";
+    plan.mixingOrder = [{ step: 1, productId: "cel", productName: "Celsius WG" }, { step: 2, productId: "nis", productName: "Synthetic surfactant" }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      // Two mix lines plus one under the Celsius card's own directions, which stay as written.
+      expect(within(surface).getAllByText("Do not mix: Label: no surfactant.")).toHaveLength(3);
+      expect(within(surface).getByText("Mix Celsius WG first, then add Synthetic surfactant.")).toBeInTheDocument();
+      expect(within(surface).queryByText("Mixing: follow this card and the label")).not.toBeInTheDocument();
+      expect(within(surface).getAllByText("0.12 oz (3.4 g) / 4 gal FlowZone")).toHaveLength(2);
+    }
+  });
+
   it("a Yes pair, no check (a failed check) or a product with no shared tank shows no mix safety line", () => {
     for (const plan of [weedMixPlan([pair("ok", "Owner checked.")]), weedMixPlan(undefined), weedMixPlan(null)]) {
       const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);

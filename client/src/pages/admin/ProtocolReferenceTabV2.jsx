@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, ScanStrip, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
-import ProtocolTankSheet, { neverMixLines } from "./ProtocolTankSheet";
+import ProtocolTankSheet, { mixOrderIds, neverLinesFor, tankMixWarnings } from "./ProtocolTankSheet";
 import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
@@ -888,21 +888,26 @@ export function ProtocolMixCard({
   );
 }
 
-// One tank's mixing order. A Never pair among its products (the mix safety table, /lawn-mix mixCheck): the "Do not mix" lines
-// come first and the steps lose their numbers, so nothing reads as an order to combine them; every product and its amount
-// line stay (owner 2026-11-26).
+// One tank's mixing order, its verdicts from the sheet's one path (tankMixWarnings, /lawn-mix mixCheck). Every non-Yes line
+// (Do not mix, Caution, jar test, no rule) comes before the steps. A Never pair also drops the step numbers, so nothing reads
+// as an order to combine them, and puts its "Do not mix" line directly under each step it concerns. Step text, every product
+// and its amount line stay as sent (owner 2026-11-26: warnings only).
 function MixOrderSteps({ steps, mixCheck, nameClass, textClass }) {
-  const never = neverMixLines(steps.filter((step) => step.productId).map((step) => String(step.productId)), mixCheck);
+  const warnings = tankMixWarnings(mixOrderIds(steps), mixCheck);
+  const hasNever = warnings.some((warning) => warning.replacesLine);
+  const ordered = [...warnings.filter((warning) => warning.replacesLine), ...warnings.filter((warning) => !warning.replacesLine)];
   return (
     <>
-      {never.map((text) => <div key={text} className={`${nameClass} font-medium text-alert-fg`}>{text}</div>)}
-      {never.length > 0 && <div className={`${textClass} text-alert-fg`}>Not one tank: mix these separately. The amounts below stay for reference.</div>}
+      {ordered.map((warning) => (
+        <div key={warning.text} className={`${textClass} ${warning.replacesLine ? "font-medium text-alert-fg" : warning.verdict === "unknown" ? "text-zinc-700" : "text-alert-fg"}`}>{warning.text}</div>
+      ))}
+      {hasNever && <div className={`${textClass} text-alert-fg`}>Not one tank: mix these separately. The amounts below stay for reference.</div>}
       {steps.map((step) => (
         <div
           key={`${step.step}-${step.productId}`}
           className="flex gap-3 rounded-sm border-hairline border-zinc-200 p-3"
         >
-          {!never.length && (
+          {!hasNever && (
             <div className="h-6 w-6 rounded-xs bg-zinc-900 text-white text-12 u-nums flex items-center justify-center flex-shrink-0">
               {step.step}
             </div>
@@ -910,6 +915,9 @@ function MixOrderSteps({ steps, mixCheck, nameClass, textClass }) {
           <div>
             <div className={`${nameClass} font-medium text-zinc-900`}>{step.productName}</div>
             <div className={`${textClass} text-ink-secondary leading-normal mt-1`}>{step.instruction}</div>
+            {neverLinesFor(warnings, { productId: step.productId, text: step.instruction }).map((text) => (
+              <div key={text} className={`${textClass} font-medium text-alert-fg mt-1`}>{text}</div>
+            ))}
           </div>
         </div>
       ))}
