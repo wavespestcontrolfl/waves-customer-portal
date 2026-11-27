@@ -133,6 +133,12 @@ describe('confirmOnRoads', () => {
     // And if real roads DO answer for bar4 and show it fails the floor, bar4 is rejected!
     const barRejected = await run(four, { now: [20, 20, 10], bar4: [19, 19, 10] }, { config: minutesConfig });
     expect(barRejected).toMatchObject({ qualifies: false, roadFailed: true, ranked: [] });
+    // When real roads ARE available for m1/m2 (both miss floor), the 3rd-ranked slot m3 is still checked and wins!
+    const thirdWins = await run(four, {
+      now: [20, 20, 10], m1: [16, 16, 10], m2: [16, 16, 10], m3: [10, 10, 10], bar4: [19, 19, 10],
+    }, { config: minutesConfig });
+    expect(thirdWins).toMatchObject({ qualifies: true, byMinutes: true });
+    expect(thirdWins.best.name).toBe('m3');
     // Same slot WITH real Google confirmation clearing the 10-min floor: passes.
     const confirmed = await run(onlyNeg, { now: [20, 20, 10], first: [10, 10, 10] }, { config: minutesConfig });
     expect(confirmed).toMatchObject({ qualifies: true, byMinutes: true });

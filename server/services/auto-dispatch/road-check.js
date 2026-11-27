@@ -166,10 +166,15 @@ async function withProjectionChecked(ranked, ctx) {
   if (!ranked.normalBest || !isOverlap || ctx.config.mode === 'apply') return ranked;
   const moveRules = require('./move-rules');
   const floor = ctx.config.minDayMoveDriveSavingMinutes || 0;
-  const toCheck = slotsToMeasure(projectionRows(ranked), moveRules.isSundayDate);
+  const rows = projectionRows(ranked);
+  const top = rows.slice(0, ROAD_CHECK_SLOTS);
+  const fallback = fallbackSlotAfter(rows, moveRules.isSundayDate);
+  let allUnavailable = true;
   try {
-    for (const row of toCheck) {
+    for (let i = 0; i < top.length; i += 1) {
+      const row = nextSlotToCheck(top, i, allUnavailable, fallback);
       const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
+      if (road) allUnavailable = false;
       const requireRoad = needsConfirmedRoad(row);
       const rowFloor = projectionFloor(row, floor, ranked, ctx);
       if ((!road && !requireRoad) || (road && road.saving_minutes >= rowFloor)) {
@@ -198,18 +203,21 @@ const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: r
  * noMoveReason), with the best slot's numbers in the audit row.
  * Never throws: a failure keeps the model's answer.
  */
-// Select up to ROAD_CHECK_SLOTS candidates to measure on Google roads. When all
-// top slots require road confirmation (nonpositive-gain minutes-rule) and a
-// later score-bar/positive-gain candidate exists, reserve the final slot for
-// that candidate so it is actually road-checked (never approved unchecked on an
-// estimate) while keeping total provider calls bounded at ROAD_CHECK_SLOTS.
-function slotsToMeasure(rankedRows, isSundayDate) {
+// Find the first score-bar/positive-gain candidate after ROAD_CHECK_SLOTS in
+// the same Sunday tier. Only substituted for the final check slot when every
+// earlier nonpositive-gain slot had no Google road measurement, so normal road
+// runs still check the 3rd-ranked slot while unavailable runs stay bounded at
+// ROAD_CHECK_SLOTS and never approve a fallback unchecked.
+function fallbackSlotAfter(rankedRows, isSundayDate) {
   const top = (rankedRows || []).slice(0, ROAD_CHECK_SLOTS);
-  if (top.length < ROAD_CHECK_SLOTS || !top.every(needsConfirmedRoad)) return top;
+  if (top.length < ROAD_CHECK_SLOTS || !top.every(needsConfirmedRoad)) return null;
   const tierSunday = isSundayDate(top[top.length - 1].cand && top[top.length - 1].cand.date);
-  const fallback = (rankedRows || []).slice(ROAD_CHECK_SLOTS)
-    .find((row) => !needsConfirmedRoad(row) && isSundayDate(row.cand && row.cand.date) === tierSunday);
-  return fallback ? [...top.slice(0, ROAD_CHECK_SLOTS - 1), fallback] : top;
+  return (rankedRows || []).slice(ROAD_CHECK_SLOTS)
+    .find((row) => !needsConfirmedRoad(row) && isSundayDate(row.cand && row.cand.date) === tierSunday) || null;
+}
+
+function nextSlotToCheck(top, idx, allUnavailable, fallback) {
+  return idx === ROAD_CHECK_SLOTS - 1 && allUnavailable && fallback ? fallback : top[idx];
 }
 
 async function confirmOnRoads(ranked, ctx) {
@@ -219,10 +227,14 @@ async function confirmOnRoads(ranked, ctx) {
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
   const failed = [];
-  const toCheck = slotsToMeasure(ranked.rankedRows, moveRules.isSundayDate);
+  const top = (ranked.rankedRows || []).slice(0, ROAD_CHECK_SLOTS);
+  const fallback = fallbackSlotAfter(ranked.rankedRows, moveRules.isSundayDate);
+  let allUnavailable = true;
   try {
-    for (const row of toCheck) {
+    for (let i = 0; i < top.length; i += 1) {
+      const row = nextSlotToCheck(top, i, allUnavailable, fallback);
       const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
+      if (road) allUnavailable = false;
       const requireRoad = needsConfirmedRoad(row);
       // No road answer for the best slot: for a score-bar or positive-gain slot
       // the model's result stands (marked as estimate) and unchecked
@@ -243,7 +255,7 @@ async function confirmOnRoads(ranked, ctx) {
     // closed with roadUnavailable; any other best slot stands on the estimate
     // with unchecked minutes-rule slots removed from the fallback list.
     if (failed.length) return settled(ranked, failed[0], false);
-    const first = toCheck[0];
+    const first = top[0];
     if (needsConfirmedRoad(first)) {
       return settled(ranked, { ...withRoad(first, null), floor: floorOfRow(first, floor, ctx), unavailable: true }, false);
     }
