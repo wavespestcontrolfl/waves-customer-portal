@@ -299,6 +299,8 @@ describe('native customer-app bootstrap reproducibility', () => {
       expect(fs.existsSync(path.join(resRoot, 'drawable-port-xxhdpi/splash.png'))).toBe(true);
 
       const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-android.sh'), 'utf8');
+      expect(source).toContain('ANDROID_MIN_SDK=24');
+      expect(source).toContain('minSdkVersion = $ANDROID_MIN_SDK');
       expect(source).toContain('WAVES_ANDROID_VERSION_NAME');
       expect(source).toContain('WAVES_ANDROID_VERSION_CODE');
     } finally {
