@@ -22,6 +22,14 @@ describe('OnHoldStrip', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it('offers Reschedule, handing the row to the page', async () => {
+    adminFetch.mockResolvedValueOnce({ enabled: true, visits: [ROW] });
+    const onReschedule = vi.fn();
+    render(<OnHoldStrip enabled onReschedule={onReschedule} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Reschedule' }));
+    expect(onReschedule).toHaveBeenCalledWith(expect.objectContaining({ id: 'v-1' }));
+  });
+
   it('lists held visits with the note and how long, and Release hold removes the row', async () => {
     adminFetch.mockResolvedValueOnce({ enabled: true, visits: [ROW] });
     adminFetch.mockResolvedValueOnce({ success: true });

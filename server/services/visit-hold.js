@@ -241,7 +241,7 @@ async function listHeldVisits({ conn = db, limit = 200 } = {}) {
     .orderBy('ss.held_at', 'asc')
     .limit(Math.min(Math.max(Number(limit) || 200, 1), 500))
     .select(
-      'ss.id', 'ss.customer_id', 'ss.service_type', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.status',
+      'ss.id', 'ss.customer_id', 'ss.technician_id', 'ss.estimated_duration_minutes', 'ss.service_type', 'ss.scheduled_date', 'ss.window_start', 'ss.window_end', 'ss.status',
       'ss.held_at', 'ss.hold_note', 'ss.is_recurring', 'ss.recurring_parent_id', 'ss.recurring_pattern',
       'c.first_name', 'c.last_name', 'c.phone as customer_phone',
       't.name as tech_name', 'hb.name as held_by_name',
@@ -253,6 +253,8 @@ async function listHeldVisits({ conn = db, limit = 200 } = {}) {
     customerName: [r.first_name, r.last_name].filter(Boolean).join(' ') || null,
     customerPhone: r.customer_phone || null,
     serviceType: r.service_type,
+    technicianId: r.technician_id || null,
+    estimatedDuration: r.estimated_duration_minutes || null,
     scheduledDate: r.scheduled_date,
     windowStart: r.window_start,
     windowEnd: r.window_end,

@@ -1555,7 +1555,9 @@ async function lockedStop(trx, serviceId, { now = new Date(), ignoreHorizon = fa
   // reconcile passes must clear it instead of keeping two up for one stop.
   const representative = representativeOf(members);
   const stale = !!representative && String(representative.id) !== String(serviceId);
-  return { visit, members, promise, representative, live: stale ? null : live };
+  // GATE_VISIT_HOLD: a visit put on hold after its alert or tech notice was raised is no longer overdue work; read on
+  // the locked row, so the reconcile passes close the office alert and dismiss the technician notice (live: null).
+  return { visit, members, promise, representative, live: stale || require('./visit-hold').rowIsHeld(visit) ? null : live };
 }
 
 // The kill switch has to CLEAN UP, not just stop creating: sweep() is the

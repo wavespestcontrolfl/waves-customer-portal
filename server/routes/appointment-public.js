@@ -1194,6 +1194,8 @@ router.post('/:token/confirm', confirmLimiter, async (req, res, next) => {
           // visit the row no longer belongs to (knex renders null as
           // IS NULL for ungrouped rows).
           visit_id: svc.visit_id || null,
+          // GATE_VISIT_HOLD: a hold that committed after the read stops the confirm (the other CAS columns still match a held row).
+          ...(require('../services/visit-hold').visitHoldLive() ? { held_at: null } : {}),
         })
         // customer_confirmed + confirmed_at ride along for parity with the
         // logged-in confirm route (routes/schedule.js) and self-booking

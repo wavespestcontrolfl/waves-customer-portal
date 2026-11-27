@@ -595,4 +595,65 @@ postgres('visit on hold on PostgreSQL', () => {
       });
     });
   });
+
+  describe('round 4', () => {
+    test('a customer confirm racing a hold is fenced in the write itself', async () => {
+      process.env.GATE_APPOINTMENT_PAGE = 'true';
+      await trx('customers').where({ id: customerId }).update({ active: true });
+      const express = require('express');
+      const app = express();
+      app.use(express.json());
+      app.use('/api/public/appointment', require('../routes/appointment-public'));
+      const server = await new Promise((resolve) => { const s = app.listen(0, () => resolve(s)); });
+      const tok = require('node:crypto').randomBytes(32).toString('hex');
+      try {
+        const id = await visit({ status: 'pending', reschedule_token: tok });
+        await hold.putVisitOnHold({ visitId: id });
+        // the hold landed AFTER the handler's read: every read of the row says "not held"
+        const spy = jest.spyOn(hold, 'rowIsHeld').mockReturnValue(false);
+        const shown = await row(id);
+        const res = await fetch(`http://127.0.0.1:${server.address().port}/api/public/appointment/${tok}/confirm`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date: String(shown.scheduled_date.toISOString?.().slice(0, 10)), windowStart: '09:00' }),
+        });
+        spy.mockRestore();
+        expect(res.status).not.toBe(200);
+        const after = await row(id);
+        expect(after.status).toBe('pending');
+        expect(after.customer_confirmed).not.toBe(true);
+      } finally {
+        delete process.env.GATE_APPOINTMENT_PAGE;
+        await new Promise((resolve) => server.close(resolve));
+      }
+    });
+
+    test('an open late alert closes when its visit is put on hold (the existing resolver)', async () => {
+      const { resolveAlertsForHeldVisits } = require('../services/tech-late-detector');
+      const id = await visit({ scheduled_date: ymdOffset(0) });
+      const [alert] = await trx('dispatch_alerts').insert({ type: 'tech_late', job_id: id }).returning('id');
+      await resolveAlertsForHeldVisits();
+      expect((await trx('dispatch_alerts').where({ id: alert.id }).first()).resolved_at).toBeNull();
+      await hold.putVisitOnHold({ visitId: id });
+      await resolveAlertsForHeldVisits();
+      expect((await trx('dispatch_alerts').where({ id: alert.id }).first()).resolved_at).not.toBeNull();
+    });
+
+    test('the no-show reconcile reads a held visit as no longer overdue (live is null)', async () => {
+      const { lockedStop } = require('../services/no-show-detector');
+      const id = await visit({ scheduled_date: ymdOffset(0) });
+      await hold.putVisitOnHold({ visitId: id });
+      const stop = await lockedStop(trx, id, { ignoreHorizon: true });
+      expect(stop.visit.id).toBe(id);
+      expect(stop.live).toBeNull();
+    });
+
+    test('the office list carries what the reschedule modal needs', async () => {
+      const techId = randomUUID();
+      await trx('technicians').insert({ id: techId, name: 'Tech T' });
+      const id = await visit({ technician_id: techId, estimated_duration_minutes: 90 });
+      await hold.putVisitOnHold({ visitId: id });
+      const entry = (await hold.listHeldVisits({ conn: trx })).find((r) => r.id === id);
+      expect(entry).toMatchObject({ technicianId: techId, estimatedDuration: 90, windowStart: expect.any(String) });
+    });
+  });
 });

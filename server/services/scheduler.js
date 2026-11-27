@@ -7423,7 +7423,8 @@ function initScheduledJobs() {
               `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'STREET_LEVEL_HOLD') {
+          } else if (smsResult.code === 'STREET_LEVEL_HOLD' || smsResult.code === 'VISIT_ON_HOLD') {
+            // GATE_VISIT_HOLD: a visit the customer asked us to hold waits the same way (VISIT_ON_HOLD): refunded, re-polled, sent after the release.
             // A visit the text is about is a street-level address hold awaiting the office confirm
             // (street-level-hold.js): a validator deferral that can last as long as the office takes, so it
             // must not spend the bounded 3-attempt rail and end terminally blocked. Like the send-window

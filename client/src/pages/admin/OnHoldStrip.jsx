@@ -2,12 +2,13 @@
 //
 // "On hold - customer will call" list for the office (GATE_VISIT_HOLD, owner 2026-11-27). Held visits leave every day
 // view, so this is where the office finds them: customer, the visit's old date, how long it has been held, the note, and
-// Release hold. It texts nobody. Renders nothing while the gate is off or the list is empty.
+// Release hold, and Reschedule (which releases the hold in the move itself; the way out when Release is refused because the
+// original time was booked). It texts nobody. Renders nothing while the gate is off or the list is empty.
 import React, { useCallback, useEffect, useState } from 'react';
 import { adminFetch } from '../../utils/admin-fetch';
 import { formatETDateOnly } from '../../lib/timezone';
 
-export default function OnHoldStrip({ enabled = false, refreshKey = 0, onChanged }) {
+export default function OnHoldStrip({ enabled = false, refreshKey = 0, onChanged, onReschedule }) {
   const [visits, setVisits] = useState([]);
   const [busyId, setBusyId] = useState('');
   const [error, setError] = useState('');
@@ -68,6 +69,16 @@ export default function OnHoldStrip({ enabled = false, refreshKey = 0, onChanged
               >
                 {busyId === row.id ? 'Releasing…' : 'Release hold'}
               </button>
+              {onReschedule && (
+                <button
+                  type="button"
+                  onClick={() => onReschedule(row)}
+                  className="rounded-full bg-white border border-hairline border-solid border-zinc-200 text-zinc-900 font-medium u-focus-ring"
+                  style={{ padding: '10px 16px', fontSize: 14 }}
+                >
+                  Reschedule
+                </button>
+              )}
               {row.customerId && (
                 <a
                   href={`/admin/customers?customerId=${encodeURIComponent(row.customerId)}`}

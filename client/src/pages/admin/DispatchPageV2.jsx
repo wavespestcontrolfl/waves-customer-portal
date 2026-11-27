@@ -1974,7 +1974,13 @@ export default function DispatchPageV2({
             );
           })()}
           {/* GATE_VISIT_HOLD: the office list of held visits (they are off every day view). */}
-          <OnHoldStrip enabled={verifiedRole === "admin" && safeData.visitHold === true} refreshKey={scheduleRefreshKey} onChanged={() => fetchSchedule(date, { silent: true })} />
+          <OnHoldStrip enabled={verifiedRole === "admin" && safeData.visitHold === true} refreshKey={scheduleRefreshKey} onChanged={() => fetchSchedule(date, { silent: true })}
+            // Reschedule opens the office's own reschedule modal; the move releases the hold.
+            onReschedule={(row) => setRescheduleService({
+              id: row.id, customerId: row.customerId, customerName: row.customerName, serviceType: row.serviceType,
+              scheduledDate: row.scheduledDate, windowStart: row.windowStart, windowEnd: row.windowEnd,
+              technicianId: row.technicianId, estimatedDuration: row.estimatedDuration, heldAt: row.heldAt,
+            })} />
           <HeldVisitsStrip heldVisits={heldVisits} onBook={bookHeldVisit} onDismiss={dismissHeldVisit} />
           {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
               so dispatchers can drag jobs between tech lanes and create a
