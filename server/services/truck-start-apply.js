@@ -192,7 +192,7 @@ async function raiseStartBell({ row, technician, workDate, action, detail }, rai
       spec = {
         area: 'Billing',
         action: `check ${first}'s moved start`,
-        why: `Start moved back ${minutes} min to the truck's first stop at ${formatETTime(eventAt)} — check it was work.`,
+        why: `Start moved back ${minutes} min to the truck's GPS start at ${formatETTime(eventAt)} — check it was work.`,
       };
     } else if (action === 'flag_early_tap') {
       const minutes = Math.round(Number(detail.minutes_early));
