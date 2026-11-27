@@ -346,10 +346,9 @@ describe('a browser-priced save (the server could not price it)', () => {
     for (const inputs of [{ grassType: 'st_augustine' }, { grassType: 'bahia' }, { grassType: 'bermuda' }, { grassType: 'zoysia' }, {}]) {
       expect(() => guard(planRow({ inputs }))).toThrow(refused);
     }
-    // Named only by the result key it sits under, or only in a note outside the inputs.
+    // Named only by the result key it sits under.
     expect(() => guard({ result: { lawn: [{ tier: 'enhanced', monthly: 46 }] } })).toThrow(refused);
     expect(() => guard({ result: { lawnMeta: { track: 'st_augustine' } } })).toThrow(refused);
-    expect(() => guard({ notes: 'Added lawn care per customer request', result: { lineItems: [{ service: 'pest_control', price: 39 }] } })).toThrow(refused);
     const forged = planRow({ inputs: { grassType: 'st_augustine' } });
     forged.result.pricingMetadata = { legacyLawnOneLane: true };
     expect(() => guard(forged, forged)).toThrow(refused);
@@ -364,10 +363,26 @@ describe('a browser-priced save (the server could not price it)', () => {
       expect(() => guard({ result: { recurring: { services: [row] } } })).toThrow(refused);
       expect(() => guard({ recurring: { services: [row] } })).toThrow(refused);
       expect(() => guard({ sendSnapshot: { result: { recurring: { services: [row] } } } })).toThrow(refused);
+      // Raw line items: the page's recurringServicesWithSupplements keys them the same way and carries their price to acceptance.
+      expect(() => guard({ result: { lineItems: [row] } })).toThrow(refused);
+      expect(() => guard({ engineResult: { lineItems: [row] } })).toThrow(refused);
     }
+    // A one-time row under a catalog name is a lawn price too.
+    expect(() => guard({ result: { oneTime: { items: [{ name: 'Lawn Fertilization', price: 137 }] } } })).toThrow(refused);
     // The same names in the inputs ask for a service; they price nothing.
     expect(() => guard({ inputs: { recurring: { services: [{ service: 'lawn_fertilization' }] } }, result: { lineItems: [{ service: 'pest_control', price: 39 }] } }))
       .not.toThrow();
+  });
+
+  test('free text names no row: a pest-only save whose note mentions lawn care is not refused', () => {
+    for (const save of [
+      { notes: 'Customer declined lawn care', result: { lineItems: [{ service: 'pest_control', price: 39 }] } },
+      { result: { lineItems: [{ service: 'pest_control', price: 39, detail: 'Customer declined lawn care' }] }, internalNotes: 'Lawn pest seen; no lawn plan sold' },
+      { result: { property: { turfBasis: 'lawnSqFt' }, metrics: [{ label: 'Treatable lawn', value: '4,500 sq ft' }], lineItems: [{ service: 'pest_control', price: 39 }] } },
+    ]) {
+      expect(() => guard(save)).not.toThrow();
+      expect(save.result.pricingMetadata.legacyLawnOneLane).toBe(false);
+    }
   });
 
   test('the browser\'s commercial manual-quote turf row is not refused; a residential row cannot borrow its request field', () => {
@@ -390,6 +405,18 @@ describe('a browser-priced save (the server could not price it)', () => {
     expect(save.result.pricingMetadata.legacyLawnOneLane).toBe(false);
     const residential = { service: 'lawn_fertilization', originalRequestedService: 'lawn_care', isCommercial: true, mo: 46 };
     expect(() => guard({ result: { recurring: { services: [residential] } } })).toThrow(refused);
+    // An exemption reads what the row is, not a word on it.
+    for (const forged of [{ service: 'lawn_care', name: 'Lawn Care (commercial-grade)', mo: 46 }, { service: 'lawn_care', name: 'Lawn Care (no plugging)', mo: 46 }]) {
+      expect(() => guard({ result: { recurring: { services: [forged] } } })).toThrow(refused);
+    }
+    // The other turf work keeps its own price: plugging, top dressing, dethatching, the area add-ons.
+    for (const row of [
+      { service: 'lawn_plugging', name: 'Lawn Plugging Service', price: 900 },
+      { name: 'Lawn Top Dressing Service', price: 400 },
+      { name: 'Lawn Dethatching Service', price: 300 },
+      { service: 'area_addon_lawn_insect_spot', name: 'Lawn Insect Spot Treatment', price: 95 },
+      { serviceKey: 'area_addon_lawn_insect_preventive', name: 'Yearly Lawn Insect Preventive', price: 120 },
+    ]) expect(() => guard({ result: { oneTime: { specItems: [row] } } })).not.toThrow();
   });
 
   test('other turf services and the turf basis name no lawn price row', () => {

@@ -2185,9 +2185,8 @@ const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$
 // (specialty-prices-20261126.test.js prices both and checks).
 const specialtyKeyHoldsRows = (value) => !!value && typeof value === 'object' && Object.keys(value).length > 0;
 // The walk itself, for any set of row words (the whole-home sizing check below reads the same way). browserRowKey: a key the
-// browser estimator files such rows under without naming them (the mosquito tier rows under `mq`). skipField(row, key): a field
-// of a row that names something other than the row itself (the lawn check below; no other check passes one).
-function saveHoldsRowNamed(estimateData, words, browserRowKey = null, skipField = null) {
+// browser estimator files such rows under without naming them (the mosquito tier rows under `mq`).
+function saveHoldsRowNamed(estimateData, words, browserRowKey = null) {
   const seen = new Set();
   const walk = (node) => {
     if (typeof node === 'string') return words.test(node);
@@ -2196,7 +2195,6 @@ function saveHoldsRowNamed(estimateData, words, browserRowKey = null, skipField 
     if (Array.isArray(node)) return node.some(walk);
     return Object.entries(node).some(([key, value]) => {
       if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
-      if (skipField && skipField(node, key)) return false;
       if ((key === browserRowKey || words.test(key)) && specialtyKeyHoldsRows(value)) return true;
       return walk(value);
     });
@@ -2259,46 +2257,62 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
 // the St. Augustine anchor for every grass. The browser cannot prove which rule priced its row, nor that its prices match the live
 // tables: its lawn grid is hard-coded dollars (a Settings change to the lawn table never reaches it), a page cached before the rule
 // prices each grass's own rows and the 2.2 one-time multiple, and a rule stamp it posts proves none of that. So, the same rule as
-// the rows above: such a save is refused (409, reload and let the server price it) when it NAMES lawn care, a one-time lawn
-// treatment or the lawn pest knockdown anywhere outside its inputs, whatever grass and whatever stamp it posts, new or re-saved,
-// changed or not. No grass is exempt: only the server's price follows the live lawn tables.
-// "lawn" alone names no such row: every server result carries property.turfBasis "lawnSqFt", and plugging, top dressing and
-// dethatching are other services with their own prices ("Lawn Plugging Service"). The rows are known by their own names (Lawn Care,
-// lawn_care, One-Time Lawn, one_time_lawn, OT Lawn, Lawn Pest) or by the result key they sit under (results.lawn, results.lawnMeta).
-const LAWN_ONE_LANE_ROW_WORDS = {
-  test: (text) => /lawn[ _-]?care|one[ _-]?time[ _-]?lawn|\bot[ _-]?lawn|lawn[ _-]?pest/i.test(text) || /^lawn(Meta|Tiers)?$/.test(text),
-};
-// The estimate page and the converter key a plan row by recurringServiceKey (estimate-public.js): any identity holding "lawn",
-// and not "pest" or "commercial", is lawn care there. So a plan row under a catalog name the words above do not hold ("Lawn
-// Fertilization & Weed Control", lawn_fertilization) is still a lawn care price on the page and at acceptance (pre-push audit
-// P0). Every recurring row the save carries is read the page's way: each recurring.services list outside the inputs, at any
-// depth (result, the bare data, the send snapshot). An engine result needs no second reading: the page maps its lawn row from
-// the lawn_care line only (v1-legacy-mapper), and the word check reads that key.
-function saveHoldsRecurringLawnCare(estimateData) {
-  const { recurringServiceKey } = require('../routes/estimate-public');
-  const holdsLawnCare = (rows) => Array.isArray(rows) && rows.some((row) => isPlainRecord(row) && recurringServiceKey(row) === 'lawn_care');
+// the rows above: such a save is refused (409, reload and let the server price it) when a service row outside its inputs is lawn
+// care, a one-time lawn treatment or the lawn pest knockdown, whatever grass and whatever stamp it posts, new or re-saved, changed
+// or not. No grass is exempt: only the server's price follows the live lawn tables.
+// A row is known by what names it, not by a fixed list of phrases (pre-push audit P0: the estimate page and the converter call a
+// row lawn care when its service, key or name holds "lawn", so a catalog name such as "Lawn Fertilization & Weed Control" or
+// lawn_fertilization is a lawn care price there, in recurring.services and in raw lineItems alike). The fields read are the
+// ones those readers key a row by (recurringServiceKey: service, key, name, label, displayName; oneTimeItemFamilyKeys adds
+// service_key, kind and catalogServiceKey), the browser estimator's own (serviceKey, title, n), and the request a manual-quote
+// row records (originalRequestedService). Any service row so named "lawn" is refused, except:
+// - the turf work the lawn tables do not price: plugging, top dressing, dethatching and the area add-ons (Lawn Insect Spot
+//   Treatment, Yearly Lawn Insect Preventive), as the page's own specialty test reads them;
+// - a commercial row: this rule does not price commercial lawn. The browser's commercial manual-quote row (service
+//   commercial_lawn, price null) records the visitor's request as originalRequestedService 'lawn_care' (pre-push audit P1).
+// A service row is an object with a key-like identity (service, serviceKey, service_key, key, kind, catalogServiceKey), or a
+// name with a price beside it; a label with no price is a display line. Free text names no row (pre-push audit P1): a note
+// such as "Customer declined lawn care" prices nothing, so notes, details and reasons are never read. The rows the browser files
+// under a lawn result key without naming them (results.lawn tier rows, lawnMeta, lawnTiers) are refused by that key.
+const LAWN_ROW_KEY_FIELDS = ['service', 'serviceKey', 'service_key', 'key', 'kind', 'catalogServiceKey'];
+const LAWN_ROW_NAME_FIELDS = ['name', 'label', 'displayName', 'title', 'n'];
+const LAWN_ROW_PRICE_FIELDS = ['price', 'mo', 'monthly', 'ann', 'annual', 'perApp', 'perTreatment', 'perVisit', 'amount', 'total',
+  'monthlyBeforeDiscount', 'annualBeforeDiscount', 'monthlyAfterDiscount', 'annualAfterDiscount'];
+const LAWN_OTHER_TURF_WORK = /top ?dress|dethatch|plugging|area ?addon|insect spot|insect preventive/;
+const LAWN_RESULT_ROW_KEY = /^lawn(Meta|Tiers)?$/;
+// An exemption reads what the row IS, never a word anywhere on it: commercial = the key the page itself gives the row
+// (recurringServiceKey reads its first identity field), other turf work = the row's own first identity. So "Lawn Care
+// (commercial-grade)" under service lawn_care, or "Lawn Care (no plugging)", is still a lawn care row.
+function isLawnPriceRow(row) {
+  const strings = (fields) => fields.map((field) => row[field]).filter((value) => typeof value === 'string' && value);
+  const keys = strings(LAWN_ROW_KEY_FIELDS);
+  const names = strings(LAWN_ROW_NAME_FIELDS);
+  if (!keys.length && !(names.length && LAWN_ROW_PRICE_FIELDS.some((field) => Number(row[field]) > 0))) return false;
+  const words = (text) => text.toLowerCase().replace(/[_-]+/g, ' ');
+  if (!words([...keys, ...names, ...strings(['originalRequestedService'])].join(' ')).includes('lawn')) return false;
+  if (/^commercial_/.test(require('../routes/estimate-public').recurringServiceKey(row))) return false;
+  return !LAWN_OTHER_TURF_WORK.test(words([...keys, ...names][0]));
+}
+function saveHoldsLawnPriceRow(estimateData) {
   const seen = new Set();
   const walk = (node) => {
     if (!node || typeof node !== 'object' || seen.has(node)) return false;
     seen.add(node);
     if (Array.isArray(node)) return node.some(walk);
-    if (isPlainRecord(node.recurring) && holdsLawnCare(node.recurring.services)) return true;
-    return Object.entries(node).some(([key, value]) => !SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key) && walk(value));
+    if (isLawnPriceRow(node)) return true;
+    return Object.entries(node).some(([key, value]) => {
+      if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
+      if (LAWN_RESULT_ROW_KEY.test(key) && specialtyKeyHoldsRows(value)) return true;
+      return walk(value);
+    });
   };
   return walk(estimateData);
 }
-// The browser's commercial manual-quote row (commercialManualQuoteItem in client/src/lib/estimateEngine.js: service
-// commercial_lawn, price null, quoteRequired) records the service the visitor asked for as originalRequestedService 'lawn_care'.
-// That field names the request, not the row, and this rule does not price commercial lawn (pre-push audit P1). It is skipped
-// only on a row the page keys as commercial, so a residential lawn row cannot use it to pass.
-const lawnRequestFieldOfCommercialRow = (row, key) => key === 'originalRequestedService'
-  && /^commercial_/.test(require('../routes/estimate-public').recurringServiceKey(row));
 // The lawn rule stamp of a browser-priced save that passed the refusal (it holds no lawn row) is the server's reading, never the
 // browser's: a revision keeps the stored estimate's stamp, so a lawn service the server adds later stays on the rule the estimate
 // was sold on; a first save is new. Written on every result container, so the reader finds it whichever one it picks.
 function guardLawnOneLaneOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  if (saveHoldsRowNamed(estimateData, LAWN_ONE_LANE_ROW_WORDS, null, lawnRequestFieldOfCommercialRow)
-    || saveHoldsRecurringLawnCare(estimateData)) {
+  if (saveHoldsLawnPriceRow(estimateData)) {
     throw errorWithStatus('This estimate has a lawn care or one-time lawn price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
   }
   if (!isPlainRecord(estimateData)) return;
