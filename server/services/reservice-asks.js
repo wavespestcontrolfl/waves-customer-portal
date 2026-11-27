@@ -47,6 +47,8 @@ const NOTE_APPENDIX_RE = /\s+—\s+(?=Unit: |booked beside |self-booked plan |fi
 // What other writers append to the visit's notes after the customer's words: routes/schedule.js's " | RESCHEDULE
 // REQUEST: ..." and time-tracking's " [auto-closed ...]" suffix.
 const NOTE_RECORD_BOUNDARY_RE = /\s+\|\s+RESCHEDULE REQUEST:|\s+\[auto-closed/;
+// The note reservice-public.js writes when the customer gave no details: not their words.
+const GENERATED_BOOKING_NOTE_RE = /^Re-service requested via self-serve link\.?$/i;
 const LEGACY_NOTE_RE = /^Re-service request(?: \([^)]*\))?: (.+)$/;
 
 // ---------------------------------------------------------------------------
@@ -202,7 +204,7 @@ function selfBookedNoteText(notes, customerNotes = null) {
     const match = /(?:^|\n)\s*Self-booked\.\s*Notes:\s*([\s\S]+)$/.exec(String(notes || ''));
     text = match ? compact(match[1].split(NOTE_APPENDIX_RE)[0].split(NOTE_RECORD_BOUNDARY_RE)[0]) : '';
   }
-  return text && !LEGACY_NOTE_RE.test(text) ? text : null;
+  return text && !LEGACY_NOTE_RE.test(text) && !GENERATED_BOOKING_NOTE_RE.test(text) ? text : null;
 }
 
 // The booking's own words as { source, text, quoted, lead } before the scrub,

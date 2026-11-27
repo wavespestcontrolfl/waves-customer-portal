@@ -630,3 +630,16 @@ describe('selfBookedNoteText: stops at records other writers append', () => {
     expect(selfBookedNoteText('Self-booked via portal — Unit: 5 | RESCHEDULE REQUEST: Move it')).toBeNull();
   });
 });
+
+describe('selfBookedNoteText: the generated self-serve note', () => {
+  const { selfBookedNoteText } = require('../services/reservice-asks');
+  test('the fallback reservice-public.js writes when the customer gave nothing is not their words', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link')).toBeNull();
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link — Unit: 5')).toBeNull();
+    expect(selfBookedNoteText('x', 'Re-service requested via self-serve link')).toBeNull();
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link | RESCHEDULE REQUEST: Friday')).toBeNull();
+  });
+  test('real words that mention the link stay', () => {
+    expect(selfBookedNoteText('Self-booked. Notes: Re-service requested via self-serve link, gate code is open')).toBe('Re-service requested via self-serve link, gate code is open');
+  });
+});

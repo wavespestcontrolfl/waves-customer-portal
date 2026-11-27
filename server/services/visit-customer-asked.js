@@ -153,17 +153,38 @@ async function visitScope(svc, dbh) {
   }
 }
 
-// The address the portal form stored on a request (metadata.property.address, one line), against the visit's
-// premises: the stored address is what the customer saw, so it is checked on every path, single premises included. A
-// request with no stored address keeps the property-id rule alone, and a visit with no premises evidence is the
-// primary property (the id rule already decided it).
-function storedAddressMatches(row, scope) {
+// The address the portal form stored on a request (metadata.property.address, one line), or null.
+function storedAddress(row) {
   let meta = row.metadata;
   if (typeof meta === 'string') {
     try { meta = JSON.parse(meta); } catch { meta = null; }
   }
-  const address = meta?.property?.address;
-  if (!address || !scope.hasEvidence) return true;
+  return meta?.property?.address || null;
+}
+
+// An unstamped visit is on the primary property: its premises key is the customer's CURRENT primary property address
+// (the customer row's own address when no property row exists). Nothing resolvable is "stamp present, not resolved":
+// it matches nothing.
+async function primaryScope(svc, dbh) {
+  try {
+    const linkage = require('./estimate-property-linkage');
+    const columns = ['address_line1', 'address_line2', 'city', 'zip'];
+    const property = await dbh('customer_properties').where({ customer_id: svc.customer_id, is_primary: true, active: true }).first(...columns);
+    const source = property || await dbh('customers').where({ id: svc.customer_id }).first(...columns);
+    const key = source ? linkage.normalizedStampedStreet(source.address_line1, source.address_line2, source.city, source.zip) : null;
+    return { hasEvidence: true, key: key && !linkage.scopeKeyLacksLocality(key) ? key : null };
+  } catch (err) {
+    logger.warn(`[visit-customer-asked] primary address unreadable: ${err?.code || err?.name || 'Error'}`);
+    return { hasEvidence: true, key: null };
+  }
+}
+
+// The stored address against the visit's premises: it is what the customer saw, so it is checked on every path,
+// single premises and an unstamped primary visit included (`scope` is then the primary address). A request with no
+// stored address keeps the property-id rule alone.
+function storedAddressMatches(row, scope) {
+  const address = storedAddress(row);
+  if (!address) return true;
   if (!scope.key) return false;
   const { sameResolvedProperty } = require('./service-report/visit-property-scope');
   const key = require('./estimate-property-linkage').normalizedEstimateStreet(address);
@@ -229,16 +250,23 @@ async function portalItems(svc, dbh) {
   const single = await singlePremises(svc, dbh);
   const scope = await visitScope(svc, dbh);
   const rows = await portalRowsQuery(dbh, svc, single ? null : await visitPropertyIds(svc, dbh, scope));
-  return (rows || []).filter((row) => storedAddressMatches(row, scope)).slice(0, PORTAL_ROW_LIMIT).map((row) => {
-    if (row.source === RESCHEDULE_SOURCE) {
-      const revised = rescheduleNote(row.description, row.created_at);
-      // `appointment` marks a note that belongs to this one appointment, so a grouped stop keeps it with its service.
-      return revised ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }) : null;
-    }
-    const note = row.source ? '' : compact(row.description);
-    const subject = compact(row.subject);
-    return entry('portal_request', row.created_at, note ? `${subject}: ${note}` : subject, { source: 'portal' });
-  });
+  // An unstamped visit resolves its premises only when a row has an address to check against.
+  const checkScope = scope.hasEvidence || !(rows || []).some(storedAddress) ? scope : await primaryScope(svc, dbh);
+  // Entries first, empties dropped (a preferred-date-only reschedule), THEN the limit.
+  return (rows || [])
+    .filter((row) => storedAddressMatches(row, checkScope))
+    .map((row) => {
+      if (row.source === RESCHEDULE_SOURCE) {
+        const revised = rescheduleNote(row.description, row.created_at);
+        // `appointment` marks a note that belongs to this one appointment, so a grouped stop keeps it with its service.
+        return revised ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }) : null;
+      }
+      const note = row.source ? '' : compact(row.description);
+      const subject = compact(row.subject);
+      return entry('portal_request', row.created_at, note ? `${subject}: ${note}` : subject, { source: 'portal' });
+    })
+    .filter(Boolean)
+    .slice(0, PORTAL_ROW_LIMIT);
 }
 
 const newestFirst = (a, b) => Date.parse(b.at) - Date.parse(a.at);

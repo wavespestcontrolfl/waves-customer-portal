@@ -35,13 +35,13 @@ const SVC = {
 };
 
 // A stub dbh: service_requests resolves to `rows`, self_booked_appointments to `booking`; `fail` makes every read throw.
-function fakeDbh({ rows = [], booking, props = [], fail = false } = {}) {
+function fakeDbh({ rows = [], booking, props = [], customer, fail = false } = {}) {
   const calls = [];
   const dbh = (table) => {
     calls.push(['table', table]);
     const q = {};
     for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit']) {
-      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; return q; };
+      q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; return q; };
     }
     q.select = async () => {
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
@@ -49,7 +49,8 @@ function fakeDbh({ rows = [], booking, props = [], fail = false } = {}) {
     };
     q.first = async () => {
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
-      if (table === 'customer_properties') return props.find((p) => p.id === q.id) || undefined;
+      if (table === 'customer_properties') return (q.primary ? props.find((p) => p.is_primary) : props.find((p) => p.id === q.id)) || undefined;
+      if (table === 'customers') return customer;
       return table === 'self_booked_appointments' ? booking : undefined;
     };
     return q;
@@ -272,8 +273,30 @@ describe('customerAskedFacts: the address the request stored', () => {
   test('a stored address cannot be matched when the visit premises are unresolved or the address is unreadable', () => {
     const row = { metadata: { property: { address: '100 Example Ave, Bradenton, FL 34205' } } };
     expect(_test.storedAddressMatches(row, { hasEvidence: true, key: null })).toBe(false);
-    expect(_test.storedAddressMatches(row, { hasEvidence: false, key: null })).toBe(true);
     expect(_test.storedAddressMatches({ metadata: { property: { address: 'the yellow house' } } }, { hasEvidence: true, key: '100exampleave|bradenton|34205' })).toBe(false);
+  });
+
+  describe('an unstamped primary visit checks the saved primary address', () => {
+    const row = (address) => withAddress(address, { description: 'Gate sticks' });
+    test('a request for the primary address shows', async () => {
+      const facts = await customerAskedFacts(SVC, fakeDbh({ props: [HOME], rows: [row('100 Example Avenue, Bradenton, FL 34205')] }));
+      expect(facts.items[0].text).toBe('Pest issue: Gate sticks');
+    });
+    test('a request for another address is withheld', async () => {
+      expect(await customerAskedFacts(SVC, fakeDbh({ props: [HOME], rows: [row('200 Sample St, Parrish, FL 34219')] }))).toBeNull();
+    });
+    test('the customer row address stands in when no property row exists', async () => {
+      const customer = { address_line1: '100 Example Ave', address_line2: null, city: 'Bradenton', zip: '34205' };
+      expect((await customerAskedFacts(SVC, fakeDbh({ customer, rows: [row('100 Example Ave, Bradenton, FL 34205')] }))).items).toHaveLength(1);
+    });
+    test('an unresolvable primary address withholds a request that carries an address', async () => {
+      expect(await customerAskedFacts(SVC, fakeDbh({ rows: [row('100 Example Ave, Bradenton, FL 34205')] }))).toBeNull();
+    });
+    test('nothing is read for the primary when no request carries an address', async () => {
+      const dbh = fakeDbh({ rows: [formRow()] });
+      await customerAskedFacts(SVC, dbh);
+      expect(dbh.calls.filter((c) => c[0] === 'customers')).toEqual([]);
+    });
   });
 
   test('the query reads more rows than it shows, so a dropped row does not hide a valid one', () => {
@@ -294,6 +317,23 @@ describe('customerAskedFacts: the eight slots', () => {
     expect(facts.items.filter((i) => i.kind === 'reservice_reason')).toHaveLength(1);
     // The 7 newest messages (n = 3..9) fill the other slots; the reason is oldest, so it sorts last.
     expect(facts.items.map((i) => i.text)).toEqual([...Array.from({ length: 7 }, (_, k) => `Message number ${9 - k}.`), 'Ants in the kitchen.']);
+  });
+});
+
+describe('customerAskedFacts: entries first, then the limit', () => {
+  test('empty reschedule rows (a preferred date only) do not use up the five slots', async () => {
+    const quiet = (n) => formRow({ subject: `Reschedule ${n}`, description: 'Appointment svc-1: Pest Control on 2026-12-01\nPreferred date: 2026-12-03', source: 'customer_portal_reschedule', created_at: `2026-11-2${n}T10:00:00.000Z` });
+    const rows = [...[1, 2, 3, 4, 5].map(quiet), formRow({ subject: 'Lawn Care', description: 'Brown patch', created_at: '2026-11-10T10:00:00.000Z' })];
+    const facts = await customerAskedFacts(SVC, fakeDbh({ rows }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Lawn Care: Brown patch']);
+  });
+});
+
+describe('customerAskedFacts: the generated self-serve note', () => {
+  test('a re-service booked with no details is not a booking note, from the notes line or the booking row', async () => {
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Re-service requested via self-serve link — Unit: 5' };
+    expect(await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: 'Re-service requested via self-serve link' } }))).toBeNull();
+    expect(await customerAskedFacts({ ...svc, self_booking_id: null }, fakeDbh())).toBeNull();
   });
 });
 
