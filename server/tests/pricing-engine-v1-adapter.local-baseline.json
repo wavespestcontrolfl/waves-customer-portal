@@ -479,21 +479,21 @@
     "recurring": {
       "tier": "Gold",
       "discount": 0.15,
-      "annualBeforeDiscount": 1717.36,
-      "annualAfterDiscount": 1459.76,
-      "monthlyTotal": 121.65,
-      "savings": 257.6,
+      "annualBeforeDiscount": 1693.36,
+      "annualAfterDiscount": 1439.36,
+      "monthlyTotal": 119.95,
+      "savings": 254,
       "serviceCount": 3
     },
     "results": {
       "lawn": [
         {
-          "mo": 52,
+          "mo": 50,
           "recommended": true,
           "name": "9x applications/yr"
         },
         {
-          "mo": 69,
+          "mo": 66,
           "recommended": false,
           "name": "12x applications/yr"
         }
@@ -540,8 +540,8 @@
       "specItems": []
     },
     "totals": {
-      "year1": 1459.76,
-      "year2": 1459.76
+      "year1": 1439.36,
+      "year2": 1439.36
     }
   },
   "v1adapter_zone_d_quarterly_pest_bahia": {

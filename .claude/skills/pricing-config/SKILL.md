@@ -112,6 +112,24 @@ environment that carries the row (prod does), **editing
   browser has no guarantee price, the server must price it). Homes only: a
   commercial property keeps the footprint path for both. An unmeasured rodent
   guarantee (2,000 fallback) goes to review.
+- **One lawn price lane** (owner 2026-11-26 "make these one type of grass",
+  new quotes only; no gate, ships live): a Bermuda or Zoysia plan reads the
+  St. Augustine rows of `lawn_pricing_brackets` (`LAWN_ONE_LANE`), so the
+  Bermuda and Zoysia tables in Settings price only quotes made before the
+  rule; Bahia keeps its own rows. Grass type still picks the program, the
+  products, the Bermuda add-ons and the cost floor. One-time lawn is 1.8x
+  the St. Augustine 6-visit per-application price for every grass, +20% for
+  insect or fungus work; the 1.8 and the factors (1.00 / 1.00 / 1.20 / 1.20)
+  are CODE constants (`ONE_TIME.lawn.newRule`), not Settings, so
+  `onetime_lawn.recurringPerAppMultiplier` (2.2) and `treatment_multipliers`
+  price only quotes made before the rule. The `onetime_lawn.floor` ($115)
+  stays live for both. Quotes made before it keep their price
+  (`pricingMetadata.legacyLawnOneLane`; an unstamped priced estimate, or
+  inputs-only asking for lawn, reads the same). Plan-wide stamp: a lawn
+  service added to a legacy estimate stays on the old rule. A browser-priced
+  save naming a lawn care, one-time lawn or lawn pest row is always refused,
+  for every grass (409: the browser's lawn grid is hard-coded, so only the
+  server's price follows the live tables).
 - **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
   Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
   estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps

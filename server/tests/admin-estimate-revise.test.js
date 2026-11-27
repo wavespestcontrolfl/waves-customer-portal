@@ -218,23 +218,25 @@ const reviseBody = {
   customerEmail: 'beverly@example.com',
   customerId: null,
   estimateData: {
-    inputs: { address: '456 Gulf Dr', svcPest: true, svcLawn: true },
+    // The added service is one no browser-save rule refuses: since the one lawn price lane (2026-11-26) a browser-priced lawn
+    // row is always refused (see the lawn test below), and these tests exercise the revise itself.
+    inputs: { address: '456 Gulf Dr', svcPest: true, svcRodentBait: true },
     result: {
       recurring: {
         grandTotal: 132,
         services: [
           { service: 'pest_control', name: 'Pest Control', mo: 48 },
-          { service: 'lawn_care', name: 'Lawn Care', mo: 84 },
+          { service: 'rodent_bait', name: 'Rodent Bait Stations', mo: 84 },
         ],
       },
     },
-    engineRequest: { profile: { homeSqFt: 1800 }, selectedServices: ['PEST', 'LAWN'], options: {} },
+    engineRequest: { profile: { homeSqFt: 1800 }, selectedServices: ['PEST', 'RODENT_BAIT'], options: {} },
   },
   monthlyTotal: 132,
   annualTotal: 1584,
   onetimeTotal: 0,
   waveguardTier: 'Silver',
-  notes: 'Added lawn care per customer request',
+  notes: 'Added rodent bait stations per customer request',
   satelliteUrl: null,
   showOneTimeOption: false,
   billByInvoice: false,
@@ -358,7 +360,7 @@ describe('reviseAdminEstimate', () => {
     expect(patch.monthly_total).toBe(132);
     expect(patch.annual_total).toBe(1584);
     const data = JSON.parse(patch.estimate_data);
-    expect(data.inputs.svcLawn).toBe(true);
+    expect(data.inputs.svcRodentBait).toBe(true);
     expect(data.result.recurring.services).toHaveLength(2);
     // The stale send snapshot + customer preferences described the previous
     // quote and must not survive the revise.
@@ -367,6 +369,26 @@ describe('reviseAdminEstimate', () => {
     expect(estimate.id).toBe('est-1');
     expect(estimate.token).toBe('tok-abc123');
     expect(estimate.status).toBe('sent');
+  });
+
+  // One lawn price lane (2026-11-26): only the server's price follows the live lawn tables, so a browser-priced revision that
+  // names lawn care is refused before anything is written, on any grass (services/admin-estimate-persistence.js).
+  test('a browser-priced revision that adds lawn care is refused (409) and writes nothing', async () => {
+    const { database, updates } = makeReviseDatabase({ estimate: sentEstimate });
+    const lawnBody = {
+      ...reviseBody,
+      estimateData: {
+        inputs: { address: '456 Gulf Dr', svcPest: true, svcLawn: true, grassType: 'st_augustine' },
+        result: { recurring: { grandTotal: 132, services: [
+          { service: 'pest_control', name: 'Pest Control', mo: 48 },
+          { service: 'lawn_care', name: 'Lawn Care', mo: 84 },
+        ] } },
+        engineRequest: { profile: { homeSqFt: 1800 }, selectedServices: ['PEST', 'LAWN'], options: {} },
+      },
+    };
+    await expect(reviseAdminEstimate({ database, estimateId: 'est-1', body: lawnBody, technicianId: 'tech-2', recompute: noRecompute, now: fixedNow }))
+      .rejects.toMatchObject({ statusCode: 409 });
+    expect(updates).toHaveLength(0);
   });
 
   // Returning-customer $99 rule (owner 2026-11-24, GATE_RETURNING_SETUP_FEE_GAP): a revision carries no promise.
