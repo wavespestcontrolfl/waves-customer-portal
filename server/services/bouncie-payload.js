@@ -94,6 +94,18 @@ function pickLatestSample(payload = {}) {
   return best;
 }
 
+// The time a trip-end happened, read apart from which block gave the coordinates.
+function tripEndTime(payload = {}) {
+  return firstPresent(
+    payload.end?.timestamp,
+    payload.end?.ts,
+    payload.timestamp,
+    payload.ts,
+    payload.location?.timestamp,
+    payload.position?.timestamp
+  ) ?? null;
+}
+
 function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayload(payload)) {
   if (canonicalEventType === 'trip-data') {
     return pointFromSource(pickLatestSample(payload));
@@ -111,7 +123,7 @@ function pointFromPayload(payload = {}, canonicalEventType = eventTypeFromPayloa
     );
     // An end point without its own time keeps the event's own time.
     if (point && point.reported_at == null) {
-      point.reported_at = firstPresent(payload.end?.timestamp, payload.timestamp, payload.ts) ?? null;
+      point.reported_at = tripEndTime(payload);
     }
     return point;
   }
@@ -240,6 +252,7 @@ function webhookDedupeKey(payload = {}, canonicalEventType = eventTypeFromPayloa
 }
 
 module.exports = {
+  tripEndTime,
   eventTypeFromPayload,
   extractImei,
   firstPresent,

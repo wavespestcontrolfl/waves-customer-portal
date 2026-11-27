@@ -242,6 +242,26 @@ describe('Bouncie tracking webhook, engine-off arrival', () => {
     expect(point.engine_off).toBeUndefined();
   });
 
+  test('a trip-end with departure GPS and a top-level ts never uses the departure point: fresh last location at ts', async () => {
+    installDb({ lastLocation: { lat: '27.4386000', lng: '-82.3719000', heading: 90, reported_at: msBefore(4 * 60 * 1000) } });
+    const payload = { eventType: 'tripEnd', imei: 'imei-1', transactionId: 't-2', ts: ENDED_AT, start: { lat: 27.01, lon: -82.01, timestamp: msBefore(30 * 60 * 1000) } };
+
+    await router._test.processTrackingEvent({ logId: 23, eventType: 'tripEnd', payload });
+
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
+    expect(point).toMatchObject({ lat: '27.4386000', lng: '-82.3719000', reported_at: ENDED_AT, engine_off: true, position_source: 'last_location' });
+  });
+
+  test('a trip-end with end GPS but no end time takes the time from the envelope location', async () => {
+    installDb({ lastLocation: null });
+    const payload = { eventType: 'tripEnd', imei: 'imei-1', transactionId: 't-3', end: { gps: { lat: 27.51, lon: -82.52 } }, location: { lat: 26.9, lon: -82.0, timestamp: ENDED_AT } };
+
+    await router._test.processTrackingEvent({ logId: 24, eventType: 'tripEnd', payload });
+
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
+    expect(point).toMatchObject({ lat: 27.51, lng: -82.52, reported_at: ENDED_AT, engine_off: true, position_source: 'trip_end_gps' });
+  });
+
   test('a trip-end with its own GPS uses it as the engine-off position', async () => {
     installDb({ lastLocation: { lat: 1, lng: 2, reported_at: msBefore(60 * 1000) } });
 

@@ -40,6 +40,7 @@ const {
   normalizeTripMetricsPayload,
   pointFromPayload,
   webhookDedupeKey,
+  tripEndTime,
 } = require('../services/bouncie-payload');
 
 // ---------- normalization ----------
@@ -146,7 +147,7 @@ const ENGINE_OFF_LAST_LOCATION_MAX_MS = 10 * 60 * 1000;
 // detector's freshness and en-route checks as a fresh engine-off. Without one,
 // null: the event is handled as before and never as an engine-off.
 async function engineOffPoint({ imei, payload, ownPoint }) {
-  const endedMs = Date.parse(firstPresent(payload.end?.timestamp, ownPoint?.reported_at, payload.timestamp) || '');
+  const endedMs = Date.parse(firstPresent(payload.end?.timestamp, ownPoint?.reported_at, tripEndTime(payload)) || '');
   if (!Number.isFinite(endedMs)) return null;
   const endedAt = new Date(endedMs);
   const base = { ignition: false, speed_mph: 0, reported_at: endedAt.toISOString(), engine_off: true };

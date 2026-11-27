@@ -3,6 +3,7 @@ const {
   extractImei,
   normalizeTripMetricsPayload,
   pointFromPayload,
+  tripEndTime,
   tripIdentity,
   webhookDedupeKey,
 } = require('../services/bouncie-payload');
@@ -111,6 +112,9 @@ describe('Bouncie payload normalization', () => {
     expect(pointFromPayload({ eventType: 'tripEnd', location: { lat: 26.9, lon: -82.0 }, end: { timestamp: 'x' } }, 'trip-end')).toMatchObject({ lat: 26.9 });
     expect(pointFromPayload({ eventType: 'tripEnd', ts: '2026-11-25T12:21:00.000Z', location: { lat: 26.9, lon: -82.0 }, end: { lat: 27.5, lon: -82.5 } }, 'trip-end'))
       .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:21:00.000Z' });
+    expect(pointFromPayload({ eventType: 'tripEnd', end: { lat: 27.5, lon: -82.5 }, location: { lat: 26.9, lon: -82.0, timestamp: '2026-11-25T12:22:00.000Z' } }, 'trip-end'))
+      .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:22:00.000Z' });
+    expect(tripEndTime({ ts: '2026-11-25T12:23:00.000Z', start: { lat: 1, lon: 1 } })).toBe('2026-11-25T12:23:00.000Z');
     expect(pointFromPayload({ eventType: 'tripEnd', connect: { lat: 27.1, lon: -82.1 } }, 'trip-end')).toBeNull();
     expect(pointFromPayload({ eventType: 'tripEnd', end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
   });
