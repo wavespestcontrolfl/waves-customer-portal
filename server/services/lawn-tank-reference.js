@@ -68,14 +68,18 @@ function mixFields(row, percent) {
   return { mixWith, applyAlone: row?.gates?.applyAlone === true, surfactantNote };
 }
 
-// Whole passes that put the label volume down with a sprayer that puts out less: only when that many passes land within 5% of the
-// label volume (4 on 1.33 = 3 passes, 3.99 gal). Otherwise (2 on 1.33: two passes put down 2.66) no pass count, and a sprayer that
-// puts out more never gets one.
+// Whole passes that put the label volume down with a sprayer that puts out less: only when that many passes land at or under the
+// label volume and within 5% below it (4 on 2 = 2 passes; 4 on 1.33 = 3 passes, 3.99 gal). Never a count that goes over
+// (4 on 2.09: two passes put down 4.18) or far under (2 on 1.33: one pass puts down 1.33); a sprayer that puts out more gets none.
 const PASS_TOLERANCE = 0.05;
 function passesFor(label, tested) {
-  const passes = Math.round(label / tested);
-  return tested < label && passes >= 2 && Math.abs(passes * tested - label) <= PASS_TOLERANCE * label ? passes : null;
+  const passes = Math.floor(label / tested + 1e-9);
+  return passes >= 2 && passes * tested <= label + 1e-9 && passes * tested >= (1 - PASS_TOLERANCE) * label ? passes : null;
 }
+
+// The other sprayer on this sheet whose test puts out the label volume (within 2%, the rounding of a test output), else null.
+const SAME_VOLUME = 0.02;
+const sprayerAt = (label, sprayers, except) => sprayers.find((other) => other !== except && Math.abs(rigCarrier(other) - label) <= SAME_VOLUME * label)?.system_name || null;
 
 // Each sprayer whose tested output differs from a volume the program fixes (Arena at 4 gal per 1,000 sq ft on a FlowZone tested
 // at 1.33), with the use it applies to (null = the whole line): the fill stays; the card says how to reach the label volume.
@@ -88,7 +92,7 @@ function volumeChecks(volumes, sprayers) {
     .filter((sprayer) => rigCarrier(sprayer) > 0 && Math.abs(rigCarrier(sprayer) - label) > 1e-9)
     .map((sprayer) => ({
       use, sprayerName: sprayer.system_name || null, labelGalPer1000: label, testedGalPer1000: rigCarrier(sprayer),
-      passes: passesFor(label, rigCarrier(sprayer)),
+      passes: passesFor(label, rigCarrier(sprayer)), otherSprayerName: sprayerAt(label, sprayers, sprayer),
     })));
 }
 

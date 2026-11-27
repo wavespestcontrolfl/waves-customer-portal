@@ -72,7 +72,7 @@ describe('a several-use line and a hand-shaker bait', () => {
     expect(ref).toMatchObject({ fixedCarrierGalPer1000: null, backpack4Gal: { amount: 1.504, carrierGalPer1000: 1.33, carrierSource: 'calibration' } });
     expect(ref.useFills).toEqual([expect.objectContaining({ use: 'mapped large patch', carrierGalPer1000: 2, backpack4Gal: expect.objectContaining({ amount: 1, carrierSource: 'line' }) })]);
     // The volume check names the use it applies to; the general fill on the sprayer's own volume gets none.
-    expect(ref.volumeChecks).toEqual([{ use: 'mapped large patch', sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null }]);
+    expect(ref.volumeChecks).toEqual([{ use: 'mapped large patch', sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null, otherSprayerName: null }]);
   });
   test('a one-use line keeps its volume for the whole line (Arena: the clause after it is a note)', () => {
     const arena = { name: 'Arena', default_rate_per_1000: 0.29, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
@@ -97,17 +97,21 @@ describe('a fixed volume the sprayer test does not put out, and the Celsius heat
   test('Arena at 4 gal per 1,000 sq ft on a tank tested at 2 and a FlowZone at 1.33: one check per sprayer, the amounts stay', () => {
     const item = { raw: 'Arena 50 WDG — chinch, 0.147 oz per 1,000 sq ft in 4 gal per 1,000 sq ft', role: 'base', conditional: false };
     const ref = tankReference({ product: arena, item, rig: TANK, backpack: BACKPACK });
-    // Passes = label volume / tested output, rounded up (1.33 is a rounded 4/3, so 3 passes, not 4).
+    // Whole passes at or under the label volume, within 5% below it (3 x 1.33 = 3.99 of 4).
     expect(ref.volumeChecks).toEqual([
-      { use: null, sprayerName: 'Fixture tank', labelGalPer1000: 4, testedGalPer1000: 2, passes: 2 },
-      { use: null, sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 },
+      { use: null, sprayerName: 'Fixture tank', labelGalPer1000: 4, testedGalPer1000: 2, passes: 2, otherSprayerName: null },
+      { use: null, sprayerName: 'FlowZone fixture backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3, otherSprayerName: null },
     ]);
     // Passes only when that many land within 5% of the label volume; a sprayer that puts out more never gets one.
     const passes = (label, tested) => tankReference({ product: arena, item: { ...item, raw: `Arena — 0.147 oz per 1,000 sq ft in ${label} gal per 1,000 sq ft` },
       rig: { ...TANK, carrier_gal_per_1000: tested } }).volumeChecks[0].passes;
-    expect([passes(4, 2), passes(4, 1.33), passes(2, 1.33), passes(2, 4)]).toEqual([2, 3, null, null]);
+    // Never over the label volume (4 on 2.09: two passes put down 4.18), never far under (2 on 1.33).
+    expect([passes(4, 2), passes(4, 1.33), passes(2, 1.33), passes(2, 4), passes(4, 2.09), passes(4, 1.9)]).toEqual([2, 3, null, null, null, 2]);
+    // The other sprayer is named only when its test puts out the label volume.
+    const atTwo = tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft in 2 gal per 1,000 sq ft' }, rig: TANK, backpack: BACKPACK });
+    expect(atTwo.volumeChecks).toEqual([expect.objectContaining({ sprayerName: 'FlowZone fixture backpack', passes: null, otherSprayerName: 'Fixture tank' })]);
     expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft in 1 gal per 1,000 sq ft' }, rig: TANK }).volumeChecks)
-      .toEqual([{ use: null, sprayerName: 'Fixture tank', labelGalPer1000: 1, testedGalPer1000: 2, passes: null }]);
+      .toEqual([{ use: null, sprayerName: 'Fixture tank', labelGalPer1000: 1, testedGalPer1000: 2, passes: null, otherSprayerName: null }]);
     expect(ref).toMatchObject({ per100Gal: { amount: 3.675, carrierSource: 'line' }, backpack4Gal: { amount: 0.147 } });
     // The sprayer's own volume needs no check; neither does a line volume the sprayer was tested at.
     expect(tankReference({ product: arena, item: { ...item, raw: 'Arena — 0.147 oz per 1,000 sq ft' }, rig: TANK, backpack: BACKPACK }).volumeChecks).toEqual([]);

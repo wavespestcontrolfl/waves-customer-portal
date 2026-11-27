@@ -247,16 +247,19 @@ describe("110-gallon tank reference", () => {
     const plan = fixture();
     plan.items[0].tankAmounts.volumeChecks = [
       { use: null, sprayerName: null, labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3 },
-      { use: null, sprayerName: "Fixture tank", labelGalPer1000: 1, testedGalPer1000: 2, passes: null },
-      { use: "mapped large patch", sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null },
+      { use: null, sprayerName: "Fixture tank", labelGalPer1000: 1, testedGalPer1000: 2, passes: null, otherSprayerName: null },
+      { use: "mapped large patch", sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null, otherSprayerName: null },
+      { use: null, sprayerName: "FlowZone fixture", labelGalPer1000: 2, testedGalPer1000: 1.33, passes: null, otherSprayerName: "Fixture tank" },
     ];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Label volume is 4 gal per 1,000. This sprayer was tested at 1.33. Make 3 passes, or slow down to reach the label volume.")).toBeInTheDocument();
-      // A sprayer that puts out more is never told to make passes.
-      expect(within(surface).getByText("Label volume is 1 gal per 1,000. Fixture tank was tested at 2. Speed up or use the other sprayer.")).toBeInTheDocument();
-      // No whole pass count lands near 2 on 1.33: never a pass count that over-applies.
-      expect(within(surface).getByText("Mapped large patch: Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Slow down to reach 2, or use a sprayer tested at 2.")).toBeInTheDocument();
+      // A sprayer that puts out more is never told to make passes; with no other sprayer tested at the label volume, none is named.
+      expect(within(surface).getByText("Label volume is 1 gal per 1,000. Fixture tank was tested at 2. Speed up to reach 1.")).toBeInTheDocument();
+      // No whole pass count lands at or just under 2 on 1.33: never a pass count that over- or under-applies.
+      expect(within(surface).getByText("Mapped large patch: Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Slow down to reach 2.")).toBeInTheDocument();
+      // The other sprayer only when the server found it tested at the label volume.
+      expect(within(surface).getByText("Label volume is 2 gal per 1,000. FlowZone fixture was tested at 1.33. Slow down to reach 2, or use Fixture tank (tested at 2).")).toBeInTheDocument();
       expect(within(surface).getAllByText("12.5 oz / 110 gal").length).toBeGreaterThan(0);
     }
   });
@@ -279,19 +282,42 @@ describe("110-gallon tank reference", () => {
     expect(within(document.querySelector(".protocol-print-sheet")).getAllByText(rule)).toHaveLength(1);
   });
 
-  it("Bermuda removal: every card names the one shared tank, the surfactant last, never the herbicides pointing at each other", () => {
+  // The Bermuda removal step (lawn-bermuda-removal.js): the server's step order, by product id; no order for a blocked step.
+  const bermudaPlan = (overrides = {}) => {
     const plan = fixture();
-    const item = (id, name, category, mixWith) => ({ selected: true, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: category },
-      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, mixWith } });
+    const item = (id, name, category, mixWith) => ({ selected: true, conditional: true, bermudaStep: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: category },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, mixWith }, ...overrides[id] });
+    // The catalog's short name for Recognition does not start with the staged name the marks use: the ids still tie them.
     plan.items = [
-      item("nis", "Synthetic surfactant", "adjuvant_last", "Recognition and Fusilade II"),
-      item("fus", "Fusilade II", "ec_ew", "Recognition"),
+      item("nis", "Synthetic surfactant", "adjuvant_last", "Recognition Post Emergent Herbicide and Fusilade II"),
+      item("fus", "Fusilade II", "ec_ew", "Recognition Post Emergent Herbicide"),
       item("rec", "Recognition", "dry_wg_wdg_wp_df", "Fusilade II"),
     ];
-    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    plan.bermudaMixingOrder = [{ step: 1, productId: null, productName: "Water" },
+      { step: 2, productId: "rec", productName: "Recognition" }, { step: 3, productId: "fus", productName: "Fusilade II" }, { step: 4, productId: "nis", productName: "Synthetic surfactant" }];
+    return plan;
+  };
+
+  it("Bermuda removal: every card names the one shared tank by product id, the surfactant last, never the herbicides pointing at each other", () => {
+    const { container } = render(<ProtocolTankSheet plan={bermudaPlan()} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getAllByText("Same tank: Recognition + Fusilade II + Synthetic surfactant")).toHaveLength(3);
       expect(within(surface).queryByText(/Add to the|Tank with/)).not.toBeInTheDocument();
+    }
+  });
+
+  it("a blocked Bermuda removal step gives no mix line on any card, and the amounts stay", () => {
+    const unavailable = { unavailable: { reason: "Synthetic limit reached." } };
+    const blocked = { ...bermudaPlan({ rec: { ...unavailable, tankAmounts: { ...tankAmounts(), planState: "capped" } }, fus: unavailable, nis: unavailable }), bermudaMixingOrder: undefined };
+    // A step the server marks unavailable, a capped member, or an unselected member: never a partial "Same tank".
+    for (const plan of [blocked, bermudaPlan({ rec: { selected: false } }), bermudaPlan({ fus: { tankAmounts: { ...tankAmounts(), planState: "capped" } } })]) {
+      const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
+      for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+        expect(within(surface).queryByText(/Same tank|Add to the|Tank with/)).not.toBeInTheDocument();
+        expect(within(surface).getAllByText("Mixing: follow this card and the label")).toHaveLength(3);
+      }
+      expect(within(container).getAllByText("FlowZone 4 gal").length).toBeGreaterThan(0);
+      unmount();
     }
   });
 

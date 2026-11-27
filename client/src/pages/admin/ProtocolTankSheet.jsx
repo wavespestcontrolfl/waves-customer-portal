@@ -17,48 +17,36 @@ const CARRIER_SOURCE = { row: "from the program row", line: "protocol line" };
 const isSpreader = (item) => item.tankAmounts?.application === "spreader";
 const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 // How a product goes on, from the program's own mix marks: a spreader; added to another product's mix (the surfactant and
-// Certainty in the Celsius weed mix); the base of a mix others are added to; applied alone. With no mark, neutral wording.
-// A mix instruction is for today only: both products selected for this sheet, neither at a limit.
-const mixable = (item) => item.selected && item.tankAmounts?.planState !== "capped";
-// A mark may name several products ("Recognition and Fusilade II" on the Bermuda removal surfactant).
-const mixNames = (item) => String(item.tankAmounts?.mixWith || "").split(/\s*(?:,|\+|\band\b)\s*/).filter(Boolean);
-const mixesInto = (additive, base) => mixNames(additive).some((name) => nameKey(base.product.name).startsWith(nameKey(name)));
+// Certainty in the Celsius weed mix); the base of a mix others are added to; the Bermuda removal step's one shared tank; applied
+// alone. With no mark, neutral wording.
+// The one test every mix instruction uses: a product is in today's mix only when it is selected for this sheet and not blocked
+// (a Bermuda step the server marks unavailable, a field hold), at a limit, held, skipped, or a spreader product.
+const BLOCKED_PLAN_STATES = new Set(["capped", "held", "unavailable"]);
+const mixReady = (item) => Boolean(item.selected && !item.unavailable && !item.fieldHold && !item.tankAmounts?.skipped
+  && !BLOCKED_PLAN_STATES.has(item.tankAmounts?.planState) && !isSpreader(item));
+const mixesInto = (additive, base) => Boolean(additive.tankAmounts?.mixWith) && nameKey(base.product.name).startsWith(nameKey(additive.tankAmounts.mixWith));
 const GRANULAR_METHOD = { hand_shaker: "Hand shaker", spreader: "Spreader" };
 
-// The mixable products the marks tie to this one, directly or through another.
-function mixGroup(item, products) {
-  const pool = products.filter(mixable);
-  const group = [item];
-  for (let i = 0; i < group.length; i += 1) {
-    group.push(...pool.filter((other) => !group.includes(other) && (mixesInto(group[i], other) || mixesInto(other, group[i]))));
-  }
-  return group;
+// The Bermuda removal step's shared tank, by product id from the server's step order (lawn-bermuda-removal.js mixOrderField:
+// water, Recognition, Fusilade II, the surfactant last). The server sends no order for a blocked step, and the line shows only
+// when every step product on the sheet is ready.
+function sharedTank(item, products, order) {
+  const steps = (order || []).filter((step) => step.productId);
+  const ids = steps.map((step) => String(step.productId));
+  const stepItems = products.filter((other) => other.bermudaStep);
+  if (!ids.includes(String(item.product.id)) || !stepItems.every((other) => mixReady(other) && ids.includes(String(other.product.id)))) return null;
+  return `Same tank: ${steps.map((step) => step.productName).join(" + ")}`;
 }
 
-// One base the others are added to (the Celsius weed mix). Otherwise (Bermuda removal: the two herbicides name each other and the
-// surfactant names both) every card names the one shared tank, in mixing order, the surfactant last.
-const isBaseMix = (group) => {
-  const bases = group.filter((member) => !mixNames(member).length);
-  return bases.length === 1 && group.every((member) => member === bases[0] || (mixNames(member).length === 1 && mixesInto(member, bases[0])));
-};
-const MIX_ORDER = [...TANK_MIX_CATEGORIES];
-const mixRank = (item) => (MIX_ORDER.includes(item.product.mixingOrderCategory) ? MIX_ORDER.indexOf(item.product.mixingOrderCategory) : MIX_ORDER.length - 1);
-function sharedTank(item, products) {
-  const group = mixGroup(item, products);
-  if (group.length < 2 || isBaseMix(group)) return null;
-  const ordered = [...group].sort((a, b) => mixRank(a) - mixRank(b) || products.indexOf(a) - products.indexOf(b));
-  return `Same tank: ${ordered.map((member) => member.product.name).join(" + ")}`;
-}
-
-function applicationMethod(item, products) {
+function applicationMethod(item, products, order) {
   const amounts = item.tankAmounts || {};
   if (isSpreader(item)) return GRANULAR_METHOD[amounts.applicator] || "Spreader";
   const neutral = amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
-  if (!mixable(item)) return neutral;
-  const shared = sharedTank(item, products);
-  if (shared) return shared;
-  if (products.some((base) => mixable(base) && mixesInto(item, base))) return `Add to the ${amounts.mixWith} mix`;
-  const partners = products.filter((other) => mixable(other) && mixesInto(other, item));
+  if (!mixReady(item)) return neutral;
+  // A Bermuda step line never takes the name marks below (they point at each other): the shared tank, or neutral wording.
+  if (item.bermudaStep) return sharedTank(item, products, order) || neutral;
+  if (products.some((base) => mixReady(base) && mixesInto(item, base))) return `Add to the ${amounts.mixWith} mix`;
+  const partners = products.filter((other) => mixReady(other) && mixesInto(other, item));
   return partners.length ? `Tank with: ${partners.map((other) => other.product.name).join(", ")}` : neutral;
 }
 
@@ -68,20 +56,22 @@ function surfactantNote(item, products) {
   // The surfactant's own card always carries it, selected or not; the Celsius card when the sheet tells them to mix.
   const own = item.tankAmounts?.surfactantNote;
   if (own) return own;
-  if (!mixable(item)) return null;
-  return products.find((other) => mixable(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
+  if (!mixReady(item)) return null;
+  return products.find((other) => mixReady(other) && other.tankAmounts?.surfactantNote && mixesInto(other, item))?.tankAmounts.surfactantNote || null;
 }
 
 // A program volume the sprayer's test does not put out (server: the pass count), named for the use it applies to.
 const sentenceCase = (text) => text.charAt(0).toUpperCase() + text.slice(1);
-function volumeAdvice(label, tested, passes) {
-  if (tested > label) return "Speed up or use the other sprayer.";
-  return passes ? `Make ${passes} passes, or slow down to reach the label volume.` : `Slow down to reach ${num(label)}, or use a sprayer tested at ${num(label)}.`;
+// "Use the other sprayer" only when the server found another sprayer on this sheet tested at the label volume.
+function volumeAdvice({ labelGalPer1000: label, testedGalPer1000: tested, passes, otherSprayerName }) {
+  const other = otherSprayerName ? `, or use ${otherSprayerName} (tested at ${num(label)})` : "";
+  if (passes) return `Make ${passes} passes, or slow down to reach the label volume.`;
+  return `${tested > label ? "Speed up" : "Slow down"} to reach ${num(label)}${other}.`;
 }
-const volumeText = ({ use, sprayerName, labelGalPer1000: label, testedGalPer1000: tested, passes }) => [
-  use ? `${sentenceCase(use)}:` : null,
-  `Label volume is ${num(label)} gal per 1,000. ${sprayerName || "This sprayer"} was tested at ${num(tested)}.`,
-  volumeAdvice(label, tested, passes),
+const volumeText = (check) => [
+  check.use ? `${sentenceCase(check.use)}:` : null,
+  `Label volume is ${num(check.labelGalPer1000)} gal per 1,000. ${check.sprayerName || "This sprayer"} was tested at ${num(check.testedGalPer1000)}.`,
+  volumeAdvice(check),
 ].filter(Boolean).join(" ");
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
@@ -206,7 +196,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
               <h3>{product.name}</h3>
               <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            <p className="mt-2 font-medium">{applicationMethod(item, products)}</p>
+            <p className="mt-2 font-medium">{applicationMethod(item, products, plan.bermudaMixingOrder)}</p>
             <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}
