@@ -86,13 +86,18 @@ function RenderedSections({ document, rendered }) {
   });
 }
 
+function releaseBlockersOf(rendered) {
+  return [...(rendered.unresolved || []), ...(rendered.table_issues || [])];
+}
+
 function ReaderChrome({ document, version, versions, versionIdentity, rendered, error, manage, busy, needsPreview, previewReady, previewError, onVersion, onEdit, onRequired, onDownload }) {
+  const releaseBlockers = releaseBlockersOf(rendered);
   return (
     <section className="staff-document-reader-chrome waves-field-no-print" style={{ ...box, borderLeft: `4px solid ${D.blue}` }}>
       <div style={{ ...row, justifyContent: 'space-between' }}><span style={{ textTransform: 'capitalize', color: D.accent, fontWeight: 600 }}>{document.staff_kind} · {versionIdentity.status}</span><button disabled={busy || (needsPreview && !previewReady)} style={buttonStyle} onClick={onDownload}>Export PDF</button></div>
       <div className="staff-document-reader-version"><Field label="Version history"><select style={inputStyle} value={version.id} onChange={e => onVersion(e.target.value)}>{versions.map(item => <option key={item.id} value={item.id}>v{item.number} · {item.issued ? dateLabel(item.effective_at) : 'Draft'}</option>)}</select></Field></div>
       {version.content_hash && <details><summary style={{ cursor: 'pointer', padding: '10px 0', color: D.accent, fontWeight: 600 }}>Version identity</summary><p style={{ overflowWrap: 'anywhere', fontSize: 14 }}>SHA-256: {version.content_hash}</p><p>Version ID: {version.id}</p></details>}
-      {rendered.unresolved.length > 0 && <div style={{ padding: 16, background: D.warm, borderLeft: `4px solid ${D.gold}`, borderRadius: 6 }}><strong style={{ color: D.accent }}>Decisions needed before issuance</strong><ul>{rendered.unresolved.map(value => <li key={value} style={{ overflowWrap: 'anywhere', marginTop: 6 }}>{value}</li>)}</ul></div>}
+      {releaseBlockers.length > 0 && <div style={{ padding: 16, background: D.warm, borderLeft: `4px solid ${D.gold}`, borderRadius: 6 }}><strong style={{ color: D.accent }}>Decisions needed before issuance</strong><ul>{releaseBlockers.map(value => <li key={value} style={{ overflowWrap: 'anywhere', marginTop: 6 }}>{value}</li>)}</ul></div>}
       {error && <p role="alert" style={{ padding: '10px 12px', background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B', borderRadius: 6 }}>{error}</p>}
       {manage && <div style={{ ...row, margin: '18px 0' }}><button style={buttonStyle} disabled={busy} onClick={onEdit}>Create revision</button>
         <label style={row}><input type="checkbox" disabled={busy} checked={document.onboarding_required === true} onChange={e => onRequired(e.target.checked)} />Required at onboarding</label></div>}
@@ -182,7 +187,7 @@ export default function DocumentReader({ detail, people, selfId, manage, onVersi
         <IssueVersionForm
           version={version} effective={effective} setEffective={setEffective}
           issueAccepted={issueAccepted} setIssueAccepted={setIssueAccepted}
-          previewReady={previewReady} busy={busy} unresolvedCount={rendered.unresolved.length}
+          previewReady={previewReady} busy={busy} unresolvedCount={releaseBlockersOf(rendered).length}
           onRefresh={() => { setIssueAccepted(false); setRefreshPreview(value => value + 1); }}
           onIssue={() => act(async () => { await request(`/${document.id}/issue`, { version_id: version.id, effective_at: effective, preview_hash: preview.preview_hash }); onSaved('Document issued.'); })}
         />

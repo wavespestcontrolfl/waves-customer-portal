@@ -117,6 +117,10 @@ test('unresolved placeholders in displayed metadata are flagged and rejected at 
   const bindingRendered = renderSource(bindingDraft, values);
   expect(bindingRendered.unresolved).toEqual(expect.arrayContaining(['{{policy.pay_schedule}}', '{{policy.pay_frequency}}']));
   expect(() => checkRelease(bindingDraft, bindingRendered, new Date())).toThrow(/Resolve before issuing/);
+
+  const unclosedBodyBinding = renderSource(source('## Scope {#scope}\nPay schedule: {{policy.pay_schedule'), values);
+  expect(unclosedBodyBinding.unresolved).toEqual(expect.arrayContaining(['{{']));
+  expect(() => checkRelease(draft, unclosedBodyBinding, new Date())).toThrow(/Resolve before issuing/);
 });
 test('HTML, scripts, images and unsafe links cannot become executable content', () => {
   const html = renderSource(source('## Example {#example}\n<img src=x onerror=alert(1)> [bad](javascript:alert) [good](https://example.com/?q="x") **Bold**')).sections[0].html;

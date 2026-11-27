@@ -129,7 +129,9 @@ test('non-admin signing a signature agreement sees Sign this agreement, no due p
     },
   });
   const onSaved = vi.fn();
-  render(<DocumentRecord detail={detail()} people={people} selfId="hire" manage={false} canWrite onSaved={onSaved} />);
+  const sigDetail = detail();
+  sigDetail.rendered.metadata.fields = sigDetail.rendered.metadata.fields.map(f => ({ ...f, required: true }));
+  render(<DocumentRecord detail={sigDetail} people={people} selfId="hire" manage={false} canWrite onSaved={onSaved} />);
   expect(screen.getByRole('heading', { name: 'Sign this agreement' })).toBeInTheDocument();
   expect(screen.queryByLabelText('Next action due (Eastern)')).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Save open record|Save draft/ })).not.toBeInTheDocument();
@@ -139,6 +141,11 @@ test('non-admin signing a signature agreement sees Sign this agreement, no due p
   fireEvent.click(screen.getByLabelText('I agree *'));
   expect(submit).toBeDisabled();
   fireEvent.change(screen.getByLabelText('Typed name *'), { target: { value: 'Sample Hire' } });
+  // Required vehicle/address/start-date fields are still blank, so submit stays disabled.
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Assigned vehicle *'), { target: { value: 'Truck 7' } });
+  fireEvent.change(screen.getByLabelText('Home address *'), { target: { value: '123 Main St' } });
+  fireEvent.change(screen.getByLabelText('Start date *'), { target: { value: '2026-11-01' } });
   expect(submit).toBeEnabled();
   fireEvent.click(submit);
   await waitFor(() => expect(onSaved).toHaveBeenCalledWith('Agreement signed and saved.'));

@@ -135,8 +135,13 @@ function computeRecordState({ rendered, answers, owner, selfId, canWrite, record
   const isSignatureForm = rendered.kind === 'form' && Boolean(signatureField);
   const signedName = String(answers['signed-name'] || '');
   const signatureReady = !isSignatureForm || signedNameValid(signedName);
-  const checkboxesReady = rendered.metadata.fields.every(field => field.type !== 'checkbox' || !field.required || answers[field.id] === true);
-  const canSignNow = owner === selfId && (!isSignatureForm || (signatureReady && checkboxesReady));
+  const requiredFieldsReady = rendered.metadata.fields.every(field => {
+    if (!field.required) return true;
+    if (field.type === 'checkbox') return answers[field.id] === true;
+    if (field.id === 'signed-name' && field.type === 'text') return signedNameValid(answers[field.id]);
+    return Boolean(String(answers[field.id] || '').trim());
+  });
+  const canSignNow = owner === selfId && (!isSignatureForm || (signatureReady && requiredFieldsReady));
   const locked = !canWrite || Boolean(record?.completed_at);
   const selectableRecords = [...new Map([...records, ...(record ? [record] : [])].map(item => [item.id, item])).values()];
   const hasValidSavedSignature = Boolean(record?.completed_at && isSignatureForm && signedNameValid(record.answers?.['signed-name']));

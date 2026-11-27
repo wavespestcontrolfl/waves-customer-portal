@@ -259,7 +259,7 @@ function renderSource(source, policyValues) {
     table_issues: [...new Set(budget.issues)],
     unresolved: [...new Set([...rendered.unresolvedVariables, ...title.unresolvedVariables,
       ...findUnresolvedMarkers(`${title.rendered}\n${rendered.rendered}\n${metaText}`),
-      ...findTemplateBindings(metaText)])],
+      ...findTemplateBindings(`${title.rendered}\n${rendered.rendered}\n${metaText}`)])],
   };
 }
 

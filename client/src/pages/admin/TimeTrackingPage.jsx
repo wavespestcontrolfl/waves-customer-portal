@@ -5587,7 +5587,9 @@ const FILE_ICON_COMPONENTS = {
 };
 
 function renderFileTypeIcon(fileType) {
-  const IconComp = FILE_ICON_COMPONENTS[fileType] || FileIcon;
+  const IconComp = typeof fileType === "string" && Object.hasOwn(FILE_ICON_COMPONENTS, fileType)
+    ? FILE_ICON_COMPONENTS[fileType]
+    : FileIcon;
   return <IconComp size={22} strokeWidth={1.75} color="#04395E" aria-hidden="true" />;
 }
 
