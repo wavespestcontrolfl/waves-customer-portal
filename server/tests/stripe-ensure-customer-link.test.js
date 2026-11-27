@@ -9,6 +9,7 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
   let stripeClient;
   let logger;
   let enqueue;
+  let trxHandle;
 
   // A one-row customers table. `beforeLink` runs after the Stripe call and before
   // the link-back write, to play the part of a concurrent merge or request.
@@ -35,6 +36,9 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
       return q;
     };
     const database = jest.fn(query);
+    // A real-db-like handle: the link runs in database.transaction, on a handle that reads the same table.
+    trxHandle = jest.fn(query);
+    database.transaction = jest.fn(async (fn) => fn(trxHandle));
     stripeClient = { customers: { create: jest.fn(async () => ({ id: 'cus_new' })) } };
     logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     jest.doMock('../models/db', () => jest.fn());
@@ -60,17 +64,19 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
   test('an email that changed during creation queues a Stripe email sync after the link', async () => {
     const { StripeService, database } = load({ row: { email: 'old@example.test' }, beforeLink: (st) => { st.row.email = 'new@example.test'; } });
     await expect(StripeService.ensureStripeCustomer('cust-1', { database })).resolves.toBe('cus_new');
-    expect(enqueue).toHaveBeenCalledWith(database, 'cust-1', 'stripe_link');
+    const trxSeen = database.transaction.mock.calls.length ? trxHandle : null;
+    // Queued inside the link's own transaction (the handle the link used), so the two commit together.
+    expect(enqueue).toHaveBeenCalledWith(trxSeen, 'cust-1', 'stripe_link');
+    expect(database.transaction).toHaveBeenCalledTimes(1);
   });
 
-  test('an unchanged email queues nothing, and a failed queue keeps the link', async () => {
+  test('an unchanged email queues nothing, and a failed queue fails the call (the link rolls back with it)', async () => {
     const a = load({ row: { email: 'same@example.test' } });
     await a.StripeService.ensureStripeCustomer('cust-1', { database: a.database });
     expect(enqueue).not.toHaveBeenCalled();
     const b = load({ row: { email: 'old@example.test' }, beforeLink: (st) => { st.row.email = 'new@example.test'; } });
     enqueue.mockRejectedValue(new Error('db down'));
-    await expect(b.StripeService.ensureStripeCustomer('cust-1', { database: b.database })).resolves.toBe('cus_new');
-    expect(b.state.row.stripe_customer_id).toBe('cus_new');
+    await expect(b.StripeService.ensureStripeCustomer('cust-1', { database: b.database })).rejects.toThrow('Failed to create Stripe customer');
   });
 
   test('already linked: returns it with no Stripe call and no write (fast path unchanged)', async () => {

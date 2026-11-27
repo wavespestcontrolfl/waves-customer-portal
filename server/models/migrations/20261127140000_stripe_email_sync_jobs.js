@@ -6,9 +6,10 @@
  *   status   pending | done | skipped | failed
  *   result   updated | not_linked | no_email | not_configured | gone | shared | gave_up
  *
- * One pending row per customer (partial unique index): a second change before the drain only bumps the row, and the
- * drain always reads the email on file at that moment. Additive; down drops the table (pending syncs are lost, the
- * customer record is unchanged).
+ * No unique index on purpose: a customer merge repoints these rows from the retired record to the kept one (the merge
+ * FK sweep), and two pending rows for one customer are harmless, since each job locks the customer row and writes the
+ * email on file at that moment. enqueue() skips the insert when a pending row already exists. Additive; down drops the
+ * table (pending syncs are lost, the customer record is unchanged).
  */
 exports.up = async function up(knex) {
   if (await knex.schema.hasTable('stripe_email_sync_jobs')) return;
@@ -24,7 +25,7 @@ exports.up = async function up(knex) {
     t.timestamp('finished_at', { useTz: true });
     t.timestamps(true, true);
   });
-  await knex.raw("CREATE UNIQUE INDEX stripe_email_sync_jobs_one_pending ON stripe_email_sync_jobs (customer_id) WHERE status = 'pending'");
+  await knex.raw("CREATE INDEX stripe_email_sync_jobs_pending_customer ON stripe_email_sync_jobs (customer_id) WHERE status = 'pending'");
   await knex.raw("CREATE INDEX stripe_email_sync_jobs_due ON stripe_email_sync_jobs (next_attempt_at) WHERE status = 'pending'");
 };
 

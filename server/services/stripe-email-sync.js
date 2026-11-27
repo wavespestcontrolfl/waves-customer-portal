@@ -3,8 +3,9 @@
  * same email. The work is a durable row (stripe_email_sync_jobs) written in the change's own transaction; drainDue()
  * runs every minute (scheduler.js).
  *
- * Fencing: each job runs in one transaction that locks the job row and the customer row FOR UPDATE and holds them
- * through the Stripe call. Customer merges and their undo lock the customers rows they move a Stripe id between
+ * Fencing: each job runs in one transaction that locks the customer row FOR UPDATE first (the same order as an email
+ * confirm, which updates the customer row and then inserts the job), then claims the job row, and holds both through
+ * the Stripe call. Customer merges and their undo lock the customers rows they move a Stripe id between
  * (customer-dedupe.js, sorted ids), so no transfer can land between the ownership check and the Stripe write. The email
  * is read under that lock, so the write always carries the address on file now; a later change re-queues the row.
  * A Stripe id that another customer row also holds (dedupe can leave two rows on one id) is never changed here: the job
@@ -19,13 +20,13 @@ const MAX_ATTEMPTS = 6;
 const STRIPE_TIMEOUT_MS = 10000;
 const MERGE_RETIRED_PHONE_PREFIX = 'merged-';
 
-// Queue (or re-arm) the customer's one pending job, on the caller's transaction handle.
+// Queue a job on the caller's transaction handle, unless one is already pending for this customer (it will read the
+// newest email anyway). The callers hold the customer row lock (they just wrote it), so two of them cannot both insert.
 async function enqueue(trx, customerId, source) {
   await trx.raw(
-    `INSERT INTO ${TABLE} (customer_id, source) VALUES (?, ?)
-     ON CONFLICT (customer_id) WHERE status = 'pending'
-     DO UPDATE SET next_attempt_at = now(), attempts = 0, last_error = NULL, updated_at = now()`,
-    [customerId, source],
+    `INSERT INTO ${TABLE} (customer_id, source)
+     SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE customer_id = ? AND status = 'pending')`,
+    [customerId, source, customerId],
   );
 }
 
@@ -35,9 +36,16 @@ async function finish(trx, job, status, result) {
   await trx(TABLE).where({ id: job.id }).update({ status, result, finished_at: trx.fn.now(), updated_at: trx.fn.now() });
 }
 
-const OFFICE_WHY = {
-  shared: 'Another customer record uses the same Stripe profile, so the app left its email alone.',
-  gave_up: 'Stripe did not take the new email after several tries.',
+// Shared profile: the office must sort out WHICH record owns the Stripe profile before any email edit there.
+const OFFICE_COPY = {
+  shared: {
+    why: 'Another customer record uses the same Stripe profile, so the app left its email alone.',
+    next: 'Do not change the Stripe email yet. First work out which customer record owns this Stripe profile; the other record may need its own.',
+  },
+  gave_up: {
+    why: 'Stripe did not take the new email after several tries.',
+    next: 'Compare the Stripe profile email with the customer record now, and fix Stripe by hand only if they differ.',
+  },
 };
 
 // One alert per job, written in the job's own transaction (it commits with the status change).
@@ -45,7 +53,7 @@ async function alertOffice(trx, job, customer, result) {
   await require('./admin-alert-compose').raiseAdminAlert('customer', {
     area: 'Customers',
     action: 'Stripe email not updated',
-    why: OFFICE_WHY[result],
+    why: OFFICE_COPY[result].why,
     severity: 'needs-you',
     link: `/admin/customers?customerId=${customer.id}`,
     subject: { type: 'customer', id: String(customer.id) },
@@ -55,17 +63,24 @@ async function alertOffice(trx, job, customer, result) {
     trx,
     bell: true,
     dedupeKey: `stripe_email_sync:${job.id}`,
-    detail: `Email on the customer record: ${customer.email || 'none'}\nCompare the Stripe profile email with the customer record now, and fix Stripe by hand only if they differ.`,
+    detail: `Email on the customer record: ${customer.email || 'none'}\n${OFFICE_COPY[result].next}`,
     metadata: { kind: 'stripe_email_sync', customerId: customer.id, result },
   });
 }
 
 async function processJob(jobId) {
   return db.transaction(async (trx) => {
-    const job = await trx(TABLE).where({ id: jobId, status: 'pending' }).forUpdate().skipLocked().first();
-    if (!job) return 'busy';
-    const customer = await trx('customers').where({ id: job.customer_id }).forUpdate()
+    // Customer first, then the job (the confirm's order). A peek finds the customer; the claim re-checks everything.
+    const peek = await trx(TABLE).where({ id: jobId }).first('customer_id');
+    if (!peek) return 'busy';
+    const customer = await trx('customers').where({ id: peek.customer_id }).forUpdate().skipLocked()
       .first('id', 'email', 'stripe_customer_id', 'deleted_at', 'phone');
+    // The claim: still pending, still due (an overlapping drain may have just rescheduled it), still this customer's
+    // (a merge may have moved it).
+    const job = await trx(TABLE).where({ id: jobId, status: 'pending', customer_id: peek.customer_id })
+      .where('next_attempt_at', '<=', trx.fn.now()).forUpdate().skipLocked().first();
+    if (!job) return 'busy';
+    if (customer === undefined && await trx('customers').where({ id: peek.customer_id }).first('id')) return 'busy';
     if (!customer || (customer.deleted_at && String(customer.phone || '').startsWith(MERGE_RETIRED_PHONE_PREFIX))) {
       await finish(trx, job, 'skipped', 'gone');
       return 'gone';

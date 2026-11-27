@@ -5,23 +5,25 @@
 describe('stripe-email-sync processJob', () => {
   let state; let locks; let updateEmail; let raiseAdminAlert;
 
-  function load({ job = {}, customers = [], stripeResult = 'updated' } = {}) {
+  function load({ job = {}, customers = [], stripeResult = 'updated', lockedCustomers = [] } = {}) {
     jest.resetModules();
     locks = [];
     state = {
-      jobs: [{ id: 'job-1', customer_id: 'c1', status: 'pending', attempts: 0, ...job }],
+      jobs: [{ id: 'job-1', customer_id: 'c1', status: 'pending', attempts: 0, due: true, ...job }],
       customers,
     };
     const builder = (table) => {
-      const q = { conds: [], nots: [], locked: false };
-      q.where = (c) => { q.conds.push(c); return q; };
+      const q = { conds: [], nots: [], locked: false, skip: false, dueOnly: false };
+      q.where = (c) => { if (typeof c === 'string') q.dueOnly = true; else q.conds.push(c); return q; };
       q.whereNot = (c) => { q.nots.push(c); return q; };
       q.orderBy = () => q;
       q.forUpdate = () => { q.locked = true; return q; };
-      q.skipLocked = () => q;
+      q.skipLocked = () => { q.skip = true; return q; };
       const rows = () => (table === 'stripe_email_sync_jobs' ? state.jobs : state.customers)
         .filter((r) => q.conds.every((c) => Object.entries(c).every(([k, v]) => r[k] === v))
-          && q.nots.every((c) => Object.entries(c).every(([k, v]) => r[k] !== v)));
+          && q.nots.every((c) => Object.entries(c).every(([k, v]) => r[k] !== v))
+          && (!q.dueOnly || r.due)
+          && !(q.skip && table === 'customers' && lockedCustomers.includes(r.id)));
       const note = (rs) => { if (q.locked) rs.forEach((r) => locks.push(`${table}:${r.id}`)); return rs; };
       q.first = async () => { const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
       q.select = async () => note(rows()).map((r) => ({ id: r.id }));
@@ -49,7 +51,8 @@ describe('stripe-email-sync processJob', () => {
     const sync = load({ customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
     expect(updateEmail).toHaveBeenCalledWith('cus_1', 'new@example.test', { timeout: 10000 });
-    expect(locks).toEqual(['stripe_email_sync_jobs:job-1', 'customers:c1', 'stripe-call']);
+    // Customer first, then the job: the same order as an email confirm (no deadlock).
+    expect(locks).toEqual(['customers:c1', 'stripe_email_sync_jobs:job-1', 'stripe-call']);
     expect(state.jobs[0]).toMatchObject({ status: 'done', result: 'updated' });
     expect(raiseAdminAlert).not.toHaveBeenCalled();
   });
@@ -93,6 +96,29 @@ describe('stripe-email-sync processJob', () => {
     expect(state.jobs[0]).toMatchObject({ status: 'pending', attempts: 0 });
   });
 
+  test('a job an overlapping drain just rescheduled is not due, so it is left alone', async () => {
+    const sync = load({ job: { due: false, attempts: 1 }, customers: [cust()], stripeResult: new Error('x') });
+    await expect(sync.processJob('job-1')).resolves.toBe('busy');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(state.jobs[0].attempts).toBe(1);
+  });
+
+  test('a customer row another transaction holds (a confirm in flight) leaves the job for the next tick', async () => {
+    const sync = load({ customers: [cust()], lockedCustomers: ['c1'] });
+    await expect(sync.processJob('job-1')).resolves.toBe('busy');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(state.jobs[0].status).toBe('pending');
+  });
+
+  test('shared and gave-up alerts give different instructions: never edit a shared profile by hand first', async () => {
+    let sync = load({ customers: [cust(), cust({ id: 'c2' })] });
+    await sync.processJob('job-1');
+    expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/Do not change the Stripe email yet/);
+    sync = load({ job: { attempts: 5 }, customers: [cust()], stripeResult: new Error('x') });
+    await sync.processJob('job-1');
+    expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/fix Stripe by hand only if they differ/);
+  });
+
   test('a job already claimed or finished is left alone', async () => {
     const sync = load({ job: { status: 'done' }, customers: [cust()] });
     await expect(sync.processJob('job-1')).resolves.toBe('busy');
@@ -101,7 +127,7 @@ describe('stripe-email-sync processJob', () => {
 });
 
 describe('stripe-email-sync enqueue', () => {
-  test('one pending row per customer: a repeat re-arms it on the caller handle', async () => {
+  test('skips the insert when a pending job already exists, on the caller handle', async () => {
     jest.resetModules();
     jest.doMock('../models/db', () => jest.fn());
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn() }));
@@ -109,7 +135,7 @@ describe('stripe-email-sync enqueue', () => {
     const trx = { raw: jest.fn(async () => {}) };
     await enqueue(trx, 'c1', 'app_email_change');
     const [sql, args] = trx.raw.mock.calls[0];
-    expect(sql).toMatch(/ON CONFLICT \(customer_id\) WHERE status = 'pending'/);
-    expect(args).toEqual(['c1', 'app_email_change']);
+    expect(sql).toMatch(/WHERE NOT EXISTS \(SELECT 1 FROM stripe_email_sync_jobs WHERE customer_id = \? AND status = 'pending'\)/);
+    expect(args).toEqual(['c1', 'app_email_change', 'c1']);
   });
 });
