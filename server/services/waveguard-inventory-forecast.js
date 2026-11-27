@@ -1,7 +1,7 @@
 const db = require('../models/db');
 const logger = require('./logger');
 const { buildPlanForService, customerBillingModeColumnExists } = require('./waveguard-plan-engine');
-const { etDateString, addETDays } = require('../utils/datetime-et');
+const { etDateString, addETDays, validCalendarDate } = require('../utils/datetime-et');
 const { describeInventoryConversion } = require('./inventory-units');
 const { lawnPlanProgramApplies } = require('./lawn-completion-defaults');
 
@@ -40,6 +40,19 @@ function forecastBound(value, { name, fallback, max }) {
   return Math.max(1, Math.min(max, Math.floor(n)));
 }
 
+// The window a forecast covers: an explicit range (the weekly buy list's Monday-Saturday
+// week) takes both ends or neither, real calendar dates, start not after end; absent, the
+// rolling window from today for `days`. Anything else is a 400, like a bad days or limit.
+function forecastRange(startDate, endDate, days) {
+  if (startDate == null && endDate == null) return { startDate: etDateString(), endDate: etDateString(addETDays(new Date(), days)) };
+  const start = validCalendarDate(startDate);
+  const end = validCalendarDate(endDate);
+  if (!start || !end || start > end) {
+    throw Object.assign(new Error('startDate and endDate must be real dates, start not after end'), { statusCode: 400, isOperational: true });
+  }
+  return { startDate: start, endDate: end };
+}
+
 function summarizeForecastStatus(row) {
   if (row.unitMismatchCount > 0) return 'unit_mismatch';
   if (row.onHand == null) return 'not_tracked';
@@ -56,11 +69,10 @@ function forecastPriority(status, firstShortDate) {
   return 'low';
 }
 
-async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db } = {}) {
+async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, limit = 150, knex = db, startDate: rangeStart, endDate: rangeEnd } = {}) {
   const safeDays = forecastBound(days, { name: 'days', fallback: DEFAULT_FORECAST_DAYS, max: 90 });
   const safeLimit = forecastBound(limit, { name: 'limit', fallback: 150, max: 300 });
-  const startDate = etDateString();
-  const endDate = etDateString(addETDays(new Date(), safeDays));
+  const { startDate, endDate } = forecastRange(rangeStart, rangeEnd, safeDays);
   // One schema probe for the whole batch — the planner would otherwise
   // probe information_schema once per forecasted service (Codex #4365 r4 P2).
   const billingModeColumnExists = await customerBillingModeColumnExists(knex);
@@ -252,6 +264,8 @@ async function buildWaveGuardInventoryForecast({ days = DEFAULT_FORECAST_DAYS, l
     endDate,
     days: safeDays,
     serviceCount: services.length,
+    // The visits the forecast looked at (for a caller that must tell a visit it left out from one it planned).
+    serviceIds: services.map((service) => service.id),
     productCount: products.length,
     statusCounts,
     products,

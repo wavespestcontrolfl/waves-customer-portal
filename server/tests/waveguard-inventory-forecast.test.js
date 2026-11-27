@@ -409,3 +409,28 @@ describe('technician forecast (audit A2 / C1): product totals for all, names onl
     expect(projected.skippedNonProgram).toEqual([{ serviceId: 'visit-1', scheduledDate: '2030-01-09', customerName: 'Pat Example' }]);
   });
 });
+
+describe('explicit date range (the weekly buy list reads a Monday-Saturday week)', () => {
+  test('an explicit range replaces the rolling window and names the visits it read', async () => {
+    const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20, startDate: '2030-02-04', endDate: '2030-02-09' });
+    expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-02-04', '2030-02-09']);
+    expect(result).toMatchObject({ startDate: '2030-02-04', endDate: '2030-02-09', serviceCount: 3 });
+    expect(result.serviceIds).toEqual(['visit-1', 'visit-2', 'visit-3']);
+  });
+
+  test('no range keeps today through today + days, as before', async () => {
+    const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+    expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-01-09', '2030-01-11']);
+    expect(result).toMatchObject({ startDate: '2030-01-09', endDate: '2030-01-11' });
+  });
+
+  test.each([
+    ['one end only', { startDate: '2030-02-04' }],
+    ['an impossible date', { startDate: '2030-02-30', endDate: '2030-03-02' }],
+    ['a start after the end', { startDate: '2030-02-09', endDate: '2030-02-04' }],
+    ['text that is not a date', { startDate: 'Monday', endDate: 'Saturday' }],
+  ])('%s is a 400, not a bad query', async (_label, range) => {
+    await expect(buildWaveGuardInventoryForecast({ days: 2, limit: 20, ...range })).rejects.toMatchObject({ statusCode: 400 });
+    expect(db).not.toHaveBeenCalled();
+  });
+});
