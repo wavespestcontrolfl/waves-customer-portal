@@ -102,8 +102,8 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
       const { _internals: { scoreOnSharedModel, isSamePlacement } } = require('../services/auto-dispatch/candidate-slots');
       const svc = { id: 'v', scheduled_date: '2026-12-10', technician_id: 't1', window_start: '09:00:00', route_order: 3 };
       const stops = [
-        { id: 's1', geo: NORTH, startMin: 480, window_start: '08:00', route_order: 1 },
-        { id: 's2', geo: SOUTH, startMin: 780, window_start: '13:00', route_order: 2 },
+        { id: 's1', technician_id: 't1', geo: NORTH, startMin: 480, window_start: '08:00', route_order: 1 },
+        { id: 's2', technician_id: 't1', geo: SOUTH, startMin: 780, window_start: '13:00', route_order: 2 },
       ];
       const sameCand = { date: '2026-12-10', technician_id: 't1', start_time: '09:00', route_order_ids: ['s1', '__candidate__', 's2'] };
       const shiftedCand = { date: '2026-12-10', technician_id: 't1', start_time: '10:00', route_order_ids: ['s1', '__candidate__', 's2'] };
@@ -113,6 +113,12 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
       const shiftedScored = scoreOnSharedModel(svc, NEAR_NORTH, shiftedCand, stops, [], { targets: [] });
       // Same slot keeps route_order=3 (behind s2 -> big backtrack detour); shifted slot inserts between s1 and s2.
       expect(sameScored.detour_minutes).toBeGreaterThan(shiftedScored.detour_minutes + 15);
+      expect(sameScored.route_order_ids).toBeUndefined();
+      expect(shiftedScored.route_order_ids).toEqual(['s1', '__candidate__', 's2']);
+      // Destination day with an unassigned stop drops route_order_ids so scoring and commit agree.
+      const withUnassigned = [...stops, { id: 'u1', technician_id: null, geo: SOUTH, startMin: 600, window_start: '10:00', route_order: null }];
+      const unassignedScored = scoreOnSharedModel(svc, NEAR_NORTH, shiftedCand, withUnassigned, [], { targets: [] });
+      expect(unassignedScored.route_order_ids).toBeUndefined();
     } finally {
       if (prevAdmin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdmin;

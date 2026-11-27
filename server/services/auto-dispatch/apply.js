@@ -976,6 +976,12 @@ function placeInRouteOptsFor(service, best, config) {
   };
 }
 
+function applyPlaceInRouteOptions(options, service, best, config) {
+  if (!Array.isArray(best && best.route_order_ids) || !best.route_order_ids.length) return;
+  options.placeInRoute = true;
+  options.placeInRouteOpts = placeInRouteOptsFor(service, best, config);
+}
+
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
@@ -1036,11 +1042,13 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
   // The visit keeps its own status inside the move transaction (pending
   // stays pending), so no write after the commit has to put it back.
   options.keepStatus = true;
-  // Insert standalone moved visits into the destination day's route order on
-  // commit (arrival-route.js placeMovedVisit) from the same tech start point
-  // and departure time, verifying the road-checked neighbors under the lock.
-  options.placeInRoute = true;
-  options.placeInRouteOpts = placeInRouteOptsFor(service, best, config);
+  // When the arrival search certified a standalone mid-route order (route_order_ids),
+  // insert the moved visit into the destination day's route order on commit
+  // (arrival-route.js placeMovedVisit) from the same tech start point and
+  // departure time, verifying the road-checked neighbors under the lock.
+  // Legacy / shadow / grouped / unassigned-day candidates without a certified
+  // order keep the prior placement behavior so search, scoring, and commit agree.
+  applyPlaceInRouteOptions(options, service, best, config);
   const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
   // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit) reports its
   // members here; a single-row move has none.

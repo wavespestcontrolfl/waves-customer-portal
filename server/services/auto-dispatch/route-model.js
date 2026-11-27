@@ -84,6 +84,13 @@ function stopRankIn(stop, rank) {
   return null;
 }
 
+function routeOrderCovers(stops, routeOrderIds) {
+  if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return false;
+  const rank = new Map(routeOrderIds.map((id, i) => [String(id), i]));
+  if (!rank.has('__candidate__')) return false;
+  return physicalStops(stops).every((s) => stopRankIn(s, rank) != null);
+}
+
 function insertByRouteOrder(sequence, unit, routeOrderIds) {
   if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return insertByWindow(sequence, unit);
   const rank = new Map(routeOrderIds.map((id, i) => [String(id), i]));
@@ -299,6 +306,7 @@ module.exports = {
   stopPlanningMinutes,
   chainDriveMinutes,
   routeCost,
+  routeOrderCovers,
   clusterShare,
   physicalStops,
   _internals: { physicalStops, chainWithVisit, insertByWindow, insertByRouteOrder, groupUnit, sumPlanningMinutes },

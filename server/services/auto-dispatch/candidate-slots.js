@@ -45,7 +45,7 @@ const { LAWN_ROUNDS_9, roundOf } = require('../lawn-rounds');
 const { flexCandidateRules } = require('./flex-tier');
 const { autoDispatchSharedModelLive } = require('../../config/feature-gates');
 const { isActiveRouteStop } = require('./overlap-predicate');
-const { routeCost, clusterShare } = require('./route-model');
+const { routeCost, routeOrderCovers, clusterShare } = require('./route-model');
 const { techStartPointsLive, techStartPoint, START_COLUMNS } = require('../scheduling/tech-start-point');
 const { ROAD_LEGS, roadLegsOf } = require('./road-check');
 const { occupiedRows, windowsOverlap } = require('../scheduling/occupancy');
@@ -557,19 +557,30 @@ function candidateRouteOrder(service, cand) {
 
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
-// active stops. Standalone candidates insert by arrival window (matching
-// apply.js placeInRoute -> arrival-route.js placeMovedVisit); grouped visits
-// are skipped by placeMovedVisit and keep currentOrder.
+// active stops. Only candidates with a certified solver order (`route_order_ids`,
+// standalone, non-same-slot, no unassigned stops outside the tech's order) use
+// mid-route insertion in both scoring and commit (apply.js placeInRoute); legacy
+// or mismatched candidates keep currentOrder on both sides.
+function certifiedRouteOrderIds(service, cand, stops, siblings) {
+  if (isSamePlacement(service, cand) || !canPlaceInRoute(siblings)) return null;
+  if (!Array.isArray(cand.route_order_ids) || !cand.route_order_ids.length) return null;
+  if ((stops || []).some((s) => s && s.technician_id == null)) return null;
+  if (!routeOrderCovers(stops, cand.route_order_ids)) return null;
+  return cand.route_order_ids;
+}
+
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const insertByTime = !isSamePlacement(service, cand) && canPlaceInRoute(siblings);
+  const certifiedOrder = certifiedRouteOrderIds(service, cand, stops, siblings);
   const cost = routeCost(
     stops,
-    serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), insertByTime, cand.route_order_ids),
+    serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), Boolean(certifiedOrder), certifiedOrder),
     home,
   );
+  const { route_order_ids: _ignoredOrder, ...candBase } = cand;
   return {
-    ...cand,
+    ...candBase,
+    ...(certifiedOrder ? { route_order_ids: certifiedOrder } : {}),
     detour_minutes: cost.detourMinutes,
     total_drive_minutes: cost.driveWithMinutes,
     route_minutes: cost.routeTimeWithMinutes,

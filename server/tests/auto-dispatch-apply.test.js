@@ -654,8 +654,8 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const opts = SmartRebooker.reschedule.mock.calls[0][5];
     expect(typeof opts.memberGuard).toBe('function');
     expect(typeof opts.moveGuard).toBe('function');
-    expect(opts.placeInRoute).toBe(true);
-    expect(opts.placeInRouteOpts).toMatchObject({ startPoints: true });
+    // Legacy/unverified candidate without route_order_ids keeps prior placement behavior.
+    expect(opts.placeInRoute).toBeUndefined();
   });
 
   test('placeInRouteOpts passes expectedNeighbours and vanDepartureMin for ordinary route_order_ids moves, and retries ROUTE_ORDER_CHANGED', async () => {
@@ -674,9 +674,11 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
       expect(out.ok).toBe(true);
       expect(out.attempts).toBe(2);
       expect(out.applied).toBe(cand2);
+      expect(SmartRebooker.reschedule.mock.calls[0][5].placeInRoute).toBe(true);
       expect(SmartRebooker.reschedule.mock.calls[0][5].placeInRouteOpts).toEqual({
         startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p1', nextId: 'n1' },
       });
+      expect(SmartRebooker.reschedule.mock.calls[1][5].placeInRoute).toBe(true);
       expect(SmartRebooker.reschedule.mock.calls[1][5].placeInRouteOpts).toEqual({
         startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p2', nextId: null },
       });

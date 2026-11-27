@@ -1412,7 +1412,7 @@ async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lat
   try {
     return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, startPoints, vanDepartureMin, expectedNeighbours }));
   } catch (error) {
-    if (error && error.code === 'ROUTE_ORDER_CHANGED') throw error;
+    if (expectedNeighbours || (error && error.code === 'ROUTE_ORDER_CHANGED')) throw error;
     logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
     return null;
   }
@@ -1477,19 +1477,19 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, st
   if (staffSave === true) context.travel = staffSaveTravel(date);
   // `lateDays` (the staff saves' callers only): the save numbers the day in
   // the same bounded late-day order its picker offered the hour on. The automatic writers never pass it.
+  // Non-capacity resolvePlacementOrigin reads `departureMin` (not context.vanDepartureMin),
+  // so pass vanDepartureMin through as departureMin when auto-dispatch certified with one.
   const fit = evaluateArrivalPlacement(context, { windowStart: String(row.window_start).slice(0, 5),
     windowEnd: row.window_end ? String(row.window_end).slice(0, 5) : undefined, place: true,
+    ...(Number.isFinite(vanDepartureMin) ? { departureMin: vanDepartureMin } : {}),
     ...(lateDays === true ? { lateDays: true } : {}) });
-  // A refused check still numbers the visit by its arrival time.
+  // A refused check still numbers the visit by its arrival time for ordinary
+  // callers, but when auto-dispatch requires verified neighbors, an infeasible
+  // commit-time check must abort and roll back rather than fall back to clock order.
   const refuseOrNumberByTime = async reason => {
+    if (expectedNeighbours) throw routeOrderChangedError(`Commit-time route check failed (${reason}) while neighbor verification was required`);
     refusePlacement(serviceId, source, reason, date);
-    const fallbackOrder = await placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
-    const effectiveOrder = fallbackOrder || currentOrder([
-      ...context.rows.filter(r => r.technician_id === row.technician_id && r.reservation_expires_at == null && r.status !== 'completed'),
-      { ...context.target, id: serviceId, route_order: null },
-    ]).map(r => r.id);
-    verifyPlacedNeighbours(effectiveOrder, { context, serviceId, expectedNeighbours });
-    return fallbackOrder;
+    return placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
   };
   if (!fit.feasible) return refuseOrNumberByTime(fit.reason || 'no_order');
   if (!fit.routeOrder) return refuseOrNumberByTime('no_order');
