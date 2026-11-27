@@ -5098,8 +5098,8 @@ function prepGuideSection(context) {
 
 // REPORT DELIVERY (owner 2026-11-26, texting AI gap 2): whether the service report of each of the latest completed visits went out by email,
 // as ONE finished sentence per visit the model copies word for word (sms-staff-facts.loadReportDeliveryFacts: service_report_deliveries and
-// the account holder's own report email). The address is never in the facts: a sentence says "the email address on your account" only when
-// the holder's own email was delivered to the address the account carries now. The section is part of the block the unanswered-text
+// the account holder's own report email). The address is never in the facts: a sentence says "your email address on file" only when the
+// holder's own email was delivered to the address the account carries now. The section is part of the block the unanswered-text
 // fingerprint hashes, so a delivery row (or the account's email) that changed between draft and send retires the draft (facts_changed).
 // Gate off, no row, or a failed read: no section.
 function reportDeliverySentence(visit) {
@@ -5112,16 +5112,20 @@ function reportDeliverySentence(visit) {
   if (visit.state !== 'sent') return '';
   const sentDay = formatEtDate(visit.sentOn);
   if (!sentDay) return '';
-  if (visit.recipient === 'account') return `${report} was emailed on ${sentDay} to the email address on your account.`;
-  if (visit.recipient === 'other_address') return `${report} was emailed on ${sentDay} to an email address that is not the one on your account now.`;
-  if (visit.recipient === 'undelivered') return `${report} was sent on ${sentDay}, but the email to you did not go through.`;
+  // (worded so the payment-status detector never reads them as an account status: "on your account" and "did not go through" are its words)
+  if (visit.recipient === 'account') return `${report} was emailed on ${sentDay} to your email address on file.`;
+  if (visit.recipient === 'other_address') return `${report} was emailed on ${sentDay} to an email address that is no longer yours on file.`;
+  if (visit.recipient === 'undelivered') return `${report} was emailed on ${sentDay}, but that email did not reach you.`;
   return `${report} was emailed on ${sentDay}.`;
 }
+// The sentences the facts render, gate or no gate: the send-time recheck (sms-amount-recheck.reportDeliveryStale) re-renders them from live
+// rows after a gate rollback too. null when the facts are missing or the read failed.
+function reportDeliverySentences(reportDeliveries) {
+  return reportDeliveries && Array.isArray(reportDeliveries.visits) ? reportDeliveries.visits.map(reportDeliverySentence).filter(Boolean) : null;
+}
 function reportDeliverySection(context) {
-  const facts = context.reportDeliveries;
-  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS') || !facts || !Array.isArray(facts.visits)) return '';
-  const lines = facts.visits.map(reportDeliverySentence).filter(Boolean);
-  if (!lines.length) return '';
+  const lines = gateEnvValue('GATE_SMS_REAL_ANSWERS') ? reportDeliverySentences(context.reportDeliveries) : null;
+  if (!lines?.length) return '';
   return `REPORT DELIVERY (service report emails for their latest visits; to say whether, when or where a report went out, copy the sentence for the visit asked about word for word; never write or guess an email address, and never say a report was resent or will be sent):\n${lines.map((line) => `- ${line}`).join('\n')}\n`;
 }
 
@@ -7233,6 +7237,7 @@ module.exports = {
   buildUserPrompt,
   buildUserPromptFromFacts,
   buildFactsBlock,
+  reportDeliverySentences,
   renderVisitLoopsSection,
   visitLoopCommitmentIds,
   visitLoopStatus,

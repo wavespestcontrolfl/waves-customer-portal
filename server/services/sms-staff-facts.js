@@ -212,9 +212,10 @@ const cleanAddress = (value) => String(value || '').trim().toLowerCase();
 // A delivery queue status (service_report_deliveries.status) as what the customer may be told: not yet, not sent, or sent.
 const DELIVERY_STATE = { queued: 'pending', sending: 'pending', skipped: 'not_sent', failed: 'not_sent', cancelled: 'not_sent', sent: 'sent' };
 
-// Where a sent report went, judged from the account holder's own report email row (one row, or none): never the address itself.
+// Where a sent report went, judged from the account holder's own report email row: never the address itself. null with no single row (the
+// report may have gone only to a service contact, or the ledger lost it): no sentence then, a person answers.
 function reportRecipient(messages, accountEmail) {
-  if (messages.length !== 1) return 'unknown';
+  if (messages.length !== 1) return null;
   const status = String(messages[0].status || '').toLowerCase();
   const address = cleanAddress(messages[0].recipient_email_snapshot);
   if (REPORT_EMAIL_UNDELIVERED.has(status)) return 'undelivered';
@@ -223,7 +224,7 @@ function reportRecipient(messages, accountEmail) {
 }
 
 // One visit's delivery fact, or null when a person answers: no delivery row (or, never by the unique key, two), an unknown status, no service
-// name or day, or a sent row with no send time.
+// name or day, or a sent row with no send time or no ledger row for the account holder's own email.
 function visitDelivery(record, { rows, own, accountEmail }) {
   const { dateOnlyString } = require('../utils/date-only');
   const state = rows.length === 1 ? DELIVERY_STATE[String(rows[0].status || '').toLowerCase()] : undefined;
@@ -231,8 +232,9 @@ function visitDelivery(record, { rows, own, accountEmail }) {
   if (!state || !visit.serviceType || !visit.serviceDate) return null;
   if (state !== 'sent') return visit;
   const sentAt = rows[0].sent_at ? new Date(rows[0].sent_at) : null;
-  if (!(sentAt?.getTime() >= 0)) return null;
-  return { ...visit, sentOn: require('../utils/datetime-et').etDateString(sentAt), recipient: reportRecipient(own, accountEmail) };
+  const recipient = reportRecipient(own, accountEmail);
+  if (!(sentAt?.getTime() >= 0) || !recipient) return null;
+  return { ...visit, sentOn: require('../utils/datetime-et').etDateString(sentAt), recipient };
 }
 
 /**
@@ -243,7 +245,8 @@ function visitDelivery(record, { rows, own, accountEmail }) {
  *   sentOn     the ET calendar day of sent_at (YYYY-MM-DD), for 'sent' only
  *   recipient  for 'sent': 'account' (the account holder's own report email was delivered, to the email address the account carries NOW),
  *              'other_address' (delivered, to an address the account no longer carries), 'undelivered' (that email did not go through),
- *              or 'unknown' (no ledger row for the holder's own email, or a status that says nothing): the address is never returned.
+ *              or 'unknown' (the holder's own email row carries a status that says nothing): the address is never returned.
+ *              A sent report with NO ledger row for the holder's own email is left out (it may have gone only to a service contact).
  * A visit with no delivery row (a report sent before the queue, or none), an unknown status or a sent row with no send time is left out: a
  * person answers. Never an email address, never a technician note. { visits: [] } when nothing qualifies; null when a read failed. Never throws.
  */

@@ -64,7 +64,7 @@ describe('loadReportDeliveryFacts', () => {
     expect(calls).toContainEqual(['email_messages', 'whereIn', ['idempotency_key', ['service_report_ready:sr-1:primary', 'service_report_ready:sr-2:primary']]]);
   });
 
-  test('not yet sent, not sent, bounced, no ledger row, an uninformative status, and no delivery row', async () => {
+  test('not yet sent, not sent, bounced, no ledger row (left out), an uninformative status, and no delivery row', async () => {
     const { db } = fakeDb({
       deliveries: [
         { service_record_id: 'q', status: 'queued', sent_at: null },
@@ -79,7 +79,8 @@ describe('loadReportDeliveryFacts', () => {
     expect(await one('q')).toEqual([expect.objectContaining({ state: 'pending' })]);
     expect(await one('k')).toEqual([expect.objectContaining({ state: 'not_sent' })]);
     expect(await one('b')).toEqual([expect.objectContaining({ state: 'sent', sentOn: '2026-11-02', recipient: 'undelivered' })]);
-    expect(await one('n')).toEqual([expect.objectContaining({ state: 'sent', sentOn: '2026-11-03', recipient: 'unknown' })]);
+    // sent, but no ledger row for the holder's own email (it may have gone only to a service contact): no fact, a person answers
+    expect(await one('n')).toEqual([]);
     expect(await one('u')).toEqual([expect.objectContaining({ state: 'sent', recipient: 'unknown' })]);
     expect(await one('none')).toEqual([]); // no queue row: a person answers
   });
@@ -112,8 +113,8 @@ describe('REPORT DELIVERY in the facts block', () => {
       visit({ recordId: 'sr-2', serviceDate: '2026-10-20', sentOn: '2026-10-21', recipient: 'other_address' }),
     ]);
     expect(facts).toContain('REPORT DELIVERY (service report emails for their latest visits; to say whether, when or where a report went out, copy the sentence for the visit asked about word for word;');
-    expect(facts).toContain('- The service report for your Quarterly Pest Control visit on Friday, Nov 20 was emailed on Friday, Nov 20 to the email address on your account.');
-    expect(facts).toContain('- The service report for your Quarterly Pest Control visit on Tuesday, Oct 20 was emailed on Wednesday, Oct 21 to an email address that is not the one on your account now.');
+    expect(facts).toContain('- The service report for your Quarterly Pest Control visit on Friday, Nov 20 was emailed on Friday, Nov 20 to your email address on file.');
+    expect(facts).toContain('- The service report for your Quarterly Pest Control visit on Tuesday, Oct 20 was emailed on Wednesday, Oct 21 to an email address that is no longer yours on file.');
     expect(facts).not.toMatch(/@/);
     // it sits just before ACCOUNT FLAGS, outside the structural markers
     expect(facts.indexOf('REPORT DELIVERY (')).toBeLessThan(facts.indexOf('ACCOUNT FLAGS:'));
@@ -126,7 +127,7 @@ describe('REPORT DELIVERY in the facts block', () => {
     ]);
     expect(facts).toContain('- The service report for your Quarterly Pest Control visit on Friday, Nov 20 has not been emailed yet.');
     expect(facts).toContain('- The service report for your Quarterly Pest Control visit on Tuesday, Oct 20 has not been emailed.');
-    expect(block([visit({ recipient: 'undelivered' })])).toContain('was sent on Friday, Nov 20, but the email to you did not go through.');
+    expect(block([visit({ recipient: 'undelivered' })])).toContain('was emailed on Friday, Nov 20, but that email did not reach you.');
     expect(block([visit({ recipient: 'unknown' })])).toContain('- The service report for your Quarterly Pest Control visit on Friday, Nov 20 was emailed on Friday, Nov 20.\n');
   });
 
@@ -162,5 +163,22 @@ describe('the prompt rules (gate on only)', () => {
     const off = freshDrafter().buildSystemPromptWithProfile('').system;
     expect(off).not.toContain('VISIT RESULTS');
     expect(off).not.toContain('REPORT DELIVERY');
+  });
+});
+
+describe('the REPORT DELIVERY sentences are never read as a payment status', () => {
+  const freshDrafter = () => { let d; jest.isolateModules(() => { d = require('../services/sms-shadow-drafter'); }); return d; };
+  test('every rendered form passes the payment-status detector, whatever the customer asked (else the draft and the send would hold it)', () => {
+    const { assertsPaymentStatus, remainderHasMoney } = require('../services/payment-status-contract');
+    const base = { recordId: 'sr-1', serviceType: 'Quarterly Pest Control', serviceDate: '2026-11-20', sentOn: '2026-11-20' };
+    const forms = [{ state: 'pending' }, { state: 'not_sent' }, ...['account', 'other_address', 'undelivered', 'unknown'].map((recipient) => ({ state: 'sent', recipient }))];
+    const sentences = freshDrafter().reportDeliverySentences({ visits: forms.map((f) => ({ ...base, ...f })) });
+    expect(sentences).toHaveLength(6);
+    for (const sentence of sentences) {
+      for (const inboundText of [null, 'did my report go out? which email did you send it to', 'did you get my payment and send the report?']) {
+        expect(assertsPaymentStatus(sentence, { inboundText })).toBe(false);
+        expect(remainderHasMoney(sentence, inboundText)).toBe(false);
+      }
+    }
   });
 });
