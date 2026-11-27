@@ -1014,6 +1014,10 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
   // The visit keeps its own status inside the move transaction (pending
   // stays pending), so no write after the commit has to put it back.
   options.keepStatus = true;
+  // Insert standalone moved visits into the destination day's route order on
+  // commit (arrival-route.js placeMovedVisit) instead of stranding them with
+  // route_order = NULL at position 999 behind numbered stops.
+  options.placeInRoute = true;
   const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
   // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit) reports its
   // members here; a single-row move has none.

@@ -208,6 +208,42 @@ describe('findValidCandidateSlots', () => {
     expect(findAvailableSlots.mock.calls[2][0]).toMatchObject({ includeWeekends: true, arrivalSearch: true, departureMinutes: 450 });
   });
 
+  test('arrival search passes arrivalInsert for standalone visits only (never grouped visits)', async () => {
+    const prev = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    try {
+      findAvailableSlots.mockResolvedValue({ slots: [] });
+      const prefsNone = { service_category: 'general', blackout: null };
+      const sharedDb = (siblings = []) => () => {
+        let isSiblingRead = false;
+        const c = {};
+        ['where', 'whereNot', 'whereNotIn', 'whereIn', 'whereBetween', 'whereNotNull', 'orWhere', 'orWhereNull', 'leftJoin', 'orderBy'].forEach((m) => {
+          c[m] = (...args) => {
+            if (m === 'where' && (args[0] === 'visit_id' || (args[0] && args[0].visit_id))) isSiblingRead = true;
+            if (m === 'whereIn' && args[0] === 'id') isSiblingRead = true;
+            return c;
+          };
+        });
+        c.first = async () => ({ window_start: '09:00' });
+        c.select = async () => (isSiblingRead ? siblings : []);
+        return c;
+      };
+      await findValidCandidateSlots(SERVICE, prefsNone, { ...ctx(), db: sharedDb([]), arrivalSearch: true });
+      expect(findAvailableSlots.mock.calls[0][0]).toMatchObject({ arrivalSearch: true, arrivalInsert: true });
+
+      const groupedSiblings = [
+        { id: 's1', status: 'confirmed' },
+        { id: 's2', status: 'confirmed', scheduled_date: '2026-08-04', technician_id: 't1', window_start: '09:00', window_end: '10:00' },
+      ];
+      await findValidCandidateSlots({ ...SERVICE, visit_id: 'v1' }, prefsNone, { ...ctx(), db: sharedDb(groupedSiblings), arrivalSearch: true });
+      expect(findAvailableSlots.mock.calls[1][0].arrivalSearch).toBe(true);
+      expect(findAvailableSlots.mock.calls[1][0].arrivalInsert).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = prev;
+    }
+  });
+
   test('records what the search saw: the window and each searched day\'s open starts before any filter, so a full week reads as full (owner audit 2026-10-22, finding 6)', async () => {
     findAvailableSlots.mockResolvedValue({
       slots: [

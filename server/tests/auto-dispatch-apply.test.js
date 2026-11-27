@@ -654,6 +654,7 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const opts = SmartRebooker.reschedule.mock.calls[0][5];
     expect(typeof opts.memberGuard).toBe('function');
     expect(typeof opts.moveGuard).toBe('function');
+    expect(opts.placeInRoute).toBe(true);
   });
 
   test('move guard: the tapped row (standalone or primary) is re-checked against the receiving tech inside the move trx — Off refuses, active/missing pass, tech unchanged included', async () => {

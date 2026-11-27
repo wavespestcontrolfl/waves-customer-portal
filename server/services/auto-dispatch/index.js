@@ -1448,7 +1448,14 @@ async function evaluateServiceForRun(service, run) {
 // Pass-2 order: due deadlines first (the earliest unplaced due date before
 // its placement window closes), then visits in conflict (an overlap or a
 // closed day: they cannot stay where they are; cheapest fix first), then
-// descending route gain.
+// descending real drive minutes saved (so the per-run cap funds the largest
+// road-time reductions first), tie-broken by descending score gain.
+function driveSavingOf(pm) {
+  const m = pm.result && pm.result.audit && pm.result.audit.routeMetrics;
+  const v = m && Number(m.drive_saving_minutes);
+  return Number.isFinite(v) ? v : 0;
+}
+
 function byDueThenImprovement(a, b) {
   const aDue = !a.service.window_start ? toDateStr(a.service.recurring_dispatch_due_date) : null;
   const bDue = !b.service.window_start ? toDateStr(b.service.recurring_dispatch_due_date) : null;
@@ -1456,7 +1463,8 @@ function byDueThenImprovement(a, b) {
     || (aDue && bDue ? aDue.localeCompare(bDue) : 0)
     || Number(inConflict(b)) - Number(inConflict(a))
     || cheaperConflictFix(a, b)
-    || b.result.improvement - a.result.improvement;
+    || (driveSavingOf(b) - driveSavingOf(a))
+    || (b.result.improvement - a.result.improvement);
 }
 
 // Of two visits in conflict, the one with the cheaper fix goes first: a

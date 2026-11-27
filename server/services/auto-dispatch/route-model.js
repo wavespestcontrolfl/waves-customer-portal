@@ -66,6 +66,28 @@ function hhmmFromMin(min) {
   return `${String(Math.floor(min / 60)).padStart(2, '0')}:${String(min % 60).padStart(2, '0')}`;
 }
 
+function hhmmToMin(t) {
+  if (!t) return null;
+  const [h, m] = String(t).split(':').map(Number);
+  return Number.isNaN(h) ? null : h * 60 + (m || 0);
+}
+
+// Insert a moved standalone candidate at its arrival-window position in
+// `sequence` (before the first stop whose window starts strictly later,
+// matching arrival-route.js placeMovedVisit / timeFallbackOrder), instead of
+// appending an unsequenced stop at COALESCE(route_order, 999) behind every
+// numbered stop on the destination day.
+function insertByWindow(sequence, unit) {
+  const unitStart = Number.isFinite(unit.startMin) ? unit.startMin : hhmmToMin(unit.window_start);
+  if (!Number.isFinite(unitStart)) return [...sequence, unit];
+  const idx = sequence.findIndex((s) => {
+    const sStart = Number.isFinite(s.startMin) ? s.startMin : hhmmToMin(s.window_start);
+    return Number.isFinite(sStart) && sStart > unitStart;
+  });
+  if (idx < 0) return [...sequence, unit];
+  return [...sequence.slice(0, idx), unit, ...sequence.slice(idx)];
+}
+
 // The keys the canonical sequence reads (route_order, window_start,
 // created_at, id): a stop given only a `startMin` reads it as its start.
 function withSequenceKeys(stop) {
@@ -145,6 +167,7 @@ function physicalStops(stops) {
 function chainWithVisit(sequence, visit) {
   const own = Number.isFinite(visit.startMin) ? { ...visit, window_start: hhmmFromMin(visit.startMin) } : withSequenceKeys(visit);
   const unit = visit.unitMembers && visit.unitMembers.length ? groupUnit([own, ...visit.unitMembers]) : own;
+  if (visit.insertByTime === true) return insertByWindow(sequence, unit);
   return currentOrder([...sequence, unit]);
 }
 
@@ -242,5 +265,5 @@ module.exports = {
   routeCost,
   clusterShare,
   physicalStops,
-  _internals: { physicalStops, chainWithVisit, groupUnit, sumPlanningMinutes },
+  _internals: { physicalStops, chainWithVisit, insertByWindow, groupUnit, sumPlanningMinutes },
 };

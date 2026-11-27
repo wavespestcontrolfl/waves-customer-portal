@@ -172,7 +172,7 @@ function rowToDayStop(r) {
 // so routeCost must charge their planning minutes with the visit's — on the
 // current placement and every candidate alike — or a grouped visit's route
 // minutes would omit their work (Codex pre-push P1).
-function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order) {
+function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = service.route_order, insertByTime = false) {
   return {
     geo,
     startMin,
@@ -189,6 +189,7 @@ function serviceToRouteStop(service, geo, startMin, siblings = [], routeOrder = 
     window_end: service.window_end,
     preserveCapacity: preservesCapacity(service),
     unitMembers: siblings,
+    ...(insertByTime ? { insertByTime: true } : {}),
   };
 }
 
@@ -537,10 +538,17 @@ function candidateRouteOrder(service, cand) {
 
 // One surviving candidate's numbers on the shared model — the SAME
 // routeCost/clusterShare computeCurrentPlacement uses — over that tech-day's
-// active stops.
+// active stops. Standalone candidates insert by arrival window (matching
+// apply.js placeInRoute -> arrival-route.js placeMovedVisit); grouped visits
+// are skipped by placeMovedVisit and keep currentOrder.
 function scoreOnSharedModel(service, geo, cand, stops, siblings, placement, home = HQ) {
   const moved = movedSiblings(siblings, placement, cand);
-  const cost = routeCost(stops, serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand)), home);
+  const insertByTime = siblings.length === 0;
+  const cost = routeCost(
+    stops,
+    serviceToRouteStop(service, geo, hhmmToMin(cand.start_time), moved, candidateRouteOrder(service, cand), insertByTime),
+    home,
+  );
   return {
     ...cand,
     detour_minutes: cost.detourMinutes,
@@ -1284,9 +1292,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // instead of one-hour blocks with drive time on both sides. It spends none
     // of the paid road allowance customer booking shares (providerTravel
     // false): the run scores on the shared model, and road-check.js still asks
-    // Google about an ordinary move before it is made.
+    // Google about an ordinary move before it is made. For standalone visits
+    // (`arrivalInsert: true`), allow mid-route insertion into numbered days,
+    // matching apply.js placeInRoute -> arrival-route.js placeMovedVisit.
     arrivalSearch: ctx.arrivalSearch === true,
     ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
+    ...(ctx.arrivalSearch === true && ctx.groupContext && ctx.groupContext.siblings.length === 0 ? { arrivalInsert: true } : {}),
     // GATE_AUTO_DISPATCH_DAY_RULES (config.dayRules, carried on ctx by
     // index.js): Sundays are searched too (move-rules.js takes one only when
     // no other day qualifies), and the arrival search's van leaves at the

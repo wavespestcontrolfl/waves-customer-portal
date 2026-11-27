@@ -40,7 +40,7 @@ jest.mock('../services/scheduling/arrival-route', () => ({
 
 const db = require('../models/db');
 const { createSchedulingTravel } = require('../services/route-optimizer');
-const { loadArrivalRouteContext } = require('../services/scheduling/arrival-route');
+const { loadArrivalRouteContext, evaluateArrivalPlacement } = require('../services/scheduling/arrival-route');
 const { findAvailableSlots } = require('../services/scheduling/find-time');
 
 function chain(result) {
@@ -139,6 +139,23 @@ describe('findAvailableSlots — the night arrival search', () => {
       expect(ask).toMatchObject({ preserveCapacity: false, planningMinutes: true, startPoints: false });
     }
     expect(createSchedulingTravel).toHaveBeenCalledWith(undefined);
+  });
+
+  test('arrivalInsert enables mid-route insertion for standalone night searches only (never booking callers)', async () => {
+    await findAvailableSlots({ ...NIGHT, arrivalInsert: true });
+    expect(evaluateArrivalPlacement).toHaveBeenCalled();
+    for (const [, opts] of evaluateArrivalPlacement.mock.calls) expect(opts.allowInsertion).toBe(true);
+
+    evaluateArrivalPlacement.mockClear();
+    await findAvailableSlots(NIGHT);
+    expect(evaluateArrivalPlacement).toHaveBeenCalled();
+    for (const [, opts] of evaluateArrivalPlacement.mock.calls) expect(opts.allowInsertion).toBe(false);
+
+    evaluateArrivalPlacement.mockClear();
+    process.env.GATE_SCHEDULING_CAPACITY = 'true';
+    await findAvailableSlots({ ...BASE, arrivalInsert: true });
+    expect(evaluateArrivalPlacement).toHaveBeenCalled();
+    for (const [, opts] of evaluateArrivalPlacement.mock.calls) expect(opts.allowInsertion).toBe(false);
   });
 });
 
