@@ -11,8 +11,10 @@
  *  - Skipped with an office alert: a Stripe id another record also holds, another record's saved card uses, or a
  *    third-party payer holds; a record whose own saved cards point at another Stripe profile; a Stripe profile whose
  *    own record (metadata) does not name this customer; and any
- *    record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office sorts
- *    those out by hand instead of the app guessing.
+ *    LINKED record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office
+ *    sorts those out by hand instead of the app guessing. A record with no Stripe profile has nothing in Stripe to fix,
+ *    so a merged one gets no alert: its job finishes as not_linked (a profile made later is created with the email on
+ *    file then).
  *  - No Stripe profile yet: re-checked over about an hour (2, 4, 8, 16, 32 minutes), then finished. A profile being
  *    created at the moment of the change was made with the old email and links when its create call returns; that
  *    call is bounded by the Stripe client's timeout and retries (minutes at most), so the last re-check sees the link.

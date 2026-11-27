@@ -191,6 +191,13 @@ describe('stripe-email-sync processJob', () => {
     await expect(sync.processJob('job-1')).resolves.toBe('updated');
   });
 
+  test('a merged record with no Stripe profile gets no alert: nothing in Stripe to fix, the job ends as not_linked', async () => {
+    const sync = load({ job: { not_linked_checks: 5 }, customers: [cust({ stripe_customer_id: null })] });
+    state.journal.push({ id: 'j1', winner_customer_id: 'c1', loser_customer_id: 'zz' });
+    await expect(sync.processJob('job-1')).resolves.toBe('not_linked');
+    expect(raiseAdminAlert).not.toHaveBeenCalled();
+  });
+
   test('a record that was ever part of a merge (either side) is skipped with an office alert, never written', async () => {
     for (const side of ['winner_customer_id', 'loser_customer_id']) {
       const sync = load({ customers: [cust()] });
