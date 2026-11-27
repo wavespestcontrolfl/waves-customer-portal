@@ -1695,9 +1695,17 @@ ROUND_CAP="${CODEX_REVIEW_BLOCK_ROUNDS:-3}"
 ROUND_CAP_HIT=0
 ROUND_CAP_NOTE=""
 if [ "$P0_TOTAL" -gt 0 ] && [ "$ROUND_CAP" -gt 0 ] 2>/dev/null; then
-  ROUND_CAP_HIT=1
+  ROUND_CAP_HIT=0
   for i in "${!GUARD_REMOTE_REFS[@]}"; do
     cap_ref="${GUARD_REMOTE_REFS[$i]}"
+    # Only a destination whose commit has a P0 can keep the push blocked: a
+    # clean new branch in the same push must not re-arm a capped branch's block.
+    cap_p0=0
+    for j in "${!REF_SHAS[@]}"; do
+      [ "${REF_SHAS[$j]}" = "${GUARD_SHAS[$i]}" ] && cap_p0="${ROUND_LOG_P0[$j]:-0}"
+    done
+    [ "$cap_p0" -gt 0 ] 2>/dev/null || continue
+    ROUND_CAP_HIT=1
     case "$cap_ref" in
       ""|refs/heads/main|main) ROUND_CAP_HIT=0; break ;;
     esac

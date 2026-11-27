@@ -209,6 +209,22 @@ describe('pre-push round log', () => {
     expect(fourth.status).toBe(0);
   }, 240000);
 
+  test('a clean new branch in the same push does not re-arm a capped branch\'s block', () => {
+    for (let round = 1; round <= 3; round += 1) runHook({ pushes: [['refs/heads/marked', markedSha, 'refs/heads/marked']], env: { FAKE_CODEX_MARKED_VERDICT: BLOCKING } });
+    const mixed = runHook({
+      pushes: [['refs/heads/marked', markedSha, 'refs/heads/marked'], ['refs/heads/feature', sha, 'refs/heads/feature']],
+      env: { FAKE_CODEX_MARKED_VERDICT: BLOCKING },
+    });
+    expect(mixed.stderr).toContain('round cap reached for marked (round 4).');
+    expect(mixed.status).toBe(0);
+    // The capped branch with a P0 and a new branch with its own P0 still blocks: the new branch is in round 1.
+    const bothBlocked = runHook({
+      pushes: [['refs/heads/marked', markedSha, 'refs/heads/marked'], ['refs/heads/feature', sha, 'refs/heads/feature-new']],
+      env: { FAKE_CODEX_VERDICT: BLOCKING },
+    });
+    expect(bothBlocked.status).toBe(1);
+  }, 240000);
+
   test('a push to main is never relaxed by the round cap', () => {
     const toMain = { pushes: [['refs/heads/feature', sha, 'refs/heads/main']], env: { FAKE_CODEX_VERDICT: BLOCKING } };
     for (let round = 1; round <= 4; round += 1) expect(runHook(toMain).status).toBe(1);
