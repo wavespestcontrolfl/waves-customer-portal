@@ -1788,6 +1788,10 @@ describe('May Tetrino completion record', () => {
 
   test('an absent decision adds no structured-note key', () => {
     expect(tetrinoScoutFreeze(null)).toEqual({});
+    // Owner 2026-11-26: a Tetrino row is never refused, so the record reads applied from the final rows, not the sheet's flag.
+    const skipped = { tetrinoScout: { target: 'none', currentObservations: 'No current insects found', applied: false } };
+    expect(tetrinoScoutFreeze(skipped, { applied: true }).lawnTetrinoScout.applied).toBe(true);
+    expect(tetrinoScoutFreeze({ tetrinoScout: { ...skipped.tetrinoScout, applied: true } }, { applied: false }).lawnTetrinoScout.applied).toBe(false);
   });
 });
 

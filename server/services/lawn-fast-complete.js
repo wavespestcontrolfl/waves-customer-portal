@@ -754,17 +754,33 @@ function normalizedTetrinoScout(value) {
   };
 }
 
-function tetrinoScoutFreeze(lawnFast) {
+// `applied`: when given, whether Tetrino is among the final submitted rows (tetrinoScoutFreezeFor reads it), not the sheet's own
+// flag: an older sheet may send applied=false beside a Tetrino row now that the row is never refused (owner 2026-11-26).
+function tetrinoScoutFreeze(lawnFast, { applied: onRows = null } = {}) {
   const scout = normalizedTetrinoScout(lawnFast?.tetrinoScout);
   if (!scout.tetrinoTarget) return {};
+  const applied = typeof onRows === 'boolean' ? onRows : scout.tetrinoApplied;
   return { lawnTetrinoScout: {
     v: 1,
     target: scout.tetrinoTarget,
     currentObservations: scout.tetrinoCurrentObservations,
     pressure: scout.tetrinoPressure || null,
     grubTimingEvidence: scout.grubTimingEvidence || null,
-    applied: scout.tetrinoApplied,
+    applied,
   } };
+}
+
+// The freeze above with `applied` read from the submitted rows (a catalog read by id). A failed read keeps the sheet's flag.
+async function tetrinoScoutFreezeFor(lawnFast, products, knex = db) {
+  if (!normalizedTetrinoScout(lawnFast?.tetrinoScout).tetrinoTarget) return {};
+  const ids = (Array.isArray(products) ? products : []).map((row) => row?.productId).filter(isUuid);
+  try {
+    const hit = ids.length ? await knex('products_catalog').whereIn('id', ids).where({ name: TETRINO_NAME }).first('id') : null;
+    return tetrinoScoutFreeze(lawnFast, { applied: !!hit });
+  } catch (err) {
+    logger.warn(`[lawn-fast] Tetrino catalog read failed at the freeze: ${err?.code || err?.name || 'Error'}`);
+    return tetrinoScoutFreeze(lawnFast);
+  }
 }
 
 async function loadPlan(svc, knex, tetrinoScout) {
@@ -1506,7 +1522,8 @@ async function preflightLawnFastCompletion({ knex = db, svc, lawnAssessmentId = 
     const applied = (products || []).find((row) => String(row?.productId).toLowerCase() === String(tetrino.id).toLowerCase());
     // Tetrino is on the submitted products, so it was applied, whatever an older sheet sent as tetrinoApplied.
     if (!decision.eligible) logger.warn(`[lawn-fast] Tetrino on ${svc.id} without the scout record (warning only)`);
-    else if (tetrinoRatePer1000(applied) > 0.367 && !decision.highRateEligible) logger.warn(`[lawn-fast] high Tetrino rate on ${svc.id} without high chinch pressure (warning only)`);
+    // Judged on its own: a high dose with no scout record warns twice.
+    if (tetrinoRatePer1000(applied) > 0.367 && !decision.highRateEligible) logger.warn(`[lawn-fast] high Tetrino rate on ${svc.id} without high chinch pressure (warning only)`);
   }
   // An empty list that claims "every planned product is held by new sod" is re-judged by the server
   // (lawn-sod-sheet.js checkNoProductNote), else the rest of the preflight:
@@ -1609,5 +1626,6 @@ module.exports = {
   preflightLawnFastCompletion,
   normalizedTetrinoScout,
   tetrinoScoutFreeze,
+  tetrinoScoutFreezeFor,
   assertLawnFastVisitTypeUnderLock,
 };
