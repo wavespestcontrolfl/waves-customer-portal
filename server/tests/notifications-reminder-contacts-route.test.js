@@ -127,3 +127,14 @@ test('a signed-in profile moved to another account after sign-in reaches nothing
   expect(VisitRecipient.listReminderContacts).not.toHaveBeenCalled();
   expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
 });
+
+test('a signed-in profile staff turned off reaches nothing on its account', async () => {
+  const SIBLING = '44444444-4444-4444-8444-444444444444';
+  mockProfiles.current = {
+    [OWN]: { id: OWN, active: false, deleted_at: null, owner_account: OWN },
+    [SIBLING]: { id: SIBLING, active: true, deleted_at: null, owner_account: OWN },
+  };
+  expect((await call('GET', `/reminder-contacts/${SIBLING}`)).status).toBe(403);
+  expect((await call('POST', `/reminder-contacts/${SIBLING}/${REMINDER}/stop`)).status).toBe(403);
+  expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
+});

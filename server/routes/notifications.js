@@ -1273,9 +1273,9 @@ async function profileOnAccount(req, customerId, { conn = db, lock = false } = {
   if (lock === 'share') q.forShare(); else if (lock) q.forUpdate();
   const rows = await q;
   const byId = new Map(rows.map((r) => [String(r.id), r]));
-  const onAccount = (r) => !!r && !r.deleted_at && String(r.owner_account) === String(accountId);
-  const target = byId.get(String(customerId));
-  return onAccount(target) && target.active === true && onAccount(byId.get(String(selfId)));
+  // Both rows active, undeleted and on the session's account (staff turning off the signed-in profile ends its reach).
+  const onAccount = (r) => !!r && r.active === true && !r.deleted_at && String(r.owner_account) === String(accountId);
+  return onAccount(byId.get(String(customerId))) && onAccount(byId.get(String(selfId)));
 }
 
 const UUID_PARAM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
