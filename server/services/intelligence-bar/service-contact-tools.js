@@ -233,7 +233,7 @@ function planEffects({ account, name, before, after, target, plan, consentOnFile
     lines.push({ kind: 'operational', text: `${oldPhone} is no longer a contact number: anyone signed into the app with it is signed out, and its push alerts and own notification choices are removed. Adding it back later does not restore those.` });
   }
   lines.push({ kind: 'comms', text: 'Nothing is sent now: no text, email or call goes to anyone.' });
-  lines.push({ kind: 'operational', text: 'To undo, edit the contacts on the customer page.' });
+  lines.push({ kind: 'operational', text: 'To undo, ask the bar to change the contacts back (the customer page edits names, phones and emails, not the relationship).' });
   return lines;
 }
 
