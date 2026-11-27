@@ -131,6 +131,7 @@ export default function PushSettingsV2() {
   const [pushError, setPushError] = useState("");
   const [prefsLoading, setPrefsLoading] = useState(true);
   const [prefsFailed, setPrefsFailed] = useState(false);
+  const [prefsVersion, setPrefsVersion] = useState(null);
 
   const loadPreferences = async () => {
     setPrefsLoading(true);
@@ -139,6 +140,7 @@ export default function PushSettingsV2() {
       const r = await adminFetch("/admin/push/preferences");
       setPrefs(r.preferences || []);
       setCatPrefs(r.bellCategories || []);
+      setPrefsVersion(r.version || null);
       return true;
     } catch {
       setPrefsFailed(true);
@@ -192,24 +194,35 @@ export default function PushSettingsV2() {
     setSaving(true);
     setPushError("");
     try {
-      await adminFetch("/admin/push/preferences", {
+      const saved = await adminFetch("/admin/push/preferences", {
         method: "PUT",
-        body: JSON.stringify({ preferences: [...prefs, ...catPrefs] }),
+        body: JSON.stringify({
+          preferences: [...prefs, ...catPrefs],
+          ...(prefsVersion ? { expectedVersion: prefsVersion } : {}),
+        }),
       });
+      if (saved?.version) setPrefsVersion(saved.version);
       showToast("Preferences saved");
     } catch (e) {
       // Distinguish confirmed HTTP rejections (4xx/500 where the server
-      // finished and rolled back) from unknown outcomes (dropped connections,
-      // timeouts, or 408/502/503/504 gateway responses where the PUT
-      // transaction may still be running). For unknown outcomes, keep controls
-      // locked until the user explicitly reloads via Try again.
+      // finished and rolled back — including 409 VERSION_CONFLICT if an
+      // earlier timed-out save committed late) from unknown outcomes (dropped
+      // connections, timeouts, or 408/502/503/504 gateway responses where the
+      // PUT transaction may still be running). For unknown outcomes, keep
+      // controls locked until the user explicitly reloads via Try again; any
+      // subsequent save carries expectedVersion so a late commit rejects stale
+      // overwrites with 409.
       const confirmedRejection = Boolean(e?.status && !AMBIGUOUS_SAVE_STATUSES.has(e.status));
       if (confirmedRejection) {
         const reloaded = await loadPreferences();
         setPushError(
-          reloaded
-            ? `Couldn't save notification preferences (${e.message}). Reloaded saved settings from the server.`
-            : `Couldn't save notification preferences (${e.message}), and reloading saved settings failed. Try again before saving.`,
+          e.status === 409
+            ? (reloaded
+              ? "Your notification settings changed on the server. Reloaded the latest settings."
+              : "Your notification settings changed on the server, and reloading them failed. Try again before saving.")
+            : (reloaded
+              ? `Couldn't save notification preferences (${e.message}). Reloaded saved settings from the server.`
+              : `Couldn't save notification preferences (${e.message}), and reloading saved settings failed. Try again before saving.`),
         );
       } else {
         setPrefsFailed(true);

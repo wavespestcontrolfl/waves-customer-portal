@@ -13,6 +13,7 @@
  *   POST   /api/admin/push/test                    — fire a test notification to current user
  */
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const db = require('../models/db');
 const { listTriggers, TRIGGER_REGISTRY } = require('../services/notification-triggers');
@@ -285,6 +286,17 @@ router.get('/subscription-status', async (req, res, next) => {
 // login (owner 2026-11-04). An admin sees every type, as before.
 const techMayMute = (key) => TRIGGER_REGISTRY?.[key]?.techVisible === true;
 
+// Stable revision hash of an admin's persisted notification_preferences rows
+// so a timed-out save that commits late cannot be silently overwritten by a
+// stale reload (PUT /preferences rejects a mismatched expectedVersion with 409).
+function preferencesVersion(rows) {
+  const canonical = (rows || [])
+    .map((r) => `${r.trigger_key}:${r.push_enabled ? 1 : 0}:${r.bell_enabled ? 1 : 0}:${r.sound_enabled ? 1 : 0}`)
+    .sort()
+    .join('|');
+  return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
 router.get('/preferences', async (req, res, next) => {
   try {
     const adminUserId = req.technicianId;
@@ -328,7 +340,7 @@ router.get('/preferences', async (req, res, next) => {
         };
       })
       : [];
-    res.json({ preferences: merged, bellCategories });
+    res.json({ preferences: merged, bellCategories, version: preferencesVersion(rows) });
   } catch (err) { next(err); }
 });
 
@@ -336,6 +348,9 @@ router.put('/preferences', async (req, res, next) => {
   try {
     const adminUserId = req.technicianId;
     const updates = Array.isArray(req.body.preferences) ? req.body.preferences : [];
+    const expectedVersion = typeof req.body.expectedVersion === 'string' && req.body.expectedVersion
+      ? req.body.expectedVersion
+      : null;
 
     // INSERT ... ON CONFLICT replaces the previous select-then-insert
     // shape — two tabs saving the same trigger key simultaneously can't
@@ -359,7 +374,17 @@ router.put('/preferences', async (req, res, next) => {
       }
     }
     let touchedCategoryKey = false;
-    await db.transaction(async (trx) => {
+    const outcome = await db.transaction(async (trx) => {
+      if (typeof trx.raw === 'function') {
+        await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin_push_prefs:${adminUserId}`]);
+      }
+      if (expectedVersion) {
+        const currentRows = await trx('notification_preferences').where({ admin_user_id: adminUserId });
+        const currentVersion = preferencesVersion(currentRows);
+        if (currentVersion !== expectedVersion) {
+          return { conflict: true, version: currentVersion };
+        }
+      }
       for (const u of updates) {
         if (!u.key) continue;
         // A technician mutes only the types it can receive; any other key is skipped.
@@ -385,11 +410,21 @@ router.put('/preferences', async (req, res, next) => {
           .merge({ ...row, updated_at: new Date() });
         if (isCategoryKey) touchedCategoryKey = true;
       }
+      if (!expectedVersion) return { conflict: false, version: null };
+      const afterRows = await trx('notification_preferences').where({ admin_user_id: adminUserId });
+      return { conflict: false, version: preferencesVersion(afterRows) };
     });
+    if (outcome.conflict) {
+      return res.status(409).json({
+        error: 'Notification preferences changed on the server. Reload and try again.',
+        code: 'VERSION_CONFLICT',
+        version: outcome.version,
+      });
+    }
     // Apply an override toggle immediately instead of after the policy's
     // ~60s cache window.
     if (touchedCategoryKey) clearOverrideCache();
-    res.json({ ok: true });
+    res.json({ ok: true, ...(outcome.version ? { version: outcome.version } : {}) });
   } catch (err) { next(err); }
 });
 

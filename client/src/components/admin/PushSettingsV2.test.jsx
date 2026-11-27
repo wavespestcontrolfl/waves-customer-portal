@@ -57,6 +57,7 @@ it('inside Waves Admin, points to iPhone Settings instead of the browser push sw
 it('renders server-filtered triggers, labels all categories, locks switches during save, and reloads server state on failed PUT without window.alert', async () => {
   const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
   const initial = {
+    version: 'rev-1',
     preferences: [
       { key: 'sms_reply', label: 'Customer text', group: 'Customer', push_enabled: true, bell_enabled: true, sound_enabled: true },
       { key: 'payment_refunded', label: 'Payment refunded', group: 'Billing', push_enabled: true, bell_enabled: true, sound_enabled: true },
@@ -67,6 +68,7 @@ it('renders server-filtered triggers, labels all categories, locks switches duri
     ],
   };
   const reloadedAfterPartial = {
+    version: 'rev-2',
     preferences: [
       { key: 'sms_reply', label: 'Customer text', group: 'Customer', push_enabled: false, bell_enabled: true, sound_enabled: true },
       { key: 'payment_refunded', label: 'Payment refunded', group: 'Billing', push_enabled: true, bell_enabled: true, sound_enabled: true },
@@ -135,4 +137,18 @@ it('renders server-filtered triggers, labels all categories, locks switches duri
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await waitFor(() => expect(screen.getByRole('button', { name: 'Save' })).not.toBeDisabled());
   }
+
+  // 409 VERSION_CONFLICT (e.g. a timed-out save committed late): client sends
+  // expectedVersion, receives 409, reloads latest server state, and informs user.
+  let putBody = null;
+  global.fetch = vi.fn((_url, options) => {
+    if (options?.method === 'PUT') {
+      putBody = JSON.parse(options.body);
+      return Promise.resolve({ ok: false, status: 409 });
+    }
+    return Promise.resolve({ ok: true, json: async () => ({ ...reloadedAfterPartial, version: 'rev-3' }) });
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  expect(await screen.findByText(/Your notification settings changed on the server/)).toBeInTheDocument();
+  expect(putBody.expectedVersion).toBe('rev-2');
 });

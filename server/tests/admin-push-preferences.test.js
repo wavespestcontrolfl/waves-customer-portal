@@ -124,6 +124,7 @@ describe('GET /preferences', () => {
           bell_enabled: true,
         },
       ],
+      version: expect.stringMatching(/^[0-9a-f]{32}$/),
     });
   });
 
@@ -159,6 +160,7 @@ describe('GET /preferences', () => {
           bell_enabled: false,
         },
       ],
+      version: expect.stringMatching(/^[0-9a-f]{32}$/),
     });
   });
 });
@@ -219,5 +221,29 @@ describe('a technician login (owner 2026-11-04)', () => {
       ] },
     }, res, jest.fn());
     expect(insert).toHaveBeenCalledTimes(2);
+  });
+
+  test('rejects stale PUT with 409 VERSION_CONFLICT when expectedVersion no longer matches persisted rows', async () => {
+    const persisted = [
+      { trigger_key: 'new_lead', push_enabled: false, bell_enabled: true, sound_enabled: true },
+    ];
+    const insert = jest.fn();
+    db.mockReturnValue({
+      where: jest.fn(async () => persisted),
+      insert,
+    });
+    db.transaction = jest.fn(async (fn) => fn(db));
+    const res = { json: jest.fn(), status: jest.fn(() => res) };
+    await putHandler({
+      technicianId: 'admin-1',
+      techRole: 'admin',
+      body: {
+        expectedVersion: '00000000000000000000000000000000',
+        preferences: [{ key: 'new_lead', push_enabled: true, bell_enabled: true, sound_enabled: true }],
+      },
+    }, res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(409);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'VERSION_CONFLICT' }));
+    expect(insert).not.toHaveBeenCalled();
   });
 });
