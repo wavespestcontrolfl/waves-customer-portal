@@ -243,7 +243,11 @@ const REAL_ANSWERS_VERSION_FAMILY = 'house_voice_v12_real_answers';
 // were emailed, when, and whether to the address on the account; never the address), the findings of the older visits SERVICE HISTORY lists,
 // and prompt rules for both plus "no warranty terms". A new optional section and a prompt revision (fact key stays 'n'), so the numbers move
 // to "77" / "78" (here) and "79" / "80" (B1); 69-76 are taken by the other texting AI gap PRs in flight.
-const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}77_n`;
+// SCHEDULE CHANGES (owner 2026-11-26 "BUILD 1-6", texting AI gap 3): a listed visit's last logged move and a coming visit marked skipped or
+// cancelled become finished sentences in a new SCHEDULE CHANGES section (optional, like OPEN TIMES, so the fact key stays 'n'); the system
+// prompt says a move, skip or cancel is stated only from it, and WINDOW PASSED carries a plain status sentence. 77-80 are gap 2's (merged)
+// and 81-84 are gap 4's (in flight), so this change takes "85" / "86" (here) and "87" / "88" (B1).
+const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}85_n`;
 // NEXT OF SERIES (#6172, 2026-10-08): with GATE_SMS_OFFERS_SCHEDULER on, an unnamed
 // scheduling text from a customer whose upcoming visits are ONE recurring series gets
 // OPEN TIMES for the next one, where it used to get none. A behavior change, not a fact
@@ -253,16 +257,16 @@ const REAL_ANSWERS_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}77_n`;
 // stamps REAL_ANSWERS_PROMPT_VERSION. The two differ ONLY by that rule, and the two
 // behaviors never pool in graduation, exam, pathology or judge evidence whichever way the
 // gate moves. A prompt or facts revision moves BOTH numbers.
-const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}78_n`;
+const NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}86_n`;
 // PROMPT B1 (owner 2026-10-24 "go b1" / "yes all", GATE_SMS_PROMPT_B1): the drafter stops stalling (a missed visit and a covered pest
 // re-service text get real times to offer) and stops false promises (no claimed sends, no promised office actions, the follow-up
 // wording promises only a reply, no name greeting mid-thread), and the latest finished visit's customer-safe notes and findings
 // reach the facts. A prompt AND facts revision, so both bases move once more: "27" (scheduler gate off) / "28" (on). Same
-// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers80_n'
+// cumulative fact key 'n' (the openings section is optional, like OPEN TIMES, so no new marker). 'house_voice_v12_real_answers88_n'
 // is 32 chars, 39 with the six tags b c e l m v (+ separator), under PROMPT_VERSION_COLUMN_MAX (40) - pinned by a test. The
 // effective version follows the gate (realAnswersBaseVersion), so B1 drafts never pool with the 25/26 cohorts.
-const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}79_n`;
-const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}80_n`;
+const B1_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}87_n`;
+const B1_NEXT_OF_SERIES_PROMPT_VERSION = `${REAL_ANSWERS_VERSION_FAMILY}88_n`;
 const SHADOW_STATUS = 'shadow';
 
 // ── DRAFT KINDS (owner 2026-11-25) ──
@@ -4729,7 +4733,7 @@ function buildSystemPromptWithProfile(voiceProfileText = '', patchOptions) {
   // passed in by the sealed exam). block '' and version null when none applies, so the prompt
   // below is byte-identical to the unpatched one.
   const patch = promptPatch.resolvePromptPatch({ realAnswersOn, options: patchOptions, baseVersion: currentPromptVersionBase() });
-  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS' : ''}, the thread`;
+  const factSourceList = `SERVICE HISTORY, UPCOMING SERVICES${realAnswersOn ? ', OPEN TIMES' : ''}, BILLING, PENDING ESTIMATE, PROPERTY & PREFERENCES, LAWN HEALTH, ACCOUNT FLAGS, RECENT PHONE CALLS, LATEST CALL TRANSCRIPT${realAnswersOn ? ', COMPANY FACTS, LABEL FACTS, PREP GUIDE, REPORT DELIVERY, VISIT STATUS & OPEN LOOPS, SCHEDULE CHANGES' : ''}, the thread`;
   const upcomingOrThread = realAnswersOn ? 'UPCOMING SERVICES, OPEN TIMES, or the thread' : 'UPCOMING SERVICES, or the thread';
   const deferRule = realAnswersOn
     ? `Answer from the facts you have — that is the BEST reply, not a fallback. When the customer wants to book, reschedule, or change a visit, offer 2–3 SPECIFIC times straight from OPEN TIMES (verbatim — never invent one), record EACH one you offer in offered_times as {"date": ..., "window": ...} copied EXACTLY from its OPEN TIMES line (the date label AND the window text, verbatim — never paraphrase either), and add {"type":"book_appointment"} to intended_actions once they confirm the one they want. Every time mentioned anywhere in the reply must have a matching offered_times entry (if the same window is offered on two days, write the time out once per day and declare each day), and every offered_times entry must exist verbatim in OPEN TIMES; leave offered_times as an empty array when the reply offers no times. When money is due, copy the matching "Payment status sentences" line from BILLING (it carries the exact amount) and add {"type":"send_payment_link"}. PENDING ESTIMATE carries no amounts here — for estimate pricing, point them to their estimate and add {"type":"send_estimate_link"}; never state or derive an estimate figure. Use {"type":"send_portal_link"} or {"type":"send_estimate_link"} wherever they fit what the customer is asking for. Only hand off to a person when the facts genuinely can't answer — and when you do, answer any part the facts DO answer, or return ABSTAIN when nothing is left (see DRAFT KINDS); never promise a follow-up, a reply or any timing, and ALWAYS add {"type":"escalate","note":"<short reason>"} to intended_actions so a person owns it. Record the gap in missing_info either way.`
@@ -4762,6 +4766,10 @@ VISIT RESULTS (reports, findings, warranty):
 - Whether a service report went out, when, and to which email comes ONLY from a REPORT DELIVERY sentence: copy the one for the visit asked about word for word. Never write, spell, mask or guess an email address, never say a report was resent or will be sent, and with no sentence for that visit state no delivery fact at all.
 - What the technician found or did on a visit (traps set, an entry sealed, activity seen) comes ONLY from that visit's notes and findings in SERVICE HISTORY. Never infer work they do not state; when they do not answer, say nothing about it (a person answers).
 - Warranty and guarantee terms are not in the facts: never state, promise or describe one; leave it to a person, or return ABSTAIN when it is the whole question.
+
+SCHEDULE CHANGES (did a visit move, get skipped or get cancelled):
+- Say a visit was moved, rescheduled, skipped or cancelled ONLY by copying a SCHEDULE CHANGES sentence word for word. A request in the thread (the customer asking to skip, cancel or move a visit, or anyone saying it would be done) is not proof that it was done: a visit UPCOMING SERVICES still lists is still on the schedule on that day. Never say "it's been skipped", "you're all set" or "we moved it" for a change no SCHEDULE CHANGES sentence states, and never give a reason for a move.
+- When the thread and the facts disagree about a visit, state what UPCOMING SERVICES and SCHEDULE CHANGES say, or return ABSTAIN so a person handles it.
 `
     : '';
   // VISIT STATUS & OPEN LOOPS (SMS facts-gap PR 1), gate-on only: rules that act
@@ -5267,7 +5275,9 @@ function visitLoopPastWindowLine(past) {
   if (!past || typeof past !== 'object') return null;
   const type = visitLoopText(past.type, 60) || 'scheduled';
   const win = visitLoopText(past.windowDisplay, 40);
-  return `- WINDOW PASSED: the ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — apologize for the delay and escalate needs_person; promise no check, reply or timing (return ABSTAIN when the apology is all you can say)`;
+  // the record's own status, as one sentence the reply may copy: never a reason, never a new time
+  const status = `${visitLoopText(past.type, 60) ? `Your ${type} visit` : 'Your visit'} is still on our schedule and is not marked done yet.`;
+  return `- WINDOW PASSED: the ${type} window${win ? ` ${win}` : ''} has passed and the visit is not marked complete — you may say "${status}" word for word (never a reason or a new time); apologize for the delay and escalate needs_person; promise no check, reply or timing (return ABSTAIN when the apology is all you can say)`;
 }
 // A visit the office CONFIRMED as missed and has not settled (visit-loops-facts
 // loadMissedVisit; owner 2026-10-03: only a person's "This was a miss" may reach a
@@ -5451,9 +5461,19 @@ function validateReplyPromises({ reply, context = null }) {
 // The section was rendered, so the snapshot is persisted even when nothing
 // time-sensitive showed ({ signature: null }): a delay, passed window or missed
 // visit that appears while the card waits changes the live signature and refuses.
+// `schedule`: the SCHEDULE CHANGES the reply was written beside (visit-loops-facts scheduleChangesSignature; 'unread' when the read
+// failed): a move, skip or cancel recorded while the card waits changes it, and the send refuses. `scheduleVisits`: the listed visit slots.
 function visitLoopStatus(context, factsBlock) {
   if (!factsCarryVisitLoops(factsBlock)) return null;
-  return { signature: require('./visit-loops-facts').visitStatusSignature(context && context.visitLoops) };
+  const facts = require('./visit-loops-facts');
+  const v = context && context.visitLoops;
+  // scheduleVisits: the listed visits whose slot held ({ id, date, start, window, dayOnly }), so the send-time rebuild asks about the same ones
+  const sc = v && v.scheduleChanges;
+  return {
+    signature: facts.visitStatusSignature(v),
+    schedule: facts.scheduleChangesSignature(sc),
+    scheduleVisits: sc && Array.isArray(sc.listed) ? sc.listed : [],
+  };
 }
 // Renders context.visitLoops (context-aggregator / visit-loops-facts.js; may be
 // undefined for old callers) as the VISIT STATUS & OPEN LOOPS section: the fixed
@@ -5478,6 +5498,55 @@ function renderVisitLoopsSection(visitLoops) {
   // the scope line closes the section (it is not a "- " item: factsListOpenLoop stops before it)
   const { MISSED_VISIT_SCOPE_LINE } = require('./visit-loops-facts');
   return `${VISIT_LOOPS_HEADER}\n${lines.length ? lines.join('\n') : '- none'}\n${MISSED_VISIT_SCOPE_LINE}\n`;
+}
+
+// SCHEDULE CHANGES (texting AI gap 3): what the schedule records prove (visit-loops-facts loadScheduleChanges), as finished sentences:
+// the last move of a visit UPCOMING SERVICES lists, its old slot by day only and its new window as UPCOMING SERVICES shows it ("Your Pest
+// Control visit was moved on Tuesday, Nov 24 from Wednesday, Dec 2 to Friday, Dec 4, 1–3 PM."), and a coming visit (or the visits one cancel
+// stopped together) whose row says skipped or cancelled. '' gate-off, when there is none, or when the read failed.
+const SCHEDULE_CHANGES_HEADER = 'SCHEDULE CHANGES (from our schedule records; to say a visit was moved, skipped or cancelled, copy one of these sentences word for word; for a visit not named here, say nothing about a move, skip or cancel):';
+function scheduleMoveLine(m, day, visit) {
+  const on = day(m.movedOn);
+  const to = day(m.toDate);
+  const win = visitLoopText(m.toWindow, 40);
+  if (!on || !to) return null;
+  // a same-day move names no old hour (it may never have been told): only the window UPCOMING SERVICES shows now
+  if (m.sameDay) return win ? `- ${visit(m.type)} on ${to} was moved to a new time on ${on}; its window is now ${win}.` : null;
+  const from = day(m.fromDate);
+  return from ? `- ${visit(m.type)} was moved on ${on} from ${from} to ${to}${win ? `, ${win}` : ''}.` : null;
+}
+function scheduleStoppedLine(g, day, visit) {
+  const d = day(g.date);
+  const word = { skipped: 'marked skipped', cancelled: 'cancelled' }[g.status];
+  if (!d || !word) return null;
+  const count = Number(g.count) || 1;
+  const last = day(g.lastDate);
+  if (count > 1 && last) {
+    const t = visitLoopText(g.type, 60);
+    return `- Your ${count} ${t ? `${t} ` : ''}visits from ${d} through ${last} are ${word} on our schedule.`;
+  }
+  return `- ${visit(g.type)} on ${d} is ${word} on our schedule.`;
+}
+function scheduleChangesLines(scheduleChanges) {
+  const sc = scheduleChanges && typeof scheduleChanges === 'object' ? scheduleChanges : {};
+  const day = (value) => visitLoopText(formatEtDate(value), 40);
+  const visit = (type) => {
+    const t = visitLoopText(type, 60);
+    return t ? `Your ${t} visit` : 'Your visit';
+  };
+  const objects = (list) => (Array.isArray(list) ? list : []).filter((x) => x && typeof x === 'object');
+  const lines = [
+    ...objects(sc.moves).map((m) => scheduleMoveLine(m, day, visit)),
+    // an `ambiguous` stop (a going visit of that service that day at the other property)
+    // renders nothing: service and day alone would name the going visit
+    ...objects(sc.stopped).filter((g) => g.ambiguous !== true).map((g) => scheduleStoppedLine(g, day, visit)),
+  ].filter(Boolean);
+  return [...new Set(lines)];
+}
+function scheduleChangesSection(visitLoops) {
+  if (!gateEnvValue('GATE_SMS_REAL_ANSWERS')) return '';
+  const lines = scheduleChangesLines(visitLoops && visitLoops.scheduleChanges);
+  return lines.length ? `${SCHEDULE_CHANGES_HEADER}\n${lines.join('\n')}\n` : '';
 }
 
 /**
@@ -5546,6 +5615,9 @@ function buildFactsBlock(context, extras = {}) {
   const visitLoopsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
     ? renderVisitLoopsSection(context.visitLoops)
     : '';
+  // SCHEDULE CHANGES (texting AI gap 3): gate-on only, '' gate-off and when there is none. Right after the visit status section (whose
+  // item lines end at its scope line), outside the trusted "...SLA\nFREE RE-SERVICE\n[COMPANY FACTS][LABEL FACTS]BILLING:" tail.
+  const scheduleChangesFacts = scheduleChangesSection(context.visitLoops);
   // LABEL FACTS (owner ruling 2026-09-30), gate-on only, and only when the
   // fetch found verified label timing for the last visit's products.
   const labelFactsSection = gateEnvValue('GATE_SMS_REAL_ANSWERS')
@@ -5765,7 +5837,7 @@ SERVICE HISTORY (most recent first):
 ${historyBlock || `- ${lastService}`}
 UPCOMING SERVICES:
 ${upcomingBlock}
-${bankFactsSection}${visitLoopsSection}${openTimesSection}${reserviceOpeningsSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
+${bankFactsSection}${visitLoopsSection}${scheduleChangesFacts}${openTimesSection}${reserviceOpeningsSection}${slaSection}${reserviceSection}${companyFactsSection}${labelFactsSection}BILLING:
 ${billingLines.join('\n')}
 PENDING ESTIMATE: ${estimateLine}
 ${portalCancelSection}PROPERTY & PREFERENCES:
@@ -7239,6 +7311,8 @@ module.exports = {
   buildFactsBlock,
   reportDeliverySentences,
   renderVisitLoopsSection,
+  scheduleChangesSection,
+  SCHEDULE_CHANGES_HEADER,
   visitLoopCommitmentIds,
   visitLoopStatus,
   visitLoopsNeedAnswer,
