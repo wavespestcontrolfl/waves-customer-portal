@@ -686,11 +686,8 @@ export default function FastCompleteTreeShrubSheet({ service, request, operatorI
 
 function SheetBody({ service, request, ctx, submission, locked, dictationPending, onDictationPending, onCompleted, onFullForm, isMobile, onWrapChecking, collectOnSheet }) {
   if (submission.done) {
-    // The server's completion advisories (a 13-0-13 over the county limit, a history rule) are listed under the summary.
-    const advisories = (Array.isArray(submission.done.response?.completionAdvisories) ? submission.done.response.completionAdvisories : []).filter((text) => typeof text === 'string' && text);
     return (
-      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} onCompleted={() => onCompleted?.(submission.done.response || null)}>
-        {advisories.map((text) => <p key={text} className="tech-visit-muted tech-visit-status--warn" role="status">{text}</p>)}
+      <SavedView service={service} summary={submission.done.summary} notice={submission.done.notice} response={submission.done.response} onCompleted={() => onCompleted?.(submission.done.response || null)}>
         {collectOnSheet && <CollectPayment result={submission.done.response} />}
       </SavedView>
     );

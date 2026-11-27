@@ -122,6 +122,7 @@ let catalogAnswer;
 let assessAnswer;
 let confirmAnswer;
 let guideAnswer;
+let completeAnswer;
 
 // A stub of the whole admin API the sheet talks to.
 function makeRequest({ ctx = context(), contextError = null } = {}) {
@@ -158,7 +159,7 @@ function makeRequest({ ctx = context(), contextError = null } = {}) {
     if (path.endsWith('/complete')) {
       const error = completeErrors.shift();
       if (error) throw error;
-      return { success: true, invoiceId: null };
+      return completeAnswer;
     }
     return {};
   });
@@ -182,6 +183,7 @@ beforeEach(() => {
   requests = [];
   completeErrors = [];
   guideAnswer = null;
+  completeAnswer = { success: true, invoiceId: null };
   lookup = { shotListEnabled: true, assessment: null };
   propertyAreasAnswer = areasAnswer({ lawn: { sqft: 5000, source: 'recorded', reviewedAt: null } });
   tips = { available: false, groups: [] };
@@ -4225,5 +4227,25 @@ describe('carpetgrass warning on a Celsius WG row', () => {
     await addProductByName('Celsius WG');
     expect(within(await screen.findByRole('group', { name: 'Celsius WG' })).getByText(WARNING)).toBeTruthy();
     expect(screen.queryByRole('button', { name: /acknowledge|confirm carpetgrass/i })).toBeNull();
+  });
+});
+
+// Owner 2026-11-26: the server only warns. Its completionAdvisories show on the finished screen.
+describe('the finished screen', () => {
+  test('lists the server\'s completion advisories, and nothing extra without them', async () => {
+    const advisory = 'Oxadiazon (Ronstar) is not meant for a home lawn. It was recorded and the office will review it.';
+    completeAnswer = { success: true, invoiceId: null, completionAdvisories: [advisory, '', advisory, 'Stock shortfall: Celsius WG was recorded, not taken from stock.'] };
+    await openSheet();
+    await analyzeAndComplete();
+    expect(await screen.findByRole('button', { name: 'Next stop' })).toBeTruthy();
+    expect(screen.getAllByText(advisory)).toHaveLength(1);
+    expect(screen.getByText('Stock shortfall: Celsius WG was recorded, not taken from stock.')).toBeTruthy();
+  });
+
+  test('a completion with none shows no warning lines', async () => {
+    await openSheet();
+    await analyzeAndComplete();
+    expect(await screen.findByRole('button', { name: 'Next stop' })).toBeTruthy();
+    expect(document.querySelectorAll('.tech-visit-card .tech-visit-status--warn')).toHaveLength(0);
   });
 });

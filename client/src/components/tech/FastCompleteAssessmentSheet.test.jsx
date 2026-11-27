@@ -40,7 +40,7 @@ const SERVICE = {
 
 const notFound = () => Object.assign(new Error('No outcome recorded for that visit'), { status: 404 });
 
-function makeRequest({ row = null, loadError = null, completeError = null, estimate = undefined, estimateError = null } = {}) {
+function makeRequest({ row = null, loadError = null, completeError = null, estimate = undefined, estimateError = null, completeResponse = { success: true } } = {}) {
   const calls = [];
   const request = vi.fn(async (path, options = {}) => {
     calls.push({ path, method: options.method || 'GET', body: options.body ? JSON.parse(options.body) : null });
@@ -60,7 +60,7 @@ function makeRequest({ row = null, loadError = null, completeError = null, estim
     if (path === '/tech/services/svc-a/photos') return { photos: [] };
     if (path === '/admin/dispatch/svc-a/complete') {
       if (completeError) throw completeError;
-      return { success: true };
+      return completeResponse;
     }
     return {};
   });
@@ -139,6 +139,18 @@ describe('FastCompleteAssessmentSheet', () => {
     for (const key of ['products', 'clientPestRating', 'completionPhotos', 'photos', 'customerRecap']) {
       expect(body).not.toHaveProperty(key);
     }
+  });
+
+  test('the finished screen lists the server\'s completion advisories', async () => {
+    const advisory = 'The office will review this visit.';
+    const request = await openSheet(makeRequest({ completeResponse: { success: true, completionAdvisories: [advisory] } }));
+    fireEvent.change(note(), { target: { value: 'Chinch bugs in the front, wants a quote.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Warm' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Lawn' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Mosquito' }));
+    fireEvent.click(completeButton());
+    expect(await screen.findByText(advisory)).toBeTruthy();
+    expect(posts(request, '/complete')).toHaveLength(1);
   });
 
   test('turning the credit off sends false', async () => {
