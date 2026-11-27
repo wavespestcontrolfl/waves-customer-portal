@@ -19,8 +19,11 @@ import {
   BarChart3,
   CheckCircle2,
   Clock,
+  File as FileIcon,
+  FileSpreadsheet,
   Receipt,
   FileText,
+  Image as ImageIcon,
   LayoutDashboard,
   List,
   Users,
@@ -5570,18 +5573,23 @@ const DOC_CAT_COLORS = {
   general: "#71717A", // zinc-500 muted
 };
 
-const FILE_ICONS = {
-  pdf: "\uD83D\uDCC4",
-  docx: "\uD83D\uDDD2\uFE0F",
-  doc: "\uD83D\uDDD2\uFE0F",
-  xlsx: "\uD83D\uDCCA",
-  xls: "\uD83D\uDCCA",
-  png: "\uD83D\uDDBC\uFE0F",
-  jpg: "\uD83D\uDDBC\uFE0F",
-  jpeg: "\uD83D\uDDBC\uFE0F",
-  txt: "\uD83D\uDCC3",
-  csv: "\uD83D\uDCCA",
+const FILE_ICON_COMPONENTS = {
+  pdf: FileText,
+  docx: FileText,
+  doc: FileText,
+  txt: FileText,
+  xlsx: FileSpreadsheet,
+  xls: FileSpreadsheet,
+  csv: FileSpreadsheet,
+  png: ImageIcon,
+  jpg: ImageIcon,
+  jpeg: ImageIcon,
 };
+
+function renderFileTypeIcon(fileType) {
+  const IconComp = FILE_ICON_COMPONENTS[fileType] || FileIcon;
+  return <IconComp size={22} strokeWidth={1.75} color="#04395E" aria-hidden="true" />;
+}
 
 function DocumentsTab({ showToast }) {
   const [docs, setDocs] = useState([]);
@@ -6103,7 +6111,6 @@ function DocumentsTab({ showToast }) {
       >
         {docs.map((doc) => {
           const catColor = DOC_CAT_COLORS[doc.category] || D.muted;
-          const icon = FILE_ICONS[doc.file_type] || "\uD83D\uDCC1";
           const isEditing = editingId === doc.id;
 
           if (isEditing) {
@@ -6260,8 +6267,20 @@ function DocumentsTab({ showToast }) {
                 style={{ display: "flex", gap: 12, alignItems: "flex-start" }}
               >
                 {" "}
-                <div style={{ fontSize: 28, flexShrink: 0, lineHeight: 1 }}>
-                  {icon}
+                <div
+                  style={{
+                    width: 38,
+                    height: 38,
+                    borderRadius: 8,
+                    background: "#F1F7FA",
+                    border: "1px solid #D5DEE5",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  {renderFileTypeIcon(doc.file_type)}
                 </div>{" "}
                 <div style={{ flex: 1, minWidth: 0 }}>
                   {" "}

@@ -1657,6 +1657,29 @@ function AlertSettings() {
   );
 }
 
+const SIGNOFF_FEEDBACK_TONE = {
+  error: { background: '#FEF2F2', border: '1px solid #FECACA', color: '#991B1B' },
+  ok: { background: '#ECFDF5', border: '1px solid #A7F3D0', color: '#065F46' },
+};
+
+function summarizeSignoffWeek(weekly, fallbackWeekStart) {
+  const unpaidLunchMin = parseFloat(weekly.unpaid_meal_minutes) || 0;
+  const otMin = parseFloat(weekly.overtime_minutes) || 0;
+  const regMin = parseFloat(weekly.regular_minutes) || 0;
+  const totalMin = parseFloat(weekly.total_shift_minutes) || 0;
+  const hasUnpaidLunch = unpaidLunchMin > 0;
+  const hoursMin = hasUnpaidLunch ? regMin + otMin : totalMin;
+  return {
+    weekLabel: weekly.week_start ? String(weekly.week_start).split('T')[0] : fallbackWeekStart,
+    hours: (hoursMin / 60).toFixed(1),
+    hoursLabel: hasUnpaidLunch ? 'paid' : 'total',
+    hasUnpaidLunch,
+    unpaidLunchHrs: (unpaidLunchMin / 60).toFixed(1),
+    otHrs: (otMin / 60).toFixed(1),
+    jobCount: weekly.job_count || 0,
+  };
+}
+
 // Sign-off card — surfaces last week's weekly summary and a "Sign
 // timecard" button when the tech hasn't yet acknowledged the hours.
 // Quietly hides itself when there's no last-week data, when the week
@@ -1670,6 +1693,7 @@ export function TimecardSignoffCard({ techName }) {
   const [pending, setPending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [signature, setSignature] = useState('');
+  const [attested, setAttested] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [feedback, setFeedback] = useState(null); // {message, isError}
 
@@ -1694,12 +1718,6 @@ export function TimecardSignoffCard({ techName }) {
         setWeekStart(data.weekStart || null);
         setReviewToken(data.reviewToken || null);
         setPending(data.pending === true);
-        // Functional setter so we don't depend on `signature` here —
-        // including it in the useCallback deps would cause this to
-        // re-run every time the input changes, refetching on each
-        // keystroke. Pre-fill from techName only if the field is still
-        // empty.
-        if (data.weekly) setSignature((s) => s || techName || '');
       }
     } catch {
       setWeekly(null);
@@ -1710,48 +1728,41 @@ export function TimecardSignoffCard({ techName }) {
       // permanently null until a full page reload.
       setLoading(false);
     }
-  }, [techName]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
-  if (loading) return null;
-  if (!weekly) return null;
+  if (loading || !weekly) return null;
   // Server is authoritative on whether sign-off is pending. pending
   // is false for both "already signed" AND "already approved" — split
   // those: approved weeks render nothing (the week is final, no need
   // to surface anything to the tech), signed-but-not-yet-approved
   // weeks render the green "awaiting" confirmation.
   if (!pending) {
-    if (weekly.status === 'approved') return null;
-    if (weekly.tech_signed_at) {
-      return (
-        <div style={{
-          background: FIELD.card, border: `1px solid #d6d3d1`, borderRadius: 6,
-          padding: 12, margin: '20px 0',
-          fontSize: 14, color: '#1c1917',
-        }}>
-          ✓ Last week signed{weekly.tech_signature ? ` as "${weekly.tech_signature}"` : ''} — awaiting admin approval.
-        </div>
-      );
-    }
-    return null;
+    if (weekly.status === 'approved' || !weekly.tech_signed_at) return null;
+    const signedAs = weekly.tech_signature ? ` as "${weekly.tech_signature}"` : '';
+    return (
+      <div style={{
+        background: '#ECFDF5', border: '1px solid #A7F3D0', borderLeft: '4px solid #065F46', borderRadius: 8,
+        padding: 12, margin: '20px 0',
+        fontSize: 14, color: '#065F46', fontWeight: 500,
+      }}>
+        Last week signed{signedAs} — awaiting admin approval.
+      </div>
+    );
   }
 
   // What the tech attests is what payroll pays: with an unpaid lunch on the
   // week, show paid hours (regular + overtime, both from the server) and the
   // lunch taken off. With none (gate off), the card is exactly as before.
-  const unpaidLunchMin = parseFloat(weekly.unpaid_meal_minutes || 0);
-  const hasUnpaidLunch = unpaidLunchMin > 0;
-  const hoursMin = hasUnpaidLunch
-    ? parseFloat(weekly.regular_minutes || 0) + parseFloat(weekly.overtime_minutes || 0)
-    : parseFloat(weekly.total_shift_minutes || 0);
-  const hours = (hoursMin / 60).toFixed(1);
-  const otHrs = (parseFloat(weekly.overtime_minutes || 0) / 60).toFixed(1);
-  const unpaidLunchHrs = (unpaidLunchMin / 60).toFixed(1);
+  const summary = summarizeSignoffWeek(weekly, weekStart);
+  const canSign = attested && Boolean(signature.trim());
+  const disabled = submitting || !canSign;
+  const feedbackTone = feedback ? SIGNOFF_FEEDBACK_TONE[feedback.isError ? 'error' : 'ok'] : null;
 
   const handleSign = async () => {
-    if (!signature.trim()) {
-      setFeedback({ message: 'Type your name to sign', isError: true });
+    if (!canSign) {
+      setFeedback({ message: 'Confirm your hours and type your full name to sign', isError: true });
       return;
     }
     setSubmitting(true);
@@ -1769,6 +1780,8 @@ export function TimecardSignoffCard({ techName }) {
       });
       const data = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+      setSignature('');
+      setAttested(false);
       setFeedback({ message: 'Timecard signed', isError: false });
       load();
     } catch (e) {
@@ -1779,54 +1792,62 @@ export function TimecardSignoffCard({ techName }) {
 
   return (
     <div style={{
-      background: FIELD.card, borderRadius: 6, border: `1px solid #d6d3d1`,
+      background: FIELD.card, borderRadius: 8, border: '1px solid #D5DEE5', borderLeft: '4px solid #009CDE',
       padding: 16, margin: '20px 0',
     }}>
-      <div style={{ fontSize: 14, fontWeight: 500, color: '#854d0e', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 1 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, color: '#04395E', marginBottom: 4, textTransform: 'uppercase', letterSpacing: 0.6 }}>
         Sign Last Week's Timecard
       </div>
       <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 10 }}>
-        Week of {weekly.week_start ? String(weekly.week_start).split('T')[0] : weekStart} — review and attest these hours.
+        Week of {summary.weekLabel} — review and attest these hours.
       </div>
       <div style={{ display: 'flex', gap: 16, marginBottom: 12, fontSize: 14, color: FIELD.text }}>
-        <div><strong style={{ color: FIELD.text }}>{hours}h</strong> <span style={{ color: FIELD.muted }}>{hasUnpaidLunch ? 'paid' : 'total'}</span></div>
-        {hasUnpaidLunch && (
-          <div><span style={{ color: FIELD.muted }}>Unpaid lunch</span> <strong style={{ color: FIELD.text }}>{unpaidLunchHrs}h</strong></div>
+        <div><strong style={{ color: '#04395E' }}>{summary.hours}h</strong> <span style={{ color: FIELD.muted }}>{summary.hoursLabel}</span></div>
+        {summary.hasUnpaidLunch && (
+          <div><span style={{ color: FIELD.muted }}>Unpaid lunch</span> <strong style={{ color: '#04395E' }}>{summary.unpaidLunchHrs}h</strong></div>
         )}
-        <div><strong style={{ color: parseFloat(otHrs) > 0 ? '#854d0e' : FIELD.text }}>{otHrs}h</strong> <span style={{ color: FIELD.muted }}>OT</span></div>
-        <div><strong>{weekly.job_count || 0}</strong> <span style={{ color: FIELD.muted }}>jobs</span></div>
+        <div><strong style={{ color: '#04395E' }}>{summary.otHrs}h</strong> <span style={{ color: FIELD.muted }}>OT</span></div>
+        <div><strong style={{ color: '#04395E' }}>{summary.jobCount}</strong> <span style={{ color: FIELD.muted }}>jobs</span></div>
       </div>
-      <div style={{ fontSize: 14, color: FIELD.muted, marginBottom: 4 }}>Type your name to sign:</div>
+      <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, marginBottom: 10, fontSize: 14, color: FIELD.text, cursor: 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={attested}
+          onChange={(e) => setAttested(e.target.checked)}
+          style={{ width: 18, height: 18, marginTop: 2, accentColor: '#04395E' }}
+        />
+        <span>I confirm these hours are accurate and complete.</span>
+      </label>
+      <div style={{ fontSize: 14, fontWeight: 600, color: '#04395E', marginBottom: 4 }}>Type your full name to sign:</div>
       <input
         value={signature}
         onChange={(e) => setSignature(e.target.value)}
-        placeholder="Your name"
+        placeholder={techName ? `e.g. ${techName}` : 'Your full name'}
+        autoComplete="name"
         style={{
-          width: '100%', boxSizing: 'border-box',
-          padding: '8px 10px', fontSize: 14,
+          width: '100%', boxSizing: 'border-box', minHeight: 44,
+          padding: '10px 12px', fontSize: 15,
           background: FIELD.card, color: FIELD.text,
-          border: `1px solid ${FIELD.border}`, borderRadius: 6,
+          border: '1px solid #D5DEE5', borderRadius: 8,
           marginBottom: 10,
         }}
       />
       <button
         onClick={handleSign}
-        disabled={submitting || !signature.trim()}
+        disabled={disabled}
         style={{
-          width: '100%', padding: '10px', fontSize: 14, fontWeight: 500,
-          background: '#1c1917', color: '#fff', border: 'none', borderRadius: 4,
-          cursor: submitting || !signature.trim() ? 'wait' : 'pointer',
-          opacity: submitting || !signature.trim() ? 0.6 : 1,
+          width: '100%', minHeight: 44, padding: '10px', fontSize: 14, fontWeight: 600,
+          background: '#04395E', color: '#fff', border: 'none', borderRadius: 8,
+          cursor: submitting ? 'wait' : disabled ? 'not-allowed' : 'pointer',
+          opacity: disabled ? 0.6 : 1,
         }}
       >
         {submitting ? 'Signing…' : 'Sign Timecard'}
       </button>
       {feedback && (
         <div style={{
-          marginTop: 10, fontSize: 14, padding: '6px 10px', borderRadius: 6,
-          background: feedback.isError ? '#fcebeb' : '#f5f5f4',
-          border: `1px solid ${feedback.isError ? '#a32d2d' : '#1c1917'}`,
-          color: feedback.isError ? '#a32d2d' : '#1c1917',
+          marginTop: 10, fontSize: 14, padding: '8px 10px', borderRadius: 6,
+          ...feedbackTone,
         }}>{feedback.message}</div>
       )}
     </div>

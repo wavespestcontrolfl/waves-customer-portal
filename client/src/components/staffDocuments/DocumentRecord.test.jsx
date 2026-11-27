@@ -119,3 +119,28 @@ test('opening a saved record keeps its answers, even ones equal to the prefill',
   expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('Truck 7');
   expect(screen.queryByText(/Filled from the staff record/)).not.toBeInTheDocument();
 });
+
+test('non-admin signing a signature agreement sees Sign this agreement, no due picker, and must tick + type full name', async () => {
+  request.mockResolvedValue({
+    record: {
+      id: 'rec-signed', owner_id: 'hire', answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'Sample Hire' },
+      completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z',
+      due_at: '2026-11-02T12:00:00Z', completed_at: '2026-11-01T12:05:00Z',
+    },
+  });
+  const onSaved = vi.fn();
+  render(<DocumentRecord detail={detail()} people={people} selfId="hire" manage={false} canWrite onSaved={onSaved} />);
+  expect(screen.getByRole('heading', { name: 'Sign this agreement' })).toBeInTheDocument();
+  expect(screen.queryByLabelText('Next action due (Eastern)')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Save open record|Save draft/ })).not.toBeInTheDocument();
+  const submit = screen.getByRole('button', { name: 'Sign and submit agreement' });
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Typed name *'), { target: { value: 'Sample' } });
+  fireEvent.click(screen.getByLabelText('I agree *'));
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Typed name *'), { target: { value: 'Sample Hire' } });
+  expect(submit).toBeEnabled();
+  fireEvent.click(submit);
+  await waitFor(() => expect(onSaved).toHaveBeenCalledWith('Agreement signed and saved.'));
+  expect(screen.getByText(/Signed by Sample Hire/)).toBeInTheDocument();
+});

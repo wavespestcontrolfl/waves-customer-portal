@@ -2336,6 +2336,20 @@ router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
       Key: doc.s3_key,
     }), { expiresIn: 3600 });
 
+    await recordAuditEvent({
+      actor_type: 'admin',
+      actor_id: req.technicianId,
+      action: 'hr_document.downloaded',
+      resource_type: 'company_document',
+      resource_id: doc.id,
+      ip_address: req.ip ? String(req.ip).slice(0, 64) : null,
+      user_agent: req.get('user-agent') ? String(req.get('user-agent')).slice(0, 255) : null,
+      metadata: {
+        category: doc.category || null,
+        technician_id: doc.technician_id || null,
+      },
+    });
+
     res.json({ url, fileName: doc.file_name });
   } catch (err) { next(err); }
 });

@@ -71,16 +71,26 @@ export function SignedCopyView({ copy, onClose }) {
       <DialogBody>
         {copy && (
           <>
-            <div className="text-14 text-zinc-600 mb-3 break-words">
-              Signed by {copy.signedName} · {formatTimelineTime(copy.signedAt)} ET
+            <div className="flex items-center gap-3 pb-3 mb-3 border-b-2 border-[#04395E]">
+              <img src="/waves-logo.png" alt="Waves Pest Control" className="w-10 h-10 object-contain shrink-0" />
+              <div>
+                <div className="text-[16px] font-bold text-[#04395E]">Waves Pest Control, LLC</div>
+                <div className="text-14 text-[#475569]">Signed Job Offer &amp; Technician Terms</div>
+              </div>
+            </div>
+            <div className="text-14 text-[#475569] mb-4 p-3 rounded-md bg-[#F1F7FA] border border-[#D5DEE5] break-words">
+              <strong className="text-[#04395E]">Signed by {copy.signedName}</strong> · {formatTimelineTime(copy.signedAt)} ET
               {copy.signedIp ? ` · IP ${copy.signedIp}` : ""}
-              <div className="text-zinc-500 break-all">Signature hash {copy.signatureHash}</div>
+              <div className="text-[#475569] break-all mt-1">Signature hash {copy.signatureHash}</div>
             </div>
             <SafeMarkdown markdown={copy.markdown} />
           </>
         )}
       </DialogBody>
       <DialogFooter>
+        <Button size="sm" variant="secondary" onClick={() => window.print()}>
+          Print / Save PDF
+        </Button>
         <Button size="sm" onClick={onClose}>
           Close
         </Button>

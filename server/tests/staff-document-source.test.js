@@ -1,5 +1,5 @@
 const { sourceSchema, policySchema, validate, renderSource, checkRelease, hash } = require('../services/staff-document-source');
-const { recordAnswers } = require('../services/staff-documents');
+const { recordAnswers, parseSignedName } = require('../services/staff-documents');
 const { validateTemplatePayload } = require('../services/document-template-library');
 const starters = require('../services/staff-document-starters');
 
@@ -29,8 +29,41 @@ test('shared values render consistently while prior rendered copies and hashes r
 });
 test('unresolved shared values and owner decisions fail issuance', () => {
   expect(() => checkRelease(source(), renderSource(source()), new Date())).toThrow(/Resolve/);
-  const decision = source('## Authority {#authority}\n[DECISION: choose the approver]');
-  expect(() => checkRelease(decision, renderSource(decision), new Date())).toThrow(/approver/);
+  for (const marker of [
+    '[DECISION: choose the approver]',
+    '[OWNER: confirm 15% and 40%]',
+    '[CPA: overtime check]',
+    '[LAWYER/CPA: regular rate]',
+    '[To write: level rules]',
+    '[BAR]',
+  ]) {
+    const blocked = source(`## Authority {#authority}\n${marker}`);
+    expect(() => checkRelease(blocked, renderSource(blocked, values), new Date())).toThrow(/Resolve/);
+  }
+});
+test('renders markdown pipe tables, ordered lists, and mixed paragraph+bullet blocks safely', () => {
+  const md = [
+    '## Pay examples {#pay-examples}',
+    '**1. Step one.**',
+    '- Bullet A',
+    '- Bullet B',
+    '',
+    '1. First item',
+    '2. Second item',
+    '',
+    '| Week | Pay |',
+    '|---|---|',
+    '| Slow | **$920** |',
+    '| Strong | <script>alert(1)</script> |',
+  ].join('\n');
+  const html = renderSource(source(md), values).sections[0].html;
+  expect(html).toContain('<p><strong>1. Step one.</strong></p>');
+  expect(html).toContain('<ul><li>Bullet A</li><li>Bullet B</li></ul>');
+  expect(html).toContain('<ol><li value="1">First item</li><li value="2">Second item</li></ol>');
+  expect(html).toContain('<table><thead><tr><th>Week</th><th>Pay</th></tr></thead>');
+  expect(html).toContain('<td><strong>$920</strong></td>');
+  expect(html).not.toContain('<script>');
+  expect(html).toMatch(/&(?:lt|#x3C);script/);
 });
 test('shared values cannot issue with embedded decision markers or merge placeholders', () => {
   for (const pay_schedule of ['[DECISION: approve the pay dates]', '{{approved.pay_dates}}']) {
@@ -64,6 +97,23 @@ test('form records reject extra fields and require a completed required checkbox
   expect(() => recordAnswers(version, { answers: { unknown: 'x' }, completed_steps: [], complete: false })).toThrow();
   expect(() => recordAnswers(version, { answers: { reviewed: false }, completed_steps: [], complete: true })).toThrow();
   expect(recordAnswers(version, { answers: { reviewed: true }, completed_steps: [], complete: true }).answers).toBe('{"reviewed":true}');
+});
+test('signature fields require a full name (first and last) when completing a form', () => {
+  expect(parseSignedName('x')).toBeNull();
+  expect(parseSignedName('Jordan')).toBeNull();
+  expect(parseSignedName('  Jordan   Rivera  ')).toBe('Jordan Rivera');
+  const version = {
+    staff_metadata: {
+      fields: [
+        { id: 'agree', label: 'I agree', type: 'checkbox', required: true },
+        { id: 'signed-name', label: 'Typed name', type: 'text', required: true },
+      ],
+    },
+    content_snapshot: { kind: 'form', sections: [{ id: 'sig' }] },
+  };
+  expect(() => recordAnswers(version, { answers: { agree: true, 'signed-name': 'x' }, completed_steps: [], complete: true })).toThrow(/full name/);
+  expect(recordAnswers(version, { answers: { agree: true, 'signed-name': '  Jordan Rivera ' }, completed_steps: [], complete: true }).answers)
+    .toBe('{"agree":true,"signed-name":"Jordan Rivera"}');
 });
 test('procedure completion requires every step and rejects duplicate or invented steps', () => {
   const version = { staff_metadata: { fields: [] }, content_snapshot: { kind: 'procedure', sections: [{ id: 'first' }, { id: 'second' }] } };

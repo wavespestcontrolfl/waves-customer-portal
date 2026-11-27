@@ -70,4 +70,15 @@ describe('weekly timecard sign-off card', () => {
     expect(await screen.findByText('42.0h')).toBeInTheDocument();
     expect(screen.queryByText('Unpaid lunch')).not.toBeInTheDocument();
   });
+
+  it('does not auto-prefill the signature and requires explicit attestation before signing', async () => {
+    mountWith(week({}));
+    expect(await screen.findByText('Sign Last Week\'s Timecard')).toBeInTheDocument();
+    const input = screen.getByPlaceholderText('e.g. Fixture Technician');
+    const checkbox = screen.getByLabelText('I confirm these hours are accurate and complete.');
+    const button = screen.getByRole('button', { name: 'Sign Timecard' });
+    expect(input).toHaveValue('');
+    expect(checkbox).not.toBeChecked();
+    expect(button).toBeDisabled();
+  });
 });

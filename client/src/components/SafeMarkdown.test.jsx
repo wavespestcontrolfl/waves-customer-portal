@@ -50,4 +50,13 @@ describe('SafeMarkdown', () => {
     expect(container).toHaveTextContent('<script>alert(1)</script>');
     expect(container).toHaveTextContent('[click](javascript:alert(1))');
   });
+
+  it('renders markdown pipe tables as accessible HTML tables', () => {
+    const { container } = render(
+      <SafeMarkdown markdown={'| Week | Pay |\n|---|---|\n| Slow | **$920** |\n| Strong | $1,210 |'} />,
+    );
+    expect(container.querySelectorAll('table thead th')).toHaveLength(2);
+    expect(container.querySelectorAll('table tbody tr')).toHaveLength(2);
+    expect(container.querySelector('table tbody strong')).toHaveTextContent('$920');
+  });
 });
