@@ -267,6 +267,12 @@ describe('Florida minimum wage floor (Fla. Const. art. X, s. 24)', () => {
     expect(() => paycheck({ payDate: '2026-09-30', hourlyRate: '14.99' })).toThrow(/below the Florida minimum wage of \$15\.00/);
   });
 
+  test('validates against workWeekEnd when provided so hours worked before Sept 30 and paid Oct 2 still clear the prior floor', () => {
+    expect(paycheck({ payDate: '2026-10-02', workWeekEnd: '2026-09-27', hourlyRate: '14.50' }).grossPayCents).toBe(58000);
+    expect(() => paycheck({ payDate: '2026-10-02', workWeekEnd: '2026-09-27', hourlyRate: '13.99' }))
+      .toThrow('Hourly rate $13.99 is below the Florida minimum wage of $14.00 on 2026-09-27');
+  });
+
   test('the table steps from $14.00 to $15.00 on 30 Sep 2026 and ends on 31 Dec 2027', () => {
     expect(floridaMinimumWageCentsFor('2025-09-30')).toBe(1400n);
     expect(floridaMinimumWageCentsFor('2026-09-29')).toBe(1400n);

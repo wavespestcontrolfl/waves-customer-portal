@@ -24,6 +24,7 @@ import {
 import AdminCommandHeader from "../../components/admin/AdminCommandHeader";
 import ProductLabelReview from "../../components/admin/ProductLabelReview";
 import VendorCancellationDialog from "../../components/admin/VendorCancellationDialog";
+import AlreadyCountedDialog from "../../components/admin/AlreadyCountedDialog";
 import {
   ActionFeedback,
   Badge,
@@ -52,7 +53,13 @@ function adminFetch(path, options = {}) {
     },
     ...options,
   }).then((r) => {
-    if (!r.ok) throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status });
+    if (!r.ok) {
+      // The body is kept for callers that branch on the server's code (the Restock tab's
+      // "already counted" warning); the message stays the bare status the toasts show.
+      return r.json().catch(() => null).then((body) => {
+        throw Object.assign(new Error(`HTTP ${r.status}`), { status: r.status, code: body?.code, details: body });
+      });
+    }
     return r.json();
   });
 }
@@ -3259,6 +3266,8 @@ function RestockRequestsTab({
   const [receiveDrafts, setReceiveDrafts] = useState({});
   // The request whose "Record vendor cancellation" dialog is open.
   const [vendorCancelFor, setVendorCancelFor] = useState(null);
+  // { request, message }: Receive was refused because an invoice already added this stock.
+  const [alreadyCounted, setAlreadyCounted] = useState(null);
   // requestId → { screenshots: [{ label, url }], expiresAt } once fetched. The
   // server presigns for 1 h; the cell drops the links a little before that
   // and offers Refresh, so a tab left open can always re-request fresh URLs.
@@ -3325,7 +3334,7 @@ function RestockRequestsTab({
     };
   }, [load, refreshId]);
 
-  async function runAction(request, action) {
+  async function runAction(request, action, { confirm = false, fingerprint = null } = {}) {
     setReceivingId(request.id);
     try {
       const draft = receiveDrafts[request.id] || {};
@@ -3339,19 +3348,32 @@ function RestockRequestsTab({
           quantity: draft.quantity || null,
           unit: draft.unit || null,
           note: draft.note || null,
+          ...(confirm ? { confirm: true } : {}),
+          ...(fingerprint ? { confirmFingerprint: fingerprint } : {}),
         }),
       });
-      if (action === "receive") {
-        showToast("Stock received.");
-      } else {
-        showToast(
-          action === "mark_ordered" ? "Marked ordered" : "Request cancelled",
-        );
-      }
+      setAlreadyCounted(null);
+      showToast(
+        {
+          receive: "Stock received.",
+          mark_ordered: "Marked ordered",
+          close_counted: "Closed. Stock was not changed.",
+        }[action] || "Request cancelled",
+      );
       await load();
       onUpdate && onUpdate();
     } catch (err) {
-      showToast(`Failed: ${err.message}`);
+      const said = err.details?.error || err.message;
+      if (err.code === "already_counted_by_receipt") {
+        setAlreadyCounted({ request, message: said, fingerprint: err.details?.receiptFingerprint });
+      } else if (err.code === "receipts_changed") {
+        // Every listed receipt was undone while the dialog was open: nothing is counted any more.
+        setAlreadyCounted(null);
+        showToast(said);
+        await load();
+      } else {
+        showToast(`Failed: ${err.message}`);
+      }
     } finally {
       setReceivingId("");
     }
@@ -3491,6 +3513,16 @@ function RestockRequestsTab({
           </Table>
         </div>
       )}
+      {alreadyCounted && (
+        <AlreadyCountedDialog
+          request={alreadyCounted.request}
+          message={alreadyCounted.message}
+          busy={receivingId === alreadyCounted.request.id}
+          onClose={() => setAlreadyCounted(null)}
+          onCloseCounted={() => runAction(alreadyCounted.request, "close_counted", { fingerprint: alreadyCounted.fingerprint })}
+          onReceiveAnyway={() => runAction(alreadyCounted.request, "receive", { confirm: true, fingerprint: alreadyCounted.fingerprint })}
+        />
+      )}
       {vendorCancelFor && (
         <VendorCancellationDialog
           request={vendorCancelFor}
@@ -3561,7 +3593,7 @@ function RestockStatusCell({
   // Mark Ordered eligibility: an owner, an open request, and no bot claim
   // placing.
   const canAct =
-    canAuthor && request.status === "open" && order?.status !== "placing";
+    canAuthor && request.status === "open" && order?.status !== "placing" && !orderOutstanding(order);
   const summary = order ? autoOrderSummary(order) : null;
   // Links show only while their presigned URLs are live; an expired or empty
   // fetch falls back to the button, and live links keep a Refresh beside them.
@@ -3632,6 +3664,10 @@ function RestockStatusCell({
   );
 }
 
+// `outstanding` is the server's one outstanding-order rule (placed, or a post-submit park even without its
+// timestamp); an older payload falls back to placedAt. Such an order hides Mark Ordered and Cancel.
+const orderOutstanding = (order) => order?.outstanding ?? (!!order?.placedAt && !order.revokedAt);
+
 // Restock tab — the receive draft (quantity / unit) and the Receive / Cancel
 // actions; the dispatcher owns a placing request, and a dispatched order that
 // is neither received nor revoked cannot be cancelled (the server 409s both).
@@ -3670,14 +3706,16 @@ function RestockActionCell({
     );
   const lateOrderReceive =
     request.status === "received" && !!request.order?.landedAfterReceive;
-  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive)
+  // A cancelled request whose order may be out still blocks the product's next order: staff receive the goods when
+  // they arrive (or close it as already counted), or record the vendor cancellation. It never offers Cancel again.
+  const cancelledOut = request.status === "cancelled" && orderOutstanding(request.order);
+  if (!["open", "ordered"].includes(request.status) && !lateOrderReceive && !cancelledOut)
     return (
       <TD>
         <span className="text-ink-secondary">Closed</span>
       </TD>
     );
-  // placedAt set means the order exists, so revokedAt needs no ?.
-  const orderOut = !!request.order?.placedAt && !request.order.revokedAt;
+  const orderOut = orderOutstanding(request.order);
   return (
     <TD>
       <div className="grid gap-[6px] min-w-[220px]">
@@ -3714,6 +3752,13 @@ function RestockActionCell({
             variant="primary"
           >
             Receive
+          </Button>
+          <Button
+            onClick={() => runAction(request, "close_counted")}
+            disabled={receivingId === request.id}
+            variant="secondary"
+          >
+            Close, already counted
           </Button>
           {lateOrderReceive || orderOut ? (
             <VendorCancelControls

@@ -1533,7 +1533,8 @@ describe('admin estimate persistence', () => {
             recurring: {
               services: [
                 { name: 'Pest Control', mo: 89 },
-                { name: 'Lawn Care', mo: 80 },
+                // A service no browser-save rule refuses: a browser-priced lawn row is refused (409) before this check runs.
+                { name: 'Rodent Bait Stations', mo: 80 },
               ],
             },
           },

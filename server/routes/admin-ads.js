@@ -87,6 +87,7 @@ const RESERVED_METADATA_KEYS = new Map([
   ['budget_hold', HOLD_SWITCH],
   ['budget_hold_cleared', HOLD_SWITCH],
   ['lsa_customer_id', 'the daily Local Services sync writes it'],
+  ['performance_max_present', 'the daily Local Services sync writes it'],
 ]);
 // Managed by /budget, /mode, /pause, /enable, /sync — never the generic writes.
 const CAMPAIGN_MANAGED_FIELDS = ['budget_mode', 'daily_budget_base', 'daily_budget_current'];
@@ -235,10 +236,22 @@ router.get('/campaigns', async (req, res, next) => {
     const enriched = campaigns.map(c => {
       const p7 = perf7.filter(p => p.campaign_id === c.id);
       const p30 = perf30.filter(p => p.campaign_id === c.id);
+      const last7d = aggregate(p7);
+      const last30d = aggregate(p30);
+      const pmaxPresent = c.platform === 'google_lsa' && metadataObject(c.metadata).performance_max_present === true;
+      if (pmaxPresent) {
+        last7d.cpa = null;
+        last30d.cpa = null;
+      }
       return {
         ...c,
-        last7d: aggregate(p7),
-        last30d: aggregate(p30),
+        last7d,
+        last30d,
+        ...(pmaxPresent ? {
+          performanceMaxPresent: true,
+          cpaUnavailable: true,
+          cpaUnavailableReason: 'Performance Max ran alongside Local Services — standalone CPA is unavailable',
+        } : {}),
       };
     });
 
@@ -460,14 +473,39 @@ function gapDecisionText(decision, win, settings) {
 // GET /api/admin/ads/gap-rule
 router.get('/gap-rule', async (req, res, next) => {
   try {
-    const mode = requireGapRule(res);
-    if (!mode) return undefined;
     const BudgetManager = getBudgetManager();
     const now = new Date();
     const today = etDateString(now);
+    const mode = gapRuleMode();
+    if (mode === 'off') {
+      // Cron honors active stored holds even when GATE_ADS_GAP_RULE is off, so
+      // expose active holds (read-only + release) while keeping 404 gap_rule_off
+      // when no hold is active.
+      const rows = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+      const heldCampaigns = rows
+        .map((c) => {
+          const hold = BudgetManager.activeBudgetHold(c.metadata, today);
+          if (!hold) return null;
+          return {
+            id: c.id,
+            campaign_name: c.campaign_name,
+            budget_mode: c.budget_mode,
+            daily_budget_current: c.daily_budget_current,
+            daily_budget_base: c.daily_budget_base,
+            hold: { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null },
+          };
+        })
+        .filter(Boolean);
+      if (heldCampaigns.length === 0) return res.status(404).json({ error: 'gap_rule_off' });
+      return res.json({ mode: 'off', settings: null, window: null, decision: null, campaigns: heldCampaigns, last_run: null });
+    }
     const targets = await db('ad_targets').first();
     const ev = await BudgetManager.evaluateGapRule(now, targets);
     const campaigns = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+    const legacyBranded = typeof BudgetManager.findLegacyAutoThrottledBranded === 'function'
+      ? await BudgetManager.findLegacyAutoThrottledBranded(campaigns)
+      : [];
+    const legacyBrandedIds = new Set(legacyBranded.map((entry) => String(entry.campaign.id)));
     const lastRow = await db('system_settings').where({ key: BudgetManager.GAP_LAST_KEY }).first();
     let lastRun = null;
     try {
@@ -488,17 +526,27 @@ router.get('/gap-rule', async (req, res, next) => {
         total_stops: ev.total_stops,
       },
       decision: { mode: ev.decision, reason: gapDecisionText(ev.decision, ev, ev.settings) },
-      campaigns: campaigns.map((c) => {
-        const hold = BudgetManager.activeBudgetHold(c.metadata, today);
-        return {
-          id: c.id,
-          campaign_name: c.campaign_name,
-          budget_mode: c.budget_mode,
-          daily_budget_current: c.daily_budget_current,
-          daily_budget_base: c.daily_budget_base,
-          hold: hold ? { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null } : null,
-        };
-      }),
+      campaigns: campaigns
+        .filter((c) => (
+          BudgetManager.isCapacityEligibleCampaign(c)
+          || Boolean(BudgetManager.activeBudgetHold(c.metadata, today))
+          || legacyBrandedIds.has(String(c.id))
+        ))
+        .map((c) => {
+          const hold = BudgetManager.activeBudgetHold(c.metadata, today);
+          const releaseOnly = !BudgetManager.isCapacityEligibleCampaign(c);
+          const legacyAutoThrottled = legacyBrandedIds.has(String(c.id));
+          return {
+            id: c.id,
+            campaign_name: c.campaign_name,
+            budget_mode: c.budget_mode,
+            daily_budget_current: c.daily_budget_current,
+            daily_budget_base: c.daily_budget_base,
+            hold: hold ? { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null } : null,
+            ...(releaseOnly ? { release_only: true } : {}),
+            ...(legacyAutoThrottled ? { legacy_auto_throttled: true } : {}),
+          };
+        }),
       last_run: lastRun,
     });
   } catch (err) { next(err); }
@@ -565,6 +613,9 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
     if (campaign.status !== 'active') {
       return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is ${campaign.status || 'not active'} — re-enable it before holding its budget.` });
     }
+    if (!getBudgetManager().isCapacityEligibleCampaign(campaign)) {
+      return res.status(400).json({ error: `Timed holds only apply to non-branded Google Search campaigns managed by the automatic budget rule ("${campaign.campaign_name}" is not eligible).` });
+    }
 
     const hold = {
       mode,
@@ -588,24 +639,66 @@ router.post('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// DELETE /api/admin/ads/campaigns/:id/hold — the next 2-hour run decides
+// DELETE /api/admin/ads/campaigns/:id/hold — the next 2-hour run decides.
+// If the gap rule gate is off, still allow clearing an ACTIVE stored hold so an
+// operator is never trapped by a hold the cron still honors; otherwise 404 gap_rule_off.
 router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
   try {
-    if (!requireGapRule(res)) return undefined;
+    const BudgetManager = getBudgetManager();
+    const mode = gapRuleMode();
+    const existing = UUID_RE.test(req.params.id)
+      ? await db('ad_campaigns').where({ id: req.params.id }).first()
+      : null;
+    if (mode === 'off') {
+      const activeHold = existing && BudgetManager.activeBudgetHold(existing.metadata, etDateString(new Date()));
+      if (!activeHold) return res.status(404).json({ error: 'gap_rule_off' });
+    }
+    if (!existing) return res.status(404).json({ error: 'Campaign not found' });
     // When a hold existed, the same metadata write leaves a release record
     // (budget_hold_cleared) so "who lifted it and when" survives. No ad_budget_log
-    // row: a no-change row would trip assertNoChangeSince and the advisor's
-    // recent-change checks. With no hold there is nothing to record.
+    // row on capacity-eligible campaigns: a no-change row would trip assertNoChangeSince
+    // and the advisor's recent-change checks. For a non-eligible campaign (e.g. branded
+    // Search with a legacy throttled hold), the 2-hour cron will never restore it, so
+    // atomically restore 'base' mode and clear the hold under the row lock.
     const clearedAt = new Date().toISOString();
     const clearedBy = req.technicianId || null;
-    const updated = UUID_RE.test(req.params.id)
-      ? await updateCampaignMetadata(req.params.id, (meta) => {
-        const { budget_hold: removed, ...rest } = meta;
-        if (!removed) return rest;
-        // Replaces any older budget_hold_cleared.
-        return { ...rest, budget_hold_cleared: { at: clearedAt, by: clearedBy, mode: removed.mode || null, until: removed.until || null } };
-      })
-      : null;
+    const existingMeta = metadataObject(existing.metadata);
+    const hasStoredHold = Boolean(existingMeta.budget_hold);
+    if (hasStoredHold && existingMeta.budget_hold?.mode === 'stop'
+      && !BudgetManager.isCapacityEligibleCampaign(existing)
+      && existing.platform === 'google_ads' && existing.status === 'active'
+      && existing.budget_mode === 'stop') {
+      const applied = await applyLive(
+        () => BudgetManager.setMode(
+          existing.id,
+          'base',
+          'Hold cleared on non-automated campaign — restored to base budget',
+          {
+            requireLivePush: true,
+            requireActive: true,
+            trigger: 'manual',
+            clearHold: {
+              at: clearedAt,
+              by: clearedBy,
+              requireIneligibleRestore: true,
+              expectedMode: existingMeta.budget_hold?.mode || null,
+              expectedUntil: existingMeta.budget_hold?.until || null,
+            },
+          },
+        ),
+        res,
+      );
+      if (applied === APPLY_FAILED) return undefined;
+      const restored = await db('ad_campaigns').where({ id: existing.id }).first();
+      if (!restored) return res.status(404).json({ error: 'Campaign not found' });
+      return res.json({ campaign: restored, hold: null });
+    }
+    const updated = await updateCampaignMetadata(existing.id, (meta) => {
+      const { budget_hold: removed, ...rest } = meta;
+      if (!removed) return rest;
+      // Replaces any older budget_hold_cleared.
+      return { ...rest, budget_hold_cleared: { at: clearedAt, by: clearedBy, mode: removed.mode || null, until: removed.until || null } };
+    });
     if (!updated) return res.status(404).json({ error: 'Campaign not found' });
     res.json({ campaign: updated, hold: null });
   } catch (err) { next(err); }
@@ -1066,7 +1159,11 @@ async function applyLive(fn, res) {
       res.status(409).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
-    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded'].includes(err.code)) {
+    if (err.code === 'hold_not_eligible') {
+      res.status(400).json({ applied: false, error: err.message });
+      return APPLY_FAILED;
+    }
+    if (['campaign_inactive', 'mode_noop', 'budget_noop', 'budget_out_of_bounds', 'budget_unbounded', 'budget_direction_invalid', 'budget_cap_exceeded'].includes(err.code)) {
       res.status(422).json({ applied: false, error: err.message });
       return APPLY_FAILED;
     }
@@ -1179,10 +1276,22 @@ router.post('/advisor/apply', requireAdmin, async (req, res, next) => {
       // already match the target — counting it as applied would be the same
       // false green. A same-base apply with DRIFTED current stays allowed:
       // that push reconciles the live budget back to the recorded base.
-      if (amount === baseBudget && amount === toFiniteNumber(campaign.daily_budget_current)) {
+      const currentNum = toFiniteNumber(campaign.daily_budget_current);
+      if (amount === baseBudget && amount === currentNum) {
         return res.status(422).json({ applied: false, error: `"${campaign.campaign_name}" is already at $${amount}/day — nothing to apply.` });
       }
-      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireNoChangeSince, trigger: 'advisor' }), res);
+      // Direction sanity check (W16): verify against BOTH base and current live budget so
+      // decrease_budget can never raise a manually lowered live budget and increase_budget can never lower it.
+      const liveRef = Number.isFinite(currentNum) && currentNum > 0 ? currentNum : boundRef;
+      const isReconcileUp = Number.isFinite(baseBudget) && amount === baseBudget && liveRef < amount;
+      if (action === 'increase_budget' && ((amount <= boundRef && !isReconcileUp) || amount <= liveRef)) {
+        return res.status(422).json({ applied: false, error: `Refusing increase_budget to $${amount}/day because it does not increase the current $${liveRef}/day live budget (base $${boundRef}/day).` });
+      }
+      if (action === 'decrease_budget' && (amount >= boundRef || amount >= liveRef)) {
+        return res.status(422).json({ applied: false, error: `Refusing decrease_budget to $${amount}/day because it does not decrease the current $${liveRef}/day live budget (base $${boundRef}/day).` });
+      }
+      const requireDirection = action === 'increase_budget' ? 'increase' : 'decrease';
+      result = await applyLive(() => getBudgetManager().setBudget(campaign.id, amount, auditReason || `Advisor: ${action}`, { requireLivePush: true, requireBaseMode: true, requireActive: true, requireBoundFactor: 3, requireDirection, requireNoChangeSince, trigger: 'advisor' }), res);
       if (result === APPLY_FAILED) return undefined;
     } else {
       if (!['base', 'spent', 'stop'].includes(value)) {

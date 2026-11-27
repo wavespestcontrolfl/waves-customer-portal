@@ -1,9 +1,13 @@
 // The 07:05 notice's rain note (owner 2026-11-19 D3): rain hours by area, from NWS only, never the paid backup.
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/auto-dispatch/candidate-slots', () => ({ DAY_OPEN: 8 * 60, DAY_CLOSE: 17 * 60 }));
-jest.mock('../services/weather-forecast', () => ({ getNwsHourlyRain: jest.fn(async () => []), getHourlyRainOutlook: jest.fn() }));
+jest.mock('../services/weather-forecast', () => ({
+  getNwsHourlyRain: jest.fn(async () => []),
+  getOpenMeteoHourlyBackup: jest.fn(async () => null),
+  getHourlyRainOutlook: jest.fn(),
+}));
 
-const { getNwsHourlyRain, getHourlyRainOutlook } = require('../services/weather-forecast');
+const { getNwsHourlyRain, getOpenMeteoHourlyBackup, getHourlyRainOutlook } = require('../services/weather-forecast');
 const { ZONE_COORDS } = require('../services/scheduling/forecast-zones');
 const { rainNote, _internals: { readDay } } = require('../services/day-replan/rain-note');
 
@@ -90,10 +94,19 @@ describe('rainNote', () => {
     expect(note.days.every((d) => !d.gaps.length && !d.areas.length)).toBe(true);
   });
 
-  test('reads NWS only, at each area\'s board point: never the reader with the paid backup', async () => {
+  test('reads NWS first at each area\'s board point and falls back to Open-Meteo backup when NWS fails', async () => {
     await rainNote(MORNING);
     expect(getNwsHourlyRain).toHaveBeenCalledTimes(Object.keys(ZONE_COORDS).length);
     for (const p of Object.values(ZONE_COORDS)) expect(getNwsHourlyRain).toHaveBeenCalledWith(p.lat, p.lng);
+    expect(getOpenMeteoHourlyBackup).not.toHaveBeenCalled();
     expect(getHourlyRainOutlook).not.toHaveBeenCalled();
+
+    jest.clearAllMocks();
+    getNwsHourlyRain.mockResolvedValue(null);
+    getOpenMeteoHourlyBackup.mockResolvedValue(fullDays(THREE, { [DAY]: { 14: 75 } }));
+    const fallbackNote = await rainNote(MORNING);
+    expect(getOpenMeteoHourlyBackup).toHaveBeenCalledTimes(Object.keys(ZONE_COORDS).length);
+    expect(fallbackNote.unread).toEqual([]);
+    expect(fallbackNote.days[0].areas).toHaveLength(Object.keys(ZONE_COORDS).length);
   });
 });

@@ -307,13 +307,16 @@ describe('AI screen reads the essential-functions answer as asked', () => {
     answers,
   });
 
-  test('the answer reaches the model under a name that says what "Yes" means, never the stored key', () => {
+  test('the answer reaches the model under a name that says what "Yes" means, never the stored key, and omits name/city/language', () => {
     const user = application({
       physical_limitations: 'Yes (with or without reasonable accommodation)',
       experience: 'lawn crew',
     });
     expect(user).toContain('can_perform_essential_functions: Yes (with or without reasonable accommodation)');
     expect(user).not.toContain('physical_limitations');
+    expect(user).not.toContain('Jane Doe');
+    expect(user).not.toContain('Venice');
+    expect(user).not.toContain('Application language');
     // Every other answer keeps its stored name.
     expect(user).toContain('experience: lawn crew');
   });
@@ -350,6 +353,15 @@ describe('AI screen mapping', () => {
     expect(mapScreen({ score: 182, recommendation: 'strong' })).toBeNull();
     expect(mapScreen({ score: 50, recommendation: 'hire_now' })).toBeNull();
     expect(mapScreen({ recommendation: 'weak' })).toBeNull();
+  });
+
+  test('contradictory score and recommendation normalize recommendation to score band', () => {
+    expect(mapScreen({ score: 25, recommendation: 'strong', strengths: [], flags: [], summary: 's' }))
+      .toMatchObject({ score: 25, recommendation: 'weak' });
+    expect(mapScreen({ score: 62, recommendation: 'strong', strengths: [], flags: [], summary: 's' }))
+      .toMatchObject({ score: 62, recommendation: 'possible' });
+    expect(mapScreen({ score: 85, recommendation: 'weak', strengths: [], flags: [], summary: 's' }))
+      .toMatchObject({ score: 85, recommendation: 'strong' });
   });
 });
 

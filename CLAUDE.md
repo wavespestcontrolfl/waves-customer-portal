@@ -4,8 +4,9 @@ Context for Claude Code sessions working on the waves-customer-portal monorepo.
 
 ## Dev Workflow
 
-- Subagents that only search, read logs, or run tests pass `model: sonnet`
-  (or `haiku`) — a search agent inherits the main model otherwise.
+- Work directly in the main session for routine lookups; when delegating a
+  bounded search, log-read, or test subagent, pass `model: sonnet` (or `haiku`)
+  so it does not inherit the main model.
 - Start the app only when the authorized task needs runtime verification.
   Read-only audits and explanations do not require startup.
 - Before startup, verify the selected checkout, command hooks, database
@@ -27,9 +28,9 @@ results as queued messages or as live graduation evidence.
 Waves Pest Control — family-owned, SW Florida (Manatee / Sarasota / Charlotte counties). Custom AI-native operations platform: React/Vite frontend + Express/Node.js backend + PostgreSQL, deployed on Railway.
 
 Three interfaces:
-- **Admin portal** (`/admin/*`) — owner/operator dashboard, full business management
+- **Admin portal** (`/admin/*`) — owner/operator dashboard, full business management, and all new field technician UI
 - **Customer portal** (`/`) — customer-facing PWA (service tracking, payments, referrals)
-- **Tech portal** (`/tech/*`) — field technician mobile app (route, protocols, estimating)
+- **Tech portal** (`/tech/*`) — **deprecated** legacy field UI (owner 2026-10-02): do not build new features here; build new field UI in the admin portal (`/admin/*`)
 
 ## Tech Stack
 
@@ -43,7 +44,7 @@ Three interfaces:
 
 ## Key Team Members
 
-- **Adam Benetti** — Owner-operator: primary admin user and a field technician (uses both admin and Tech portals). Design tech features for a multi-technician team (`docs/technician-provisioning-runbook.md`).
+- **Adam Benetti** — Owner-operator: primary admin user and field technician. Design tech features in `/admin/*` for a multi-technician team (`docs/technician-provisioning-runbook.md`).
 - **Virginia** — Office manager/CSR; uses Communications (`CommunicationsPageV2.jsx`) and the Pipeline Leads tab (`LeadsTabs.jsx`) daily
 
 ## Rules

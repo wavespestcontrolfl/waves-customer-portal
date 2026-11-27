@@ -844,9 +844,15 @@ describe('lawn pricing production follow-up', () => {
     expect(stAug.selected.perApp).toBe(69);
     expect(stAug.selected.costFloorApplied).toBe(true);
 
-    // Bermuda enhanced remains market-table priced because market is above the floor.
-    expect(bermuda.selected.perApp).toBe(68);
-    expect(bermuda.selected.costFloorApplied).toBe(false);
+    // A quote saved before the one lawn price lane: bermuda enhanced stays market-table priced ($68, its own rows), because
+    // that market is above the floor.
+    const bermudaLegacy = priceLawnCare(property, { track: 'bermuda', lawnFreq: 9, useLawnCostFloor: true, legacyLawnOneLane: true });
+    expect(bermudaLegacy.selected.perApp).toBe(68);
+    expect(bermudaLegacy.selected.costFloorApplied).toBe(false);
+    // A new bermuda quote reads the St. Augustine market rows (2026-11-26) while its floor keeps the bermuda budget, so with the
+    // floor re-armed it lifts to that floor ($598.31 a year, $67 an application). Floors stay disarmed on real quotes.
+    expect(bermuda.selected.perApp).toBe(67);
+    expect(bermuda.selected.costFloorApplied).toBe(true);
 
     // Zoysia enhanced carries the largest reserve budget (#2812 fold), which
     // pushes its floor above the market table — floor-priced when re-armed.

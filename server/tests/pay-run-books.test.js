@@ -63,11 +63,11 @@ describe('payRunTotals', () => {
     expect(t.wagesCents).toBe(200000);
   });
 
-  test('employer taxes sum the four columns; cents become dollars', async () => {
+  test('employer taxes, HSA (Line 14), and SIMPLE IRA match (Line 19) sum into total; cents become dollars', async () => {
     const conn = fakeConn([
       check('2026-03-06', 'finalized', {
         gross_cents: 123456, employer_social_security_cents: 7654, employer_medicare_cents: 1790,
-        futa_cents: 741, fl_reemployment_cents: 333,
+        futa_cents: 741, fl_reemployment_cents: 333, hsa_employer_cents: 20000, simple_employer_cents: 2469,
       }),
       check('2026-03-13', 'finalized', {
         gross_cents: 1, employer_social_security_cents: 1, employer_medicare_cents: 1, futa_cents: 0, fl_reemployment_cents: 2,
@@ -76,14 +76,29 @@ describe('payRunTotals', () => {
     const t = await payRunTotals(conn, '2026-01-01', '2026-12-31');
     expect(t.wagesCents).toBe(123457);
     expect(t.employerTaxesCents).toBe(7654 + 1790 + 741 + 333 + 4);
+    expect(t.hsaEmployerCents).toBe(20000);
+    expect(t.simpleEmployerCents).toBe(2469);
     expect(t.wages).toBe(1234.57);
     expect(t.employerTaxes).toBe(105.22);
-    expect(t.total).toBe(1339.79);
+    expect(t.employeeBenefits).toBe(200);
+    expect(t.retirementContributions).toBe(24.69);
+    expect(t.total).toBe(1564.48);
   });
 
   test('no checks reads as zero', async () => {
     const t = await payRunTotals(fakeConn([]), '2026-01-01', '2026-12-31');
-    expect(t).toEqual({ checks: 0, wagesCents: 0, employerTaxesCents: 0, wages: 0, employerTaxes: 0, total: 0 });
+    expect(t).toEqual({
+      checks: 0,
+      wagesCents: 0,
+      employerTaxesCents: 0,
+      hsaEmployerCents: 0,
+      simpleEmployerCents: 0,
+      wages: 0,
+      employerTaxes: 0,
+      employeeBenefits: 0,
+      retirementContributions: 0,
+      total: 0,
+    });
   });
 });
 

@@ -114,11 +114,11 @@ const SELECTORS = [
   // deep: true — its only call site (sms-operational-extractor.js, TEXT_POLICIES.smsOperationalActions)
   // goes through llm/call.js.
   { key: 'SMS_OPERATIONAL_ACTIONS', env: 'MODEL_SMS_OPERATIONAL_ACTIONS', description: 'SMS operational extraction, text channel (2026-11-27 replay test: Sonnet 5.5; before that Opus 5.5)', accepts: { providers: ['anthropic'], cap: 'text', deep: true } },
-  { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; dark behind GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
+  { key: 'PLANT_ID_REFEREE', env: 'MODEL_PLANT_ID_REFEREE', description: 'Plant/tree/shrub/palm photo ID referee (owner ruling 2026-09-28: Fable 5.1, effort high; gated by GATE_PLANT_ID_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true, cap 'vision' — same rationale as PLANT_ID_REFEREE above: its
   // only call site (lawn-visit-referee.js, ROUTES.lawnAssessmentReferee) goes
   // through llm/call.js#dispatch and sends the visit's photos.
-  { key: 'LAWN_ASSESSMENT_REFEREE', env: 'MODEL_LAWN_ASSESSMENT_REFEREE', description: 'Lawn visit assessment name referee (owner ruling 2026-09-29: Fable 5.1, effort high; dark behind GATE_LAWN_ASSESSMENT_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
+  { key: 'LAWN_ASSESSMENT_REFEREE', env: 'MODEL_LAWN_ASSESSMENT_REFEREE', description: 'Lawn visit assessment name referee (owner ruling 2026-09-29: Fable 5.1, effort high; gated by GATE_LAWN_ASSESSMENT_REFEREE)', accepts: { providers: ['anthropic'], cap: 'vision', deep: true } },
   // deep: true — its only call site (campaign-advisor.js, TEXT_POLICIES.adsAdvisor)
   // goes through llm/call.js#dispatch, which floors max_tokens for always-thinking
   // models and reads past thinking blocks; its default (Fable 5.1) is itself a
@@ -466,7 +466,7 @@ const LANES = [
   // invalid, or out of budget leaves the escalation result unchanged.
   L('sms_scheduling_decide', 'SMS scheduling decide (reply to an offer → slot accepted?)', 'sms-scheduling-decide.js', 'reason', R('smsSchedulingDecide'), null, { inbound: true, note: 'GATE_SMS_SCHEDULING_DECIDE: records what it would do (owner ruling 2026-10-02: one model, Sonnet 5.5); a would-move is carried out by code only when GATE_SMS_SCHEDULING_ACT_MOVE is on' }),
   L('auto_dispatch_proofreader', 'Auto-dispatch move proofreader (may a move break a time promise?)', 'auto-dispatch/proofreader/index.js', 'reason', R('autoDispatchProofreader'), null, { note: 'Owner 2026-10-09: allow / hold / unknown on one planned move, from the full customer record. Called by the 04:10 auto-dispatch run behind GATE_AUTO_DISPATCH_PROOFREADER (auto-dispatch/proofreader/nightly.js: only an allow moves the visit; an unknown raises an admin notice) and by the replay (scripts/auto-dispatch-proofreader-replay.js)' }),
-  L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE, dark; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
+  L('plant_id_referee', 'Plant/tree/shrub/palm photo ID referee (name tie-break)', 'photo-id-v2/plant-engine.js', 'multimodal', R('plantIdReferee'), null, { inbound: true, note: 'GATE_PLANT_ID_REFEREE; Claude Fable 5.1 breaks a Gemini/Sol name disagreement in identify mode only (owner ruling 2026-09-29)' }),
   // Gemini-only scoring (owner ruling 2026-09-24: no more Claude+Gemini
   // averaging) — a sequential ladder like treatment_zone/tech_caption_vision,
   // not a fan-out: Gemini live, then the prior Gemini model, then Claude
@@ -482,7 +482,7 @@ const LANES = [
   // The gated name tie-break (owner ruling 2026-09-29): Sol re-reads an unsure
   // or serious Gemini answer, and Fable breaks a Gemini/Sol NAME disagreement
   // (grass type, what a finding is) only. Single leg, no automatic fallback.
-  L('lawn_assessment_referee', 'Lawn visit assessment referee (name tie-break)', 'lawn-visit-referee.js', 'multimodal', R('lawnAssessmentReferee'), null, { inbound: true, note: 'GATE_LAWN_ASSESSMENT_REFEREE, dark; Sol second opinion when Gemini is unsure or serious, Claude Fable 5.1 breaks a grass/finding name disagreement only (owner ruling 2026-09-29)' }),
+  L('lawn_assessment_referee', 'Lawn visit assessment referee (name tie-break)', 'lawn-visit-referee.js', 'multimodal', R('lawnAssessmentReferee'), null, { inbound: true, note: 'GATE_LAWN_ASSESSMENT_REFEREE; Sol second opinion when Gemini is unsure or serious, Claude Fable 5.1 breaks a grass/finding name disagreement only (owner ruling 2026-09-29)' }),
   // Sequential ladder, not a fan-out (owner ruling 2026-09-24): analyzePhoto
   // tries Gemini, then the prior Gemini, and reaches Claude VISION only when
   // both miss (with schema validation gating each rung's acceptance).

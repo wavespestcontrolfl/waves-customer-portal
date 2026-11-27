@@ -67,16 +67,21 @@ describe('open-balance selection', () => {
     ]));
   });
 
-  test('excludes WITHDRAWN packet invoices in SQL (pre-push P0)', async () => {
+  test('excludes WITHDRAWN packet invoices and chemical-review holds in SQL and JS (pre-push P0)', async () => {
     // A combined-visit invoice whose Bill-To moved after the homeowner held
-    // its link keeps a collectible status and a NULL payer_id, and the live
-    // re-resolution below reads only the invoice's OWN representative
-    // service — the payer may sit on another billed member of the packet.
-    // Left in, the row rides a sibling's combined payment.
-    await openBalanceInvoices('cust-1');
+    // its link keeps a collectible status and a NULL payer_id, and a chemical
+    // add-on review hold also keeps a collectible status while awaiting office
+    // review. Neither may ride a sibling's combined payment.
+    tableResults.rows = [
+      { id: 'held', invoice_number: 'INV-HELD', total: '100.00', credit_applied: 0, scheduled_send_error: 'chemical_addon_review:svc-1' },
+      { id: 'open', invoice_number: 'INV-OPEN', total: '50.00', credit_applied: 0, scheduled_send_error: null },
+    ];
+    const rows = await openBalanceInvoices('cust-1');
     expect(tableResults.lastCalls).toEqual(expect.arrayContaining([
       ['whereRaw', ["COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'payer_billed:%'"]],
+      ['whereRaw', ["COALESCE(invoices.scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'"]],
     ]));
+    expect(rows.map((r) => r.id)).toEqual(['open']);
   });
 
   test('no customer id → empty, no query', async () => {

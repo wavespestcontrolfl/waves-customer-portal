@@ -4,7 +4,12 @@
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../middleware/admin-auth', () => ({
-  adminAuthenticate: (req, _res, next) => { req.technicianId = 'admin-1'; next(); },
+  adminAuthenticate: (req, _res, next) => {
+    req.technicianId = 'admin-1';
+    req.techRole = 'admin';
+    req.technician = { id: 'admin-1', role: 'admin', email: req.headers['x-test-email'] ?? 'contact@wavespestcontrol.com' };
+    next();
+  },
   requireAdmin: (_req, _res, next) => next(),
 }));
 
@@ -189,6 +194,84 @@ describe('poller decisions', () => {
     // The transaction already linked to the payment is found by its id.
     expect(poller.transactionFor({ ...row, mercury_transaction_id: 'z' }, [{ id: 'z', requestId: null, amountCents: 1, note: null, counterpartyId: 'x' }]).id).toBe('z');
     expect(poller.transactionFor(row, [{ id: 'd', requestId: null, amountCents: 81240, note: 'waves-pay:p1', counterpartyId: 'rec-1' }]).id).toBe('d');
+    // An inbound credit / ACH return (isOutbound === false) with the same amount must not match an outbound payout.
+    expect(poller.transactionFor(row, [
+      { id: 'ret', requestId: 'req-1', amountCents: 81240, isOutbound: false, note: 'waves-pay:p1', counterpartyId: 'rec-1' },
+    ])).toBeNull();
+  });
+
+  test('mercuryHoldsSameAmount ignores requests/transactions owned by other checks but still blocks earlier attempts of this check and untracked duplicates', async () => {
+    const now = new Date('2026-11-13T15:00:00Z');
+    const priorCheckPaymentId = '11111111-1111-4111-8111-111111111111';
+    const earlierSameCheckAttemptId = '22222222-2222-4222-8222-222222222222';
+    const client = {
+      listRequests: jest.fn(async () => [{
+        requestId: 'req-last-week',
+        recipientId: 'rec-1',
+        amountCents: 81240,
+        status: 'approved',
+        createdAt: '2026-11-09T15:00:00Z',
+        memo: `waves-pay:${priorCheckPaymentId}`,
+      }]),
+      listTransactions: jest.fn(async () => [{
+        id: 'tx-last-week',
+        requestId: 'req-last-week',
+        counterpartyId: 'rec-1',
+        amountCents: 81240,
+        isOutbound: true,
+        status: 'sent',
+        createdAt: '2026-11-09T16:00:00Z',
+        note: `waves-pay:${priorCheckPaymentId}`,
+      }]),
+    };
+    // Prior week's paycheck owned by a different check_id does not deadlock retrying this week's timed-out check
+    // (even when identified only by its waves-pay:<id> note).
+    expect(await mercury.mercuryHoldsSameAmount(client, {
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      now,
+      attemptAt: '2026-11-13T14:55:00Z',
+      excludeRequestIds: new Set(),
+      excludeTransactionIds: new Set(),
+      excludePaymentIds: new Set([priorCheckPaymentId]),
+    })).toBe(false);
+    // An earlier timed-out attempt of THIS SAME check_id (not in excludePaymentIds) that later appeared in Mercury
+    // MUST still block a duplicate retry.
+    client.listRequests.mockResolvedValueOnce([{
+      requestId: 'req-attempt-1',
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      status: 'pendingApproval',
+      createdAt: '2026-11-13T14:50:00Z',
+      memo: `waves-pay:${earlierSameCheckAttemptId}`,
+    }]);
+    expect(await mercury.mercuryHoldsSameAmount(client, {
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      now,
+      attemptAt: '2026-11-13T14:55:00Z',
+      excludeRequestIds: new Set(['req-last-week']),
+      excludeTransactionIds: new Set(['tx-last-week']),
+      excludePaymentIds: new Set([priorCheckPaymentId]),
+    })).toBe(true);
+    // An untracked request without another check's note still blocks retry.
+    client.listRequests.mockResolvedValueOnce([{
+      requestId: 'req-untracked',
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      status: 'pendingApproval',
+      createdAt: '2026-11-13T14:56:00Z',
+      memo: null,
+    }]);
+    expect(await mercury.mercuryHoldsSameAmount(client, {
+      recipientId: 'rec-1',
+      amountCents: 81240,
+      now,
+      attemptAt: '2026-11-13T14:55:00Z',
+      excludeRequestIds: new Set(['req-last-week']),
+      excludeTransactionIds: new Set(['tx-last-week']),
+      excludePaymentIds: new Set([priorCheckPaymentId]),
+    })).toBe(true);
   });
 
   test('a sent payment read again: a failed, reversed or refunded transaction is returned; a posted day fills in once', () => {

@@ -370,7 +370,7 @@ function buildLeadEngineInput({ intake = {}, customer = {}, body = {}, services 
   // strings are truthy but the pest normalizer silently defaults them —
   // without the marker such a draft stayed 'generated' with no review
   // reason at default single-family pricing.
-  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || null;
+  const resolvedPropertyType = body.propertyType || body.property_type || customer.property_type || county?.propertyType || null;
   if (unitScopeGuardrailsEnabled()) {
     if (!resolvedPropertyType) {
       review.push('property_type_unresolved');
@@ -468,6 +468,7 @@ function compactLineItem(item = {}) {
     ...(typeof item.legacyOneTimePestBuffer === 'boolean' ? { legacyOneTimePestBuffer: item.legacyOneTimePestBuffer } : {}),
     ...(typeof item.legacyPestAboveTable === 'boolean' ? { legacyPestAboveTable: item.legacyPestAboveTable } : {}),
     ...(typeof item.legacyWholeHomeSizing === 'boolean' ? { legacyWholeHomeSizing: item.legacyWholeHomeSizing } : {}),
+    ...(typeof item.legacyLawnOneLane === 'boolean' ? { legacyLawnOneLane: item.legacyLawnOneLane } : {}),
     ...(typeof item.legacySpecialty1126 === 'boolean' ? { legacySpecialty1126: item.legacySpecialty1126 } : {}),
     annual: item.annualAfterDiscount ?? item.annual ?? null,
     monthly: item.monthlyAfterDiscount ?? item.monthly ?? null,
@@ -732,6 +733,9 @@ async function buildAutomatedLeadDraftEstimate({ intake = {}, customer = {}, bod
                 : {}),
               ...(typeof estimate.pricingMetadata.legacyWholeHomeSizing === 'boolean'
                 ? { legacyWholeHomeSizing: estimate.pricingMetadata.legacyWholeHomeSizing }
+                : {}),
+              ...(typeof estimate.pricingMetadata.legacyLawnOneLane === 'boolean'
+                ? { legacyLawnOneLane: estimate.pricingMetadata.legacyLawnOneLane }
                 : {}),
               ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
                 ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }

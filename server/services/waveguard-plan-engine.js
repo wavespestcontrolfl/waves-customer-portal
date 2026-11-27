@@ -2327,7 +2327,9 @@ async function loadVisitForPlan(knex, id, scope = (q) => q) {
   return (await scope(knex('scheduled_services').where({ 'scheduled_services.id': id }))
     .first('id', 'customer_id', 'property_id', 'scheduled_date', 'service_id', 'service_type', 'recurring_pattern', 'recurring_interval_days', 'lawn_protocol_version', 'lawn_protocol_key', 'lawn_protocol_window_key',
       // The stamped address: the property resolver's evidence for a visit with no property_id (the November nitrogen rule).
-      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip')) || null;
+      'service_address_line1', 'service_address_line2', 'service_address_city', 'service_address_zip',
+      // The visit's own rig, once one is assigned (the tank sheet sizes on it before showing every tank).
+      'assigned_equipment_system_id', 'assigned_calibration_id')) || null;
 }
 
 // The city a booked visit is judged under, resolved the way the plan resolves it (the stamped visit

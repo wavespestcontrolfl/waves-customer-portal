@@ -76,7 +76,11 @@ function weekHoldsTwelfth(check, year, month) {
 }
 
 function employeesOnTwelfth(checks, year, month) {
-  return new Set(checks.filter((c) => weekHoldsTwelfth(c, year, month)).map((c) => c.technicianId)).size;
+  return new Set(
+    checks
+      .filter((c) => (c.gross === undefined || c.gross > 0) && weekHoldsTwelfth(c, year, month))
+      .map((c) => c.technicianId),
+  ).size;
 }
 
 function socialSecurityWageBaseCents(year) {
@@ -326,7 +330,7 @@ function formRt6(year, quarter, quarterChecks, periodChecks) {
   const byEmployee = new Map();
   // An exempt family employee is not on the wage list.
   for (const c of quarterChecks.filter((q) => !q.unemploymentExempt)) {
-    const e = byEmployee.get(c.technicianId) || { name: c.name, grossCents: 0, taxableCents: 0 };
+    const e = byEmployee.get(c.technicianId) || { technicianId: c.technicianId, name: c.name, grossCents: 0, taxableCents: 0 };
     e.name = c.name;
     e.grossCents += c.rt6.gross;
     e.taxableCents += c.rt6.capWages;
@@ -363,7 +367,7 @@ function floridaQuartersNotPaidOnTime(year, yearChecks, rt6Paid) {
     const paid = rt6Paid
       .filter((r) => (r.source_key === prefix || String(r.source_key).startsWith(`${prefix}:balance:`))
         && r.paid_date && String(r.paid_date).slice(0, 10) <= dueDate)
-      .reduce((acc, r) => acc + Math.round(num(r.amount_paid) * 100), 0);
+      .reduce((acc, r) => acc + Math.round(num(r.amount_paid ?? r.amount_due) * 100), 0);
     if (paid < owed) open.push(q);
   }
   return { dueDate, open };
@@ -530,7 +534,12 @@ function buildFormFigures({ year, quarter, rows = [], priorRows = [], periodRows
   // April still counts for March 12). periodRows: the finalized checks whose
   // week can hold a 12th of the quarter; without them, every check given.
   const periodChecks = (periodRows || [...priorRows, ...rows])
-    .map((r) => ({ technicianId: r.technician_id, weekStart: r.week_start, unemploymentExempt: r.unemployment_exempt === true }));
+    .map((r) => ({
+      technicianId: r.technician_id,
+      weekStart: r.week_start,
+      unemploymentExempt: r.unemployment_exempt === true,
+      gross: r.gross_cents == null ? undefined : num(r.gross_cents),
+    }));
   const line12Of = (y, q) => quarterTaxes(allChecks.filter((c) => c.payDate.startsWith(`${y}-`) && quarterOfMonth(monthOf(c)) === q)).line12;
   const quarterEnd = `${year}-${pad(quarter * 3)}`;
   const dayCents = new Map();
@@ -589,7 +598,7 @@ async function paidRt6Rows(conn, year) {
   return conn('tax_filing_calendar')
     .where({ status: 'paid' })
     .whereRaw('source_key ~ ?', [`^payroll:rt6:${year}-Q[1-4](:balance:[0-9]+)?$`])
-    .select('source_key', 'amount_paid', conn.raw("to_char(paid_date, 'YYYY-MM-DD') AS paid_date"));
+    .select('source_key', 'amount_paid', 'amount_due', conn.raw("to_char(paid_date, 'YYYY-MM-DD') AS paid_date"));
 }
 
 /** The route's read: year and quarter are already validated integers. */
@@ -624,7 +633,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
     .where({ status: 'finalized' })
     .where('week_start', '>=', addStaffWorkDays(`${year}-${pad(firstMonth)}-12`, -6))
     .where('week_start', '<=', `${year}-${pad(firstMonth + 2)}-12`)
-    .select('technician_id', 'unemployment_exempt', conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"));
+    .select('technician_id', 'unemployment_exempt', 'gross_cents', conn.raw("to_char(week_start, 'YYYY-MM-DD') AS week_start"));
   const quarterMonths = [1, 2, 3].map((n) => `${year}-${pad((quarter - 1) * 3 + n)}`);
   const deposits941 = await paidDeposits(conn, '941_deposit', quarterMonths);
   const deposits940 = await paidDeposits(conn, '940_deposit', [String(year)]);
@@ -633,7 +642,7 @@ async function readFormFigures({ year, quarter, conn = db }) {
   const addresses = new Map();
   const flsaCovered = new Map();
   if (ids.length) {
-    const techs = await conn('technicians').whereIn('id', ids).select('id', 'address', ...(payLinesOn() ? ['flsa_overtime_covered'] : []));
+    const techs = await conn('technicians').whereIn('id', ids).select('id', 'address', 'flsa_overtime_covered');
     for (const t of techs) {
       const address = String(t.address || '').trim();
       if (address) addresses.set(t.id, address);

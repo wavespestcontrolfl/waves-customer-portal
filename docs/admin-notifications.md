@@ -939,6 +939,8 @@ week's end>`, so the catch-up dedupes onto the week's row. A week with no inboun
 `call_log.answer_seconds` (stamped when a person presses 1); a row older than those columns is judged at read time from the same number registry and the
 row's own signals.
 
+**Receipt lines that failed** (owner 2026-11-27, "build fixes", auto-buy audit 9a; `server/services/purchase-receipts/failed-lines-alert.js`, called at the end of the purchase-receipt restock sweep). A line that throws rolls back whole and leaves no `purchase_receipt_lines` row; the sweep retries it only while its email is inside the 7-day lookback, and `job_health` records the run as a success. A SiteOne invoice email whose read throws before any line is attempted is the same kind of silent loss. ONE standing row: category `inventory` with `bell: true`, headline "Inventory — check 3 failed receipt items", why "Their stock was not added; log it by hand if it is stock.", link `/admin/inventory?tab=products`, done-when `count_zero`, who `person`. `detail` lists up to 5 entries ("Vendor, date: product - masked reason", or "invoice email could not be read: Vendor date") and "and N more"; every open key stays in `metadata.failedLines` (about 250 bytes each, no cap). dedupeKey `purchase-receipt-failed-lines`, raised through `raiseAdminAlertWithReopen` with `refreshOnDedupe`: it rings when it first appears and again only when a NEW entry joins the set; the same set refreshes quietly. An entry stays counted past the lookback and drops only on positive evidence: a `purchase_receipt_lines` row exists for it under the same vendor and shipment key (the invoice number) from ANY email, by line number, or, one-to-one, by product text from ANOTHER email's row when that text is on exactly one recorded row and one failed entry of the invoice (a recorded sibling line with the same text never clears a failed one), so the other copy of an invoice counts (an email: only a row whose source email is that email), checked after both vendors ran, or this run recorded an outcome for that exact key (an email: read without throwing). Not attempting an entry is not evidence. Nothing left closes the row (`closeAdminAlertKeys`, `count_zero`); a person's Done stays done until a new entry fails, and a PERSON's Done (not the 72-hour quiet fall-off) marks every entry the row held as handled (`metadata.handledKeys`): a reopened row lists and counts only the new entries, and resolves when only handled ones remain. An entry whose email came before `PURCHASE_RECEIPT_SINCE` is retired (the physical count includes it). A line number from another copy clears an entry only with the same product text. If the alert cannot be saved the sweep throws after every line was processed, so `job_health` records a failed run and the next tick rewrites it. No `RERING` entry is owed (no `dedupeOpenOnly`).
+
 **Weekly buy list** (owner 2026-11-27, "once a week look at upcoming appts, and buy for the entire week, based on current inventory";
 `server/services/procurement/weekly-buy-alert.js`, job `weekly-buy-list`, Monday to Saturday 7:00 AM ET, no gate: it writes admin
 notifications only and orders, texts and charges nothing). One alert per technician (and one for visits with no technician) that has
@@ -955,6 +957,23 @@ recounts from today: a list that gains a short product or more packs than the al
 alert says (a store, pack label, price, note, warning, or a smaller need) rewrites it quietly; an identical list writes nothing; a list with
 nothing left to buy and no warning closes (`closeAdminAlertKeys`). A person's Done stays done until the list grows.
 Read-only preview: `node server/scripts/weekly-buy-list.js [--json] [--date YYYY-MM-DD]`.
+
+**Automatic restock request open over 7 days** (owner 2026-11-27, "build fixes"; `server/services/procurement/stale-request-alert.js`, run by the
+server's daily `runVendorOrderDispatch` reconcile step, no gate: it writes admin notifications only). One standing bell per request from the
+auto-reorder sweep (`source` `auto_reorder`, any status but received or cancelled) older than 7 days. Category `system` with `bell: true`, area
+Inventory, headline "Inventory — check the <product> restock, open N days", why "Open since Nov 23; no order recorded, check the Sticker Mule account." (an order may exist that the portal never recorded: an ambiguous submit, or one placed by hand) (or "marked ordered,
+nothing received"), link `/admin/inventory?tab=restock&requestId=<request id>` (the tab loads that row), done-when `request_closed`, who `person`. dedupeKey `restock-open:<request id>`, raised
+through `raiseAdminAlertWithReopen` with `refreshOnDedupe` and a `ringOnRefresh` that is always false: it rings once, the day count then refreshes
+the row quietly, and a person's Done stays done. Each run closes (`closeAdminAlertKeys`) the alert of a request that is received, cancelled or
+gone. It does not overlap `macWatchdog` (a SiteOne request the Mac did not touch for 30 hours goes to the office); this one reports any
+automatic request that stays open a week, whatever stalled it. No `RERING` entry is owed (no `dedupeOpenOnly`).
+
+The auto-order park alert (`auto-order:<ledger id>:<version>`) of a park BEFORE the buy click (`server/services/procurement/order-dispatch.js`) says
+"The robot stopped before buying: <reason>. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request."
+Nothing retries on its own: only a dry-run park is re-claimed. Cancel is open on such a park. A park after the click ("Do NOT re-order") refuses both
+Mark Ordered and Cancel while its order is unrevoked. One rule decides "an order may be out" everywhere (`maybePlacedSql` / `isMaybePlaced` in order-dispatch.js):
+unrevoked AND (`placed_at` set OR the error is a post-submit reason). It also drives the sweep's hand-off after a gate closes, the claim guards, the month's spend,
+the on-order list, bell re-rings, Record vendor cancellation (service, route and the Restock tab's `order.outstanding`).
 
 ## 7. How to raise one
 

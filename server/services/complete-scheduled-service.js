@@ -624,12 +624,15 @@ function advisorySafeMessage(text) {
 // Advisory messages recorded on a completion, flattened for the closeout
 // success view — the operator must see a recorded overrun/exception at
 // completion time, not only later in Customer 360.
-function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit, deductions = [], shortfalls = false }) {
+function completionAdvisoryMessages({ blackout, nLimit, manager, calibration, inventory, limit, treeShrub = [], deductions = [], shortfalls = false }) {
   return [
     ...[blackout, nLimit, manager, calibration, inventory, limit]
       .filter((record) => record && record.advisory)
       .flatMap((record) => (Array.isArray(record.blocks) ? record.blocks : []))
       .map((block) => block && block.message)
+      .filter(Boolean),
+    ...(Array.isArray(treeShrub) ? treeShrub : [])
+      .map((w) => (typeof w === 'string' ? w : w?.message))
       .filter(Boolean),
     ...deductionAdvisoryMessages(deductions, { shortfalls }),
   ];
@@ -2499,9 +2502,13 @@ function savedLawnWarningFindings(record) {
   return Array.isArray(notes?.lawnWarningFindings) ? notes.lawnWarningFindings : [];
 }
 
-// The two completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn, and a bermuda removal
-// step past its yearly or 42-day limit. Each is the application-limit finding shape, so it takes the same advisory line and office alert.
+// The completion warnings that used to refuse the closeout (owner 2026-11-26): oxadiazon on a home lawn,
+// bermuda removal pair / area / limit checks, and chemical area add-on actuals / missing applications.
+// Each has its own limitType, accurate office alert copy, and distinct deduplication key.
 const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
+const BERMUDA_PAIR_TYPE = 'bermuda_pair_missing';
+const BERMUDA_AREA_TYPE = 'bermuda_area_missing';
+const BERMUDA_CONFIG_TYPE = 'bermuda_limits_not_configured';
 const bermudaStepFinding = (message) => ({
   code: 'application_limit_exceeded',
   limitType: BERMUDA_STEP_LIMIT_TYPE,
@@ -2509,45 +2516,101 @@ const bermudaStepFinding = (message) => ({
   reason: message,
   message: `Bermuda removal went past its limit: ${message} The visit was recorded and the office was told.`,
 });
+const bermudaPairFinding = (message) => ({
+  code: 'bermuda_pair_warning',
+  limitType: BERMUDA_PAIR_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal pair check warning: ${message} The visit was recorded and the office was told.`,
+});
+const bermudaAreaFinding = (message) => ({
+  code: 'bermuda_area_warning',
+  limitType: BERMUDA_AREA_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal treated area warning: ${message} The visit was recorded and the office was told.`,
+});
+const bermudaConfigFinding = (message) => ({
+  code: 'bermuda_config_warning',
+  limitType: BERMUDA_CONFIG_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal limits could not be checked: ${message} The visit was recorded and the office was told.`,
+});
+const FINDING_ACTION = {
+  [BERMUDA_PAIR_TYPE]: () => 'review Bermuda removal product pairing',
+  [BERMUDA_AREA_TYPE]: () => 'review Bermuda removal treated area',
+  [BERMUDA_CONFIG_TYPE]: () => 'verify Bermuda removal limits configuration',
+  [areaAddOnGovernedRate.ACTUALS_CODE]: () => 'review area add-on actuals',
+  [areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE]: () => 'review unrecorded chemical add-on',
+  [tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE]: () => 'review NutriRoot application',
+};
 FINDING_WHY[lawnProhibited.LIMIT_TYPE] = (name) => `${name} was recorded on a home lawn, and its label prohibits residential use.`;
 FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past its yearly or 42-day limit.';
+FINDING_WHY[BERMUDA_PAIR_TYPE] = () => 'Bermuda removal was recorded without both required paired products.';
+FINDING_WHY[BERMUDA_AREA_TYPE] = () => 'Bermuda removal was recorded without its required treated area.';
+FINDING_WHY[BERMUDA_CONFIG_TYPE] = () => 'Bermuda removal limits were not configured, so yearly and 42-day limits could not be checked.';
+FINDING_WHY[areaAddOnGovernedRate.ACTUALS_CODE] = (name) => `${name} add-on was recorded with incomplete application actuals.`;
+FINDING_WHY[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (name) => `${name} chemical add-on completed with no recorded product application.`;
 FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
 FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit past its limit: ${f.reason} The visit was recorded. Review it and report it if needed.`;
+FINDING_DETAIL[BERMUDA_PAIR_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without both paired products: ${f.reason} The visit was recorded. Review it with the technician.`;
+FINDING_DETAIL[BERMUDA_AREA_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without its required treated area: ${f.reason} The visit was recorded. Review it with the technician.`;
+FINDING_DETAIL[BERMUDA_CONFIG_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit, but its limits could not be checked: ${f.reason} Verify the Bermuda removal limits configuration and review this application.`;
+FINDING_DETAIL[areaAddOnGovernedRate.ACTUALS_CODE] = (fullName, f, svc) => `Area add-on (${fullName}) on a ${svc.service_type || 'service'} visit was recorded with incomplete application actuals: ${f.message || f.reason || 'missing rate or treated area'}. Review it with the technician.`;
+FINDING_DETAIL[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (fullName, f, svc) => `Chemical area add-on (${fullName}) on a ${svc.service_type || 'service'} visit completed with no recorded product application: ${f.message || f.reason || 'no product recorded'}. Automatic invoicing was held for office review.`;
 
-// A product the catalog could not name (a free-text oxadiazon entry) keys on its name, so two of them do not share one alert.
-const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || (finding.limitType === lawnProhibited.LIMIT_TYPE && finding.productName) || 'all'}:${finding.limitType || 'all'}`;
+// A product the catalog could not name (a free-text oxadiazon entry or area add-on key) keys on its name, so distinct warnings do not share one alert.
+const NAME_KEYED_LIMIT_TYPES = new Set([
+  lawnProhibited.LIMIT_TYPE,
+  areaAddOnGovernedRate.ACTUALS_CODE,
+  areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE,
+]);
+const limitFindingDedupeKey = (record, finding) => `application-limit-finding:${record.id}:${finding.code}:${finding.productId || (NAME_KEYED_LIMIT_TYPES.has(finding.limitType) && finding.productName) || 'all'}:${finding.limitType || 'all'}`;
 
 async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
   const { raiseAdminAlert } = require('../services/admin-alert-compose');
   for (const finding of findings) {
     try {
       const over = finding.code === 'application_limit_exceeded';
+      const customAdvisory = !over && Boolean(FINDING_DETAIL[finding.limitType] && FINDING_WHY[finding.limitType]);
+      const known = over || customAdvisory;
       const unchecked = tsOrnamental.UNCHECKED_LIMIT_TYPES.includes(finding.limitType);
-      const nutriRootReview = finding.limitType === tsFertilizerEvidence.NUTRIROOT_REVIEW_LIMIT_TYPE;
       const fullName = finding.productName || 'a product';
       // The headline and the one-sentence why carry a short name (a catalog name can run to 80 characters); the detail keeps it whole.
       const name = require('../services/ops-digest').truncateAtWord(fullName, 24);
-      const fullText = over
-        ? (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc)
-        : 'A visit was recorded, but its product limits could not be checked. Review the products applied.';
-      const why = !over ? 'A visit was recorded, but its product limits could not be checked.'
-        : (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding);
+      const [fullText, why] = known
+        ? [
+            (FINDING_DETAIL[finding.limitType] || FINDING_DETAIL.annual_max_apps)(fullName, finding, svc),
+            (FINDING_WHY[finding.limitType] || FINDING_WHY.annual_max_apps)(name, finding),
+          ]
+        : [
+            'A visit was recorded, but its product limits could not be checked. Review the products applied.',
+            'A visit was recorded, but its product limits could not be checked.',
+          ];
       const dedupeKey = limitFindingDedupeKey(record, finding);
       // A catalog name the alert rules refuse (a bracket tag, a code) falls back to plain words; the detail keeps it whole.
-      const labelWords = finding.limitType === lawnProhibited.LIMIT_TYPE
+      const fallbackAction = FINDING_ACTION[finding.limitType]?.(name, finding)
+        || (unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked`
+          : over ? `review ${name} over its limit` : 'review product limits not checked');
+      const words = finding.limitType === lawnProhibited.LIMIT_TYPE
         ? stockAlertWords(fullName, (n) => ({ action: `review ${n} label use`, why: FINDING_WHY[lawnProhibited.LIMIT_TYPE](n) }),
           { action: 'review a product label use', why: 'A product was recorded on a home lawn, and its label prohibits residential use.' })
-        : null;
+        : { action: fallbackAction, why };
+      const doneWhen = finding.limitType === BERMUDA_CONFIG_TYPE
+        ? 'limits_checked'
+        : customAdvisory ? 'application_warning_reviewed'
+          : (over && !unchecked) ? 'limit_overage_reviewed' : 'limits_checked';
       const created = await raiseAdminAlert('service', {
         area: 'Schedule',
-        action: labelWords ? labelWords.action : unchecked ? `review ${name} ${tsOrnamental.UNCHECKED_HEADLINE_WORD[finding.limitType]} not checked` : nutriRootReview ? 'review NutriRoot application' : over ? `review ${name} over its limit` : 'review product limits not checked',
-        why: labelWords ? labelWords.why : why,
+        action: words.action,
+        why: words.why,
         severity: 'needs-you',
         who: 'person',
         link: `/admin/customers?customerId=${svc.customer_id}`,
         subject: { type: 'visit', id: String(svc.id) },
         // A limit that could not be checked is done when it is checked, not when an overage is reviewed.
-        doneWhen: over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
+        doneWhen,
       }, {
         bell: true,
         dedupeKey,
@@ -3204,6 +3267,10 @@ function shouldAutoInvoiceCompletion({
   // the route parks a manual-billing alert instructing the office to bill
   // setup + first application together.
   unmintedSetupFeeHold = false,
+  // Chemical area add-on completed without a recorded application (non-blocking
+  // closeout warning per owner 2026-11-26): hold automatic invoicing/collection
+  // for office billing review so unverified chemical add-ons are never auto-billed.
+  unrecordedChemicalAddOnHold = false,
   createInvoiceOnComplete,
   waveguardTier,
   explicitMembership = false,
@@ -3261,6 +3328,9 @@ function shouldAutoInvoiceCompletion({
   // when the one-time setup fee would ride along un-billed; the route
   // parks the manual-billing alert instead.
   if (unmintedSetupFeeHold) return false;
+  // Unverified chemical add-on: closeout stays non-blocking, but automatic
+  // invoicing is held for office review before charging the customer.
+  if (unrecordedChemicalAddOnHold) return false;
   // Committed REQUIRED-mint posture (Codex P0 fix round 8; broadened to
   // every branch, Codex P1 fix round 9): under backfill a supplied boolean
   // posture GOVERNS the whole decision, in both directions, ahead of every
@@ -5541,12 +5611,55 @@ async function completeScheduledService(completionInput, packetContext = null) {
       lawnWarningFindings.push(...prohibited.map(lawnProhibited.lawnProhibitedProductFinding));
     }
 
-    // A row tagged to a chemical area add-on is that add-on's application record, so a fresh closeout must carry its rate,
-    // treated area and amount (a 400 otherwise; the total is filled from the rate and area when the client sent none). A replay or
-    // resume of a committed completion and an incomplete visit are left alone, as for the lawn square-feet rule.
-    await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
-    // ... and a completed visit records an application for EVERY chemical add-on it carries (they are invoiced from the visit).
-    await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
+    // Chemical area add-on actuals & coverage checks: owner ruling 2026-11-26
+    // ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW") —
+    // operational 400 gaps are recorded as non-blocking warnings; genuine 503
+    // DB-read failures still propagate so the attempt retries safely.
+    try {
+      await areaAddOnGovernedRate.requireAddOnActuals(db, products, addOnTags, { fresh: claim.action === 'proceed' });
+    } catch (addOnErr) {
+      if (addOnErr?.code === areaAddOnGovernedRate.ACTUALS_CODE) {
+        const items = Array.isArray(addOnErr.problems) && addOnErr.problems.length
+          ? addOnErr.problems
+          : [{ addOnKey: addOnErr.addOnKey || 'Area add-on', name: addOnErr.addOnKey || 'Area add-on', missing: addOnErr.missing, message: addOnErr.message }];
+        for (const item of items) {
+          const missingFields = Array.isArray(item.missing) && item.missing.length ? item.missing.join(',') : 'unknown';
+          logger.warn(`[dispatch] non-blocking add-on actuals warning for ${svc.id}: addOnKey=${item.addOnKey || 'unknown'} missing=${missingFields}`);
+          lawnWarningFindings.push({
+            code: addOnErr.code,
+            limitType: addOnErr.code,
+            productId: null,
+            productName: item.name || item.addOnKey || 'Area add-on',
+            addOnKey: item.addOnKey || null,
+            message: item.message,
+          });
+        }
+      } else {
+        throw addOnErr;
+      }
+    }
+    try {
+      await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
+    } catch (addOnErr) {
+      if (addOnErr?.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE) {
+        const missingItems = Array.isArray(addOnErr.missingAddOns) && addOnErr.missingAddOns.length
+          ? addOnErr.missingAddOns
+          : [{ addOnKey: addOnErr.addOnKey || 'Area add-on', name: addOnErr.addOnKey || 'Area add-on', message: addOnErr.message }];
+        for (const item of missingItems) {
+          logger.warn(`[dispatch] non-blocking chemical add-on warning for ${svc.id}: addOnKey=${item.addOnKey || 'unknown'}`);
+          lawnWarningFindings.push({
+            code: addOnErr.code,
+            limitType: addOnErr.code,
+            productId: null,
+            productName: item.name || item.addOnKey || 'Area add-on',
+            addOnKey: item.addOnKey || null,
+            message: item.message,
+          });
+        }
+      } else {
+        throw addOnErr;
+      }
+    }
 
     // A malformed amount (any role) is refused on a FRESH completion only, before the first service write (service_products, inventory,
     // FDACS ledger, cost, report). A same-key replay or resume of a committed completion is never judged. The claim is released as
@@ -5647,30 +5760,40 @@ async function completeScheduledService(completionInput, packetContext = null) {
       try {
         // Strict reads: an error reading the account or its properties fails this attempt
         // (marked failed, nothing committed), never reads as "not requested".
-        bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
-        if (!bermudaPairMessage) bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
-        if (!bermudaPairMessage) bermudaAreaMessage = await require('./lawn-bermuda-removal').bermudaAreaViolation(db, products, { serviceId: completionInput.serviceId });
+        // Always check limits and treated area even when the product pair is incomplete
+        // so a third spray with one product missing records both findings.
+        const bermudaRemoval = require('./lawn-bermuda-removal');
+        bermudaPairMessage = await bermudaRemoval.bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
+        bermudaLimitMessage = await bermudaRemoval.bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
+        bermudaAreaMessage = await bermudaRemoval.bermudaAreaViolation(db, products, { serviceId: completionInput.serviceId });
       } catch (err) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
         throw err;
       }
+      // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+      // Bermuda removal pair, area, config, and limit checks warn on the visit and alert the office without hard-400 blocking.
+      const bermudaNotConfigured = require('./lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE;
+      const pushBermudaFinding = (finding) => {
+        if (!lawnWarningFindings.some((existing) => existing.limitType === finding.limitType)) {
+          lawnWarningFindings.push(finding);
+        }
+      };
       if (bermudaPairMessage) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_pair_required'), db);
-        return { status: 400, body: { error: bermudaPairMessage, code: 'lawn_bermuda_pair_required' } };
+        logger.warn(`[dispatch] non-blocking bermuda pair warning for ${svc.id}: ${bermudaPairMessage}`);
+        pushBermudaFinding(bermudaPairMessage === bermudaNotConfigured
+          ? bermudaConfigFinding(bermudaPairMessage)
+          : bermudaPairFinding(bermudaPairMessage));
       }
-      // A recorded step spray states its treated area (or a rate): a spot mix has no catalog-derived amount.
       if (bermudaAreaMessage) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_area_required'), db);
-        return { status: 400, body: { error: bermudaAreaMessage, code: 'lawn_bermuda_area_required' } };
+        logger.warn(`[dispatch] non-blocking bermuda area warning for ${svc.id}: ${bermudaAreaMessage}`);
+        pushBermudaFinding(bermudaAreaFinding(bermudaAreaMessage));
       }
-      // The step's own limits (a 3rd spray this calendar year, or fewer than 42 days after the last one at that property),
-      // judged the way the plan judges them, are a WARNING (owner 2026-11-26): recorded on the visit and sent to the office.
-      // The pair and area checks above are data entry and stay refusals; so does "its limits are not loaded" (setup, not a cap).
-      if (bermudaLimitMessage === require('./lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE) {
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, new Error('lawn_bermuda_limit_reached'), db);
-        return { status: 400, body: { error: bermudaLimitMessage, code: 'lawn_bermuda_limit_reached' } };
+      if (bermudaLimitMessage) {
+        logger.warn(`[dispatch] non-blocking bermuda limit warning for ${svc.id}: ${bermudaLimitMessage}`);
+        pushBermudaFinding(bermudaLimitMessage === bermudaNotConfigured
+          ? bermudaConfigFinding(bermudaLimitMessage)
+          : bermudaStepFinding(bermudaLimitMessage));
       }
-      if (bermudaLimitMessage) lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
         await CompletionAttempts.markCompletionAttemptFailed(
@@ -6049,19 +6172,16 @@ async function completeScheduledService(completionInput, packetContext = null) {
         customerRecap,
         technicianNotes,
       });
+      // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+      // surface Tree/Shrub closeout findings as non-blocking warnings instead of trapping techs with a 400 lockout.
       if (!treeShrubValidation.ok) {
-        const validationErr = new Error('Tree/Shrub closeout lockout');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, validationErr, db);
-        return ({ status: 400, body: {
-          error: 'Tree/Shrub protocol closeout required',
-          code: 'tree_shrub_closeout_lockout',
-          details: treeShrubValidation.blocks.map((block) => block.message),
-          blocks: treeShrubValidation.blocks,
-          warnings: treeShrubValidation.warnings,
-        } });
+        logger.warn(`[dispatch] non-blocking Tree/Shrub closeout warnings for ${svc.id}: ${treeShrubValidation.blocks.map((b) => b.code).join(', ')}`);
       }
       treeShrubCloseoutSummary = treeShrubValidation.normalized;
-      treeShrubCloseoutWarnings = treeShrubValidation.warnings || [];
+      treeShrubCloseoutWarnings = [
+        ...(treeShrubValidation.blocks || []).map((block) => ({ ...block, advisory: true })),
+        ...(treeShrubValidation.warnings || []),
+      ];
     }
 
     // Typed Tree & Shrub completions replace the legacy closeout UX but keep
@@ -6174,18 +6294,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
         completionPhotos,
         treeShrubReview: completionInput.body?.treeShrubReview,
       });
+      // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
+      // surface typed Tree & Shrub compliance findings as non-blocking warnings instead of hard-400 blocking.
       if (!typedCompliance.ok) {
-        const complianceErr = new Error('tree_shrub_typed_compliance');
-        await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, complianceErr, db);
-        return ({ status: 400, body: {
-          error: 'Tree & Shrub compliance checks must pass before completion',
-          code: 'tree_shrub_typed_compliance',
-          details: typedCompliance.blocks.map((block) => block.message),
-          blocks: typedCompliance.blocks,
-          warnings: typedCompliance.warnings,
-        } });
+        logger.warn(`[dispatch] non-blocking typed Tree & Shrub compliance warnings for ${svc.id}: ${typedCompliance.blocks.map((b) => b.code).join(', ')}`);
       }
-      treeShrubCloseoutWarnings = typedCompliance.warnings || [];
+      treeShrubCloseoutWarnings = [
+        ...(typedCompliance.blocks || []).map((block) => ({ ...block, advisory: true })),
+        ...(typedCompliance.warnings || []),
+      ];
     }
 
     // GATE_LAWN_ACTUALS_LEDGER: every lawn visit gets the appointment plan
@@ -9040,6 +9157,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             const rowIdentity = areaAddOnGovernedRate.productRowIdentity(addOnTags, p);
             if (seenProductIds.has(rowIdentity)) continue;
             seenProductIds.add(rowIdentity);
+            const isResolvedAreaAddOnRow = Boolean(addOnTags?.get?.(areaAddOnGovernedRate.productRowKey(p)));
             if (p.rateUnit && !isValidRateUnit(p.rateUnit)) {
               const err = new Error(`Invalid product unit for ${p.name || p.productId}`);
               err.isOperational = true; err.statusCode = 400;
@@ -9076,8 +9194,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
             if (
               !isIncompleteVisit
-              &&
-              requiresSqftForReportApplication(applicationMethod, reportServiceLine)
+              && !isResolvedAreaAddOnRow
+              && requiresSqftForReportApplication(applicationMethod, reportServiceLine)
               && (!Number.isFinite(areaValue) || areaValue <= 0 || areaUnit !== 'sqft')
             ) {
               const err = new Error(`Square feet are required for ${product.name}`);
@@ -9126,7 +9244,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
             if (serviceProductCols.zone_ids) serviceProductInsert.zone_ids = Array.isArray(p.zoneIds) ? p.zoneIds : [];
             if (serviceProductCols.targets) serviceProductInsert.targets = spotTargets.of(p);
             if (serviceProductCols.area_value) {
-              serviceProductInsert.area_value = Number.isFinite(areaValue) ? areaValue : null;
+              serviceProductInsert.area_value = Number.isFinite(areaValue) && areaValue > 0 ? areaValue : null;
             }
             if (serviceProductCols.area_unit) serviceProductInsert.area_unit = areaUnit;
             Object.assign(serviceProductInsert, areaAddOnGovernedRate.addOnProductColumns(serviceProductCols, addOnTags, p));
@@ -9174,9 +9292,22 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // on this transaction, before the application rows are written (a fresh attempt
         // only; the preflight above cannot see a spray a concurrent completion commits).
         if (!resumingCommittedCompletion && insertedServiceProducts.length) {
-          // The cap re-check under the customer lock stays, but a breach is a warning (owner 2026-11-26), once per completion.
-          const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
-          if (capWarning && !lawnWarningFindings.some((finding) => finding.limitType === BERMUDA_STEP_LIMIT_TYPE)) lawnWarningFindings.push(bermudaStepFinding(capWarning));
+          // The cap, config, and pair re-checks under the customer lock stay, returning typed warnings
+          // ({ kind: 'pair' | 'config' | 'limit', message }[]) deduplicated against preflight findings.
+          const rawCapWarnings = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+          const capWarnings = Array.isArray(rawCapWarnings) ? rawCapWarnings : (rawCapWarnings ? [rawCapWarnings] : []);
+          for (const capWarning of capWarnings) {
+            const kind = typeof capWarning === 'object' ? capWarning.kind : 'limit';
+            const msg = typeof capWarning === 'object' ? capWarning.message : capWarning;
+            const finding = kind === 'pair'
+              ? bermudaPairFinding(msg)
+              : kind === 'config'
+                ? bermudaConfigFinding(msg)
+                : bermudaStepFinding(msg);
+            if (!lawnWarningFindings.some((existing) => existing.limitType === finding.limitType)) {
+              lawnWarningFindings.push(finding);
+            }
+          }
         }
         if (insertedServiceProducts.length) {
           const ComplianceService = require('../services/compliance');
@@ -9347,10 +9478,23 @@ async function completeScheduledService(completionInput, packetContext = null) {
           const uniqueCompletionPhotosUploaded = completionPhotoUploadResult.uniqueUploaded
             ?? completionPhotoUploadResult.uploaded;
           if (treeShrubPhotoGateRequired && uniqueCompletionPhotosUploaded < TREE_SHRUB_MIN_CLOSEOUT_PHOTOS) {
-            throw treeShrubPhotoUploadRequiredError(
-              completionPhotoUploadResult,
-              TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
-            );
+            if (completionPhotoUploadResult.failed > 0) {
+              // Actual photo upload failure (e.g. storage outage or corrupt image):
+              // preserve the retryable refusal so submitted photos are never silently dropped.
+              throw treeShrubPhotoUploadRequiredError(
+                completionPhotoUploadResult,
+                TREE_SHRUB_MIN_CLOSEOUT_PHOTOS,
+              );
+            }
+            // Fewer than 2 photos submitted with no upload failure: warn, never block (owner 2026-11-26).
+            logger.warn(`[dispatch] non-blocking Tree/Shrub photo count warning for ${svc.id}: ${uniqueCompletionPhotosUploaded}/${TREE_SHRUB_MIN_CLOSEOUT_PHOTOS} photos uploaded`);
+            if (!treeShrubCloseoutWarnings.some((w) => w?.code === 'tree_shrub_photos_required')) {
+              treeShrubCloseoutWarnings.push({
+                code: 'tree_shrub_photos_required',
+                message: `At least ${TREE_SHRUB_MIN_CLOSEOUT_PHOTOS} Tree/Shrub closeout photos are recommended (${uniqueCompletionPhotosUploaded} uploaded).`,
+                advisory: true,
+              });
+            }
           }
           // Away Watch counts every photo this closeout attaches, not only the body's: the visit photos staged
           // from Tech Home or the pest sheet (promoted above) and the linked lawn assessment's photos count too,
@@ -9368,6 +9512,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           completionPhotosUploadedBeforeCommit = true;
           const photoNotes = {
             ...parseJsonObject(record.structured_notes),
+            ...(treeShrubCloseoutWarnings.length ? { treeShrubCloseoutWarnings } : {}),
             completionPhotos: {
               uploaded: completionPhotoUploadResult.uploaded,
               uniqueUploaded: uniqueCompletionPhotosUploaded,
@@ -11047,6 +11192,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
         }
       } catch (e) { invoiceLookupFailed = true; /* non-blocking */ }
     }
+    // Chemical add-on completed without a recorded application (non-blocking warning):
+    // hoisted BEFORE existing/pre-minted invoice lookups assign `invoice`, `payUrl`,
+    // or `invoiceCreated` so unpaid invoices are never exposed to account credit,
+    // autopay, card-hold capture, or pay-link SMS before office review.
+    const unrecordedChemicalAddOnHold = (lawnWarningFindings.length ? lawnWarningFindings : savedLawnWarningFindings(record))
+      .some((f) => f && f.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE);
     let existingCompletionInvoice = null;
     // GATE_REPORT_AFTER_PAY: the payment this visit is held on, as its
     // payment's closeout recorded it (linkReportAfterPayHold; null with the
@@ -11256,10 +11407,12 @@ async function completeScheduledService(completionInput, packetContext = null) {
             }
           }
         }
+        const holdExistingUnpaid = Boolean(existingCompletionInvoice) && !packetEffects && unrecordedChemicalAddOnHold
+          && !['paid', 'prepaid'].includes(existingCompletionInvoice.status);
         if (existingCompletionInvoice) {
           invoice = existingCompletionInvoice;
           if (!recapReviewOnly) {
-            payUrl = existingCompletionInvoice.token
+            payUrl = (!holdExistingUnpaid && existingCompletionInvoice.token)
               ? await shortenOrPassthrough(
                   `${publicPortalUrl()}/pay/${existingCompletionInvoice.token}`,
                   {
@@ -11273,6 +11426,15 @@ async function completeScheduledService(completionInput, packetContext = null) {
               : null;
             if (['paid', 'prepaid'].includes(existingCompletionInvoice.status)) alreadyPaid = true;
             else invoiceCreated = true;
+          }
+          if (holdExistingUnpaid && !recapReviewOnly) {
+            // Unverified chemical add-on hold: keep existingCompletionInvoice for
+            // dedupe and office alert context, but do NOT expose it to account credit,
+            // autopay, card-hold capture, or pay-link delivery until office review.
+            logger.warn(`[dispatch] visit ${svc.id}: held collection/delivery on existing unpaid invoice ${existingCompletionInvoice.id} pending chemical add-on billing review`);
+            invoice = null;
+            payUrl = null;
+            invoiceCreated = false;
           }
         }
       } catch (e) { invoiceLookupFailed ||= true; /* non-blocking — same flag as the direct-suppressor catch above */ }
@@ -11652,6 +11814,11 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // Default OFF = behaviour identical to before.
     // Hoisted so the terminal-invoice alert below can re-ask the SAME gate
     // with only the terminal flag cleared (deciding-reason check).
+    const unpaidPreMintedOnChemicalHold = !packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly
+      && Boolean(preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status));
+    const unpaidExistingOnChemicalHold = unpaidPreMintedOnChemicalHold
+      || (!packetEffects && unrecordedChemicalAddOnHold && !recapReviewOnly
+        && Boolean(existingCompletionInvoice && !['paid', 'prepaid'].includes(existingCompletionInvoice.status)));
     const completionInvoiceGateInput = {
       issuedInvoiceCloseout: neverMints,
       recapReviewOnly,
@@ -11673,6 +11840,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
       // invoice minted between the two reads appears only in
       // preMintedInvoice, and the hold and beside-branch must agree.
       unmintedSetupFeeHold: !!unmintedSetupFeeObligation && !terminalCompletionInvoice && !existingCompletionInvoice && !preMintedInvoice,
+      unrecordedChemicalAddOnHold,
       createInvoiceOnComplete: svc.create_invoice_on_complete,
       waveguardTier: svc.cust_waveguard_tier,
       explicitMembership: explicitMembershipLane,
@@ -11707,6 +11875,119 @@ async function completeScheduledService(completionInput, packetContext = null) {
       annualPrepayCovered,
     };
     const shouldInvoice = !packetEffects && shouldAutoInvoiceCompletion(completionInvoiceGateInput);
+    let stampedHeldInvoiceIds = [];
+    if (unrecordedChemicalAddOnHold && !recapReviewOnly) {
+      // Lock and hold EVERY non-terminal, non-payer-billed invoice linked to this visit or
+      // service record — on BOTH standalone closeouts and grouped packet effects — so an older
+      // unpaid invoice for the same visit cannot remain collectible or keep active reminders.
+      // Then neutralize any open Stripe PaymentIntents (canceling confirmable intents / reconciling in-flight ones).
+      const knownHeldIds = [...new Set([
+        existingCompletionInvoice && !['paid', 'prepaid'].includes(existingCompletionInvoice.status) ? existingCompletionInvoice.id : null,
+        preMintedInvoice && !['paid', 'prepaid'].includes(preMintedInvoice.status) ? preMintedInvoice.id : null,
+      ].filter(Boolean))];
+      try {
+        let invoicesToNeutralize = [];
+        await db.transaction(async (trx) => {
+          const held = await stampChemicalReviewHoldOnVisitInvoices(trx, {
+            serviceId: svc.id,
+            recordId: record?.id || null,
+            knownHeldIds,
+          });
+          stampedHeldInvoiceIds.push(...held.stampedIds);
+          invoicesToNeutralize = held.invoicesToNeutralize;
+        });
+        if (invoicesToNeutralize.length) {
+          const { guardOpenPaymentIntentForPrepaid } = require('../services/prepaid-pi-guard');
+          const StripeService = require('../services/stripe');
+          for (const heldInv of invoicesToNeutralize) {
+            const verdict = await guardOpenPaymentIntentForPrepaid(heldInv);
+            if (verdict.ok) {
+              await db('invoices')
+                .where({ id: heldInv.id, stripe_payment_intent_id: heldInv.stripe_payment_intent_id })
+                .update({ stripe_payment_intent_id: null, updated_at: new Date() });
+            } else if (verdict.reason === 'payment_in_flight') {
+              try {
+                await StripeService.confirmInvoicePayment(heldInv.id, heldInv.stripe_payment_intent_id);
+              } catch (reconcileErr) {
+                logger.warn(`[dispatch] chemical hold PI reconciliation for invoice ${heldInv.id} (${verdict.piStatus || 'in_flight'}): ${reconcileErr.message}`);
+              }
+            } else {
+              throw new Error(`Could not neutralize open payment session for held invoice ${heldInv.id}: ${verdict.detail || verdict.reason}`);
+            }
+          }
+        }
+      } catch (holdPersistErr) {
+        logger.error(`[dispatch] chemical_addon_billing_alert_failed (persist hold failed) for visit ${svc.id} — closeout NOT finalized: ${holdPersistErr.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, holdPersistErr);
+        return ({ status: 503, body: {
+          error: released
+            ? 'This visit\'s chemical add-on billing hold could not be saved — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+            : `This visit's chemical add-on billing hold could not be saved — the closeout is saved but NOT finalized. Retry in about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes.`,
+          code: 'chemical_addon_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
+    const anyUnpaidHeldOnVisit = unpaidExistingOnChemicalHold || stampedHeldInvoiceIds.length > 0;
+    // Annual-prepay covered visits route their add-on billing hold and held-invoice
+    // office alert through reconcileCoveredVisitInvoice below; all other visits raise
+    // the fail-closed billing review alert here. Using the counterfactual
+    // shouldAutoInvoiceCompletion check directly ensures out-of-band prepaid backfills
+    // (where backfill requires a review invoice despite prepaidCovered) still alert.
+    const chemicalAddOnBillingHoldApplies = !packetEffects && unrecordedChemicalAddOnHold
+      && !recapReviewOnly && (!alreadyPaid || stampedHeldInvoiceIds.length > 0) && !autopayCoversVisit
+      && ((anyUnpaidHeldOnVisit && !annualPrepayCovered)
+        || (!shouldInvoice && shouldAutoInvoiceCompletion({ ...completionInvoiceGateInput, unrecordedChemicalAddOnHold: false })));
+    if (chemicalAddOnBillingHoldApplies) {
+      logger.warn(`[dispatch] visit ${svc.id}: chemical add-on had no recorded product application — ${anyUnpaidHeldOnVisit ? 'collection on existing unpaid invoice' : 'automatic invoicing'} held for office billing review`);
+      // This billing alert is the ONLY durable office work item for a held bill,
+      // so fail closed (release for resume + 503) if persistence returns null or throws.
+      // The service_record is already committed and the alert is deduplicated by visit id.
+      let holdAlert = null;
+      let holdAlertError = null;
+      try {
+        const { raiseAdminAlert } = require('../services/admin-alert-compose');
+        holdAlert = await raiseAdminAlert('billing', {
+          area: 'Billing',
+          action: 'review held invoice for unverified chemical add-on',
+          why: unpaidExistingOnChemicalHold
+            ? 'A chemical area add-on had no recorded application, so collection on the open invoice was held.'
+            : 'A chemical area add-on was completed without a recorded product application, so automatic invoicing was held.',
+          severity: 'needs-you',
+          who: 'person',
+          link: `/admin/customers?customerId=${svc.customer_id}`,
+          subject: { type: 'visit', id: String(svc.id) },
+          doneWhen: 'invoice_reviewed',
+        }, {
+          bell: true,
+          dedupeKey: `unrecorded_chemical_addon_billing:${svc.id}`,
+          detail: `Visit ${svc.id} (${svc.service_type || 'service'}) completed with a chemical add-on warning (no product application recorded). Confirm with the technician whether the add-on was applied before issuing or collecting the invoice.`,
+          metadata: {
+            scheduledServiceId: svc.id,
+            serviceRecordId: record?.id || null,
+            customerId: svc.customer_id,
+            heldInvoiceId: preMintedInvoice?.id || existingCompletionInvoice?.id || null,
+            reason: areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE,
+          },
+        });
+      } catch (holdAlertErr) {
+        holdAlertError = holdAlertErr;
+      }
+      if (!holdAlert) {
+        const err = holdAlertError || new Error('chemical_addon_billing_alert_not_recorded');
+        logger.error(`[dispatch] chemical_addon_billing_alert_failed for visit ${svc.id} — closeout NOT finalized: ${err.message}`);
+        const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, err);
+        return ({ status: 503, body: {
+          error: released
+            ? 'This visit\'s chemical add-on billing review alert could not be saved — the closeout is saved but NOT finalized. Retry the closeout in a moment.'
+            : `This visit's chemical add-on billing review alert could not be saved — the closeout is saved but NOT finalized. Retry in about ${Math.ceil(CompletionAttempts.STALE_SIDE_EFFECTS_MS / 60000)} minutes.`,
+          code: 'chemical_addon_billing_alert_failed',
+          ...(released ? {} : { retryAfterMs: CompletionAttempts.STALE_SIDE_EFFECTS_MS }),
+          serviceRecordId: record.id,
+        } });
+      }
+    }
     // An annual-prepay visit completing WITHOUT coverage (no prepaid stamp,
     // not already paid) that the gate ALSO declined to bill (an explicitly
     // priced add-on invoices normally — Codex round-11) means the term
@@ -13836,15 +14117,25 @@ async function completeScheduledService(completionInput, packetContext = null) {
           updated_at: new Date(),
         });
       } catch (e) { logger.warn(`[dispatch] Could not back-link invoice to service_record: ${e.message}`); }
-      preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
-      invoice = preMintedInvoice;
-      payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
-        kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
-        codePrefix: invoiceShortCodePrefix(invoice),
-      });
-      // Treat already-paid / prepaid pre-mint as the same SMS branch.
-      if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
-      else invoiceCreated = true;
+      if (unpaidPreMintedOnChemicalHold) {
+        // Unverified chemical add-on hold: keep the pre-minted unpaid invoice
+        // linked to the service_record, but withhold credit application,
+        // autopay collection, and pay-link delivery until office review.
+        invoice = null;
+        payUrl = null;
+        invoiceCreated = false;
+        logger.warn(`[dispatch] visit ${svc.id}: held collection/delivery on pre-minted invoice ${preMintedInvoice.id} pending chemical add-on billing review`);
+      } else {
+        preMintedInvoice = await applyPrepaidCreditToInvoice(preMintedInvoice);
+        invoice = preMintedInvoice;
+        payUrl = await shortenOrPassthrough(`${portalUrl}/pay/${invoice.token}`, {
+          kind: 'invoice', entityType: 'invoices', entityId: invoice.id, customerId: invoice.customer_id,
+          codePrefix: invoiceShortCodePrefix(invoice),
+        });
+        // Treat already-paid / prepaid pre-mint as the same SMS branch.
+        if (invoice.status === 'paid' || invoice.status === 'prepaid') alreadyPaid = true;
+        else invoiceCreated = true;
+      }
     }
 
     // The FIRST PERFORMED visit carries a queued setup fee (scheduled_services
@@ -13901,6 +14192,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
     // (GATE_SERIES_PRICE_GUARDS; off = the two log lines above only).
     // Non-blocking: the closeout is already committed.
     if (!packetEffects && !recapReviewOnly && !systemQuietCloseout && !isBackfillCompletion
+      && !chemicalAddOnBillingHoldApplies
       && SeriesPriceGuards.seriesPriceGuardsLive()
       && SeriesPriceGuards.unbilledCompletionAlertDue({
         visitPerformed, isCallback: svc.is_callback, serviceType: svc.service_type, reviewedVisitPrice,
@@ -13924,6 +14216,8 @@ async function completeScheduledService(completionInput, packetContext = null) {
       const covered = await reconcileCoveredVisitInvoice({
         svc, record, invoice, payUrl, alreadyPaid, invoiceCreated,
         issuedInvoiceCloseout, recapReviewOnly, visitPerformed, terminalCompletionInvoice, packetEffects, invoiceLookupFailed,
+        unrecordedChemicalAddOnHold,
+        heldExistingInvoice: unpaidExistingOnChemicalHold ? (preMintedInvoice || existingCompletionInvoice) : null,
         quietBackfill: isBackfillCompletion,
         serviceDate: serviceDateOnly(record?.service_date),
         portalUrl,
@@ -16637,6 +16931,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceDate: serviceDateOnly(svc.scheduled_date),
         }, packetEffects ? {
           dedupeKey: `visit_member_complete:${record.id}`,
+          pushOnDedupe: true,
           beforePush: async ({ dispatching }) => {
             if (!dispatching) return true;
             try {
@@ -16942,6 +17237,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
         calibration: waveguardCalibrationAdvisory,
         inventory: waveguardInventoryAdvisory,
         limit: applicationLimitAdvisory,
+        treeShrub: treeShrubCloseoutWarnings,
         deductions: inventoryDeductions,
         shortfalls: !isWaveGuardLawnCompletion(svc),
       }),
@@ -16999,8 +17295,60 @@ async function completeScheduledService(completionInput, packetContext = null) {
   }
 }
 
+async function stampChemicalReviewHoldOnVisitInvoices(trx, {
+  serviceId,
+  recordId = null,
+  knownHeldIds = [],
+  noWait = false,
+}) {
+  const { chemicalAddonHoldStamp, invoiceWithdrawnFromCustomer } = require('./invoice-helpers');
+  const lockQuery = trx('invoices')
+    .where((q) => {
+      q.where({ scheduled_service_id: serviceId });
+      if (recordId) q.orWhere({ service_record_id: recordId });
+      if (knownHeldIds.length) q.orWhereIn('id', knownHeldIds);
+    })
+    .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+    .orderBy('id', 'asc')
+    .forUpdate();
+  if (noWait && typeof lockQuery.noWait === 'function') lockQuery.noWait();
+  const visitInvoices = await lockQuery.select('id', 'invoice_number', 'status', 'stripe_payment_intent_id', 'scheduled_send_error');
+  const stampedIds = [];
+  const invoicesToNeutralize = [];
+  for (const heldInv of visitInvoices) {
+    // Skip third-party-billed invoices via the single withdrawal authority (row is already FOR UPDATE locked).
+    if (invoiceWithdrawnFromCustomer(heldInv)) continue;
+    const stamped = await trx('invoices')
+      .where({ id: heldInv.id })
+      .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+      .update({
+        scheduled_send_at: null,
+        scheduled_send_error: chemicalAddonHoldStamp(serviceId),
+        updated_at: new Date(),
+      });
+    // Pause ONLY active follow-up sequences in the same transaction after a successful
+    // stamp so prior office stops or payment-plan pauses keep their status and reason.
+    if (Number(stamped) > 0) {
+      stampedIds.push(heldInv.id);
+      if (heldInv.stripe_payment_intent_id) invoicesToNeutralize.push(heldInv);
+      await trx('invoice_followup_sequences')
+        .where({ invoice_id: heldInv.id, status: 'active' })
+        .update({
+          updated_at: new Date(),
+          status: 'paused',
+          paused_reason: 'unrecorded_chemical_addon_review',
+          paused_until: null,
+          paused_by_admin_id: null,
+          next_touch_at: null,
+        });
+    }
+  }
+  return { stampedIds, invoicesToNeutralize };
+}
+
 module.exports = {
   completeScheduledService,
+  stampChemicalReviewHoldOnVisitInvoices,
   actualProductBlackoutBlocks,
   heldProductBlocks,
   freezeReportProductFacts,
@@ -17082,4 +17430,9 @@ module.exports.exceedsVisitLimit = exceedsVisitLimit;
 module.exports.deductionAdvisoryMessages = deductionAdvisoryMessages;
 module.exports.isOverVisitLimitLine = (line) => OVER_VISIT_LIMIT_LINES.has(line);
 module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
+module.exports.bermudaStepFinding = bermudaStepFinding;
+module.exports.bermudaPairFinding = bermudaPairFinding;
+module.exports.bermudaAreaFinding = bermudaAreaFinding;
+module.exports.bermudaConfigFinding = bermudaConfigFinding;
+module.exports.limitFindingDedupeKey = limitFindingDedupeKey;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

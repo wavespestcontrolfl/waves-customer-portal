@@ -513,6 +513,104 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(copied[0]).toMatchObject({ phone_key: BOB.slice(-10), customer_id: customerId, source: 'customer_reminder_contact' });
       });
 
+      describe('the sticky stop (owner 2026-11-26 "simpler", 2026-11-27 "yes")', () => {
+        const stopBob = async (by = 'customer') => {
+          const [listedBob] = await listed();
+          return VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: true, by });
+        };
+
+        test('a stop ends the texts for every visit, a "just this visit" grant included, and deletes nothing', async () => {
+          await record();
+          await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+          expect(sentTo()).toEqual([BOB]);
+          const before = (await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId])).length;
+          const stopped = await stopBob();
+          expect(stopped).toMatchObject({ stopped: true, stoppedBy: 'customer', changed: true });
+          expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
+          expect(await VisitRecipient.contactsForVisit(otherVisitId, 'reminder_24h')).toEqual([]);
+          expect((await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId])).length).toBe(before);
+          expect(await listed()).toHaveLength(1);
+        });
+
+        test('a stop on a record merged into another counts there: no texts, no map link, even with the visits gone; Restart there clears it', async () => {
+          await record();
+          await stopBob();
+          const [{ id: survivorId }] = await db('customers').insert({ first_name: 'Sam', last_name: 'Survivor', phone: phone(45) }).returning('id');
+          const [{ id: journalId }] = await db('customer_merge_journal').insert({
+            winner_customer_id: survivorId, loser_customer_id: customerId, loser_snapshot: JSON.stringify({}), tier: 'manual', performed_by: 'test',
+          }).returning('id');
+          const [{ id: survivorRow }] = await db('customer_reminder_contacts').insert({
+            customer_id: survivorId, phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Bob', source: 'customer_reminder_contact',
+            consent_version: 'owner-ruling-2026-11-24-every-visit',
+          }).returning('id');
+          try {
+            // The survivor lists Bob too, and the old visits are gone: the stop on the old record still counts.
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(true);
+            expect(await VisitRecipient.listReminderContacts(survivorId)).toEqual([expect.objectContaining({ stopped: true, stoppedBy: 'customer' })]);
+            // An undone merge no longer carries the stop.
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: db.fn.now(), undone_by: 'test' });
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(false);
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: null, undone_by: null });
+            // Restart on the survivor ends the stop there, and writes only the survivor's own row.
+            expect(await VisitRecipient.setReminderContactStopped({ customerId: survivorId, id: survivorRow, stopped: false, by: 'customer' }))
+              .toMatchObject({ stopped: false, changed: true });
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(false);
+            const [old] = await listed();
+            expect(old.texts_stopped_at).not.toBeNull();
+            // Undo the merge: the old record's stop is as it was.
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: db.fn.now(), undone_by: 'test' });
+            expect(await VisitRecipient.declinedByRecipient({ customerId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(true);
+            // A stop on the old record saved AFTER the survivor's restart counts there again.
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: null, undone_by: null });
+            await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ texts_stopped_at: db.raw("now() + interval '1 minute'") });
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(true);
+          } finally {
+            await db('customer_reminder_contacts').where({ customer_id: survivorId }).del();
+            await db('customer_merge_journal').where({ id: journalId }).del();
+            await db('customers').where({ id: survivorId }).del();
+          }
+        });
+
+        test('a later call naming the person again never clears a stop', async () => {
+          await record();
+          await stopBob('staff');
+          await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+          await record({}, entry({ appointment_texts_scope: 'this_visit' }));
+          await record();
+          const [row] = await listed();
+          expect(row).toMatchObject({ texts_stopped_by: 'staff' });
+          expect(row.texts_stopped_at).not.toBeNull();
+          expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toEqual([]);
+        });
+
+        test('a repeat stop keeps the first stop; another customer\'s id changes nothing', async () => {
+          await record();
+          const first = await stopBob('customer');
+          // an id in capitals is the same id
+          const again = await VisitRecipient.setReminderContactStopped({ customerId, id: String(first.id).toUpperCase(), stopped: true, by: 'staff' });
+          expect(again).toMatchObject({ stoppedBy: 'customer', changed: false });
+          expect(first).toMatchObject({ changed: true });
+          const [{ id: strangerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Stranger', phone: phone(44) }).returning('id');
+          try {
+            expect(await VisitRecipient.setReminderContactStopped({ customerId: strangerId, id: first.id, stopped: false, by: 'customer' })).toBeNull();
+            expect(await VisitRecipient.listReminderContacts(strangerId)).toEqual([]);
+            const [row] = await listed();
+            expect(row.texts_stopped_at).not.toBeNull();
+          } finally {
+            await db('customers').where({ id: strangerId }).del();
+          }
+        });
+
+        test('the list says who is also in the contact spots', async () => {
+          await record();
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([
+            expect.objectContaining({ firstName: 'Bob', lastName: 'Roe', phone: BOB, stopped: false, inContacts: false }),
+          ]);
+          await db('customers').where({ id: customerId }).update({ service_contact2_phone: `1-${BOB.slice(2)}` });
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true })]);
+        });
+      });
+
       test('a visit of ANOTHER customer gets nothing, and a visit moved to another customer gets that customer\'s list only', async () => {
         const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(43) }).returning('id');
         try {
@@ -1079,6 +1177,18 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
     });
     afterEach(() => { delete process.env[GATE]; });
 
+    test('a stop on the customer\'s list closes the person\'s map link; a restart opens it again (owner 2026-11-27)', async () => {
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      const [listedBob] = await db('customer_reminder_contacts').where({ customer_id: customerId });
+      await VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: true, by: 'customer' });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      const restarted = await VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: false, by: 'customer' });
+      expect(restarted).toMatchObject({ stopped: false, stoppedAt: null, stoppedBy: null });
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
+
     test('a token of any other shape (an old 64-hex one) is replaced once by the recognizable vr_ shape, then stays', async () => {
       const [{ id }] = await rows();
       await db('visit_text_recipients').where({ id }).update({ track_token: 'c'.repeat(64) });
@@ -1499,6 +1609,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             await db('visit_text_recipients').where({ id }).update({ source: 'customer_reminder_contact' });
             await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
           },
+          // last: a stop is sticky for the rest of the loop
+          'the person stopped on the customer\'s list (a call-recorded row)': () => db('customer_reminder_contacts')
+            .where({ customer_id: customerId }).update({ texts_stopped_at: new Date(), texts_stopped_by: 'customer' }),
         };
         let spy;
         beforeEach(async () => {

@@ -4,7 +4,7 @@
 // the lunch taken off; with none it is exactly the shift-hours card.
 import React from 'react';
 import '@testing-library/jest-dom/vitest';
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('socket.io-client', () => ({ io: () => ({ on: vi.fn(), off: vi.fn(), disconnect: vi.fn() }) }));
@@ -69,5 +69,18 @@ describe('weekly timecard sign-off card', () => {
     mountWith(week({}));
     expect(await screen.findByText('42.0h')).toBeInTheDocument();
     expect(screen.queryByText('Unpaid lunch')).not.toBeInTheDocument();
+  });
+
+  it('does not auto-prefill the signature and requires a full name (first and last) before signing', async () => {
+    mountWith(week({}));
+    expect(await screen.findByText('Sign Last Week\'s Timecard')).toBeInTheDocument();
+    const input = screen.getByPlaceholderText('e.g. Fixture Technician');
+    const button = screen.getByRole('button', { name: 'Sign Timecard' });
+    expect(input).toHaveValue('');
+    expect(button).toBeDisabled();
+    fireEvent.change(input, { target: { value: 'x' } });
+    expect(button).toBeDisabled();
+    fireEvent.change(input, { target: { value: 'Fixture Technician' } });
+    expect(button).toBeEnabled();
   });
 });

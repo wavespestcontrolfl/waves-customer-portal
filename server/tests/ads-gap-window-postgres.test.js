@@ -110,11 +110,15 @@ postgres('gap window stop count against migrated PostgreSQL', () => {
     expect(await stops()).toBe(1);
   });
 
-  test('a cancelled row and an expired reservation count for nothing', async () => {
+  test('a cancelled row and an unclaimed expired reservation count for nothing; a claimed customer row still counts', async () => {
     await row({ status: 'cancelled', window_start: '09:00', window_end: '11:00' });
-    await row({ customer_id: otherCustomerId, window_start: '09:00', window_end: '11:00',
+    await row({ customer_id: null, window_start: '09:00', window_end: '11:00',
       reservation_expires_at: new Date(Date.now() - 60 * 60 * 1000) });
     expect(await stops()).toBe(0);
+    // A claimed booking (customer_id populated) counts even if reservation_expires_at is in the past.
+    await row({ customer_id: otherCustomerId, window_start: '09:00', window_end: '11:00',
+      reservation_expires_at: new Date(Date.now() - 60 * 60 * 1000) });
+    expect(await stops()).toBe(1);
   });
 
   test('a reservation that has not expired still counts', async () => {

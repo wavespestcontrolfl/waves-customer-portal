@@ -456,19 +456,19 @@ const SERVICE_DETAILS_COPY = {
   // Render order inside one section: paragraphs, steps, bullets, table, note.
   lawn_care: {
     title: 'Lawn Care — Service Details',
-    tagline: 'Your grass type, your property’s conditions, and the actual problem determine the treatment. This guide tells you what to do before and after each visit, what we do while we’re there, and why.',
+    tagline: 'Your lawn’s conditions and the actual problem determine the treatment. This guide tells you what to do before and after each visit, what we do while we’re there, and why.',
     systemBox: {
       heading: 'Your program at a glance',
       rows: [
         ['Visits', 'The count on your estimate, timed to turf growth, pest season, weather, and local fertilizer rules — not a fixed monthly date'],
-        ['Built for your grass', 'St. Augustine, Bermuda, Zoysia, and Bahia each run their own product track. We confirm the grass before anything goes down, because a product that helps one grass can injure another', { lawnTracks: true }],
+        ['Built for your lawn', 'We inspect your lawn before anything goes down and use only products labeled for it'],
         ['Every visit', 'Inspect first. Then the month’s step for your turf (a feeding, a weed barrier, micronutrients or an insect pass), plus weed, insect or disease treatment when the evidence supports it'],
         ['Covered insects', 'Chinch bugs, sod webworms, armyworms, white grubs, mole crickets — checked every visit, treated on evidence. Fire ants only when your proposal includes them'],
         ['Disease', 'Scouted every visit. Fungicide is applied when disease is present or the risk is documented, on comprehensive plans; fertilization-only and weed-only plans quote it separately'],
         ['Re-service', 'Covered issues are re-serviced at no charge while your plan is active. Report a concern any time. Grass lost to a plant virus (sugarcane mosaic virus) is not covered, because no treatment cures it'],
         ['Documentation', 'A digital report every visit: findings, photos, exact products, watering and mowing instructions, and your lawn-health trend in the Waves app'],
       ],
-      note: 'Your estimate and service agreement control scope, covered pests, and guarantee terms. Turf-specific program · Re-service for covered issues per your program terms · Every visit documented.',
+      note: 'Your estimate and service agreement control scope, covered pests, and guarantee terms. One program, adjusted at every visit · Re-service for covered issues per your program terms · Every visit documented.',
     },
     sections: [
       {
@@ -480,7 +480,7 @@ const SERVICE_DETAILS_COPY = {
           'Who mows, and what day. We schedule around your mow so product isn’t stripped off the blade the next morning. Why: most liquid applications need a day or two on the leaf to work.',
           { scope: 'recurring', text: 'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it on the first visit. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.' },
           { scope: 'one_time', text: 'Your irrigation days and run times per zone. If you don’t know them, tell us the controller brand and we’ll read it when we arrive. Why: watering-in and dry-time instructions are written against your real schedule, and overwatering is the single biggest cause of dollarweed, sedge, and fungus in our area.' },
-          'Grass type if you know it, and the sod invoice if you have one. Why: the herbicide list is different for every grass, and for Bermuda removal the St. Augustine cultivar decides whether that treatment is allowed at all.',
+          'The sod invoice, if you have one. Why: it shows exactly what was planted, and some products are labeled only for certain lawns.',
           'Anything applied in the last 60 days by anyone. Store-bought weed-and-feed, a previous company, a landscaper. Send a photo of the bag or bottle. Why: stacking products injures turf and voids label intervals.',
           'Edible gardens, ponds, beehives, chickens, an invisible-fence wire, and shallow irrigation lines. Why: product placement is planned around them.',
         ],
@@ -578,7 +578,7 @@ const SERVICE_DETAILS_COPY = {
       {
         heading: 'New sod you had installed (we don’t install sod)',
         level: 2,
-        paragraphs: ['Tell us the install date, the grass type, and what the installer applied. New sod stays on your regular program. We hold some products while it roots.'],
+        paragraphs: ['Tell us the install date and what the installer applied. New sod stays on your regular program. We hold some products while it roots.'],
         bullets: [
           'Water: days 1–7, 2–3 short cycles a day; days 8–14, once a day, early morning; weeks 3–4, 2–3 times a week at ¼–½ inch; once rooted (3 to 4 weeks after laying), as needed at ½–¾ inch on your allowed watering days. New sod is usually exempt from district watering days for the first 30 days only.',
           'Mow: first cut at 14–21 days, once a tug on the sod holds. Sharp blade, correct height for the grass, never more than a third of the blade.',
@@ -603,7 +603,7 @@ const SERVICE_DETAILS_COPY = {
         bullets: [
           'Before: mow short the day before. Sprinklers off for 24 hours. Mark sprinkler heads, drip lines, and invisible-fence wire. Why: dry thatch lifts, wet thatch smears; the machine finds anything you don’t mark.',
           'After: the lawn looks rough for 2–3 weeks. That’s expected. Water and, in season, feed within a week; this is the best moment for top dressing or plugging thin spots.',
-          'When: in the grass’s active growth window so it recovers. We pick the date for your grass type.',
+          'When: in the grass’s active growth window so it recovers. We pick the date.',
           'Why: more than ½ inch of thatch blocks water and fertilizer from the soil and shelters chinch bugs and fungus.',
         ],
       },
@@ -655,7 +655,7 @@ const SERVICE_DETAILS_COPY = {
     // walkthrough (included + process) and every scope:'recurring' entry, so
     // a one-time customer is never promised visits, re-service, or a program.
     oneTime: {
-      tagline: 'Your grass type, your property’s conditions, and the actual problem determine the work. This guide tells you what to do before and after your service, what we do while we’re there, and why.',
+      tagline: 'Your lawn’s conditions and the actual problem determine the work. This guide tells you what to do before and after your service, what we do while we’re there, and why.',
       // The recurring program walkthrough does not apply to one-time work.
       included: [],
       process: [],
@@ -767,7 +767,7 @@ const SERVICE_DETAILS_COPY = {
         'Behind the program is our agronomic knowledge base: Southwest Florida turf protocols, product data, and documented outcomes from real local lawns. That knowledge base — not guesswork — is what treatment decisions draw on.',
       ],
     },
-    ctaMicro: 'Turf-specific program · Re-service for covered issues per your program terms · Every visit documented',
+    ctaMicro: 'One program, adjusted at every visit · Re-service for covered issues per your program terms · Every visit documented',
   },
   // Tree & Shrub guide rebuilt 2026-07-11 per the owner-supplied external
   // T&S review: plant-ID-first protocol, treat-only-when-warranted honesty,
@@ -933,16 +933,6 @@ function formatGuidePhone(raw) {
     return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
   }
   return raw ? String(raw) : null;
-}
-
-// The "Built for your grass" row follows the live lawn program: GATE_LAWN_V13 has no bahia track, so
-// the guide stops promising one and says the office reviews bahia lawns. Gate off, the row is as written.
-function lawnTracksRowText(written) {
-  const { lawnTrackNames, lawnV13NoBahiaProgram } = require('./lawn-program');
-  if (!lawnV13NoBahiaProgram()) return written;
-  const names = lawnTrackNames();
-  const list = names.length > 1 ? `${names.slice(0, -1).join(', ')} or ${names[names.length - 1]}` : names.join('');
-  return `We confirm your grass (${list}) before anything goes down, because a product that helps one grass can injure another. Bahiagrass lawns: our team reviews these before quoting`;
 }
 
 function serviceDetailsAvailable(serviceKey) {
@@ -1157,7 +1147,6 @@ async function buildServiceDetailsContent(serviceKey, estimate = {}, options = {
         .filter((row) => bondGateOn || !(Array.isArray(row) && row[2] && row[2].requiresTermiteBondGate))
         .filter((row) => !(Array.isArray(row) && row[2])
           || ownershipMatches(row[2].requiresStationOwnership))
-        .map((row) => (Array.isArray(row) && row[2]?.lawnTracks ? [row[0], lawnTracksRowText(row[1])] : row))
         .map((row) => (Array.isArray(row) && row.length > 2 ? [row[0], row[1]] : row));
       return { ...copy.systemBox, rows };
     })(),

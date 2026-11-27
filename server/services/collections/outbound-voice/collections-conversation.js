@@ -55,6 +55,22 @@ const flags = require('./flags');
 const { invoiceAmountDue, SEND_CLAIMABLE_STATUSES } = require('../../invoice-helpers');
 const { etCalendarDayOf, etDateString } = require('../../../utils/datetime-et');
 const { anchorInvoiceOf, orderByDue, dueDayOf, invoiceDaysOverdue, accountDaysOverdue, dunningTierForOverdue, registerForTier } = require('../account-anchor');
+const { recordStreamedMessage } = require('../../llm-dispatch-metrics');
+const { providerErrorReason } = require('../../llm/call');
+
+function recordCollectionsStreamRound({ message = null, stream = null, t0, timedOut = false, err = null }) {
+  const errorCode = err
+    ? (timedOut ? 'anthropic_timeout' : providerErrorReason('anthropic', err))
+    : null;
+  recordStreamedMessage({
+    provider: 'anthropic',
+    requestedModel: MODEL,
+    message: message || stream?.currentMessage || null,
+    latencyMs: Math.round(performance.now() - t0),
+    laneId: 'voice_relay_collections',
+    errorCode,
+  });
+}
 
 // The pay link is a /pay/:token SMS, and InvoiceService.sendViaSMS only
 // CLAIMS its SEND_CLAIMABLE_STATUSES (the one sendability authority). The
@@ -308,8 +324,8 @@ const REGISTER_RULES = {
   ],
 };
 
-function buildSystemPrompt({ firstName, today, register = 'friendly' }) {
-  const who = firstName || 'the customer';
+function buildSystemPrompt({ firstName, today, register = 'friendly' } = {}) {
+  const who = firstName || 'the named caller in the CALLER TO REACH block below';
   return [
     `You are ${agentName()}, the automated billing assistant for Waves Pest Control, on a RECORDED outbound phone call about an open balance. Keep every reply to one or two short spoken sentences. Never use emojis or read out symbols.`,
     // The current ET calendar date rides the prompt (gh prb-r11): without
@@ -872,11 +888,24 @@ class CollectionsConversation {
       logger.warn(`[collections-voice] ET date for prompt failed: ${err.message}`);
     }
     this._promptRegister = this._ctx.register;
-    this._systemBlocks = [{
-      type: 'text',
-      text: buildSystemPrompt({ firstName: this._ctx.customer.first_name, today, register: this._ctx.register }),
-      cache_control: { type: 'ephemeral' },
-    }];
+    const who = String(this._ctx.customer.first_name || '').replace(/[\r\n]+/g, ' ').trim() || 'the customer';
+    // Block 0 is identical across every collections call in the same register
+    // on the same ET day (5m ephemeral breakpoint — keeps write cost at 1.25x
+    // since tool schemas also vary by call state). The caller's first name
+    // rides Block 1 so turns within this call stay cached without busting
+    // Block 0 across callers.
+    this._systemBlocks = [
+      {
+        type: 'text',
+        text: buildSystemPrompt({ today, register: this._ctx.register }),
+        cache_control: { type: 'ephemeral' },
+      },
+      {
+        type: 'text',
+        text: `CALLER TO REACH: ${who}`,
+        cache_control: { type: 'ephemeral' },
+      },
+    ];
   }
 
   async _modelTurn() {
@@ -884,11 +913,13 @@ class CollectionsConversation {
     for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
       if (this.ended) return;
       let msg;
+      let stream = null;
+      const t0 = performance.now();
       const controller = new AbortController();
       let timedOut = false;
       const timer = setTimeout(() => { timedOut = true; try { controller.abort(); } catch { /* no-op */ } }, STREAM_TIMEOUT_MS);
       try {
-        const stream = getClient().messages.stream(
+        stream = getClient().messages.stream(
           {
             model: MODEL,
             max_tokens: MAX_TOKENS,
@@ -906,7 +937,9 @@ class CollectionsConversation {
           { signal: controller.signal },
         );
         msg = await stream.finalMessage();
+        recordCollectionsStreamRound({ message: msg, t0 });
       } catch (err) {
+        recordCollectionsStreamRound({ stream, t0, timedOut, err });
         if (timedOut) {
           this.say('Sorry, that took a moment — could you say that again?');
           return;

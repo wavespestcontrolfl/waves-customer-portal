@@ -443,6 +443,43 @@ describe('restoring a saved draft on a regular pest visit', () => {
     ]);
   });
 
+  // Card wording 2026-11-27: a draft saved under a card line's old text restores as the current line and submits it once.
+  // A month-keyed list (tree & shrub) drops a stale selection only after the rename, so the renamed marker survives.
+  it.each([
+    ['a reworded card line', 'Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then', 'Any'],
+    ['a capitalization-only change', 'doors open until the spray dries; nobody rides and no child seat goes back in until then', 'Any'],
+    ['a reworded line on a month-keyed list', 'Leave the doors open until the spray has dried; nobody rides in the vehicle and no child seat goes back in until then', 'March'],
+  ])('a draft saved with %s restores the current line and submits one wording', async (_name, OLD, month) => {
+    const NEW = 'Doors open until the spray dries; nobody rides and no child seat goes back in until then';
+    const service = regularPest();
+    const onSubmit = vi.fn().mockResolvedValue({});
+    fetch.mockImplementation(async (url) => ({
+      ok: true,
+      json: async () => {
+        if (String(url).includes('/default-products')) return { source: 'none', products: [], unresolved: [], taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } };
+        if (String(url).includes('/completion-actions')) {
+          return { visit: { visit: 4, month }, actions: [{ id: 'cockroach_4_8', kind: 'protocol', label: NEW, note: NEW, raw: NEW, role: 'primary', scope: 'interior', treatmentApplied: false, product: null }] };
+        }
+        return { customer: {}, actions: [], available: false };
+      },
+    }));
+    localStorage.setItem(draftKey(service), JSON.stringify({
+      serviceId: service.id,
+      notes: `[Protocol] ${OLD}\nSaved note`,
+      selectedProtocolActionLabels: [OLD],
+      actionScopeByLabel: { [OLD]: { scope: 'interior', treatmentApplied: false } },
+    }));
+    await mount(service, { onSubmit });
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore', exact: true }));
+    await screen.findByDisplayValue((value) => String(value).includes(`[Protocol] ${NEW}`));
+    await act(async () => { fireEvent.click(submitButton()); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    const body = onSubmit.mock.calls[0][1];
+    expect(body.protocolActionsCompleted).toEqual([NEW]);
+    expect(body.protocolActionScopesCompleted).toEqual([{ label: NEW, scope: 'interior', treatmentApplied: false }]);
+    expect(body.technicianNotes.split('\n')).toEqual([`[Protocol] ${NEW}`, 'Saved note']);
+  });
+
   it('keeps a protocol action the draft already carries and still sends it', async () => {
     const service = regularPest();
     const onSubmit = vi.fn().mockResolvedValue({});

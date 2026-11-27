@@ -119,3 +119,94 @@ test('opening a saved record keeps its answers, even ones equal to the prefill',
   expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('Truck 7');
   expect(screen.queryByText(/Filled from the staff record/)).not.toBeInTheDocument();
 });
+
+test('non-admin signing a signature agreement sees Sign this agreement, no due picker, and must tick + type full name', async () => {
+  request.mockResolvedValue({
+    record: {
+      id: 'rec-signed', owner_id: 'hire', answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'Sample Hire' },
+      completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z',
+      due_at: '2026-11-02T12:00:00Z', completed_at: '2026-11-01T12:05:00Z',
+    },
+  });
+  const onSaved = vi.fn();
+  const sigDetail = detail();
+  sigDetail.rendered.metadata.fields = sigDetail.rendered.metadata.fields.map(f => ({ ...f, required: true }));
+  render(<DocumentRecord detail={sigDetail} people={people} selfId="hire" manage={false} canWrite onSaved={onSaved} />);
+  expect(screen.getByRole('heading', { name: 'Sign this agreement' })).toBeInTheDocument();
+  expect(screen.queryByLabelText('Next action due (Eastern)')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: /Save open record|Save draft/ })).not.toBeInTheDocument();
+  const submit = screen.getByRole('button', { name: 'Sign and submit agreement' });
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Typed name *'), { target: { value: 'Sample' } });
+  fireEvent.click(screen.getByLabelText('I agree *'));
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Typed name *'), { target: { value: 'Sample Hire' } });
+  // Required vehicle/address/start-date fields are still blank, so submit stays disabled.
+  expect(submit).toBeDisabled();
+  fireEvent.change(screen.getByLabelText('Assigned vehicle *'), { target: { value: 'Truck 7' } });
+  fireEvent.change(screen.getByLabelText('Home address *'), { target: { value: '123 Main St' } });
+  fireEvent.change(screen.getByLabelText('Start date *'), { target: { value: '2026-11-01' } });
+  expect(submit).toBeEnabled();
+  fireEvent.click(submit);
+  await waitFor(() => expect(onSaved).toHaveBeenCalledWith('Agreement signed and saved.'));
+  expect(screen.getByText(/Signed by Sample Hire/)).toBeInTheDocument();
+});
+
+test('an optional signed-name field does not activate agreement mode or label a blank record Signed', () => {
+  const base = detail();
+  base.rendered.metadata.fields = [
+    { id: 'vehicle', label: 'Assigned vehicle', type: 'text', required: false },
+    { id: 'signed-name', label: 'Typed name', type: 'text', required: false },
+  ];
+  base.records = [{
+    id: 'rec-blank', owner_id: 'hire', answers: { vehicle: 'Truck 7', 'signed-name': '' },
+    completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z',
+    due_at: '2026-11-02T12:00:00Z', completed_at: '2026-11-01T12:05:00Z',
+  }];
+  render(<DocumentRecord detail={base} people={people} selfId="hire" manage={false} canWrite onSaved={() => {}} />);
+  expect(screen.getByRole('heading', { name: 'Create a record' })).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: /Completed/ })).toBeInTheDocument();
+  expect(screen.queryByRole('option', { name: /Signed/ })).not.toBeInTheDocument();
+});
+
+test('a historical completed signature record with a single-character name does not render a Signed agreement heading', () => {
+  const legacy = {
+    id: 'rec-legacy', owner_id: 'hire', answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'x' },
+    completed_steps: [], created_at: '2026-04-01T12:00:00Z', updated_at: '2026-04-01T12:00:00Z',
+    due_at: '2026-04-02T12:00:00Z', completed_at: '2026-04-01T12:05:00Z',
+  };
+  render(<DocumentRecord detail={detail({ records: [legacy] })} people={people} selfId="hire" manage={false} canWrite onSaved={() => {}} />);
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-legacy' } });
+  expect(screen.getByRole('heading', { name: 'Completed record' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: 'Signed agreement' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Signed by/)).not.toBeInTheDocument();
+});
+
+test('opening an admin-assigned draft clears prefilled signature and consent fields before the employee can sign', () => {
+  const assignedDraft = {
+    id: 'rec-assigned', owner_id: 'hire', created_by: 'me',
+    answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'Sample Hire' },
+    completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z',
+    due_at: '2026-11-02T12:00:00Z', completed_at: null,
+  };
+  render(<DocumentRecord detail={detail({ records: [assignedDraft] })} people={people} selfId="hire" manage={false} canWrite onSaved={() => {}} />);
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-assigned' } });
+  expect(screen.getByLabelText('Assigned vehicle')).toHaveValue('Truck 7');
+  expect(screen.getByLabelText('Typed name *')).toHaveValue('');
+  expect(screen.getByLabelText('I agree *')).not.toBeChecked();
+  expect(screen.getByRole('button', { name: 'Sign and submit agreement' })).toBeDisabled();
+});
+
+test('an admin viewing another employee\'s completed agreement sees the saved signature and consent', () => {
+  const signed = {
+    id: 'rec-done', owner_id: 'hire', created_by: 'hire',
+    answers: { vehicle: 'Truck 7', agree: true, 'signed-name': 'Sample Hire' },
+    completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:05:00Z',
+    due_at: '2026-11-02T12:00:00Z', completed_at: '2026-11-01T12:05:00Z',
+  };
+  render(<DocumentRecord detail={detail({ records: [signed] })} people={people} selfId="me" manage canWrite onSaved={() => {}} />);
+  fireEvent.change(screen.getByLabelText('Saved records'), { target: { value: 'rec-done' } });
+  expect(screen.getByLabelText('Typed name *')).toHaveValue('Sample Hire');
+  expect(screen.getByLabelText('I agree *')).toBeChecked();
+  expect(screen.getByText(/Signed by Sample Hire/)).toBeInTheDocument();
+});
