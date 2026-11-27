@@ -406,6 +406,17 @@ function firstFiniteVal(...values) {
   return undefined;
 }
 
+const plainRecord = (value) => (value && typeof value === 'object' ? value : {});
+
+function boraCareStoredInputs(estData) {
+  const primary = estData?.engineInputs || estData?.engineRequest || estData?.inputs;
+  if (!primary || typeof primary !== 'object') return null;
+  const raw = plainRecord(estData?.inputs);
+  const reqOpts = plainRecord(estData?.engineRequest?.options);
+  const svc = primary.services?.boraCare || primary.services?.bora_care || reqOpts.boraCare || reqOpts.bora_care;
+  return { primary, raw, opts: plainRecord(svc) };
+}
+
 function boraCareStoredScope(row, estData) {
   if (row.atticSqFt !== undefined || row.surfaceSqFt !== undefined) {
     return {
@@ -413,30 +424,27 @@ function boraCareStoredScope(row, estData) {
       pinnedSurfaceSqFt: positiveOrNull(row.surfaceSqFt),
     };
   }
-  const storedInputs = estData?.engineInputs || estData?.engineRequest || estData?.inputs;
-  if (!storedInputs || typeof storedInputs !== 'object') return {};
-  const rawInputs = estData?.inputs && typeof estData.inputs === 'object' ? estData.inputs : {};
-  const reqOpts = estData?.engineRequest?.options && typeof estData.engineRequest.options === 'object' ? estData.engineRequest.options : {};
-  const svc = storedInputs.services?.boraCare || storedInputs.services?.bora_care || reqOpts.boraCare || reqOpts.bora_care;
-  const opts = svc && typeof svc === 'object' ? svc : {};
+  const stored = boraCareStoredInputs(estData);
+  if (!stored) return {};
+  const { primary, raw, opts } = stored;
   const { resolveBoraCareSqFt, resolveBoraCareSurfaceSqFt } = require('./pricing-engine/service-pricing');
-  const attic = resolveBoraCareSqFt(storedInputs, opts);
-  const surface = resolveBoraCareSurfaceSqFt(storedInputs, {
+  const attic = resolveBoraCareSqFt(primary, opts);
+  const surface = resolveBoraCareSurfaceSqFt(primary, {
     ...opts,
     surfaceLinearFt: firstFiniteVal(
       opts.surfaceLinearFt, opts.wallLinearFt,
-      storedInputs.boraCareSurfaceLinearFt, storedInputs.boracareSurfaceLinearFt, storedInputs.boraCareWallLinearFt,
-      rawInputs.boraCareSurfaceLinearFt, rawInputs.boracareSurfaceLinearFt,
+      primary.boraCareSurfaceLinearFt, primary.boracareSurfaceLinearFt, primary.boraCareWallLinearFt,
+      raw.boraCareSurfaceLinearFt, raw.boracareSurfaceLinearFt,
     ),
     surfaceHeightFt: firstFiniteVal(
       opts.surfaceHeightFt, opts.wallHeightFt,
-      storedInputs.boraCareSurfaceHeightFt, storedInputs.boracareSurfaceHeightFt, storedInputs.boraCareWallHeightFt,
-      rawInputs.boraCareSurfaceHeightFt, rawInputs.boracareSurfaceHeightFt,
+      primary.boraCareSurfaceHeightFt, primary.boracareSurfaceHeightFt, primary.boraCareWallHeightFt,
+      raw.boraCareSurfaceHeightFt, raw.boracareSurfaceHeightFt,
     ),
   });
   const legacyBcSqFt = positiveOrNull(firstFiniteVal(
-    storedInputs.boracareSqft, storedInputs.boraCareSqft, storedInputs.bcSqft, storedInputs.bcSqFt,
-    rawInputs.boracareSqft, rawInputs.boraCareSqft, rawInputs.bcSqft,
+    primary.boracareSqft, primary.boraCareSqft, primary.bcSqft, primary.bcSqFt,
+    raw.boracareSqft, raw.boraCareSqft, raw.bcSqft,
     opts.boracareSqft, opts.bcSqft, opts.bcSqFt,
   ));
   const pinnedAtticSqFt = attic.value !== null ? attic.value : legacyBcSqFt;
