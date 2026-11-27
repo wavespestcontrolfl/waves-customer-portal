@@ -411,13 +411,11 @@ describe('lane SQL binding integrity', () => {
     await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadOpenServiceRequests(new Date('2026-08-08T00:00:00Z'));
-    await loaders.loadUnworkedDigitalLeads(new Date('2026-08-08T00:00:00Z'));
     await loaders.loadCallbackCalls(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
     await loaders.loadDroppedFollowUps(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
     await loaders.loadUnansweredThreads(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
-    await loaders.loadUnworkedDigitalLeads(new Date('2026-08-08T00:00:00Z'), { includeExpired: true });
-    expect(captured.length).toBe(9);
-    expect(captured.slice(5).every(({ bindings }) => bindings.includeExpired === true)).toBe(true);
+    expect(captured.length).toBe(7);
+    expect(captured.slice(4).every(({ bindings }) => bindings.includeExpired === true)).toBe(true);
 
     const knexPg = require('knex')({ client: 'pg' });
     for (const { sql, bindings } of captured) {
@@ -427,5 +425,92 @@ describe('lane SQL binding integrity', () => {
       expect(maxPlaceholder).toBe(native.bindings.length);
       for (const value of native.bindings) expect(value).toBeDefined();
     }
+  });
+
+  test('loadUnworkedDigitalLeads delegates human-contact checks to lead-contact-sync and requires real estimate delivery + unambiguous linkage', async () => {
+    const t0 = '2026-11-27T10:00:00Z';
+    const t1 = '2026-11-27T11:00:00Z';
+    const candidateRows = [
+      // Cleared by judgeLeads (connected call / human text / exact email / live booking)
+      { id: 'lead-contacted', lead_type: 'form_submission', first_name: 'Ana', last_name: 'Smith', phone: '+19415550101', email: 'ana@example.com', first_contact_at: t0, customer_id: 'cust-1', estimate_id: null },
+      // Cleared by direct delivered estimate_id (even on a shared customer)
+      { id: 'lead-est-direct', lead_type: 'quote_wizard', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, customer_id: 'cust-shared', estimate_id: 'est-delivered' },
+      // Shares cust-shared with lead-est-direct: MUST NOT be cleared by cust-shared's other estimate
+      { id: 'lead-shared-open', lead_type: 'email_inquiry', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, customer_id: 'cust-shared', estimate_id: null },
+      // Unambiguous single open lead cleared by customer-level delivered estimate
+      { id: 'lead-est-cust', lead_type: 'voicemail', first_name: 'Cara', last_name: 'Lee', phone: '+19415550103', email: 'cara@example.com', first_contact_at: t0, customer_id: 'cust-solo', estimate_id: null },
+      // Truly unworked lead (judgeLeads skipped with no_contact_evidence, no delivered estimate)
+      { id: 'lead-unworked', lead_type: 'form_submission', first_name: 'Dan', last_name: 'Ng', phone: '+19415550104', email: 'dan@example.com', first_contact_at: t0, customer_id: 'cust-unworked', estimate_id: null },
+    ];
+    const estimateSqls = [];
+    const knexPg = require('knex')({ client: 'pg' });
+    jest.doMock('../models/db', () => {
+      const makeChain = (table) => {
+        const chain = {
+          whereNull: () => chain,
+          whereNotNull: () => chain,
+          where: (arg) => { if (typeof arg === 'function') arg(chain); return chain; },
+          whereIn: () => chain,
+          whereNotIn: () => chain,
+          orWhereIn: () => chain,
+          whereRaw: (sql, bindings) => {
+            if (String(table).startsWith('estimates')) estimateSqls.push({ sql, bindings });
+            return chain;
+          },
+          orderBy: () => chain,
+          limit: () => chain,
+          select: () => Promise.resolve(
+            String(table).startsWith('estimates')
+              ? [
+                { id: 'est-delivered', customer_id: 'cust-shared', delivered_at: t1 },
+                { id: 'est-solo', customer_id: 'cust-solo', delivered_at: t1 },
+              ]
+              : candidateRows,
+          ),
+        };
+        return chain;
+      };
+      const dbMock = (table) => makeChain(table);
+      dbMock.raw = (sql, bindings) => ({ sql, bindings });
+      return dbMock;
+    });
+    const judgeLeads = jest.fn(async () => new Map([
+      ['lead-contacted', { evidenceType: 'staff_text', evidenceId: 'sms-1', at: new Date(t1) }],
+      ['lead-est-direct', { skip: 'no_contact_evidence' }],
+      ['lead-shared-open', { skip: 'shared_phone' }],
+      ['lead-est-cust', { skip: 'no_contact_evidence' }],
+      ['lead-unworked', { skip: 'no_contact_evidence' }],
+    ]));
+    const openLeadIdentities = jest.fn(async () => new Map([
+      ['customer:cust-shared', new Set(['lead-est-direct', 'lead-shared-open'])],
+      ['customer:cust-solo', new Set(['lead-est-cust'])],
+      ['customer:cust-unworked', new Set(['lead-unworked'])],
+    ]));
+    jest.doMock('../services/lead-contact-sync', () => ({
+      judgeLeads,
+      openLeadIdentities,
+      usablePhoneKey: (p) => (p ? String(p).replace(/\D/g, '').slice(-10) : null),
+      leadEmail: (e) => (e ? String(e).toLowerCase() : null),
+    }));
+
+    let loaders;
+    jest.isolateModules(() => {
+      ({ _private: loaders } = require('../services/unworked-comms-watcher'));
+    });
+    jest.dontMock('../models/db');
+    jest.dontMock('../services/lead-contact-sync');
+
+    const rows = await loaders.loadUnworkedDigitalLeads(new Date('2026-11-27T12:00:00Z'));
+    expect(judgeLeads).toHaveBeenCalledTimes(1);
+    expect(openLeadIdentities).toHaveBeenCalledTimes(1);
+    expect(rows.map((r) => r.id)).toEqual(['lead-shared-open', 'lead-unworked']);
+    expect(rows[0].total_count).toBe(2);
+    expect(rows[0].all_ids).toEqual(['lead-shared-open', 'lead-unworked']);
+    // Estimate delivery SQL binds cleanly through Knex PG native compiler with no stray ? placeholders.
+    expect(estimateSqls.length).toBe(1);
+    const native = knexPg.raw(estimateSqls[0].sql, estimateSqls[0].bindings).toSQL().toNative();
+    const maxPlaceholder = (native.sql.match(/\$\d+/g) || [])
+      .reduce((max, p) => Math.max(max, Number(p.slice(1))), 0);
+    expect(maxPlaceholder).toBe(native.bindings.length);
   });
 });

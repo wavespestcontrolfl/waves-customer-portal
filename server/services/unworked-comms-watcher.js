@@ -27,11 +27,13 @@ const { deliverOpsDigest, fullSetItemKeys } = require('./ops-digest');
 const { retireIfClean } = require('./ops-digest-fall-off');
 const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
-const { deliveryInstantSql } = require('./self-serve-estimates');
+const { firstDeliveryEvidenceSql, deliveryInstantSql } = require('./self-serve-estimates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { SPEED_TO_LEAD_FRESH_START } = require('../utils/speed-to-lead-fresh-start');
-const { INTERNAL_TEST_CUSTOMERS } = require('./internal-test-customers');
-const { personSentFilter } = require('./email/email-customer-link');
+const { excludeInternalTestLeads } = require('./lead-waiting-queue');
+const {
+  judgeLeads, openLeadIdentities, usablePhoneKey, leadEmail,
+} = require('./lead-contact-sync');
 
 const DIGITAL_LEAD_TYPES = Object.freeze(['form_submission', 'email_inquiry', 'voicemail', 'quote_wizard']);
 const DIGITAL_LEAD_LABELS = Object.freeze({
@@ -543,103 +545,97 @@ async function loadOpenServiceRequests(cutoff = new Date()) {
 
 // Lane 5: unworked digital leads (web forms, email inquiries, voicemails, quote
 // wizard) sitting in status='new' past the 30-minute SLA with no recorded
-// response and no real human outreach (connected call, human text, delivered
-// estimate, person-sent Gmail email, or booked visit). Mirrors the shared
-// waiting-queue predicate (lead-waiting-queue.js) plus person-contact witnesses.
-async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = false } = {}) {
-  const { rows } = await db.raw(
-    `
-    SELECT l.id, l.lead_type, l.first_name, l.last_name, l.phone, l.email,
-           l.service_interest, l.first_contact_at, l.estimate_id, l.customer_id,
-           COUNT(*) OVER () AS total_count,
-           ARRAY_AGG(l.id::text) OVER () AS all_ids
-    FROM leads l
-    WHERE l.deleted_at IS NULL
-      AND l.status = 'new'
-      AND l.response_time_minutes IS NULL
-      AND l.converted_at IS NULL
-      AND l.first_contact_at IS NOT NULL
-      AND l.lead_type = ANY(CAST(:leadTypes AS text[]))
-      AND (CAST(:includeExpired AS boolean) OR l.first_contact_at >= now() - interval '30 days')
-      AND (CAST(:freshStart AS timestamptz) IS NULL OR l.first_contact_at >= CAST(:freshStart AS timestamptz))
-      AND l.first_contact_at <= CAST(:cutoff AS timestamptz) - interval '30 minutes'
-      AND NOT (LOWER(COALESCE(l.first_name, '') || ' ' || COALESCE(l.last_name, '')) = ANY(CAST(:internalNames AS text[])))
-      AND NOT EXISTS (
-        SELECT 1 FROM call_log oc
-        WHERE oc.direction = 'outbound'
-          AND COALESCE(oc.duration_seconds, 0) >= 60
-          AND oc.created_at > l.first_contact_at
-          AND (
-            (l.customer_id IS NOT NULL AND oc.customer_id = l.customer_id)
-            OR (l.customer_id IS NULL
-              AND LENGTH(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g')) >= 10
-              AND RIGHT(REGEXP_REPLACE(COALESCE(oc.to_phone, ''), '\\D', '', 'g'), 10)
-                = RIGHT(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g'), 10))
-          )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM sms_log os
-        WHERE os.direction = 'outbound'
-          AND os.message_type IN ('manual', 'ai_approved', 'ai_revised')
-          AND os.status IN ('queued', 'sent', 'delivered')
-          AND os.created_at > l.first_contact_at
-          AND NOT EXISTS (
-            SELECT 1 FROM message_drafts mdx
-            WHERE mdx.sms_log_id IS NULL
-              AND (mdx.customer_id = os.customer_id OR (mdx.customer_id IS NULL AND os.customer_id IS NULL AND RIGHT(regexp_replace(COALESCE(mdx.flags->>'phone', mdx.flags->>'toPhone', ''), '[^0-9]', '', 'g'), 10) = RIGHT(regexp_replace(COALESCE(os.to_phone, ''), '[^0-9]', '', 'g'), 10)))
-              AND mdx.sent_at BETWEEN os.created_at - interval '2 minutes'
-                                  AND os.created_at + interval '2 minutes'
-          )
-          AND (
-            (l.customer_id IS NOT NULL AND os.customer_id = l.customer_id)
-            OR (l.customer_id IS NULL
-              AND LENGTH(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g')) >= 10
-              AND RIGHT(REGEXP_REPLACE(COALESCE(os.to_phone, ''), '\\D', '', 'g'), 10)
-                = RIGHT(REGEXP_REPLACE(COALESCE(l.phone, ''), '\\D', '', 'g'), 10))
-          )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM estimates fe
-        WHERE fe.archived_at IS NULL
-          AND (
-            (l.estimate_id IS NOT NULL AND fe.id = l.estimate_id)
-            OR (l.customer_id IS NOT NULL AND fe.customer_id = l.customer_id)
-          )
-          AND (
-            (COALESCE(fe.source, '') NOT IN ('service_report_cta', 'plan_restart', 'plan_start')
-              AND fe.sent_at IS NOT NULL AND fe.sent_at > l.first_contact_at)
-            OR (COALESCE(fe.source, '') IN ('service_report_cta', 'plan_restart', 'plan_start')
-              AND COALESCE(fe.estimate_data #>> '{deliveryState,lastDeliveredAt}', '') <> ''
-              AND ${deliveryInstantSql('fe', 'lastDeliveredAt')} > l.first_contact_at)
-          )
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM emails em
-        WHERE ${personSentFilter('em')}
-          AND em.received_at > l.first_contact_at
-          AND NULLIF(LOWER(BTRIM(COALESCE(l.email, ''))), '') IS NOT NULL
-          AND STRPOS(LOWER(CONCAT_WS(',', em.to_address, em.cc_address, em.bcc_address)), LOWER(BTRIM(l.email))) > 0
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM scheduled_services ss
-        WHERE l.customer_id IS NOT NULL
-          AND ss.customer_id = l.customer_id
-          AND ss.created_at > l.first_contact_at
-          AND COALESCE(ss.status, '') <> 'cancelled'
-      )
-    ORDER BY l.first_contact_at DESC
-    LIMIT :cap
-    `,
-    {
-      cap: MAX_PER_SECTION,
-      cutoff,
-      includeExpired,
-      freshStart: SPEED_TO_LEAD_FRESH_START || null,
-      leadTypes: [...DIGITAL_LEAD_TYPES],
-      internalNames: [...INTERNAL_TEST_CUSTOMERS],
-    },
+// response and no verified human outreach. Delegates calls, human texts,
+// exact-recipient Gmail emails, live top-level bookings, and shared-identity
+// ambiguity checks to lead-contact-sync.js (`judgeLeads` / `openLeadIdentities`)
+// and uses self-serve-estimates.js delivery evidence for estimates so the
+// watcher never diverges from the portal's canonical contact rules.
+const DIGITAL_LEAD_CANDIDATE_CAP = 500;
+const DIGITAL_LEAD_SLA_MS = 30 * 60 * 1000;
+const DIGITAL_LEAD_HORIZON_MS = 30 * 24 * 60 * 60 * 1000;
+
+async function loadDigitalLeadCandidates(cutoff, includeExpired) {
+  const query = db('leads')
+    .whereNull('deleted_at')
+    .where('status', 'new')
+    .whereNull('response_time_minutes')
+    .whereNull('converted_at')
+    .whereNotNull('first_contact_at')
+    .whereIn('lead_type', [...DIGITAL_LEAD_TYPES])
+    .where('first_contact_at', '<=', new Date(cutoff.getTime() - DIGITAL_LEAD_SLA_MS))
+    .orderBy('first_contact_at', 'desc')
+    .limit(DIGITAL_LEAD_CANDIDATE_CAP);
+  if (!includeExpired) {
+    query.where('first_contact_at', '>=', new Date(cutoff.getTime() - DIGITAL_LEAD_HORIZON_MS));
+  }
+  if (SPEED_TO_LEAD_FRESH_START) {
+    query.where('first_contact_at', '>=', SPEED_TO_LEAD_FRESH_START);
+  }
+  return excludeInternalTestLeads(query, db).select(
+    'id', 'lead_type', 'first_name', 'last_name', 'phone', 'email',
+    'service_interest', 'first_contact_at', 'estimate_id', 'customer_id', 'twilio_call_sid',
   );
-  return rows;
+}
+
+async function loadDeliveredEstimateClearSet(leads, owners) {
+  if (!leads.length) return new Set();
+  const estIds = [...new Set(leads.map((l) => l.estimate_id).filter(Boolean))];
+  const clearableCustIds = [...new Set(
+    leads
+      .filter((l) => l.customer_id && (owners.get(`customer:${l.customer_id}`)?.size || 0) <= 1)
+      .map((l) => l.customer_id),
+  )];
+  if (!estIds.length && !clearableCustIds.length) return new Set();
+  const minFirstAt = new Date(Math.min(...leads.map((l) => new Date(l.first_contact_at).getTime())));
+  const deliveredAtExpr = `GREATEST(${firstDeliveryEvidenceSql('fe')}, ${deliveryInstantSql('fe', 'lastDeliveredAt')})`;
+  const rows = await db('estimates as fe')
+    .whereNull('fe.archived_at')
+    .whereRaw(`${deliveredAtExpr} > ?`, [minFirstAt])
+    .where((q) => {
+      if (estIds.length) q.orWhereIn('fe.id', estIds);
+      if (clearableCustIds.length) q.orWhereIn('fe.customer_id', clearableCustIds);
+    })
+    .select('fe.id', 'fe.customer_id', db.raw(`${deliveredAtExpr} AS delivered_at`));
+  const byEstId = new Map();
+  const byCustId = new Map();
+  for (const r of rows) {
+    const ms = new Date(r.delivered_at).getTime();
+    if (!Number.isFinite(ms)) continue;
+    byEstId.set(String(r.id), Math.max(byEstId.get(String(r.id)) || 0, ms));
+    if (r.customer_id) byCustId.set(String(r.customer_id), Math.max(byCustId.get(String(r.customer_id)) || 0, ms));
+  }
+  const cleared = new Set();
+  for (const l of leads) {
+    const firstMs = new Date(l.first_contact_at).getTime();
+    const directMs = l.estimate_id ? byEstId.get(String(l.estimate_id)) : 0;
+    const custAllowed = Boolean(l.customer_id) && (owners.get(`customer:${l.customer_id}`)?.size || 0) <= 1;
+    const custMs = custAllowed ? (byCustId.get(String(l.customer_id)) || 0) : 0;
+    if (directMs > firstMs || custMs > firstMs) cleared.add(String(l.id));
+  }
+  return cleared;
+}
+
+async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = false } = {}) {
+  const candidates = await loadDigitalLeadCandidates(cutoff, includeExpired);
+  if (!candidates.length) return [];
+  const verdicts = await judgeLeads(db, candidates);
+  const uncontacted = candidates.filter((lead) => {
+    const verdict = verdicts.get(String(lead.id));
+    return !verdict || Boolean(verdict.skip);
+  });
+  if (!uncontacted.length) return [];
+  const peers = [...new Set(uncontacted.map((l) => usablePhoneKey(l.phone)).filter(Boolean))];
+  const emails = [...new Set(uncontacted.map((l) => leadEmail(l.email)).filter(Boolean))];
+  const customerIds = [...new Set(uncontacted.map((l) => l.customer_id).filter(Boolean))];
+  const owners = await openLeadIdentities(db, { peers, emails, customerIds });
+  const estCleared = await loadDeliveredEstimateClearSet(uncontacted, owners);
+  const remaining = uncontacted.filter((lead) => !estCleared.has(String(lead.id)));
+  const allIds = remaining.map((l) => String(l.id));
+  return remaining.slice(0, MAX_PER_SECTION).map((row) => ({
+    ...row,
+    total_count: remaining.length,
+    all_ids: allIds,
+  }));
 }
 
 function formatDigitalLeadRow(r) {
