@@ -525,6 +525,17 @@ exports.down = async function down(knex) {
       throw new Error(`${tbl} holds accounting evidence. Preserve the schema and roll forward; do not drop it.`);
     }
   }
+  if (await knex.schema.hasTable('gl_accounts')) {
+    const customOrEdited = await knex('gl_accounts')
+      .where('is_system', false)
+      .orWhere('active', false)
+      .orWhereNotNull('plaid_account_id')
+      .orWhereRaw('updated_at > created_at')
+      .first('id');
+    if (customOrEdited) {
+      throw new Error('gl_accounts holds customized chart-of-accounts configuration. Preserve the schema and roll forward; do not drop it.');
+    }
+  }
 
   await knex.raw('DROP TRIGGER IF EXISTS trg_gl_lines_immutability ON gl_journal_lines');
   await knex.raw('DROP FUNCTION IF EXISTS gl_enforce_line_immutability()');

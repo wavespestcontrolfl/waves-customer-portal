@@ -125,6 +125,19 @@ function BalanceSheetView({ data }) {
             <TR className="bg-zinc-50"><TD colSpan={2} className="font-semibold text-zinc-700">Fixed Assets (Net of Accumulated Depreciation)</TD></TR>
             {sections.fixed_assets.map((r) => <MoneyRow key={r.id} code={r.code} label={r.name} amount={r.amount_cents} />)}
             <MoneyRow label="Total Fixed Assets (Net)" amount={totals.fixed_assets_net_cents} strong />
+
+            {sections.other_assets?.length ? (
+              <>
+                <TR className="bg-zinc-50"><TD colSpan={2} className="font-semibold text-zinc-700">Other Assets</TD></TR>
+                {sections.other_assets.map((r) => <MoneyRow key={r.id} code={r.code} label={r.name} amount={r.amount_cents} />)}
+                <MoneyRow
+                  label="Total Other Assets"
+                  amount={sections.other_assets.reduce((s, r) => s + r.amount_cents, 0)}
+                  strong
+                />
+              </>
+            ) : null}
+
             <MoneyRow label="TOTAL ASSETS" amount={totals.total_assets_cents} strong />
 
             <TR className="bg-zinc-50"><TD colSpan={2} className="font-semibold text-zinc-700">Current Liabilities</TD></TR>

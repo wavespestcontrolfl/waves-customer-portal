@@ -241,9 +241,82 @@ async function loadEntryWithLines(conn, entryId) {
   };
 }
 
+function canonicalLinesFingerprint(lines) {
+  return [...(lines || [])]
+    .map((l) => [
+      String(l.account_id || '').toLowerCase(),
+      Math.trunc(Number(l.debit_cents) || 0),
+      Math.trunc(Number(l.credit_cents) || 0),
+      String(l.customer_id || '').toLowerCase(),
+      String(l.vendor_id || '').toLowerCase(),
+      String(l.invoice_ref || ''),
+    ].join(':'))
+    .sort()
+    .join('|');
+}
+
+function entryPayloadsMatch(existingEntry, normalized, resolvedLines) {
+  if (dateCellText(existingEntry.entry_date) !== normalized.entry_date) return false;
+  if (existingEntry.entry_type !== normalized.entry_type) return false;
+  if (existingEntry.basis_scope !== normalized.basis_scope) return false;
+  if (existingEntry.source_type !== normalized.source_type) return false;
+  if (existingEntry.memo !== normalized.memo) return false;
+  return canonicalLinesFingerprint(existingEntry.lines) === canonicalLinesFingerprint(resolvedLines);
+}
+
+/**
+ * Resolve stored account normal_balance values for opening balances and reject any
+ * caller-supplied normalBalance that conflicts with the Chart of Accounts.
+ */
+async function resolveOpeningBalanceItems(items, { conn = db } = {}) {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new AccountingError(400, 'At least one opening balance item is required');
+  }
+  const ids = [...new Set(items.map((i) => assertOptionalUuid(i.accountId ?? i.account_id, 'items[].accountId')).filter(Boolean))];
+  const codes = [...new Set(items.map((i) => optionalText(i.accountCode ?? i.account_code, 16)).filter(Boolean))];
+  if (!ids.length && !codes.length) {
+    throw new AccountingError(400, 'Each opening balance item requires accountId or accountCode');
+  }
+
+  const rows = await conn('gl_accounts')
+    .where((q) => {
+      if (ids.length) q.orWhereIn('id', ids);
+      if (codes.length) q.orWhereIn('code', codes);
+    })
+    .select('id', 'code', 'name', 'active', 'normal_balance');
+  const byId = new Map(rows.map((r) => [String(r.id).toLowerCase(), r]));
+  const byCode = new Map(rows.map((r) => [r.code, r]));
+
+  return items.map((item, idx) => {
+    const accountId = assertOptionalUuid(item.accountId ?? item.account_id, `items[${idx}].accountId`);
+    const accountCode = optionalText(item.accountCode ?? item.account_code, 16);
+    const acct = accountId ? byId.get(accountId) : byCode.get(accountCode);
+    if (!acct) {
+      throw new AccountingError(400, `Opening balance item ${idx + 1}: account ${accountCode || accountId} not found`);
+    }
+    if (!acct.active) {
+      throw new AccountingError(409, `Opening balance item ${idx + 1}: account ${acct.code} is inactive`);
+    }
+    const supplied = item.normalBalance ?? item.normal_balance;
+    if (supplied != null && supplied !== '' && supplied !== acct.normal_balance) {
+      throw new AccountingError(
+        400,
+        `Opening balance item ${idx + 1} (${acct.code} ${acct.name}): normalBalance "${supplied}" conflicts with stored normal balance "${acct.normal_balance}"`,
+      );
+    }
+    return {
+      accountId: acct.id,
+      accountCode: acct.code,
+      balanceCents: item.balanceCents ?? item.balance_cents,
+      normalBalance: acct.normal_balance,
+    };
+  });
+}
+
 /**
  * Post a balanced double-entry journal entry atomically.
- * If `idempotencyKey` already exists, returns `{ entry, created: false }` cleanly.
+ * If `idempotencyKey` already exists with an identical payload, returns `{ entry, created: false }`.
+ * If `idempotencyKey` was previously used for a DIFFERENT payload, throws 409 IDEMPOTENCY_CONFLICT.
  */
 async function postJournalEntry(input, { conn = db, actorId = null, requestMeta = {} } = {}) {
   const normalized = validateJournalEntryInput(input);
@@ -254,7 +327,16 @@ async function postJournalEntry(input, { conn = db, actorId = null, requestMeta 
         .where({ idempotency_key: normalized.idempotency_key })
         .first('id');
       if (existing) {
-        return { entry: await loadEntryWithLines(trx, existing.id), created: false };
+        const existingEntry = await loadEntryWithLines(trx, existing.id);
+        const resolvedForCompare = await resolveLineAccounts(trx, normalized.lines);
+        if (!entryPayloadsMatch(existingEntry, normalized, resolvedForCompare)) {
+          throw new AccountingError(
+            409,
+            'This submission key was already used for a different journal entry. Review the posted entry or open a fresh form before retrying.',
+            'IDEMPOTENCY_CONFLICT',
+          );
+        }
+        return { entry: existingEntry, created: false };
       }
     }
 
@@ -829,6 +911,7 @@ module.exports = {
   assertOptionalUuid,
   acquirePeriodLock,
   validateJournalEntryInput,
+  resolveOpeningBalanceItems,
   postJournalEntry,
   reverseJournalEntry,
   linkJournalEntryVendor,

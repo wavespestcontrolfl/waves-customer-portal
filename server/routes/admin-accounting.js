@@ -225,9 +225,10 @@ router.post('/quick-transfer', requireFullAccess, async (req, res) => {
 router.post('/opening-balances', requireFullAccess, async (req, res) => {
   try {
     const b = req.body || {};
+    const resolvedItems = await ledger.resolveOpeningBalanceItems(b.items);
     const payload = rules.buildOpeningBalanceEntry({
       asOfDate: b.asOfDate,
-      items: b.items,
+      items: resolvedItems,
       memo: b.memo || null,
     });
     const { entry, created } = await ledger.postJournalEntry(payload, actorContext(req));

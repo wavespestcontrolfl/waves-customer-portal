@@ -4,21 +4,26 @@
  * Reads Waves' operational tables (invoices, estimate_deposits, payments,
  * paid-Stripe-invoice gaps & refunded gap markers, stripe_payout_transactions
  * outflows/deposit refunds & fees, manual refunds by refund date, stripe_payouts,
- * expenses, and finalized/voided payroll_runs) for an Eastern-calendar date range
- * and posts balanced Journal Entries via posting-rules.js + ledger.js.
+ * expenses, and finalized/voided payroll_runs) for a calendar date range and
+ * posts balanced Journal Entries via posting-rules.js + ledger.js.
  *
  * Key guarantees:
- * - PostgreSQL DATE columns are selected as ISO text ('YYYY-MM-DD') and NEVER shifted
- *   via timezone conversion; Eastern conversion applies ONLY to TIMESTAMPTZ columns.
+ * - PostgreSQL DATE columns are selected as ISO text ('YYYY-MM-DD') and NEVER shifted;
+ *   Stripe payout arrival_date uses UTC calendar day matching ARRIVAL_DAY_SQL; Eastern
+ *   conversion applies only to event TIMESTAMPTZ columns.
  * - All reads and writes run through the injected `conn` (preserving caller transactions).
  * - Dry runs perform ZERO database writes while executing the exact same validation,
  *   idempotency, account-active, and period-lock checks as live runs.
+ * - Source edits, prepay-coverage conversions, reductions to $0, voids/deletions,
+ *   undone manual payments, and late payment rows after gap recovery all reconcile
+ *   through immutable dated adjustments or reversals under entity-level advisory locks.
  */
 
 const crypto = require('crypto');
 const db = require('../../models/db');
 const { etDateString } = require('../../utils/datetime-et');
 const { isInternalTestContact } = require('../internal-test-customers');
+const { invoicePrincipalCents, invoiceDepositCreditCents } = require('../invoice-helpers');
 const { outflowTransactionsQuery } = require('../pnl-report');
 const { bookedSharePct } = require('../tax-shared-bills');
 const {
@@ -39,9 +44,18 @@ const rules = require('./posting-rules');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const BANK_DIRECT_TENDERS = new Set(['zelle', 'us_bank_account', 'ach', 'ach_direct', 'bank_transfer', 'wire', 'direct_deposit']);
 const UNDEPOSITED_TENDERS = new Set(['cash', 'check', 'cheque', 'paper_check', 'money_order']);
+const ARRIVAL_DAY_SQL = "(arrival_date AT TIME ZONE 'UTC')::date";
+const MANUAL_PAYMENT_RECORDED_ACTION = 'invoice.manual_payment_recorded';
+const MANUAL_PAYMENT_UNDONE_ACTION = 'invoice.manual_payment_undone';
 
 function safeNonNegCents(val) {
   return Math.max(0, dollarsToCents(val || 0) || 0);
+}
+
+function billedInvoicePrincipalCents(inv) {
+  if (!inv) return 0;
+  if (inv.subtotal != null) return invoicePrincipalCents(inv);
+  return safeNonNegCents(inv.total);
 }
 
 function timestampToEtDate(value) {
@@ -50,6 +64,14 @@ function timestampToEtDate(value) {
   const d = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(d.getTime())) return null;
   return etDateString(d);
+}
+
+function timestampToUtcDate(value) {
+  if (!value) return null;
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  const d = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString().slice(0, 10);
 }
 
 function isTestCustomerRow(row) {
@@ -76,28 +98,8 @@ function parseJsonObject(raw) {
   return typeof raw === 'object' ? raw : {};
 }
 
-function parseLineItems(raw) {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw;
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-}
-
 function extractAppliedDepositCents(lineItems) {
-  let total = 0;
-  for (const li of parseLineItems(lineItems)) {
-    if (li?.category === 'deposit_credit') {
-      total += Math.abs(dollarsToCents(li.amount) || 0);
-    }
-  }
-  return total;
+  return invoiceDepositCreditCents({ line_items: lineItems });
 }
 
 function extractSurchargeCents(pay, grossCents) {
@@ -119,14 +121,21 @@ function extractSurchargeCents(pay, grossCents) {
 /**
  * Resolve tender across all durable payment-method sources:
  * Stripe processor/PI/charge -> 'stripe' (1050 Stripe Clearing);
- * otherwise payments.payment_method_type -> metadata.payment_method -> linked invoice.payment_method.
- * Cash, checks, and unrecorded manual tenders route to Undeposited Funds (1060) until bank deposit.
+ * otherwise payments.payment_method_type -> metadata.payment_method ->
+ * manual-payment audit marker method -> linked invoice.payment_method.
+ * Cash, checks, and unrecorded manual tenders route to Undeposited Funds (1060).
  */
-function resolvePaymentMethod(pay, linkedInv = null) {
+function resolvePaymentMethod(pay, linkedInv = null, auditMarker = null) {
   const proc = String(pay.processor || '').toLowerCase();
   if (proc === 'stripe' || pay.stripe_payment_intent_id || pay.stripe_charge_id) return 'stripe';
   const meta = parseJsonObject(pay.metadata);
-  const raw = String(pay.payment_method_type || meta.payment_method || linkedInv?.payment_method || '').trim().toLowerCase();
+  const raw = String(
+    pay.payment_method_type
+    || meta.payment_method
+    || auditMarker?.method
+    || linkedInv?.payment_method
+    || '',
+  ).trim().toLowerCase();
   if (raw === 'zelle') return 'zelle';
   if (BANK_DIRECT_TENDERS.has(raw)) return 'ach_direct';
   if (raw === 'cash') return 'cash';
@@ -149,7 +158,7 @@ function computeProratedRefundTaxCents(refundTotalCents, linkedInvoice, paymentA
   const invTaxCents = safeNonNegCents(linkedInvoice.tax_amount);
   if (invTaxCents <= 0) return 0;
   const payGrossCents = paymentAmountDollars != null ? safeNonNegCents(paymentAmountDollars) : 0;
-  const invTotalCents = safeNonNegCents(linkedInvoice.total);
+  const invTotalCents = billedInvoicePrincipalCents(linkedInvoice);
   const denom = Math.max(payGrossCents, invTotalCents);
   if (denom <= 0) return 0;
   if (refundTotalCents >= denom) return Math.min(invTaxCents, refundTotalCents);
@@ -158,13 +167,28 @@ function computeProratedRefundTaxCents(refundTotalCents, linkedInvoice, paymentA
 }
 
 /**
- * Pure: allocate a payer statement payment's principal across its child invoices
- * proportionally to each child invoice's net amount due (exact-cent remainder handling).
+ * Pure: allocate sales-tax reversal incrementally from cumulative refunded gross so
+ * repeated partial refunds never reverse more tax than the invoice accrued.
  */
+function computeIncrementalRefundTaxCents(priorGrossCents, priorTaxCents, signedRefundDeltaCents, linkedInvoice, paymentAmountDollars = null) {
+  const delta = Math.trunc(Number(signedRefundDeltaCents) || 0);
+  if (delta === 0 || !linkedInvoice) return 0;
+  const priorGross = Math.max(0, Math.trunc(Number(priorGrossCents) || 0));
+  const priorTax = Math.max(0, Math.trunc(Number(priorTaxCents) || 0));
+
+  if (delta > 0) {
+    const targetCumTax = computeProratedRefundTaxCents(priorGross + delta, linkedInvoice, paymentAmountDollars);
+    return Math.max(0, Math.min(delta, targetCumTax - priorTax));
+  }
+  const absRev = Math.abs(delta);
+  const targetCumTax = computeProratedRefundTaxCents(Math.max(0, priorGross - absRev), linkedInvoice, paymentAmountDollars);
+  return Math.max(0, Math.min(absRev, priorTax - targetCumTax));
+}
+
 function allocateStatementPrincipalAcrossInvoices(principalCents, childInvoices) {
   const valid = (childInvoices || [])
     .map((inv) => {
-      const due = Math.max(0, safeNonNegCents(inv.total) - safeNonNegCents(inv.credit_applied));
+      const due = Math.max(0, billedInvoicePrincipalCents(inv) - safeNonNegCents(inv.credit_applied));
       const isCommercial = isCommercialProperty(inv.property_type);
       return {
         invoiceId: inv.id,
@@ -197,10 +221,6 @@ function allocateStatementPrincipalAcrossInvoices(principalCents, childInvoices)
   return allocations.length ? allocations : null;
 }
 
-/**
- * Pure: split a deposit refund amount into principal (2300 Unearned Revenue)
- * and surcharge (4085 Card Surcharge Recovery) using the deposit's recorded split.
- */
 function splitDepositRefundCents(absCents, deposit) {
   const faceCents = safeNonNegCents(deposit.amount);
   const surchargeTotal = safeNonNegCents(deposit.card_surcharge);
@@ -215,15 +235,34 @@ function splitDepositRefundCents(absCents, deposit) {
   return { principalCents: absCents - surchargeCents, surchargeCents };
 }
 
-function buildInvoiceDeltaEntry(inv, desiredLines, bookedByCode, adjustmentDate) {
-  const desiredByCode = new Map();
-  for (const l of desiredLines) {
+function mapLinesToNetByCode(lines, accountsById = null) {
+  const map = new Map();
+  for (const l of lines || []) {
+    const code = l.accountCode || l.account_code
+      || (accountsById && l.accountId ? accountsById.get(String(l.accountId).toLowerCase())?.code : null);
+    if (!code) continue;
     const net = (l.debitCents || 0) - (l.creditCents || 0);
-    desiredByCode.set(l.accountCode, (desiredByCode.get(l.accountCode) || 0) + net);
+    map.set(code, (map.get(code) || 0) + net);
   }
+  return map;
+}
 
+function buildDeltaEntry({
+  sourceType,
+  sourceId,
+  keyPrefix,
+  revisionSeq,
+  desiredLines,
+  bookedByCode,
+  adjustmentDate,
+  basisScope,
+  reference,
+  memo,
+  lineMeta = {},
+  accountsById = null,
+}) {
+  const desiredByCode = mapLinesToNetByCode(desiredLines || [], accountsById);
   const allCodes = [...new Set([...desiredByCode.keys(), ...bookedByCode.keys()])].sort();
-  const invoiceRef = String(inv.id);
   const deltaLines = [];
   for (const code of allCodes) {
     const delta = (desiredByCode.get(code) || 0) - (bookedByCode.get(code) || 0);
@@ -232,9 +271,8 @@ function buildInvoiceDeltaEntry(inv, desiredLines, bookedByCode, adjustmentDate)
       accountCode: code,
       debitCents: delta > 0 ? delta : 0,
       creditCents: delta < 0 ? Math.abs(delta) : 0,
-      customerId: inv.customer_id || null,
-      invoiceRef,
-      memo: 'Invoice source update adjustment',
+      ...lineMeta,
+      memo: 'Source update adjustment',
     });
   }
   if (deltaLines.length < 2) return null;
@@ -244,14 +282,30 @@ function buildInvoiceDeltaEntry(inv, desiredLines, bookedByCode, adjustmentDate)
   return {
     entryDate: adjustmentDate,
     entryType: 'adjusting',
-    basisScope: 'accrual_only',
-    sourceType: 'invoice',
-    sourceId: invoiceRef,
-    idempotencyKey: `invoice-adj:${inv.id}:${hash}`,
-    reference: inv.invoice_number || invoiceRef,
-    memo: `Invoice adjustment ${inv.invoice_number || inv.id}`,
+    basisScope,
+    sourceType,
+    sourceId: String(sourceId),
+    idempotencyKey: `${keyPrefix}:${sourceId}:seq-${revisionSeq}:${hash}`,
+    reference: reference || String(sourceId),
+    memo,
     lines: deltaLines,
   };
+}
+
+function buildInvoiceDeltaEntry(inv, desiredLines, bookedByCode, adjustmentDate, revisionSeq = 1) {
+  return buildDeltaEntry({
+    sourceType: 'invoice',
+    sourceId: inv.id,
+    keyPrefix: 'invoice-adj',
+    revisionSeq,
+    desiredLines,
+    bookedByCode,
+    adjustmentDate,
+    basisScope: 'accrual_only',
+    reference: inv.invoice_number || String(inv.id),
+    memo: `Invoice adjustment ${inv.invoice_number || inv.id}`,
+    lineMeta: { customerId: inv.customer_id || null, invoiceRef: String(inv.id) },
+  });
 }
 
 // ── Shared Execution & Dry-Run Helpers ───────────────────────────────────────
@@ -287,19 +341,19 @@ async function previewEntry(entryInput, ctx, bucket, { isAdjustment = false } = 
     normalized = validateJournalEntryInput(entryInput);
   } catch (err) {
     ctx.stats[bucket].errors.push({ idempotencyKey: entryInput?.idempotencyKey || null, message: err.message });
-    return;
+    return false;
   }
 
   const key = normalized.idempotency_key;
   if (key) {
     if (ctx.caches.seenPreviewKeys.has(key)) {
       ctx.stats[bucket].skipped += 1;
-      return;
+      return false;
     }
     const existing = await ctx.conn('gl_journal_entries').where({ idempotency_key: key }).first('id');
     if (existing) {
       ctx.stats[bucket].skipped += 1;
-      return;
+      return false;
     }
   }
 
@@ -309,53 +363,55 @@ async function previewEntry(entryInput, ctx, bucket, { isAdjustment = false } = 
       idempotencyKey: key,
       message: `Accounting period ${periodMonth} is locked. Post an adjusting or reversing entry in an open period.`,
     });
-    return;
+    return false;
   }
 
   const acctErr = validatePreviewAccounts(normalized.lines, ctx.caches);
   if (acctErr) {
     ctx.stats[bucket].errors.push({ idempotencyKey: key, message: acctErr });
-    return;
+    return false;
   }
 
   if (key) ctx.caches.seenPreviewKeys.add(key);
   if (isAdjustment) ctx.stats[bucket].would_adjust += 1;
   else ctx.stats[bucket].would_post += 1;
+  return true;
 }
 
-async function postOrPreview(entryInput, ctx, bucket, { isAdjustment = false } = {}) {
+async function postOrPreview(entryInput, ctx, bucket, { isAdjustment = false, connOverride = null } = {}) {
   if (ctx.dryRun) {
-    await previewEntry(entryInput, ctx, bucket, { isAdjustment });
-    return;
+    return previewEntry(entryInput, ctx, bucket, { isAdjustment });
   }
   try {
     const res = await postJournalEntry(entryInput, {
-      conn: ctx.conn,
+      conn: connOverride || ctx.conn,
       actorId: ctx.actorId,
       requestMeta: ctx.requestMeta,
     });
     if (res.created) {
       if (isAdjustment) ctx.stats[bucket].adjusted += 1;
       else ctx.stats[bucket].posted += 1;
-    } else {
-      ctx.stats[bucket].skipped += 1;
+      return true;
     }
+    ctx.stats[bucket].skipped += 1;
+    return false;
   } catch (err) {
     ctx.stats[bucket].errors.push({ idempotencyKey: entryInput.idempotencyKey, message: err.message });
+    return false;
   }
 }
 
-async function reverseOrPreview(origEntry, reversalDate, reason, ctx, bucket) {
+async function reverseOrPreview(origEntry, reversalDate, reason, ctx, bucket, { connOverride = null } = {}) {
   const revKey = `reversal:${origEntry.id}`;
   if (ctx.dryRun) {
     if (origEntry.reversed_by_entry_id || ctx.caches.seenPreviewKeys.has(revKey)) {
       ctx.stats[bucket].skipped += 1;
-      return;
+      return false;
     }
     const existingRev = await ctx.conn('gl_journal_entries').where({ idempotency_key: revKey }).first('id');
     if (existingRev) {
       ctx.stats[bucket].skipped += 1;
-      return;
+      return false;
     }
     const periodMonth = reversalDate.slice(0, 7);
     if (ctx.caches.lockedMonths.has(periodMonth)) {
@@ -363,11 +419,11 @@ async function reverseOrPreview(origEntry, reversalDate, reason, ctx, bucket) {
         idempotencyKey: revKey,
         message: `Accounting period ${periodMonth} is locked. Reopen or reverse in an open period.`,
       });
-      return;
+      return false;
     }
     ctx.caches.seenPreviewKeys.add(revKey);
     ctx.stats[bucket].would_reverse += 1;
-    return;
+    return true;
   }
 
   try {
@@ -376,13 +432,26 @@ async function reverseOrPreview(origEntry, reversalDate, reason, ctx, bucket) {
       reason,
       actorId: ctx.actorId,
       requestMeta: ctx.requestMeta,
-      conn: ctx.conn,
+      conn: connOverride || ctx.conn,
     });
     ctx.stats[bucket].reversed += 1;
+    return true;
   } catch (err) {
     if (err && err.code === 'ALREADY_REVERSED') ctx.stats[bucket].skipped += 1;
     else ctx.stats[bucket].errors.push({ idempotencyKey: revKey, message: err.message });
+    return false;
   }
+}
+
+async function withEntitySyncLock(conn, lockKey, fn) {
+  const run = async (trx) => {
+    if (typeof trx.raw === 'function') {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [lockKey]);
+    }
+    return fn(trx);
+  };
+  if (conn.isTransaction || typeof conn.transaction !== 'function') return run(conn);
+  return conn.transaction(run);
 }
 
 async function loadInvoicesForLinks(conn, invoiceIds, piIds) {
@@ -401,7 +470,7 @@ async function loadInvoicesForLinks(conn, invoiceIds, piIds) {
     })
     .select(
       'i.id', 'i.stripe_payment_intent_id', 'i.service_type', 'i.payment_method', 'i.total', 'i.tax_amount',
-      'i.subtotal', 'i.discount_amount', 'i.credit_applied', 'c.property_type',
+      'i.subtotal', 'i.discount_amount', 'i.credit_applied', 'i.line_items', 'c.property_type',
     );
   for (const r of rows) {
     byId.set(String(r.id), r);
@@ -410,21 +479,28 @@ async function loadInvoicesForLinks(conn, invoiceIds, piIds) {
   return { byId, byPi };
 }
 
-// ── 1. Invoices (Initial Post + Edit Adjustments + Void/Archive Reversals) ───
+// ── 1. Invoices (Initial Post + Coverage Conversion + Zero/Edit Deltas + Voids) ─
 
 function buildCoveredPrepayVisitPayload(inv, issueDate, serviceLine, isCommercial, taxCents) {
   const rawPreTax = (dollarsToCents(inv.subtotal || 0) || 0) - (dollarsToCents(inv.discount_amount || 0) || 0);
-  const amountCents = rawPreTax > 0 ? rawPreTax : Math.max(0, safeNonNegCents(inv.total) - taxCents);
+  const amountCents = rawPreTax > 0 ? rawPreTax : Math.max(0, billedInvoicePrincipalCents(inv) - taxCents);
   if (amountCents <= 0) return null;
-  return rules.buildUnearnedRecognitionEntry({
-    sourceId: `covered-inv:${inv.id}`,
-    recognitionDate: issueDate,
-    amountCents,
-    serviceLine,
-    isCommercial,
-    customerId: inv.customer_id,
+  const revCode = rules.revenueAccountCodeFor(serviceLine, isCommercial);
+  const invoiceRef = String(inv.id);
+  return {
+    entryDate: issueDate,
+    entryType: 'adjusting',
+    basisScope: 'accrual_only',
+    sourceType: 'invoice',
+    sourceId: invoiceRef,
+    idempotencyKey: `invoice:${inv.id}`,
+    reference: inv.invoice_number || invoiceRef,
     memo: `Annual prepay covered visit ${inv.invoice_number || inv.id}`,
-  });
+    lines: [
+      { accountCode: SYSTEM_CODES.UNEARNED_REVENUE, debitCents: amountCents, creditCents: 0, customerId: inv.customer_id, serviceLine, invoiceRef },
+      { accountCode: revCode, debitCents: 0, creditCents: amountCents, customerId: inv.customer_id, serviceLine, invoiceRef },
+    ],
+  };
 }
 
 function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
@@ -441,10 +517,10 @@ function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
     return buildCoveredPrepayVisitPayload(inv, issueDate, serviceLine, isCommercial, taxCents);
   }
 
-  const totalDueCents = safeNonNegCents(inv.total);
-  const appliedDepositCents = extractAppliedDepositCents(inv.line_items);
-  const appliedCreditCents = Math.min(safeNonNegCents(inv.credit_applied), totalDueCents);
-  const subtotalCents = Math.max(0, totalDueCents + appliedDepositCents - taxCents);
+  const principalCents = billedInvoicePrincipalCents(inv);
+  const appliedDepositCents = invoiceDepositCreditCents(inv);
+  const appliedCreditCents = Math.min(safeNonNegCents(inv.credit_applied), principalCents);
+  const subtotalCents = Math.max(0, principalCents + appliedDepositCents - taxCents);
   if (subtotalCents + taxCents <= 0) return null;
 
   return rules.buildInvoiceEntry({
@@ -462,26 +538,59 @@ function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
   });
 }
 
-async function loadBookedInvoiceNets(conn, invoiceIds) {
-  const byInvoice = new Map();
-  if (!invoiceIds.length) return byInvoice;
+async function loadBookedInvoiceState(conn, invoiceId) {
   const rows = await conn('gl_journal_lines as l')
     .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
     .join('gl_accounts as a', 'a.id', 'l.account_id')
     .where('e.status', 'posted')
-    .where('e.source_type', 'invoice')
     .whereNull('e.reversed_by_entry_id')
-    .whereIn('e.source_id', invoiceIds)
-    .select('e.source_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
+    .where((q) => {
+      q.where({ 'e.source_type': 'invoice', 'e.source_id': String(invoiceId) })
+        .orWhere({ 'e.source_type': 'unearned_recognition', 'e.source_id': `covered-inv:${invoiceId}` });
+    })
+    .select('e.id as entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
 
+  const bookedByCode = new Map();
+  const entryIds = new Set();
   for (const r of rows) {
-    const invKey = String(r.source_id);
-    const map = byInvoice.get(invKey) || new Map();
+    entryIds.add(r.entry_id);
     const net = Number(r.debit_cents) - Number(r.credit_cents);
-    map.set(r.code, (map.get(r.code) || 0) + net);
-    byInvoice.set(invKey, map);
+    bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
   }
-  return byInvoice;
+  return { bookedByCode, entryCount: entryIds.size };
+}
+
+async function syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx) {
+  const desired = buildInvoiceGlPayload(inv, prepayInvoiceIds);
+  const fallbackDate = dateCellText(inv.service_date)
+    || timestampToEtDate(inv.sent_at)
+    || timestampToEtDate(inv.created_at);
+  const updatedDate = timestampToEtDate(inv.updated_at);
+  const baseDate = desired?.entryDate || fallbackDate;
+  const adjDate = updatedDate && baseDate && updatedDate >= baseDate ? updatedDate : baseDate;
+
+  const reconcile = async (trx) => {
+    const { bookedByCode, entryCount } = await loadBookedInvoiceState(trx, inv.id);
+    if (entryCount === 0) {
+      if (!desired) return;
+      await postOrPreview(desired, ctx, 'invoices', { connOverride: trx });
+      return;
+    }
+
+    if (!adjDate) return;
+    const adjEntry = buildInvoiceDeltaEntry(inv, desired ? desired.lines : [], bookedByCode, adjDate, entryCount);
+    if (!adjEntry) {
+      ctx.stats.invoices.skipped += 1;
+      return;
+    }
+    await postOrPreview(adjEntry, ctx, 'invoices', { isAdjustment: true, connOverride: trx });
+  };
+
+  if (ctx.dryRun) {
+    await reconcile(ctx.conn);
+  } else {
+    await withEntitySyncLock(ctx.conn, `gl-sync-invoice:${inv.id}`, reconcile);
+  }
 }
 
 async function reconcileVoidedInvoices(conn, from, to, ctx) {
@@ -530,10 +639,12 @@ async function syncInvoices(conn, from, to, ctx) {
           .whereExists(function alreadyBooked() {
             this.select(conn.raw('1'))
               .from('gl_journal_entries as ge')
-              .where('ge.source_type', 'invoice')
-              .whereRaw('ge.source_id = i.id::text')
               .where('ge.status', 'posted')
-              .whereNull('ge.reversed_by_entry_id');
+              .whereNull('ge.reversed_by_entry_id')
+              .where((sub) => {
+                sub.whereRaw("ge.source_type = 'invoice' AND ge.source_id = i.id::text")
+                  .orWhereRaw("ge.source_type = 'unearned_recognition' AND ge.source_id = 'covered-inv:' || i.id::text");
+              });
           });
       });
     })
@@ -544,30 +655,9 @@ async function syncInvoices(conn, from, to, ctx) {
       'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
     );
 
-  const nonTestRows = rows.filter((inv) => !isTestCustomerRow(inv));
-  const bookedByInvoice = await loadBookedInvoiceNets(
-    conn,
-    nonTestRows.filter((i) => !i.annual_prepay_covered_term_id).map((i) => String(i.id)),
-  );
-
-  for (const inv of nonTestRows) {
-    const desired = buildInvoiceGlPayload(inv, prepayInvoiceIds);
-    if (!desired) continue;
-
-    const booked = !inv.annual_prepay_covered_term_id ? bookedByInvoice.get(String(inv.id)) : null;
-    if (!booked) {
-      await postOrPreview(desired, ctx, 'invoices');
-      continue;
-    }
-
-    const updatedDate = timestampToEtDate(inv.updated_at);
-    const adjDate = updatedDate && updatedDate >= desired.entryDate ? updatedDate : desired.entryDate;
-    const adjEntry = buildInvoiceDeltaEntry(inv, desired.lines, booked, adjDate);
-    if (!adjEntry) {
-      ctx.stats.invoices.skipped += 1;
-      continue;
-    }
-    await postOrPreview(adjEntry, ctx, 'invoices', { isAdjustment: true });
+  for (const inv of rows) {
+    if (isTestCustomerRow(inv)) continue;
+    await syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx);
   }
 
   await reconcileVoidedInvoices(conn, from, to, ctx);
@@ -609,26 +699,49 @@ async function syncEstimateDeposits(conn, from, to, ctx) {
   }
 }
 
-// ── 3. Customer Payments, Statement Allocations & Stripe Invoice Gap Receipts ─
+// ── 3. Payments (Manual Audit Recovery, Statement Allocations, Undo & Gaps) ──
 
-function linkedInvoiceForPayment(pay, invoiceMaps) {
+async function loadManualPaymentAuditMarkers(conn, paymentIds) {
+  const byPaymentId = new Map();
+  if (!paymentIds.length || !(await conn.schema.hasTable('audit_log'))) return byPaymentId;
+  const rows = await conn('audit_log')
+    .where({ action: MANUAL_PAYMENT_RECORDED_ACTION, resource_type: 'invoices' })
+    .whereIn(conn.raw("metadata->>'paymentId'"), paymentIds.map(String))
+    .select('resource_id as invoice_id', 'metadata');
+  for (const r of rows) {
+    const meta = parseJsonObject(r.metadata);
+    if (meta.paymentId) {
+      byPaymentId.set(String(meta.paymentId), {
+        invoiceId: r.invoice_id || null,
+        method: meta.method || null,
+      });
+    }
+  }
+  return byPaymentId;
+}
+
+function linkedInvoiceForPayment(pay, invoiceMaps, auditMarker = null) {
   const meta = parseJsonObject(pay.metadata);
-  const metaInvId = meta.invoice_id || meta.dispute_invoice_id;
-  if (metaInvId && invoiceMaps.byId.has(String(metaInvId))) return invoiceMaps.byId.get(String(metaInvId));
+  const candidates = [meta.invoice_id, meta.dispute_invoice_id, auditMarker?.invoiceId];
+  for (const id of candidates) {
+    if (id && invoiceMaps.byId.has(String(id))) return invoiceMaps.byId.get(String(id));
+  }
   if (pay.stripe_payment_intent_id && invoiceMaps.byPi.has(String(pay.stripe_payment_intent_id))) {
     return invoiceMaps.byPi.get(String(pay.stripe_payment_intent_id));
   }
   return null;
 }
 
-function collectPaymentInvoiceRefs(rows) {
+function collectPaymentInvoiceRefs(rows, auditMarkers = new Map()) {
   const ids = [];
   const pis = [];
   const statementIds = [];
   for (const r of rows) {
     const meta = parseJsonObject(r.metadata);
+    const marker = auditMarkers.get(String(r.id));
     if (meta.invoice_id) ids.push(meta.invoice_id);
     if (meta.dispute_invoice_id) ids.push(meta.dispute_invoice_id);
+    if (marker?.invoiceId) ids.push(marker.invoiceId);
     if (r.stripe_payment_intent_id) pis.push(r.stripe_payment_intent_id);
     if (r.statement_id != null) statementIds.push(r.statement_id);
   }
@@ -644,7 +757,10 @@ async function loadStatementChildInvoices(conn, statementIds) {
     .whereNotIn('i.status', ['void', 'cancelled', 'canceled'])
     .whereNull('i.archived_at')
     .orderBy('i.created_at', 'asc')
-    .select('i.id', 'i.payer_statement_id', 'i.customer_id', 'i.total', 'i.credit_applied', 'i.service_type', 'c.property_type');
+    .select(
+      'i.id', 'i.payer_statement_id', 'i.customer_id', 'i.subtotal', 'i.discount_amount',
+      'i.tax_amount', 'i.total', 'i.credit_applied', 'i.line_items', 'i.service_type', 'c.property_type',
+    );
   for (const r of rows) {
     const k = String(r.payer_statement_id);
     const list = byStatement.get(k) || [];
@@ -654,37 +770,72 @@ async function loadStatementChildInvoices(conn, statementIds) {
   return byStatement;
 }
 
-function resolvePaymentContext(pay, linkedInv, statementInvoicesByStmt) {
+function resolvePaymentContext(pay, linkedInv, auditMarker, statementInvoicesByStmt) {
   const meta = parseJsonObject(pay.metadata);
-  const method = resolvePaymentMethod(pay, linkedInv);
+  const method = resolvePaymentMethod(pay, linkedInv, auditMarker);
   const isDeposit = !linkedInv && !pay.statement_id && /deposit/i.test(String(meta.type || meta.source || ''));
   const isCommercial = isCommercialProperty(linkedInv?.property_type || pay.property_type);
   const serviceLine = isCommercial ? 'commercial' : (linkedInv?.service_type || null);
-  const metaInvId = UUID_RE.test(String(meta.invoice_id || '')) ? meta.invoice_id : null;
+  const fallbackInvId = UUID_RE.test(String(meta.invoice_id || ''))
+    ? meta.invoice_id
+    : (UUID_RE.test(String(auditMarker?.invoiceId || '')) ? auditMarker.invoiceId : null);
   const stmtChildren = pay.statement_id != null ? statementInvoicesByStmt.get(String(pay.statement_id)) : null;
   return {
     method,
     isDeposit,
     serviceLine,
-    invoiceId: linkedInv?.id || metaInvId,
+    invoiceId: linkedInv?.id || fallbackInvId,
     stmtChildren,
   };
 }
 
-async function syncSinglePaymentRow(pay, invoiceMaps, statementInvoicesByStmt, ctx) {
+function paymentLineSignature(lines) {
+  return [...(lines || [])]
+    .map((l) => [
+      l.accountCode || l.account_code || '',
+      Math.trunc(Number(l.debitCents ?? l.debit_cents) || 0),
+      Math.trunc(Number(l.creditCents ?? l.credit_cents) || 0),
+      String(l.invoiceRef ?? l.invoice_ref ?? ''),
+    ].join(':'))
+    .sort()
+    .join('|');
+}
+
+async function findSupersedingGapEntry(conn, pay, invoiceId) {
+  if (!pay.stripe_payment_intent_id && !invoiceId) return null;
+  const gapEntry = await conn('gl_journal_entries')
+    .where({ source_type: 'payment', status: 'posted' })
+    .whereNull('reversed_by_entry_id')
+    .where((q) => {
+      if (invoiceId) q.orWhere('idempotency_key', `payment:gap:${invoiceId}`);
+      if (pay.stripe_payment_intent_id) {
+        q.orWhere((sub) => sub.where('reference', pay.stripe_payment_intent_id).where('idempotency_key', 'like', 'payment:gap:%'));
+      }
+    })
+    .first('id', 'reversed_by_entry_id', conn.raw('entry_date::text as entry_date'));
+  if (!gapEntry) return null;
+  const gapLines = await conn('gl_journal_lines as l')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .where('l.entry_id', gapEntry.id)
+    .select('a.code as account_code', 'l.debit_cents', 'l.credit_cents', 'l.invoice_ref');
+  return { ...gapEntry, lines: gapLines };
+}
+
+async function syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, statementInvoicesByStmt, ctx) {
   const paymentDate = dateCellText(pay.payment_date) || timestampToEtDate(pay.created_at);
   const grossCents = dollarsToCents(pay.amount);
   if (!paymentDate || !grossCents || grossCents <= 0) return;
 
-  const linkedInv = linkedInvoiceForPayment(pay, invoiceMaps);
-  const pCtx = resolvePaymentContext(pay, linkedInv, statementInvoicesByStmt);
+  const auditMarker = auditMarkers.get(String(pay.id)) || null;
+  const linkedInv = linkedInvoiceForPayment(pay, invoiceMaps, auditMarker);
+  const pCtx = resolvePaymentContext(pay, linkedInv, auditMarker, statementInvoicesByStmt);
   const surchargeCents = extractSurchargeCents(pay, grossCents);
   const principalCents = grossCents - surchargeCents;
   const arAllocations = pCtx.stmtChildren
     ? allocateStatementPrincipalAcrossInvoices(principalCents, pCtx.stmtChildren)
     : null;
 
-  await postOrPreview(rules.buildPaymentEntry({
+  const entry = rules.buildPaymentEntry({
     paymentId: pay.id,
     paymentDate,
     grossCents,
@@ -697,7 +848,87 @@ async function syncSinglePaymentRow(pay, invoiceMaps, statementInvoicesByStmt, c
     customerId: pay.customer_id,
     serviceLine: pCtx.serviceLine,
     reference: pay.stripe_payment_intent_id || pay.id,
-  }), ctx, 'payments');
+  });
+
+  // Reconcile any prior Stripe gap receipt atomically so a late payments row never duplicates or orphans it.
+  const applyPayment = async (trx) => {
+    const priorGap = await findSupersedingGapEntry(trx, pay, pCtx.invoiceId);
+    let reversedGap = false;
+    if (priorGap) {
+      if (paymentLineSignature(priorGap.lines) === paymentLineSignature(entry.lines)) {
+        ctx.stats.payments.skipped += 1;
+        return;
+      }
+      reversedGap = await reverseOrPreview(
+        priorGap,
+        paymentDate,
+        `Superseded by settled payment ${pay.id}`,
+        ctx,
+        'payments',
+        { connOverride: trx },
+      );
+      if (!reversedGap) return;
+    }
+    const posted = await postOrPreview(entry, ctx, 'payments', { connOverride: trx });
+    if (reversedGap && !posted && !ctx.dryRun) {
+      ctx.stats.payments.reversed = Math.max(0, ctx.stats.payments.reversed - 1);
+      const rollbackErr = new Error('ABORT_GAP_REPLACEMENT');
+      rollbackErr.code = 'ABORT_GAP_REPLACEMENT';
+      throw rollbackErr;
+    }
+  };
+
+  if (ctx.dryRun) {
+    await applyPayment(ctx.conn);
+  } else {
+    try {
+      await withEntitySyncLock(ctx.conn, `gl-sync-payment:${pay.stripe_payment_intent_id || pay.id}`, applyPayment);
+    } catch (err) {
+      if (err?.code !== 'ABORT_GAP_REPLACEMENT') throw err;
+    }
+  }
+}
+
+async function reconcileCanceledPayments(conn, from, to, ctx) {
+  const canceled = await conn('gl_journal_entries as e')
+    .join('payments as p', conn.raw("e.idempotency_key = 'payment:' || p.id::text"))
+    .where('e.status', 'posted')
+    .whereNull('e.reversed_by_entry_id')
+    .whereIn('p.status', ['canceled', 'cancelled'])
+    .where((q) => {
+      q.whereBetween('p.payment_date', [from, to])
+        .orWhereRaw(
+          "DATE(COALESCE((p.metadata->'manualPaymentUndo'->>'at')::timestamptz, p.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
+          [from, to],
+        );
+    })
+    .select(
+      'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+      'p.id as payment_id', 'p.metadata', 'p.updated_at',
+    );
+  if (!canceled.length) return;
+
+  const undoAuditByPayment = new Map();
+  if (await conn.schema.hasTable('audit_log')) {
+    const audits = await conn('audit_log')
+      .where({ action: MANUAL_PAYMENT_UNDONE_ACTION })
+      .whereIn(conn.raw("metadata->>'paymentId'"), canceled.map((r) => String(r.payment_id)))
+      .select('created_at', 'metadata');
+    for (const a of audits) {
+      const m = parseJsonObject(a.metadata);
+      if (m.paymentId) undoAuditByPayment.set(String(m.paymentId), { at: m.at || a.created_at, reason: m.reason || null });
+    }
+  }
+
+  for (const row of canceled) {
+    const meta = parseJsonObject(row.metadata);
+    const undo = meta.manualPaymentUndo || undoAuditByPayment.get(String(row.payment_id)) || {};
+    const revDate = timestampToEtDate(undo.at || row.updated_at) || dateCellText(row.entry_date);
+    const reason = undo.reason
+      ? `Manual payment undone: ${String(undo.reason).slice(0, 220)}`
+      : 'Payment canceled/undone';
+    await reverseOrPreview(row, revDate, reason, ctx, 'payments');
+  }
 }
 
 async function syncPayments(conn, from, to, ctx) {
@@ -719,15 +950,30 @@ async function syncPayments(conn, from, to, ctx) {
     );
 
   const nonTestRows = rows.filter((r) => !isTestCustomerRow(r));
-  const { ids, pis, statementIds } = collectPaymentInvoiceRefs(nonTestRows);
+  const manualIds = nonTestRows
+    .filter((r) => !(String(r.processor || '').toLowerCase() === 'stripe' || r.stripe_payment_intent_id || r.stripe_charge_id))
+    .map((r) => r.id);
+  const auditMarkers = await loadManualPaymentAuditMarkers(conn, manualIds);
+  const { ids, pis, statementIds } = collectPaymentInvoiceRefs(nonTestRows, auditMarkers);
   const [invoiceMaps, stmtMap] = await Promise.all([
     loadInvoicesForLinks(conn, ids, pis),
     loadStatementChildInvoices(conn, statementIds),
   ]);
 
   for (const pay of nonTestRows) {
-    await syncSinglePaymentRow(pay, invoiceMaps, stmtMap, ctx);
+    await syncSinglePaymentRow(pay, invoiceMaps, auditMarkers, stmtMap, ctx);
   }
+
+  await reconcileCanceledPayments(conn, from, to, ctx);
+}
+
+async function hasExistingPaymentEntryForPi(conn, piId) {
+  if (!piId) return false;
+  const existing = await conn('gl_journal_entries')
+    .where({ source_type: 'payment', reference: piId, status: 'posted' })
+    .whereNull('reversed_by_entry_id')
+    .first('id');
+  return Boolean(existing);
 }
 
 async function syncStripeInvoiceGapPayments(conn, from, to, ctx) {
@@ -752,14 +998,18 @@ async function syncStripeInvoiceGapPayments(conn, from, to, ctx) {
   }
 
   const gapInvoices = await q.select(
-    'i.id', 'i.customer_id', 'i.total', 'i.credit_applied', 'i.service_type',
-    'i.stripe_payment_intent_id', 'i.paid_at',
+    'i.id', 'i.customer_id', 'i.subtotal', 'i.discount_amount', 'i.tax_amount', 'i.total',
+    'i.credit_applied', 'i.line_items', 'i.service_type', 'i.stripe_payment_intent_id', 'i.paid_at',
     'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
   );
 
   for (const inv of gapInvoices) {
     if (isTestCustomerRow(inv)) continue;
-    const grossCents = Math.max(0, safeNonNegCents(inv.total) - safeNonNegCents(inv.credit_applied));
+    if (await hasExistingPaymentEntryForPi(conn, inv.stripe_payment_intent_id)) {
+      ctx.stats.payments.skipped += 1;
+      continue;
+    }
+    const grossCents = Math.max(0, billedInvoicePrincipalCents(inv) - safeNonNegCents(inv.credit_applied));
     const paymentDate = timestampToEtDate(inv.paid_at);
     if (!paymentDate || grossCents <= 0) continue;
 
@@ -809,6 +1059,10 @@ async function syncRefundedGapReceiptMarkers(conn, from, to, ctx) {
   for (const m of markers) {
     const customerId = m.customer_id || m.invoice_customer_id || null;
     if (isTestCustomerRow({ ...m, customer_id: customerId })) continue;
+    if (await hasExistingPaymentEntryForPi(conn, m.stripe_payment_intent_id)) {
+      ctx.stats.payments.skipped += 1;
+      continue;
+    }
     const grossCents = dollarsToCents(m.amount);
     const paymentDate = timestampToEtDate(m.paid_at) || dateCellText(m.payment_date);
     if (!paymentDate || !grossCents || grossCents <= 0) continue;
@@ -831,7 +1085,7 @@ async function syncRefundedGapReceiptMarkers(conn, from, to, ctx) {
   }
 }
 
-// ── 4. Refunds (Stripe Outflows, Unused Deposit Refunds & Manual Refunds) ────
+// ── 4. Refunds (Stripe Outflows w/ Cumulative Tax, Verified Deposits, Manual) ─
 
 function collectOutflowInvoiceRefs(rows) {
   const ids = [];
@@ -886,68 +1140,110 @@ async function loadDepositsForOutflows(conn, customerIds) {
   return { byPi, byCustomer };
 }
 
+/**
+ * Pure: match an unlinked Stripe outflow to an unused estimate deposit ONLY when
+ * verified by an exact PaymentIntent reference OR a unique exact amount match.
+ * Never guesses on a mismatched single candidate; flags ambiguous outflows for review.
+ */
 function findMatchingDepositForOutflow(row, absCents, depositMaps) {
-  if (row.payment_id || row.invoice_id) return null;
+  if (row.payment_id || row.invoice_id) return { deposit: null, ambiguous: false };
   const desc = String(row.description || '');
   for (const [pi, dep] of depositMaps.byPi.entries()) {
-    if (desc.includes(pi)) return dep;
+    if (desc.includes(pi)) return { deposit: dep, ambiguous: false };
   }
   const cid = row.customer_id ? String(row.customer_id) : null;
-  if (!cid || !depositMaps.byCustomer.has(cid)) return null;
+  if (!cid || !depositMaps.byCustomer.has(cid)) return { deposit: null, ambiguous: false };
+
   const candidates = depositMaps.byCustomer.get(cid);
-  const exact = candidates.find((d) => {
+  const exactMatches = candidates.filter((d) => {
     const face = safeNonNegCents(d.amount);
     const refFace = safeNonNegCents(d.refunded_amount);
     const sur = safeNonNegCents(d.card_surcharge);
-    return absCents === refFace || absCents === face + sur || absCents === refFace + sur;
+    return (refFace > 0 && (absCents === refFace || absCents === refFace + sur))
+      || (face > 0 && absCents === face + sur);
   });
-  return exact || (candidates.length === 1 ? candidates[0] : null);
+  if (exactMatches.length === 1) return { deposit: exactMatches[0], ambiguous: false };
+  return { deposit: null, ambiguous: candidates.length > 0 };
 }
 
-function buildOutflowGlEntry(row, invoiceMaps, depositMaps) {
-  const amountCents = dollarsToCents(row.amount);
-  const entryDate = timestampToEtDate(row.created_at_stripe);
-  if (!entryDate || !amountCents) return null;
+async function loadPriorRefundTotalsByInvoice(conn, invoiceIds) {
+  const map = new Map();
+  if (!invoiceIds.length) return map;
+  const rows = await conn('gl_journal_lines as l')
+    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
+    .join('gl_accounts as a', 'a.id', 'l.account_id')
+    .where('e.status', 'posted')
+    .whereNull('e.reversed_by_entry_id')
+    .whereIn('e.source_type', ['refund', 'refund_reversal'])
+    .whereIn('l.invoice_ref', invoiceIds.map(String))
+    .select('l.invoice_ref', 'a.code', 'l.debit_cents', 'l.credit_cents');
 
-  const absCents = Math.abs(amountCents);
-  const txnKey = row.stripe_txn_id || row.id;
-  const customerId = row.customer_id || row.payment_customer_id || null;
-  const reason = row.description
-    ? String(row.description).slice(0, 300)
-    : `Stripe ${row.reporting_category || row.type || 'refund'}`;
-
-  const linkedInv = resolveOutflowLinkedInvoice(row, invoiceMaps);
-  if (!linkedInv) {
-    const dep = findMatchingDepositForOutflow(row, absCents, depositMaps);
-    if (dep) {
-      const { principalCents, surchargeCents } = splitDepositRefundCents(absCents, dep);
-      return amountCents < 0
-        ? rules.buildDepositRefundEntry({
-          txnId: txnKey,
-          idempotencyKey: `deposit-refund:spt:${txnKey}`,
-          refundDate: entryDate,
-          principalCents,
-          surchargeCents,
-          method: 'stripe',
-          customerId,
-          reference: txnKey,
-          reason,
-        })
-        : rules.buildDepositRefundReversalEntry({
-          txnId: txnKey,
-          idempotencyKey: `deposit-refund-reversal:spt:${txnKey}`,
-          reversalDate: entryDate,
-          principalCents,
-          surchargeCents,
-          method: 'stripe',
-          customerId,
-          reference: txnKey,
-          reason,
-        });
+  for (const r of rows) {
+    const key = String(r.invoice_ref);
+    const rec = map.get(key) || { grossCents: 0, taxCents: 0 };
+    const dr = Number(r.debit_cents);
+    const cr = Number(r.credit_cents);
+    if (r.code === SYSTEM_CODES.REV_REFUNDS_ALLOWANCES) rec.grossCents += (dr - cr);
+    if (r.code === SYSTEM_CODES.SALES_TAX_PAYABLE) {
+      rec.grossCents += (dr - cr);
+      rec.taxCents += (dr - cr);
     }
+    map.set(key, rec);
   }
+  return map;
+}
 
-  const taxCents = computeProratedRefundTaxCents(absCents, linkedInv, row.payment_amount);
+function buildDepositOutflowEntry(dep, txnKey, amountCents, entryDate, customerId, reason) {
+  const { principalCents, surchargeCents } = splitDepositRefundCents(Math.abs(amountCents), dep);
+  if (amountCents < 0) {
+    return rules.buildDepositRefundEntry({
+      txnId: txnKey,
+      idempotencyKey: `deposit-refund:spt:${txnKey}`,
+      refundDate: entryDate,
+      principalCents,
+      surchargeCents,
+      method: 'stripe',
+      customerId,
+      reference: txnKey,
+      reason,
+    });
+  }
+  return rules.buildDepositRefundReversalEntry({
+    txnId: txnKey,
+    idempotencyKey: `deposit-refund-reversal:spt:${txnKey}`,
+    reversalDate: entryDate,
+    principalCents,
+    surchargeCents,
+    method: 'stripe',
+    customerId,
+    reference: txnKey,
+    reason,
+  });
+}
+
+async function tryHandleUnlinkedDepositOutflow({ row, absCents, amountCents, txnKey, entryDate, customerId, reason, depositMaps, ctx }) {
+  const depCheck = findMatchingDepositForOutflow(row, absCents, depositMaps);
+  if (depCheck.deposit) {
+    await postOrPreview(
+      buildDepositOutflowEntry(depCheck.deposit, txnKey, amountCents, entryDate, customerId, reason),
+      ctx,
+      'refunds',
+    );
+    return true;
+  }
+  if (depCheck.ambiguous) {
+    ctx.stats.refunds.needs_review.push({
+      txn_id: txnKey,
+      customer_id: customerId,
+      amount_cents: absCents,
+      reason: 'Unverified Stripe outflow for customer with refunded deposit — link manually before reducing 2300',
+    });
+    return true;
+  }
+  return false;
+}
+
+function buildOutflowRefundEntry({ row, linkedInv, amountCents, absCents, taxCents, txnKey, expectedKey, entryDate, customerId, reason }) {
   const isCommercial = isCommercialProperty(linkedInv?.property_type || row.property_type);
   const common = {
     subtotalCents: absCents - taxCents,
@@ -959,27 +1255,62 @@ function buildOutflowGlEntry(row, invoiceMaps, depositMaps) {
     reference: txnKey,
     reason,
   };
+  return amountCents < 0
+    ? rules.buildRefundEntry({ ...common, refundId: txnKey, idempotencyKey: expectedKey, refundDate: entryDate })
+    : rules.buildRefundReversalEntry({ ...common, txnId: txnKey, idempotencyKey: expectedKey, reversalDate: entryDate });
+}
 
-  if (amountCents < 0) {
-    return rules.buildRefundEntry({
-      ...common,
-      refundId: txnKey,
-      idempotencyKey: `refund:spt:${txnKey}`,
-      refundDate: entryDate,
+async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, cumRefundsByInvoice, ctx) {
+  const amountCents = dollarsToCents(row.amount);
+  const entryDate = timestampToEtDate(row.created_at_stripe);
+  if (!entryDate || !amountCents) return;
+
+  const absCents = Math.abs(amountCents);
+  const txnKey = row.stripe_txn_id || row.id;
+  const customerId = row.customer_id || row.payment_customer_id || null;
+  const reason = row.description
+    ? String(row.description).slice(0, 300)
+    : `Stripe ${row.reporting_category || row.type || 'refund'}`;
+
+  const linkedInv = resolveOutflowLinkedInvoice(row, invoiceMaps);
+  if (!linkedInv) {
+    const handled = await tryHandleUnlinkedDepositOutflow({
+      row, absCents, amountCents, txnKey, entryDate, customerId, reason, depositMaps, ctx,
+    });
+    if (handled) return;
+  }
+
+  const expectedKey = amountCents < 0 ? `refund:spt:${txnKey}` : `refund-reversal:spt:${txnKey}`;
+  const existing = await ctx.conn('gl_journal_entries').where({ idempotency_key: expectedKey }).first('id');
+  if (existing) {
+    ctx.stats.refunds.skipped += 1;
+    return;
+  }
+
+  // Allocate sales tax from cumulative refunded gross per invoice so separate partial refunds never over-reverse tax.
+  const invKey = linkedInv ? String(linkedInv.id) : null;
+  const cum = invKey ? (cumRefundsByInvoice.get(invKey) || { grossCents: 0, taxCents: 0 }) : { grossCents: 0, taxCents: 0 };
+  const signedDelta = amountCents < 0 ? absCents : -absCents;
+  const taxCents = computeIncrementalRefundTaxCents(cum.grossCents, cum.taxCents, signedDelta, linkedInv, row.payment_amount);
+
+  const entry = buildOutflowRefundEntry({
+    row, linkedInv, amountCents, absCents, taxCents, txnKey, expectedKey, entryDate, customerId, reason,
+  });
+  const posted = await postOrPreview(entry, ctx, 'refunds');
+  if (posted && invKey) {
+    cumRefundsByInvoice.set(invKey, {
+      grossCents: Math.max(0, cum.grossCents + signedDelta),
+      taxCents: Math.max(0, cum.taxCents + (amountCents < 0 ? taxCents : -taxCents)),
     });
   }
-  return rules.buildRefundReversalEntry({
-    ...common,
-    txnId: txnKey,
-    idempotencyKey: `refund-reversal:spt:${txnKey}`,
-    reversalDate: entryDate,
-  });
 }
 
 async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('stripe_payout_transactions'))) return;
   const rows = await outflowTransactionsQuery(conn, from, to)
     .leftJoin('customers as c', conn.raw('c.id = COALESCE(spt.customer_id, lp.customer_id)'))
+    .orderBy('spt.created_at_stripe', 'asc')
+    .orderBy('spt.id', 'asc')
     .select(
       'spt.id', 'spt.stripe_txn_id', 'spt.type', 'spt.reporting_category',
       'spt.amount', 'spt.description', 'spt.customer_id', 'spt.invoice_id', 'spt.payment_id',
@@ -998,18 +1329,14 @@ async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
     loadInvoicesForLinks(conn, ids, pis),
     loadDepositsForOutflows(conn, customerIds),
   ]);
+  const resolvedInvIds = [...new Set([...invoiceMaps.byId.keys()])];
+  const cumRefundsByInvoice = await loadPriorRefundTotalsByInvoice(conn, resolvedInvIds);
 
   for (const row of nonTestRows) {
-    const entry = buildOutflowGlEntry(row, invoiceMaps, depositMaps);
-    if (!entry) continue;
-    await postOrPreview(entry, ctx, 'refunds');
+    await syncSingleOutflowRow(row, invoiceMaps, depositMaps, cumRefundsByInvoice, ctx);
   }
 }
 
-/**
- * Sync non-Stripe (cash/check/manual) refunds strictly inside the REFUND period
- * (not the original payment period) using cumulative delta tracking.
- */
 async function syncManualRefunds(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('payments'))) return;
   const rows = await conn('payments as p')
@@ -1031,7 +1358,8 @@ async function syncManualRefunds(conn, from, to, ctx) {
 
   const nonTestRows = rows.filter((r) => !isTestCustomerRow(r));
   if (!nonTestRows.length) return;
-  const { ids, pis } = collectPaymentInvoiceRefs(nonTestRows);
+  const auditMarkers = await loadManualPaymentAuditMarkers(conn, nonTestRows.map((r) => r.id));
+  const { ids, pis } = collectPaymentInvoiceRefs(nonTestRows, auditMarkers);
   const invoiceMaps = await loadInvoicesForLinks(conn, ids, pis);
 
   for (const pay of nonTestRows) {
@@ -1057,11 +1385,12 @@ async function syncManualRefunds(conn, from, to, ctx) {
       continue;
     }
 
-    const linkedInv = linkedInvoiceForPayment(pay, invoiceMaps);
+    const marker = auditMarkers.get(String(pay.id)) || null;
+    const linkedInv = linkedInvoiceForPayment(pay, invoiceMaps, marker);
     const cumTax = computeProratedRefundTaxCents(cumRefundCents, linkedInv, pay.amount);
     const prevTax = computeProratedRefundTaxCents(alreadyBooked, linkedInv, pay.amount);
     const deltaTax = Math.max(0, Math.min(deltaCents, cumTax - prevTax));
-    const method = resolvePaymentMethod(pay, linkedInv);
+    const method = resolvePaymentMethod(pay, linkedInv, marker);
     const serviceLine = isCommercialProperty(linkedInv?.property_type || pay.property_type)
       ? 'commercial'
       : (linkedInv?.service_type || null);
@@ -1082,7 +1411,7 @@ async function syncManualRefunds(conn, from, to, ctx) {
   }
 }
 
-// ── 5. Stripe Processing Fees & Payouts ──────────────────────────────────────
+// ── 5. Stripe Processing Fees & Payouts (UTC Calendar Day per ARRIVAL_DAY_SQL) ─
 
 async function syncStripeFees(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('stripe_payout_transactions'))) return;
@@ -1125,11 +1454,17 @@ async function syncStripePayouts(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('stripe_payouts'))) return;
   const rows = await conn('stripe_payouts')
     .where({ status: 'paid' })
-    .whereRaw("DATE(arrival_date AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to])
-    .select('id', 'stripe_payout_id', 'amount', 'arrival_date');
+    .whereRaw(`${ARRIVAL_DAY_SQL} BETWEEN ?::date AND ?::date`, [from, to])
+    .select(
+      'id',
+      'stripe_payout_id',
+      'amount',
+      'arrival_date',
+      conn.raw("to_char(arrival_date AT TIME ZONE 'UTC', 'YYYY-MM-DD') as arrival_day"),
+    );
 
   for (const p of rows) {
-    const arrivalDate = timestampToEtDate(p.arrival_date);
+    const arrivalDate = dateCellText(p.arrival_day) || timestampToUtcDate(p.arrival_date);
     const amountCents = dollarsToCents(p.amount);
     if (!arrivalDate || !amountCents || amountCents <= 0) continue;
 
@@ -1142,7 +1477,7 @@ async function syncStripePayouts(conn, from, to, ctx) {
   }
 }
 
-// ── 6. Expenses (Shared-Bill Personal Split + Vendor Matching & Backfill) ────
+// ── 6. Expenses (Shared-Bill Split, Vendor Backfill, Edit Deltas & Deletions) ─
 
 async function loadVendorLookup(conn) {
   const vendors = await conn('gl_vendors')
@@ -1173,12 +1508,6 @@ async function loadVendorLookup(conn) {
   };
 }
 
-/**
- * Pure: book 100% of business spend to the expense account (keeping book expense
- * separate from tax-deductibility adjustments like meals or partial deductions).
- * Split to 3100 Owner Draws ONLY when explicit shared-bill personal-share evidence
- * (`[Shared bill: <label> <pct>%]` from tax-shared-bills.js) is present.
- */
 function buildExpenseSplits(exp, mapped, matchedVendor, amountCents) {
   const resolvedAccountId = mapped?.id || matchedVendor?.default_account_id || null;
   const resolvedCode = resolvedAccountId ? null : SYSTEM_CODES.OPEX_UNCATEGORIZED;
@@ -1209,38 +1538,130 @@ function buildExpenseSplits(exp, mapped, matchedVendor, amountCents) {
   }];
 }
 
-async function backfillExpenseVendorIfNeeded(exp, matchedVendor, ctx) {
-  if (!matchedVendor) return false;
-  const existing = await ctx.conn('gl_journal_entries as e')
-    .where('e.idempotency_key', `expense:${exp.id}`)
-    .where('e.status', 'posted')
-    .first('e.id');
-  if (!existing) return false;
-
-  const unlinked = await ctx.conn('gl_journal_lines as l')
+async function loadBookedExpenseState(conn, expenseId) {
+  const rows = await conn('gl_journal_lines as l')
+    .join('gl_journal_entries as e', 'e.id', 'l.entry_id')
     .join('gl_accounts as a', 'a.id', 'l.account_id')
-    .where('l.entry_id', existing.id)
-    .whereNull('l.vendor_id')
-    .whereNull('l.reconciliation_id')
-    .whereIn('a.account_type', ['cogs', 'expense'])
-    .first('l.id');
-  if (!unlinked) return false;
+    .where({ 'e.status': 'posted', 'e.source_type': 'expense', 'e.source_id': String(expenseId) })
+    .whereNull('e.reversed_by_entry_id')
+    .select('e.id as entry_id', 'a.code', 'l.debit_cents', 'l.credit_cents');
+
+  const bookedByCode = new Map();
+  const entryIds = new Set();
+  for (const r of rows) {
+    entryIds.add(r.entry_id);
+    const net = Number(r.debit_cents) - Number(r.credit_cents);
+    bookedByCode.set(r.code, (bookedByCode.get(r.code) || 0) + net);
+  }
+  return { bookedByCode, entryCount: entryIds.size };
+}
+
+async function backfillExpenseVendorIfNeeded(exp, matchedVendor, trx, ctx) {
+  if (!matchedVendor) return;
+  const existing = await trx('gl_journal_entries as e')
+    .where({ 'e.source_type': 'expense', 'e.source_id': String(exp.id), 'e.status': 'posted' })
+    .whereNull('e.reversed_by_entry_id')
+    .select('e.id');
+
+  for (const row of existing) {
+    const unlinked = await trx('gl_journal_lines as l')
+      .join('gl_accounts as a', 'a.id', 'l.account_id')
+      .where('l.entry_id', row.id)
+      .whereNull('l.vendor_id')
+      .whereNull('l.reconciliation_id')
+      .whereIn('a.account_type', ['cogs', 'expense'])
+      .first('l.id');
+    if (!unlinked) continue;
+
+    if (ctx.dryRun) {
+      ctx.stats.expenses.would_link_vendors += 1;
+    } else {
+      await linkJournalEntryVendor(row.id, {
+        vendorId: matchedVendor.id,
+        reason: 'Subledger sync matched newly registered vendor',
+        actorId: ctx.actorId,
+        requestMeta: ctx.requestMeta,
+        conn: trx,
+      });
+      ctx.stats.expenses.linked_vendors += 1;
+    }
+  }
+}
+
+async function syncSingleExpenseRow(exp, mapped, matchedVendor, ctx) {
+  const entryDate = dateCellText(exp.expense_date);
+  const amountCents = dollarsToCents(exp.amount);
+  if (!entryDate || amountCents == null || amountCents < 0) return;
+
+  const desired = amountCents > 0
+    ? rules.buildExpenseEntry({
+      sourceType: 'expense',
+      sourceId: exp.id,
+      entryDate,
+      paymentAccountCode: paymentAccountCodeForExpense(exp.payment_method),
+      paymentMethod: exp.payment_method || null,
+      splits: buildExpenseSplits(exp, mapped, matchedVendor, amountCents),
+      vendorId: matchedVendor ? matchedVendor.id : null,
+      memo: [exp.vendor_name, exp.description].filter(Boolean).join(' — ').slice(0, 500) || 'Expense',
+    })
+    : null;
+
+  const updatedDate = timestampToEtDate(exp.updated_at);
+  const adjDate = updatedDate && updatedDate >= entryDate ? updatedDate : entryDate;
+
+  const reconcile = async (trx) => {
+    const { bookedByCode, entryCount } = await loadBookedExpenseState(trx, exp.id);
+    if (entryCount === 0) {
+      if (!desired) return;
+      await postOrPreview(desired, ctx, 'expenses', { connOverride: trx });
+      return;
+    }
+
+    await backfillExpenseVendorIfNeeded(exp, matchedVendor, trx, ctx);
+    const adjEntry = buildDeltaEntry({
+      sourceType: 'expense',
+      sourceId: exp.id,
+      keyPrefix: 'expense-adj',
+      revisionSeq: entryCount,
+      desiredLines: desired ? desired.lines : [],
+      bookedByCode,
+      adjustmentDate: adjDate,
+      basisScope: 'both',
+      reference: String(exp.id),
+      memo: `Expense adjustment — ${[exp.vendor_name, exp.description].filter(Boolean).join(' — ').slice(0, 420) || exp.id}`,
+      lineMeta: { vendorId: matchedVendor ? matchedVendor.id : null, paymentMethod: exp.payment_method || null },
+      accountsById: ctx.caches.accountsById,
+    });
+    if (!adjEntry) {
+      ctx.stats.expenses.skipped += 1;
+      return;
+    }
+    await postOrPreview(adjEntry, ctx, 'expenses', { isAdjustment: true, connOverride: trx });
+  };
 
   if (ctx.dryRun) {
-    ctx.stats.expenses.would_link_vendors += 1;
-    ctx.stats.expenses.skipped += 1;
-    return true;
+    await reconcile(ctx.conn);
+  } else {
+    await withEntitySyncLock(ctx.conn, `gl-sync-expense:${exp.id}`, reconcile);
   }
-  await linkJournalEntryVendor(existing.id, {
-    vendorId: matchedVendor.id,
-    reason: 'Subledger sync matched newly registered vendor',
-    actorId: ctx.actorId,
-    requestMeta: ctx.requestMeta,
-    conn: ctx.conn,
-  });
-  ctx.stats.expenses.linked_vendors += 1;
-  ctx.stats.expenses.skipped += 1;
-  return true;
+}
+
+async function reconcileDeletedExpenses(conn, from, to, ctx) {
+  const deleted = await conn('gl_journal_entries as e')
+    .where({ 'e.source_type': 'expense', 'e.status': 'posted' })
+    .whereNull('e.reversed_by_entry_id')
+    .whereBetween('e.entry_date', [from, to])
+    .whereNotExists(function expenseStillExists() {
+      this.select(conn.raw('1')).from('expenses as ex').whereRaw('ex.id::text = e.source_id');
+    })
+    .select('e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'));
+
+  const today = etDateString(new Date());
+  for (const row of deleted) {
+    const entryDay = dateCellText(row.entry_date);
+    const revDate = today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay);
+    await reverseOrPreview(row, revDate, 'Source expense deleted', ctx, 'expenses');
+  }
 }
 
 async function syncExpenses(conn, from, to, ctx) {
@@ -1255,24 +1676,34 @@ async function syncExpenses(conn, from, to, ctx) {
 
   const rows = await conn('expenses as e')
     .leftJoin('expense_categories as c', 'c.id', 'e.category_id')
-    .whereBetween('e.expense_date', [from, to])
+    .where((q) => {
+      q.whereBetween('e.expense_date', [from, to])
+        .orWhere((edited) => {
+          edited.whereRaw("DATE(e.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to])
+            .whereExists(function alreadyBooked() {
+              this.select(conn.raw('1'))
+                .from('gl_journal_entries as ge')
+                .where({ 'ge.source_type': 'expense', 'ge.status': 'posted' })
+                .whereNull('ge.reversed_by_entry_id')
+                .whereRaw('ge.source_id = e.id::text');
+            });
+        });
+    })
     .whereRaw("COALESCE(c.name, '') <> 'Payroll (counted from pay runs)'")
     .whereRaw("COALESCE(c.irs_line, '') NOT IN ('13', '30')")
     .select(
       'e.id', 'e.category_id', 'e.description', 'e.amount', 'e.tax_deductible_amount', 'e.notes',
       conn.raw('e.expense_date::text as expense_date'), 'e.vendor_name', 'e.payment_method',
-      'e.scheduled_service_id', 'c.name as category_name',
+      'e.scheduled_service_id', 'e.updated_at', 'c.name as category_name',
     );
 
   const unmatchedContractors = new Map();
   for (const exp of rows) {
-    const entryDate = dateCellText(exp.expense_date);
     const amountCents = dollarsToCents(exp.amount);
-    if (!entryDate || !amountCents || amountCents <= 0) continue;
-
     const mapped = exp.category_id ? glByCatId.get(exp.category_id) : null;
     const matchedVendor = vendorLookup.match(exp.vendor_name);
-    if (exp.vendor_name && !matchedVendor) {
+
+    if (exp.vendor_name && !matchedVendor && amountCents > 0) {
       ctx.stats.expenses.unmatched_vendors += 1;
       const isContractorCat = mapped?.code === SYSTEM_CODES.COGS_SUBCONTRACTORS
         || /contract|subcontract|1099/i.test(String(exp.category_name || ''));
@@ -1285,21 +1716,11 @@ async function syncExpenses(conn, from, to, ctx) {
       }
     }
 
-    if (await backfillExpenseVendorIfNeeded(exp, matchedVendor, ctx)) continue;
-
-    await postOrPreview(rules.buildExpenseEntry({
-      sourceType: 'expense',
-      sourceId: exp.id,
-      entryDate,
-      paymentAccountCode: paymentAccountCodeForExpense(exp.payment_method),
-      paymentMethod: exp.payment_method || null,
-      splits: buildExpenseSplits(exp, mapped, matchedVendor, amountCents),
-      vendorId: matchedVendor ? matchedVendor.id : null,
-      memo: [exp.vendor_name, exp.description].filter(Boolean).join(' — ').slice(0, 500) || 'Expense',
-    }), ctx, 'expenses');
+    await syncSingleExpenseRow(exp, mapped, matchedVendor, ctx);
   }
 
   ctx.stats.expenses.unmatched_contractor_vendors = Array.from(unmatchedContractors.values());
+  await reconcileDeletedExpenses(conn, from, to, ctx);
 }
 
 // ── 7. Payroll Runs (Finalized Posts + Voided Run Reversals) ─────────────────
@@ -1416,11 +1837,15 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
     missing_system_accounts: missingSystemAccounts,
     invoices: makeBucket({ adjusted: 0, would_adjust: 0, reversed: 0, would_reverse: 0 }),
     deposits: makeBucket(),
-    payments: makeBucket(),
-    refunds: makeBucket(),
+    payments: makeBucket({ reversed: 0, would_reverse: 0 }),
+    refunds: makeBucket({ needs_review: [] }),
     stripe_fees: makeBucket(),
     stripe_payouts: makeBucket(),
     expenses: makeBucket({
+      adjusted: 0,
+      would_adjust: 0,
+      reversed: 0,
+      would_reverse: 0,
       linked_vendors: 0,
       would_link_vendors: 0,
       unmatched_vendors: 0,
@@ -1446,12 +1871,17 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
 
 module.exports = {
   syncSubledgersToGl,
+  billedInvoicePrincipalCents,
   extractAppliedDepositCents,
   extractSurchargeCents,
   resolvePaymentMethod,
   computeProratedRefundTaxCents,
+  computeIncrementalRefundTaxCents,
   allocateStatementPrincipalAcrossInvoices,
   splitDepositRefundCents,
+  findMatchingDepositForOutflow,
   buildExpenseSplits,
+  buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,
+  timestampToUtcDate,
 };

@@ -129,6 +129,9 @@ export default function JournalEntriesTab({ onChanged }) {
       onChanged?.();
     } catch (err) {
       setFormError(err.message || "Could not post journal entry.");
+      if (err.status === 409) {
+        loadData();
+      }
     } finally {
       setSaving(false);
     }
@@ -155,6 +158,9 @@ export default function JournalEntriesTab({ onChanged }) {
       onChanged?.();
     } catch (err) {
       setFormError(err.message || "Could not post transfer.");
+      if (err.status === 409) {
+        loadData();
+      }
     } finally {
       setSaving(false);
     }

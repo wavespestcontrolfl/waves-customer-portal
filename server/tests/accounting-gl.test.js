@@ -40,6 +40,7 @@ const {
   AccountingError,
   getAccountRegister,
   postJournalEntry,
+  resolveOpeningBalanceItems,
 } = require('../services/accounting/ledger');
 const rules = require('../services/accounting/posting-rules');
 const {
@@ -56,14 +57,19 @@ const { computeReconciliationMath, startReconciliation, toggleClearedLines } = r
 const { lockPeriod } = require('../services/accounting/periods');
 const {
   syncSubledgersToGl,
+  billedInvoicePrincipalCents,
   extractAppliedDepositCents,
   extractSurchargeCents,
   resolvePaymentMethod,
   computeProratedRefundTaxCents,
+  computeIncrementalRefundTaxCents,
   allocateStatementPrincipalAcrossInvoices,
   splitDepositRefundCents,
+  findMatchingDepositForOutflow,
   buildExpenseSplits,
+  buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,
+  timestampToUtcDate,
 } = require('../services/accounting/sync-bridge');
 const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
 const { encryptTin, publicVendor } = require('../services/accounting/vendors');
@@ -1113,11 +1119,216 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     expect(audited.some((a) => a.table === 'audit_log' && a.row.action === 'accounting.reconciliation.clear_lines')).toBe(true);
   });
 
-  test('migration down() refuses rollback once accounting evidence exists', async () => {
-    const nonEmptyKnex = (tbl) => ({
-      first: () => Promise.resolve(tbl === 'gl_journal_entries' ? { id: 'je-1' } : null),
+  test('migration down() refuses rollback once accounting evidence or customized COA exists', async () => {
+    const makeStub = (hitTable) => {
+      const fn = (tbl) => {
+        const chain = {
+          where: () => chain,
+          orWhere: () => chain,
+          orWhereNotNull: () => chain,
+          orWhereRaw: () => chain,
+          first: () => Promise.resolve(tbl === hitTable ? { id: 'row-1' } : null),
+        };
+        return chain;
+      };
+      fn.schema = { hasTable: () => Promise.resolve(true) };
+      return fn;
+    };
+    await expect(migrationGl.down(makeStub('gl_journal_entries'))).rejects.toThrow(/holds accounting evidence/i);
+    await expect(migrationGl.down(makeStub('gl_accounts'))).rejects.toThrow(/gl_accounts holds custom/i);
+  });
+
+  test('Pass-3: card-surcharge-rewritten invoice total bills pre-surcharge principal and clears A/R to $0.00', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    // Stripe card surcharge overwrote invoices.total from $100.00 to $102.90 while subtotal stayed $100.00
+    const inv = {
+      id: 'inv-sur-1',
+      invoice_number: 'WPC-SUR-1',
+      subtotal: '100.00',
+      discount_amount: '0.00',
+      tax_amount: '0.00',
+      total: '102.90',
+      credit_applied: '0.00',
+      line_items: '[]',
+      service_type: 'pest',
+      service_date: '2026-11-12',
+      property_type: 'single_family',
+    };
+    expect(billedInvoicePrincipalCents(inv)).toBe(10000);
+    const invJe = buildInvoiceGlPayload(inv, new Set());
+    const payJe = rules.buildPaymentEntry({
+      paymentId: 'pay-sur-1',
+      paymentDate: '2026-11-12',
+      grossCents: 10290,
+      surchargeCents: 290,
+      feeCents: 0,
+      method: 'stripe',
+      invoiceId: inv.id,
     });
-    nonEmptyKnex.schema = { hasTable: () => Promise.resolve(true) };
-    await expect(migrationGl.down(nonEmptyKnex)).rejects.toThrow(/holds accounting evidence/i);
+    const sums = accumulateEntries(accounts, [invJe, payJe]);
+    const bal = (code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+    expect(bal(SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(10000);
+    expect(bal(SYSTEM_CODES.REV_CARD_SURCHARGE)).toBe(290);
+    expect(bal(SYSTEM_CODES.STRIPE_CLEARING)).toBe(10290);
+  });
+
+  test('Pass-3: annual-prepay coverage conversion, zeroing edit, and repeated A->B->A->B edits stay balanced with unique keys', () => {
+    // 1. Regular invoice posted for $100 (DR 1100 10000 / CR 4000 10000), then converted to annual-prepay covered visit
+    const coveredInv = {
+      id: 'inv-cov-1',
+      invoice_number: 'WPC-COV-1',
+      annual_prepay_covered_term_id: 'term-1',
+      subtotal: '100.00',
+      discount_amount: '0.00',
+      tax_amount: '0.00',
+      total: '0.00',
+      service_type: 'pest',
+      service_date: '2026-11-10',
+      property_type: 'single_family',
+    };
+    const desiredCovered = buildInvoiceGlPayload(coveredInv, new Set());
+    expect(desiredCovered.sourceType).toBe('invoice');
+    expect(desiredCovered.sourceId).toBe('inv-cov-1');
+
+    const alreadyBookedRegular = new Map([
+      [SYSTEM_CODES.ACCOUNTS_RECEIVABLE, 10000],
+      [SYSTEM_CODES.REV_RESIDENTIAL_PEST, -10000],
+    ]);
+    const conversionDelta = buildInvoiceDeltaEntry(coveredInv, desiredCovered.lines, alreadyBookedRegular, '2026-11-12', 1);
+    expect(validateJournalEntryInput(conversionDelta).totalCents).toBe(10000);
+    // Only reclasses DR 2300 / CR 1100 — zero revenue doubling!
+    expect(conversionDelta.lines.map((l) => [l.accountCode, l.debitCents, l.creditCents]).sort()).toEqual([
+      [SYSTEM_CODES.ACCOUNTS_RECEIVABLE, 0, 10000],
+      [SYSTEM_CODES.UNEARNED_REVENUE, 10000, 0],
+    ]);
+
+    // 2. Reducing a previously posted $107 invoice to $0 zeroes out A/R, revenue, and tax cleanly
+    const bookedTaxable = new Map([
+      [SYSTEM_CODES.ACCOUNTS_RECEIVABLE, 10700],
+      [SYSTEM_CODES.REV_COMMERCIAL_PEST, -10000],
+      [SYSTEM_CODES.SALES_TAX_PAYABLE, -700],
+    ]);
+    const zeroDelta = buildInvoiceDeltaEntry({ id: 'inv-zero-1', invoice_number: 'WPC-Z1' }, [], bookedTaxable, '2026-11-14', 1);
+    expect(validateJournalEntryInput(zeroDelta).totalCents).toBe(10700);
+
+    // 3. Repeated edits A->B->A->B receive distinct sequence keys so returning to B is never suppressed
+    const lines120 = rules.buildInvoiceEntry({ invoiceId: 'inv-aba', issueDate: '2026-11-01', subtotalCents: 12000, taxCents: 0 }).lines;
+    const booked100 = new Map([[SYSTEM_CODES.ACCOUNTS_RECEIVABLE, 10000], [SYSTEM_CODES.REV_RESIDENTIAL_PEST, -10000]]);
+    const edit1 = buildInvoiceDeltaEntry({ id: 'inv-aba' }, lines120, booked100, '2026-11-02', 1);
+    const edit3 = buildInvoiceDeltaEntry({ id: 'inv-aba' }, lines120, booked100, '2026-11-04', 3);
+    expect(edit1.idempotencyKey).not.toBe(edit3.idempotencyKey);
+  });
+
+  test('Pass-3: manual Zelle audit marker, verified deposit refunds, cumulative refund tax, and UTC payout date', () => {
+    // Manual payment recorded via Zelle recovers 'zelle' (1010 Checking) from audit marker
+    expect(resolvePaymentMethod({}, null, { invoiceId: 'inv-1', method: 'zelle' })).toBe('zelle');
+
+    // Deposit outflow matching refuses blind single-candidate guess when amount & PI don't match
+    const depMaps = {
+      byPi: new Map([['pi_dep_exact', { id: 'dep-1', amount: '100.00', refunded_amount: '100.00', card_surcharge: '0' }]]),
+      byCustomer: new Map([['cust-1', [{ id: 'dep-1', amount: '100.00', refunded_amount: '100.00', card_surcharge: '0' }]]]),
+    };
+    expect(findMatchingDepositForOutflow({ customer_id: 'cust-1', description: 'Unrelated refund' }, 7500, depMaps))
+      .toEqual({ deposit: null, ambiguous: true });
+    expect(findMatchingDepositForOutflow({ customer_id: 'cust-1', description: 'Refund for pi_dep_exact' }, 7500, depMaps).deposit?.id)
+      .toBe('dep-1');
+    expect(findMatchingDepositForOutflow({ customer_id: 'cust-1', description: 'Exact match' }, 10000, depMaps).deposit?.id)
+      .toBe('dep-1');
+
+    // Cumulative Stripe refund sales-tax allocation: two partial refunds on $1.07 (7c tax) reverse 4c + 3c = 7c (never 8c)
+    const inv = { subtotal: '1.00', discount_amount: '0', tax_amount: '0.07', total: '1.07' };
+    const tax1 = computeIncrementalRefundTaxCents(0, 0, 54, inv, '1.07');
+    const tax2 = computeIncrementalRefundTaxCents(54, tax1, 53, inv, '1.07');
+    expect(tax1).toBe(4);
+    expect(tax2).toBe(3);
+    expect(tax1 + tax2).toBe(7);
+    // Dispute win reverses the exact tax back
+    expect(computeIncrementalRefundTaxCents(107, 7, -53, inv, '1.07')).toBe(3);
+
+    // Midnight UTC Stripe payout arrival_date preserves UTC calendar day (never shifts 1 day early in ET)
+    expect(timestampToUtcDate('2026-12-01T00:00:00Z')).toBe('2026-12-01');
+  });
+
+  test('Pass-3: opening balances require authoritative normalBalance and postJournalEntry rejects conflicting idempotency reuse', async () => {
+    expect(() => rules.buildOpeningBalanceEntry({
+      asOfDate: '2026-01-01',
+      items: [{ accountCode: '1010', balanceCents: 50000 }],
+    })).toThrow(/requires explicit normalBalance/i);
+
+    const acc1010 = { id: '00000000-0000-4000-8000-000000000001', code: '1010', name: 'Checking', active: true, account_type: 'asset', normal_balance: 'debit' };
+    const acc4000 = { id: '00000000-0000-4000-8000-000000000002', code: '4000', name: 'Revenue', active: true, account_type: 'revenue', normal_balance: 'credit' };
+    const lookupConn = () => {
+      const chain = {
+        where: () => chain,
+        orWhereIn: () => chain,
+        select: () => Promise.resolve([acc1010, acc4000]),
+      };
+      return chain;
+    };
+    const resolved = await resolveOpeningBalanceItems([{ accountCode: '1010', balanceCents: 50000 }], { conn: lookupConn });
+    expect(resolved[0].normalBalance).toBe('debit');
+    await expect(resolveOpeningBalanceItems([{ accountCode: '1010', balanceCents: 50000, normalBalance: 'credit' }], { conn: lookupConn }))
+      .rejects.toThrow(/conflicts with stored normal balance/i);
+
+    // postJournalEntry with reused idempotencyKey: identical payload -> { created: false }, different payload -> 409 IDEMPOTENCY_CONFLICT
+    const existingEntryRow = {
+      id: '00000000-0000-4000-8000-000000000077',
+      entry_date: '2026-11-15',
+      entry_type: 'adjusting',
+      basis_scope: 'both',
+      source_type: 'manual',
+      memo: 'Owner adjustment',
+    };
+    const existingLines = [
+      { account_id: acc1010.id, debit_cents: 10000, credit_cents: 0, customer_id: null, vendor_id: null, invoice_ref: null },
+      { account_id: acc4000.id, debit_cents: 0, credit_cents: 10000, customer_id: null, vendor_id: null, invoice_ref: null },
+    ];
+    const idemTrx = (table) => {
+      const chain = {
+        where: () => chain,
+        orWhereIn: () => chain,
+        join: () => chain,
+        leftJoin: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve([acc1010, acc4000]);
+          if (table === 'gl_journal_lines as l') return Promise.resolve(existingLines);
+          return chain;
+        },
+        first: () => Promise.resolve(table === 'gl_journal_entries' ? existingEntryRow : null),
+      };
+      return chain;
+    };
+    idemTrx.raw = (sql) => sql;
+    idemTrx.isTransaction = true;
+
+    const sameRes = await postJournalEntry({
+      entryDate: '2026-11-15',
+      entryType: 'adjusting',
+      memo: 'Owner adjustment',
+      idempotencyKey: 'manual-form-key-1',
+      lines: [
+        { accountCode: '1010', debitCents: 10000, creditCents: 0 },
+        { accountCode: '4000', debitCents: 0, creditCents: 10000 },
+      ],
+    }, { conn: idemTrx });
+    expect(sameRes.created).toBe(false);
+
+    await expect(postJournalEntry({
+      entryDate: '2026-11-15',
+      entryType: 'adjusting',
+      memo: 'Owner adjustment',
+      idempotencyKey: 'manual-form-key-1',
+      lines: [
+        { accountCode: '1010', debitCents: 25000, creditCents: 0 },
+        { accountCode: '4000', debitCents: 0, creditCents: 25000 },
+      ],
+    }, { conn: idemTrx })).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_CONFLICT' });
   });
 });

@@ -764,6 +764,28 @@ function buildDepreciationEntry({ sourceId, entryDate, amountCents, assetName = 
   };
 }
 
+function buildOpeningBalanceLine(item) {
+  const raw = Math.trunc(Number(item.balanceCents) || 0);
+  if (raw === 0) return null;
+  const normalBalance = item.normalBalance ?? item.normal_balance;
+  if (normalBalance !== 'debit' && normalBalance !== 'credit') {
+    throw new AccountingError(
+      400,
+      `Opening balance item (${item.accountCode || item.accountId || 'unknown'}) requires explicit normalBalance ("debit" or "credit")`,
+    );
+  }
+  const isDebit = normalBalance === 'debit';
+  const debitCents = (isDebit && raw > 0) || (!isDebit && raw < 0) ? Math.abs(raw) : 0;
+  const creditCents = debitCents === 0 ? Math.abs(raw) : 0;
+  return {
+    accountId: item.accountId || null,
+    accountCode: item.accountId ? null : item.accountCode,
+    debitCents,
+    creditCents,
+    memo: 'Opening balance',
+  };
+}
+
 /**
  * 12. Cutover Opening Balance Entry.
  *     Takes account opening balances ({ accountCode, balanceCents, normalBalance }) and
@@ -778,20 +800,11 @@ function buildOpeningBalanceEntry({ asOfDate, items, memo = null }) {
   let netCredits = 0;
 
   for (const item of items) {
-    const raw = Math.trunc(Number(item.balanceCents) || 0);
-    if (raw === 0) continue;
-    const isDebit = item.normalBalance === 'debit';
-    const debitCents = (isDebit && raw > 0) || (!isDebit && raw < 0) ? Math.abs(raw) : 0;
-    const creditCents = debitCents === 0 ? Math.abs(raw) : 0;
-    netDebits += debitCents;
-    netCredits += creditCents;
-    lines.push({
-      accountId: item.accountId || null,
-      accountCode: item.accountId ? null : item.accountCode,
-      debitCents,
-      creditCents,
-      memo: 'Opening balance',
-    });
+    const line = buildOpeningBalanceLine(item);
+    if (!line) continue;
+    netDebits += line.debitCents;
+    netCredits += line.creditCents;
+    lines.push(line);
   }
 
   const plug = netDebits - netCredits;

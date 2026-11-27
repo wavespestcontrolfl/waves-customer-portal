@@ -174,7 +174,7 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
         sections: {
           current_assets: [{ id: "c1", code: "1010", name: "Capital One Operating Checking", amount_cents: 100000 }],
           fixed_assets: [],
-          other_assets: [],
+          other_assets: [{ id: "o1", code: "1700", name: "Security Deposit (Warehouse)", amount_cents: 25000 }],
           current_liabilities: [],
           long_term_liabilities: [],
           equity: [],
@@ -182,14 +182,15 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
         totals: {
           current_assets_cents: 100000,
           fixed_assets_net_cents: 0,
-          total_assets_cents: 100000,
+          other_assets_cents: 25000,
+          total_assets_cents: 125000,
           current_liabilities_cents: 0,
           long_term_liabilities_cents: 0,
           total_liabilities_cents: 0,
           recorded_equity_cents: 0,
-          net_income_cents: 100000,
-          total_equity_cents: 100000,
-          liabilities_and_equity_cents: 100000,
+          net_income_cents: 125000,
+          total_equity_cents: 125000,
+          liabilities_and_equity_cents: 125000,
           discrepancy_cents: 0,
           balanced: true,
         },
@@ -198,5 +199,7 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
 
     expect(await screen.findByText(/Balanced \(Assets = Liabilities \+ Equity\)/)).toBeTruthy();
     expect(screen.getByText(/Capital One Operating Checking/)).toBeTruthy();
+    expect(screen.getByText(/Security Deposit \(Warehouse\)/)).toBeTruthy();
+    expect(screen.getByText(/Total Other Assets/)).toBeTruthy();
   });
 });
