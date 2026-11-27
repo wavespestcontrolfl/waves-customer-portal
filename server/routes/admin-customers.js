@@ -2895,6 +2895,45 @@ router.get('/pipeline/view', requireAdmin, async (req, res, next) => {
 // Lightweight endpoint so the MobilePaymentSheet's Card on File picker
 // doesn't have to load the full customer profile (tags, interactions,
 // services, etc.) every time the tech opens the payment sheet.
+// People a caller named for the visit texts on this customer (owner 2026-11-24 PM, 2026-11-27 "yes"): staff see the
+// list and can stop or restart each one. Admin only (techs see no contact lists of this kind). A stop is a mark,
+// never a delete (services/call-visit-recipient.js setReminderContactStopped).
+const REMINDER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+router.get('/:id/reminder-contacts', requireAdmin, async (req, res, next) => {
+  try {
+    if (!REMINDER_ID.test(String(req.params.id))) return res.status(400).json({ error: 'Invalid customer id' });
+    const VisitRecipient = require('../services/call-visit-recipient');
+    res.json({ reminderContacts: await VisitRecipient.listReminderContacts(req.params.id) });
+  } catch (err) { next(err); }
+  return undefined;
+});
+
+for (const [action, stopped] of [['stop', true], ['restart', false]]) {
+  router.post(`/:id/reminder-contacts/:reminderId/${action}`, requireAdmin, async (req, res, next) => {
+    try {
+      if (!REMINDER_ID.test(String(req.params.id)) || !REMINDER_ID.test(String(req.params.reminderId))) {
+        return res.status(400).json({ error: 'Invalid id' });
+      }
+      const VisitRecipient = require('../services/call-visit-recipient');
+      const entry = await VisitRecipient.setReminderContactStopped({ customerId: req.params.id, id: req.params.reminderId, stopped, by: 'staff' });
+      if (!entry) return res.status(404).json({ error: 'Not found' });
+      await recordAuditEvent({
+        actor_type: 'technician',
+        actor_id: req.technicianId || null,
+        action: stopped ? 'customer.reminder_contact_stopped' : 'customer.reminder_contact_restarted',
+        resource_type: 'customer',
+        resource_id: req.params.id,
+        metadata: { reminder_contact_id: req.params.reminderId },
+        ip_address: req.ip,
+        user_agent: req.get('user-agent') || null,
+      }).catch(() => {});
+      res.json({ reminderContact: entry });
+    } catch (err) { next(err); }
+    return undefined;
+  });
+}
+
 router.get('/:id/cards', async (req, res, next) => {
   try {
     // Payment methods stay visible to the tech checkout/project flows, but

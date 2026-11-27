@@ -513,6 +513,63 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(copied[0]).toMatchObject({ phone_key: BOB.slice(-10), customer_id: customerId, source: 'customer_reminder_contact' });
       });
 
+      describe('the sticky stop (owner 2026-11-26 "simpler", 2026-11-27 "yes")', () => {
+        const stopBob = async (by = 'customer') => {
+          const [listedBob] = await listed();
+          return VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: true, by });
+        };
+
+        test('a stop ends the texts for every visit, a "just this visit" grant included, and deletes nothing', async () => {
+          await record();
+          await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+          expect(sentTo()).toEqual([BOB]);
+          const before = (await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId])).length;
+          const stopped = await stopBob();
+          expect(stopped).toMatchObject({ stopped: true, stoppedBy: 'customer' });
+          expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
+          expect(await VisitRecipient.contactsForVisit(otherVisitId, 'reminder_24h')).toEqual([]);
+          expect((await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId])).length).toBe(before);
+          expect(await listed()).toHaveLength(1);
+        });
+
+        test('a later call naming the person again never clears a stop', async () => {
+          await record();
+          await stopBob('staff');
+          await db('visit_text_recipients').where({ scheduled_service_id: visitId }).del();
+          await record({}, entry({ appointment_texts_scope: 'this_visit' }));
+          await record();
+          const [row] = await listed();
+          expect(row).toMatchObject({ stopped_by: 'staff' });
+          expect(row.stopped_at).not.toBeNull();
+          expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toEqual([]);
+        });
+
+        test('a repeat stop keeps the first stop; another customer\'s id changes nothing', async () => {
+          await record();
+          const first = await stopBob('customer');
+          const again = await VisitRecipient.setReminderContactStopped({ customerId, id: first.id, stopped: true, by: 'staff' });
+          expect(again).toMatchObject({ stoppedBy: 'customer' });
+          const [{ id: strangerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Stranger', phone: phone(44) }).returning('id');
+          try {
+            expect(await VisitRecipient.setReminderContactStopped({ customerId: strangerId, id: first.id, stopped: false, by: 'customer' })).toBeNull();
+            expect(await VisitRecipient.listReminderContacts(strangerId)).toEqual([]);
+            const [row] = await listed();
+            expect(row.stopped_at).not.toBeNull();
+          } finally {
+            await db('customers').where({ id: strangerId }).del();
+          }
+        });
+
+        test('the list says who already has app access (an on-location contact slot)', async () => {
+          await record();
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([
+            expect.objectContaining({ firstName: 'Bob', lastName: 'Roe', phone: BOB, stopped: false, hasAppAccess: false }),
+          ]);
+          await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ hasAppAccess: true })]);
+        });
+      });
+
       test('a visit of ANOTHER customer gets nothing, and a visit moved to another customer gets that customer\'s list only', async () => {
         const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(43) }).returning('id');
         try {
@@ -1078,6 +1135,18 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
       await db('scheduled_services').where({ id: visitId }).update({ status: 'en_route', track_state: 'en_route', en_route_at: new Date(Date.now() - 10 * 60 * 1000) });
     });
     afterEach(() => { delete process.env[GATE]; });
+
+    test('a stop on the customer\'s list closes the person\'s map link; a restart opens it again (owner 2026-11-27)', async () => {
+      const [{ id }] = await rows();
+      const token = await VisitRecipient.ensureTrackToken(id, customerId);
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+      const [listedBob] = await db('customer_reminder_contacts').where({ customer_id: customerId });
+      await VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: true, by: 'customer' });
+      expect(await VisitRecipient.visitForTrackToken(token)).toBeNull();
+      const restarted = await VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: false, by: 'customer' });
+      expect(restarted).toMatchObject({ stopped: false, stoppedAt: null, stoppedBy: null });
+      expect(await VisitRecipient.visitForTrackToken(token)).not.toBeNull();
+    });
 
     test('a token of any other shape (an old 64-hex one) is replaced once by the recognizable vr_ shape, then stays', async () => {
       const [{ id }] = await rows();

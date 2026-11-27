@@ -7,9 +7,9 @@
  * applies to them unchanged, plus one rule: a copy grants only while the visit's current customer lists the number. List entries are never deleted or changed by a
  * call. Every existing stop route
  * (STOP, suppression, opt-in decline, own choices, a "no texts" call) is read at each send, as for every row. A caller who limits the texts to the booked visit ("just this visit": the extraction's
- * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The staff and portal
- * list adds a sticky stop (a stopped_at column read by declinedByRecipient, never a row delete) in a follow-up change; the
- * gate stays off until it ships.
+ * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. The account holder (in
+ * the app) and staff can stop a listed person: a sticky stopped_at mark that declinedByRecipient reads at every send and
+ * on the map link, never a row delete, and that no later call clears (listReminderContacts, setReminderContactStopped).
  * The rest of this header describes the per-visit rows.
  *
  * A caller who books a visit and gives another person's number to be texted ("my husband Bob will
@@ -286,7 +286,7 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
       `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
        SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
          FROM scheduled_services s
-         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id
+         JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id AND c.stopped_at IS NULL
         WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
        ON CONFLICT (scheduled_service_id, phone_key) DO NOTHING`,
       [REMINDER_SOURCE, scheduledServiceId, owner, ...LIVE_STATUSES],
@@ -301,6 +301,12 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
   });
 }
 
+// The account holder or staff stopped this number on the customer's list.
+async function stoppedOnList(customerId, phoneKey, conn) {
+  if (!customerId || !phoneKey) return false;
+  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNotNull('stopped_at').first('id'));
+}
+
 // The customer lists the number for every visit.
 async function listedBy(customerId, phoneKey, conn) {
   return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).first('id'));
@@ -312,6 +318,9 @@ async function listedBy(customerId, phoneKey, conn) {
  * suppression. Read only. Throws on an unreadable answer; callers fail closed.
  */
 async function declinedByRecipient({ customerId, phoneKey, phoneE164, purpose, conn = db }) {
+  // A stop on the customer's list (the account holder in the app, or staff) is sticky and covers EVERY visit row of the
+  // number on this customer: list copies and a call's "just this visit" grant alike. Nothing is deleted.
+  if (await stoppedOnList(customerId, phoneKey, conn)) return true;
   // The person's own saved choices row: a direct read (code-only errors, no write), whatever GATE_CONTACT_LOGIN says. That gate
   // only governs whether the contact pages and the holder's senders use the table; a decline saved there is a decline for this
   // feature too. contactPhoneDeclinesText is not used (it skips with the gate off and logs err.message). failClosed: a missing
@@ -933,7 +942,51 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
     .catch((err) => { throw Object.assign(new Error('visit-only replay release failed'), { code: err && err.code }); });
 }
 
+/**
+ * The customer's list of people a caller named for the visit texts, for the account holder's app and for staff.
+ * `hasAppAccess`: the number already sits in one of the account's on-location contact slots (the app's own contacts,
+ * which can sign in); the app hides "Give app access" for them. Read only.
+ */
+async function listReminderContacts(customerId, { conn = db } = {}) {
+  if (!customerId) return [];
+  const rows = await conn(REMINDER_TABLE).where({ customer_id: customerId }).orderBy('created_at', 'asc')
+    .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'stopped_at', 'stopped_by', 'created_at');
+  if (!rows.length) return [];
+  const customer = await conn('customers').where({ id: customerId }).first();
+  const { getServiceContactSlots, phoneKeyOf } = require('./customer-contact');
+  const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
+  return rows.map((row) => ({
+    id: row.id,
+    firstName: row.first_name || '',
+    lastName: row.last_name || '',
+    phone: row.phone_e164,
+    stopped: !!row.stopped_at,
+    stoppedAt: row.stopped_at || null,
+    stoppedBy: row.stopped_by || null,
+    addedAt: row.created_at,
+    hasAppAccess: slotKeys.has(row.phone_key),
+  }));
+}
+
+/**
+ * Stop or restart the visit texts for one person on the customer's list. `by`: 'customer' (the account holder in the
+ * app) or 'staff'. Scoped to the customer: an id of another customer's list changes nothing and answers null. A stop
+ * is a mark, never a delete; a later call never clears it. Returns the updated entry, or null when not found.
+ */
+async function setReminderContactStopped({ customerId, id, stopped, by, conn = db }) {
+  if (!customerId || !id || !['customer', 'staff'].includes(by)) return null;
+  const patch = stopped ? { stopped_at: conn.fn.now(), stopped_by: by } : { stopped_at: null, stopped_by: null };
+  const query = conn(REMINDER_TABLE).where({ id, customer_id: customerId });
+  // A repeat stop keeps the first stop's time and who made it.
+  if (stopped) query.whereNull('stopped_at');
+  const updated = await query.update(patch).returning('id');
+  if (!updated.length && !(await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).first('id'))) return null;
+  return (await listReminderContacts(customerId, { conn })).find((entry) => String(entry.id) === String(id)) || null;
+}
+
 module.exports = {
+  listReminderContacts,
+  setReminderContactStopped,
   gateLive,
   SOURCE,
   CONSENT_VERSION,

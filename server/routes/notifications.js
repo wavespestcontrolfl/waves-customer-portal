@@ -1242,6 +1242,60 @@ router.put('/preferences', async (req, res, next) => {
   }
 });
 
+// People a caller named for the visit texts (owner 2026-11-24 PM, 2026-11-27 "yes"): the account holder sees them per
+// profile, can stop or restart each one, and can give one app access by moving them into an on-location contact
+// (the client fills the contacts editor; the existing save and its consent tick do the rest). Holder only: a contact
+// session never reaches these routes (CONTACT_SESSION_ROUTES) and is refused here as well.
+async function reminderContactProfile(req, res) {
+  if (req.contactSession) {
+    res.status(403).json({ error: 'Account holder only', code: 'ACCOUNT_HOLDER_ONLY' });
+    return null;
+  }
+  const ids = await accountPropertyIds(req);
+  if (!ids.some((id) => String(id) === String(req.params.customerId))) {
+    res.status(403).json({ error: 'Property is not available for this account' });
+    return null;
+  }
+  return req.params.customerId;
+}
+
+const REMINDER_PARAMS = Joi.object({
+  customerId: Joi.string().guid().required(),
+  reminderId: Joi.string().guid(),
+});
+
+router.get('/reminder-contacts/:customerId', async (req, res, next) => {
+  try {
+    await REMINDER_PARAMS.validateAsync(req.params);
+    const customerId = await reminderContactProfile(req, res);
+    if (!customerId) return undefined;
+    const VisitRecipient = require('../services/call-visit-recipient');
+    res.json({ reminderContacts: await VisitRecipient.listReminderContacts(customerId) });
+  } catch (err) {
+    if (err.isJoi) return res.status(400).json({ error: 'Invalid request' });
+    next(err);
+  }
+  return undefined;
+});
+
+for (const [action, stopped] of [['stop', true], ['restart', false]]) {
+  router.post(`/reminder-contacts/:customerId/:reminderId/${action}`, async (req, res, next) => {
+    try {
+      await REMINDER_PARAMS.validateAsync(req.params);
+      const customerId = await reminderContactProfile(req, res);
+      if (!customerId) return undefined;
+      const VisitRecipient = require('../services/call-visit-recipient');
+      const entry = await VisitRecipient.setReminderContactStopped({ customerId, id: req.params.reminderId, stopped, by: 'customer' });
+      if (!entry) return res.status(404).json({ error: 'Not found' });
+      res.json({ reminderContact: entry });
+    } catch (err) {
+      if (err.isJoi) return res.status(400).json({ error: 'Invalid request' });
+      next(err);
+    }
+    return undefined;
+  });
+}
+
 router.put('/property-preferences/:customerId', async (req, res, next) => {
   try {
     const ids = await accountPropertyIds(req);
