@@ -6,7 +6,7 @@
 // and a week with none looks exactly as it did.
 import React from "react";
 import "@testing-library/jest-dom/vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApprovalsTab } from "./staff/ApprovalsTab";
 
@@ -74,6 +74,40 @@ describe("automatic clock-outs on the approvals tab", () => {
     const [, options] = calls.find(([u]) => u.includes("/confirm-auto-close"));
     expect(options.method).toBe("POST");
     await waitFor(() => expect(calls.filter(([u]) => u.includes("/week-detail")).length).toBeGreaterThan(1));
+  });
+
+  it("does not reopen technician A when Confirm finishes after switching to technician B", async () => {
+    let finishConfirm;
+    const detailTechs = [];
+    const techs = [
+      week({ technician_id: "tech-a", tech_name: "Tech Alpha", auto_close_pending: 1 }),
+      week({ technician_id: "tech-b", tech_name: "Tech Beta", auto_close_pending: 0 }),
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (url) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.includes("/confirm-auto-close")) {
+        return new Promise((resolve) => { finishConfirm = resolve; });
+      }
+      if (u.pathname.includes("/week-detail")) {
+        const tid = u.searchParams.get("technicianId");
+        detailTechs.push(tid);
+        return json({ dailies: [], entries: tid === "tech-a" ? [flagged] : [] });
+      }
+      return json({ techs });
+    }));
+
+    render(<ApprovalsTab showToast={() => {}} />);
+    await screen.findByText("Tech Alpha");
+    fireEvent.click(screen.getAllByRole("button", { name: "Details" })[0]);
+    expect(await screen.findByRole("button", { name: "Confirm clock-out" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Confirm clock-out" }));
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    await waitFor(() => expect(detailTechs).toEqual(["tech-a", "tech-b"]));
+
+    await act(async () => { finishConfirm(json({ success: true })); });
+    expect(detailTechs).toEqual(["tech-a", "tech-b"]);
+    expect(screen.queryByRole("button", { name: "Confirm clock-out" })).not.toBeInTheDocument();
   });
 
   it("shows nothing extra for a week with no automatic clock-out, or one already reviewed", async () => {

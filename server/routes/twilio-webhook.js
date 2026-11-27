@@ -2236,6 +2236,7 @@ router._internals = {
   lastOutboundAskedQuestion,
   isAffirmativeReactionToAutomatedText,
   AUTOMATED_VISIT_TEXT_TYPES,
+  mirrorApplicantSmsCompliance,
 };
 
 async function mirrorApplicantSmsCompliance({ from, body, messageSid, stage, code = null, revokeOfferConsent = false }) {
@@ -2254,7 +2255,7 @@ async function mirrorApplicantSmsCompliance({ from, body, messageSid, stage, cod
     for (const app of openApps) {
       const hist = Array.isArray(app.comms_history) ? app.comms_history : [];
       if (messageSid && hist.some((e) => e && e.twilio_sid === messageSid)) continue;
-      await appendCommsHistory(app.id, {
+      await appendCommsHistory(app.id, [{
         id: crypto.randomUUID(),
         at: new Date().toISOString(),
         stage,
@@ -2265,7 +2266,7 @@ async function mirrorApplicantSmsCompliance({ from, body, messageSid, stage, cod
         body: redactOfferLinks(body || ''),
         by: 'applicant',
         twilio_sid: messageSid || null,
-      });
+      }]);
     }
     if (revokeOfferConsent) {
       await db('job_offers')

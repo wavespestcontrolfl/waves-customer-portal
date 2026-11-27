@@ -245,13 +245,13 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
 
   // Confirm an automatic clock-out as it stands (GATE_SHIFT_CLOSE_REVIEW).
   const confirmAutoClose = async (entryId) => {
+    const targetTechId = expandedRef.current;
     try {
       await adminFetch(`/admin/timetracking/entries/${entryId}/confirm-auto-close`, {
         method: "POST",
       });
       showToast("Clock-out confirmed");
-      load();
-      if (expanded) await refreshDetail(expanded);
+      await refreshAfterMutation(weekStart, targetTechId);
     } catch (e) {
       showToast(`Confirm failed: ${errMessage(e)}`);
     }
