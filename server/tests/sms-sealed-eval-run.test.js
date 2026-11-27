@@ -1486,5 +1486,10 @@ describe('Gemini native systemInstruction sealed-eval versioning', () => {
     const summary = await sealedEval.getSealedExamSummary({ dbi: summaryDb });
     expect(summary.legs.gemini).toBeNull();
     expect(summary.legs.anthropic?.id).toBe('anth-done');
+    expect(summary.currentVersionsByLeg).toMatchObject({
+      anthropic: baseVersion,
+      openai: baseVersion,
+      gemini: gemVersion,
+    });
   });
 });

@@ -1503,8 +1503,12 @@ async function getSealedExamSummary({ dbi = db } = {}) {
   const coverage = versionNeedsMissedCases(currentVersion)
     ? missedVisitCoverage(currentVersion, await dbi('sms_sealed_eval_items').where('active', true).select('facts_block'))
     : null;
+  const currentVersionsByLeg = Object.fromEntries(
+    EXAM_LEGS.map((leg) => [leg, examVersionForLeg(currentVersion, leg)]),
+  );
   return {
     currentVersion,
+    currentVersionsByLeg,
     items: { active: Number(counts?.active) || 0, total: Number(counts?.total) || 0 },
     ...(coverage ? { missedVisitCoverage: { ...coverage, short: coverage.have < coverage.need } } : {}),
     legs,
