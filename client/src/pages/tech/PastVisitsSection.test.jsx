@@ -33,7 +33,7 @@ function renderPanel(facts) {
 
 describe('PastVisitsSection', () => {
   it('shows the first 3 visits and a button for the rest', () => {
-    render(<PastVisitsSection visits={VISITS} />);
+    render(<PastVisitsSection memberBits={[{ facts: { past_visits: VISITS } }]} />);
     expect(screen.getByText('Past visits')).toBeInTheDocument();
     expect(screen.getByText(/2026-11-10 · Lawn Care Treatment/)).toBeInTheDocument();
     expect(screen.getByText(/2026-09-01 · Mosquito Control/)).toBeInTheDocument();
@@ -45,7 +45,7 @@ describe('PastVisitsSection', () => {
   });
 
   it('the button opens all five, then folds back', () => {
-    render(<PastVisitsSection visits={VISITS} />);
+    render(<PastVisitsSection memberBits={[{ facts: { past_visits: VISITS } }]} />);
     fireEvent.click(screen.getByRole('button', { name: '2 more' }));
     expect(screen.getByText(/2026-08-01/)).toBeInTheDocument();
     expect(screen.getByText(/2026-07-01/)).toBeInTheDocument();
@@ -55,7 +55,7 @@ describe('PastVisitsSection', () => {
   });
 
   it('three or fewer visits: no button', () => {
-    render(<PastVisitsSection visits={VISITS.slice(0, 3)} />);
+    render(<PastVisitsSection memberBits={[{ facts: { past_visits: VISITS.slice(0, 3) } }]} />);
     expect(screen.queryByRole('button')).toBeNull();
   });
 });

@@ -1358,8 +1358,6 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
   const access = memberBits.map((m) => m.facts?.access || m.visitBrief?.access).find(Boolean) || null;
   // Label warnings ride the lawn member's own facts (a grouped stop's other members carry none): the first that has them.
   const labelWarnings = firstLabelWarnings(memberBits);
-  // Last five visits, every line: the same customer-wide list on every member's facts, so the first that has it.
-  const pastVisits = memberBits.map((m) => m.facts?.past_visits).find((v) => Array.isArray(v) && v.length) || null;
   // Customer-sent photos before the visit — same "first member that
   // answered carries it" dedup as access (deterministicVisitFacts resolves
   // ONE stop-level list, identical on every member's own facts). Keep the
@@ -1454,9 +1452,9 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
         grouped={grouped}
       />
 
-      {/* facts.past_visits (last five visits, every line) replaces the single Last visit block; absent = old block. */}
-      {pastVisits && <PastVisitsSection visits={pastVisits} />}
-      {!pastVisits && memberBits.some((m) => {
+      {/* facts.past_visits (last five visits, every line) replaces the single Last visit block; absent = the children. */}
+      <PastVisitsSection memberBits={memberBits}>
+      {memberBits.some((m) => {
         const bl = m.visitBrief?.last_visit || m.facts?.last_visit;
         return bl || m.service.lastLineServiceDate || m.service.lastLineServiceNotes;
       }) && (
@@ -1473,6 +1471,7 @@ export default function VisitBriefPanel({ stop, detail, onRetry, onPhotos, onPro
           ))}
         </>
       )}
+      </PastVisitsSection>
 
       {memberBits.map((m) => (
         <BriefGuidanceSection

@@ -120,24 +120,45 @@ function visitFactsGateEnabled() {
 // The customer's newest completed visits of EVERY service line (owner 2026-11-26,
 // "ALL REC"): date, service name, the technician's note (the day payload's own
 // previewText cut, same as lastLineServiceNotes), product NAMES only (no rates,
-// no money) and a free re-service mark. The visit being viewed is left out.
+// no money) and a free re-service mark. Left out: every member of the viewed stop
+// (a sibling completed minutes ago is this visit, not a past one) and any record
+// dated after the viewed visit's day (an older stop never lists a later visit).
 // Fail-soft: a read failure returns null so the key is omitted and the client
 // keeps its single-visit section; a product read failure only empties names.
 const PAST_VISITS_LIMIT = 5;
+
+// svc.id plus the stop's other current members; a failed stop lookup keeps svc.id alone.
+async function viewedStopIds(dbh, svc) {
+  try {
+    const ids = await require('./visit-prep').techStopMemberIds(svc, dbh);
+    return [...new Set([svc.id, ...ids].map(String))];
+  } catch (err) {
+    logger.warn(`[previsit-brief] visit-facts past-visit stop members unreadable for service ${svc.id}: ${err.message}`);
+    return [String(svc.id)];
+  }
+}
+
 async function loadPastVisits(dbh, svc) {
   try {
     const { isReserviceVisit } = require('./reservice-asks');
-    const rows = await dbh('service_records')
-      .where({ customer_id: svc.customer_id, status: 'completed' })
-      // whereNot alone drops NULL rows: a record with no scheduled visit stays.
-      .where(function notThisVisit() {
-        this.whereNull('scheduled_service_id').orWhereNot('scheduled_service_id', svc.id);
+    const stopIds = await viewedStopIds(dbh, svc);
+    const viewedDay = calendarDay(svc.scheduled_date);
+    const rows = await dbh('service_records as sr')
+      // The linked visit's catalog key: a catalog re-service counts as a free return even with the
+      // record flag off, and a rodent trapping follow-up never does (isReserviceVisit decides).
+      .leftJoin('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
+      .leftJoin('services as catalog', 'catalog.id', 'ss.service_id')
+      .where({ 'sr.customer_id': svc.customer_id, 'sr.status': 'completed' })
+      // whereNotIn alone drops NULL rows: a record with no scheduled visit stays.
+      .where(function notThisStop() {
+        this.whereNull('sr.scheduled_service_id').orWhereNotIn('sr.scheduled_service_id', stopIds);
       })
-      .orderBy('service_date', 'desc')
-      .orderBy('created_at', 'desc')
-      .orderBy('id', 'desc')
+      .modify((q) => { if (viewedDay) q.where('sr.service_date', '<=', viewedDay); })
+      .orderBy('sr.service_date', 'desc')
+      .orderBy('sr.created_at', 'desc')
+      .orderBy('sr.id', 'desc')
       .limit(PAST_VISITS_LIMIT)
-      .select('id', 'service_type', 'service_date', 'technician_notes', 'is_callback');
+      .select('sr.id', 'sr.service_type', 'sr.service_date', 'sr.technician_notes', 'sr.is_callback', 'catalog.service_key');
     let productRows = [];
     try {
       productRows = await loadProductHistory(dbh, rows.map((r) => r.id));
@@ -150,7 +171,7 @@ async function loadPastVisits(dbh, svc) {
       notes: previewText(r.technician_notes),
       products: dedupeHistoryProducts(productRows.filter((p) => String(p.service_record_id) === String(r.id)))
         .map((p) => ({ name: p.name })),
-      callback: isReserviceVisit({ is_callback: r.is_callback === true }),
+      callback: isReserviceVisit({ is_callback: r.is_callback === true, service_key: r.service_key }),
     }));
   } catch (err) {
     logger.warn(`[previsit-brief] visit-facts past visits unreadable for customer ${svc.customer_id}: ${err.message}`);
