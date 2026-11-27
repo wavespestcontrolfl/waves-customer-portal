@@ -60,4 +60,31 @@ async function hasAnySendClaim(claimKeys, conn = db) {
   return Boolean(row);
 }
 
-module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, hasAnySendClaim, WEEKLY_CLAIM_PREFIXES };
+// Atomically reserve a legacy daily claim alongside a scoped-sender marker in
+// one transaction. If an older release already claimed legacyKey (without the
+// marker), returns { allowed: false, reservedHere: false }. If a new-release
+// run reserved both (even if it crashed before claiming audiences), the marker
+// already exists so reruns get { allowed: true, reservedHere: false } and
+// resume unclaimed audiences safely.
+async function claimScopedDay(legacyKey, markerKey, conn = db) {
+  const run = async (trx) => {
+    if (await hasAnySendClaim([markerKey], trx)) return { allowed: true, reservedHere: false };
+    const gotLegacy = await takeSendClaim(legacyKey, trx);
+    if (!gotLegacy) return { allowed: false, reservedHere: false };
+    await takeSendClaim(markerKey, trx);
+    return { allowed: true, reservedHere: true };
+  };
+  return typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn);
+}
+
+async function releaseScopedDay(legacyKey, markerKey, conn = db) {
+  const run = async (trx) => {
+    await trx('sms_send_claims').whereIn('claim_key', [legacyKey, markerKey]).del();
+  };
+  return typeof conn.transaction === 'function' ? conn.transaction(run) : run(conn);
+}
+
+module.exports = {
+  pruneSmsSendClaims, takeSendClaim, releaseSendClaim, hasAnySendClaim,
+  claimScopedDay, releaseScopedDay, WEEKLY_CLAIM_PREFIXES,
+};
