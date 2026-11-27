@@ -172,6 +172,10 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
     wireDb({ customers: HOME, customer_properties: rows([{ ...AT_HOME, occupancy_type: 'commercial' }]) });
     expect((await bookBlankWdo()).finalPrice).toBe(250);
+    // Only the account calls it commercial: that property is the customer's own address, so the account's type counts.
+    const OFFICE = { ...HOME, property_type: 'commercial' };
+    wireDb({ customers: OFFICE, customer_properties: rows([AT_HOME]) });
+    expect((await bookBlankWdo({ customer: OFFICE })).finalPrice).toBe(250);
     // The one active property is a rental at another address. The save stamps the visit with it but no street, so
     // dispatch shows the customer's own address: two homes, so the catalog price stands and no record is read.
     lookup.mockClear();
@@ -285,16 +289,51 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect((await bookBlankWdo({ customer: { ...HOME, property_type: 'commercial' }, ...fromEstimate })).finalPrice).toBe(250);
   });
 
-  test('the office save runs that check inside its transaction, right after it stamps the sole active property', () => {
+  test('the office save runs that check inside its transaction for every save, right after the property stamps', () => {
     const source = fs.readFileSync(path.join(__dirname, '../routes/admin-schedule.js'), 'utf8');
     const stamp = source.indexOf('.soleActivePropertyId(customerId, trx);');
-    // Every save that named no property: an estimate's included.
-    const checked = source.indexOf(['      if (!bookingProperty) {',
-      '        await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, estimateId: linkedEstimateId || null, trx });'].join('\n'));
+    const call = '      await assertWdoTableHomeUnchanged(pricing.wdoTable, {';
+    const checked = source.indexOf(call);
     expect(stamp).toBe(source.lastIndexOf('.soleActivePropertyId(customerId, trx);'));
     expect(stamp).toBeGreaterThan(0);
     expect(checked).toBeGreaterThan(stamp);
-    expect(source.slice(stamp, checked).split('\n')).toHaveLength(3);
+    expect(source.indexOf('assertWdoTableHomeUnchanged(pricing.wdoTable', checked + call.length)).toBe(-1);
+    // At the save's own level, under no condition: a property the office chose is checked too, and so is an estimate's home.
+    const between = source.slice(stamp, checked);
+    expect(between).not.toMatch(/bookingProperty|if \(/);
+    expect(between.split('\n').length).toBeLessThan(8);
+  });
+
+  test('inside the save, a property the office chose is read again: one marked commercial after pricing refuses', async () => {
+    const { assertWdoTableHomeUnchanged } = adminSchedule._test;
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    let rental = RENTAL;
+    wireDb({ customers: HOME, customer_properties: (cond) => (cond.id === PROPERTY_ID ? rental : undefined) });
+    const pricing = await bookBlankWdo({ refillContext: { propertyId: PROPERTY_ID, sourceEstimateId: null } });
+    expect(pricing.finalPrice).toBe(275);
+    const check = () => assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId: CUSTOMER_ID, propertyId: PROPERTY_ID, chosenPropertyId: PROPERTY_ID, trx: dbMock });
+    await expect(check()).resolves.toBeUndefined();
+    rental = { ...RENTAL, occupancy_type: 'commercial' };
+    await expect(check()).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  test('inside the save, a chosen property beside a linked estimate is the home checked, as pricing read it', async () => {
+    const { assertWdoTableHomeUnchanged } = adminSchedule._test;
+    lookup.mockResolvedValue(record(4200, 'crawl'));
+    const ESTIMATE_ID = 'a1b2c3d4-5555-4e6f-8a7b-9c0d1e2f3a4b';
+    // The estimate quotes the customer's own address; the office chose the rental.
+    wireDb({
+      customers: HOME,
+      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
+      customer_properties: (cond) => (cond.id === PROPERTY_ID ? RENTAL : (cond.id ? undefined : [RENTAL])),
+    });
+    const pricing = await bookBlankWdo({ refillContext: { propertyId: PROPERTY_ID, sourceEstimateId: ESTIMATE_ID } });
+    expect(pricing.finalPrice).toBe(275);
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('200 Sample Rd'));
+    await expect(assertWdoTableHomeUnchanged(pricing.wdoTable, {
+      customerId: CUSTOMER_ID, propertyId: PROPERTY_ID, chosenPropertyId: PROPERTY_ID, estimateId: ESTIMATE_ID, trx: dbMock,
+    })).resolves.toBeUndefined();
   });
 
   test('a failed read never blocks a booking: the catalog price stands', async () => {

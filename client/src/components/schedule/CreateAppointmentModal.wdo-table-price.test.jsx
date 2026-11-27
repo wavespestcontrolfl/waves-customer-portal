@@ -514,6 +514,37 @@ describe('a WDO line in the modal', () => {
     expect(schedulePosts(fetcher)[0].sourceEstimateId).toBeUndefined();
   });
 
+  it('a changed price read for an estimate unlinked during the read never replaces the answer for the booking as it is now', async () => {
+    const BLOCK_2600 = { price: 175, source: 'wdo_table', basis: '2,600 sq ft, construction not verified', staffNote: null };
+    const CHANGED = { price: 225, source: 'wdo_table', basis: '3,600 sq ft, wood frame', staffNote: null };
+    let holdReads = false;
+    const releases = [];
+    const fetcher = installFetch({
+      // The estimate's question answers $200 and, once held, a changed $225; the question without it answers $175.
+      quote: (body) => {
+        if (!body.estimateId) return BLOCK_2600;
+        return holdReads ? new Promise((resolve) => { releases.push(() => resolve(json(CHANGED))); }) : FRAME_2600;
+      },
+      estimates: [{ id: 'est-1', status: 'sent', serviceInterest: 'WDO inspection', lines: [], propertyId: null }],
+    });
+    mount();
+    const estimateSelect = async () => (await screen.findByRole('option', { name: /WDO inspection/ })).closest('select');
+    fireEvent.change(await estimateSelect(), { target: { value: 'est-1' } });
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    holdReads = true;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(releases).toHaveLength(1));
+    // The office unlinks the estimate while the price is re-read; the line reads the new question's price.
+    fireEvent.change(await estimateSelect(), { target: { value: '' } });
+    await waitFor(() => expect(hint()?.textContent).toBe('Table price: $175.00 (2,600 sq ft, construction not verified).'));
+    releases.forEach((release) => release());
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect(hint()?.textContent).toBe('Table price: $175.00 (2,600 sq ft, construction not verified).');
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+  });
+
   it('a line edited while Save re-reads the WDO price books nothing; the next save books what the form shows', async () => {
     let holdReads = false;
     const releases = [];

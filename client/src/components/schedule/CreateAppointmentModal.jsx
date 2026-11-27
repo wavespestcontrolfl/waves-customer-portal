@@ -2819,10 +2819,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // main line then posts the $0 the total showed, never a catalog price the total left out (pre-push audit P0): before
   // the table price, a WDO line came filled in with the catalog price, so such a group counted as priced.
   const groupShowsPrice = (lines) => lines.some((s) => lineHasEnteredPrice(s) || wdoAutoAmount(s) != null);
-  // A booking wdoSubmitGate held (Save and Book): ask again after a failed read, or show the changed price.
+  // A booking wdoSubmitGate held (Save and Book): ask again after a failed read, or show the changed price. A price read
+  // for a question the form has since moved off (another property, estimate or address) never replaces the answer to the
+  // new question: that line would show "Reading" with nothing left to read (pre-push audit P1).
   const applyWdoHold = (hold) => {
     if (hold.retry) setWdoQuoteAttempt((n) => n + 1);
-    if (hold.refresh) setWdoQuote(hold.refresh);
+    if (hold.refresh) setWdoQuote((current) => (current?.key && current.key !== hold.refresh.key ? current : hold.refresh));
   };
   // A read that failed: the line offers Retry (pre-push audit P1). Until the line shows a price, Book stays disabled and
   // Save holds (wdoSubmitGate).

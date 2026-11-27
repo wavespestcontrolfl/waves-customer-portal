@@ -67,6 +67,7 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   const { customerAtBookingProperty } = require('./one-time-pest-booking-price');
   const { addressForCustomer } = require('./customer-pricing-ai');
   const { addressKey } = require('./customer-properties');
+  const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
   // No property named: a booking stamps the customer's sole active property when there is exactly one
   // (customer-properties soleActivePropertyId), so that property's own records count, even one not marked primary
   // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
@@ -82,7 +83,6 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   // customer's own address, and only the account's own records can call it commercial (pre-push audit P0).
   if ((customerAddress || (!propertyId && !written)) && at.otherProperty) {
     if (soleActive) return { refusal: 'the visit is stamped with the customer\'s one property, at another address than the customer\'s own' };
-    const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
     at = {
       customer: row,
       otherProperty: false,
@@ -101,9 +101,11 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   // read on its own record: only the account's own tier calls it commercial, never the home's records. The home under
   // another town name is the home: its own records, read at its own address (pre-push audit P0).
   const writtenElsewhere = !!written && addressKey(serviceRow) !== addressKey(at.customer);
+  // At the customer's own address the account's own type describes the same home, also when the property saved there is
+  // not marked primary (the shared rule reads it only beside a primary property) (pre-push audit P0).
   const commercial = writtenElsewhere
-    ? require('./pricing-engine/commercial-helpers').normalizePropertyType(row.waveguard_tier) === 'commercial'
-    : at.commercial;
+    ? normalizePropertyType(row.waveguard_tier) === 'commercial'
+    : at.commercial || (!at.otherProperty && normalizePropertyType(row.property_type) === 'commercial');
   if (commercial) return { refusal: 'the stored records call this a commercial property' };
   return { address: writtenElsewhere ? written : addressForCustomer(at.customer) };
 }

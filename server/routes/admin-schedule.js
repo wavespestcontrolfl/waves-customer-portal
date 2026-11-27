@@ -3181,9 +3181,11 @@ async function wdoTableForBooking({ customer, propertyId = null, estimateId = nu
 // the price again (WDO_PRICE_CHANGED): a property added, removed or edited, or an estimate moved, in between is another
 // home (pre-push audit P0). Reads the customer, estimate and property rows on the transaction, never the property record.
 // No table price: nothing to check.
-async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = null, estimateId = null, trx }) {
+async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = null, chosenPropertyId = null, estimateId = null, trx }) {
   if (!table) return;
-  const home = estimateId ? await bookedHomeProperty({ customerId, propertyId: null, estimateId, conn: trx }) : { propertyId };
+  // The home the price was read at, by the pricing's own rule: the property the office chose, else the linked estimate's,
+  // else the property the visit is stamped with.
+  const home = estimateId ? await bookedHomeProperty({ customerId, propertyId: chosenPropertyId, estimateId, conn: trx }) : { propertyId };
   const customer = home.unsure ? null : await trx('customers').where({ id: customerId }).first();
   const stillApplies = (at) => wdoTableStillApplies(table, { customer, conn: trx, ...at });
   // A linked estimate's home must also be the property the visit is stamped with, when one is (pre-push audit P0).
@@ -10284,9 +10286,13 @@ async function scheduleCreateHandler(req, res, next) {
         insertData.property_id = await require('../services/customer-properties')
           .soleActivePropertyId(customerId, trx);
       }
-      if (!bookingProperty) {
-        await assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId, propertyId: insertData.property_id || null, estimateId: linkedEstimateId || null, trx });
-      }
+      // The WDO table price was read before this transaction. Its home is read again here, after the property stamp (the
+      // property the office chose, re-read under the locks above, or the sole active one): a home that moved, or whose
+      // records now call it commercial, refuses before any write (pre-push audit P0).
+      await assertWdoTableHomeUnchanged(pricing.wdoTable, {
+        customerId, propertyId: insertData.property_id || null, chosenPropertyId: bookingProperty ? insertData.property_id || null : null,
+        estimateId: linkedEstimateId || null, trx,
+      });
       // Add new workflow columns (safe — migration may not have run yet)
       if (cols.service_id && serviceId) insertData.service_id = serviceId;
       if (cols.service_key_snapshot) insertData.service_key_snapshot = pricing.primaryServiceKey || null;
