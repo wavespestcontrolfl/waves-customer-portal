@@ -5462,18 +5462,23 @@ export function ContactNotificationCard({ customer, card, sectionTitle, muted, s
 // People named on a call ("text my husband Bob too"): visit texts only, no app
 // login. The account holder can stop or restart each one. Holder sessions only;
 // a failed load hides the section.
-function ReminderContactsSection({ property, enabled, muted, buttonStyle }) {
+function ReminderContactsSection({ property, enabled, savedContactsKey, muted, buttonStyle }) {
   const profileId = property.customerId || property.id;
   const [list, setList] = useState([]);
   const [busyId, setBusyId] = useState(null);
+  // A Stop / Restart bumps this: a read that started before it is dropped, so it never puts back the old state.
+  const readSeq = useRef(0);
   useEffect(() => {
     if (!enabled || !profileId) { setList([]); return undefined; }
     let alive = true;
+    const mine = ++readSeq.current;
+    const current = () => alive && readSeq.current === mine;
     Promise.resolve(api.getReminderContacts(profileId))
-      .then((res) => { if (alive) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
-      .catch((err) => { console.error(err); if (alive) setList([]); });
+      .then((res) => { if (current()) setList(Array.isArray(res?.reminderContacts) ? res.reminderContacts : []); })
+      .catch((err) => { console.error(err); if (current()) setList([]); });
     return () => { alive = false; };
-  }, [enabled, profileId]);
+  // savedContactsKey: a count of contact saves, so "also in your contacts" stays current after the editor above saves.
+  }, [enabled, profileId, savedContactsKey]);
   if (!enabled || !list.length) return null;
   const toggle = async (person) => {
     if (busyId) return;
@@ -5483,6 +5488,7 @@ function ReminderContactsSection({ property, enabled, muted, buttonStyle }) {
         ? await api.restartReminderContact(profileId, person.id)
         : await api.stopReminderContact(profileId, person.id);
       if (res?.reminderContact) {
+        readSeq.current += 1;
         setList((prev) => prev.map((x) => (x.id === person.id ? { ...x, ...res.reminderContact } : x)));
       }
     } catch (err) {
@@ -5498,7 +5504,7 @@ function ReminderContactsSection({ property, enabled, muted, buttonStyle }) {
     <div data-testid="reminder-contacts" style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #E7E2D7' }}>
       <div style={{ fontSize: 14, fontWeight: 700, color: B.glassNavy }}>Also gets visit texts</div>
       <div style={{ fontSize: 14, color: muted, marginTop: 4, lineHeight: 1.4 }}>
-        People named on a call get the booking, reminder and on-the-way texts for every visit. They can&rsquo;t sign in.
+        People named on a call get the booking, reminder and on-the-way texts for every visit. Being on this list does not give app access.
       </div>
       {list.map((person) => {
         const name = [person.firstName, person.lastName].filter(Boolean).join(' ') || 'Contact';
@@ -5601,6 +5607,8 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
   const [confirmTimestamps, setConfirmTimestamps] = useState({});
   const [confirmingIds, setConfirmingIds] = useState({});
   const [prefsLocked, setPrefsLocked] = useState({});
+  // Successful contact saves per property: the caller-named list re-reads after each one.
+  const [contactSaves, setContactSaves] = useState({});
   const app = useAppNotifications(prefs?.appPreferencesAvailable === true, customer?.id);
   // Per-property attestation that listed on-location contacts agreed to
   // receive service texts. Re-attested on every contact save.
@@ -5841,6 +5849,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
           }
           : p
       )));
+      setContactSaves(prev => ({ ...prev, [propertyId]: (prev[propertyId] || 0) + 1 }));
     } catch (err) {
       showCustomerAlert(whenOffline('Could not save the on-location contacts. Please try again.'));
       console.error(err);
@@ -6821,6 +6830,7 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
                     <ReminderContactsSection
                       property={property}
                       enabled={!contactSession}
+                      savedContactsKey={contactSaves[property.id]}
                       muted={muted}
                       buttonStyle={secondaryButton}
                     />

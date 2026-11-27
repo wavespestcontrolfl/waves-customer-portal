@@ -58,7 +58,7 @@ describe('Also gets visit texts (named on a call)', () => {
     setup();
     const section = await screen.findByTestId('reminder-contacts');
     expect(within(section).getByText('Also gets visit texts')).toBeInTheDocument();
-    expect(within(section).getByText(/People named on a call get the booking, reminder and on-the-way texts for every visit\. They can.t sign in\./)).toBeInTheDocument();
+    expect(within(section).getByText(/People named on a call get the booking, reminder and on-the-way texts for every visit\. Being on this list does not give app access\./)).toBeInTheDocument();
     expect(within(section).getByText('Bob Example')).toBeInTheDocument();
     expect(api.getReminderContacts).toHaveBeenCalledWith('c1');
   });
@@ -115,5 +115,16 @@ describe('Also gets visit texts (named on a call)', () => {
     expect(within(section).getByText('Also in your contacts above, which has its own text settings.')).toBeInTheDocument();
     expect(within(section).getByRole('button', { name: 'Stop texts for Bob Example' })).toBeInTheDocument();
     expect(within(section).queryByRole('button', { name: 'Give app access' })).not.toBeInTheDocument();
+  });
+  it('a contacts save re-reads the list, so "also in your contacts" stays current', async () => {
+    setup({ contacts: [filled(1)] });
+    await screen.findByTestId('reminder-contacts');
+    expect(api.getReminderContacts).toHaveBeenCalledTimes(1);
+    api.getReminderContacts.mockResolvedValue({ reminderContacts: [person({ inContacts: true })] });
+    api.updatePropertyNotificationPrefs.mockResolvedValue({ success: true, preferences: {}, serviceContacts: [filled(1)] });
+    fireEvent.click(await screen.findByLabelText(/Everyone listed with a phone number agreed/));
+    fireEvent.click(screen.getByRole('button', { name: 'Save contact' }));
+    await waitFor(() => expect(api.getReminderContacts).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText('Also in your contacts above, which has its own text settings.')).toBeInTheDocument();
   });
 });
