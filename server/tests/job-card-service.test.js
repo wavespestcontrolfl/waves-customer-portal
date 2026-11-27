@@ -2659,6 +2659,25 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     expect(text).toMatch(/never tank-mix with oil/);
   });
 
+  // Owner 2026-11-26: a percentage in a product name ("6% Fe") is not a dilution; the per-area catalog rate stands.
+  test('a line naming Sequestar 6% Fe does not turn the iron content into a tank dilution', async () => {
+    const protocols = { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Sequestar 6% Fe EDDHA per plant, drenched at the base' }] } };
+    const seq = { id: 'sq', name: 'Sequestar 6% Fe EDDHA', default_rate_per_1000: 2, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [seq], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('sq', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, ratePerGallon: null, ratePer1000: 2, reason: 'No carrier rate on file' });
+  });
+
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {
     const protocols = {
       pest: { visits: [{ visit: 1, month: 'Any', primary: 'Demand CS 0.4 fl oz/gal' }, { visit: 2, month: 'Any', primary: 'German roach cleanout — Advion Gel per label' }, { visit: 3, month: 'Any', primary: 'Non-repellent treatment for ghost or trailing ants\nAdvion Ant Gel per label' }, { visit: 4, month: 'Any', primary: 'Bifen IT broadcast per label' }] },

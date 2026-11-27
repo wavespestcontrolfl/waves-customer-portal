@@ -2301,7 +2301,7 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
   const protocolPerGallon = protocolBand(labelPerGallon, protocolLine);
   // A product whose catalog row states only a per-area rate (Acelepryn's lawn rate) but whose booked line states its own dilution
   // (a Tree & Shrub foliar spray per 100 gallons) is dosed at the line's dilution, never the lawn rate through the rig (owner 2026-11-26).
-  const lineOnlyBand = !labelPerGallon && !plannedRate && protocolLine?.rate ? protocolLine.rate : null;
+  const lineOnlyBand = !labelPerGallon && !plannedRate && protocolLine?.rate && protocolLine.explicitDilution ? protocolLine.rate : null;
   const perGallon = protocolPerGallon || labelPerGallon || lineOnlyBand;
   // A card's label rate is stated over its own spray volume (Tekko Pro on cockroaches: 2 fl oz per gallon at 1 gallon per
   // 1,000 sq ft). The mix per gallon is the label amount per area only at that volume, so:
@@ -2437,13 +2437,16 @@ function perGallonDose({ band, volume, lineCarrier, rigCarrier }) {
 // check uses it; one that does not ("see its card") falls back to the label band, so each row still has a number when one exists.
 function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
   return conflictLines.map((line) => {
-    const band = protocolBand(labelPerGallon, line);
-    const used = band || labelPerGallon || (!labelPerGallon && line.rate) || null;
+    const protocolBandOfLine = protocolBand(labelPerGallon, line);
+    // The band actually used, tracked as the single dose does: the card's own, else the line's own dilution when the catalog has no
+    // per-gallon band, else the label band.
+    const band = protocolBandOfLine || (!labelPerGallon && line.explicitDilution && line.rate ? line.rate : null);
+    const used = band || labelPerGallon || null;
     if (!used) return { service: line.name, amount: null, unit: null, fromCard: false, warnings: [], ...(line.conditional ? { conditional: true } : {}) };
     const lineCarrier = lineCarrierOf(band, line);
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
     const rigWarning = rigVolumeWarning({ lineCarrier, ...rigCtx });
-    const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, line.conditional && line.useText && `Applies to: ${line.useText}`, rigWarning].filter(Boolean);
+    const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, line.conditional && line.useText && `Applies to: ${line.useText}`, line.labelHold, rigWarning].filter(Boolean);
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
     return {
       service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
@@ -2560,12 +2563,18 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     // stated spray volume, is a row each (owner 2026-11-26).
     const mixed = list.length > 1 && list.some((h) => h.hit.selected === false) && list.some((h) => h.hit.selected !== false);
     const volumes = new Set(list.map((h) => statedVolumeOf(h.hit) || h.hit.labelCarrierGalPer1000 || 0));
-    return (rates.size > 1 || mixed || volumes.size > 1) && list.length > 1 && list.some((h) => h.hit.labelUseRate || h.hit.declaredRate || rateOf(h)) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
+    // Several "if needed" services that differ in target or restriction keep one row each, even at one concentration.
+    const conditionalUses = list.filter((h) => h.hit.selected === false);
+    const usesDiffer = conditionalUses.length > 1 && new Set(conditionalUses.map((h) => String(h.hit.raw || '').replace(/\s+/g, ' ').trim())).size > 1;
+    return (rates.size > 1 || mixed || volumes.size > 1 || usesDiffer) && list.length > 1 && list.some((h) => h.hit.labelUseRate || h.hit.declaredRate || rateOf(h)) ? { conflictLines: list.map((h) => ({ name: h.c.name, ...lineOf(h) })) } : {};
   };
   const lineOf = (h) => {
     const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
+      // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
+      explicitDilution: /(?:\/|\bper\b)\s*(?:100\s*)?gal/i.test(String(h.hit.raw || '')),
+      ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
       ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
