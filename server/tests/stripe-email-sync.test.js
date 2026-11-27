@@ -13,6 +13,7 @@ describe('stripe-email-sync processJob', () => {
       customers,
       cards: [],
       journal: [],
+      payers: [],
     };
     const builder = (table) => {
       const q = { conds: [], nots: [], locked: false, skip: false, dueOnly: false };
@@ -24,22 +25,24 @@ describe('stripe-email-sync processJob', () => {
       };
       q.whereNot = (c) => { q.nots.push(c); return q; };
       q.orderBy = () => q;
+      q.limit = () => q;
+      q.pluck = async (col) => rows().map((r) => r[col]);
       q.forUpdate = () => { q.locked = true; return q; };
       q.skipLocked = () => { q.skip = true; return q; };
-      const rows = () => ({ stripe_email_sync_jobs: state.jobs, customers: state.customers, payment_methods: state.cards, customer_merge_journal: state.journal }[table])
+      const rows = () => ({ stripe_email_sync_jobs: state.jobs, customers: state.customers, payment_methods: state.cards, customer_merge_journal: state.journal, payers: state.payers }[table])
         .filter((r) => !q.ors || q.ors.some((o) => Object.entries(o).every(([k, v]) => r[k] === v)))
         .filter((r) => q.conds.every((c) => Object.entries(c).every(([k, v]) => r[k] === v))
           && q.nots.every((c) => Object.entries(c).every(([k, v]) => r[k] !== v))
           && (!q.dueOnly || r.due)
           && !(q.skip && table === 'customers' && lockedCustomers.includes(r.id)));
       const note = (rs) => { if (q.locked) rs.forEach((r) => locks.push(`${table}:${r.id}`)); return rs; };
-      q.first = async () => { const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
+      q.first = async () => { if (state.throwOn === table) throw new Error('boom'); const r = note(rows().slice(0, 1))[0]; return r ? { ...r } : undefined; };
       q.select = async () => note(rows()).map((r) => ({ id: r.id }));
       q.update = async (patch) => { rows().forEach((r) => Object.assign(r, patch)); return 1; };
       return q;
     };
-    const trx = Object.assign(builder, { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
-    const db = Object.assign(builder, { transaction: async (fn) => fn(trx), fn: trx.fn });
+    const trx = Object.assign((t) => builder(t), { fn: { now: () => 'NOW' }, raw: (sql) => ({ sql }) });
+    const db = Object.assign((t) => builder(t), { transaction: async (fn) => fn(trx), fn: trx.fn, raw: trx.raw });
     jest.doMock('../models/db', () => db);
     jest.doMock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
     updateEmail = jest.fn(async () => {
@@ -87,6 +90,24 @@ describe('stripe-email-sync processJob', () => {
     const own = load({ customers: [cust()] });
     state.cards.push({ id: 'pm-1', customer_id: 'c1', stripe_customer_id: 'cus_1' });
     await expect(own.processJob('job-1')).resolves.toBe('updated');
+  });
+
+  test('a third-party payer on the same Stripe profile counts as shared: never written, office alerted', async () => {
+    const sync = load({ customers: [cust()] });
+    state.payers.push({ id: 'p1', stripe_customer_id: 'cus_1' });
+    await expect(sync.processJob('job-1')).resolves.toBe('shared');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(raiseAdminAlert).toHaveBeenCalledTimes(1);
+  });
+
+  test('a job that throws outside the Stripe call is pushed back, so it cannot hold a place in every batch', async () => {
+    const sync = load({ customers: [cust()] });
+    state.throwOn = 'customer_merge_journal';
+    jest.doMock('../config/stripe-config', () => ({ secretKey: 'sk_test_x' }));
+    await expect(sync.drainDue()).resolves.toEqual({ error: 1 });
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(state.jobs[0]).toMatchObject({ status: 'pending', last_error: 'Error' });
+    expect(state.jobs[0].next_attempt_at).toEqual({ sql: "now() + interval '15 minutes'" });
   });
 
   test('no Stripe profile yet: five re-checks over about an hour (counted apart from Stripe errors), then finished', async () => {

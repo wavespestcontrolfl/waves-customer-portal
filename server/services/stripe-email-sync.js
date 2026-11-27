@@ -7,7 +7,8 @@
  *  - Locks: the customer row FOR UPDATE first (the confirm's order: it updates the customer, then inserts the job), then
  *    the job, both held through one short Stripe call (10 s, no SDK retries). A merge or its undo must lock this
  *    customer row to move its Stripe id, so nothing moves between the checks and the write.
- *  - Skipped with an office alert: a Stripe id another record also holds or another record's saved card uses, and any
+ *  - Skipped with an office alert: a Stripe id another record also holds, another record's saved card uses, or a
+ *    third-party payer holds, and any
  *    record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office sorts
  *    those out by hand instead of the app guessing.
  *  - No Stripe profile yet: re-checked over about an hour (2, 4, 8, 16, 32 minutes), then finished. A profile being
@@ -121,7 +122,10 @@ async function processJob(jobId) {
       .whereNot({ id: customer.id }).first('id');
     const otherCard = otherRow ? null : await trx('payment_methods').where({ stripe_customer_id: customer.stripe_customer_id })
       .whereNot({ customer_id: customer.id }).first('id');
-    if (otherRow || otherCard) {
+    // A third-party payer (a property manager, a family member who pays) on the same Stripe profile: its statements
+    // bill through that profile, so the homeowner's email must not land on it.
+    const payer = otherRow || otherCard ? null : await trx('payers').where({ stripe_customer_id: customer.stripe_customer_id }).first('id');
+    if (otherRow || otherCard || payer) {
       await finish(trx, job, 'skipped', 'shared');
       await alertOffice(trx, job, customer, 'shared');
       return 'shared';
@@ -161,8 +165,13 @@ async function drainDue({ limit = 20 } = {}) {
       const r = await processJob(id);
       counts[r] = (counts[r] || 0) + 1;
     } catch (err) {
+      // Something outside the Stripe call failed (the transaction rolled back): push the job back so a row that keeps
+      // failing never holds a place in every tick's batch. Best effort; a failure here is only logged.
       counts.error = (counts.error || 0) + 1;
       logger.warn(`[stripe-email-sync] job ${id} failed: ${err.code || err.name || 'error'}`);
+      await db(TABLE).where({ id, status: 'pending' })
+        .update({ last_error: String(err.code || err.name || 'error').slice(0, 80), next_attempt_at: db.raw("now() + interval '15 minutes'"), updated_at: db.fn.now() })
+        .catch((e) => logger.warn(`[stripe-email-sync] could not push back job ${id}: ${e.code || e.name || 'error'}`));
     }
   }
   if (due.length) logger.info(`[stripe-email-sync] drained ${due.length}: ${JSON.stringify(counts)}`);
