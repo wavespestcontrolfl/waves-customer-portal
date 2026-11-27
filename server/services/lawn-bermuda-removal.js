@@ -561,19 +561,32 @@ async function enforceStepLimitsInTransaction(trx, products, { serviceId } = {})
   const stepVisit = await stepVisitOf(trx, serviceId, { strict: true });
   // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
   // Return missing-pair, unconfigured-limits, and cap findings as non-blocking warnings inside the
-  // locked transaction rather than rolling back completion.
+  // locked transaction rather than rolling back completion. Always run the locked cap check even
+  // when the product pair is incomplete so a third spray with one product missing records both.
   const inconsistent = !!stepVisit && !unconfigured && !(await stepConfigured(trx, stepVisit));
-  if (stepVisit && inconsistent) return { kind: 'limit', message: NOT_CONFIGURED_MESSAGE };
+  if (stepVisit && inconsistent) return [{ kind: 'config', message: NOT_CONFIGURED_MESSAGE }];
+  const findings = [];
   const pairProblem = stepVisit ? pairMessage({ recognition, fusilade, unconfigured }) : null;
-  if (pairProblem) return { kind: 'pair', message: pairProblem };
+  if (pairProblem) {
+    findings.push({ kind: pairProblem === NOT_CONFIGURED_MESSAGE ? 'config' : 'pair', message: pairProblem });
+  }
   const sprayed = recognition ? [recognition, fusilade].filter(Boolean) : (stepVisit ? [fusilade] : []);
-  if (!sprayed.length) return;
-  const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
-  if (!visit) return;
-  await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
-    [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
-  const message = (unconfigured && stepVisit) ? NOT_CONFIGURED_MESSAGE : await capViolation(trx, visit, sprayed);
-  return message ? { kind: 'limit', message } : undefined;
+  if (sprayed.length) {
+    const visit = stepVisit || await resolvedVisitOf(trx, serviceId, { strict: true });
+    if (visit) {
+      await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
+        [LOCK_NAMESPACE, `customer:${visit.customer_id}`]);
+      if (unconfigured && stepVisit) {
+        if (!findings.some((f) => f.kind === 'config')) {
+          findings.push({ kind: 'config', message: NOT_CONFIGURED_MESSAGE });
+        }
+      } else {
+        const capMessage = await capViolation(trx, visit, sprayed);
+        if (capMessage) findings.push({ kind: 'limit', message: capMessage });
+      }
+    }
+  }
+  return findings.length ? findings : undefined;
 }
 
 // The pest recap is not a place to record the bermuda removal spray: it takes no treated area

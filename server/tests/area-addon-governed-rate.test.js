@@ -614,12 +614,24 @@ describe('requireEveryChemicalAddOnRecorded', () => {
     await expect(ask('', tags([]))).resolves.toBeUndefined();
   });
 
-  test('a carried chemical add-on with no row is refused by name', async () => {
+  test('a carried chemical add-on with no row is refused by name, and multiple missing add-ons are all reported in missingAddOns (P1-2)', async () => {
     await expect(ask(FIRE, tags([]))).rejects.toMatchObject({
       statusCode: 400, code: 'area_addon_application_required', addOnKey: FIRE,
       message: expect.stringMatching(/add-on: no product is recorded for it\. Record its product, rate and treated square feet, then complete the visit\. If it was not applied, ask the office to take it off this visit first\.$/),
+      missingAddOns: [expect.objectContaining({ addOnKey: FIRE })],
     });
-    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({ addOnKey: 'area_addon_bed_pre_emergent' });
+    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([['p-1|x', FIRE]]))).rejects.toMatchObject({
+      addOnKey: 'area_addon_bed_pre_emergent',
+      missingAddOns: [expect.objectContaining({ addOnKey: 'area_addon_bed_pre_emergent' })],
+    });
+    await expect(ask(`area_addon_bed_pre_emergent,${FIRE}`, tags([]))).rejects.toMatchObject({
+      code: 'area_addon_application_required',
+      addOnKey: 'area_addon_bed_pre_emergent',
+      missingAddOns: [
+        expect.objectContaining({ addOnKey: 'area_addon_bed_pre_emergent' }),
+        expect.objectContaining({ addOnKey: FIRE }),
+      ],
+    });
   });
 
   test('an incomplete outcome and a replay are not judged; a set that could not be read is a retryable refusal for a fresh completed visit', async () => {

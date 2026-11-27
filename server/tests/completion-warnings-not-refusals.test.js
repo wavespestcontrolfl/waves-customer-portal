@@ -43,9 +43,27 @@ describe('a bermuda removal step past its limit: recorded, flagged, alerted', ()
   const message = 'Recognition: only 21 days since last app (min 42).';
   test('the preflight turns cap, not-configured, pair, and area messages into non-blocking warnings (owner 2026-11-26)', () => {
     expect(source).toContain('if (bermudaLimitMessage) {');
-    expect(source).toContain('lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));');
+    expect(source).toContain('bermudaConfigFinding(bermudaLimitMessage)');
+    expect(source).toContain('bermudaStepFinding(bermudaLimitMessage)');
     expect(source).toContain('if (bermudaAreaMessage) {');
     expect(source).toContain('enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id })');
+  });
+
+  test('missing Bermuda limits configuration emits a distinct config warning rather than application_limit_exceeded (P1-4)', async () => {
+    const { bermudaConfigFinding } = require('../services/complete-scheduled-service');
+    const notCfg = require('../services/lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE;
+    const finding = bermudaConfigFinding(notCfg);
+    expect(finding.code).toBe('bermuda_config_warning');
+    expect(finding.limitType).toBe('bermuda_limits_not_configured');
+    await notifyOfficeOfLimitFindings({ svc, record, findings: [finding] });
+    const [, spec, opts] = compose.raiseAdminAlert.mock.calls[0];
+    expect(spec).toMatchObject({
+      action: 'verify Bermuda removal limits configuration',
+      why: 'Bermuda removal limits were not configured, so yearly and 42-day limits could not be checked.',
+      doneWhen: 'limits_checked',
+    });
+    expect(opts.detail).toContain(notCfg);
+    expect(() => compose.composeAdminAlert(spec)).not.toThrow();
   });
 
   test('one office alert names the limit, and the alert rules accept it', async () => {

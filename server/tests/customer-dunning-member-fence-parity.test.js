@@ -33,6 +33,7 @@ const VERIFIER_REFUSALS = {
   'invoice # is #': 'predicate:not_collectible',
   'invoice # became payer-billed': 'predicate:payer_billed',
   'invoice # was withdrawn to a third-party payer': 'predicate:withdrawn',
+  'invoice # is held for chemical add-on billing review': 'predicate:chemical_addon_hold',
   'payer resolution unavailable for invoice #': 'predicate:throws (payer lookup failure is never "clear")',
   'invoice # is payer-billed': 'predicate:payer_billed',
   'invoice # remainder changed': 'session-only: compares against the allocation snapshot the page minted; the resolver builds the snapshot itself from these same rows',
@@ -46,6 +47,7 @@ const VERIFIER_CALLS = {
   dunningStoppedInvoiceIds: 'other-authority (see above)',
   isInvoiceCollectibleStatus: 'predicate',
   invoiceWithdrawnFromCustomer: 'predicate',
+  invoiceHeldForChemicalReview: 'predicate',
   resolveForInvoice: 'predicate',
   amountDueCents: 'session-only (snapshot cents)',
   assertNoInvoiceChargeReconciliationPending: 'predicate',
@@ -88,7 +90,7 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     const body = src(PayCombined.memberCollectionPending);
     const asserts = [...new Set([...body.matchAll(/\b(assert[A-Za-z]+)\(/g)].map((m) => m[1]))].sort();
     expect(asserts).toEqual(['assertInvoiceDepositSettlementReady', 'assertNoInvoiceChargeReconciliationPending']);
-    for (const h of ['isInvoiceCollectibleStatus', 'invoiceWithdrawnFromCustomer', 'resolveForInvoice']) expect(body).toContain(h);
+    for (const h of ['isInvoiceCollectibleStatus', 'invoiceWithdrawnFromCustomer', 'invoiceHeldForChemicalReview', 'resolveForInvoice']) expect(body).toContain(h);
   });
 
   // Behavioural half: every 'predicate:<reason>' row above is actually produced.
@@ -125,6 +127,7 @@ describe('memberCollectionPending mirrors the pay page\'s per-member checks', ()
     ['payer_billed', { payer_id: 'p1' }],
     ['payer_billed', { payer_statement_id: 's1' }],
     ['withdrawn', { scheduled_send_error: 'payer_billed:p1' }],
+    ['chemical_addon_hold', { scheduled_send_error: 'chemical_addon_review:svc-1' }],
   ])('%s from the row alone (%j), before any query', async (reason, over) => {
     expect(await run({ ...base(), ...over })).toEqual({ reason });
     expect(mockResolveForInvoice).not.toHaveBeenCalled();

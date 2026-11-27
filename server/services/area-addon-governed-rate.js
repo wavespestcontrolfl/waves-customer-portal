@@ -474,11 +474,16 @@ async function requireEveryChemicalAddOnRecorded(knex, carriedKeySet, tags, { fr
   const carried = String(carriedKeySet).split(',').filter((key) => key && isGoverned(key));
   if (!carried.length) return;
   const recorded = new Set(tags ? [...tags.values()] : []);
-  const missing = carried.find((key) => !recorded.has(key));
-  if (!missing) return;
-  const names = await addOnDisplayNames(knex, [missing]);
-  throw Object.assign(new Error(`${names.get(missing)} add-on: no product is recorded for it. Record its product, rate and treated square feet, then complete the visit. If it was not applied, ask the office to take it off this visit first.`), {
-    statusCode: 400, isOperational: true, code: APPLICATION_REQUIRED_CODE, addOnKey: missing,
+  const missingKeys = [...new Set(carried.filter((key) => !recorded.has(key)))];
+  if (!missingKeys.length) return;
+  const names = await addOnDisplayNames(knex, missingKeys);
+  const missingAddOns = missingKeys.map((key) => ({
+    addOnKey: key,
+    name: names.get(key),
+    message: `${names.get(key)} add-on: no product is recorded for it. Record its product, rate and treated square feet, then complete the visit. If it was not applied, ask the office to take it off this visit first.`,
+  }));
+  throw Object.assign(new Error(missingAddOns[0].message), {
+    statusCode: 400, isOperational: true, code: APPLICATION_REQUIRED_CODE, addOnKey: missingAddOns[0].addOnKey, missingAddOns,
   });
 }
 

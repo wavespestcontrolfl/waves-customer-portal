@@ -1351,8 +1351,10 @@ describe('unverified chemical add-on billing hold (P0-1)', () => {
     expect(shouldAutoInvoiceCompletion({ ...backfillPrepaid, unrecordedChemicalAddOnHold: true })).toBe(false);
 
     const source = require('fs').readFileSync(require.resolve('../services/complete-scheduled-service'), 'utf8');
+    expect(source).toContain('scheduled_send_at: null');
     expect(source).toContain('scheduled_send_error: chemicalAddonHoldStamp(svc.id)');
-    expect(source).toContain("InvoiceFollowups.pauseSequence(heldId, { reason: 'unrecorded_chemical_addon_review' })");
+    expect(source).toContain("where({ invoice_id: heldId, status: 'active' })");
+    expect(source).toContain('if (Number(stamped) > 0)');
     const holdAppliesAt = source.indexOf('const chemicalAddOnBillingHoldApplies =');
     expect(source.slice(holdAppliesAt, holdAppliesAt + 350)).not.toContain('!prepaidCovered &&');
   });

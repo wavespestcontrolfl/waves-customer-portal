@@ -37,6 +37,8 @@ let mockNewerAuditRow = null;
 // Row returned for the rollback's OWN-op lookup (non-null = the "failed"
 // transaction actually committed; its acknowledgement was lost).
 let mockOwnOpRow = null;
+// Latest ad_budget_log row (orderBy created_at desc) for expired-hold attribution and legacy branded checks.
+let mockLatestBudgetLogRow = null;
 
 const mockDb = jest.fn((table) => {
   if (table === 'ad_campaigns') {
@@ -55,6 +57,7 @@ const mockDb = jest.fn((table) => {
   }
   if (table === 'ad_budget_log') {
     let ownOpLookup = false;
+    let latestLookup = false;
     const b = {
       insert: mockLogInsert,
       where: jest.fn((arg) => {
@@ -63,7 +66,11 @@ const mockDb = jest.fn((table) => {
       }),
       whereNull: jest.fn(() => b),
       orWhereNot: jest.fn(() => b),
-      first: jest.fn(() => Promise.resolve(ownOpLookup ? mockOwnOpRow : mockNewerAuditRow)),
+      orderBy: jest.fn(() => {
+        latestLookup = true;
+        return b;
+      }),
+      first: jest.fn(() => Promise.resolve(ownOpLookup ? mockOwnOpRow : (latestLookup ? mockLatestBudgetLogRow : mockNewerAuditRow))),
       // The supersession check selects ALL newer audit rows and inspects
       // google_ads_updated per row in JS.
       select: jest.fn(() => Promise.resolve(mockNewerAuditRow ? [mockNewerAuditRow] : [])),
@@ -103,6 +110,7 @@ describe('BudgetManager live Google Ads push', () => {
     campaignFirstRow = null;
     mockNewerAuditRow = null;
     mockOwnOpRow = null;
+    mockLatestBudgetLogRow = null;
     // 99% utilization → above the default orange max (95) → mode 'stop'
     // (a change from 'base'), so every adjustBudgets test exercises a write.
     jest.spyOn(BudgetManager, 'getCapacityForArea')
@@ -732,6 +740,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     campaignFirstRow = null;
     mockNewerAuditRow = null;
     mockOwnOpRow = null;
+    mockLatestBudgetLogRow = null;
   });
 
   test.each([
@@ -855,13 +864,15 @@ describe('in-lock rechecks (requireLivePush)', () => {
     expect(mockUpdateBudget).not.toHaveBeenCalled();
     expect(mockCampaignUpdate).not.toHaveBeenCalled();
 
-    // Expired hold on a throttled branded Search campaign is restored to base automatically.
+    // Expired hold on a throttled branded Search campaign is restored to base automatically
+    // when the latest ad_budget_log entry proves the expired stop hold caused the throttle.
     const expiredBranded = {
       ...branded,
       metadata: { budget_hold: { mode: 'stop', until: '2020-01-01' }, keep: true },
     };
     campaignRows = [expiredBranded];
     campaignFirstRow = expiredBranded;
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
     mockIsEnabled.mockReturnValue(true);
     mockUpdateBudget.mockResolvedValue({ ok: true });
 
@@ -899,6 +910,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     };
     campaignRows = [expiredBranded];
     campaignFirstRow = expiredBranded;
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
     mockIsEnabled.mockReturnValue(false);
     mockIsConfigured.mockReturnValue(true);
     const skippedRes = await BudgetManager.adjustBudgets();
@@ -910,6 +922,7 @@ describe('in-lock rechecks (requireLivePush)', () => {
     jest.clearAllMocks();
     campaignRows = [expiredBranded];
     campaignFirstRow = expiredBranded;
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Hold: stop until 2020-01-01 (set in the portal)', trigger: 'manual' };
     mockIsEnabled.mockReturnValue(true);
     mockIsConfigured.mockReturnValue(true);
     mockUpdateBudget.mockResolvedValue({ ok: true, previousDailyBudget: 0.4 });
@@ -918,6 +931,64 @@ describe('in-lock rechecks (requireLivePush)', () => {
     expect(failRes.failed).toBe(1);
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 40);
     expect(mockUpdateBudget).toHaveBeenCalledWith('1234567890', 0.4);
+
+    // P0-3: expired 'base' hold followed by a manual 'stop' MUST NOT restore base (clears metadata only).
+    jest.clearAllMocks();
+    const expiredBaseWithManualStop = {
+      ...baseCampaign(),
+      is_branded: true,
+      budget_mode: 'stop',
+      daily_budget_current: '0.40',
+      metadata: { budget_hold: { mode: 'base', until: '2020-01-01' } },
+    };
+    campaignRows = [expiredBaseWithManualStop];
+    campaignFirstRow = expiredBaseWithManualStop;
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Manual pause for promo', trigger: 'manual' };
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    const baseHoldRes = await BudgetManager.adjustBudgets();
+    expect(baseHoldRes).toEqual({ evaluated: 0, changed: 0, failed: 0 });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).toHaveBeenCalledTimes(1);
+    expect(mockCampaignUpdate.mock.calls[0][0].budget_mode).toBeUndefined();
+
+    // P0-3: expired 'stop' hold superseded by a newer manual 'stop' MUST NOT restore base (clears metadata only).
+    jest.clearAllMocks();
+    campaignRows = [expiredBranded];
+    campaignFirstRow = expiredBranded;
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Manual stop by owner', trigger: 'manual' };
+    mockIsEnabled.mockReturnValue(true);
+    mockIsConfigured.mockReturnValue(true);
+    const supersededRes = await BudgetManager.adjustBudgets();
+    expect(supersededRes).toEqual({ evaluated: 0, changed: 0, failed: 0 });
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(mockCampaignUpdate).toHaveBeenCalledTimes(1);
+    expect(mockCampaignUpdate.mock.calls[0][0].budget_mode).toBeUndefined();
+
+    // P1-5: branded Search left throttled by prior automatic capacity rule (no hold) is surfaced for review.
+    jest.clearAllMocks();
+    const legacyAutoBranded = {
+      ...baseCampaign(),
+      id: 'c-brand-legacy',
+      campaign_name: 'Waves Branded Search',
+      is_branded: true,
+      budget_mode: 'stop',
+      daily_budget_current: '0.40',
+      metadata: {},
+    };
+    campaignRows = [legacyAutoBranded];
+    campaignFirstRow = legacyAutoBranded;
+    mockLatestBudgetLogRow = { new_mode: 'stop', reason: 'Capacity 98% > 95%', trigger: 'auto' };
+    const alertSpy = jest.spyOn(require('../services/admin-alert-compose'), 'raiseAdminAlert').mockResolvedValue({ id: 'a-1' });
+    await BudgetManager.adjustBudgets();
+    expect(mockUpdateBudget).not.toHaveBeenCalled();
+    expect(require('../services/logger').warn).toHaveBeenCalledWith(expect.stringContaining('Waves Branded Search'));
+    expect(alertSpy).toHaveBeenCalledWith(
+      'alert',
+      expect.objectContaining({ action: 'review branded campaign left throttled', subject: { type: 'campaign', id: 'c-brand-legacy' } }),
+      expect.objectContaining({ dedupeKey: 'branded-legacy-auto-throttle:c-brand-legacy' }),
+    );
+    alertSpy.mockRestore();
 
     // P1-3: stale DELETE clearHold (hold already cleared concurrently before FOR UPDATE lock) must NOT push base to Google.
     jest.clearAllMocks();
@@ -1030,6 +1101,7 @@ describe('rollbackAfterLivePush r9', () => {
     campaignFirstRow = null;
     mockNewerAuditRow = null;
     mockOwnOpRow = null;
+    mockLatestBudgetLogRow = null;
   });
 
   test('a sync mirror of OUR failed push is restored, not treated as superseded', async () => {

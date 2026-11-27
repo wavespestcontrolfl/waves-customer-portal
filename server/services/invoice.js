@@ -4200,6 +4200,13 @@ function refuseFirstDeliveryHold(current, invoiceId, firstDeliveryOnly, override
   if (isStaleClaimReviewHold(current) && !overridesReviewHold) {
     throw staleClaimReviewHoldError(invoiceId);
   }
+  const invoiceHelpers = require("./invoice-helpers");
+  if (typeof invoiceHelpers.invoiceHeldForChemicalReview === "function"
+    && invoiceHelpers.invoiceHeldForChemicalReview(current) && !overridesReviewHold) {
+    const e = new Error(`Invoice ${invoiceId} is held for office billing review of a chemical area add-on`);
+    e.code = "INVOICE_CHEMICAL_ADDON_HOLD";
+    throw e;
+  }
   if (firstDeliveryOnly && alreadyDeliveredForFirstSend(current)) {
     throw invoiceAlreadyDeliveredError(current);
   }
@@ -4631,6 +4638,7 @@ async function recordZeroDueSchedulingOutcome(reasonText, inv) {
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
+    .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
     .update({
       scheduled_send_attempts: db.raw("COALESCE(scheduled_send_attempts, 0) + 1"),
       scheduled_send_at: new Date(Date.now() + 5 * 60 * 1000),
@@ -4667,6 +4675,7 @@ async function dequeuePayerOwnedZeroDueInvoice(inv, reasonText) {
     .where({ id: inv.id, status: "scheduled" })
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
+    .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
     .update({
       scheduled_send_at: null,
       scheduled_send_error: reasonText,
@@ -4699,6 +4708,7 @@ async function claimDueScheduledInvoiceForSend(database, invoiceId) {
     .whereNotNull("scheduled_send_at")
     .where("scheduled_send_at", "<=", new Date())
     .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
+    .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
     .update({
       status: "sending", updated_at: new Date(), send_claim_token: claimToken,
       // A scheduled first send that went out after its due day takes the send day (invoice-helpers.js).
@@ -4967,10 +4977,13 @@ function standingStrandedAlert() {
 }
 const STALE_SENDING_SQL = "NOW() - INTERVAL '10 minutes'";
 function stalePark() {
+  const staleText = require("./invoice-helpers").STALE_SEND_PARK_ERROR;
   return {
     status: "scheduled",
     scheduled_send_at: null,
-    scheduled_send_error: require("./invoice-helpers").STALE_SEND_PARK_ERROR,
+    scheduled_send_error: typeof db?.raw === "function"
+      ? db.raw("CASE WHEN COALESCE(scheduled_send_error, '') LIKE 'chemical_addon_review:%' THEN scheduled_send_error ELSE ? END", [staleText])
+      : staleText,
     send_claim_token: null,
     updated_at: new Date(),
   };
@@ -5138,6 +5151,7 @@ function buildClaimFlip(database, invoiceId, current, { firstDeliveryOnly, overr
       "NOT (status = 'scheduled' AND scheduled_send_at IS NULL AND COALESCE(scheduled_send_error, '') LIKE ?)",
       [`${require("./invoice-helpers").STALE_SEND_PARK_ERROR}%`],
     );
+    flip.whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'");
   }
   if (!expectedVersion) return flip;
   // The approved edit time, in the claim's own locked UPDATE: an edit after the card was shown stamps updated_at.
@@ -5296,7 +5310,9 @@ async function claimPacketInvoiceForSend(invoiceId, packetId, {
     if (requireDue) {
       const due = await trx("invoices").where({ id: invoiceId, status: "scheduled" })
         .whereNotNull("scheduled_send_at").where("scheduled_send_at", "<=", new Date())
-        .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5)).first("id");
+        .where((q) => q.whereNull("scheduled_send_attempts").orWhere("scheduled_send_attempts", "<", 5))
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
+        .first("id");
       if (!due) return { payerBilled: false, claim: null };
     }
     const { visit, billed, payerId } = await Packets.resolvePacketOwnershipLocked(packetId, trx);
@@ -5601,7 +5617,8 @@ async function markAcceptedChannelPendingEmail(invoiceId, claimToken, acceptedSm
     const marked = await whereSendClaimOwned(
       db("invoices").where({ id: invoiceId, status: "sending" })
         .whereNull("payer_id")
-        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'"),
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+        .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'"),
       claimToken,
     ).update({
       sms_sent_at: db.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
@@ -9569,6 +9586,7 @@ const InvoiceService = {
             .where({ id: invoiceId, status: "sending", send_claim_token: claim.invoice.send_claim_token })
             .whereNull("payer_id")
             .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
             .forUpdate()
             .first("id", "scheduled_send_error", "scheduled_send_attempts");
           if (!owned) return false;
@@ -9585,6 +9603,7 @@ const InvoiceService = {
             .where({ id: invoiceId, status: "sending", send_claim_token: claim.invoice.send_claim_token })
             .whereNull("payer_id")
             .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
             .update({
               status: "scheduled",
               sms_sent_at: trx.raw("COALESCE(sms_sent_at, ?)", [acceptedSmsAt]),
@@ -10067,6 +10086,7 @@ const InvoiceService = {
           .whereNull("scheduled_send_attempts")
           .orWhere("scheduled_send_attempts", "<", 5),
       )
+      .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
       // Invoices held by a customer's active collection HOLD (a dispute, or the wrong-number /
       // wrong-party fallback a released dispute restores) never take a page
       // slot (owner ruling 2026-09-30): a pile of held invoices, re-due every
@@ -10302,6 +10322,7 @@ const InvoiceService = {
                 .whereNull("scheduled_send_attempts")
                 .orWhere("scheduled_send_attempts", "<", 5),
             )
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
             .update({
               scheduled_send_at: nextOpen,
               scheduled_send_error:
@@ -10360,9 +10381,24 @@ const InvoiceService = {
       }
       if (!claimed) continue;
 
-      const restoreClaimedInvoice = (payload) => db("invoices")
-        .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
-        .update({ ...payload, send_claim_token: null });
+      const restoreClaimedInvoice = async (payload, { allowChemicalHold = false } = {}) => {
+        const q = db("invoices")
+          .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token });
+        if (!allowChemicalHold) {
+          q.whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'");
+        }
+        const updated = await q.update({ ...payload, send_claim_token: null });
+        if (updated || allowChemicalHold) return updated;
+        // If a concurrent closeout stamped chemical_addon_review: while this worker held the
+        // sending claim, release the claim back to parked (scheduled_send_at NULL) without
+        // overwriting scheduled_send_error or re-arming the schedule.
+        const parkQuery = db("invoices");
+        if (!parkQuery || typeof parkQuery.where !== "function") return 0;
+        return parkQuery
+          .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
+          .whereRaw("COALESCE(scheduled_send_error, '') LIKE 'chemical_addon_review:%'")
+          .update({ status: "scheduled", scheduled_send_at: null, send_claim_token: null, updated_at: new Date() });
+      };
 
       // Collections HOLD (owner ruling 2026-09-30; any active collection_hold - a dispute or the
       // wrong-number / wrong-party fallback, Codex #5424 r13): no pay link reaches
@@ -10495,6 +10531,29 @@ const InvoiceService = {
         logger.warn(`[invoice] Scheduled send for ${inv.invoice_number} delivered Text/App but could not persist its timestamp — claim retained for review`);
         continue;
       }
+      const invoiceHelpersForHold = require("./invoice-helpers");
+      const heldForChemicalAddon = result.code === "INVOICE_CHEMICAL_ADDON_HOLD"
+        || result.sms?.code === "INVOICE_CHEMICAL_ADDON_HOLD"
+        || result.email?.code === "INVOICE_CHEMICAL_ADDON_HOLD"
+        || (typeof invoiceHelpersForHold.invoiceHeldForChemicalReview === "function"
+          && (invoiceHelpersForHold.invoiceHeldForChemicalReview(inv) || invoiceHelpersForHold.invoiceHeldForChemicalReview(claimed)));
+      if (heldForChemicalAddon) {
+        held += 1;
+        const parkedHold = await restoreClaimedInvoice(
+          { status: "scheduled", scheduled_send_at: null, updated_at: new Date() },
+          { allowChemicalHold: true },
+        );
+        if (parkedHold && result.creditApplied > 0) {
+          try {
+            const { reverseAppliedCredit } = require("./customer-credit");
+            await reverseAppliedCredit({ invoiceId: inv.id, amount: result.creditApplied, createdBy: "system:scheduled_send_failed" });
+          } catch (e) {
+            logger.warn(`[invoice] credit reversal after chemical-hold park skipped for ${inv.id}: ${e.message}`);
+          }
+        }
+        logger.info(`[invoice] Scheduled send for ${inv.invoice_number} parked — held for chemical add-on billing review`);
+        continue;
+      }
 
       const error =
         [
@@ -10547,6 +10606,7 @@ const InvoiceService = {
           const parked = await db("invoices")
             .where({ id: inv.id, status: "sending", send_claim_token: claimed.send_claim_token })
             .whereNull("sms_sent_at")
+            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'chemical_addon_review:%'")
             .update({
               status: "scheduled",
               scheduled_send_at: null,

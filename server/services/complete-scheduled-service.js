@@ -2508,6 +2508,7 @@ function savedLawnWarningFindings(record) {
 const BERMUDA_STEP_LIMIT_TYPE = 'bermuda_step_limit';
 const BERMUDA_PAIR_TYPE = 'bermuda_pair_missing';
 const BERMUDA_AREA_TYPE = 'bermuda_area_missing';
+const BERMUDA_CONFIG_TYPE = 'bermuda_limits_not_configured';
 const bermudaStepFinding = (message) => ({
   code: 'application_limit_exceeded',
   limitType: BERMUDA_STEP_LIMIT_TYPE,
@@ -2529,9 +2530,17 @@ const bermudaAreaFinding = (message) => ({
   reason: message,
   message: `Bermuda removal treated area warning: ${message} The visit was recorded and the office was told.`,
 });
+const bermudaConfigFinding = (message) => ({
+  code: 'bermuda_config_warning',
+  limitType: BERMUDA_CONFIG_TYPE,
+  productName: 'Bermuda removal',
+  reason: message,
+  message: `Bermuda removal limits could not be checked: ${message} The visit was recorded and the office was told.`,
+});
 const FINDING_ACTION = {
   [BERMUDA_PAIR_TYPE]: () => 'review Bermuda removal product pairing',
   [BERMUDA_AREA_TYPE]: () => 'review Bermuda removal treated area',
+  [BERMUDA_CONFIG_TYPE]: () => 'verify Bermuda removal limits configuration',
   [areaAddOnGovernedRate.ACTUALS_CODE]: () => 'review area add-on actuals',
   [areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE]: () => 'review unrecorded chemical add-on',
 };
@@ -2539,12 +2548,14 @@ FINDING_WHY[lawnProhibited.LIMIT_TYPE] = (name) => `${name} was recorded on a ho
 FINDING_WHY[BERMUDA_STEP_LIMIT_TYPE] = () => 'Bermuda removal was recorded past its yearly or 42-day limit.';
 FINDING_WHY[BERMUDA_PAIR_TYPE] = () => 'Bermuda removal was recorded without both required paired products.';
 FINDING_WHY[BERMUDA_AREA_TYPE] = () => 'Bermuda removal was recorded without its required treated area.';
+FINDING_WHY[BERMUDA_CONFIG_TYPE] = () => 'Bermuda removal limits were not configured, so yearly and 42-day limits could not be checked.';
 FINDING_WHY[areaAddOnGovernedRate.ACTUALS_CODE] = (name) => `${name} add-on was recorded with incomplete application actuals.`;
 FINDING_WHY[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (name) => `${name} chemical add-on completed with no recorded product application.`;
 FINDING_DETAIL[lawnProhibited.LIMIT_TYPE] = (fullName, f, svc) => `${fullName} was recorded on a ${svc.service_type || 'lawn'} visit at a residential property. The label prohibits residential use: oxadiazon is not for use on home lawns. The visit was recorded. Review it with the technician and report it if needed.`;
 FINDING_DETAIL[BERMUDA_STEP_LIMIT_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit past its limit: ${f.reason} The visit was recorded. Review it and report it if needed.`;
 FINDING_DETAIL[BERMUDA_PAIR_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without both paired products: ${f.reason} The visit was recorded. Review it with the technician.`;
 FINDING_DETAIL[BERMUDA_AREA_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit without its required treated area: ${f.reason} The visit was recorded. Review it with the technician.`;
+FINDING_DETAIL[BERMUDA_CONFIG_TYPE] = (fullName, f, svc) => `Bermuda removal was recorded on a ${svc.service_type || 'lawn'} visit, but its limits could not be checked: ${f.reason} Verify the Bermuda removal limits configuration and review this application.`;
 FINDING_DETAIL[areaAddOnGovernedRate.ACTUALS_CODE] = (fullName, f, svc) => `Area add-on (${fullName}) on a ${svc.service_type || 'service'} visit was recorded with incomplete application actuals: ${f.message || f.reason || 'missing rate or treated area'}. Review it with the technician.`;
 FINDING_DETAIL[areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE] = (fullName, f, svc) => `Chemical area add-on (${fullName}) on a ${svc.service_type || 'service'} visit completed with no recorded product application: ${f.message || f.reason || 'no product recorded'}. Automatic invoicing was held for office review.`;
 
@@ -2590,7 +2601,7 @@ async function notifyOfficeOfLimitFindings({ svc, record, findings }) {
         link: `/admin/customers?customerId=${svc.customer_id}`,
         subject: { type: 'visit', id: String(svc.id) },
         // A limit that could not be checked is done when it is checked, not when an overage is reviewed.
-        doneWhen: customAdvisory ? 'application_warning_reviewed' : over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
+        doneWhen: finding.limitType === BERMUDA_CONFIG_TYPE ? 'limits_checked' : customAdvisory ? 'application_warning_reviewed' : over && !unchecked ? 'limit_overage_reviewed' : 'limits_checked',
       }, {
         bell: true,
         dedupeKey,
@@ -5615,14 +5626,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
       await areaAddOnGovernedRate.requireEveryChemicalAddOnRecorded(db, addOnKeysBeforeLock, addOnTags, { fresh: claim.action === 'proceed', incomplete: isIncompleteVisit });
     } catch (addOnErr) {
       if (addOnErr?.code === areaAddOnGovernedRate.APPLICATION_REQUIRED_CODE) {
-        logger.warn(`[dispatch] non-blocking chemical add-on warning for ${svc.id}: ${addOnErr.message}`);
-        lawnWarningFindings.push({
-          code: addOnErr.code,
-          limitType: addOnErr.code,
-          productId: null,
-          productName: addOnErr.addOnKey || 'Area add-on',
-          message: addOnErr.message,
-        });
+        const missingItems = Array.isArray(addOnErr.missingAddOns) && addOnErr.missingAddOns.length
+          ? addOnErr.missingAddOns
+          : [{ addOnKey: addOnErr.addOnKey || 'Area add-on', name: addOnErr.addOnKey || 'Area add-on', message: addOnErr.message }];
+        for (const item of missingItems) {
+          logger.warn(`[dispatch] non-blocking chemical add-on warning for ${svc.id}: ${item.message}`);
+          lawnWarningFindings.push({
+            code: addOnErr.code,
+            limitType: addOnErr.code,
+            productId: null,
+            productName: item.name || item.addOnKey || 'Area add-on',
+            addOnKey: item.addOnKey || null,
+            message: item.message,
+          });
+        }
       } else {
         throw addOnErr;
       }
@@ -5727,26 +5744,39 @@ async function completeScheduledService(completionInput, packetContext = null) {
       try {
         // Strict reads: an error reading the account or its properties fails this attempt
         // (marked failed, nothing committed), never reads as "not requested".
-        bermudaPairMessage = await require('./lawn-bermuda-removal').bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
-        if (!bermudaPairMessage) bermudaLimitMessage = await require('./lawn-bermuda-removal').bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
-        if (!bermudaPairMessage) bermudaAreaMessage = await require('./lawn-bermuda-removal').bermudaAreaViolation(db, products, { serviceId: completionInput.serviceId });
+        // Always check limits and treated area even when the product pair is incomplete
+        // so a third spray with one product missing records both findings.
+        const bermudaRemoval = require('./lawn-bermuda-removal');
+        bermudaPairMessage = await bermudaRemoval.bermudaPairViolation(db, products, { serviceId: completionInput.serviceId });
+        bermudaLimitMessage = await bermudaRemoval.bermudaLimitViolation(db, products, { serviceId: completionInput.serviceId });
+        bermudaAreaMessage = await bermudaRemoval.bermudaAreaViolation(db, products, { serviceId: completionInput.serviceId });
       } catch (err) {
         await CompletionAttempts.markCompletionAttemptFailed(completionAttempt, err, db);
         throw err;
       }
       // Owner ruling 2026-11-26 ("EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING, FOR NOW"):
-      // Bermuda removal pair, area, and limit checks warn on the visit and alert the office without hard-400 blocking.
+      // Bermuda removal pair, area, config, and limit checks warn on the visit and alert the office without hard-400 blocking.
+      const bermudaNotConfigured = require('./lawn-bermuda-removal').NOT_CONFIGURED_MESSAGE;
+      const pushBermudaFinding = (finding) => {
+        if (!lawnWarningFindings.some((existing) => existing.limitType === finding.limitType)) {
+          lawnWarningFindings.push(finding);
+        }
+      };
       if (bermudaPairMessage) {
         logger.warn(`[dispatch] non-blocking bermuda pair warning for ${svc.id}: ${bermudaPairMessage}`);
-        lawnWarningFindings.push(bermudaPairFinding(bermudaPairMessage));
+        pushBermudaFinding(bermudaPairMessage === bermudaNotConfigured
+          ? bermudaConfigFinding(bermudaPairMessage)
+          : bermudaPairFinding(bermudaPairMessage));
       }
       if (bermudaAreaMessage) {
         logger.warn(`[dispatch] non-blocking bermuda area warning for ${svc.id}: ${bermudaAreaMessage}`);
-        lawnWarningFindings.push(bermudaAreaFinding(bermudaAreaMessage));
+        pushBermudaFinding(bermudaAreaFinding(bermudaAreaMessage));
       }
       if (bermudaLimitMessage) {
         logger.warn(`[dispatch] non-blocking bermuda limit warning for ${svc.id}: ${bermudaLimitMessage}`);
-        lawnWarningFindings.push(bermudaStepFinding(bermudaLimitMessage));
+        pushBermudaFinding(bermudaLimitMessage === bermudaNotConfigured
+          ? bermudaConfigFinding(bermudaLimitMessage)
+          : bermudaStepFinding(bermudaLimitMessage));
       }
       const companionValidationError = runCompanionValidation();
       if (companionValidationError) {
@@ -9245,15 +9275,20 @@ async function completeScheduledService(completionInput, packetContext = null) {
         // on this transaction, before the application rows are written (a fresh attempt
         // only; the preflight above cannot see a spray a concurrent completion commits).
         if (!resumingCommittedCompletion && insertedServiceProducts.length) {
-          // The cap and pair re-checks under the customer lock stay, returning a typed warning
-          // ({ kind: 'pair' | 'limit', message }) deduplicated against the matching preflight finding.
-          const capWarning = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
-          if (capWarning) {
+          // The cap, config, and pair re-checks under the customer lock stay, returning typed warnings
+          // ({ kind: 'pair' | 'config' | 'limit', message }[]) deduplicated against preflight findings.
+          const rawCapWarnings = await require('./lawn-bermuda-removal').enforceStepLimitsInTransaction(trx, products, { serviceId: svc.id });
+          const capWarnings = Array.isArray(rawCapWarnings) ? rawCapWarnings : (rawCapWarnings ? [rawCapWarnings] : []);
+          for (const capWarning of capWarnings) {
             const kind = typeof capWarning === 'object' ? capWarning.kind : 'limit';
             const msg = typeof capWarning === 'object' ? capWarning.message : capWarning;
-            const targetType = kind === 'pair' ? BERMUDA_PAIR_TYPE : BERMUDA_STEP_LIMIT_TYPE;
-            if (!lawnWarningFindings.some((finding) => finding.limitType === targetType)) {
-              lawnWarningFindings.push(kind === 'pair' ? bermudaPairFinding(msg) : bermudaStepFinding(msg));
+            const finding = kind === 'pair'
+              ? bermudaPairFinding(msg)
+              : kind === 'config'
+                ? bermudaConfigFinding(msg)
+                : bermudaStepFinding(msg);
+            if (!lawnWarningFindings.some((existing) => existing.limitType === finding.limitType)) {
+              lawnWarningFindings.push(finding);
             }
           }
         }
@@ -11830,18 +11865,33 @@ async function completeScheduledService(completionInput, packetContext = null) {
       ].filter(Boolean))];
       try {
         const { chemicalAddonHoldStamp } = require('../services/invoice-helpers');
-        const InvoiceFollowups = require('../services/invoice-followups');
-        for (const heldId of heldIds) {
-          await db('invoices')
-            .where({ id: heldId })
-            .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
-            .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
-            .update({
-              scheduled_send_error: chemicalAddonHoldStamp(svc.id),
-              updated_at: new Date(),
-            });
-          await InvoiceFollowups.pauseSequence(heldId, { reason: 'unrecorded_chemical_addon_review' });
-        }
+        await db.transaction(async (trx) => {
+          for (const heldId of heldIds) {
+            const stamped = await trx('invoices')
+              .where({ id: heldId })
+              .whereNotIn('status', ['paid', 'prepaid', 'void', 'refunded', 'canceled', 'cancelled'])
+              .whereRaw("COALESCE(scheduled_send_error, '') NOT LIKE 'payer_billed:%'")
+              .update({
+                scheduled_send_at: null,
+                scheduled_send_error: chemicalAddonHoldStamp(svc.id),
+                updated_at: new Date(),
+              });
+            // Pause ONLY active follow-up sequences in the same transaction after a successful
+            // stamp so prior office stops or payment-plan pauses keep their status and reason.
+            if (Number(stamped) > 0) {
+              await trx('invoice_followup_sequences')
+                .where({ invoice_id: heldId, status: 'active' })
+                .update({
+                  updated_at: new Date(),
+                  status: 'paused',
+                  paused_reason: 'unrecorded_chemical_addon_review',
+                  paused_until: null,
+                  paused_by_admin_id: null,
+                  next_touch_at: null,
+                });
+            }
+          }
+        });
       } catch (holdPersistErr) {
         logger.error(`[dispatch] chemical_addon_billing_alert_failed (persist hold failed) for visit ${svc.id} — closeout NOT finalized: ${holdPersistErr.message}`);
         const released = await CompletionAttempts.releaseCompletionAttemptForResume(completionAttempt, holdPersistErr);
@@ -17306,5 +17356,6 @@ module.exports.notifyOfficeOfStockShortfalls = notifyOfficeOfStockShortfalls;
 module.exports.bermudaStepFinding = bermudaStepFinding;
 module.exports.bermudaPairFinding = bermudaPairFinding;
 module.exports.bermudaAreaFinding = bermudaAreaFinding;
+module.exports.bermudaConfigFinding = bermudaConfigFinding;
 module.exports.limitFindingDedupeKey = limitFindingDedupeKey;
 module.exports.officeNoteForCompletion = officeNoteForCompletion;

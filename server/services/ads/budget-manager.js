@@ -234,6 +234,12 @@ function isCapacityEligibleCampaign(c) {
   return c.is_branded !== true && String(c.intent_type || '').toLowerCase() !== 'branded';
 }
 
+function isBrandedSearchCampaign(c) {
+  if (!c || c.status !== 'active' || c.platform !== 'google_ads') return false;
+  if (!SEARCH_CAMPAIGN_TYPES.has(String(c.campaign_type ?? ''))) return false;
+  return c.is_branded === true || String(c.intent_type || '').toLowerCase() === 'branded';
+}
+
 class BudgetManager {
   /**
    * The active Google campaigns the capacity rule may change: non-branded Search
@@ -256,20 +262,97 @@ class BudgetManager {
     }
     const todayEt = etDateString(new Date());
     // Any non-capacity-eligible campaign (branded Search or non-Search) that still carries
-    // an expired timed hold from before holds were restricted must be released back to base
-    // so it cannot remain throttled at 1% indefinitely.
+    // an expired timed hold from before holds were restricted must be inspected under lock:
+    // restore to base ONLY if the expired stop hold itself caused the current throttle, and
+    // otherwise clear only the stale hold metadata.
     this._expiredNonAutomatedHolds = rows.filter((c) => {
       if (isCapacityEligibleCampaign(c)) return false;
       const rawHold = parseJsonObject(parseJsonObject(c.metadata)?.budget_hold);
       return Boolean(rawHold) && !activeBudgetHold(c.metadata, todayEt);
     });
+    // Branded Search campaigns left throttled without a timed hold by the previous
+    // capacity rule are checked against ad_budget_log and surfaced for owner review.
+    this._legacyBrandedCandidates = branded.filter((c) => (
+      c.budget_mode && c.budget_mode !== 'base'
+      && !parseJsonObject(parseJsonObject(c.metadata)?.budget_hold)
+    ));
     return rows.filter((c) => isCapacityEligibleCampaign(c));
+  }
+
+  /**
+   * Identify branded Search campaigns that are currently throttled (budget_mode !== 'base',
+   * no stored timed hold) whose latest ad_budget_log entry was an automatic throttle
+   * (trigger='auto') from the prior capacity rule. Runs zero DB queries when no branded
+   * campaign is throttled.
+   */
+  async findLegacyAutoThrottledBranded(rows) {
+    const candidates = (Array.isArray(rows) ? rows : []).filter((c) => (
+      isBrandedSearchCampaign(c)
+      && c.budget_mode && c.budget_mode !== 'base'
+      && !parseJsonObject(parseJsonObject(c.metadata)?.budget_hold)
+    ));
+    if (!candidates.length) return [];
+    const flagged = [];
+    for (const campaign of candidates) {
+      const latestLog = await db('ad_budget_log')
+        .where({ campaign_id: campaign.id })
+        .orderBy('created_at', 'desc')
+        .first('new_mode', 'trigger', 'reason', 'created_at');
+      if (latestLog && latestLog.trigger === 'auto' && latestLog.new_mode === campaign.budget_mode) {
+        flagged.push({ campaign, latestLog });
+      }
+    }
+    return flagged;
+  }
+
+  async surfaceLegacyAutoThrottledBranded(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) return [];
+    let flagged = [];
+    try {
+      flagged = await this.findLegacyAutoThrottledBranded(candidates);
+    } catch (err) {
+      logger.warn(`Budget adjust: could not check branded campaigns for prior automatic throttles: ${err.message}`);
+      return [];
+    }
+    for (const { campaign, latestLog } of flagged) {
+      logger.warn(`Budget adjust: branded campaign ${campaign.campaign_name} is still in ${campaign.budget_mode} ($${campaign.daily_budget_current}/day vs $${campaign.daily_budget_base}/day base) from a prior automatic throttle (${latestLog.reason || 'auto'}) — review and restore base budget manually`);
+      try {
+        await require('../admin-alert-compose').raiseAdminAlert('alert', {
+          area: 'Ads',
+          action: 'review branded campaign left throttled',
+          why: 'A branded Search campaign is still throttled by the old automatic capacity rule.',
+          severity: 'needs-you',
+          who: 'person',
+          link: '/admin/ppc',
+          subject: { type: 'campaign', id: String(campaign.id) },
+          doneWhen: 'campaign_budget_reviewed',
+        }, {
+          bellDefault: true,
+          dedupeKey: `branded-legacy-auto-throttle:${campaign.id}`,
+          detail: `Branded Search campaign "${campaign.campaign_name}" is still in "${campaign.budget_mode}" mode ($${campaign.daily_budget_current}/day vs $${campaign.daily_budget_base}/day base) from a prior automatic capacity throttle (${latestLog.reason || 'auto'}). Automatic capacity throttling no longer touches branded Search campaigns — review and restore its base budget if intended.`,
+          metadata: {
+            campaign_id: campaign.id,
+            campaign_name: campaign.campaign_name,
+            budget_mode: campaign.budget_mode,
+            daily_budget_current: campaign.daily_budget_current,
+            daily_budget_base: campaign.daily_budget_base,
+            prior_log_reason: latestLog.reason || null,
+          },
+        });
+      } catch (alertErr) {
+        logger.warn(`Budget adjust: failed to raise review alert for legacy auto-throttled branded campaign ${campaign.campaign_name}: ${alertErr.message}`);
+      }
+    }
+    return flagged;
   }
 
   /**
    * Release expired timed holds on non-capacity-eligible campaigns (e.g. branded Search
    * or non-Search campaigns that received a hold before holds were restricted). Restores
-   * throttled campaigns back to base budget and clears metadata.budget_hold under FOR UPDATE.
+   * a throttled campaign back to base budget ONLY when the expired hold itself was a
+   * 'stop' hold that caused the current throttle (verified from ad_budget_log under
+   * FOR UPDATE with no newer superseding budget change); otherwise clears only the
+   * stale metadata.budget_hold.
    */
   async releaseExpiredNonAutomatedHolds(candidates, now, todayEt) {
     const totals = { changed: 0, failed: 0 };
@@ -297,7 +380,22 @@ class BudgetManager {
               until: removed.until || null,
             },
           });
-          if (campaign.budget_mode !== 'base') {
+          // Verify under the lock that the expired hold itself caused the current throttle
+          // and no newer budget change superseded it before restoring ad spend.
+          let holdCausedThrottle = false;
+          if (rawHold.mode === 'stop' && campaign.budget_mode === 'stop') {
+            const latestLog = await trx('ad_budget_log')
+              .where({ campaign_id: campaign.id })
+              .orderBy('created_at', 'desc')
+              .first('new_mode', 'reason', 'created_at');
+            const expectedPrefix = holdLogReason(rawHold);
+            holdCausedThrottle = Boolean(
+              latestLog
+              && latestLog.new_mode === 'stop'
+              && String(latestLog.reason || '').startsWith(expectedPrefix),
+            );
+          }
+          if (holdCausedThrottle) {
             const restoredBudget = this.calculateBudget(campaign, 'base');
             const linked = Boolean(campaign.platform_campaign_id);
             let pushedLive = false;
@@ -408,9 +506,12 @@ class BudgetManager {
     // that would drift the dashboard from Ads Manager until the next Meta sync.
     // Of the Google ones, only Search campaigns (listCapacityCampaigns).
     this._expiredNonAutomatedHolds = [];
+    this._legacyBrandedCandidates = [];
     const campaigns = await this.listCapacityCampaigns();
     const expiredNonAutomatedHolds = this._expiredNonAutomatedHolds || [];
+    const legacyBrandedCandidates = this._legacyBrandedCandidates || [];
     this._expiredNonAutomatedHolds = [];
+    this._legacyBrandedCandidates = [];
     const targets = await db('ad_targets').first();
     const thresholds = {
       green: parseFloat(targets?.capacity_green_max || 70),
@@ -650,6 +751,8 @@ class BudgetManager {
     const expiredResults = await this.releaseExpiredNonAutomatedHolds(expiredNonAutomatedHolds, now, todayEt);
     summary.changed += expiredResults.changed;
     summary.failed += expiredResults.failed;
+
+    await this.surfaceLegacyAutoThrottledBranded(legacyBrandedCandidates);
 
     // Record what the gap rule decided (live) or would have decided (shadow).
     // A recording problem never touches the budgets the loop already settled; it
@@ -1738,5 +1841,6 @@ module.exports.gapBand = gapBand;
 module.exports.decideGapMode = decideGapMode;
 module.exports.activeBudgetHold = activeBudgetHold;
 module.exports.isCapacityEligibleCampaign = isCapacityEligibleCampaign;
+module.exports.isBrandedSearchCampaign = isBrandedSearchCampaign;
 module.exports.etDateWeekday = etDateWeekday;
 module.exports.soldDay = soldDay;

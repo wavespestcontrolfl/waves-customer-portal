@@ -502,6 +502,10 @@ router.get('/gap-rule', async (req, res, next) => {
     const targets = await db('ad_targets').first();
     const ev = await BudgetManager.evaluateGapRule(now, targets);
     const campaigns = await db('ad_campaigns').where('status', 'active').where('platform', 'google_ads');
+    const legacyBranded = typeof BudgetManager.findLegacyAutoThrottledBranded === 'function'
+      ? await BudgetManager.findLegacyAutoThrottledBranded(campaigns)
+      : [];
+    const legacyBrandedIds = new Set(legacyBranded.map((entry) => String(entry.campaign.id)));
     const lastRow = await db('system_settings').where({ key: BudgetManager.GAP_LAST_KEY }).first();
     let lastRun = null;
     try {
@@ -523,10 +527,15 @@ router.get('/gap-rule', async (req, res, next) => {
       },
       decision: { mode: ev.decision, reason: gapDecisionText(ev.decision, ev, ev.settings) },
       campaigns: campaigns
-        .filter((c) => BudgetManager.isCapacityEligibleCampaign(c) || Boolean(BudgetManager.activeBudgetHold(c.metadata, today)))
+        .filter((c) => (
+          BudgetManager.isCapacityEligibleCampaign(c)
+          || Boolean(BudgetManager.activeBudgetHold(c.metadata, today))
+          || legacyBrandedIds.has(String(c.id))
+        ))
         .map((c) => {
           const hold = BudgetManager.activeBudgetHold(c.metadata, today);
           const releaseOnly = !BudgetManager.isCapacityEligibleCampaign(c);
+          const legacyAutoThrottled = legacyBrandedIds.has(String(c.id));
           return {
             id: c.id,
             campaign_name: c.campaign_name,
@@ -535,6 +544,7 @@ router.get('/gap-rule', async (req, res, next) => {
             daily_budget_base: c.daily_budget_base,
             hold: hold ? { mode: hold.mode, until: hold.until, set_at: hold.set_at || null, set_by: hold.set_by || null } : null,
             ...(releaseOnly ? { release_only: true } : {}),
+            ...(legacyAutoThrottled ? { legacy_auto_throttled: true } : {}),
           };
         }),
       last_run: lastRun,
@@ -654,9 +664,10 @@ router.delete('/campaigns/:id/hold', requireAdmin, async (req, res, next) => {
     const clearedBy = req.technicianId || null;
     const existingMeta = metadataObject(existing.metadata);
     const hasStoredHold = Boolean(existingMeta.budget_hold);
-    if (hasStoredHold && !BudgetManager.isCapacityEligibleCampaign(existing)
+    if (hasStoredHold && existingMeta.budget_hold?.mode === 'stop'
+      && !BudgetManager.isCapacityEligibleCampaign(existing)
       && existing.platform === 'google_ads' && existing.status === 'active'
-      && existing.budget_mode !== 'base') {
+      && existing.budget_mode === 'stop') {
       const applied = await applyLive(
         () => BudgetManager.setMode(
           existing.id,

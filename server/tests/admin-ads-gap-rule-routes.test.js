@@ -29,6 +29,7 @@ let targetsRow;
 let lastSetting;
 let targetsWrites;
 let campaignWrites;
+let latestBudgetLogRow = null;
 
 const mockDb = jest.fn((table) => {
   if (table === 'ad_campaigns') {
@@ -57,6 +58,14 @@ const mockDb = jest.fn((table) => {
   }
   if (table === 'system_settings') {
     return { where: () => ({ first: () => Promise.resolve(lastSetting) }) };
+  }
+  if (table === 'ad_budget_log') {
+    const b = {
+      where: () => b,
+      orderBy: () => b,
+      first: () => Promise.resolve(latestBudgetLogRow),
+    };
+    return b;
   }
   throw new Error(`Unexpected table in test: ${table}`);
 });
@@ -103,6 +112,7 @@ const evaluation = {
 
 beforeEach(() => {
   jest.restoreAllMocks();
+  mockDb.mockClear();
   mockGapMode = 'shadow';
   campaignRow = {
     id: CAMPAIGN_ID, campaign_name: 'Waves Pest Control - GBP Search', platform: 'google_ads', campaign_type: 'SEARCH', status: 'active',
@@ -112,6 +122,7 @@ beforeEach(() => {
   lastSetting = null;
   targetsWrites = [];
   campaignWrites = [];
+  latestBudgetLogRow = null;
   jest.spyOn(BudgetManager, 'evaluateGapRule').mockResolvedValue(evaluation);
   jest.spyOn(BudgetManager, 'setMode').mockResolvedValue({ campaign: 'x', previousMode: 'stop', newMode: 'base', newBudget: 5, googleAdsUpdated: true });
 });
@@ -186,6 +197,27 @@ describe('GET /gap-rule', () => {
     expect(res.body.decision.mode).toBe('keep');
     expect(res.body.campaigns[0].hold).toBeNull();
     expect(res.body.last_run).toBeNull();
+  });
+
+  test('surfaces branded Search campaigns left throttled by the prior automatic capacity rule for owner review (P1-5)', async () => {
+    campaignRow = {
+      ...campaignRow,
+      campaign_name: 'Waves Branded Search',
+      is_branded: true,
+      budget_mode: 'stop',
+      metadata: {},
+    };
+    latestBudgetLogRow = { new_mode: 'stop', trigger: 'auto', reason: 'Capacity 98% > 95%' };
+    const res = await call('GET', '/gap-rule');
+    expect(res.status).toBe(200);
+    expect(res.body.campaigns).toEqual([
+      expect.objectContaining({
+        id: CAMPAIGN_ID,
+        campaign_name: 'Waves Branded Search',
+        release_only: true,
+        legacy_auto_throttled: true,
+      }),
+    ]);
   });
 });
 
