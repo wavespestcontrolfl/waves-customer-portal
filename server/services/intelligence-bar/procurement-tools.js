@@ -236,13 +236,13 @@ Use for: "put Bifen on the restock list", "request 2 lb of Prodiamine before Tue
   },
   {
     name: 'update_restock_request',
-    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), or cancel. Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
+    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), close_counted (an invoice or hand entry already added this stock: closes the request and changes NO stock), or cancel. Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
 Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodiamine request"`,
     input_schema: {
       type: 'object',
       properties: {
         request_id: { type: 'string', format: 'uuid', description: 'Restock request UUID (from get_restock_queue)' },
-        action: { type: 'string', enum: ['mark_ordered', 'receive', 'cancel'] },
+        action: { type: 'string', enum: ['mark_ordered', 'receive', 'cancel', 'close_counted'] },
         quantity: { type: 'number', description: 'Receive only: actual amount received, if different from requested' },
         unit: { type: 'string', description: 'Receive only: unit of the received amount' },
         note: { type: 'string' },
@@ -2129,10 +2129,10 @@ async function updateRestockRequest(input, actionContext) {
   if (!actionContext.confirmed) return inventory.previewRestockAction(input.request_id, fields);
   const result = await inventory.updateRestockRequest(input.request_id, fields,
     inventoryWriteOptions(input, actionContext, 'intelligence_bar_restock_receive'));
-  const labels = { mark_ordered: 'Recorded as ordered', receive: 'Stock received', cancel: 'Request canceled' };
+  const labels = { mark_ordered: 'Recorded as ordered', receive: 'Stock received', cancel: 'Request canceled', close_counted: 'Closed, already counted' };
   const summary = result.movement
     ? `${toNumber(result.movement.quantity)} ${result.movement.unit} received; ${toNumber(result.movement.stock_after)} ${result.movement.unit} on hand.`
-    : { mark_ordered: 'Recorded the staff-placed order. Stock is unchanged.', cancel: 'The restock request is closed. No vendor order was canceled.' }[input.action];
+    : { mark_ordered: 'Recorded the staff-placed order. Stock is unchanged.', cancel: 'The restock request is closed. No vendor order was canceled.', close_counted: 'The restock request is closed as received. Stock is unchanged: it was already counted.' }[input.action];
   return { success: true, state: 'completed', request_id: result.request.id, product_id: result.request.product_id,
     status: result.request.status, verification: result.verification,
     ...(result.movement ? { movement_id: result.movement.id, stock_before: toNumber(result.movement.stock_before),

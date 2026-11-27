@@ -13,7 +13,7 @@ Full inventory and platform parity remain incomplete.
 | --- | --- | --- |
 | Adjust physical stock | `inventory-operations.adjustStock` | Admin confirmation writes the catalog count and movement atomically, with actor, entered unit and conversion provenance. |
 | Save a restock request | `inventory-operations.createRestockRequest` | Admin confirmation saves an open request with product, quantity, unit, vendor, deadline and actor; stock and supplier orders remain unchanged. |
-| Mark ordered, cancel, receive | `inventory-operations.updateRestockRequest` | Existing order guards remain; physically received quantities update stock and the movement ledger. Manual notes persist. |
+| Mark ordered, cancel, receive, close already counted | `inventory-operations.updateRestockRequest` | Existing order guards remain; physically received quantities update stock and the movement ledger. Manual notes persist. Close already counted (owner 2026-11-27) closes an open or ordered request as received with no stock change, because an invoice or hand entry already added it; its dispatched order stays on the monthly cap. A receive is refused (409 `already_counted_by_receipt`) when an invoice or delivery email added stock since the order went out, unless the operator confirms. |
 | Read restock queue | `inventory-restock-queue.listRestockRequests` | UI and bar share active/closed filters and the provider-state projection, including late supplier orders. |
 
 The portal continues to permit technicians for its existing stock endpoints.

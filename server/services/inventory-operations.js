@@ -72,7 +72,9 @@ const requestSchema = Joi.object({
   projectedRemaining: numeric.allow(null), firstShortDate: calendarDate,
 });
 const actionSchema = Joi.object({
-  action: Joi.string().valid('mark_ordered', 'receive', 'cancel').required(),
+  action: Joi.string().valid('mark_ordered', 'receive', 'cancel', 'close_counted').required(),
+  // Receive only: the operator saw "an invoice already added this" and receives again anyway.
+  confirm: Joi.boolean().when('action', { is: 'receive', then: Joi.boolean(), otherwise: Joi.forbidden() }),
   quantity: numeric.positive().when('action', { is: 'receive', then: Joi.number(), otherwise: Joi.forbidden() }),
   unit: Joi.string().trim().max(50).when('action', { is: 'receive', then: Joi.string(), otherwise: Joi.forbidden() }),
   note: optionalText,
@@ -475,9 +477,34 @@ function validateTransition(request, action, guard) {
   return secondReceive;
 }
 
+// Stock the invoice / delivery-email lane (purchase-receipts) already added for this product since
+// the request's order went out (its ledger placed_at), else since the request was raised. Receiving
+// the request then would count the same delivery twice. null when nothing was added.
+async function receiptStockAddedSince(conn, request) {
+  const { SOURCES } = require('./purchase-receipts/receipt-processor');
+  const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('placed_at');
+  const rows = await conn('product_inventory_movements')
+    .where({ product_id: request.product_id, movement_type: 'restock' })
+    .whereIn(conn.raw("metadata->>'source'"), Object.values(SOURCES))
+    .where('created_at', '>=', order?.placed_at || request.created_at)
+    .orderBy('created_at', 'desc').select('quantity', 'unit', 'created_at');
+  if (!rows.length) return null;
+  return { quantity: round4(rows.reduce((sum, row) => sum + Number(row.quantity), 0)), unit: rows[0].unit, addedAt: rows[0].created_at };
+}
+
+async function assertNotAlreadyCounted(conn, request, input) {
+  const added = await receiptStockAddedSince(conn, request);
+  if (!added) return;
+  const { formatETDate } = require('../utils/datetime-et');
+  throw Object.assign(inventoryError(
+    `An invoice already added ${added.quantity} ${String(added.unit || '').replaceAll('_', ' ')} on ${formatETDate(new Date(added.addedAt))}. Receive again only if this is a second delivery.`,
+    409, 'already_counted_by_receipt'), { details: { alreadyAdded: { ...added, addedAt: new Date(added.addedAt).toISOString() } } });
+}
+
 async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
   if (input.action !== 'receive') return { secondReceive };
+  if (!input.confirm && !secondReceive) await assertNotAlreadyCounted(conn, request, input);
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
   if (!(quantity > 0)) throw inventoryError('Receive quantity is required');
@@ -494,10 +521,11 @@ function actionPreview(request, product, input, plan) {
     request: { id: request.id, product_id: product.id, product: product.name, status: request.status,
       requested_quantity: numberOrNull(request.requested_quantity), unit: request.unit },
     product: productIdentity(product), action: input.action, note: input.note || null,
-    new_status: { mark_ordered: 'ordered', receive: 'received', cancel: 'cancelled' }[input.action],
+    new_status: { mark_ordered: 'ordered', receive: 'received', cancel: 'cancelled', close_counted: 'received' }[input.action],
     effects: { mark_ordered: 'Records that staff already placed an order. Does not submit an order or increase stock.',
       receive: 'Records physically received stock, a movement and the request receipt.',
-      cancel: 'Closes this restock request. Does not cancel a vendor order.' }[input.action],
+      cancel: 'Closes this restock request. Does not cancel a vendor order.',
+      close_counted: 'Closes this restock request as received without changing stock: an invoice or hand entry already counted it.' }[input.action],
     ...(input.action === 'receive' ? { stock_before: plan.stockBefore, adds: plan.adds, stock_after: plan.stockAfter,
       unit: plan.inventoryUnit, entered_quantity: plan.quantity, entered_unit: plan.enteredUnit,
       conversion_confidence: plan.conversionConfidence, second_receive: plan.secondReceive } : {}),
