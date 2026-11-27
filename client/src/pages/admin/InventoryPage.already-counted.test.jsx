@@ -27,11 +27,12 @@ const REQUEST = {
 };
 
 let queue;
+let requests = [REQUEST];
 function installFetch({ action }) {
   queue = vi.fn((url) => {
     const path = String(url);
     if (path.includes('/action')) return Promise.resolve(action(JSON.parse(queue.mock.calls.at(-1)[1].body)));
-    if (path.includes('/restock-requests?')) return Promise.resolve(reply({ requests: [REQUEST] }));
+    if (path.includes('/restock-requests?')) return Promise.resolve(reply({ requests }));
     if (path.includes('/inventory/stats')) return Promise.resolve(reply({ restockRequests: { open: 1 } }));
     return Promise.resolve(reply({}));
   });
@@ -51,7 +52,7 @@ function mount() {
   </Routes></MemoryRouter>);
 }
 
-beforeEach(() => { vi.stubGlobal('localStorage', { getItem: () => 'synthetic-test' }); });
+beforeEach(() => { requests = [REQUEST]; vi.stubGlobal('localStorage', { getItem: () => 'synthetic-test' }); });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Close, already counted', () => {
@@ -63,6 +64,15 @@ describe('Close, already counted', () => {
     await waitFor(() => expect(actionBodies()).toHaveLength(1));
     expect(actionBodies()[0]).toMatchObject({ action: 'close_counted' });
     expect(actionBodies()[0].confirm).toBeUndefined();
+  });
+
+  it('a late automatic order on a received request also offers it (no double receive)', async () => {
+    requests = [{ ...REQUEST, status: 'received', order: { id: '30000000-0000-4000-8000-000000000003', status: 'placed', adapter: 'siteone', placedAt: '2026-11-25T14:00:00.000Z', revokedAt: null, landedAfterReceive: true } }];
+    installFetch({ action: () => reply({ success: true, request: { id: requestId, status: 'received' } }) });
+    mount();
+    fireEvent.click(await screen.findByRole('button', { name: 'Close, already counted' }));
+    await waitFor(() => expect(actionBodies()).toHaveLength(1));
+    expect(actionBodies()[0]).toMatchObject({ action: 'close_counted' });
   });
 
   it('Receive refused by an invoice shows the warning and nothing is received', async () => {

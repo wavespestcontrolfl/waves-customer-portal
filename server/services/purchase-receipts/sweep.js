@@ -137,16 +137,17 @@ function round(value) {
 }
 
 // The logged bell's warning when a live restock request may cover the
-// delivery (shared with inventory-agent.js): cancel is the stock-neutral
-// close, since receiving the request would add this stock again.
+// delivery (shared with inventory-agent.js): "Close, already counted" is the
+// stock-neutral close, since receiving the request would add this stock again.
+// Cancel stays for an order the vendor really cancelled.
 function openRestockRequestNote(productName) {
-  return `A restock request for ${productName} is still open. If this delivery covers it, cancel that request in the Intelligence Bar; marking it received would add the stock again.`;
+  return `A restock request for ${productName} is still open. If this delivery covers it, choose Close, already counted on the Restock tab (or ask the Intelligence Bar to close it as already counted); receiving it would add the stock again. Cancel it only if the vendor cancelled the order.`;
 }
 
 // A logged line is information only: the stock change lives in
 // purchase_receipt_lines and the stock movement, so it writes nothing (the
 // FYI rule, docs/admin-notifications.md). Only a live restock request makes
-// it actionable: cancel that request or the stock is added twice. Read-only
+// it actionable: close that request as already counted or the stock is added twice. Read-only
 // note: this lane never writes a restock request (see receipt-processor.js's
 // header); a person decides whether this delivery covers it.
 const RESTOCK_HEADLINE_NAME_CHARS = 18;

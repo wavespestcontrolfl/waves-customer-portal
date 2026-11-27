@@ -3743,15 +3743,13 @@ function RestockActionCell({
           >
             Receive
           </Button>
-          {!lateOrderReceive && (
-            <Button
-              onClick={() => runAction(request, "close_counted")}
-              disabled={receivingId === request.id}
-              variant="secondary"
-            >
-              Close, already counted
-            </Button>
-          )}
+          <Button
+            onClick={() => runAction(request, "close_counted")}
+            disabled={receivingId === request.id}
+            variant="secondary"
+          >
+            Close, already counted
+          </Button>
           {lateOrderReceive || orderOut ? (
             <VendorCancelControls
               request={request}

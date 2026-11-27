@@ -236,7 +236,7 @@ Use for: "put Bifen on the restock list", "request 2 lb of Prodiamine before Tue
   },
   {
     name: 'update_restock_request',
-    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), close_counted (an invoice or hand entry already added this stock: closes the request and changes NO stock), or cancel. Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
+    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), close_counted (an invoice or hand entry already added this stock: closes the request and changes NO stock; use it, never receive, when an invoice or delivery already counted the order), or cancel (only when the order was cancelled or is no longer needed). Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
 Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodiamine request"`,
     input_schema: {
       type: 'object',

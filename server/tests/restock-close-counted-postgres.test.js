@@ -52,10 +52,10 @@ jest.setTimeout(30000);
     restock_request_id: requestId, adapter: 'siteone', status: 'placed', amount_cents: 12000,
     placed_at: new Date(Date.now() - 2 * DAY), ...overrides,
   }).returning('*').then(([row]) => row);
-  const invoiceMovement = (quantity, daysAgo, source = 'siteone_invoice') => mockConn('product_inventory_movements').insert({
-    product_id: product.id, movement_type: 'restock', quantity, unit: 'gal', stock_before: 0, stock_after: quantity,
+  const invoiceMovement = (quantity, daysAgo, source = 'siteone_invoice', unit = 'gal') => mockConn('product_inventory_movements').insert({
+    product_id: product.id, movement_type: 'restock', quantity, unit, stock_before: 0, stock_after: quantity,
     metadata: { source }, created_at: new Date(Date.now() - daysAgo * DAY),
-  });
+  }).returning('*').then(([row]) => row);
   const bell = (ledgerId) => mockConn('notifications').insert({
     recipient_type: 'admin', category: 'operations', title: 'Order parked', metadata: { dedupeKey: `auto-order:${ledgerId}` },
   }).returning('*').then(([row]) => row);
@@ -116,7 +116,7 @@ jest.setTimeout(30000);
     await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({
       statusCode: 409, code: 'already_counted_by_receipt',
       message: expect.stringMatching(/^An invoice already added 4 gal on [A-Z][a-z]+ \d{1,2}\. Receive again only if this is a second delivery\.$/),
-      details: { alreadyAdded: { quantity: 4, unit: 'gal' } },
+      details: { alreadyAdded: [{ quantity: 4, unit: 'gal' }] },
     });
     expect(await stock()).toBe(4);
     expect((await reload(req.id)).status).toBe('ordered');
@@ -150,5 +150,70 @@ jest.setTimeout(30000);
   test('confirm is not accepted on other actions', async () => {
     const req = await request();
     await expect(inventory.updateRestockRequest(req.id, { action: 'close_counted', confirm: true }, {})).rejects.toMatchObject({ statusCode: 400 });
+  });
+
+  const WARNING = /already added (.+)\. Receive again only if this is a second delivery\.$/;
+  const warningFor = async (id) => (await inventory.updateRestockRequest(id, { action: 'receive' }, {}).catch((err) => err));
+
+  test('several invoices are listed one by one, not summed; units stay apart; a long list ends "and N more"', async () => {
+    const req = await request();
+    await invoiceMovement(2, 2.5);
+    await invoiceMovement(1, 1.5);
+    const two = await warningFor(req.id);
+    expect(two.message).toMatch(/^Invoices already added 2 gal on [A-Z][a-z]+ \d+ and 1 gal on [A-Z][a-z]+ \d+\. /);
+    expect(two.message).not.toMatch(/3 gal/);
+    await invoiceMovement(5, 1.2, 'amazon_delivery', 'lb');
+    const mixed = await warningFor(req.id);
+    expect(mixed.message.match(WARNING)[1]).toMatch(/gal on .*; 5 lb on /);
+    await invoiceMovement(1, 1.1);
+    await invoiceMovement(1, 1.0);
+    const many = await warningFor(req.id);
+    expect(many.message.match(WARNING)[1]).toMatch(/^2 gal on [A-Z][a-z]+ \d+, 1 gal on [A-Z][a-z]+ \d+, 1 gal on [A-Z][a-z]+ \d+ and 1 more; 5 lb on /);
+    expect(many.details.alreadyAdded).toHaveLength(5);
+  });
+
+  test('a receipt the inventory-agent undo reversed does not trigger the warning', async () => {
+    const req = await request();
+    const original = await invoiceMovement(4, 1);
+    await mockConn('product_inventory_movements').insert({
+      product_id: product.id, movement_type: 'correction', quantity: -4, unit: 'gal', stock_before: 4, stock_after: 0,
+      metadata: { source: 'inventory_agent_undo', undoOfMovementId: original.id },
+    });
+    const received = await inventory.updateRestockRequest(req.id, { action: 'receive' }, {});
+    expect(received.request.status).toBe('received');
+    // An undone receipt does not hide a different, live one.
+    const second = await request();
+    await invoiceMovement(2, 0.5);
+    await expect(inventory.updateRestockRequest(second.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt', message: expect.stringContaining('2 gal') });
+  });
+
+  describe('a late automatic order after the request was received', () => {
+    const lateRequest = async () => {
+      const req = await request({ status: 'received', closed_at: new Date() });
+      const order = await ledger(req.id, { evidence: { landedAfterReceive: new Date().toISOString() } });
+      return { req, order };
+    };
+
+    test('an invoice since the late placement refuses Receive; Close, already counted settles it with no stock change', async () => {
+      const { req, order } = await lateRequest();
+      await invoiceMovement(4, 1);
+      await expect(inventory.updateRestockRequest(req.id, { action: 'receive' }, {})).rejects.toMatchObject({ code: 'already_counted_by_receipt' });
+      expect(await stock()).toBe(4);
+      const closed = await inventory.updateRestockRequest(req.id, { action: 'close_counted' }, {});
+      expect(closed.request.status).toBe('received');
+      expect(await stock()).toBe(4);
+      const row = await mockConn('vendor_orders').where({ id: order.id }).first();
+      expect(row.evidence.landedAfterReceive).toBeUndefined();
+      expect(row.evidence.secondReceiveAt).toBeDefined();
+      expect(await require('../services/procurement/order-dispatch').findLiveAutoOrder(mockConn, product.id)).toBeUndefined();
+    });
+
+    test('with no invoice the second receive still works; a plain received request cannot close_counted', async () => {
+      const { req } = await lateRequest();
+      await inventory.updateRestockRequest(req.id, { action: 'receive' }, {});
+      expect(await stock()).toBe(8);
+      const plain = await request({ status: 'received' });
+      await expect(inventory.updateRestockRequest(plain.id, { action: 'close_counted' }, {})).rejects.toMatchObject({ code: 'request_closed' });
+    });
   });
 });

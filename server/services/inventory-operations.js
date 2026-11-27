@@ -471,7 +471,9 @@ async function loadRequest(requestId, conn = db, lock = false) {
 
 function validateTransition(request, action, guard) {
   const status = String(request.status || '').toLowerCase();
-  const secondReceive = action === 'receive' && status === 'received' && !!guard.landedAfterReceive;
+  // A received request whose automatic order landed after that receipt admits ONE more receive, or a
+  // no-stock close when an invoice already counted that late order.
+  const secondReceive = ['receive', 'close_counted'].includes(action) && status === 'received' && !!guard.landedAfterReceive;
   if (!['open', 'ordered'].includes(status) && !secondReceive) throw inventoryError(`Restock request is already ${status}; refresh the list`, 409, 'request_closed');
   if (action === 'mark_ordered' && status !== 'open') throw inventoryError(`Only an open request can be marked ordered (this one is ${status})`, 409, 'request_not_open');
   return secondReceive;
@@ -479,32 +481,49 @@ function validateTransition(request, action, guard) {
 
 // Stock the invoice / delivery-email lane (purchase-receipts) already added for this product since
 // the request's order went out (its ledger placed_at), else since the request was raised. Receiving
-// the request then would count the same delivery twice. null when nothing was added.
+// the request then would count the same delivery twice. A receipt the inventory-agent undo reversed
+// (a correction carrying undoOfMovementId) no longer counts. Oldest first; [] when nothing was added.
 async function receiptStockAddedSince(conn, request) {
   const { SOURCES } = require('./purchase-receipts/receipt-processor');
   const order = await conn('vendor_orders').where({ restock_request_id: request.id }).first('placed_at');
-  const rows = await conn('product_inventory_movements')
-    .where({ product_id: request.product_id, movement_type: 'restock' })
-    .whereIn(conn.raw("metadata->>'source'"), Object.values(SOURCES))
-    .where('created_at', '>=', order?.placed_at || request.created_at)
-    .orderBy('created_at', 'desc').select('quantity', 'unit', 'created_at');
-  if (!rows.length) return null;
-  return { quantity: round4(rows.reduce((sum, row) => sum + Number(row.quantity), 0)), unit: rows[0].unit, addedAt: rows[0].created_at };
+  const movements = 'product_inventory_movements';
+  return conn(movements)
+    .where({ [`${movements}.product_id`]: request.product_id, [`${movements}.movement_type`]: 'restock' })
+    .whereIn(conn.raw(`${movements}.metadata->>'source'`), Object.values(SOURCES))
+    .where(`${movements}.created_at`, '>=', order?.placed_at || request.created_at)
+    .whereRaw(`NOT EXISTS (SELECT 1 FROM ${movements} u WHERE u.metadata->>'undoOfMovementId' = ${movements}.id::text)`)
+    .orderBy(`${movements}.created_at`, 'asc').select('quantity', 'unit', 'created_at');
 }
 
-async function assertNotAlreadyCounted(conn, request, input) {
-  const added = await receiptStockAddedSince(conn, request);
-  if (!added) return;
+const MOST_LISTED_RECEIPTS = 3;
+
+// "4 gal on November 24", or for several in one unit "2 gal on November 20, 1 gal on November 22 and 1 gal on
+// November 24" (the first three, then "and N more"). One sentence part per unit: units never add together.
+function describeReceiptsInUnit(rows, formatDay) {
+  const each = rows.map((row) => `${round4(Number(row.quantity))} ${String(row.unit || '').replaceAll('_', ' ')} on ${formatDay(new Date(row.created_at))}`);
+  if (each.length <= MOST_LISTED_RECEIPTS) return each.length === 1 ? each[0] : `${each.slice(0, -1).join(', ')} and ${each.at(-1)}`;
+  const more = each.length - MOST_LISTED_RECEIPTS;
+  return `${each.slice(0, MOST_LISTED_RECEIPTS).join(', ')} and ${more} more`;
+}
+
+async function assertNotAlreadyCounted(conn, request) {
+  const rows = await receiptStockAddedSince(conn, request);
+  if (!rows.length) return;
   const { formatETDate } = require('../utils/datetime-et');
+  const byUnit = new Map();
+  for (const row of rows) byUnit.set(row.unit, [...(byUnit.get(row.unit) || []), row]);
+  const parts = [...byUnit.values()].map((group) => describeReceiptsInUnit(group, formatETDate)).join('; ');
   throw Object.assign(inventoryError(
-    `An invoice already added ${added.quantity} ${String(added.unit || '').replaceAll('_', ' ')} on ${formatETDate(new Date(added.addedAt))}. Receive again only if this is a second delivery.`,
-    409, 'already_counted_by_receipt'), { details: { alreadyAdded: { ...added, addedAt: new Date(added.addedAt).toISOString() } } });
+    `${rows.length === 1 ? 'An invoice' : 'Invoices'} already added ${parts}. Receive again only if this is a second delivery.`,
+    409, 'already_counted_by_receipt'), {
+    details: { alreadyAdded: rows.map((row) => ({ quantity: round4(Number(row.quantity)), unit: row.unit, addedAt: new Date(row.created_at).toISOString() })) },
+  });
 }
 
 async function restockActionPlan(conn, request, product, input, guard) {
   const secondReceive = validateTransition(request, input.action, guard);
   if (input.action !== 'receive') return { secondReceive };
-  if (!input.confirm && !secondReceive) await assertNotAlreadyCounted(conn, request, input);
+  if (!input.confirm) await assertNotAlreadyCounted(conn, request);
   const quantity = input.quantity ?? await require('./procurement/order-dispatch').orderedQuantityFor(conn, request.id)
     ?? numberOrNull(request.requested_quantity);
   if (!(quantity > 0)) throw inventoryError('Receive quantity is required');
@@ -568,8 +587,8 @@ async function updateRestockRequest(requestId, raw, options = {}) {
         throw inventoryError('Saved stock did not match the receipt', 409, 'verification_failed');
       }
       await clearStockShortfallAlert(trx, product.id, plan.stockAfter, plan.inventoryUnit);
-      if (plan.secondReceive) await dispatch.settleLandedAfterReceive(trx, requestId);
     }
+    if (plan.secondReceive) await dispatch.settleLandedAfterReceive(trx, requestId);
     const [updated] = await trx('product_restock_requests').where({ id: requestId }).update({
       status: preview.new_status, updated_at: new Date(),
       metadata: { ...restockMeta(request.metadata), ...options.metadataPatch, lastManualAction: {

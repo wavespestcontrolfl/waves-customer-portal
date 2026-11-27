@@ -23,7 +23,7 @@
  *      fallback to requested_quantity: SiteOne rounds up to whole packages.
  * Anything else (a hand-raised request, an 'open' one, two live requests, a
  * short quantity, an order placed after the email, no PO) is left alone, and
- * the logged bell still tells a person to cancel it.
+ * the logged bell still tells a person to close it as already counted.
  *
  * The request becomes 'received' WITHOUT a second stock movement (the
  * receipt movement already added the stock) and its ledger bells settle the
