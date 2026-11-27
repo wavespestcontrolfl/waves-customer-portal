@@ -5466,8 +5466,10 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
   const profileId = property.customerId || property.id;
   const [list, setList] = useState([]);
   const [busyId, setBusyId] = useState(null);
-  // A Stop / Restart bumps this: a read that started before it is dropped, so it never puts back the old state.
+  // A Stop / Restart bumps this: a read that started before it is dropped, so it never puts back the old state, and
+  // the list then reads again (reloads), so nothing a dropped read carried (such as "also in your contacts") is lost.
   const readSeq = useRef(0);
+  const [reloads, setReloads] = useState(0);
   useEffect(() => {
     if (!enabled || !profileId) { setList([]); return undefined; }
     let alive = true;
@@ -5478,7 +5480,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
       .catch((err) => { console.error(err); if (current()) setList([]); });
     return () => { alive = false; };
   // savedContactsKey: a count of contact saves, so "also in your contacts" stays current after the editor above saves.
-  }, [enabled, profileId, savedContactsKey]);
+  }, [enabled, profileId, savedContactsKey, reloads]);
   if (!enabled || !list.length) return null;
   const toggle = async (person) => {
     if (busyId) return;
@@ -5490,6 +5492,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
       if (res?.reminderContact) {
         readSeq.current += 1;
         setList((prev) => prev.map((x) => (x.id === person.id ? { ...x, ...res.reminderContact } : x)));
+        setReloads((n) => n + 1);
       }
     } catch (err) {
       console.error(err);

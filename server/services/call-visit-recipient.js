@@ -314,7 +314,7 @@ async function stoppedOnList(customerId, phoneKey, conn) {
   try {
     // EXISTS over the list table itself: a stop row is a row of this table, so the outer read finds one exactly when a
     // stop counts.
-    return !!(await conn(REMINDER_TABLE).whereRaw(stoppedSql('?', '?'), [phoneKey, customerId, customerId, phoneKey]).first('id'));
+    return !!(await conn(REMINDER_TABLE).whereRaw(stoppedSql('?', '?'), [phoneKey, customerId, customerId, customerId, phoneKey]).first('id'));
   } catch (err) {
     throw codeOnly(err);
   }
@@ -326,7 +326,7 @@ async function effectiveStops(customerId, phoneKeys, conn) {
   if (!phoneKeys.length) return out;
   const rows = await conn(`${REMINDER_TABLE} as st`).whereIn('st.phone_key', phoneKeys).whereNotNull('st.texts_stopped_at')
     .whereRaw(`st.customer_id IN (${lineageSql('?')})`, [customerId])
-    .whereRaw(`st.texts_stopped_at > COALESCE((SELECT o.texts_restarted_at FROM ${REMINDER_TABLE} o WHERE o.customer_id = ?::uuid AND o.phone_key = st.phone_key), '-infinity'::timestamptz)`, [customerId])
+    .whereRaw(`(st.customer_id = ?::uuid OR st.texts_stopped_at > COALESCE((SELECT o.texts_restarted_at FROM ${REMINDER_TABLE} o WHERE o.customer_id = ?::uuid AND o.phone_key = st.phone_key), '-infinity'::timestamptz))`, [customerId, customerId])
     .orderBy('st.texts_stopped_at', 'asc').select('st.phone_key', 'st.texts_stopped_at', 'st.texts_stopped_by');
   for (const r of rows) if (!out.has(r.phone_key)) out.set(r.phone_key, r);
   return out;
@@ -1021,12 +1021,14 @@ async function setReminderContactStopped({ customerId, id, stopped, by, conn = d
     // counts here. A restart writes only this customer's own row: a stop that came from a merged-in record stays saved
     // there (an undone merge brings it back as it was), and the restart time outranks it here.
     let changed = false;
-    if (stopped && !own.texts_stopped_at) {
+    // Times come from clock_timestamp() (taken after the row lock), not now() (the transaction's start), so a later
+    // write always carries a later time. A stop on the customer's own row counts whatever the restart time says.
+    if (stopped && !before.stopped) {
       changed = (await conn(REMINDER_TABLE).where({ id: own.id }).whereNull('texts_stopped_at')
-        .update({ texts_stopped_at: conn.fn.now(), texts_stopped_by: by })) > 0;
+        .update({ texts_stopped_at: conn.raw('clock_timestamp()'), texts_stopped_by: by })) > 0;
     } else if (!stopped && before.stopped) {
       changed = (await conn(REMINDER_TABLE).where({ id: own.id })
-        .update({ texts_stopped_at: null, texts_stopped_by: null, texts_restarted_at: conn.fn.now() })) > 0;
+        .update({ texts_stopped_at: null, texts_stopped_by: null, texts_restarted_at: conn.raw('clock_timestamp()') })) > 0;
     }
     // The answer is the state as written, read in the same transaction. `changed`: false when nothing was written (the
     // caller audits real changes only).

@@ -88,13 +88,23 @@ describe('Also gets visit texts (named on a call)', () => {
   });
 
   it('Stop texts calls the API and shows Stopped, then Restart texts brings it back', async () => {
-    api.stopReminderContact.mockResolvedValue({ reminderContact: person({ stopped: true, stoppedBy: 'customer' }) });
-    api.restartReminderContact.mockResolvedValue({ reminderContact: person() });
+    // The server's list follows each write (the screen reads it again after a Stop or Restart).
+    api.stopReminderContact.mockImplementation(async () => {
+      api.getReminderContacts.mockResolvedValue({ reminderContacts: [person({ stopped: true, stoppedBy: 'customer', inContacts: true })] });
+      return { reminderContact: { id: 'r1', stopped: true, stoppedBy: 'customer', stoppedAt: '2026-11-27T00:00:00Z' } };
+    });
+    api.restartReminderContact.mockImplementation(async () => {
+      api.getReminderContacts.mockResolvedValue({ reminderContacts: [person()] });
+      return { reminderContact: { id: 'r1', stopped: false, stoppedBy: null, stoppedAt: null } };
+    });
     setup();
     const section = await screen.findByTestId('reminder-contacts');
     fireEvent.click(within(section).getByRole('button', { name: 'Stop texts for Bob Example' }));
     await waitFor(() => expect(api.stopReminderContact).toHaveBeenCalledWith('c1', 'r1'));
     expect(await within(section).findByText('Stopped')).toBeInTheDocument();
+    // The read after the Stop brings what the Stop answer does not carry.
+    expect(await within(section).findByText('Also in your contacts above, which has its own text settings.')).toBeInTheDocument();
+    expect(api.getReminderContacts).toHaveBeenCalledTimes(2);
     fireEvent.click(within(section).getByRole('button', { name: 'Restart texts for Bob Example' }));
     await waitFor(() => expect(api.restartReminderContact).toHaveBeenCalledWith('c1', 'r1'));
     await waitFor(() => expect(within(section).queryByText('Stopped')).not.toBeInTheDocument());
