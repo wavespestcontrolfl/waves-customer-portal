@@ -60,7 +60,7 @@ async function listRestockRequests({ status = 'active', limit = 100, showSpend =
         'c.last_name',
         'c.address_line1',
         'c.city',
-        ...(hasOrders ? ['vo.id as order_id', 'vo.updated_at as order_updated_at', 'vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'tryAgain' as order_try_again"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
+        ...(hasOrders ? ['vo.id as order_id', 'vo.updated_at as order_updated_at', 'vo.status as order_status', 'vo.external_order_number as order_number', 'vo.amount_cents as order_amount_cents', 'vo.error as order_error', 'vo.placed_at as order_placed_at', 'vo.adapter as order_adapter', db.raw("vo.evidence->>'revokedAt' as order_revoked_at"), db.raw("vo.evidence->>'landedAfterReceive' as order_landed_after_receive"), db.raw("vo.request_payload->>'orderedQuantity' as order_ordered_quantity")] : []),
       )
       .modify((q) => { if (hasOrders) q.leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id'); })
       .orderByRaw("case prr.priority when 'urgent' then 0 when 'high' then 1 when 'normal' then 2 else 3 end")
@@ -133,8 +133,6 @@ function restockOrderView(row, showSpend, officeDetail = true) {
     error: !row.order_error ? null : showSpend ? row.order_error : String(row.order_error).split(':')[0],
     placedAt: row.order_placed_at || null,
     revokedAt: row.order_revoked_at || null,
-    // Parked before the buy click: the tab offers Try again (owner only; the action re-checks under its locks).
-    canTryAgain: row.status === 'open' && require('./procurement/order-dispatch').isTryAgainPark({ status: row.order_status, error: row.order_error, placedAt: row.order_placed_at, revokedAt: row.order_revoked_at, tryAgain: row.order_try_again }),
     // What the order actually bought, in the request's unit (packages round
     // up) — the tab's receive default; a revoked order is not what arrives.
     orderedQuantity: row.order_placed_at && !row.order_revoked_at && row.order_ordered_quantity != null ? Number(row.order_ordered_quantity) : null,

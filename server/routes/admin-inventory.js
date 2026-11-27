@@ -3196,12 +3196,6 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     if (!(await db.schema.hasTable('product_restock_requests'))) return res.status(404).json({ error: 'Restock requests are not available' });
     const body = req.body || {};
     const action = String(body.action || '').toLowerCase();
-    // Try again re-arms a request parked before the buy click for the next automatic run; owner only.
-    if (action === 'try_again') {
-      if (req.techRole !== 'admin') return res.status(403).json({ error: 'Only the owner can press Try again.', code: 'forbidden' });
-      await require('../services/procurement/order-dispatch').tryAgainParkedRequest(req.params.id, { actorId: req.technicianId || null });
-      return res.json({ success: true, queued: true });
-    }
     const result = await inventoryOperations.updateRestockRequest(req.params.id, {
       action, note: body.note,
       ...(action === 'receive' ? { quantity: body.quantity ?? undefined, unit: body.unit ?? undefined, confirm: body.confirm === true } : {}),

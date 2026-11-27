@@ -1,4 +1,4 @@
-// Automatic ordering: the Restock tab's "Try again" on a request parked before the buy click, Mark Ordered
+// Automatic ordering: the alert of a request parked before the buy click, Cancel and Mark Ordered on it and
 // after an ambiguous submit, and the open-over-7-days alert, against PostgreSQL (CI's DB-gated pass; locally
 // set DATABASE_URL to a migrated scratch database). Fixture tables are LIKE copies in a unique schema that is
 // dropped after the suite. The real order-dispatch, the real action writer, the real alert writer and the real
@@ -26,8 +26,8 @@ const NOW = new Date();
 const ENV = { GATE_AUTO_ORDER: 'true', GATE_AUTO_ORDER_STICKERMULE: 'true', AUTO_ORDER_MAX_PER_ORDER_CENTS: '50000', AUTO_ORDER_MAX_MONTHLY_CENTS: '100000' };
 
 jest.setTimeout(60000);
-(SKIP ? describe.skip : describe)('Try again, Mark Ordered and the open-request alert (PostgreSQL)', () => {
-  const schema = `autobuy_try_again_${randomUUID().replaceAll('-', '')}`;
+(SKIP ? describe.skip : describe)('pre-click parks, Mark Ordered and the open-request alert (PostgreSQL)', () => {
+  const schema = `autobuy_parks_${randomUUID().replaceAll('-', '')}`;
   let dispatch;
   let inventory;
   let vendor;
@@ -85,17 +85,47 @@ jest.setTimeout(60000);
   const dispatchable = async () => (await dispatch.findDispatchable(mockConn)).map((r) => r.id);
   const adapter = (place) => ({ key: 'stickermule', preSubmitTotal: 'vendor', bindingQuote: jest.fn(async () => ({ cents: 31400, source: 'order SM-0' })), place: jest.fn(place || (async () => ({ externalOrderNumber: 'SM-1', amountCents: 31400, response: { ok: 1 }, evidence: {} }))) });
   const run = (request, a, extra = {}) => dispatch.dispatchRestockOrder(request.id, { conn: mockConn, adapters: { stickermule: a, siteone: {} }, now: NOW, env: ENV, ...extra });
-  const tryAgain = (request) => dispatch.tryAgainParkedRequest(request.id, { actorId: null });
   const refusal = (promise) => promise.then(() => { throw new Error('expected a refusal'); }, (e) => e);
-  const ledgerOf = (request) => mockConn('vendor_orders').where({ restock_request_id: request.id }).first();
   const notes = () => mockConn('notifications').orderBy('created_at');
 
-  describe('nothing retries by itself', () => {
-    test('only a request with no ledger row or a dry-run park is dispatchable; no pre-click park comes back on its own, however old', async () => {
+  describe('a park before the buy click', () => {
+    test('the alert says the robot stopped, and to buy it and press Mark Ordered or press Cancel; a park after the click still says do not re-order', async () => {
+      const pre = await fixture();
+      await run(pre.request, adapter(async () => { throw Object.assign(new Error('Sticker Mule item is not on the account.'), { refuse: 'item_not_found' }); }));
+      const post = await fixture();
+      await run(post.request, adapter(async () => { throw Object.assign(new Error('unknown outcome'), { ambiguous: true }); }));
+      const all = await notes();
+      const preAlert = all.find((n) => n.detail.includes('The robot stopped before buying'));
+      expect(preAlert.detail).toContain('The robot stopped before buying: Sticker Mule item is not on the account. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request.');
+      expect(preAlert.title).toMatch(/auto-order stopped/);
+      const postAlert = all.find((n) => n.detail.includes('Do NOT re-order'));
+      expect(postAlert.detail).not.toContain('Mark Ordered');
+    });
+
+    test('Cancel works on a pre-click parked request: it closes, the alert closes, and a fresh request for the product is claimed on its own', async () => {
+      const { request, product, note } = await fixture({ ledger: { reason: 'over_monthly_cap', amount: 31400 } });
+      await inventory.updateRestockRequest(request.id, { action: 'cancel' }, { actorId: null });
+      expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('cancelled');
+      expect((await mockConn('notifications').where({ id: note.id }).first()).done_at).not.toBeNull();
+      expect(await dispatchable()).toEqual([]);
+      const [fresh] = await mockConn('product_restock_requests').insert({
+        product_id: product.id, status: 'open', requested_quantity: 500, unit: 'each', source: 'auto_reorder', metadata: JSON.stringify({ vendorId: vendor.id }),
+      }).returning('*');
+      expect(await dispatchable()).toEqual([fresh.id]);
+      expect(await run(fresh, adapter())).toMatchObject({ status: 'placed' });
+    });
+
+    test('Mark Ordered works on a pre-click park, the take-over the alert names', async () => {
+      const { request } = await fixture({ ledger: { reason: 'item_not_found' } });
+      await inventory.updateRestockRequest(request.id, { action: 'mark_ordered' }, { actorId: null });
+      expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('ordered');
+    });
+
+    test('nothing retries by itself: only a request with no ledger row or a dry-run park is dispatchable, however old the park', async () => {
       const fresh = await fixture();
       const dry = await fixture({ ledger: { reason: 'dry_run' } });
       for (const reason of ['over_monthly_cap', 'over_per_order_cap', 'sku_not_found', 'item_not_found', 'price_jump', 'no_price', 'no_binding_total']) {
-        await fixture({ ledger: { reason, createdAt: new Date(NOW.getTime() - 90 * DAY) } });
+        await fixture({ ledger: { reason } });
       }
       await fixture({ ledger: { reason: 'adapter_error', status: 'failed' } });
       await fixture({ ledger: { reason: 'ambiguous_after_submit', placedAt: new Date(NOW.getTime() - DAY) } });
@@ -103,128 +133,21 @@ jest.setTimeout(60000);
     });
   });
 
-  describe('Try again', () => {
-    test.each(['over_monthly_cap', 'over_per_order_cap', 'sku_not_found', 'item_not_found', 'price_jump', 'no_price', 'no_binding_total'])('re-arms a %s park once: the next run claims it through the one claim, and the old alert closes', async (reason) => {
-      const { request, row, note } = await fixture({ ledger: { reason } });
-      expect(await dispatchable()).toEqual([]);
-      await tryAgain(request);
-      const queued = await ledgerOf(request);
-      expect(queued.evidence.tryAgain).toMatchObject({ at: expect.any(String) });
-      expect(queued).toMatchObject({ id: row.id, status: 'needs_review', placed_at: null });
-      expect(await dispatchable()).toEqual([request.id]);
-      // Pressed again while queued: refused, nothing written twice.
-      expect((await refusal(tryAgain(request))).code).toBe('not_parked');
-      const a = adapter();
-      expect(await run(request, a)).toMatchObject({ status: 'placed', externalOrderNumber: 'SM-1' });
-      expect(a.place).toHaveBeenCalledTimes(1);
-      // The claim is single: a second run finds the placed order and calls nothing.
-      expect(await run(request, a)).toMatchObject({ skipped: 'not_open_auto_request' });
-      expect(a.place).toHaveBeenCalledTimes(1);
-      expect((await ledgerOf(request)).id).toBe(row.id);
-      expect((await mockConn('notifications').where({ id: note.id }).first()).done_at).not.toBeNull();
-    });
-
-    test('the cap reservation is unchanged: a Try again that is still over the monthly cap parks again and is not queued again', async () => {
-      const { request } = await fixture({ ledger: { reason: 'over_monthly_cap', amount: 31400 } });
-      await tryAgain(request);
-      const a = adapter();
-      expect(await run(request, a, { env: { ...ENV, AUTO_ORDER_MAX_MONTHLY_CENTS: '100' } })).toMatchObject({ status: 'needs_review', reason: 'over_monthly_cap' });
-      expect(a.place).not.toHaveBeenCalled();
-      const saved = await ledgerOf(request);
-      expect(saved.evidence.tryAgain).toBeUndefined();
-      expect(await dispatchable()).toEqual([]);
-    });
-
-    test('a park after the buy click is refused 409 and nothing is written', async () => {
-      for (const reason of ['ambiguous_after_submit', 'stale_placing', 'persist_after_placement', 'no_final_total', 'over_cap_after_placement']) {
-        const { request, row } = await fixture({ ledger: { reason, placedAt: new Date(NOW.getTime() - DAY) } });
-        const err = await refusal(tryAgain(request));
-        expect(err).toMatchObject({ statusCode: 409, code: 'auto_order_out' });
-        expect((await ledgerOf(request)).evidence.tryAgain).toBeUndefined();
-        expect((await ledgerOf(request)).id).toBe(row.id);
+  describe('Mark Ordered and Cancel while an order may be out', () => {
+    test.each(['ambiguous_after_submit', 'stale_placing', 'persist_after_placement', 'no_final_total', 'placed_on_received_request'])('a %s park refuses Mark Ordered and Cancel, with or without placed_at', async (reason) => {
+      for (const placedAt of [new Date(NOW.getTime() - DAY), null]) {
+        const { request } = await fixture({ ledger: { reason, placedAt } });
+        for (const action of ['mark_ordered', 'cancel']) {
+          const err = await refusal(inventory.updateRestockRequest(request.id, { action }, { actorId: null })).catch((e) => { throw new Error(`${reason} ${action} placedAt=${!!placedAt}: ${e.message}`); });
+          expect(err).toMatchObject({ statusCode: 409, code: 'auto_order_out' });
+        }
+        expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('open');
       }
-      expect(await dispatchable()).toEqual([]);
     });
 
-    test('a post-submit reason with no placed_at stamp is still refused', async () => {
-      const { request } = await fixture({ ledger: { reason: 'ambiguous_after_submit' } });
-      expect((await refusal(tryAgain(request))).code).toBe('not_parked');
-    });
-
-    test('refused when the request is not parked before the click', async () => {
-      const none = await fixture();
-      expect((await refusal(tryAgain(none.request))).code).toBe('not_parked');
-      const ordered = await fixture({ ledger: { reason: 'item_not_found' }, requestOver: { status: 'ordered' } });
-      expect((await refusal(tryAgain(ordered.request))).code).toBe('request_not_open');
-      const failed = await fixture({ ledger: { reason: 'adapter_error', status: 'failed' } });
-      expect((await refusal(tryAgain(failed.request))).code).toBe('not_parked');
-      const dry = await fixture({ ledger: { reason: 'dry_run' } });
-      expect((await refusal(tryAgain(dry.request))).code).toBe('not_parked');
-      const placing = await fixture({ ledger: { reason: 'item_not_found', status: 'placing' } });
-      expect((await refusal(tryAgain(placing.request))).code).toBe('auto_order_placing');
-      const revoked = await fixture({ ledger: { reason: 'item_not_found', evidence: { revokedAt: NOW.toISOString() } } });
-      expect((await refusal(tryAgain(revoked.request))).code).toBe('not_parked');
-      const manual = await fixture({ ledger: { reason: 'item_not_found' }, requestOver: { source: 'manual' } });
-      expect((await refusal(tryAgain(manual.request))).code).toBe('request_not_open');
-      expect((await refusal(dispatch.tryAgainParkedRequest(randomUUID(), {}))).code).toBe('request_not_found');
-    });
-
-    test('refused while another automatic order for the product is live', async () => {
-      const { request, product } = await fixture({ ledger: { reason: 'item_not_found' } });
-      const [other] = await mockConn('product_restock_requests').insert({ product_id: product.id, status: 'ordered', requested_quantity: 1, unit: 'each', source: 'test_fixture' }).returning('*');
-      await mockConn('vendor_orders').insert({ restock_request_id: other.id, adapter: 'stickermule', vendor_id: vendor.id, status: 'placed', placed_at: NOW, amount_cents: 100 });
-      expect((await refusal(tryAgain(request))).code).toBe('auto_order_live');
-    });
-
-    test('Mark Ordered after a Try again is queued stops it: the claim needs an open request', async () => {
-      const { request } = await fixture({ ledger: { reason: 'item_not_found' } });
-      await tryAgain(request);
-      await inventory.updateRestockRequest(request.id, { action: 'mark_ordered' }, { actorId: null });
-      expect(await dispatchable()).toEqual([]);
-      const a = adapter();
-      expect(await run(request, a)).toMatchObject({ skipped: 'not_open_auto_request' });
-      expect(a.place).not.toHaveBeenCalled();
-    });
-
-    test('the park alert says what to press, and a park after the click still says do not re-order', async () => {
-      const pre = await fixture();
-      await run(pre.request, adapter(async () => { throw Object.assign(new Error('Sticker Mule item is not on the account'), { refuse: 'item_not_found' }); }));
-      const post = await fixture();
-      await run(post.request, adapter(async () => { throw Object.assign(new Error('unknown outcome'), { ambiguous: true }); }));
-      const all = await notes();
-      const preAlert = all.find((n) => n.detail.includes('Press Try again'));
-      expect(preAlert.detail).toContain('No order was sent and the request stays open. Press Try again on the Restock tab once the item is fixed, or buy it yourself and press Mark Ordered.');
-      expect(preAlert.title).toMatch(/auto-order parked/);
-      const postAlert = all.find((n) => n.detail.includes('Do NOT re-order'));
-      expect(postAlert.detail).not.toContain('Try again');
-    });
-
-    test('isTryAgainPark: only a needs_review park before the click, not a dry run, not queued, not revoked', () => {
-      const ok = { status: 'needs_review', error: 'item_not_found: x' };
-      expect(dispatch.isTryAgainPark(ok)).toBe(true);
-      expect(dispatch.isTryAgainPark({ ...ok, status: 'failed' })).toBe(false);
-      expect(dispatch.isTryAgainPark({ ...ok, placedAt: NOW })).toBe(false);
-      expect(dispatch.isTryAgainPark({ ...ok, revokedAt: 'x' })).toBe(false);
-      expect(dispatch.isTryAgainPark({ ...ok, tryAgain: '{}' })).toBe(false);
-      expect(dispatch.isTryAgainPark({ ...ok, error: 'dry_run: x' })).toBe(false);
-      for (const reason of dispatch._internals.POST_SUBMIT_REASONS) expect(dispatch.isTryAgainPark({ ...ok, error: `${reason}: x` })).toBe(false);
-    });
-  });
-
-  describe('Mark Ordered after an ambiguous submit', () => {
-    test('is refused while the order may exist, and allowed once the operator recorded the vendor cancellation', async () => {
+    test('allowed again once the operator recorded the vendor cancellation', async () => {
       const { request } = await fixture({ ledger: { reason: 'ambiguous_after_submit', placedAt: new Date(NOW.getTime() - DAY) } });
-      const err = await refusal(inventory.updateRestockRequest(request.id, { action: 'mark_ordered' }, { actorId: null }));
-      expect(err).toMatchObject({ statusCode: 409, code: 'auto_order_out' });
-      expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('open');
-      // A revoked order is no longer out: the request can be handled by hand.
       await mockConn('vendor_orders').where({ restock_request_id: request.id }).update({ evidence: JSON.stringify({ revokedAt: NOW.toISOString() }) });
-      await inventory.updateRestockRequest(request.id, { action: 'mark_ordered' }, { actorId: null });
-      expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('ordered');
-    });
-
-    test('still works on a pre-click park, the take-over staff are told to use', async () => {
-      const { request } = await fixture({ ledger: { reason: 'item_not_found' } });
       await inventory.updateRestockRequest(request.id, { action: 'mark_ordered' }, { actorId: null });
       expect((await mockConn('product_restock_requests').where({ id: request.id }).first()).status).toBe('ordered');
     });

@@ -967,14 +967,9 @@ gone. It does not overlap `macWatchdog` (a SiteOne request the Mac did not touch
 automatic request that stays open a week, whatever stalled it. No `RERING` entry is owed (no `dedupeOpenOnly`).
 
 The auto-order park alert (`auto-order:<ledger id>:<version>`) of a park BEFORE the buy click (`server/services/procurement/order-dispatch.js`) says
-"No order was sent and the request stays open. Press Try again on the Restock tab once <the cause> is fixed, or buy it yourself and press Mark Ordered."
-Nothing retries on its own. **Try again** (owner only, `POST /admin/inventory/restock-requests/:id/action` with `action: try_again`,
-`tryAgainParkedRequest`) re-checks under the ledger and request locks that the request is open and automatic and the ledger row is still a
-needs_review park with no `placed_at`, no post-submit reason, not revoked, not a dry run and not already queued, and that no other automatic order for the
-product is live; anything else is a 409. It writes only `evidence.tryAgain`, which re-arms the row the way a dry-run park is re-armed: the next
-dispatcher run claims it through the same single claim and cap reservation, and the claim closes the old alert. Mark Ordered, Cancel or Close
-already counted before that run stops it (the claim needs an open request). A park after the click ("Do NOT re-order") is never re-armed, and Mark Ordered
-is refused on a request whose automatic order may be out (an unrevoked post-submit row).
+"The robot stopped before buying: <reason>. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request."
+Nothing retries on its own: only a dry-run park is re-claimed. Cancel is open on such a park. A park after the click ("Do NOT re-order") refuses both
+Mark Ordered and Cancel while its order is unrevoked, judged by the ledger's post-submit reason as well as `placed_at`.
 
 ## 7. How to raise one
 

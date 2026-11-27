@@ -114,16 +114,11 @@ const CAPS_LOCK_KEY = 'vendor-order-caps';
 // received request until the revoke CLI records a revoke or the request is
 // received once more — its own receipt (Codex r27 P1, owner ruling).
 const POST_SUBMIT_REASONS = new Set(['ambiguous_after_submit', 'persist_after_placement', 'over_cap_after_placement', 'stale_placing', 'no_final_total', 'placed_on_received_request']);
-// The reasons a park BEFORE the buy click gets its own alert wording: Try again, or buy it and press Mark Ordered.
-const TRY_AGAIN_PHRASE = 'Press Try again on the Restock tab';
-const TRY_AGAIN_FIXED = { over_monthly_cap: 'the monthly cap', over_per_order_cap: 'the per-order cap', caps_unconfigured: 'the order caps', price_jump: 'the price', sku_not_found: 'the item number', item_not_found: 'the item', no_price: 'the price row' };
-// A park staff may press Try again on: needs_review before the click (no placed_at), not a dry run (those
-// re-claim on their own), never a post-submit park, not revoked, not already queued. Parks after the click
-// stay "do not reorder" and are reconciled (receive, or cancel with the vendor and record it).
-function isTryAgainPark({ status, error, placedAt = null, revokedAt = null, tryAgain = null }) {
-  const reason = String(error || '').split(':')[0];
-  return status === 'needs_review' && !placedAt && !revokedAt && !tryAgain && !!reason && reason !== 'dry_run' && !POST_SUBMIT_REASONS.has(reason);
-}
+// A park BEFORE the buy click (needs_review, a reason that is neither post-submit nor a dry run) gets its own alert
+// wording: the robot stopped, staff buy it and press Mark Ordered, or press Cancel and the next morning check
+// opens a fresh request. (Cancel is open on such a park: assertManualActionAllowed refuses it only for an order out.)
+const STOPPED_PHRASE = 'The robot stopped before buying';
+const isPreClickPark = ({ status, reason }) => status === 'needs_review' && !!reason && reason !== 'dry_run' && !POST_SUBMIT_REASONS.has(reason);
 // A received request settles its ledger row — unless the order landed after
 // that receipt (evidence.landedAfterReceive), or the claim is still
 // 'placing' (an older pod received while the call is out: the marker is
@@ -353,13 +348,15 @@ async function assertNoLiveAutoOrder(trx, productId) {
  * 'auto_order_placing' | 'auto_order_out' }.
  */
 async function assertManualActionAllowed(trx, requestId, action) {
-  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'placed_at', 'external_order_number', 'evidence');
+  const row = await trx('vendor_orders').where({ restock_request_id: requestId }).first('id', 'status', 'error', 'placed_at', 'external_order_number', 'evidence');
   const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
   if (!row) return {};
   if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park (Restock tab), then act.');
   // Mark Ordered too: a post-submit park (an ambiguous submit above all) means an order may exist at the vendor, so
   // the request is reconciled (receive it, or cancel with the vendor and record that), never marked ordered by hand.
-  if (['cancel', 'mark_ordered'].includes(action) && row.placed_at && !meta(row.evidence).revokedAt) {
+  // Judged by the ledger's post-submit reason as well as placed_at, so a row missing its timestamp still blocks.
+  const orderMayBeOut = !!row.placed_at || POST_SUBMIT_REASONS.has(String(row.error || '').split(':')[0]);
+  if (['cancel', 'mark_ordered'].includes(action) && orderMayBeOut && !meta(row.evidence).revokedAt) {
     refuse('auto_order_out', `An automatic order for this request${row.external_order_number ? ` (#${row.external_order_number})` : ''} may already have gone out. Receive it when it arrives, or cancel it with the vendor and then use Record vendor cancellation on the Restock tab, which closes the request.`);
   }
   // Returned so both receive paths can admit ONE more receive on a received
@@ -385,36 +382,6 @@ async function settleRequestLedgerBells(trx, requestId) {
   if (!row) return;
   await retireLedgerBells(trx, row.id);
   await trx('vendor_orders').where({ id: row.id }).update({ evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) - 'bell' - 'bellAt'"), updated_at: new Date() });
-}
-
-/**
- * Restock tab "Try again" (owner 2026-11-27): re-arm a request parked BEFORE the buy click so the next dispatcher
- * run claims it again. Owner-only at the route. Under the manual actions' own locks (ledger row, then request row:
- * the claim takes the same two), and in one transaction: the request is still open and automatic, the ledger row is
- * still a pre-click park (needs_review, no placed_at, no post-submit reason, not revoked, not a dry run, not already
- * queued), and no other automatic order for the product is live. Anything else is a 409 and nothing is written.
- * The write is only evidence.tryAgain: the claim (insertClaim) re-arms the row exactly as it re-arms a dry-run
- * park, so the single claim and the cap reservation are the dispatcher's own, unchanged.
- */
-async function tryAgainParkedRequest(requestId, { actorId = null, conn = db } = {}) {
-  const refuse = (code, message) => { const err = new Error(message); err.statusCode = 409; err.code = code; throw err; };
-  return conn.transaction(async (trx) => {
-    const row = await trx('vendor_orders').where({ restock_request_id: requestId }).forUpdate().first('id', 'status', 'error', 'placed_at', 'evidence');
-    const request = await trx('product_restock_requests').where({ id: requestId }).forUpdate().first('id', 'status', 'source', 'product_id');
-    if (!request) { const err = new Error('Restock request not found'); err.statusCode = 404; err.code = 'request_not_found'; throw err; }
-    if (request.status !== 'open' || request.source !== 'auto_reorder') refuse('request_not_open', 'Try again works on an open automatic request only.');
-    if (!row) refuse('not_parked', 'No automatic order is parked for this request.');
-    if (row.status === 'placing') refuse('auto_order_placing', 'An automatic order for this request is being placed right now — wait for it to place or park, then act.');
-    if (row.placed_at) refuse('auto_order_out', 'An automatic order for this request may already have gone out. Do not try again: receive it when it arrives, or cancel it with the vendor and record that on the Restock tab.');
-    const m = meta(row.evidence);
-    if (!isTryAgainPark({ status: row.status, error: row.error, placedAt: row.placed_at, revokedAt: m.revokedAt, tryAgain: m.tryAgain })) refuse('not_parked', 'This request is not parked before the buy click, or Try again is already queued for it.');
-    if (await findLiveAutoOrder(trx, request.product_id)) refuse('auto_order_live', 'Another automatic order for this product is live — reconcile it first.');
-    await trx('vendor_orders').where({ id: row.id }).update({
-      evidence: trx.raw("COALESCE(evidence, '{}'::jsonb) || ?::jsonb", [JSON.stringify({ tryAgain: { at: new Date().toISOString(), by: actorId } })]),
-      updated_at: new Date(),
-    });
-    return { ledgerId: row.id };
-  });
 }
 
 // Unlocked read for a pre-check (the IB tool's confirmation card); the
@@ -529,19 +496,13 @@ async function reserveUnderCaps(conn, ledgerId, cents, { env = process.env, acco
 // RUN park (needs_review, error 'dry_run:…'): nothing was submitted, and the
 // bell says "turn dry run off to order for real", so the request
 // stays eligible and insertClaim re-arms that row (Codex r4 P1).
-//
-// Try again (owner 2026-11-27, "build fixes"): staff press it on a request parked BEFORE the buy click, and
-// tryAgainParkedRequest (below) stamps evidence.tryAgain on that row under the manual-action locks. That stamp
-// re-arms the row exactly like a dry-run park: the next dispatcher run claims it through the same single claim
-// and cap reservation. A row is never re-armed without it, so no park retries on its own.
-const TRY_AGAIN_MARK_SQL = "(vendor_orders.placed_at IS NULL AND NULLIF(vendor_orders.evidence->>'tryAgain', '') IS NOT NULL)";
-const DRY_RUN_RECLAIMABLE_SQL = `(vendor_orders.status = 'needs_review' AND (vendor_orders.error LIKE 'dry_run:%' OR ${TRY_AGAIN_MARK_SQL}))`;
+const DRY_RUN_RECLAIMABLE_SQL = "(vendor_orders.status = 'needs_review' AND vendor_orders.error LIKE 'dry_run:%')";
 async function findDispatchable(conn = db) {
   return conn('product_restock_requests as prr')
     .leftJoin('vendor_orders as vo', 'vo.restock_request_id', 'prr.id')
     .where('prr.status', 'open')
     .where('prr.source', 'auto_reorder')
-    .where((q) => q.whereNull('vo.id').orWhereRaw(DRY_RUN_RECLAIMABLE_SQL.replaceAll('vendor_orders.', 'vo.')))
+    .where((q) => q.whereNull('vo.id').orWhereRaw("(vo.status = 'needs_review' AND vo.error LIKE 'dry_run:%')"))
     .whereRaw("NULLIF(prr.metadata->>'vendorId', '') IS NOT NULL")
     .select('prr.id')
     .orderBy('prr.created_at');
@@ -564,10 +525,10 @@ function bellAlertParts({ title, body, productName }) {
     };
   }
   if (/^Auto-order (?:failed|needs review)/.test(text) && !String(body || '').includes('Do NOT re-order')) {
-    if (String(body || '').includes(TRY_AGAIN_PHRASE)) {
+    if (String(body || '').includes(STOPPED_PHRASE)) {
       return {
-        action: named([(n) => `${n} auto-order parked, try again or buy`, (n) => `${n} auto-order parked`]),
-        why: 'No order was sent; press Try again when fixed, or buy it and press Mark Ordered.',
+        action: named([(n) => `${n} auto-order stopped, buy it or cancel`, (n) => `${n} auto-order stopped`]),
+        why: 'No order was sent; buy it and press Mark Ordered, or press Cancel for a fresh check.',
         doneWhen: 'restock_request_ordered',
       };
     }
@@ -731,11 +692,9 @@ function parkBellText({ reason, status, product, vendor, request, amountCents, m
   // manually" alone could buy it twice. Every pre-submit park of such a vendor says so, whatever
   // its reason — a failed lookup included. The request's own quantity is named: an order already
   // in for fewer does not cover it.
-  // A park before the click on a vendor the robot places for: staff fix the cause and press Try again, or buy it
-  // themselves and press Mark Ordered, which also stops a Try again that is queued (the claim needs an open request).
-  if (!checkAccountFirst && status === 'needs_review' && isTryAgainPark({ status, error: reason })) {
-    const fixed = TRY_AGAIN_FIXED[reason] || 'the cause';
-    return { title, body: `${message} No order was sent and the request stays open. ${TRY_AGAIN_PHRASE} once ${fixed} is fixed, or buy it yourself and press Mark Ordered.` };
+  // A park before the click on a vendor the robot places for: buy it and press Mark Ordered, or press Cancel.
+  if (!checkAccountFirst && isPreClickPark({ status, reason })) {
+    return { title, body: `${STOPPED_PHRASE}: ${String(message).replace(/[.\s]+$/, '')}. Buy it yourself and press Mark Ordered, or press Cancel and the next morning check opens a fresh request.` };
   }
   const needed = [request?.requested_quantity, request?.unit].filter((part) => part != null && part !== '').join(' ');
   const next = checkAccountFirst
@@ -1008,8 +967,8 @@ async function insertClaim(trx, { request, product, vendor, adapterKey, registry
   const order = pricing?.vendor_sku ? vendorOrderQuantity({ adapter: registry[adapterKey], request, pricing }) : null;
   const payload = { productId: product.id, quantity, unit: request.unit || null, vendorSku: pricing?.vendor_sku || null, vendorQuantity: order?.quantity ?? null, packSize: order?.packSize ?? null, orderedQuantity: order?.orderedQuantity ?? null };
   const claimRow = { restock_request_id: request.id, vendor_id: vendor.id, adapter: adapterKey, status: 'placing', request_payload: JSON.stringify(payload) };
-  // The unique claim is re-armed ONLY over a dry-run park or a pre-click park staff pressed Try again on
-  // (nothing was ever submitted); every other existing row wins the conflict (at-most-once).
+  // The unique claim is re-armed ONLY over a dry-run park (nothing was ever
+  // submitted); every other existing row wins the conflict (at-most-once).
   const inserted = await trx('vendor_orders').insert(claimRow)
     .onConflict('restock_request_id')
     // evidence is NOT NULL: reset to {}. created_at is the cap-accounting
@@ -1803,8 +1762,6 @@ module.exports = {
   vendorOrderQuantity,
   assertNoLiveAutoOrder,
   assertManualActionAllowed,
-  tryAgainParkedRequest,
-  isTryAgainPark,
   orderedQuantityFor,
   AUTO_ORDER_GATE: GATE,
   _internals: { siteoneRunsOnMac, macWatchdog, macStaleMs, poNumberFor, requestAdapterKey, adapterKeyFor, caps, parseCents, VENDOR_GATE, ADAPTER_BY_CODE, CAPS_LOCK_KEY, POST_SUBMIT_REASONS, STALE_PLACING_MS, HEARTBEAT_MS, startClaimHeartbeat },

@@ -3357,7 +3357,6 @@ function RestockRequestsTab({
         {
           receive: "Stock received.",
           mark_ordered: "Marked ordered",
-          try_again: "Queued: the robot tries again on its next run.",
           close_counted: "Closed. Stock was not changed.",
         }[action] || "Request cancelled",
       );
@@ -3650,16 +3649,6 @@ function RestockStatusCell({
             </div>
           )}
         </div>
-      )}
-      {canAct && order?.canTryAgain && (
-        <Button
-          onClick={() => runAction(request, "try_again")}
-          disabled={receivingId === request.id}
-          variant="secondary"
-          className="mt-[8px] mr-[8px]"
-        >
-          Try again
-        </Button>
       )}
       {canAct && (
         <Button
