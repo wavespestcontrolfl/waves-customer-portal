@@ -61,7 +61,7 @@ const { portalUrl } = require('../utils/portal-url');
 const { lockCustomerComms } = require('../utils/customer-comms-lock');
 const { assertInternalEmailRecipient } = require('../utils/internal-email-recipients');
 const { REASONS: EMAIL_VERDICT } = require('./email-division/eligibility');
-const { whereLiveCustomer } = require('./customer-stages');
+const { CUSTOMER_STAGES, whereLiveCustomer } = require('./customer-stages');
 const { NON_PERFORMED_VISIT_OUTCOMES } = require('./pest-pressure/first-visit');
 const { planOfferOf, samePlanOffer } = require('./plan-offer-estimate');
 
@@ -83,6 +83,22 @@ const expandedServicesOn = () => require('../config/feature-gates').onetimePlanE
 const activeJobServiceKeys = () => (expandedServicesOn()
   ? [...JOB_SERVICE_KEYS, ...EXPANDED_JOB_SERVICE_KEYS]
   : JOB_SERVICE_KEYS);
+const ASSESSMENT_PROSPECT_STAGES = Object.freeze([
+  'new_lead', 'contacted', 'estimate_sent', 'estimate_viewed', 'follow_up', 'negotiating',
+]);
+const EXPANDED_SERVICE_INTEREST_LABELS = Object.freeze({
+  wdo_inspection: 'Termite Control',
+  rodent_trapping: 'Rodent Control',
+  bee_wasp_removal: 'Pest Control',
+  lawn_inspection: 'Lawn Care',
+});
+function whereOfferEligibleAccount(qb, serviceKey) {
+  if (expandedServicesOn() && FREE_ASSESSMENT_SERVICE_KEYS.includes(String(serviceKey || ''))) {
+    return qb.where('active', true).whereNull('deleted_at')
+      .whereIn('pipeline_stage', [...CUSTOMER_STAGES, ...ASSESSMENT_PROSPECT_STAGES]);
+  }
+  return whereLiveCustomer(qb);
+}
 const isExpandedServiceKey = (serviceKey) => EXPANDED_JOB_SERVICE_KEYS.includes(String(serviceKey || ''));
 const PLAN_FAMILY = 'pest_control';
 const FIRST_DAY = 3;
@@ -393,13 +409,15 @@ async function anotherVisit({ job, now, deps }) {
 async function customerReachable(ctx) {
   const account = () => ctx.deps.db('customers').where({ id: ctx.job.customer_id });
   const customer = await account().whereNull('deleted_at')
-    .first('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'active');
+    .first('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip', 'active');
   if (!customer) return 'no_customer';
   if (customer.active === false) return 'inactive';
   // A live customer by the one rule every surface counts customers with (whereLiveCustomer in
-  // customer-stages.js): active, not deleted and in a customer stage. `active` alone is also true for a lead
-  // row and for a former customer, so a job on such an account is held and counted here, never offered.
-  if (!(await whereLiveCustomer(account()).first('id'))) return 'not_a_live_customer';
+  // customer-stages.js): active, not deleted and in a customer stage. Free Waves Assessments
+  // deliberately leave new prospects in a pre-sale lead stage (assessment-booking.js), so when
+  // expanded office reviews are enabled, active lead-stage prospects may enter the office-only
+  // review path without ever being emailed automatically.
+  if (!(await whereOfferEligibleAccount(account(), ctx.job.service_key).first('id'))) return 'not_a_live_customer';
   if (!String(customer.email || '').trim()) return 'no_email';
   const isTest = ctx.deps.isInternalTestContact({
     customerId: customer.id, firstName: customer.first_name, lastName: customer.last_name,
@@ -1206,8 +1224,20 @@ const OFFICE_REASON_WORDS = Object.freeze({
 });
 const officeItemKey = (jobId) => `${OFFICE_ITEM_PREFIX}${jobId}`;
 
-function officeEstimateUrl(customerId) {
-  return `/admin/estimates?tab=new&customerId=${encodeURIComponent(customerId)}`;
+function officeEstimateUrl(customer, job) {
+  const params = new URLSearchParams({ tab: 'new', customerId: String(customer.id) });
+  const fullName = [customer.first_name, customer.last_name].filter(Boolean).join(' ').trim();
+  if (fullName) params.set('customerName', fullName);
+  if (String(customer.phone || '').trim()) params.set('customerPhone', String(customer.phone).trim());
+  if (String(customer.email || '').trim()) params.set('customerEmail', String(customer.email).trim());
+  const address = [
+    customer.address_line1,
+    customer.city,
+    [customer.state, customer.zip].filter(Boolean).join(' '),
+  ].filter(Boolean).join(', ').trim();
+  if (address) params.set('address', address);
+  params.set('serviceInterest', EXPANDED_SERVICE_INTEREST_LABELS[job?.service_key] || 'Pest Control');
+  return `/admin/estimates?${params.toString()}`;
 }
 
 function officeItemWhy(job, shortOfferDay) {
@@ -1230,13 +1260,15 @@ async function raiseOfficeItem({ job, customer, offerDay, reason }) {
   const name = fullName(customer) || 'a customer';
   const { lastDay } = offerTerms(offerDay);
   const shortDay = (ymd) => formatDateOnly(ymd, { year: undefined, month: 'short', weekday: 'short' });
-  const estimateUrl = officeEstimateUrl(customer.id);
+  const estimateUrl = officeEstimateUrl(customer, job);
+  const customerProfileUrl = `/admin/customers?customerId=${encodeURIComponent(customer.id)}`;
+  const link = isExpandedServiceKey(job?.service_key) ? estimateUrl : customerProfileUrl;
   const notif = await require('./admin-alert-compose').raiseAdminAlert('estimate', {
     area: 'Estimates',
     action: fitAction('Estimates', name, [(who) => `quote ${who} the plan by hand`]),
     why: officeItemWhy(job, shortDay(offerDay)),
     severity: 'needs-you',
-    link: estimateUrl,
+    link,
     subject: { type: 'customer', id: customer.id },
     doneWhen: 'plan_offer_quoted',
     who: 'person',
@@ -1290,10 +1322,12 @@ const BLOCKER_WORDS = Object.freeze({
   commercial: 'The account reads as commercial',
   not_live: 'The customer is no longer active',
 });
-async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
+async function officeItemWithdrawn({ customerId, jobId, serviceKey }, { now, deps }) {
   const account = () => deps.db('customers').where({ id: customerId });
   const customer = await account().whereNull('deleted_at').first('id', 'email', 'active');
-  if (!customer || customer.active === false || !(await whereLiveCustomer(account()).first('id'))) return 'The customer is no longer active';
+  if (!customer || customer.active === false || !(await whereOfferEligibleAccount(account(), serviceKey).first('id'))) {
+    return 'The customer is no longer active';
+  }
   // The contact restrictions first: a failure of the plan proof below must never keep open an item that an opt-out
   // or a staff do-not-contact already withdraws.
   if (await optOutReason(deps.db, { customerId, email: customer.email, deps })) return 'The customer turned off offers';
@@ -1359,7 +1393,8 @@ async function closeOrRefreshOfficeItem(row, { today, now, deps, episodes }) {
   // An item that stays open shows the offer's current terms: a moved offer day rewrites its text and last day
   // quietly (raiseOfficeItem's refresh), so staff never read an older deadline than the one the close uses.
   else if (offer.offerDay && offer.lastDay !== meta.lastDay) {
-    const customer = await deps.db('customers').where({ id: meta.customerId }).first('id', 'first_name', 'last_name');
+    const customer = await deps.db('customers').where({ id: meta.customerId })
+      .first('id', 'first_name', 'last_name', 'email', 'phone', 'address_line1', 'city', 'state', 'zip');
     if (customer) {
       await deps.raiseOfficeItem({
         job: { id: meta.jobId, ...(offer.serviceKey ? { service_key: offer.serviceKey } : {}) },

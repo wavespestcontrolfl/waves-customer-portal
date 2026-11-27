@@ -1984,7 +1984,7 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect([category, headline]).toEqual(['estimate', 'Estimates — quote Jordan Example the plan by hand']);
       expect(why).toBe('Their one-time pest job was done Tue, Mar 5, and the app cannot price the plan offer.');
       expect(options).toMatchObject({
-        link: '/admin/estimates?tab=new&customerId=cust-1',
+        link: '/admin/customers?customerId=cust-1',
         dedupeKey: _test.officeItemKey('job-1'),
         bell: true,
         metadata: {
@@ -2488,9 +2488,11 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
       expect(notifyAdmin).toHaveBeenCalledTimes(1);
       const [, , why, options] = notifyAdmin.mock.calls[0];
       expect(why).toBe('Their Waves assessment was done Tue, Mar 5 and qualifies for a plan offer.');
-      expect(options.link).toBe('/admin/estimates?tab=new&customerId=cust-1');
+      expect(options.link).toBe(
+        '/admin/estimates?tab=new&customerId=cust-1&customerName=Jordan+Example&customerPhone=%2B19415550100&customerEmail=jordan%40example.test&address=12+Example+Test+Ln&serviceInterest=Lawn+Care',
+      );
       expect(options.metadata).toMatchObject({
-        estimateUrl: '/admin/estimates?tab=new&customerId=cust-1',
+        estimateUrl: options.link,
         offerEndDate: '2030-04-04',
         serviceKey: 'lawn_inspection',
         reason: 'expanded_service_review',
@@ -2506,8 +2508,41 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         reason: 'not_priced',
       });
       const [, , , pestOpts] = notifyAdmin.mock.calls[0];
-      expect(pestOpts.link).toBe('/admin/estimates?tab=new&customerId=cust-1');
+      expect(pestOpts.link).toBe('/admin/customers?customerId=cust-1');
+      expect(pestOpts.metadata.estimateUrl).toContain('tab=new&customerId=cust-1&customerName=Jordan+Example');
       expect(pestOpts.detail).toContain('Quarterly Pest Control Service');
+    });
+
+    test('expanded free Waves Assessments allow unconverted lead-stage prospects into office review while keeping pest restricted to live customers', async () => {
+      process.env.GATE_ONETIME_PLAN_OFFER = 'live';
+      process.env.GATE_ONETIME_PLAN_EXPANDED_SERVICES = 'true';
+      const assessmentJob = {
+        id: 'job-assess-lead',
+        customer_id: 'cust-1',
+        service_day: '2030-03-05',
+        job_day: '2030-03-05',
+        service_key: 'lawn_inspection',
+        estimated_price: 0,
+        primary_line_price: 0,
+        prepaid_amount: 0,
+      };
+      const deps = liveWorld({
+        tables: {
+          'scheduled_services as s': [assessmentJob],
+          customers: [{ ...CUSTOMER, pipeline_stage: 'new_lead' }],
+          'invoices as i': [],
+        },
+        planStartBlocker: jest.fn(async () => null),
+      });
+      const summary = await runOnetimePlanOfferJob({ now: NOW, deps });
+      expect(summary.office).toBe(1);
+      expect(summary.sent).toBe(0);
+      const customerStageQuery = deps.db.queriesOf('customers').find((q) => q.calls.some(([m, col]) => m === 'whereIn' && col === 'pipeline_stage'));
+      expect(customerStageQuery).toBeTruthy();
+      const stageList = customerStageQuery.calls.find(([m, col]) => m === 'whereIn' && col === 'pipeline_stage')[2];
+      expect(stageList).toContain('new_lead');
+      expect(stageList).not.toContain('lost');
+      expect(stageList).not.toContain('churned');
     });
 
     test('gate OFF queries only the 2 pest/roach keys; gate ON queries all 6 keys, requires free assessment to be $0, and keeps dueOfferOfJob restricted', async () => {
