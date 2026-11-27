@@ -114,7 +114,7 @@ function requestedSlots(slots, input) {
     const index = slots.findIndex((s) => !isFilled(s));
     if (index < 0) return refusal('This account already has three contacts. Change or remove one first.', 'slots_full');
     next[index] = { name: text(input.name), phone: text(input.phone), email: text(input.email) };
-    return { action, index, next, roles: { [index]: relationship } };
+    return { action, index, next, roles: keptRoles(slots, next, index, relationship) };
   }
   const index = Number(input.slot) - 1;
   const listed = contactList(slots);
@@ -124,14 +124,25 @@ function requestedSlots(slots, input) {
   if (!isFilled(slots[index])) return refusal(`Contact ${index + 1} is empty on this account. The contacts on file are listed.`, 'slot_empty', { contacts: listed });
   if (action === 'remove') {
     next[index] = { name: '', phone: '', email: '' };
-    return { action, index, next, roles: {} };
+    return { action, index, next, roles: keptRoles(slots, next, index, null) };
   }
   // Always restated on a change: the save re-derives a role by matching the person, and an edit of every detail
   // matches no one and clears it (a tenant would lose the tenant rule).
   if (!relationship) return refusal(`Ask who ${slots[index].name || 'this contact'} is to the account, then pass relationship (their current one: ${slots[index].role ? relationshipLabel(slots[index].role) : 'none recorded'}).`, 'invalid_input', { contacts: listed });
   for (const k of fields) next[index][k] = text(input[k]);
   if (!isFilled(next[index])) return refusal('That would leave the contact empty. Use action "remove" instead.', 'invalid_input');
-  return { action, index, next, roles: { [index]: relationship } };
+  return { action, index, next, roles: keptRoles(slots, next, index, relationship) };
+}
+
+// Every surviving slot's role, stated explicitly: the changed slot gets the card's relationship and every other
+// person keeps their own. Left to the compactor, a role follows a phone match, and two people sharing a phone could
+// swap roles (a tenant taking a landlord's).
+function keptRoles(slots, next, index, relationship) {
+  const roles = {};
+  next.forEach((slot, i) => {
+    if (isFilled(slot)) roles[i] = i === index ? relationship : slots[i].role;
+  });
+  return roles;
 }
 
 // The columns the handler would write for this body, run through the route's own normalizer and compactor on the
@@ -196,6 +207,11 @@ function planEffects({ account, name, before, after, target, plan, consentOnFile
       : `${name || 'This account'} has no extra contacts after this.` },
   ];
   if (plan.action !== 'remove') lines.push(emailLine(account, target));
+  // Slot 1 is the one contact the single-recipient notices go to (customer-contact.js getServiceContact).
+  const firstBefore = before.find(isFilled);
+  if (after[0] && isFilled(after[0]) && (!firstBefore || describe(firstBefore) !== describe(after[0]))) {
+    lines.push({ kind: 'comms', text: `${after[0].name || 'The new first contact'} becomes the first contact, who gets the notices that go to one contact only (such as project emails and review requests).` });
+  }
   lines.push(...textLines({ plan, consentOnFile, consentCleared }));
   // The handler prunes notification choices and push subscriptions, and revokes app sessions, only for a phone no
   // slot lists after the save; a later re-add starts fresh.
@@ -208,7 +224,7 @@ function planEffects({ account, name, before, after, target, plan, consentOnFile
   return lines;
 }
 
-async function buildPlan(input, { database = db } = {}) {
+async function buildPlan(input, { database = db, lock = false } = {}) {
   const id = text(input?.customer_id);
   if (!UUID_RE.test(id)) return refusal('customer_id must be a customer id. Find the customer with query_customers first.', 'invalid_input');
   const customer = await database('customers').where({ id }).whereNull('deleted_at').first();
@@ -219,7 +235,7 @@ async function buildPlan(input, { database = db } = {}) {
   // The account holder as the senders see this profile: a property profile takes the account primary's contact
   // details where its own are blank, and its role (withAccountPrimaryContactStrict). The duplicate check and the
   // report rule both read it.
-  const account = await require('../customer-contact').withAccountPrimaryContactStrict(customer, { db: database });
+  const account = await require('../customer-contact').withAccountPrimaryContactStrict(customer, { db: database, forShare: lock });
   if (plan.action !== 'remove') {
     const dupe = duplicateOf(account, before, plan.index, plan.next[plan.index]);
     if (dupe) return refusal(`That phone or email is already on this account as ${dupe}. Change that contact instead.`, 'already_on_account');
@@ -268,7 +284,7 @@ async function verifiedPlan(input, pinned) {
 // edit that landed after the card refuses as preview_changed and the save rolls back.
 function lockedPlanCheck(input, pinned) {
   return async (trx) => {
-    const plan = await buildPlan(input, { database: trx });
+    const plan = await buildPlan(input, { database: trx, lock: true });
     if (plan.error || JSON.stringify(plan._version) !== JSON.stringify(pinned)) {
       throw Object.assign(new Error('The customer\'s contacts changed after the card was shown.'), {
         statusCode: 409, isOperational: true, code: 'preview_changed',

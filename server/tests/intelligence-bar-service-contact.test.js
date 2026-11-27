@@ -117,6 +117,17 @@ describe('set_customer_service_contact preview', () => {
     expect(effectText(p)).toMatch(/appointment emails but no service reports/);
   });
 
+  test('every person who stays keeps their own role, even when two share a phone', async () => {
+    Object.assign(state.customer, {
+      service_contact_name: 'Lou Landlord', service_contact_phone: '+19415550111', service_contact_email: 'lou@example.invalid', service_contact_role: 'landlord',
+      service_contact2_name: 'Tess Tenant', service_contact2_phone: '+19415550111', service_contact2_email: 'tess@example.invalid', service_contact2_role: 'tenant',
+    });
+    const p = await preview({ action: 'remove', slot: 1 });
+    expect(p._version.roles).toEqual({ service_contact2_role: 'tenant' });
+    expect(p._version.after[0]).toMatchObject({ name: 'Tess Tenant', role: 'tenant' });
+    expect(effectText(p)).toMatch(/Tess Tenant becomes the first contact/);
+  });
+
   test('a phone another slot still lists is not described as signed out', async () => {
     Object.assign(state.customer, {
       service_contact_name: 'Ava Example', service_contact_phone: '+19415550111',
