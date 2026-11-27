@@ -232,5 +232,27 @@ describe('once per ET day', () => {
       { count: 1, total: 1, areas: [{ area: 'Comms', count: 1 }], day: '2026-11-03' },
       { pushOnly: true, onlyUserIds: [2] },
     );
+
+    // Partial failure: owner dispatch fails with prefsUnavailable while shared succeeds ->
+    // reports dispatch_failed, keeps shared claim, releases owner claim so retry sends only to owner.
+    mockTrigger.mockClear();
+    claimed.clear();
+    mockTrigger
+      .mockResolvedValueOnce({ bellWritten: false, push: null, prefsUnavailable: true })
+      .mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } })
+      .mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } });
+    const partial = await runMorningBanner({ now: MORNING });
+    expect(partial).toEqual({ count: 2, sent: false, error: 'dispatch_failed' });
+    expect([...claimed]).toEqual(['morning_banner:2026-11-03:shared']);
+
+    mockTrigger.mockClear();
+    const retry = await runMorningBanner({ now: MORNING });
+    expect(retry).toMatchObject({ count: 2, sent: true });
+    expect(mockTrigger).toHaveBeenCalledTimes(1);
+    expect(mockTrigger).toHaveBeenCalledWith(
+      'waiting_summary',
+      { count: 2, total: 2, areas: [{ area: 'Comms', count: 1 }, { area: 'Billing', count: 1 }], day: '2026-11-03' },
+      { pushOnly: true, onlyUserIds: [1] },
+    );
   });
 });
