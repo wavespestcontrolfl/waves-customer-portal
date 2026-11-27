@@ -581,9 +581,9 @@ describe('mergeHomeNotes ("About this home" staff notes: never lose text)', () =
   }
 
   it('both profiles have a note: the kept row holds both texts, the archived row goes', async () => {
-    const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'Gate sticks.' }, loserNote: { id: 'n2', body: 'Dog inside.' } });
+    const { trx, state } = stubTrx({ winnerNote: { id: 'n1', body: 'Gate sticks.', revision: 3 }, loserNote: { id: 'n2', body: 'Dog inside.', revision: 1 } });
     await mergeHomeNotes(trx, 'home_notes', 'customer_id', 'W', 'L');
-    expect(state.updated).toEqual({ body: 'Gate sticks.\n(merged) Dog inside.', updated_at: 'NOW' });
+    expect(state.updated).toEqual({ body: 'Gate sticks.\n(merged) Dog inside.', revision: 4, updated_at: 'NOW' });
     expect(state.deleted).toBe(true);
     expect(state.repointed).toBeNull();
   });

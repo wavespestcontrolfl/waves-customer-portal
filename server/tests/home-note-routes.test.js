@@ -80,7 +80,7 @@ const call = (base, path, { method = 'GET', role = 'admin', body } = {}) => fetc
   ...(body ? { body: JSON.stringify(body) } : {}),
 });
 
-const NOTE = { body: 'Side gate sticks.', updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
+const NOTE = { body: 'Side gate sticks.', revision: 3, updatedAt: '2026-11-26T15:00:00.000Z', updatedByFirstName: 'Ada' };
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -96,11 +96,11 @@ describe('visit routes', () => {
       expect(read.status).toBe(200);
       expect(await read.json()).toEqual({ note: NOTE, editable: true, customerId: CUSTOMER });
       expect(mockRead).toHaveBeenCalledWith(VISIT_ROW);
-      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'New text', expectedUpdatedAt: NOTE.updatedAt, expectedCustomerId: CUSTOMER } });
+      const put = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'New text', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER } });
       expect(put.status).toBe(200);
       const [row, input, opts] = mockSave.mock.calls[0];
       expect(row).toEqual(VISIT_ROW);
-      expect(input).toMatchObject({ body: 'New text', expectedUpdatedAt: NOTE.updatedAt, expectedCustomerId: CUSTOMER, actor: { type: 'technician', id: 'tech-1' } });
+      expect(input).toMatchObject({ body: 'New text', expectedRevision: NOTE.revision, expectedCustomerId: CUSTOMER, actor: { type: 'technician', id: 'tech-1' } });
       expect(opts.conn).toBeDefined();
     });
   });
@@ -134,7 +134,7 @@ describe('visit routes', () => {
     stubDb();
     await withServer(async (base) => {
       mockSave.mockResolvedValueOnce({ status: 409, error: 'Someone else changed this note.', code: 'note_changed', note: NOTE });
-      const stale = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'x', expectedUpdatedAt: '2026-11-26T14:00:00.000Z' } });
+      const stale = await call(base, `/admin/schedule/${VISIT}/home-note`, { method: 'PUT', role: 'technician', body: { body: 'x', expectedRevision: 2 } });
       expect(stale.status).toBe(409);
       expect(await stale.json()).toEqual({ error: 'Someone else changed this note.', code: 'note_changed', note: NOTE });
       mockSave.mockResolvedValueOnce({ status: 400, error: 'The note can be at most 1000 characters.', code: 'too_long' });
@@ -193,7 +193,10 @@ describe('reassignment between the first read and the answer', () => {
   test('the recheck is on even with every brief gate off, and still passes an unchanged visit', async () => {
     stubDb({ ownsVisit: [true, true] });
     await withServer(async (base) => {
+      db.mockClear();
       expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: { note: NOTE, customerId: CUSTOMER } });
+      // One scoped visit fetch and ONE ownership recheck (finalRecheck), not a second copy for the note.
+      expect(db.mock.calls.filter(([table]) => table === 'scheduled_services')).toHaveLength(2);
     });
   });
 });

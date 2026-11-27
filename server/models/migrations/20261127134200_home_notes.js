@@ -8,6 +8,7 @@
 //   body              the note, never empty (saving an empty note deletes the row). The API and the screens cap a save at
 //                     1000 characters; the table allows up to 2100 only so a customer merge can join two full notes
 //                     ("<kept note>\n(merged) <archived note>" = 1000 + 10 + 1000) without ever dropping text
+//   revision          1 on creation, +1 on every save: what the stale-save check compares (updated_at is for display only)
 //   updated_by_type   'technician' | 'admin': the role of the staff login that last saved it
 //   updated_by_id     that staff login (technicians.id; no FK so offboarding a login never touches the note)
 //
@@ -18,12 +19,14 @@ exports.up = async function up(knex) {
     t.uuid('id').primary().defaultTo(knex.raw('gen_random_uuid()'));
     t.uuid('customer_id').notNullable().unique().references('id').inTable('customers').onDelete('CASCADE');
     t.text('body').notNullable();
+    t.integer('revision').notNullable().defaultTo(1);
     t.string('updated_by_type', 16).notNullable();
     t.uuid('updated_by_id').nullable();
     t.timestamp('created_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
     t.timestamp('updated_at', { useTz: true }).notNullable().defaultTo(knex.fn.now());
   });
   await knex.raw('ALTER TABLE home_notes ADD CONSTRAINT home_notes_body_chk CHECK (length(body) BETWEEN 1 AND 2100)');
+  await knex.raw('ALTER TABLE home_notes ADD CONSTRAINT home_notes_revision_chk CHECK (revision >= 1)');
   await knex.raw("ALTER TABLE home_notes ADD CONSTRAINT home_notes_updated_by_type_chk CHECK (updated_by_type IN ('technician', 'admin'))");
 };
 

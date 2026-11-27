@@ -2296,7 +2296,7 @@ async function mergeHomeNotes(trx, table, column, winnerId, loserId) {
   if (joined.length > HOME_NOTE_TABLE_MAX) {
     throw new Error(`home notes are too long to join (${joined.length} characters, limit ${HOME_NOTE_TABLE_MAX}): shorten one note, then merge again`);
   }
-  await trx(table).where(column, winnerId).update({ body: joined, updated_at: trx.fn.now() });
+  await trx(table).where(column, winnerId).update({ body: joined, revision: Number(winnerRow.revision) + 1, updated_at: trx.fn.now() });
   await trx(table).where(column, loserId).del();
   return 'joined the two notes on the kept customer';
 }

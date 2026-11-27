@@ -24895,9 +24895,9 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     };
     // "About this home" (services/home-note.js): the customer's one staff note rides every answer, so the tech's Visit Brief
     // shows it at the top with no request of its own. `homeNote` is the note or null (no note yet); the key is left out when
-    // the visit has no customer or the read fails, so those answers are exactly as before. Whichever brief gates are on, the
-    // read is followed by its own ownership check (homeNoteStillOwned): a visit reassigned (or moved to another customer)
-    // during the read, or a check that cannot run, withholds the whole answer: the same `{ brief: null }` as finalRecheck.
+    // the visit has no customer, so that answer is exactly as before. The read is covered by finalRecheck (below), which also
+    // runs whenever a customer's note was looked up, whichever brief gates are on.
+    let homeNoteLooked = false;
     const withHomeNote = async (payload) => {
       let out = null;
       try {
@@ -24905,25 +24905,19 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief home note failed for ${svc.id}: ${err.message}`);
       }
-      // No customer: no note and no new lookup, the answer as before. Otherwise this is the last ownership check, so a
-      // check that fails or cannot run withholds the whole answer (cached access codes included), whichever gates are on.
+      // No customer: no note and nothing more to check, the answer as before. Otherwise finalRecheck below runs, even with
+      // every brief gate off, and withholds the whole answer when the visit was lost during the read or the check cannot run.
       if (out && !out.editable) return payload;
-      let owned = false;
-      try {
-        owned = Boolean(await homeNoteStillOwned(req, svc));
-      } catch (err) {
-        logger.warn(`[admin-schedule] visit-brief home note recheck failed for ${svc.id}: ${err.message}`);
-      }
-      if (!owned) return { brief: null };
+      homeNoteLooked = true;
       return out ? { ...payload, homeNote: { note: out.note, customerId: out.customerId } } : payload;
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
     // access codes, the cached brief and a customer's quoted texts, so it must still be this technician's visit AND the
     // customer the brief was built for (a merge changes the visit's customer while the technician stays assigned).
-    // No longer so, or the check itself failing: the whole answer is withheld. All three gates off: no extra read.
+    // No longer so, or the check itself failing: the whole answer is withheld. All three gates off and no home note looked up: no extra read.
     const finalRecheck = async (payload) => {
-      if (!(PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
+      if (!(homeNoteLooked || PrevisitBrief.visitFactsGateEnabled() || require('../services/away-watch').awayWatchLive() || require('../config/feature-gates').visitAccessCardsLive())) return payload;
       try {
         const stillOwned = await db('scheduled_services')
           .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
@@ -24968,11 +24962,6 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-// Still this technician's visit, for the same customer, right now (a reassignment or a customer merge changes either).
-const homeNoteStillOwned = (req, svc) => db('scheduled_services')
-  .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
-  .modify((q) => technicianCurrentVisitFilter(req, q))
-  .first('scheduled_services.id');
 // GET / PUT /api/admin/schedule/:id/home-note   body { body, expectedUpdatedAt }
 // "About this home" (services/home-note.js): the customer's one short lasting staff note, read at the top of the tech
 // Visit Brief. Same assignment check as GET /:id/visit-brief (technicianCurrentVisitFilter): a technician
@@ -24996,7 +24985,11 @@ router.get('/:id/home-note', async (req, res, next) => {
     if (!svc) return homeNoteVisitRefusal(req, res);
     const out = await HomeNote.readHomeNote(svc);
     // Recheck as the last read before the answer: a note read for a visit reassigned meanwhile is never sent.
-    if (!(await homeNoteStillOwned(req, svc))) return homeNoteVisitRefusal(req, res);
+    const stillOwned = await db('scheduled_services')
+      .where({ 'scheduled_services.id': svc.id, 'scheduled_services.customer_id': svc.customer_id })
+      .modify((q) => technicianCurrentVisitFilter(req, q))
+      .first('scheduled_services.id');
+    if (!stillOwned) return homeNoteVisitRefusal(req, res);
     HomeNote.sendHomeNote(res, out);
   } catch (err) { next(err); }
 });

@@ -21,10 +21,12 @@ test('up creates the table, the body and role checks, and the one-note-per-custo
   await migration.up(knex);
   expect(calls).toContainEqual(['createTable', 'home_notes']);
   const cols = calls.filter((c) => c[0] === 'col').map((c) => c[2]);
-  expect(cols).toEqual(expect.arrayContaining(['id', 'customer_id', 'body', 'updated_by_type', 'updated_by_id', 'created_at', 'updated_at']));
+  expect(cols).toEqual(expect.arrayContaining(['id', 'customer_id', 'body', 'revision', 'updated_by_type', 'updated_by_id', 'created_at', 'updated_at']));
   const sql = calls.filter((c) => c[0] === 'raw').map((c) => c[1]).join('\n');
   expect(sql).toMatch(/CHECK \(length\(body\) BETWEEN 1 AND 2100\)/);
   expect(sql).toMatch(/updated_by_type IN \('technician', 'admin'\)/);
+  expect(sql).toMatch(/CHECK \(revision >= 1\)/);
+  expect(calls).toContainEqual(['col', 'defaultTo', 1]);
   expect(cols).not.toContain('property_id');
   // customer_id: not null, unique, cascading foreign key to customers.
   const customerCol = calls.filter((c) => c[0] === 'col').map((c) => c[1]);

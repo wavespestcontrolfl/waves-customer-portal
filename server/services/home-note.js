@@ -9,7 +9,7 @@
  *
  * Keyed by customer alone, like property_preferences: a customer with several homes shares one note.
  *
- * Stale guard: a save carries the updated_at the editor last saw (`expectedUpdatedAt`, null = "no note yet"). When the
+ * Stale guard: a save carries the revision the editor last saw (`expectedRevision`, 0 or null = "no note yet"). When the
  * stored row differs, nothing is written and the answer is 409 with the current note, so two phones never overwrite
  * each other unseen.
  */
@@ -19,11 +19,6 @@ const { recordAuditEvent } = require('./audit-log');
 const MAX_LENGTH = 1000;
 
 const firstName = (name) => String(name || '').trim().split(/\s+/)[0] || null;
-// Two stored-or-sent times name the same instant; a missing one matches only another missing one.
-const sameInstant = (a, b) => {
-  if (!a || !b) return !a && !b;
-  return new Date(a).getTime() === new Date(b).getTime();
-};
 
 async function shapeNote(row, conn) {
   if (!row) return null;
@@ -32,7 +27,9 @@ async function shapeNote(row, conn) {
     const tech = await conn('technicians').where({ id: row.updated_by_id }).first('name');
     name = firstName(tech && tech.name);
   }
-  return { body: row.body, updatedAt: new Date(row.updated_at).toISOString(), updatedByFirstName: name };
+  return {
+    body: row.body, revision: row.revision, updatedAt: new Date(row.updated_at).toISOString(), updatedByFirstName: name,
+  };
 }
 
 const currentRow = (conn, customerId, { lock = false } = {}) => {
@@ -58,7 +55,7 @@ async function writeRow(trx, customerId, current, body, actor) {
     body, updated_by_type: actor.type, updated_by_id: actor.id || null, updated_at: new Date(),
   };
   if (current) {
-    await trx('home_notes').where({ id: current.id }).update(stamp);
+    await trx('home_notes').where({ id: current.id }).update({ ...stamp, revision: trx.raw('revision + 1') });
     return current.id;
   }
   const [inserted] = await trx('home_notes').insert({ customer_id: customerId, ...stamp }).returning('id');
@@ -69,7 +66,7 @@ async function writeRow(trx, customerId, current, body, actor) {
  * Save (or, with an empty body, delete) the customer's note. `actor` = { type: 'technician' | 'admin', id, ip, userAgent }.
  * Returns { status: 200, note } | { status: 400 | 409 | 422, error, note? }. Never throws for those refusals.
  */
-async function saveHomeNote(row, { body, expectedUpdatedAt = null, expectedCustomerId = null, actor }, { conn = db } = {}) {
+async function saveHomeNote(row, { body, expectedRevision = null, expectedCustomerId = null, actor }, { conn = db } = {}) {
   const text = typeof body === 'string' ? body.trim() : null;
   if (text === null) return refusal(400, 'The note must be text.');
   if (text.length > MAX_LENGTH) return refusal(400, `The note can be at most ${MAX_LENGTH} characters.`, { code: 'too_long' });
@@ -86,7 +83,8 @@ async function saveHomeNote(row, { body, expectedUpdatedAt = null, expectedCusto
     const live = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id');
     if (!live) return refusal(404, 'Customer not found');
     const current = await currentRow(trx, customerId, { lock: true });
-    if (!sameInstant(current ? current.updated_at : null, expectedUpdatedAt || null)) return changed(current, trx);
+    // 0 or null = the editor saw no note; anything else must be the stored revision.
+    if ((current ? current.revision : 0) !== (expectedRevision || 0)) return changed(current, trx);
     if (!text && !current) return { status: 200, note: null };
     let noteId = current && current.id;
     if (!text) await trx('home_notes').where({ id: current.id }).del();
@@ -121,7 +119,7 @@ const saveInput = (req) => {
   const b = req.body || {};
   return {
     body: b.body,
-    expectedUpdatedAt: typeof b.expectedUpdatedAt === 'string' ? b.expectedUpdatedAt : null,
+    expectedRevision: Number.isInteger(b.expectedRevision) ? b.expectedRevision : null,
     expectedCustomerId: typeof b.expectedCustomerId === 'string' ? b.expectedCustomerId : null,
   };
 };

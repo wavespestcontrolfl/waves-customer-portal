@@ -85,13 +85,26 @@ jest.setTimeout(30000);
 
   test('a stale save is 409 with the current note and writes nothing', async () => {
     const first = await saveHomeNote(visit(), { body: 'v1', actor: actor() });
-    const second = await saveHomeNote(visit(), { body: 'v2', expectedUpdatedAt: first.note.updatedAt, actor: actor({ type: 'admin' }) });
+    const second = await saveHomeNote(visit(), { body: 'v2', expectedRevision: first.note.revision, actor: actor({ type: 'admin' }) });
     expect(second.status).toBe(200);
-    const stale = await saveHomeNote(visit(), { body: 'v3', expectedUpdatedAt: first.note.updatedAt, actor: actor() });
-    expect(stale).toMatchObject({ status: 409, code: 'note_changed', note: { body: 'v2' } });
+    const stale = await saveHomeNote(visit(), { body: 'v3', expectedRevision: first.note.revision, actor: actor() });
+    expect(stale).toMatchObject({ status: 409, code: 'note_changed', note: { body: 'v2', revision: 2 } });
     expect((await readHomeNote(visit())).note.body).toBe('v2');
     // A second editor that thought there was no note is also stale.
-    expect((await saveHomeNote(visit(), { body: 'v4', expectedUpdatedAt: null, actor: actor() })).status).toBe(409);
+    expect((await saveHomeNote(visit(), { body: 'v4', expectedRevision: null, actor: actor() })).status).toBe(409);
+    expect((await saveHomeNote(visit(), { body: 'v4', expectedRevision: 0, actor: actor() })).status).toBe(409);
+    // The revision moves on every save, whatever the clock says: two saves in one millisecond are still told apart.
+    const rows = await database('home_notes').select('revision');
+    expect(rows).toEqual([{ revision: 2 }]);
+    const fixed = new Date('2026-11-26T15:00:00.000Z');
+    const RealDate = Date;
+    global.Date = class extends RealDate { constructor(...a) { super(...(a.length ? a : [fixed])); } };
+    try {
+      const a = await saveHomeNote(visit(), { body: 'v5', expectedRevision: 2, actor: actor() });
+      const b = await saveHomeNote(visit(), { body: 'v6', expectedRevision: 2, actor: actor() });
+      expect([a.status, b.status]).toEqual([200, 409]);
+      expect(a.note.revision).toBe(3);
+    } finally { global.Date = RealDate; }
   });
 
   test('two first saves at once: one wins, the other is told 409 with the winner\'s note', async () => {
@@ -107,7 +120,7 @@ jest.setTimeout(30000);
     expect((await saveHomeNote(visit(), { body: 'x'.repeat(1001), actor: actor() })).status).toBe(400);
     expect((await saveHomeNote(visit(), { body: 'x'.repeat(1000), actor: actor() })).status).toBe(200);
     const current = (await readHomeNote(visit())).note;
-    const gone = await saveHomeNote(visit(), { body: '   ', expectedUpdatedAt: current.updatedAt, actor: actor() });
+    const gone = await saveHomeNote(visit(), { body: '   ', expectedRevision: current.revision, actor: actor() });
     expect(gone).toEqual({ status: 200, note: null });
     expect(await database('home_notes').count('* as n').first()).toMatchObject({ n: '0' });
     expect((await database('audit_log').pluck('action')).sort()).toEqual(['home_note.create', 'home_note.delete']);
