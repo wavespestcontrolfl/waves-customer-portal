@@ -12,6 +12,7 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../config/feature-gates', () => ({ isEnabled: jest.fn(() => false) }));
 jest.mock('../services/dashboard-alerts', () => ({ computeDashboardAlerts: jest.fn() }));
 jest.mock('../services/notification-triggers', () => ({ triggerNotification: jest.fn(async () => undefined) }));
+jest.mock('../services/audit-log', () => ({ auditBellPolicyMuted: jest.fn(async () => 0) }));
 jest.mock('../models/db', () => {
   const state = { rows: [], deleted: [], inserted: [], updated: [], insertedRows: [], mergePatches: [], updatePatches: [] };
   const trxFn = (table) => {
@@ -49,6 +50,7 @@ const logger = require('../services/logger');
 const { isEnabled } = require('../config/feature-gates');
 const { computeDashboardAlerts } = require('../services/dashboard-alerts');
 const { triggerNotification } = require('../services/notification-triggers');
+const { auditBellPolicyMuted } = require('../services/audit-log');
 const { runDashboardAlertsCheck } = require('../services/dashboard-alerts-cron');
 
 const row = (alert_id, count = 1) => ({
@@ -120,20 +122,21 @@ describe('failed alert reads', () => {
 });
 
 describe('bell policy silenced (GATE_ADMIN_BELL_POLICY=true)', () => {
-  test('maintains dashboard_alert_state without stamping fake last_pushed_* or firing silenced dashboard_alert triggers', async () => {
+  test('maintains dashboard_alert_state without stamping fake last_pushed_* and audits new/escalated muted alerts post-commit', async () => {
     isEnabled.mockImplementation((g) => g === 'adminBellPolicy');
-    db.__state.rows = [row('ar_overdue_60', 2), row('stale_draft_invoices', 1)];
+    db.__state.rows = [row('ar_overdue_60', 2), row('churn_at_risk', 10), row('stale_draft_invoices', 1)];
     computeDashboardAlerts.mockResolvedValue({
       alerts: [
         { id: 'closeout_gaps_today', label: '2 visits not closed out', severity: 'warn', count: 2, href: '/admin/dispatch' },
-        { id: 'ar_overdue_60', label: '5 invoices overdue', severity: 'critical', count: 5, href: '/admin/invoices' },
+        { id: 'ar_overdue_60', label: '5 invoices overdue', severity: 'critical', count: 5, amount: 1200, href: '/admin/invoices' },
+        { id: 'churn_at_risk', label: '10 customers at risk', severity: 'warn', count: 10, href: '/admin/customers' },
       ],
       failures: [],
     });
 
     const result = await runDashboardAlertsCheck();
 
-    expect(result).toEqual({ fired: 0, cleared: 1, current: 2 });
+    expect(result).toEqual({ fired: 0, cleared: 1, current: 3 });
     expect(triggerNotification).not.toHaveBeenCalled();
     expect(db.__state.deleted).toEqual(['stale_draft_invoices']);
     expect(db.__state.insertedRows).toEqual([
@@ -156,9 +159,31 @@ describe('bell policy silenced (GATE_ADMIN_BELL_POLICY=true)', () => {
           last_label: '5 invoices overdue',
         }),
       },
+      {
+        alert_id: 'churn_at_risk',
+        patch: expect.objectContaining({
+          severity: 'warn',
+          current_count: 10,
+          last_label: '10 customers at risk',
+        }),
+      },
     ]);
-    expect(db.__state.updatePatches[0].patch).not.toHaveProperty('last_pushed_at');
-    expect(db.__state.updatePatches[0].patch).not.toHaveProperty('last_pushed_count');
+    for (const u of db.__state.updatePatches) {
+      expect(u.patch).not.toHaveProperty('last_pushed_at');
+      expect(u.patch).not.toHaveProperty('last_pushed_count');
+    }
+    // New + growing alerts leave the muted-policy audit record; steady churn_at_risk does not repeat.
+    expect(auditBellPolicyMuted).toHaveBeenCalledTimes(2);
+    expect(auditBellPolicyMuted).toHaveBeenCalledWith({
+      category: 'alert',
+      triggerKey: 'dashboard_alert',
+      title: '2 visits not closed out',
+    });
+    expect(auditBellPolicyMuted).toHaveBeenCalledWith({
+      category: 'alert',
+      triggerKey: 'dashboard_alert',
+      title: '5 invoices overdue ($1,200)',
+    });
   });
 });
 

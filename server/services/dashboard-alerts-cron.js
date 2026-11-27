@@ -35,6 +35,7 @@ const logger = require('./logger');
 const { computeDashboardAlerts } = require('./dashboard-alerts');
 const { triggerNotification } = require('./notification-triggers');
 const { isBellPolicyEnabled, bellAllowed } = require('./notification-bell-policy');
+const { auditBellPolicyMuted } = require('./audit-log');
 
 // Stable advisory-lock key. hashtext() produces an int4 from a string
 // so the value is reproducible across replicas without coordination.
@@ -76,6 +77,10 @@ async function runDashboardAlertsCheck() {
   } finally {
     isRunning = false;
   }
+}
+
+function formatAlertTitle(alert) {
+  return alert.label + (alert.amount ? ` ($${Math.round(alert.amount).toLocaleString()})` : '');
 }
 
 async function isDashboardAlertPushAllowed() {
@@ -179,6 +184,7 @@ async function runDashboardAlertsCheckInner() {
   let fired = 0;
   let cleared = 0;
   const pendingNotifications = [];
+  const mutedNotifications = [];
   const now = new Date();
 
   try {
@@ -205,6 +211,11 @@ async function runDashboardAlertsCheckInner() {
         if (shouldPush) {
           pendingNotifications.push({ alert });
           fired += 1;
+        } else if (!pushAllowed && (isNew || alert.count > (prev.current_count || 0))) {
+          // Preserve GATE_ALERT_CATALOG=watch muted-alert telemetry for new
+          // or growing alerts without stamping fake last_pushed_* fields or
+          // repeating on steady ticks.
+          mutedNotifications.push({ alert });
         }
       }
 
@@ -244,14 +255,25 @@ async function runDashboardAlertsCheckInner() {
       await triggerNotification('dashboard_alert', {
         alertId: alert.id,
         alertCount: alert.count,
-        title: alert.label + (alert.amount ? ` ($${Math.round(alert.amount).toLocaleString()})` : ''),
+        title: formatAlertTitle(alert),
         body: alert.severity === 'critical' ? 'Critical — needs attention now.' : 'Worth a look soon.',
         link: alert.href,
       });
     } catch (err) {
       logger.error(`[dashboard-alerts-cron] post-commit triggerNotification failed for ${alert.id}: ${err.message}`);
     }
+  }
 
+  for (const { alert } of mutedNotifications) {
+    try {
+      await auditBellPolicyMuted({
+        category: 'alert',
+        triggerKey: 'dashboard_alert',
+        title: formatAlertTitle(alert),
+      });
+    } catch (err) {
+      logger.warn(`[dashboard-alerts-cron] muted-alert audit failed for ${alert.id}: ${err?.code || 'error'}`);
+    }
   }
 
   return { fired, cleared, current: current.length, ...(failedIds.size ? { failedIds: [...failedIds] } : {}) };
