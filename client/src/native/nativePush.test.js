@@ -2,11 +2,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const nativeMocks = vi.hoisted(() => {
-  const state = { permission: 'prompt', requestResult: 'granted', listeners: {} };
+  const state = { permission: 'prompt', requestResult: 'granted', listeners: {}, platform: 'ios' };
   const PushNotifications = {
     // Capacitor's proxy exposes a callable `then` for every plugin. Resolving
     // a promise with the proxy invokes it and never settles that promise.
     then: vi.fn(),
+    createChannel: vi.fn(async () => {}),
     addListener: vi.fn(async (name, callback) => {
       state.listeners[name] = callback;
       return { remove: vi.fn() };
@@ -25,7 +26,7 @@ const reportVisitCard = vi.hoisted(() => vi.fn());
 
 vi.mock('./platform', () => ({
   isNativeApp: () => true,
-  nativePlatform: () => 'ios',
+  nativePlatform: () => nativeMocks.state.platform,
 }));
 vi.mock('./nativeLinks', () => ({ navigateToCustomerUrl }));
 vi.mock('../lib/reportError', () => ({ reportError }));
@@ -51,11 +52,13 @@ import {
 beforeEach(() => {
   nativeMocks.state.permission = 'prompt';
   nativeMocks.state.requestResult = 'granted';
+  nativeMocks.state.platform = 'ios';
   navigateToCustomerUrl.mockClear();
   reportError.mockClear();
   reportPushOpen.mockReset();
   reportVisitCard.mockReset();
   nativeMocks.PushNotifications.then.mockClear();
+  nativeMocks.PushNotifications.createChannel.mockClear();
   nativeMocks.PushNotifications.checkPermissions.mockClear();
   nativeMocks.PushNotifications.requestPermissions.mockClear();
   nativeMocks.PushNotifications.register.mockClear();
@@ -362,4 +365,13 @@ it('shows the permission popup before listener setup and bounds a stalled bind',
   expect(nativeMocks.PushNotifications.checkPermissions).not.toHaveBeenCalled();
   expect(nativeMocks.PushNotifications.requestPermissions).toHaveBeenCalledTimes(1);
   expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
+});
+
+it('creates Android notification channels on Android startup without touching iOS', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  const ids = nativeMocks.PushNotifications.createChannel.mock.calls.map(([ch]) => ch.id);
+  expect(ids).toEqual(['waves_service_updates', 'waves_billing', 'waves_messages']);
 });

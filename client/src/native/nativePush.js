@@ -117,10 +117,55 @@ function pushPlugin() {
   return pushPluginPromise;
 }
 
+const ANDROID_NOTIFICATION_CHANNELS = [
+  {
+    id: 'waves_service_updates',
+    name: 'Service & Arrival Updates',
+    description: 'Appointment reminders, technician on-the-way alerts, and completed service reports.',
+    importance: 4,
+    sound: 'default',
+    vibration: true,
+    visibility: 1,
+  },
+  {
+    id: 'waves_billing',
+    name: 'Billing & Receipts',
+    description: 'Invoice reminders, payment confirmations, and Auto Pay notices.',
+    importance: 3,
+    sound: 'default',
+    vibration: true,
+    visibility: 0,
+  },
+  {
+    id: 'waves_messages',
+    name: 'Messages from Waves',
+    description: 'Replies and updates from the Waves team.',
+    importance: 4,
+    sound: 'default',
+    vibration: true,
+    visibility: 1,
+  },
+];
+
+let androidChannelsCreated = false;
+async function ensureAndroidChannels(PushNotifications) {
+  if (androidChannelsCreated || nativePlatform() !== 'android') return;
+  if (typeof PushNotifications?.createChannel !== 'function') return;
+  androidChannelsCreated = true;
+  try {
+    await Promise.all(
+      ANDROID_NOTIFICATION_CHANNELS.map((ch) => PushNotifications.createChannel(ch).catch(() => {})),
+    );
+  } catch {
+    androidChannelsCreated = false;
+  }
+}
+
 async function bindPushListeners(PushNotifications) {
   if (listenersBound) return;
   listenersBound = true;
   try {
+    await ensureAndroidChannels(PushNotifications);
     await PushNotifications.addListener('registration', async (t) => {
       const registered = t?.value && await postToken(t.value);
       finishRegistration(registered ? 'granted' : 'registration_unavailable');

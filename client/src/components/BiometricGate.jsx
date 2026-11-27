@@ -1,11 +1,18 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import { isNativeApp, hasSessionToken } from '../native/platform';
+import { isNativeApp, hasSessionToken, nativePlatform } from '../native/platform';
 import { authenticateBiometric, NEEDS_PHONE_CODE } from '../native/biometric';
+import { registerBackButtonHandler, minimizeOrExitAndroidApp } from '../native/nativeBackButton';
 import { useOptionalAuth } from '../hooks/authContext';
 import { NATIVE_PICKER_EVENT } from '../native/camera';
 import { COLORS, FONTS } from '../theme-brand';
 import { useGlassMotion } from '../glass/glass-motion';
 import '../glass/glass-theme.css';
+
+// Returning from a quick switch (tapping Call, Text us, checking a bank
+// micro-deposit or SMS) within this window clears the app-switcher privacy
+// cover without forcing another biometric prompt. Cold launches and returns
+// past this window always require fresh biometric authentication.
+export const UNLOCK_GRACE_MS = 5 * 60 * 1000;
 
 export const BiometricLockContext = createContext(false);
 
@@ -72,11 +79,11 @@ const PICKER_GRACE_MS = 3 * 60 * 1000;
  * Pass-through on the web and when logged out (no session token), so public
  * token pages (/pay, /report, …) are never gated.
  */
-export default function BiometricGate({ children }) {
+export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
   const [locked, setLocked] = useState(() => isNativeApp() && hasSessionToken());
   const [checking, setChecking] = useState(false);
-  // Face ID cannot run in this app build: the lock offers the phone number
-  // code sign-in instead (owner 11-26). It never opens without a check.
+  // Face ID / biometrics cannot run in this app build: the lock offers the
+  // phone number code sign-in instead (owner 11-26). It never opens without a check.
   const [needsPhoneCode, setNeedsPhoneCode] = useState(false);
   const [signingOut, setSigningOut] = useState(false);
   const auth = useOptionalAuth();
@@ -89,6 +96,8 @@ export default function BiometricGate({ children }) {
   const promptInFlightRef = useRef(false); // a biometric prompt is currently showing
   const suppressStateRef = useRef(false);  // ignore app-state churn our own prompt causes
   const lockedRef = useRef(false);         // latest lock state for the stable listener closure
+  const needsPhoneCodeRef = useRef(false); // latest phone-code fallback state
+  const lastUnlockedAtRef = useRef(0);     // wall-clock timestamp of last successful unlock
   const suppressTimerRef = useRef(null);   // pending timer that clears suppressStateRef
   // Our own camera / photo picker (the native camera sheet or an <input type="file">,
   // e.g. Photo ID) covers the
@@ -139,7 +148,9 @@ export default function BiometricGate({ children }) {
       const stillForeground = typeof document === 'undefined' || document.visibilityState === 'visible';
       const phoneCode = ok === NEEDS_PHONE_CODE;
       setNeedsPhoneCode(phoneCode);
+      needsPhoneCodeRef.current = phoneCode;
       const unlocked = ok === true && stillForeground;
+      if (unlocked) lastUnlockedAtRef.current = Date.now();
       setLocked(!unlocked);
       lockedRef.current = !unlocked;
       // Keep ignoring app-state changes briefly to swallow the trailing foreground
@@ -172,9 +183,36 @@ export default function BiometricGate({ children }) {
   // Keep lockedRef in sync so the (stable) appStateChange listener reads current state.
   useEffect(() => { lockedRef.current = locked; }, [locked]);
 
+  // While locked on Android, intercept hardware Back so it minimizes the app
+  // cleanly and can never dismiss or interact with anything behind the lock.
+  useEffect(() => {
+    if (!locked) return undefined;
+    return registerBackButtonHandler(() => {
+      void minimizeOrExitAndroidApp();
+      return true;
+    });
+  }, [locked]);
+
   useEffect(() => {
     if (!isNativeApp()) return undefined;
     attempt();
+    const withinGrace = () => (
+      graceMs > 0
+      && !needsPhoneCodeRef.current
+      && lastUnlockedAtRef.current > 0
+      && (Date.now() - lastUnlockedAtRef.current) < graceMs
+    );
+    // Clear the app-switcher privacy cover immediately when returning within
+    // the grace window; otherwise require fresh biometric auth.
+    const unlockOrPrompt = () => {
+      if (!lockedRef.current) return;
+      if (withinGrace()) {
+        setLocked(false);
+        lockedRef.current = false;
+        return;
+      }
+      attempt();
+    };
     // A genuine background hides the webview document. The iOS biometric sheet does
     // NOT (the app stays foreground), so this fires only on a real background — making
     // it the authoritative signal that a fresh unlock is required on return, and it
@@ -182,7 +220,7 @@ export default function BiometricGate({ children }) {
     const unlockAfterPicker = () => {
       if (!unlockAfterPickerRef.current || pickerOpen() || document.visibilityState !== 'visible') return;
       unlockAfterPickerRef.current = false;
-      if (lockedRef.current) attempt();
+      unlockOrPrompt();
     };
     const onVisibility = () => {
       if (document.visibilityState === 'visible') {
@@ -235,16 +273,16 @@ export default function BiometricGate({ children }) {
           // dismisses — that prompt-induced re-entry is what caused the loop.
           if (suppressStateRef.current) return;
           // Only (re)prompt when actually locked — a stray foreground while already
-          // unlocked must never kick off another Face ID prompt.
+          // unlocked must never kick off another biometric prompt.
           if (!lockedRef.current) return;
           // A picker is still open, or closed with the page not yet visible: the
           // prompt runs from unlockAfterPicker() instead.
           if (pickerOpen() || unlockAfterPickerRef.current) return;
-          attempt();
+          unlockOrPrompt();
         } else if (hasSessionToken()) {
-          // ALWAYS lock on resign (willResignActive) — even during a prompt's
-          // suppression window or while our own picker is up — to cover the
-          // app-switcher snapshot.
+          // ALWAYS cover on resign (willResignActive) — even during a prompt's
+          // suppression window or while our own picker is up — to hide content
+          // from the OS app-switcher snapshot.
           setLocked(true);
           lockedRef.current = true;
           if (pickerOpen()) {
@@ -264,7 +302,7 @@ export default function BiometricGate({ children }) {
       clearTimeout(graceTimer);
       try { listener?.remove?.(); } catch { /* noop */ }
     };
-  }, [attempt]);
+  }, [attempt, graceMs]);
 
   // While locked, fully gate the still-mounted content — not just visually. Mark
   // it `inert` (blocks pointer/keyboard/focus + hides from AT) and move focus to
@@ -316,7 +354,9 @@ export default function BiometricGate({ children }) {
           aria-modal="true"
           aria-label={needsPhoneCode
             ? 'Waves is locked. Sign in with a text code to view your account.'
-            : 'Waves is locked. Unlock with Face ID to view your account.'}
+            : (nativePlatform() === 'android'
+              ? 'Waves is locked. Unlock to view your account.'
+              : 'Waves is locked. Unlock with Face ID to view your account.')}
           style={{
             position: 'fixed', inset: 0, zIndex: 99999, overflow: 'hidden',
             background: GLASS_SCENE_BG,
@@ -350,7 +390,7 @@ export default function BiometricGate({ children }) {
             }}
           >
             <img
-              src="/waves-logo.png"
+              src="/waves-logo-512.png"
               alt=""
               width={230}
               height={230}

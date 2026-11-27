@@ -52,6 +52,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import useAppNotifications from '../hooks/useAppNotifications';
 import { isNativeApp, nativePlatform } from '../native/platform';
+import { registerBackButtonHandler } from '../native/nativeBackButton';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
@@ -7998,7 +7999,7 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               {dueDate && currentBalance > 0 ? `Due ${dueDateLabel}` : 'Account balance'}
             </div>
             {primaryOpenInvoice && (
-              <div style={{ marginTop: 10, display: 'grid', gap: 8 }}>
+              <div id="billing-open-invoices" style={{ marginTop: 10, display: 'grid', gap: 8 }}>
                 <a href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, width: '100%', boxSizing: 'border-box' }} data-glass-accent="">
                   Pay {money(primaryOpenInvoice.amountDue)} now
                 </a>
@@ -8573,11 +8574,25 @@ function BillingTab({ customer, refreshCustomer, focusPaymentMethods = false, op
               </div>
               {p.status === 'failed' && (
                 <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {primaryOpenInvoice && (
-                    <a data-glass-accent="" href={primaryOpenInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
-                      Pay {money(primaryOpenInvoice.amountDue)} now
+                  {/* Only link directly to Pay when the server verified THIS failed
+                      attempt's own open invoice (never openInvoices[0], which can
+                      belong to a different service/amount). Legacy unlinked rows
+                      offer a safe scroll to the open-invoices card instead; rows
+                      whose invoice is already settled show no Pay action. */}
+                  {p.payableInvoice?.payUrl ? (
+                    <a data-glass-accent="" href={p.payableInvoice.payUrl} style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14 }}>
+                      Pay {money(p.payableInvoice.amountDue)} now
                     </a>
-                  )}
+                  ) : (!p.invoiceLinked && primaryOpenInvoice) ? (
+                    <button
+                      type="button"
+                      data-glass-accent=""
+                      onClick={() => document.getElementById('billing-open-invoices')?.scrollIntoView({ behavior: scrollBehavior(), block: 'start' })}
+                      style={{ ...payNowButtonStyle, minHeight: 44, fontSize: 14, border: 'none', cursor: 'pointer' }}
+                    >
+                      View open invoices
+                    </button>
+                  ) : null}
                   {/* Cancelled accounts have no card management: the setup-
                       intent route is not on the cancelled allowlist, so this
                       second entry point must hide with the section (the pay
@@ -10497,7 +10512,9 @@ function PropertyTab({ customer, wateringPlanCustomerId, onOpenWateringProperty 
 // 'rolling365' (the last 365 days) adds "in the last 12 months"; an older response without the field, or 'calendar_year', reads as before.
 export const weedTreatmentsLine = (stats) => {
   if (stats?.celsiusApplicationsThisYear == null) return null;
-  return `${stats.celsiusApplicationsThisYear} weed treatments${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
+  const count = stats.celsiusApplicationsThisYear;
+  const noun = Number(count) === 1 ? 'weed treatment' : 'weed treatments';
+  return `${count} ${noun}${stats.celsiusWindow === 'rolling365' ? ' in the last 12 months' : ''}`;
 };
 
 // The Celsius tip follows the program: the stats route's celsiusMaxPerYear (2 under the v13 lawn
@@ -19002,6 +19019,23 @@ export default function PortalPage() {
     };
   }, [showMenu]);
 
+  // Android hardware / gesture Back button: dismiss topmost portal sheet or
+  // menu first, then return from a secondary tab to Home before allowing the
+  // native back handler to minimize the app.
+  useEffect(() => registerBackButtonHandler(() => {
+    if (showReportIssue) { setShowReportIssue(false); setReportIssuePrefill(null); return true; }
+    if (showChat) { setShowChat(false); setChatPrompt(null); return true; }
+    if (showWavesChat) { setShowWavesChat(false); return true; }
+    if (showPhotoId) { setShowPhotoId(false); return true; }
+    if (showMoreSheet) { setShowMoreSheet(false); return true; }
+    if (showMenu) { setShowMenu(false); return true; }
+    if (activeTab !== homeTab) {
+      switchTab(homeTab);
+      return true;
+    }
+    return false;
+  }), [showReportIssue, showChat, showWavesChat, showPhotoId, showMoreSheet, showMenu, activeTab, homeTab]);
+
   if (!customer) return null;
 
   const initials = `${customer.firstName?.[0] || ''}${customer.lastName?.[0] || ''}` || 'W';
@@ -19577,7 +19611,7 @@ export default function PortalPage() {
                     onClick={async () => {
                       setShowMenu(false);
                       const confirmed = await showCustomerConfirm(
-                        'This permanently removes your access to the app and your portal account. For questions about active service or billing, please contact us first — this can’t be undone from the app.',
+                        `This permanently removes your app and portal login. Deleting your account here does not cancel active service plans, upcoming visits, or Auto Pay — cancel your plan or contact us at ${WAVES_SUPPORT_PHONE_DISPLAY} first if you want service or billing stopped. This can’t be undone from the app.`,
                         { title: 'Delete your Waves account?', confirmLabel: 'Delete account', danger: true },
                       );
                       if (!confirmed) return;

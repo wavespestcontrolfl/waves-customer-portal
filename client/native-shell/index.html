@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#E5EFF7" />
+    <title>Waves</title>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      html, body {
+        min-height: 100%;
+        background:
+          radial-gradient(900px 600px at 85% -10%, rgba(10, 126, 194, 0.22), transparent 60%),
+          radial-gradient(800px 550px at -10% 30%, rgba(240, 165, 0, 0.12), transparent 55%),
+          linear-gradient(180deg, #E0EEF9 0%, #F5FAFE 45%, #E5EFF7 100%);
+        color: #04395E;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      main {
+        min-height: 100dvh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: calc(24px + env(safe-area-inset-top, 0px)) 20px calc(24px + env(safe-area-inset-bottom, 0px));
+      }
+      .card {
+        width: min(360px, 100%);
+        background: rgba(255, 255, 255, 0.88);
+        border: 1px solid rgba(4, 57, 94, 0.14);
+        border-radius: 16px;
+        padding: 28px 22px;
+        text-align: center;
+        box-shadow: 0 18px 48px rgba(4, 57, 94, 0.12);
+      }
+      h1 { font-size: 22px; font-weight: 700; line-height: 1.25; margin-bottom: 8px; }
+      p { font-size: 15px; line-height: 1.5; color: #3F4A65; margin-bottom: 20px; }
+      .primary {
+        width: 100%;
+        min-height: 48px;
+        border: 1px solid rgba(180, 110, 0, 0.25);
+        border-radius: 10px;
+        background: #F4B014;
+        color: #04395E;
+        font-size: 16px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      .help {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .help a {
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        border: 1px solid rgba(4, 57, 94, 0.18);
+        background: #fff;
+        color: #04395E;
+        font-size: 15px;
+        font-weight: 600;
+        text-decoration: none;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="card">
+        <h1>Connecting to Waves</h1>
+        <p>Check your internet connection to open your account. We will reconnect as soon as signal returns.</p>
+        <button class="primary" type="button" onclick="window.location.replace('https://portal.wavespestcontrol.com/')">Try again</button>
+        <div class="help">
+          <a href="tel:+19412975749">Call us</a>
+          <a href="sms:+19412975749">Text us</a>
+        </div>
+      </div>
+    </main>
+    <script>
+      window.addEventListener('online', function () {
+        window.location.replace('https://portal.wavespestcontrol.com/');
+      });
+    </script>
+  </body>
+</html>
