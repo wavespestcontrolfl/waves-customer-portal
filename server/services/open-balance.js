@@ -305,7 +305,7 @@ function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds
 
   return query.select(
     'id', 'status', 'token', 'invoice_number', 'due_date',
-    'total', 'credit_applied', 'amount_paid', 'scheduled_service_id',
+    'total', 'credit_applied', 'amount_paid', 'scheduled_service_id', 'service_record_id',
   );
 }
 
@@ -314,10 +314,12 @@ function formatPayablePortalRow(row, eligibleDraftIds) {
   if (row.status && !OPEN_PORTAL_STATUSES.has(row.status) && !(row.status === 'draft' && eligibleDraftIds.has(String(row.id)))) {
     return null;
   }
+  const amountDue = invoiceAmountDue(row);
+  if (!(amountDue > 0)) return null;
   return {
     id: row.id != null ? String(row.id) : null,
     payUrl: `/pay/${row.token}`,
-    amountDue: invoiceAmountDue(row),
+    amountDue,
     invoiceNumber: row.invoice_number || null,
     dueDate: row.due_date ?? null,
   };
@@ -337,6 +339,7 @@ async function listPayablePortalInvoices(customerId, {
   database = db,
 } = {}) {
   const { loadFailedPaymentFacts } = require('./failed-payments');
+  const { invoicePayerOwnership } = require('./invoice-payer-ownership');
   const facts = failedFacts || await loadFailedPaymentFacts(customerId, database);
   const eligibleDraftIds = unsupersededFailedDraftIds(facts);
 
@@ -348,7 +351,16 @@ async function listPayablePortalInvoices(customerId, {
     });
     for (const row of rows) {
       const formatted = formatPayablePortalRow(row, eligibleDraftIds);
-      if (!formatted || !(await rowIsSelfPayDue(customerId, row, { database }))) continue;
+      if (!formatted) continue;
+      // Resolve live payer ownership via invoicePayerOwnership (covering direct
+      // scheduled_service_id, service_record_id -> scheduled_service_id, and
+      // customer default payer; fails closed when unverifiable).
+      const owner = await invoicePayerOwnership({
+        ...row,
+        customer_id: row.customer_id || customerId,
+        service_record_id: row.service_record_id ?? null,
+      }, database);
+      if (owner !== null) continue;
       payable.push(formatted);
       if (limit && payable.length >= limit) return payable;
     }

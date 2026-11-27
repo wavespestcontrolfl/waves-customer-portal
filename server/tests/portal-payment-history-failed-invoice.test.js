@@ -26,9 +26,9 @@ const PayerService = require('../services/payer');
 const { loadFailedPaymentFacts } = require('../services/failed-payments');
 const { listPortalPayments } = require('../services/portal-payment-history');
 
-function makeDb(invoiceRows = []) {
+function makeDb(invoiceRows = [], serviceRecords = []) {
   return (table) => {
-    const query = { _statuses: null, _draftIds: null, _ids: null, _numbers: null };
+    const query = { _statuses: null, _draftIds: null, _ids: null, _numbers: null, _whereObj: null };
     const subQuery = (isStatusGroup) => {
       const sq = {
         where: (col, val) => {
@@ -62,6 +62,8 @@ function makeDb(invoiceRows = []) {
         const isStatusGroup = arg.name === 'openOrEligibleDraft';
         const sq = subQuery(isStatusGroup);
         arg.call(sq, sq);
+      } else if (arg && typeof arg === 'object') {
+        query._whereObj = { ...(query._whereObj || {}), ...arg };
       }
       return query;
     };
@@ -76,7 +78,12 @@ function makeDb(invoiceRows = []) {
       return query;
     };
     query.count = () => query;
-    query.first = async () => ({ count: 1 });
+    query.first = async () => {
+      if (table === 'service_records') {
+        return serviceRecords.find((sr) => String(sr.id) === String(query._whereObj?.id)) || null;
+      }
+      return { count: 1 };
+    };
     query.select = async () => {
       if (table !== 'invoices') return [];
       return invoiceRows.filter((inv) => {
@@ -182,6 +189,38 @@ describe('listPortalPayments — failed-row payableInvoice linkage', () => {
     const byId = Object.fromEntries(res.payments.map((p) => [p.id, p]));
     expect(byId['fail-self'].payableInvoice?.payUrl).toBe('/pay/tok-a');
     expect(byId['fail-ap'].payableInvoice).toBeNull();
+  });
+
+  test('resolves payer ownership through service_record_id when scheduled_service_id is null on the invoice', async () => {
+    PayerService.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => (
+      scheduledServiceId === 'svc-from-record' ? { payerId: 'payer-via-record' } : null
+    ));
+    db.mockImplementation(makeDb(
+      [
+        {
+          id: INV_B,
+          token: 'tok-record-ap',
+          invoice_number: 'WV-2009',
+          status: 'sent',
+          total: 95,
+          credit_applied: 0,
+          amount_paid: 0,
+          scheduled_service_id: null,
+          service_record_id: 'sr-1',
+        },
+      ],
+      [{ id: 'sr-1', scheduled_service_id: 'svc-from-record' }],
+    ));
+    stripe.getPaymentHistory.mockResolvedValue([
+      { id: 'fail-record-ap', payment_date: '2026-11-20', amount: 95, status: 'failed', description: 'Lawn Care', metadata: JSON.stringify({ invoice_id: INV_B }) },
+    ]);
+
+    const res = await listPortalPayments('cust-1');
+    expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({
+      customerId: 'cust-1',
+      scheduledServiceId: 'svc-from-record',
+    }));
+    expect(res.payments[0].payableInvoice).toBeNull();
   });
 
   test('keeps an explicit invoice_id authoritative when description mentions a different open invoice', async () => {

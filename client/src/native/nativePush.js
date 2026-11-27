@@ -101,7 +101,15 @@ async function readDisabledAndroidChannels() {
 }
 
 function postToken(token) {
+  rememberToken(token);
+  const jwt = authToken();
+  if (!jwt) {
+    // Not authenticated yet — hold the token; the login flow flushes it.
+    pendingToken = token;
+    return Promise.resolve(false);
+  }
   const epoch = registrationEpoch;
+  if (registrationAborted(epoch, jwt)) return Promise.resolve(false);
   const run = registrationQueue.catch(() => {}).then(() => postTokenSerialized(token, epoch));
   registrationQueue = run;
   return run;
@@ -399,16 +407,7 @@ export async function initNativePush() {
 // the remembered token on success instead of re-arming it — re-posting a
 // token the OS will never present would just re-open the silent-drop gap.
 // On failure the memory stays, so the next app launch retries.
-async function revokeRegistrationForDeniedPermission() {
-  const token = rememberedToken();
-  if (!token) return; // this device never registered — nothing to release
-  // Mark the revocation as owed BEFORE any early return — a signed-out
-  // cold launch can't release the row, and login only calls
-  // flushNativePushToken(); the marker is what makes that flush retry us.
-  try { localStorage.setItem(PENDING_REVOKE_KEY, '1'); } catch { /* storage unavailable */ }
-  let refreshJwt = null;
-  try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
-  if (!authToken() && !refreshJwt) return;
+async function sendDeniedPermissionUnsubscribe(token) {
   try {
     const res = await api.request('/push/native-unsubscribe', {
       method: 'POST',
@@ -429,6 +428,36 @@ async function revokeRegistrationForDeniedPermission() {
     }
   } catch (err) {
     console.warn('[nativePush] denied-permission revoke failed (will retry next launch):', err?.message || err);
+  }
+}
+
+async function revokeRegistrationForDeniedPermission({ insideDeactivationLatch = false } = {}) {
+  // Invalidate any in-flight registration (e.g. awaiting Android listChannels)
+  // as soon as OS permission is lost, so it cannot reactivate a silent token
+  // after this revocation unsubscribes the device.
+  registrationEpoch += 1;
+  const token = rememberedToken();
+  if (!token) return; // this device never registered — nothing to release
+  // Mark the revocation as owed BEFORE any early return — a signed-out
+  // cold launch can't release the row, and login only calls
+  // flushNativePushToken(); the marker is what makes that flush retry us.
+  try { localStorage.setItem(PENDING_REVOKE_KEY, '1'); } catch { /* storage unavailable */ }
+  let refreshJwt = null;
+  try { refreshJwt = localStorage.getItem('waves_refresh_token'); } catch { /* storage unavailable */ }
+  if (!authToken() && !refreshJwt) return;
+  if (insideDeactivationLatch) {
+    await sendDeniedPermissionUnsubscribe(token);
+    return;
+  }
+  const prev = inflightDeactivation;
+  const chained = prev
+    ? prev.catch(() => {}).then(() => sendDeniedPermissionUnsubscribe(token))
+    : sendDeniedPermissionUnsubscribe(token);
+  inflightDeactivation = chained;
+  try {
+    await chained;
+  } finally {
+    if (inflightDeactivation === chained) inflightDeactivation = null;
   }
 }
 
@@ -481,7 +510,7 @@ async function retryPendingRevocation() {
       try { localStorage.removeItem(PENDING_REVOKE_KEY); } catch { /* storage unavailable */ }
       return;
     }
-    await revokeRegistrationForDeniedPermission();
+    await revokeRegistrationForDeniedPermission({ insideDeactivationLatch: true });
   } catch (err) {
     console.warn('[nativePush] pending revocation retry failed:', err?.message || err);
   }

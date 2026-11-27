@@ -547,3 +547,32 @@ it('blocks a fresh registration callback arriving during logout for the signing-
   // Must NOT have called /push/native-subscribe for the signing-out session.
   expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-unsubscribe']);
 });
+
+it('invalidates an Android registration awaiting listChannels when notification permission is revoked', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  let resolveChannels;
+  nativeMocks.PushNotifications.listChannels = vi.fn(() => new Promise((resolve) => { resolveChannels = resolve; }));
+  nativeMocks.PushNotifications.register.mockImplementationOnce(async () => {});
+  nativeMocks.PushNotifications.checkPermissions
+    .mockResolvedValueOnce({ receive: 'granted' })
+    .mockResolvedValueOnce({ receive: 'denied' });
+  localStorage.setItem('waves_token', 'jwt-android');
+  api.request.mockResolvedValue({ ok: true, deactivated: 1 });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+
+  // Registration starts and suspends on listChannels.
+  const regPromise = nativeMocks.state.listeners.registration({ value: 'fcm-revoked-device' });
+  await vi.waitFor(() => expect(nativeMocks.PushNotifications.listChannels).toHaveBeenCalledTimes(1));
+
+  // User turns off notifications in OS Settings and returns to foreground -> initNativePush revokes.
+  await freshNativePush.initNativePush();
+
+  // Now the earlier listChannels resolves; the invalidated registration MUST NOT re-subscribe.
+  resolveChannels({ channels: [{ id: 'waves_billing', importance: 4 }] });
+  await regPromise;
+
+  expect(api.request.mock.calls.map(([p]) => p)).toEqual(['/push/native-unsubscribe']);
+});
