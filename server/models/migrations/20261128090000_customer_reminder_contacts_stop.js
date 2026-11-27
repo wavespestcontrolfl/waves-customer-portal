@@ -18,11 +18,6 @@ exports.up = async function up(knex) {
 
 exports.down = async function down(knex) {
   if (!(await knex.schema.hasTable('customer_reminder_contacts'))) return;
-  // A saved stop is a person's (or staff's) choice: a rollback never erases it, so a re-run never restarts texts.
-  if (await knex.schema.hasColumn('customer_reminder_contacts', 'stopped_at')) {
-    const stopped = await knex('customer_reminder_contacts').whereNotNull('stopped_at').first('id');
-    if (stopped) throw new Error('customer_reminder_contacts has saved stops; refusing to drop stopped_at / stopped_by');
-  }
   await knex.raw('ALTER TABLE customer_reminder_contacts DROP COLUMN IF EXISTS stopped_by');
   await knex.raw('ALTER TABLE customer_reminder_contacts DROP COLUMN IF EXISTS stopped_at');
 };
