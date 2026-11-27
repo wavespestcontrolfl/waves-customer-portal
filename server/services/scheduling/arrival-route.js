@@ -1412,7 +1412,7 @@ async function placeMovedVisit(conn, { serviceId, source, staffSave = false, lat
   try {
     return await conn.transaction(sp => placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, autoDispatchPlace, startPoints, vanDepartureMin, expectedNeighbours }));
   } catch (error) {
-    if (expectedNeighbours || (error && error.code === 'ROUTE_ORDER_CHANGED')) throw error;
+    if (autoDispatchPlace === true || expectedNeighbours || (error && error.code === 'ROUTE_ORDER_CHANGED')) throw error;
     logger.warn(`[arrival-route] route order not placed for ${serviceId}: ${error.message}`);
     return null;
   }
@@ -1486,8 +1486,9 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, au
   const row = await sp('scheduled_services').where({ id: serviceId })
     .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
   const date = row ? dateOnly(row.scheduled_date) : '';
+  const strictPlace = autoDispatchPlace === true || Boolean(expectedNeighbours);
   const refuse = (reason) => {
-    if (expectedNeighbours) throw routeOrderChangedError(`Route placement refused (${reason}) while neighbor verification was required`);
+    if (strictPlace) throw routeOrderChangedError(`Route placement refused (${reason}) while certified placement was required`);
     return refusePlacement(serviceId, source, reason, date);
   };
   if (!row) return refuse('no_context');
@@ -1508,7 +1509,7 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, au
   // callers, but when auto-dispatch requires verified neighbors, an infeasible
   // commit-time check must abort and roll back rather than fall back to clock order.
   const refuseOrNumberByTime = async reason => {
-    if (expectedNeighbours) throw routeOrderChangedError(`Commit-time route check failed (${reason}) while neighbor verification was required`);
+    if (strictPlace) throw routeOrderChangedError(`Commit-time route check failed (${reason}) while certified placement was required`);
     refusePlacement(serviceId, source, reason, date);
     return placeByTimeAfterRefusal(sp, { context, serviceId, source, date, technicianId: row.technician_id, reason });
   };

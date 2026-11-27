@@ -84,19 +84,32 @@ function stopRankIn(stop, rank) {
   return null;
 }
 
+function physicalStopIndexById(phys) {
+  const map = new Map();
+  phys.forEach((s, idx) => {
+    if (s.id != null) map.set(String(s.id), idx);
+    for (const id of s.memberIds || []) map.set(String(id), idx);
+    for (const id of s.coIds || []) map.set(String(id), idx);
+  });
+  return map;
+}
+
+// Verify a 1-to-1 physical-stop correspondence between `stops` and the solver's
+// `routeOrderIds` (which flattens multi-row groups to every member ID).
 function routeOrderCovers(stops, routeOrderIds) {
   if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return false;
-  const rank = new Map(routeOrderIds.map((id, i) => [String(id), i]));
-  if (rank.size !== routeOrderIds.length || !rank.has('__candidate__')) return false;
   const phys = physicalStops(stops);
-  if (routeOrderIds.length !== phys.length + 1) return false;
-  const matched = new Set();
-  for (const s of phys) {
-    const r = stopRankIn(s, rank);
-    if (r == null || matched.has(r)) return false;
-    matched.add(r);
+  const byId = physicalStopIndexById(phys);
+  const seenPhys = new Set();
+  let candCount = 0;
+  for (const raw of routeOrderIds) {
+    const id = String(raw);
+    if (id === '__candidate__') { candCount += 1; continue; }
+    const idx = byId.get(id);
+    if (idx == null) return false;
+    seenPhys.add(idx);
   }
-  return matched.size === phys.length;
+  return candCount === 1 && seenPhys.size === phys.length;
 }
 
 function insertByRouteOrder(sequence, unit, routeOrderIds) {

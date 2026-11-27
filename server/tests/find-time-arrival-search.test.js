@@ -150,6 +150,17 @@ describe('findAvailableSlots — the night arrival search', () => {
     }
     expect(slots[0].route_order_ids).toEqual(['s09', '__candidate__']);
 
+    // Day with an unassigned stop falls back to append-only (no route_order_ids).
+    evaluateArrivalPlacement.mockClear();
+    loadArrivalRouteContext.mockResolvedValueOnce({
+      target: { id: 'candidate', service_type: 'pest_control' },
+      rows: [{ id: 'u1', technician_id: null, route_order: null, window_start: '09:00', status: 'confirmed' }],
+    });
+    const unassignedRes = await findAvailableSlots({ ...NIGHT, arrivalInsert: true });
+    expect(evaluateArrivalPlacement).toHaveBeenCalled();
+    for (const [, opts] of evaluateArrivalPlacement.mock.calls) expect(opts.allowInsertion).toBe(false);
+    expect(unassignedRes.slots[0].route_order_ids).toBeUndefined();
+
     evaluateArrivalPlacement.mockClear();
     await findAvailableSlots(NIGHT);
     expect(evaluateArrivalPlacement).toHaveBeenCalled();

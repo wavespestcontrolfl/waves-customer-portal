@@ -123,6 +123,16 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
       const staleOrderCand = { ...shiftedCand, route_order_ids: ['s1', 'removed-stop', '__candidate__', 's2'] };
       const staleScored = scoreOnSharedModel(svc, NEAR_NORTH, staleOrderCand, stops, [], { targets: [] });
       expect(staleScored.route_order_ids).toBeUndefined();
+      // Multi-row grouped stop on the destination day (solver emits every member ID while physicalStops collapses it to 1).
+      const groupedDayStops = [
+        { id: 'g1a', visit_id: 'vis1', technician_id: 't1', geo: NORTH, startMin: 480, window_start: '08:00', route_order: 1 },
+        { id: 'g1b', visit_id: 'vis1', technician_id: 't1', geo: NORTH, startMin: 480, window_start: '08:00', route_order: 2 },
+        { id: 's2', visit_id: null, technician_id: 't1', geo: SOUTH, startMin: 780, window_start: '13:00', route_order: 3 },
+      ];
+      const groupedCand = { date: '2026-12-10', technician_id: 't1', start_time: '10:00', route_order_ids: ['g1a', 'g1b', '__candidate__', 's2'] };
+      const groupedScored = scoreOnSharedModel(svc, NEAR_NORTH, groupedCand, groupedDayStops, [], { targets: [] });
+      expect(groupedScored.route_order_ids).toEqual(['g1a', 'g1b', '__candidate__', 's2']);
+      expect(groupedScored.detour_minutes).toBeLessThan(10);
     } finally {
       if (prevAdmin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdmin;

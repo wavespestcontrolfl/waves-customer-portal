@@ -307,9 +307,14 @@ function travelAllowance(opts) {
   return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
-function insertionOptionsFor(opts) {
+function dayHasUnassignedStop(context) {
+  return Boolean(context && Array.isArray(context.rows)
+    && context.rows.some((r) => r && r.technician_id === null && r.status !== 'completed'));
+}
+
+function insertionOptionsFor(opts, context) {
   if (opts.capacityPlacement === true) return { allowInsertion: true };
-  if (opts.arrivalSearch === true && opts.arrivalInsert === true) {
+  if (opts.arrivalSearch === true && opts.arrivalInsert === true && !dayHasUnassignedStop(context)) {
     return { allowInsertion: true, insertionMargin: true };
   }
   return { allowInsertion: false };
@@ -327,8 +332,8 @@ async function preloadCandidateTravel(candidates, travel, opts) {
   }
 }
 
-function candidateRouteOrderIds(opts, fit, targetId) {
-  if (!(opts.arrivalSearch === true && opts.arrivalInsert === true) || !Array.isArray(fit.routeOrder)) return {};
+function candidateRouteOrderIds(opts, fit, targetId, options) {
+  if (!(opts.arrivalSearch === true && opts.arrivalInsert === true && options && options.allowInsertion === true) || !Array.isArray(fit.routeOrder)) return {};
   return { route_order_ids: fit.routeOrder.map((id) => (id === targetId ? '__candidate__' : String(id))) };
 }
 
@@ -449,7 +454,7 @@ async function findCapacitySlots(opts) {
           // moved visit into numbered destination days via apply.js placeInRoute
           // (placeMovedVisit), so allow mid-route insertion with the same 15-minute
           // insertion margin instead of forcing candidates behind route_order 999.
-          durationMinutes, bufferMinutes: 0, ...insertionOptionsFor(opts),
+          durationMinutes, bufferMinutes: 0, ...insertionOptionsFor(opts, context),
           // The route must also end the visit inside this technician's shift (both checks below).
           ...shiftEndOf(shift),
         } });
@@ -508,7 +513,7 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
-      ...candidateRouteOrderIds(opts, fit, context.target.id),
+      ...candidateRouteOrderIds(opts, fit, context.target.id, options),
       // The simulation's own arrival delay past THIS slot's start (same field
       // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
       // arrival grace (owner ruling 2026-09-28) reads it to decide whether a
