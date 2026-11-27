@@ -596,8 +596,8 @@ async function listAccounts({ includeInactive = false, conn = db } = {}) {
 }
 
 const DEFAULT_SUBTYPE_BY_TYPE = {
-  asset: 'other_current_asset',
-  liability: 'other_current_liability',
+  asset: 'prepaid',
+  liability: 'ap',
   equity: 'owner_equity',
   revenue: 'service_revenue',
   cogs: 'other_cogs',

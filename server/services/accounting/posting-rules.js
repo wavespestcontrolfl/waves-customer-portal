@@ -715,9 +715,11 @@ function buildTransferEntry({
  */
 function buildSalesTaxRemittanceEntry({
   sourceId,
+  idempotencyKey = null,
   paymentDate,
   amountCents,
   periodLabel = '',
+  bankAccountId = null,
   bankAccountCode = SYSTEM_CODES.CHECKING_PRIMARY,
   bankTransactionId = null,
 }) {
@@ -729,12 +731,12 @@ function buildSalesTaxRemittanceEntry({
     basisScope: 'both',
     sourceType: 'sales_tax_remittance',
     sourceId: String(sourceId),
-    idempotencyKey: `sales-tax-remit:${sourceId}`,
+    idempotencyKey: idempotencyKey || `sales-tax-remit:${sourceId}`,
     reference: periodLabel || String(sourceId),
     memo: `FL DOR DR-15 sales tax remittance${periodLabel ? ` (${periodLabel})` : ''}`,
     lines: [
       { accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: amt, creditCents: 0 },
-      { accountCode: bankAccountCode, debitCents: 0, creditCents: amt, bankTransactionId },
+      { accountId: bankAccountId || null, accountCode: bankAccountId ? null : bankAccountCode, debitCents: 0, creditCents: amt, bankTransactionId },
     ],
   };
 }
@@ -793,9 +795,11 @@ function buildPayrollRunEntry(input = {}) {
  */
 function buildPayrollSettlementEntry({
   sourceId,
+  idempotencyKey = null,
   settlementDate,
   kind, // 'net_pay' | 'tax_remit' | 'benefits_remit'
   amountCents,
+  bankAccountId = null,
   bankAccountCode = SYSTEM_CODES.CHECKING_PAYROLL,
   bankTransactionId = null,
   memo = null,
@@ -817,11 +821,11 @@ function buildPayrollSettlementEntry({
     basisScope: 'both',
     sourceType: 'payroll_remittance',
     sourceId: String(sourceId),
-    idempotencyKey: `payroll-settle:${kind}:${sourceId}`,
+    idempotencyKey: idempotencyKey || `payroll-settle:${kind}:${sourceId}`,
     memo: memo || `Payroll ${kind.replace('_', ' ')} settlement`,
     lines: [
       { accountCode: liabilityCode, debitCents: amt, creditCents: 0 },
-      { accountCode: bankAccountCode, debitCents: 0, creditCents: amt, bankTransactionId },
+      { accountId: bankAccountId || null, accountCode: bankAccountId ? null : bankAccountCode, debitCents: 0, creditCents: amt, bankTransactionId },
     ],
   };
 }

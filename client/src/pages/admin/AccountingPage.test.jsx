@@ -112,12 +112,29 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
     expect(screen.getByText(/Showing 1–1 of 150/)).toBeTruthy();
     expect(screen.getByRole("button", { name: "Next" }).disabled).toBe(false);
 
-    // New Account dialog switches Account Subtype options to match selected Account Type
+    // New Account dialog switches Account Subtype options to match selected Account Type using canonical statement subtypes
     fireEvent.click(screen.getByRole("button", { name: "New Account" }));
-    fireEvent.change(screen.getByLabelText("Account Type"), { target: { value: "asset" } });
-    expect(screen.getByLabelText("Account Subtype").value).toBe("checking");
-    fireEvent.change(screen.getByLabelText("Account Type"), { target: { value: "liability" } });
-    expect(screen.getByLabelText("Account Subtype").value).toBe("credit_card");
+    const typeSelect = screen.getByLabelText("Account Type");
+    const subSelect = screen.getByLabelText("Account Subtype");
+    fireEvent.change(typeSelect, { target: { value: "asset" } });
+    expect(subSelect.value).toBe("checking");
+    const assetValues = Array.from(subSelect.options).map((o) => o.value);
+    expect(assetValues).toContain("ar");
+    expect(assetValues).toContain("accum_depreciation");
+    expect(assetValues).not.toContain("accounts_receivable");
+    expect(assetValues).not.toContain("accumulated_depreciation");
+
+    fireEvent.change(typeSelect, { target: { value: "liability" } });
+    expect(subSelect.value).toBe("credit_card");
+    const liabilityValues = Array.from(subSelect.options).map((o) => o.value);
+    expect(liabilityValues).toContain("ap");
+    expect(liabilityValues).toContain("net_pay_clearing");
+    expect(liabilityValues).not.toContain("accounts_payable");
+
+    fireEvent.change(typeSelect, { target: { value: "expense" } });
+    const expenseValues = Array.from(subSelect.options).map((o) => o.value);
+    expect(expenseValues).toContain("depreciation_expense");
+    expect(expenseValues).not.toContain("depreciation");
   });
 
   it("switches from Profit & Loss to Balance Sheet without crashing and ignores stale responses", async () => {

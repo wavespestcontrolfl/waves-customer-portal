@@ -543,8 +543,20 @@ async function syncCustomerCredits(conn, from, to, ctx) {
 // ── 1. Invoices (Initial Post + Coverage Conversion + Zero/Edit Deltas + Voids) ─
 
 function buildCoveredPrepayVisitPayload(inv, issueDate, serviceLine, isCommercial, taxCents) {
+  const discountedVisitCents = safeNonNegCents(inv.visit_prepaid_amount ?? inv.prepaid_amount);
+  const termPrepayCents = safeNonNegCents(inv.cov_term_prepay_amount ?? inv.term_prepay_amount);
+  const termVisitCount = Math.trunc(Number(inv.cov_term_visit_count ?? inv.coverage_visit_count) || 0);
+  const discountedTermSliceCents = termPrepayCents > 0 && termVisitCount > 0
+    ? Math.round(termPrepayCents / termVisitCount)
+    : 0;
   const rawPreTax = (dollarsToCents(inv.subtotal || 0) || 0) - (dollarsToCents(inv.discount_amount || 0) || 0);
-  const amountCents = rawPreTax > 0 ? rawPreTax : Math.max(0, billedInvoicePrincipalCents(inv) - taxCents);
+  const invoicePreTaxCents = rawPreTax > 0 ? rawPreTax : Math.max(0, billedInvoicePrincipalCents(inv) - taxCents);
+  const visitFallbackCents = computePrepayVisitRecognitionCents({
+    prepaid_amount: null,
+    estimated_price: inv.visit_estimated_price ?? inv.estimated_price,
+    term_monthly_rate: inv.cov_term_monthly_rate ?? inv.term_monthly_rate,
+  });
+  const amountCents = discountedVisitCents || discountedTermSliceCents || invoicePreTaxCents || visitFallbackCents;
   if (amountCents <= 0) return null;
   const revCode = rules.revenueAccountCodeFor(serviceLine, isCommercial);
   const invoiceRef = String(inv.id);
@@ -720,12 +732,21 @@ async function reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements =
   }
 }
 
+async function hasSchemaColumn(conn, table, column) {
+  if (typeof conn?.schema?.hasColumn !== 'function') return true;
+  return conn.schema.hasColumn(table, column);
+}
+
 async function syncInvoices(conn, from, to, ctx) {
   if (!(await conn.schema.hasTable('invoices'))) return;
-  const hasPayerStatements = await conn.schema.hasTable('payer_statements');
+  const [hasPayerStatements, hasPrepayTerms, hasScheduledServices] = await Promise.all([
+    conn.schema.hasTable('payer_statements'),
+    conn.schema.hasTable('annual_prepay_terms'),
+    conn.schema.hasTable('scheduled_services'),
+  ]);
 
   const prepayInvoiceIds = new Set();
-  if (await conn.schema.hasTable('annual_prepay_terms')) {
+  if (hasPrepayTerms) {
     const termRows = await conn('annual_prepay_terms')
       .whereNotNull('prepay_invoice_id')
       .select('prepay_invoice_id');
@@ -734,6 +755,8 @@ async function syncInvoices(conn, from, to, ctx) {
 
   let q = conn('invoices as i').leftJoin('customers as c', 'c.id', 'i.customer_id');
   if (hasPayerStatements) q = q.leftJoin('payer_statements as ps', 'ps.id', 'i.payer_statement_id');
+  if (hasPrepayTerms) q = q.leftJoin('annual_prepay_terms as cov_term', 'cov_term.id', 'i.annual_prepay_covered_term_id');
+  if (hasScheduledServices) q = q.leftJoin('scheduled_services as ss', 'ss.id', 'i.scheduled_service_id');
 
   const selectCols = [
     'i.id', 'i.invoice_number', 'i.customer_id', 'i.scheduled_service_id', 'i.subtotal', 'i.discount_amount', 'i.tax_amount', 'i.total',
@@ -748,6 +771,16 @@ async function syncInvoices(conn, from, to, ctx) {
       'ps.sent_at as statement_sent_at',
       conn.raw('ps.period_end::text as statement_period_end'),
     );
+  }
+  if (hasPrepayTerms) {
+    selectCols.push(
+      'cov_term.prepay_amount as cov_term_prepay_amount',
+      'cov_term.coverage_visit_count as cov_term_visit_count',
+      'cov_term.monthly_rate as cov_term_monthly_rate',
+    );
+  }
+  if (hasScheduledServices) {
+    selectCols.push('ss.prepaid_amount as visit_prepaid_amount', 'ss.estimated_price as visit_estimated_price');
   }
 
   const rows = await q
@@ -801,17 +834,19 @@ async function syncInvoices(conn, from, to, ctx) {
 
 /**
  * Pure: determine earned revenue to recognize from 2300 Unearned Revenue when an
- * annual-prepay covered visit completes without creating a base invoice.
+ * annual-prepay covered visit completes. Discounted prepay allocations (stamped
+ * prepaid_amount or term prepay_amount / coverage_visit_count) always take priority
+ * over undiscounted visit estimated_price so 2300 clears cleanly to $0.00.
  */
 function computePrepayVisitRecognitionCents(visit, term = null) {
   if (!visit) return 0;
   const prepaid = safeNonNegCents(visit.prepaid_amount);
   if (prepaid > 0) return prepaid;
-  const est = safeNonNegCents(visit.estimated_price);
-  if (est > 0) return est;
   const termPrepay = safeNonNegCents(term?.prepay_amount ?? visit.term_prepay_amount);
   const visitCount = Math.trunc(Number(term?.coverage_visit_count ?? visit.coverage_visit_count) || 0);
   if (termPrepay > 0 && visitCount > 0) return Math.round(termPrepay / visitCount);
+  const est = safeNonNegCents(visit.estimated_price);
+  if (est > 0) return est;
   const monthly = safeNonNegCents(term?.monthly_rate ?? visit.term_monthly_rate);
   return monthly > 0 ? monthly : 0;
 }
@@ -2119,7 +2154,134 @@ async function syncStripePayouts(conn, from, to, ctx) {
   }
 }
 
-// ── 6. Expenses (Shared-Bill Split, Vendor Backfill, Edit Deltas & Deletions) ─
+// ── 6. Expenses (Shared-Bill Split, Linked Bank Accounts, Vendor Backfill, Deltas & Deletions) ─
+
+async function loadPlaidGlAccountLookup(conn) {
+  const byPlaidExternalId = new Map();
+  const byAccountLabel = new Map();
+  if (!(await conn.schema.hasTable('plaid_accounts'))) {
+    return { byPlaidExternalId, byAccountLabel };
+  }
+  const rows = await conn('gl_accounts as g')
+    .join('plaid_accounts as pa', 'pa.id', 'g.plaid_account_id')
+    .where('g.active', true)
+    .whereNotNull('g.plaid_account_id')
+    .orderBy('g.code', 'asc')
+    .select('g.id', 'g.code', 'pa.account_id as plaid_external_id', 'pa.account_label');
+
+  const labelCounts = new Map();
+  for (const r of rows) {
+    const extId = String(r.plaid_external_id || '').trim();
+    if (extId && !byPlaidExternalId.has(extId)) {
+      byPlaidExternalId.set(extId, { id: r.id, code: r.code });
+    }
+    const label = normalizeVendorName(r.account_label);
+    if (label) {
+      labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+      byAccountLabel.set(label, { id: r.id, code: r.code });
+    }
+  }
+  for (const [label, count] of labelCounts.entries()) {
+    if (count > 1) byAccountLabel.delete(label);
+  }
+  return { byPlaidExternalId, byAccountLabel };
+}
+
+/**
+ * Pure: resolve the GL cash/credit-card account for a bank_transactions row using
+ * its Plaid external account_id first, then a unique Plaid account_label match (for
+ * CSV imports), and finally account_type ('card' -> 2000, 'bank' -> fallbackCode).
+ */
+function resolveBankTxnGlAccount(bankTxn, lookup, fallbackCode = SYSTEM_CODES.CHECKING_PRIMARY) {
+  if (!bankTxn) return { accountId: null, accountCode: fallbackCode };
+  const extId = String(bankTxn.plaid_account_id || '').trim();
+  if (extId && lookup?.byPlaidExternalId?.has(extId)) {
+    const hit = lookup.byPlaidExternalId.get(extId);
+    return { accountId: hit.id, accountCode: hit.code };
+  }
+  const label = normalizeVendorName(bankTxn.account_label);
+  if (label && lookup?.byAccountLabel?.has(label)) {
+    const hit = lookup.byAccountLabel.get(label);
+    return { accountId: hit.id, accountCode: hit.code };
+  }
+  const acctType = String(bankTxn.account_type || '').toLowerCase();
+  if (acctType === 'card') return { accountId: null, accountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY };
+  return { accountId: null, accountCode: fallbackCode };
+}
+
+const PAYROLL_BENEFITS_FILING_TYPES = new Set(['payroll_simple_deposit', 'payroll_simple_employer']);
+const PAYROLL_TAX_FILING_TYPES = new Set([
+  'payroll_941_deposit', 'payroll_941', 'payroll_rt6', 'payroll_940', 'payroll_futa_alert',
+]);
+
+/**
+ * Pure: classify a tax_filing_calendar row into the liability it clears when a bank
+ * debit is matched to it ('sales_tax' -> 2100, 'tax_remit' -> 2200, 'benefits_remit' -> 2210).
+ * Non-liability filings (1040-ES estimated owner tax, annual returns, 1099/W-2 filings) return null.
+ */
+function classifyTaxFilingSettlement(filing) {
+  const ft = String(filing?.filing_type || '').trim().toLowerCase();
+  const sk = String(filing?.source_key || filing?.filing_source_key || '').trim().toLowerCase();
+  const title = String(filing?.title || filing?.filing_title || '').trim().toLowerCase();
+  const combined = `${ft} ${title}`;
+
+  if (ft === 'dr15_sales_tax' || /dr-?15|sales_tax|sales tax/.test(combined)) {
+    return { kind: 'sales_tax', label: 'sales tax remittance' };
+  }
+  if (PAYROLL_BENEFITS_FILING_TYPES.has(ft) || /simple|hsa|401k|retirement/.test(`${ft} ${sk}`)) {
+    return { kind: 'benefits_remit', label: 'payroll benefits remittance' };
+  }
+  if (
+    PAYROLL_TAX_FILING_TYPES.has(ft)
+    || /^payroll:(?:941|940|rt6|futa)/.test(sk)
+    || /\b(?:941|940|rt-?6|eftps|futa|suta|reemployment)\b/.test(combined)
+  ) {
+    return { kind: 'tax_remit', label: 'payroll tax remittance' };
+  }
+  return null;
+}
+
+function settlementKeyForTaxFiling(btId, classification) {
+  if (!classification) return null;
+  if (classification.kind === 'sales_tax') return `sales-tax-remit:bt:${btId}`;
+  return `payroll-settle:${classification.kind}:bt:${btId}`;
+}
+
+async function loadBankTxnCapabilities(conn) {
+  const hasBankTxns = await conn.schema.hasTable('bank_transactions');
+  if (!hasBankTxns) {
+    return { hasBankTxns: false, hasPlaidCol: false, hasCheckMatch: false, hasFilingMatch: false };
+  }
+  const [hasPlaidCol, hasCheckMatch, hasFilingMatch] = await Promise.all([
+    hasSchemaColumn(conn, 'bank_transactions', 'plaid_account_id'),
+    hasSchemaColumn(conn, 'bank_transactions', 'matched_payroll_check_id'),
+    hasSchemaColumn(conn, 'bank_transactions', 'matched_tax_filing_id'),
+  ]);
+  return { hasBankTxns: true, hasPlaidCol, hasCheckMatch, hasFilingMatch };
+}
+
+async function loadMatchedBankTxnsForExpenses(conn, expenseIds, bankCaps) {
+  const map = new Map();
+  if (!expenseIds.length || !bankCaps.hasBankTxns) return map;
+  const hasTaxCal = bankCaps.hasFilingMatch && (await conn.schema.hasTable('tax_filing_calendar'));
+  const hasSourceKey = hasTaxCal && (await hasSchemaColumn(conn, 'tax_filing_calendar', 'source_key'));
+
+  let q = conn('bank_transactions as bt').whereIn('bt.matched_expense_id', expenseIds);
+  const cols = ['bt.id', 'bt.matched_expense_id', 'bt.account_label', 'bt.account_type', 'bt.matched_at', 'bt.updated_at'];
+  if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id');
+  if (bankCaps.hasCheckMatch) cols.push('bt.matched_payroll_check_id');
+  if (bankCaps.hasFilingMatch) cols.push('bt.matched_tax_filing_id');
+  if (hasTaxCal) {
+    q = q.leftJoin('tax_filing_calendar as tfc', 'tfc.id', 'bt.matched_tax_filing_id');
+    cols.push('tfc.filing_type', 'tfc.title as filing_title');
+    if (hasSourceKey) cols.push('tfc.source_key as filing_source_key');
+  }
+  const rows = await q.select(...cols);
+  for (const r of rows) {
+    if (r.matched_expense_id) map.set(String(r.matched_expense_id), r);
+  }
+  return map;
+}
 
 async function loadVendorLookup(conn) {
   const vendors = await conn('gl_vendors')
@@ -2233,26 +2395,44 @@ async function backfillExpenseVendorIfNeeded(exp, matchedVendor, trx, ctx) {
   }
 }
 
-async function syncSingleExpenseRow(exp, mapped, matchedVendor, ctx) {
+function latestAdjustmentDate(entryDate, timestamps) {
+  let latest = entryDate;
+  for (const ts of timestamps) {
+    const d = timestampToEtDate(ts);
+    if (d && d > latest) latest = d;
+  }
+  return latest;
+}
+
+async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, ctx) {
   const entryDate = dateCellText(exp.expense_date);
   const amountCents = dollarsToCents(exp.amount);
   if (!entryDate || amountCents == null || amountCents < 0) return;
 
-  const desired = amountCents > 0
+  const isLiabilitySettlement = Boolean(
+    matchedBankTxn?.matched_payroll_check_id
+    || (matchedBankTxn?.matched_tax_filing_id && classifyTaxFilingSettlement(matchedBankTxn)),
+  );
+  const resolvedPayment = matchedBankTxn
+    ? resolveBankTxnGlAccount(matchedBankTxn, plaidGlLookup, SYSTEM_CODES.CHECKING_PRIMARY)
+    : { accountId: null, accountCode: paymentAccountCodeForExpense(exp.payment_method) };
+
+  const desired = amountCents > 0 && !isLiabilitySettlement
     ? rules.buildExpenseEntry({
       sourceType: 'expense',
       sourceId: exp.id,
       entryDate,
-      paymentAccountCode: paymentAccountCodeForExpense(exp.payment_method),
+      paymentAccountId: resolvedPayment.accountId,
+      paymentAccountCode: resolvedPayment.accountCode,
       paymentMethod: exp.payment_method || null,
+      bankTransactionId: matchedBankTxn?.id || null,
       splits: buildExpenseSplits(exp, mapped, matchedVendor, amountCents),
       vendorId: matchedVendor ? matchedVendor.id : null,
       memo: [exp.vendor_name, exp.description].filter(Boolean).join(' — ').slice(0, 500) || 'Expense',
     })
     : null;
 
-  const updatedDate = timestampToEtDate(exp.updated_at);
-  const adjDate = updatedDate && updatedDate >= entryDate ? updatedDate : entryDate;
+  const adjDate = latestAdjustmentDate(entryDate, [exp.updated_at, matchedBankTxn?.matched_at, matchedBankTxn?.updated_at]);
 
   const reconcile = async (trx) => {
     const { bookedByCode, totalEntryCount } = await loadBookedExpenseState(trx, exp.id);
@@ -2333,13 +2513,14 @@ async function reconcileRemovedOrExcludedExpenses(conn, from, to, ctx) {
   }
 }
 
-async function syncExpenses(conn, from, to, ctx) {
+async function syncExpenses(conn, from, to, ctx, plaidGlLookup = null, bankCapsArg = null) {
   if (!(await conn.schema.hasTable('expenses'))) return;
-  const [glAccounts, vendorLookup] = await Promise.all([
+  const [glAccounts, vendorLookup, bankCaps] = await Promise.all([
     conn('gl_accounts')
       .whereNotNull('expense_category_id')
       .select('id', 'code', 'expense_category_id', 'schedule_c_line'),
     loadVendorLookup(conn),
+    bankCapsArg ? Promise.resolve(bankCapsArg) : loadBankTxnCapabilities(conn),
   ]);
   const glByCatId = new Map(glAccounts.map((a) => [a.expense_category_id, a]));
 
@@ -2357,6 +2538,22 @@ async function syncExpenses(conn, from, to, ctx) {
                 .whereRaw('ge.source_id = e.id::text');
             });
         });
+      if (bankCaps.hasBankTxns) {
+        q.orWhere((bankLinked) => {
+          bankLinked.whereExists(function linkedInWindow() {
+            this.select(conn.raw('1'))
+              .from('bank_transactions as bt')
+              .whereRaw('bt.matched_expense_id = e.id')
+              .whereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+          }).whereExists(function alreadyBooked() {
+            this.select(conn.raw('1'))
+              .from('gl_journal_entries as ge')
+              .where({ 'ge.source_type': 'expense', 'ge.status': 'posted' })
+              .whereNull('ge.reversed_by_entry_id')
+              .whereRaw('ge.source_id = e.id::text');
+          });
+        });
+      }
     })
     .whereRaw("COALESCE(c.name, '') <> 'Payroll (counted from pay runs)'")
     .whereRaw("COALESCE(c.irs_line, '') NOT IN ('13', '30')")
@@ -2366,11 +2563,13 @@ async function syncExpenses(conn, from, to, ctx) {
       'e.scheduled_service_id', 'e.updated_at', 'c.name as category_name',
     );
 
+  const matchedBankByExpense = await loadMatchedBankTxnsForExpenses(conn, rows.map((r) => r.id), bankCaps);
   const unmatchedContractors = new Map();
   for (const exp of rows) {
     const amountCents = dollarsToCents(exp.amount);
     const mapped = exp.category_id ? glByCatId.get(exp.category_id) : null;
     const matchedVendor = vendorLookup.match(exp.vendor_name);
+    const matchedBankTxn = matchedBankByExpense.get(String(exp.id)) || null;
 
     if (exp.vendor_name && !matchedVendor && amountCents > 0) {
       ctx.stats.expenses.unmatched_vendors += 1;
@@ -2385,14 +2584,14 @@ async function syncExpenses(conn, from, to, ctx) {
       }
     }
 
-    await syncSingleExpenseRow(exp, mapped, matchedVendor, ctx);
+    await syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, ctx);
   }
 
   ctx.stats.expenses.unmatched_contractor_vendors = Array.from(unmatchedContractors.values());
   await reconcileRemovedOrExcludedExpenses(conn, from, to, ctx);
 }
 
-// ── 7. Payroll Runs (Finalized Posts + Voided Run Reversals) ─────────────────
+// ── 7. Payroll Runs & Settlements (Mercury Paychecks, Bank-Matched Checks & Tax Filings) ─
 
 function intCents(v) {
   return Math.trunc(Number(v) || 0);
@@ -2489,13 +2688,318 @@ async function syncPayrollRuns(conn, from, to, ctx) {
   }
 }
 
+async function applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx) {
+  let reversedBt = false;
+  if (pp.bt_id) {
+    const priorBt = await trx('gl_journal_entries')
+      .where({ idempotency_key: `payroll-settle:net_pay:bt:${pp.bt_id}`, status: 'posted' })
+      .whereNull('reversed_by_entry_id')
+      .first('id', 'reversed_by_entry_id', trx.raw('entry_date::text as entry_date'));
+    if (priorBt) {
+      reversedBt = await reverseOrPreview(
+        priorBt,
+        settlementDate,
+        `Superseded by Mercury payroll payment ${pp.id}`,
+        ctx,
+        'payroll_settlements',
+        { connOverride: trx },
+      );
+      if (!reversedBt) return;
+    }
+  }
+  const posted = await postOrPreview(entry, ctx, 'payroll_settlements', { connOverride: trx });
+  if (reversedBt && !posted && !ctx.dryRun) {
+    ctx.stats.payroll_settlements.reversed = Math.max(0, ctx.stats.payroll_settlements.reversed - 1);
+    const err = new Error('ABORT_SETTLEMENT_REPLACEMENT');
+    err.code = 'ABORT_SETTLEMENT_REPLACEMENT';
+    throw err;
+  }
+}
+
+async function syncMercuryPayrollPayments(conn, from, to, ctx, plaidGlLookup, bankCaps) {
+  if (!(await conn.schema.hasTable('payroll_payments')) || !(await conn.schema.hasTable('payroll_checks'))) return;
+
+  let q = conn('payroll_payments as pp')
+    .join('payroll_checks as pc', 'pc.id', 'pp.check_id')
+    .where('pp.state', 'sent')
+    .where('pc.status', 'finalized')
+    .whereRaw(
+      "COALESCE(pp.posted_on, DATE(pp.resolved_at AT TIME ZONE 'America/New_York'), DATE(pp.updated_at AT TIME ZONE 'America/New_York')) BETWEEN ?::date AND ?::date",
+      [from, to],
+    );
+  const cols = [
+    'pp.id', 'pp.check_id', 'pp.amount_cents',
+    conn.raw('pp.posted_on::text as posted_on'), 'pp.resolved_at', 'pp.updated_at',
+    'pc.employee_name',
+  ];
+  if (bankCaps.hasCheckMatch) {
+    q = q.leftJoin('bank_transactions as bt', 'bt.matched_payroll_check_id', 'pp.check_id');
+    cols.push('bt.id as bt_id', 'bt.account_label as bt_account_label', 'bt.account_type as bt_account_type');
+    if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id as bt_plaid_account_id');
+  }
+  const sentRows = await q.select(...cols);
+
+  for (const pp of sentRows) {
+    const settlementDate = dateCellText(pp.posted_on) || timestampToEtDate(pp.resolved_at || pp.updated_at);
+    const amountCents = intCents(pp.amount_cents);
+    if (!settlementDate || amountCents <= 0) continue;
+
+    const btRow = pp.bt_id
+      ? { id: pp.bt_id, account_label: pp.bt_account_label, account_type: pp.bt_account_type, plaid_account_id: pp.bt_plaid_account_id }
+      : null;
+    const bankAcct = resolveBankTxnGlAccount(btRow, plaidGlLookup, SYSTEM_CODES.CHECKING_PAYROLL);
+    const entry = rules.buildPayrollSettlementEntry({
+      sourceId: `pp:${pp.id}`,
+      idempotencyKey: `payroll-settle:net_pay:pp:${pp.id}`,
+      settlementDate,
+      kind: 'net_pay',
+      amountCents,
+      bankAccountId: bankAcct.accountId,
+      bankAccountCode: bankAcct.accountCode,
+      bankTransactionId: pp.bt_id || null,
+      memo: `Payroll net pay settled via Mercury${pp.employee_name ? ` — ${pp.employee_name}` : ''}`,
+    });
+
+    if (ctx.dryRun) {
+      await applyMercurySettlementAtomic(ctx.conn, pp, entry, settlementDate, ctx);
+    } else {
+      try {
+        await withEntitySyncLock(ctx.conn, `gl-sync-payroll-check:${pp.check_id}`, (trx) => (
+          applyMercurySettlementAtomic(trx, pp, entry, settlementDate, ctx)
+        ));
+      } catch (err) {
+        if (err?.code !== 'ABORT_SETTLEMENT_REPLACEMENT') throw err;
+      }
+    }
+  }
+
+  const revokedRows = await conn('gl_journal_entries as e')
+    .join('payroll_payments as pp', conn.raw("e.idempotency_key = 'payroll-settle:net_pay:pp:' || pp.id::text"))
+    .leftJoin('payroll_checks as pc', 'pc.id', 'pp.check_id')
+    .where('e.status', 'posted')
+    .whereNull('e.reversed_by_entry_id')
+    .whereRaw("(pp.state IN ('returned', 'failed', 'cancelled', 'rejected') OR pc.status = 'voided')")
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("DATE(COALESCE(pp.resolved_at, pp.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select(
+      'e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+      'pp.state as pp_state', 'pp.resolved_at', 'pp.updated_at', 'pp.resolution', 'pc.status as check_status',
+    );
+
+  for (const row of revokedRows) {
+    const revDate = latestAdjustmentDate(dateCellText(row.entry_date), [row.resolved_at, row.updated_at]);
+    const detail = row.resolution ? ` (${String(row.resolution).slice(0, 120)})` : '';
+    const reason = row.check_status === 'voided'
+      ? 'Payroll paycheck voided'
+      : `Mercury payroll payment ${row.pp_state}${detail}`;
+    await reverseOrPreview(row, revDate, reason, ctx, 'payroll_settlements');
+  }
+}
+
+async function syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, bankCaps) {
+  if (!bankCaps.hasCheckMatch || !(await conn.schema.hasTable('payroll_checks'))) return;
+  const hasPayrollPayments = await conn.schema.hasTable('payroll_payments');
+
+  let q = conn('bank_transactions as bt')
+    .join('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
+    .whereNotNull('bt.matched_payroll_check_id')
+    .where({ 'bt.direction': 'debit', 'pc.status': 'finalized' })
+    .where((win) => {
+      win.whereBetween('bt.txn_date', [from, to])
+        .orWhereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    });
+  if (hasPayrollPayments) {
+    q = q.whereNotExists(function noSentMercuryPayment() {
+      this.select(conn.raw('1'))
+        .from('payroll_payments as pp')
+        .whereRaw("pp.check_id = bt.matched_payroll_check_id AND pp.state = 'sent'");
+    });
+  }
+  const cols = [
+    'bt.id', conn.raw('bt.txn_date::text as txn_date'), 'bt.amount', 'bt.description',
+    'bt.account_label', 'bt.account_type', 'bt.matched_payroll_check_id', 'pc.employee_name',
+  ];
+  if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id');
+  const rows = await q.select(...cols);
+
+  for (const bt of rows) {
+    const settlementDate = dateCellText(bt.txn_date);
+    const amountCents = dollarsToCents(bt.amount);
+    if (!settlementDate || !amountCents || amountCents <= 0) continue;
+
+    const bankAcct = resolveBankTxnGlAccount(bt, plaidGlLookup, SYSTEM_CODES.CHECKING_PAYROLL);
+    const entry = rules.buildPayrollSettlementEntry({
+      sourceId: `bt-check:${bt.id}`,
+      idempotencyKey: `payroll-settle:net_pay:bt:${bt.id}`,
+      settlementDate,
+      kind: 'net_pay',
+      amountCents,
+      bankAccountId: bankAcct.accountId,
+      bankAccountCode: bankAcct.accountCode,
+      bankTransactionId: bt.id,
+      memo: `Payroll net pay cleared bank${bt.employee_name ? ` — ${bt.employee_name}` : ''}`,
+    });
+
+    const applyCheck = async (trx) => {
+      if (hasPayrollPayments) {
+        const sent = await trx('payroll_payments')
+          .where({ check_id: bt.matched_payroll_check_id, state: 'sent' })
+          .first('id');
+        if (sent) {
+          ctx.stats.payroll_settlements.skipped += 1;
+          return;
+        }
+      }
+      await postOrPreview(entry, ctx, 'payroll_settlements', { connOverride: trx });
+    };
+
+    if (ctx.dryRun) {
+      await applyCheck(ctx.conn);
+    } else {
+      await withEntitySyncLock(ctx.conn, `gl-sync-payroll-check:${bt.matched_payroll_check_id}`, applyCheck);
+    }
+  }
+
+  const unlinked = await conn('gl_journal_entries as e')
+    .leftJoin('bank_transactions as bt', conn.raw("e.idempotency_key = 'payroll-settle:net_pay:bt:' || bt.id::text"))
+    .leftJoin('payroll_checks as pc', 'pc.id', 'bt.matched_payroll_check_id')
+    .where({ 'e.source_type': 'payroll_remittance', 'e.status': 'posted' })
+    .where('e.idempotency_key', 'like', 'payroll-settle:net_pay:bt:%')
+    .whereNull('e.reversed_by_entry_id')
+    .whereRaw("(bt.id IS NULL OR bt.matched_payroll_check_id IS NULL OR pc.status = 'voided')")
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("bt.updated_at IS NOT NULL AND DATE(bt.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select('e.id', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'), 'bt.updated_at', 'pc.status as check_status');
+
+  const today = etDateString(new Date());
+  for (const row of unlinked) {
+    const entryDay = dateCellText(row.entry_date);
+    const revDate = row.updated_at
+      ? latestAdjustmentDate(entryDay, [row.updated_at])
+      : (today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay));
+    const reason = row.check_status === 'voided' ? 'Payroll paycheck voided' : 'Bank payroll check link removed';
+    await reverseOrPreview(row, revDate, reason, ctx, 'payroll_settlements');
+  }
+}
+
+function buildTaxFilingSettlementEntry(bt, cls, settlementDate, amountCents, plaidGlLookup) {
+  const fallbackCode = cls.kind === 'sales_tax' ? SYSTEM_CODES.CHECKING_PRIMARY : SYSTEM_CODES.CHECKING_PAYROLL;
+  const bankAcct = resolveBankTxnGlAccount(bt, plaidGlLookup, fallbackCode);
+  const idempotencyKey = settlementKeyForTaxFiling(bt.id, cls);
+  if (cls.kind === 'sales_tax') {
+    return rules.buildSalesTaxRemittanceEntry({
+      sourceId: `bt-filing:${bt.id}`,
+      idempotencyKey,
+      paymentDate: settlementDate,
+      amountCents,
+      periodLabel: bt.filing_period_label || bt.filing_title || '',
+      bankAccountId: bankAcct.accountId,
+      bankAccountCode: bankAcct.accountCode,
+      bankTransactionId: bt.id,
+    });
+  }
+  const suffix = bt.filing_period_label ? ` (${bt.filing_period_label})` : '';
+  return rules.buildPayrollSettlementEntry({
+    sourceId: `bt-filing:${bt.id}`,
+    idempotencyKey,
+    settlementDate,
+    kind: cls.kind,
+    amountCents,
+    bankAccountId: bankAcct.accountId,
+    bankAccountCode: bankAcct.accountCode,
+    bankTransactionId: bt.id,
+    memo: `${bt.filing_title || cls.label}${suffix}`.slice(0, 300),
+  });
+}
+
+async function reconcileRemovedTaxFilingSettlements(conn, from, to, ctx, hasSourceKey) {
+  const revCols = [
+    'e.id', 'e.idempotency_key', 'e.reversed_by_entry_id', conn.raw('e.entry_date::text as entry_date'),
+    'bt.id as bt_id', 'bt.matched_tax_filing_id', 'bt.updated_at',
+    'tfc.filing_type', 'tfc.title as filing_title',
+  ];
+  if (hasSourceKey) revCols.push('tfc.source_key as filing_source_key');
+
+  const bookedFilings = await conn('gl_journal_entries as e')
+    .leftJoin('bank_transactions as bt', conn.raw("e.source_id = 'bt-filing:' || bt.id::text"))
+    .leftJoin('tax_filing_calendar as tfc', 'tfc.id', 'bt.matched_tax_filing_id')
+    .where('e.status', 'posted')
+    .whereNull('e.reversed_by_entry_id')
+    .whereIn('e.source_type', ['payroll_remittance', 'sales_tax_remittance'])
+    .where('e.source_id', 'like', 'bt-filing:%')
+    .where((win) => {
+      win.whereBetween('e.entry_date', [from, to])
+        .orWhereRaw("bt.updated_at IS NOT NULL AND DATE(bt.updated_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select(...revCols);
+
+  const today = etDateString(new Date());
+  for (const row of bookedFilings) {
+    const currentKey = row.bt_id && row.matched_tax_filing_id
+      ? settlementKeyForTaxFiling(row.bt_id, classifyTaxFilingSettlement(row))
+      : null;
+    if (currentKey && currentKey === row.idempotency_key) continue;
+    const entryDay = dateCellText(row.entry_date);
+    const fallbackRevDate = today >= entryDay && today <= to ? today : (to >= entryDay ? to : entryDay);
+    const revDate = row.updated_at ? latestAdjustmentDate(entryDay, [row.updated_at]) : fallbackRevDate;
+    await reverseOrPreview(row, revDate, 'Bank tax filing link removed or reclassified', ctx, 'payroll_settlements');
+  }
+}
+
+async function syncBankMatchedTaxFilings(conn, from, to, ctx, plaidGlLookup, bankCaps) {
+  if (!bankCaps.hasFilingMatch || !(await conn.schema.hasTable('tax_filing_calendar'))) return;
+  const hasSourceKey = await hasSchemaColumn(conn, 'tax_filing_calendar', 'source_key');
+
+  const cols = [
+    'bt.id', conn.raw('bt.txn_date::text as txn_date'), 'bt.amount', 'bt.description',
+    'bt.account_label', 'bt.account_type', 'bt.matched_tax_filing_id',
+    'tfc.filing_type', 'tfc.title as filing_title', 'tfc.period_label as filing_period_label',
+  ];
+  if (hasSourceKey) cols.push('tfc.source_key as filing_source_key');
+  if (bankCaps.hasPlaidCol) cols.push('bt.plaid_account_id');
+
+  const rows = await conn('bank_transactions as bt')
+    .join('tax_filing_calendar as tfc', 'tfc.id', 'bt.matched_tax_filing_id')
+    .whereNotNull('bt.matched_tax_filing_id')
+    .where('bt.direction', 'debit')
+    .where((win) => {
+      win.whereBetween('bt.txn_date', [from, to])
+        .orWhereRaw("DATE(COALESCE(bt.matched_at, bt.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+    })
+    .select(...cols);
+
+  for (const bt of rows) {
+    const cls = classifyTaxFilingSettlement(bt);
+    if (!cls) continue;
+    const settlementDate = dateCellText(bt.txn_date);
+    const amountCents = dollarsToCents(bt.amount);
+    if (!settlementDate || !amountCents || amountCents <= 0) continue;
+    const entry = buildTaxFilingSettlementEntry(bt, cls, settlementDate, amountCents, plaidGlLookup);
+    await postOrPreview(entry, ctx, 'payroll_settlements');
+  }
+
+  await reconcileRemovedTaxFilingSettlements(conn, from, to, ctx, hasSourceKey);
+}
+
+async function syncPayrollSettlements(conn, from, to, ctx, plaidGlLookup, bankCaps) {
+  await syncMercuryPayrollPayments(conn, from, to, ctx, plaidGlLookup, bankCaps);
+  await syncBankMatchedPayrollChecks(conn, from, to, ctx, plaidGlLookup, bankCaps);
+  await syncBankMatchedTaxFilings(conn, from, to, ctx, plaidGlLookup, bankCaps);
+}
+
 async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = false, actorId = null, requestMeta = {}, conn = db } = {}) {
   const today = etDateString(new Date());
   const from = assertValidDate(fromDate || `${today.slice(0, 4)}-01-01`, 'fromDate');
   const to = assertValidDate(toDate || today, 'toDate');
-  const [missingSystemAccounts, caches] = await Promise.all([
+  const [missingSystemAccounts, caches, plaidGlLookup, bankCaps] = await Promise.all([
     findMissingSystemAccountCodes(conn),
     loadSyncCaches(conn),
+    loadPlaidGlAccountLookup(conn),
+    loadBankTxnCapabilities(conn),
   ]);
 
   const makeBucket = (extra = {}) => ({ posted: 0, skipped: 0, would_post: 0, errors: [], ...extra });
@@ -2522,6 +3026,7 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
       unmatched_contractor_vendors: [],
     }),
     payroll_runs: makeBucket({ reversed: 0, would_reverse: 0 }),
+    payroll_settlements: makeBucket({ reversed: 0, would_reverse: 0 }),
   };
 
   const ctx = { dryRun: Boolean(dryRun), actorId, requestMeta, stats, conn, caches };
@@ -2535,8 +3040,9 @@ async function syncSubledgersToGl({ fromDate = null, toDate = null, dryRun = fal
   await syncManualRefunds(conn, from, to, ctx);
   await syncStripeFees(conn, from, to, ctx);
   await syncStripePayouts(conn, from, to, ctx);
-  await syncExpenses(conn, from, to, ctx);
+  await syncExpenses(conn, from, to, ctx, plaidGlLookup, bankCaps);
   await syncPayrollRuns(conn, from, to, ctx);
+  await syncPayrollSettlements(conn, from, to, ctx, plaidGlLookup, bankCaps);
 
   return stats;
 }
@@ -2558,6 +3064,8 @@ module.exports = {
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,
   extractStripeDisputeTokens,
+  resolveBankTxnGlAccount,
+  classifyTaxFilingSettlement,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,

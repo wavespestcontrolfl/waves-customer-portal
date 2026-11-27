@@ -188,7 +188,7 @@ export default function VendorsAndPeriodsTab({ onChanged }) {
               <div className="font-medium">
                 {syncResult.dry_run ? "Dry Run Preview" : "Sync Results"} ({syncResult.from} to {syncResult.to})
               </div>
-              {["invoices", "deposits", "payments", "refunds", "stripe_fees", "stripe_payouts", "expenses", "payroll_runs"].map((k) => {
+              {["customer_credits", "invoices", "deposits", "payments", "refunds", "stripe_fees", "stripe_payouts", "expenses", "payroll_runs", "payroll_settlements"].map((k) => {
                 const b = syncResult[k];
                 if (!b) return null;
                 return (

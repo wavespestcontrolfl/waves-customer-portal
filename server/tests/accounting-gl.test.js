@@ -82,6 +82,8 @@ const {
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,
+  resolveBankTxnGlAccount,
+  classifyTaxFilingSettlement,
   timestampToUtcDate,
 } = require('../services/accounting/sync-bridge');
 const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
@@ -1576,5 +1578,233 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
       chargeId: 'ch_9XYZ89',
       piId: null,
     });
+  });
+
+  test('Codex R2: covered prepay invoices recognize discounted allocation so 2300 clears to $0.00', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // $380 discounted annual prepay covering 4 visits whose undiscounted invoice subtotals stay $100 each
+    const prepayInv = rules.buildInvoiceEntry({
+      invoiceId: 'inv-prepay-380',
+      issueDate: '2026-01-01',
+      subtotalCents: 38000,
+      taxCents: 0,
+      isAnnualPrepay: true,
+    });
+    const coveredVisits = [1, 2, 3, 4].map((n) => buildInvoiceGlPayload({
+      id: `inv-cov-disc-${n}`,
+      invoice_number: `WPC-DISC-${n}`,
+      annual_prepay_covered_term_id: 'term-380',
+      subtotal: '100.00',
+      discount_amount: '0.00',
+      tax_amount: '0.00',
+      total: '0.00',
+      visit_prepaid_amount: n <= 2 ? '95.00' : null,
+      visit_estimated_price: '100.00',
+      cov_term_prepay_amount: '380.00',
+      cov_term_visit_count: 4,
+      service_type: 'pest',
+      service_date: `2026-0${n}-15`,
+      property_type: 'single_family',
+    }, new Set()));
+
+    for (const je of coveredVisits) {
+      expect(validateJournalEntryInput(je).totalCents).toBe(9500);
+    }
+    // Visit recognition path matches covered invoice path even when visit_prepaid_amount is missing
+    expect(computePrepayVisitRecognitionCents({
+      prepaid_amount: null,
+      estimated_price: '100.00',
+      term_prepay_amount: '380.00',
+      coverage_visit_count: 4,
+    })).toBe(9500);
+
+    const sums = accumulateEntries(accounts, [prepayInv, ...coveredVisits]);
+    expect(bal(sums, SYSTEM_CODES.UNEARNED_REVENUE)).toBe(0);
+    expect(bal(sums, SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(38000);
+  });
+
+  test('Codex R2: linked Plaid/bank GL account is honored on expenses and canonical subtypes flow into statements', () => {
+    const secCheckingId = '00000000-0000-4000-8000-000000009015';
+    const secCardId = '00000000-0000-4000-8000-000000009020';
+    const lookup = {
+      byPlaidExternalId: new Map([
+        ['plaid_ext_checking_2', { id: secCheckingId, code: '1015' }],
+        ['plaid_ext_amex', { id: secCardId, code: '2010' }],
+      ]),
+      byAccountLabel: new Map([
+        ['mercury checking', { id: secCheckingId, code: '1015' }],
+      ]),
+    };
+
+    expect(resolveBankTxnGlAccount({ plaid_account_id: 'plaid_ext_checking_2', account_label: 'Other', account_type: 'bank' }, lookup))
+      .toEqual({ accountId: secCheckingId, accountCode: '1015' });
+    expect(resolveBankTxnGlAccount({ plaid_account_id: null, account_label: 'Mercury Checking', account_type: 'bank' }, lookup))
+      .toEqual({ accountId: secCheckingId, accountCode: '1015' });
+    expect(resolveBankTxnGlAccount({ plaid_account_id: null, account_label: 'Unmapped Card', account_type: 'card' }, lookup))
+      .toEqual({ accountId: null, accountCode: SYSTEM_CODES.CREDIT_CARD_PRIMARY });
+
+    const btExpId = '00000000-0000-4000-8000-00000000b001';
+    const expJe = rules.buildExpenseEntry({
+      sourceId: 'exp-plaid-1',
+      entryDate: '2026-11-18',
+      paymentAccountId: secCheckingId,
+      paymentAccountCode: '1015',
+      bankTransactionId: btExpId,
+      splits: [{ accountCode: SYSTEM_CODES.COGS_CHEMICALS, amountCents: 45000 }],
+      memo: 'Chemical restock from secondary checking',
+    });
+    expect(validateJournalEntryInput(expJe).totalCents).toBe(45000);
+    expect(expJe.lines[1].accountId).toBe(secCheckingId);
+    expect(expJe.lines[1].accountCode).toBeNull();
+    expect(expJe.lines[1].bankTransactionId).toBe(btExpId);
+
+    // Canonical subtypes (ar, prepaid, accum_depreciation, ap, net_pay_clearing, depreciation_expense, interest_expense)
+    const customAccounts = [
+      ...makeSyntheticAccounts(),
+      { id: 'c-prepaid', code: '1310', name: 'Prepaid Insurance', account_type: 'asset', sub_type: 'prepaid', normal_balance: 'debit', deductible_pct: 100, active: true },
+      { id: 'c-ap', code: '2050', name: 'Accounts Payable', account_type: 'liability', sub_type: 'ap', normal_balance: 'credit', deductible_pct: 100, active: true },
+      { id: 'c-dep', code: '6710', name: 'Custom Depreciation', account_type: 'expense', sub_type: 'depreciation_expense', normal_balance: 'debit', deductible_pct: 100, active: true },
+    ];
+    const customSums = new Map([
+      ['c-prepaid', { debitCents: 12000, creditCents: 0 }],
+      ['c-ap', { debitCents: 0, creditCents: 12000 }],
+      ['c-dep', { debitCents: 5000, creditCents: 0 }],
+      [customAccounts.find((a) => a.code === SYSTEM_CODES.ACCUM_DEPRECIATION).id, { debitCents: 0, creditCents: 5000 }],
+    ]);
+    const bs = computeBalanceSheet(customAccounts, customSums, '2026-11-30');
+    expect(bs.sections.current_assets.some((r) => r.code === '1310')).toBe(true);
+    expect(bs.sections.current_liabilities.some((r) => r.code === '2050')).toBe(true);
+    expect(bs.sections.fixed_assets.some((r) => r.code === SYSTEM_CODES.ACCUM_DEPRECIATION)).toBe(true);
+    expect(bs.totals.balanced).toBe(true);
+
+    const pnl = computeProfitAndLoss(customAccounts, customSums, { from: '2026-11-01', to: '2026-11-30' });
+    expect(pnl.totals.net_income_cents).toBe(-5000);
+    expect(pnl.totals.ebitda_cents).toBe(0);
+  });
+
+  test('Codex R2: payroll and tax filing settlements clear 2290, 2200, 2210, 2100 and syncSubledgersToGl previews settlements & reversals', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    expect(classifyTaxFilingSettlement({ filing_type: 'dr15_sales_tax', title: 'FL DR-15' })?.kind).toBe('sales_tax');
+    expect(classifyTaxFilingSettlement({ filing_type: 'payroll_941_deposit', source_key: 'payroll:941_deposit:2026-11' })?.kind).toBe('tax_remit');
+    expect(classifyTaxFilingSettlement({ filing_type: 'payroll_rt6', title: 'FL RT-6' })?.kind).toBe('tax_remit');
+    expect(classifyTaxFilingSettlement({ filing_type: 'payroll_simple_deposit', title: 'SIMPLE IRA' })?.kind).toBe('benefits_remit');
+    expect(classifyTaxFilingSettlement({ filing_type: '1040es_quarterly', title: 'Federal Estimated Tax' })).toBeNull();
+
+    // Full payroll + sales tax cycle clears 2290, 2200, 2210, and 2100 to $0.00
+    const cycle = accumulateEntries(accounts, [
+      rules.buildInvoiceEntry({ invoiceId: 'inv-tax-1', issueDate: '2026-11-01', subtotalCents: 100000, taxCents: 7000, isCommercial: true }),
+      rules.buildSalesTaxRemittanceEntry({ sourceId: 'bt-filing:dr15-1', idempotencyKey: 'sales-tax-remit:bt:dr15-1', paymentDate: '2026-11-20', amountCents: 7000, periodLabel: 'Nov 2026' }),
+      rules.buildPayrollRunEntry({
+        runId: 'run-settle-1',
+        payDate: '2026-11-06',
+        weekLabel: 'Week of 2026-10-26',
+        fieldGrossCents: 200000,
+        fieldEmployerTaxCents: 15300,
+        employeeTaxWithheldCents: 35000,
+        employeeSimpleDeferralCents: 6000,
+        employerSimpleCents: 6000,
+        employerHsaCents: 5000,
+        netPayCents: 159000,
+      }),
+      rules.buildPayrollSettlementEntry({
+        sourceId: 'pp:pp-1',
+        idempotencyKey: 'payroll-settle:net_pay:pp:pp-1',
+        settlementDate: '2026-11-06',
+        kind: 'net_pay',
+        amountCents: 159000,
+        bankAccountCode: SYSTEM_CODES.CHECKING_PAYROLL,
+      }),
+      rules.buildPayrollSettlementEntry({
+        sourceId: 'bt-filing:941-1',
+        idempotencyKey: 'payroll-settle:tax_remit:bt:941-1',
+        settlementDate: '2026-11-15',
+        kind: 'tax_remit',
+        amountCents: 50300,
+        bankAccountCode: SYSTEM_CODES.CHECKING_PAYROLL,
+      }),
+      rules.buildPayrollSettlementEntry({
+        sourceId: 'bt-filing:simple-1',
+        idempotencyKey: 'payroll-settle:benefits_remit:bt:simple-1',
+        settlementDate: '2026-11-15',
+        kind: 'benefits_remit',
+        amountCents: 17000,
+        bankAccountCode: SYSTEM_CODES.CHECKING_PAYROLL,
+      }),
+    ]);
+    expect(bal(cycle, SYSTEM_CODES.NET_PAY_CLEARING)).toBe(0);
+    expect(bal(cycle, SYSTEM_CODES.PAYROLL_TAX_LIABILITIES)).toBe(0);
+    expect(bal(cycle, SYSTEM_CODES.PAYROLL_BENEFITS_PAYABLE)).toBe(0);
+    expect(bal(cycle, SYSTEM_CODES.SALES_TAX_PAYABLE)).toBe(0);
+
+    // Dry-run syncSubledgersToGl previews Mercury sent paychecks, bank-matched checks/filings, and returned Mercury reversals
+    const makeBuilder = (table) => {
+      const state = { whereObj: null, hasJoinTable: null };
+      const chain = {
+        leftJoin: () => chain,
+        join: (t) => { state.hasJoinTable = t; return chain; },
+        where: (a) => { if (a && typeof a === 'object') state.whereObj = a; return chain; },
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'payroll_payments as pp') {
+            return Promise.resolve([
+              { id: 'pp-sent-1', check_id: 'chk-1', amount_cents: 159000, posted_on: '2026-11-06', resolved_at: null, updated_at: '2026-11-06T16:00:00Z', employee_name: 'Tech One', bt_id: null },
+            ]);
+          }
+          if (table === 'gl_journal_entries as e' && state.hasJoinTable === 'payroll_payments as pp') {
+            return Promise.resolve([
+              { id: 'je-pp-ret-1', reversed_by_entry_id: null, entry_date: '2026-11-06', pp_state: 'returned', resolved_at: '2026-11-09T15:00:00Z', updated_at: '2026-11-09T15:00:00Z', resolution: 'R01 NSF' },
+            ]);
+          }
+          if (table === 'bank_transactions as bt' && state.hasJoinTable === 'payroll_checks as pc') {
+            return Promise.resolve([
+              { id: '00000000-0000-4000-8000-00000000b002', txn_date: '2026-11-08', amount: '850.00', description: 'Check #1042', account_label: 'Mercury', account_type: 'bank', plaid_account_id: null, matched_payroll_check_id: 'chk-2', employee_name: 'Tech Two' },
+            ]);
+          }
+          if (table === 'bank_transactions as bt' && state.hasJoinTable === 'tax_filing_calendar as tfc') {
+            return Promise.resolve([
+              { id: '00000000-0000-4000-8000-00000000b003', txn_date: '2026-11-18', amount: '70.00', description: 'FL DOR DR-15', account_label: 'Checking', account_type: 'bank', plaid_account_id: null, matched_tax_filing_id: 'tfc-1', filing_type: 'dr15_sales_tax', filing_title: 'FL Sales Tax Return (DR-15)', filing_period_label: 'Oct 2026', filing_source_key: null },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    const fakeConn = (table) => makeBuilder(table);
+    fakeConn.raw = (sql) => sql;
+    fakeConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+
+    const preview = await syncSubledgersToGl({ fromDate: '2026-11-01', toDate: '2026-11-30', dryRun: true, conn: fakeConn });
+    expect(preview.payroll_settlements.would_post).toBe(3);
+    expect(preview.payroll_settlements.would_reverse).toBe(1);
+    expect(preview.payroll_settlements.errors).toEqual([]);
   });
 });
