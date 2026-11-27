@@ -1010,6 +1010,12 @@ function buildFeasibleResult({ target, capacity, staffInsert = false, startMin, 
   };
 }
 
+function sequencersFor({ capacity, placement, groupedPending, pending, preserveExistingOrder }) {
+  return !preserveExistingOrder && (capacity || placement) && storedOrderStale(groupedPending, pending)
+    ? [currentOrder, clockOrder]
+    : [currentOrder];
+}
+
 /** Pure evaluation shared by the hint, live conflict check, and save probe. */
 function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMinutes, dayEndMin = 20 * 60,
   departureMin, returnByMin, bufferMinutes = 0, collectLegs, allowInsertion = true, place = false,
@@ -1034,6 +1040,10 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // opts.arrivalInsert): enforce the same INSERTION_MARGIN_MINUTES (15) as
   // placeMovedVisit so search and commit agree on every inserted stop.
   insertionMargin,
+  // Restrict candidate orders to insertions into the day's currentOrder so
+  // auto-dispatch only certifies orders that preserve all existing stops'
+  // relative order (keeping road-check's 3-leg detour exact).
+  preserveExistingOrder = false,
   shiftEndMin }) {
   if (!context) return unverified(null, 'this date');
   const { date, grouped } = context;
@@ -1083,7 +1093,7 @@ function evaluateArrivalPlacement(context, { windowStart, windowEnd, durationMin
   // staff route insertion a staff move follows the same rule, and so does
   // the visit where it is saved, so its own hour reads like every other hour
   // (nothing is written for it: only a move's result carries an order).
-  const sequencers = (capacity || placement) && storedOrderStale(groupedPending, pending) ? [currentOrder, clockOrder] : [currentOrder];
+  const sequencers = sequencersFor({ capacity, placement, groupedPending, pending, preserveExistingOrder });
   const rangeForStop = row => row.arrivalRange || effectiveWindowRange(row);
   const simulate = (order, usedLegs, extra = {}) => {
     const travel = context.travel || (capacity ? RouteOptimizer.createSchedulingTravel({ maxRequests: 0 }) : null);
@@ -1396,25 +1406,60 @@ function visitKeyMap(context) {
   return new Map(rows.filter(r => r && r.id != null && r.visit_id != null).map(r => [String(r.id), `v:${r.visit_id}`]));
 }
 
-function verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours }) {
-  if (!expectedNeighbours) return;
-  const self = String(serviceId);
-  const completedIds = completedIdSet(context);
-  const visitById = visitKeyMap(context);
-  const keyOf = (id) => (id == null ? null : (String(id) === self ? '__self__' : (visitById.get(String(id)) || String(id))));
+function baselinePhysicalKeys(context, self, visitById, completedIds) {
+  const rows = (context && context.rows) || [];
+  const techId = context && context.target && context.target.technician_id;
+  const capacity = capacityEnabled() || Boolean(context && context.preserveCapacity);
+  const ownPending = rows.filter(r => r && r.id != null && String(r.id) !== self
+    && !completedIds.has(String(r.id))
+    && (techId == null || String(r.technician_id) === String(techId))
+    && (capacity || r.reservation_expires_at == null));
+  const seen = new Set();
+  const keys = [];
+  for (const r of currentOrder(ownPending)) {
+    const k = visitById.get(String(r.id)) || String(r.id);
+    if (!seen.has(k)) {
+      seen.add(k);
+      keys.push(k);
+    }
+  }
+  return keys;
+}
+
+function collapseOrderKeys(order, self, completedIds, keyOf) {
   const keys = [];
   for (const id of (order || [self])) {
     if (String(id) !== self && completedIds.has(String(id))) continue;
     const k = keyOf(id);
     if (k && keys[keys.length - 1] !== k) keys.push(k);
   }
+  return keys;
+}
+
+function keysEqual(a, b) {
+  return a.length === b.length && a.every((k, i) => k === b[i]);
+}
+
+function verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours }) {
+  if (!expectedNeighbours) return;
+  const self = String(serviceId);
+  const completedIds = completedIdSet(context);
+  const visitById = visitKeyMap(context);
+  const keyOf = (id) => (id == null ? null : (String(id) === self ? '__self__' : (visitById.get(String(id)) || String(id))));
+  const label = (k) => k || 'home';
+  const keys = collapseOrderKeys(order, self, completedIds, keyOf);
   const at = keys.indexOf('__self__');
   const actualPrev = at > 0 ? keys[at - 1] : null;
   const actualNext = at >= 0 && at < keys.length - 1 ? keys[at + 1] : null;
   const expectedPrev = keyOf(expectedNeighbours.prevId);
   const expectedNext = keyOf(expectedNeighbours.nextId);
   if (actualPrev !== expectedPrev || actualNext !== expectedNext) {
-    throw routeOrderChangedError(`Expected neighbors (${expectedPrev || 'home'}, ${expectedNext || 'home'}), got (${actualPrev || 'home'}, ${actualNext || 'home'})`);
+    throw routeOrderChangedError(`Expected neighbors (${label(expectedPrev)}, ${label(expectedNext)}), got (${label(actualPrev)}, ${label(actualNext)})`);
+  }
+  const otherKeys = keys.filter(k => k !== '__self__');
+  const baselineKeys = baselinePhysicalKeys(context, self, visitById, completedIds);
+  if (!keysEqual(otherKeys, baselineKeys)) {
+    throw routeOrderChangedError('Committed route reordered existing stops relative to the locked baseline');
   }
 }
 
@@ -1481,10 +1526,11 @@ async function evaluatePlacementInSavepoint(sp, { context, row, date, autoDispat
   if (autoDispatchPlace === true) {
     // Mirror find-time.js findCapacitySlots (arrivalSearch + arrivalInsert):
     // same capacity blockers/grouping, planning minutes, van departure,
-    // 15-minute insertion margin, and technician shift-end check.
+    // 15-minute insertion margin, preserved existing-stop order, and shift-end check.
     const shiftEndMin = await pickedShiftEnd(context, { conn: sp, date, windowStart, windowEnd });
     return evaluateArrivalPlacement({ ...context, insertTarget: true }, {
       windowStart, windowEnd, bufferMinutes: 0, allowInsertion: true, insertionMargin: true,
+      preserveExistingOrder: true,
       ...(shiftEndMin != null ? { shiftEndMin } : {}),
     });
   }
@@ -1546,8 +1592,9 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, au
     verifyPlacedNeighbours([serviceId], { context, serviceId, expectedNeighbours });
     return clearLoneRouteOrder(sp, { context, serviceId, date, technicianId: row.technician_id });
   }
+  const plannedOrder = fit.routeOrder.map(id => (id === '__candidate__' ? serviceId : id));
+  verifyPlacedNeighbours(plannedOrder, { context, serviceId, expectedNeighbours });
   const order = await writeRouteOrder(sp, fit, serviceId);
-  verifyPlacedNeighbours(order, { context, serviceId, expectedNeighbours });
   await require('../audit-log').recordAuditEvent({ actor_type: 'system', action: 'schedule.route_order_placed',
     resource_type: 'scheduled_service', resource_id: serviceId, critical: true, trx: sp,
     metadata: { policy: 'staff_route_insertion_2026_10_25', route_order: order, ...(source ? { source } : {}) } });

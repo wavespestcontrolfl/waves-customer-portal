@@ -222,6 +222,14 @@ describe('confirmOnRoads', () => {
     });
     expect(applyOut).toBe(ranked);
     expect(askedApply).toHaveLength(0);
+    // Non-overlap conflicts (closed day / blackout) never consume overlap projections; skip road calls.
+    const askedClosed = [];
+    const closedConflict = { ...current, conflict: { kind: 'closed_day' } };
+    const closedOut = await confirmOnRoads(ranked, {
+      service, current: closedConflict, config: { ...config, mode: 'dry_run' }, travel: travelWith({ now: [20, 20, 10], after: [10, 10, 10] }, askedClosed),
+    });
+    expect(closedOut).toBe(ranked);
+    expect(askedClosed).toHaveLength(0);
     // Fallback from a failed minutes-rule projection to a score-bar slot clears stale minutes metadata.
     const minutesConfig = { ...config, minutesRuleSavingMinutes: 10 };
     const fallbackRanked = {

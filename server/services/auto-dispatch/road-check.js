@@ -162,7 +162,8 @@ function projectionFloor(row, floor, ranked, ctx) {
 }
 
 async function withProjectionChecked(ranked, ctx) {
-  if (!ranked.normalBest || ctx.config.mode === 'apply') return ranked;
+  const isOverlap = Boolean(ctx.current && ctx.current.conflict && ctx.current.conflict.kind === 'overlap');
+  if (!ranked.normalBest || !isOverlap || ctx.config.mode === 'apply') return ranked;
   const moveRules = require('./move-rules');
   const floor = ctx.config.minDayMoveDriveSavingMinutes || 0;
   const toCheck = slotsToMeasure(projectionRows(ranked), moveRules.isSundayDate);

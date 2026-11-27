@@ -91,6 +91,51 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
     expect(() => verifyPlacedNeighbours(['svc'], {
       context: { rows: [] }, serviceId: 'svc', expectedNeighbours: { prevId: null, nextId: null },
     })).not.toThrow();
+    // Reordering stops outside the moved visit's immediate neighbors still throws ROUTE_ORDER_CHANGED.
+    const fourStops = {
+      target: { technician_id: 't1' },
+      rows: [
+        { id: 's1', technician_id: 't1', route_order: 1, window_start: '08:00' },
+        { id: 's2', technician_id: 't1', route_order: 2, window_start: '10:00' },
+        { id: 's3', technician_id: 't1', route_order: 3, window_start: '12:00' },
+        { id: 's4', technician_id: 't1', route_order: 4, window_start: '14:00' },
+      ],
+    };
+    expect(() => verifyPlacedNeighbours(['s1', 'svc', 's2', 's4', 's3'], {
+      context: fourStops, serviceId: 'svc', expectedNeighbours: { prevId: 's1', nextId: 's2' },
+    })).toThrow(expect.objectContaining({ code: 'ROUTE_ORDER_CHANGED', statusCode: 409 }));
+  });
+
+  test('evaluateArrivalPlacement with preserveExistingOrder keeps feasible currentOrder insertion on stale numbered days', () => {
+    const { evaluateArrivalPlacement } = require('../services/scheduling/arrival-route');
+    const MID_NORTH = { lat: 27.48, lng: -82.45 };
+    // Stored order (s1@09:30 -> s2@09:00) is stale (triggers clockOrder rescue by default):
+    // clockOrder (HQ -> MID_NORTH -> NORTH -> NEAR_NORTH -> HQ) has strictly less drive than
+    // currentOrder (HQ -> NORTH -> MID_NORTH -> NEAR_NORTH -> HQ), while both keep every 2h window.
+    const ctx = {
+      date: '2026-12-10',
+      now: new Date('2026-11-27T09:00:00-05:00'),
+      preserveCapacity: true,
+      prospective: true,
+      target: { id: '__candidate__', lat: NEAR_NORTH.lat, lng: NEAR_NORTH.lng, estimated_duration_minutes: 30, technician_id: 't1' },
+      rows: [
+        { id: 's1', technician_id: 't1', status: 'pending', lat: NORTH.lat, lng: NORTH.lng, window_start: '09:30:00', window_end: '10:00:00', estimated_duration_minutes: 30, route_order: 1 },
+        { id: 's2', technician_id: 't1', status: 'pending', lat: MID_NORTH.lat, lng: MID_NORTH.lng, window_start: '09:00:00', window_end: '09:30:00', estimated_duration_minutes: 30, route_order: 2 },
+      ],
+    };
+    const defaultFit = evaluateArrivalPlacement(ctx, {
+      windowStart: '11:00', windowEnd: '11:30', durationMinutes: 30, bufferMinutes: 0,
+      allowInsertion: true, insertionMargin: true,
+    });
+    expect(defaultFit.feasible).toBe(true);
+    expect(defaultFit.routeOrder.filter((id) => id !== '__candidate__')).toEqual(['s2', 's1']);
+    const preservedFit = evaluateArrivalPlacement(ctx, {
+      windowStart: '11:00', windowEnd: '11:30', durationMinutes: 30, bufferMinutes: 0,
+      allowInsertion: true, insertionMargin: true, preserveExistingOrder: true,
+    });
+    expect(preservedFit.feasible).toBe(true);
+    // Preserves stored s1 -> s2 relative order instead of flipping to clockOrder s2 -> s1.
+    expect(preservedFit.routeOrder.filter((id) => id !== '__candidate__')).toEqual(['s1', 's2']);
   });
 
   test('scoreOnSharedModel keeps stored route_order for same (date, tech, start) slot so a stale day never triggers a no-op move', () => {

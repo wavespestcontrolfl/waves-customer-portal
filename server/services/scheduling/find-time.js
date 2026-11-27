@@ -319,7 +319,7 @@ function dayIncompatibleWithInsertion(context) {
 function insertionOptionsFor(opts, context) {
   if (opts.capacityPlacement === true) return { allowInsertion: true };
   if (opts.arrivalSearch === true && opts.arrivalInsert === true && !dayIncompatibleWithInsertion(context)) {
-    return { allowInsertion: true, insertionMargin: true };
+    return { allowInsertion: true, insertionMargin: true, preserveExistingOrder: true };
   }
   return { allowInsertion: false };
 }
