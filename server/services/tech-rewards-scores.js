@@ -54,6 +54,7 @@ const CALLBACK_RATE_AT_ZERO = 10;
 const PART_KEYS = Object.freeze(['onTime', 'audit', 'callbacks', 'truck', 'ownerRating']);
 const CUT_LINE_KEYS = Object.freeze(['top', 'mid', 'low']);
 const SETTINGS_LOCK_KEY = 'tech-reward-settings';
+const BASELINE_SETTINGS_DATE = '1970-01-01';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 class TechRewardsScoresError extends Error {
@@ -193,7 +194,18 @@ async function saveSettings(input, actor = null, conn = db) {
     if (last && effectiveFrom < last.effective_from) {
       fail('INVALID_EFFECTIVE_FROM', `effectiveFrom must not be before ${last.effective_from}, the date of version ${last.version}`);
     }
-    const version = last ? last.version + 1 : 1;
+    let version = last ? last.version + 1 : 1;
+    // When the owner saves the first stored settings version from the UI (typically effective today),
+    // seed version 1 with the calculator defaults as a baseline so earlier seasons still resolve
+    // instead of throwing NO_SETTINGS_IN_FORCE.
+    if (!last && input.preserveBaseline && effectiveFrom > BASELINE_SETTINGS_DATE) {
+      await trx.raw(
+        `INSERT INTO tech_reward_settings (version, weights, cut_lines, effective_from, created_by)
+         VALUES (?, ?::jsonb, ?::jsonb, ?::date, ?)`,
+        [1, JSON.stringify(DEFAULT_WEIGHTS), JSON.stringify(DEFAULT_CUT_LINES), BASELINE_SETTINGS_DATE, actor],
+      );
+      version = 2;
+    }
     const inserted = (await trx.raw(
       `INSERT INTO tech_reward_settings (version, weights, cut_lines, effective_from, created_by)
        VALUES (?, ?::jsonb, ?::jsonb, ?::date, ?)

@@ -40,6 +40,10 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(new Set());
   const [expanded, setExpanded] = useState(null);
+  const expandedRef = useRef(expanded);
+  expandedRef.current = expanded;
+  const weekStartRef = useRef(weekStart);
+  weekStartRef.current = weekStart;
   const [detail, setDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
@@ -138,6 +142,15 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
     );
   };
 
+  const refreshAfterMutation = (actionWeek, techId = null) => {
+    if (weekStartRef.current !== actionWeek) return undefined;
+    load();
+    if (techId && expandedRef.current === techId) {
+      return refreshDetail(techId);
+    }
+    return undefined;
+  };
+
   const approveOne = async (techId) => {
     if (busyTechId || bulkBusy) return;
     setBusyTechId(techId);
@@ -150,8 +163,7 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
         body: { technicianId: techId, weekStart, reviewToken },
       });
       showToast("Week approved");
-      load();
-      if (expanded === techId) refreshDetail(techId);
+      refreshAfterMutation(weekStart, techId);
     } catch (e) {
       showToast(`Approve failed: ${errMessage(e)}`);
     } finally {
@@ -185,7 +197,7 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
         ? `, ${r.failed.length} failed (${r.failed.map((f) => f.error).filter(Boolean).slice(0, 2).join("; ")})`
         : "";
       showToast(`Approved ${r.approved}${failedSummary}`, { error: r.approved === 0 && (r.failed?.length || 0) > 0 });
-      load();
+      refreshAfterMutation(weekStart);
     } catch (e) {
       showToast(`Bulk approve failed: ${errMessage(e)}`);
     } finally {
@@ -207,8 +219,7 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
         body: { technicianId: techId, weekStart, reason: reason.trim(), reviewToken },
       });
       showToast("Week unlocked");
-      load();
-      if (expanded === techId) refreshDetail(techId);
+      refreshAfterMutation(weekStart, techId);
     } catch (e) {
       showToast(`Unlock failed: ${errMessage(e)}`);
     } finally {
@@ -219,14 +230,14 @@ export function ApprovalsTab({ showToast, weekStartParam = null }) {
   const disputeEntry = async (entryId) => {
     const reason = prompt("Reason for disputing this entry?");
     if (!reason || !reason.trim()) return;
+    const targetTechId = expandedRef.current;
     try {
       await adminFetch("/admin/timesheets/dispute", {
         method: "POST",
         body: { entryId, reason: reason.trim() },
       });
       showToast("Entry disputed");
-      load();
-      if (expanded) await refreshDetail(expanded);
+      await refreshAfterMutation(weekStart, targetTechId);
     } catch (e) {
       showToast(`Dispute failed: ${errMessage(e)}`);
     }

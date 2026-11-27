@@ -401,7 +401,7 @@ postgres('payroll minimum paid week', () => {
     // An explicit fromWeek applies even when the submitted hours match the current technician-level minimum.
     expect((await put({ hours: '32' })).status).toBe(200);
     expect((await put({ hours: '32', fromWeek: W1 })).status).toBe(200);
-    const backdated = (await draft(W1)).body.run;
+    const backdated = (await api('POST', `/runs/${late.id}/recompute`)).body.run;
     expect(byName(backdated, 'Sample Alpha')).toMatchObject({ regularHours: '30.00', minimumWeekHours: '2.00' });
   });
 

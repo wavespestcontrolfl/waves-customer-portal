@@ -193,6 +193,11 @@ function GoogleSigninField({ enabled, tech, value, onChange }) {
 // The supply store goes in the save only when the admin changed it (absent = unchanged on the server).
 const supplyStorePatch = (value, loaded) => ((value ?? "") === (loaded ?? "") ? {} : { supplyStore: value });
 
+const visitWarningText = (list, tail) =>
+  list?.length
+    ? `${list.length} upcoming visit${list.length === 1 ? "" : "s"} ${tail}`
+    : "";
+
 export function TeamTab({ showToast, staffProfile, payrollAvailable = false, onOpenPayroll = null }) {
   const [techs, setTechs] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -353,66 +358,61 @@ export function TeamTab({ showToast, staffProfile, payrollAvailable = false, onO
 
   const handleSave = async () => {
     if (saveInFlightRef.current || !form.name.trim()) return;
-    const validationError =
-      (workDaysEnabled && form.workDays.length === 0 && "Pick at least one work day") ||
-      (shiftHoursEnabled && shiftHoursProblem(form));
-    if (validationError) {
-      showToast(validationError, { error: true });
+    if (workDaysEnabled && !form.workDays.length) {
+      showToast("Pick at least one work day", { error: true });
+      return;
+    }
+    const shiftProblem = shiftHoursEnabled ? shiftHoursProblem(form) : "";
+    if (shiftProblem) {
+      showToast(shiftProblem, { error: true });
       return;
     }
     saveInFlightRef.current = true;
     setSaving(true);
     try {
-      const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
+      const {
+        startMode: _startMode, startText: _startText, startPoint: _startPoint,
+        supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest
+      } = form;
+      const basePayload = { ...rest, ...buildWorkDaysPayload(workDaysEnabled, workDays) };
       let targetId = editingId;
       let warningNote = "";
+      let savedLabel = "Technician updated";
       if (editingId) {
-        const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
+        const shiftPayload = shiftLoaded && shiftLoaded.start === shiftStart && shiftLoaded.end === shiftEnd
+          ? {}
+          : buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd);
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
           body: JSON.stringify({
-            ...rest,
-            ...buildWorkDaysPayload(workDaysEnabled, workDays),
-            ...(shiftChanged ? buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd) : {}),
+            ...basePayload,
+            ...shiftPayload,
             startPoint: buildStartPointPayload(form),
             ...supplyStorePatch(supplyStore, storeLoaded),
           }),
         });
-        // Leaving the dispatch pool through Edit (Employment → Inactive or
-        // Prospective, or field eligibility removed) surfaces the same
-        // remaining-assignment notice as the Deactivate button: future work
-        // stays on the schedule for manual reassignment.
-        const pending = res?.futureAssignedVisits || [];
-        // New shift hours (GATE_TECH_SHIFT_HOURS): the visits those hours do not hold stay where they are.
-        const outside = res?.outsideShiftVisits || [];
-        const stillThere = pending.length
-          ? `${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
-          : outside.length
-            ? `${outside.length} upcoming visit${outside.length === 1 ? "" : "s"} outside the new shift hours; move or reassign on the Schedule`
-            : "";
-        warningNote = stillThere;
-        if (!(await saveGoogleSignin(editingId, warningNote)).ok) {
-          load();
-          return;
-        }
-        showToast(stillThere ? `Technician updated — ${stillThere}` : "Technician updated");
+        // Leaving the dispatch pool through Edit or changing shift hours keeps
+        // future visits on the schedule for manual reassignment.
+        warningNote =
+          visitWarningText(res.futureAssignedVisits, "still assigned; reassign on the Schedule") ||
+          visitWarningText(res.outsideShiftVisits, "outside the new shift hours; move or reassign on the Schedule");
       } else {
         const created = await adminFetch("/admin/timetracking/technicians", {
           method: "POST",
           body: JSON.stringify({
-            ...rest,
-            ...buildWorkDaysPayload(workDaysEnabled, workDays),
+            ...basePayload,
             ...buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd),
           }),
         });
         targetId = created.technician.id;
-        if (!(await saveGoogleSignin(targetId)).ok) {
-          setEditingId(targetId);
-          load();
-          return;
-        }
-        showToast("Technician added");
+        savedLabel = "Technician added";
       }
+      if (!(await saveGoogleSignin(targetId, warningNote)).ok) {
+        setEditingId(targetId);
+        load();
+        return;
+      }
+      showToast([savedLabel, warningNote].filter(Boolean).join(" — "));
       setShowAdd(false);
       setEditingId(null);
       setForm(EMPTY_TECH_FORM);
@@ -448,14 +448,13 @@ export function TeamTab({ showToast, staffProfile, payrollAvailable = false, onO
       const res = await adminFetch(`/admin/timetracking/technicians/${tech.id}`, {
         method: "DELETE",
       });
-      const pending = (res && res.futureAssignedVisits) || [];
       // Future work is left on the schedule for manual reassignment — the
       // server never cancels or rewrites visits on deactivation.
-      showToast(
-        pending.length
-          ? `${tech.name} deactivated — ${pending.length} upcoming visit${pending.length === 1 ? "" : "s"} still assigned; reassign on the Schedule`
-          : `${tech.name} deactivated`,
+      const warning = visitWarningText(
+        res?.futureAssignedVisits,
+        "still assigned; reassign on the Schedule",
       );
+      showToast(warning ? `${tech.name} deactivated — ${warning}` : `${tech.name} deactivated`);
       setDeactivateTech(null);
       load();
     } catch (e) {

@@ -676,7 +676,6 @@ async function adminEditEntry(entryId, {
   const { normalizedReason, parsedClockIn, parsedClockOut } = validateAdminEditInput({
     clock_in, clock_out, entry_type, edit_reason,
   });
-  const expectedUpdatedAtMs = expected_updated_at ? new Date(expected_updated_at).getTime() : null;
   const actorId = edited_by || null;
 
   const updated = await db.transaction(async (trx) => {
@@ -698,11 +697,12 @@ async function adminEditEntry(entryId, {
       requestedWorkDate,
     ], finalType === 'shift' ? requestedWorkDate : null);
 
-    if (
-      expected_updated_at !== undefined
-      && (entry.updated_at ? new Date(entry.updated_at).getTime() : null) !== expectedUpdatedAtMs
-    ) {
-      throw staffTimeHttpError(409, 'Entry changed since it was read; reload before editing.');
+    if (expected_updated_at !== undefined) {
+      const observed = expected_updated_at ? new Date(expected_updated_at).getTime() : null;
+      const current = entry.updated_at ? new Date(entry.updated_at).getTime() : null;
+      if (observed !== current) {
+        throw staffTimeHttpError(409, 'Entry changed since it was read; reload before editing.');
+      }
     }
 
     const { updates, finalIn, finalOut, timeChanged } = buildAdminEditUpdates(entry, {

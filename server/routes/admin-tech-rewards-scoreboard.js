@@ -70,6 +70,7 @@ router.post('/settings', requireFullAccess, async (req, res) => {
       weights: req.body?.weights,
       cutLines: req.body?.cutLines,
       effectiveFrom: req.body?.effectiveFrom,
+      preserveBaseline: true,
     }, req.technicianId);
     res.status(201).json({ settings });
   } catch (err) { fail(res, err, 'save score settings'); }

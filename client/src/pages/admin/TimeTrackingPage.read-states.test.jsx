@@ -217,6 +217,52 @@ describe("approvals week switch", () => {
     expect(screen.getByRole("button", { name: "Details" })).toBeInTheDocument();
   });
 
+  it("does not reopen technician A or cancel technician B's detail when approving A finishes after switching to B", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-28T15:00:00Z"));
+    let finishApprove;
+    const detailCalls = [];
+    const techs = [
+      { ...week("Tech Alpha", "tok-a"), technician_id: "tech-a" },
+      { ...week("Tech Beta", "tok-b"), technician_id: "tech-b" },
+    ];
+    vi.stubGlobal("fetch", vi.fn(async (url, opts) => {
+      const u = new URL(String(url), "http://localhost");
+      if (u.pathname.endsWith("/approve") && opts?.method === "POST") {
+        return new Promise((resolve) => { finishApprove = resolve; });
+      }
+      if (u.pathname.endsWith("/week-detail")) {
+        const tid = u.searchParams.get("technicianId");
+        detailCalls.push(tid);
+        return json({
+          dailies: [{ id: `d-${tid}`, work_date: tid === "tech-a" ? "2026-10-19" : "2026-10-20", total_shift_minutes: 480, overtime_minutes: 0 }],
+          entries: [],
+        });
+      }
+      return json({ techs });
+    }));
+    render(<ApprovalsTab showToast={() => {}} />);
+
+    await screen.findByText("Tech Alpha");
+    const detailButtons = screen.getAllByRole("button", { name: "Details" });
+    fireEvent.click(detailButtons[0]);
+    expect(await screen.findByText("2026-10-19")).toBeInTheDocument();
+
+    // Start approving Tech Alpha, then expand Tech Beta before approval resolves.
+    fireEvent.click(screen.getAllByRole("button", { name: "Approve" })[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    expect(await screen.findByText("2026-10-20")).toBeInTheDocument();
+    expect(detailCalls).toEqual(["tech-a", "tech-b"]);
+
+    await act(async () => {
+      finishApprove(json({ ok: true }));
+    });
+    // Tech Beta stays open and Tech Alpha's detail is NOT re-fetched.
+    expect(screen.getByText("2026-10-20")).toBeInTheDocument();
+    expect(screen.queryByText("2026-10-19")).not.toBeInTheDocument();
+    expect(detailCalls).toEqual(["tech-a", "tech-b"]);
+  });
+
   // The "timesheets wait" bell links to ?tab=approvals&weekStart=<Monday>: that week opens, however old.
   function stubPending() {
     const asked = [];
