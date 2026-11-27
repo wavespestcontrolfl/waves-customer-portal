@@ -189,10 +189,10 @@ class AvailabilityEngine {
       // exact-case IN misses zone rows (the estimate generator lowercases
       // both sides; match it).
       const zoneCitiesLower = zoneCities.map((city) => String(city || '').toLowerCase());
-      const scheduledInZone = await db('scheduled_services')
+      const scheduledInZone = await require('./visit-hold').excludeHeld(db('scheduled_services')
         .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
         .where('scheduled_services.scheduled_date', dateStr)
-        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+        .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
         .whereNotNull('scheduled_services.window_start')
         .where((q) => {
           q.whereNull('scheduled_services.reservation_expires_at')
@@ -550,10 +550,10 @@ class AvailabilityEngine {
     // At confirmation a staff-booked visit occupies its zone even when its
     // original hold timestamp has lapsed since the customer loaded the picker.
     const occupied = [];
-    const scheduledInZone = await conn('scheduled_services')
+    const scheduledInZone = await require('./visit-hold').excludeHeld(conn('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .where('scheduled_services.scheduled_date', dateStr)
-      .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+      .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
       .whereNotNull('scheduled_services.window_start')
       .where(bookedVisitOrLiveHold)
       .modify((q) => {

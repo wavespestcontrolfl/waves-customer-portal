@@ -108,7 +108,7 @@ function makeCapabilityFn(map) {
 }
 
 function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
-  return db('scheduled_services')
+  return require('../visit-hold').excludeHeld(db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     // Every visit but a booster-month row (is_recurring=false WITH a parent;
     // waveguard-existing-services.js): plan visits, a plan's first visit and
@@ -120,7 +120,7 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
     // Archiving a customer sets customers.deleted_at without clearing `active`,
     // so filter it here like the reminder/billing crons do.
     .whereNull('customers.deleted_at')
-    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereIn('scheduled_services.status', ['pending', 'confirmed']), 'scheduled_services')
     .where(function () {
       this.where('scheduled_services.scheduled_date', '>', lockBoundary)
         .orWhere(function () {
@@ -349,10 +349,10 @@ async function unloadedLiveVisitIds(run) {
   if (!run.lookaheadEnd || !run.today) return [];
   const loaded = new Set((run.loaded || []).map((s) => String(s.id)));
   try {
-    const rows = await db('scheduled_services')
+    const rows = await require('../visit-hold').excludeHeld(db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereNull('customers.deleted_at')
-      .whereIn('scheduled_services.status', [...VALID_STATUSES])
+      .whereIn('scheduled_services.status', [...VALID_STATUSES]), 'scheduled_services')
       .whereNotNull('scheduled_services.window_start')
       .where('scheduled_services.scheduled_date', '>', run.today)
       .where('scheduled_services.scheduled_date', '<=', run.lookaheadEnd)

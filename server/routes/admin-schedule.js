@@ -450,6 +450,9 @@ const { isTechnicianRequest, technicianCurrentVisitFilter, technicianLiveVisitFi
 // close (same TECH_ACCESS_WINDOW_DAYS / dead-status contract).
 function scopeToAssignedTech(req, q) {
   technicianCurrentVisitFilter(req, q);
+  // GATE_VISIT_HOLD: a held visit is off the day, week, month and list feeds and the next-visit read (the office
+  // reaches it through the On hold list). Gate off: no clause.
+  require('../services/visit-hold').excludeHeld(q, 'scheduled_services');
 }
 
 // Column guard cache for the discount/provenance projection (GET /week,
@@ -6712,6 +6715,50 @@ router.post('/held-visits/:callLogId/dismiss', requireAdmin, async (req, res) =>
   }
 });
 
+// ─── Visit on hold, "customer will call" (GATE_VISIT_HOLD, owner 2026-11-27) ─────────────────────────────────
+// Gate off: all three answer 404 {enabled:false} before any read. The office puts any visit on hold; a technician only
+// his OWN live visit (the same ownership predicate the other tech visit writes use, 404 on a miss). Release and the
+// office list are admin only. Nothing here texts or emails a customer (services/visit-hold.js).
+const visitHoldService = require('../services/visit-hold');
+function visitHoldOff(res) {
+  return res.status(404).json({ enabled: false, error: 'Visit hold is not enabled' });
+}
+
+// GET /api/admin/schedule/on-hold — every held visit, oldest hold first (the office "On hold" list).
+router.get('/on-hold', requireAdmin, async (req, res, next) => {
+  try {
+    if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
+    return res.json({ enabled: true, visits: await visitHoldService.listHeldVisits({ conn: db }) });
+  } catch (err) { next(err); }
+});
+
+// POST /api/admin/schedule/:id/hold { note? } — put one visit on hold.
+router.post('/:id/hold', async (req, res, next) => {
+  try {
+    if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
+    // Ownership is checked inside the writer, on the locked row (scopeReq), so a reassignment cannot slip past it.
+    const result = await visitHoldService.putVisitOnHold({
+      visitId: req.params.id, note: req.body?.note, heldBy: req.technicianId || null, scopeReq: req, conn: db,
+    });
+    return res.json({ success: true, changed: result.changed, heldAt: result.heldAt });
+  } catch (err) {
+    if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
+// POST /api/admin/schedule/:id/hold/release — take one visit off hold (office only).
+router.post('/:id/hold/release', requireAdmin, async (req, res, next) => {
+  try {
+    if (!visitHoldService.visitHoldLive()) return visitHoldOff(res);
+    const result = await visitHoldService.releaseVisitHold({ visitId: req.params.id, conn: db });
+    return res.json({ success: true, changed: result.changed });
+  } catch (err) {
+    if (err.status && err.code) return res.status(err.status).json({ error: err.message, code: err.code });
+    next(err);
+  }
+});
+
 // GET /api/admin/schedule — day view (board + dispatch)
 // GATE_NEW_CALLER_BOOKING: a visit booked by address before its customer
 // exists reads "New caller" and offers Link customer on the visit sheet (PUT
@@ -7488,6 +7535,8 @@ router.get('/', async (req, res, next) => {
       visitCloseout: legacyCloseoutEnabled,
       // GATE_NEW_CALLER_BOOKING: New Appointment's Book saves a new caller's visit by address, no customer yet.
       newCallerBooking: isEnabled('newCallerBooking'),
+      // GATE_VISIT_HOLD: both apps show the hold action only when this is true.
+      visitHold: visitHoldService.visitHoldLive(),
       techSummary: Object.values(byTech),
       unassigned,
       technicians,
@@ -12824,6 +12873,8 @@ async function planCollectiveEditDateMove(req) {
       // delta), so this call always lands as a series move.
       const result = await SmartRebooker.reschedule(row.id, target, win, 'admin', 'admin', {
         allowLive: true,
+        // GATE_VISIT_HOLD: an office edit of a held visit's date ends the hold (the move is the person's choice).
+        ...(visitHoldService.visitHoldLive() && req.techRole === 'admin' ? { releaseHold: true } : {}),
         qualityDates,
         adminWindowRules: true,
         overlapAdvisory: true,

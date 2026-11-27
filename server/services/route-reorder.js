@@ -1104,10 +1104,10 @@ async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdere
       await assertStartPointUnchanged(trx, techId, home,
         () => Object.assign(new Error('technician start point changed during the run'), { code: 'START_POINT_CHANGED' }));
     }
-    const live = await trx('scheduled_services')
+    const live = await require('./visit-hold').excludeHeld(trx('scheduled_services')
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)
-      .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES)
+      .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES), 'scheduled_services')
       .whereRaw(LIVE_HOLD_SQL)
       .forUpdate('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')

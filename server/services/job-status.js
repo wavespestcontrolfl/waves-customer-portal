@@ -487,9 +487,17 @@ async function transitionJobStatus({
     // (or fromStatus is wrong). Either way, we abort — the audit log
     // would otherwise record a transition that didn't happen on the
     // source table.
-    const updated = await t('scheduled_services')
-      .where({ id: jobId, status: fromStatus })
-      .update({ status: toStatus, updated_at: t.fn.now() });
+    // GATE_VISIT_HOLD (owner 2026-11-27): a visit on hold is not worked, so the update itself fences held_at: a hold that
+    // commits between any earlier read and this write still stops the transition. Cancel and skip stay open.
+    const holdFence = ['en_route', 'on_site', 'completed'].includes(String(toStatus || '')) && require('./visit-hold').visitHoldLive();
+    const statusUpdate = t('scheduled_services').where({ id: jobId, status: fromStatus });
+    if (holdFence) statusUpdate.whereNull('held_at');
+    const updated = await statusUpdate.update({ status: toStatus, updated_at: t.fn.now() });
+    if (updated === 0 && holdFence && await t('scheduled_services').where({ id: jobId }).whereNotNull('held_at').first('id')) {
+      throw Object.assign(new Error('That visit is on hold: the customer will call. Release the hold first.'), {
+        statusCode: 409, status: 409, code: 'VISIT_ON_HOLD', isOperational: true,
+      });
+    }
     if (updated === 0) {
       throw new Error(
         `transitionJobStatus: ${jobId} not in state ${fromStatus} (racing transition or stale fromStatus)`

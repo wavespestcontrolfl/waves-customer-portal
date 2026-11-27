@@ -27,6 +27,7 @@ import { TIMEZONE } from '../../lib/timezone';
 import { confirmCardHoldFeeChoice } from '../../lib/cardHoldCancel';
 import CancelFeeNotice from './CancelFeeNotice';
 import SkipVisitOption from './SkipVisitOption';
+import VisitHoldControls, { OnHoldChip } from './VisitHoldControls';
 import MobileCustomerDetailSheet from './MobileCustomerDetailSheet';
 import RainOutSheet from './RainOutSheet';
 import { formatTimeWindow } from './timeWindow';
@@ -144,6 +145,10 @@ export default function MobileAppointmentDetailSheet({
   // After Wrong code or Add gate code, refetch the
   // day and resolve to this visit's fresh row (or null) for the Access section.
   onAccessChanged,
+  // GATE_VISIT_HOLD (the day feed's visitHold): "Customer will call - put on hold" and, for the office, Release hold.
+  // onHoldChanged refetches the route after either one.
+  visitHold = false,
+  onHoldChanged,
 }) {
   const [note, setNote] = useState(service?.notes || '');
   const [showOutcome, setShowOutcome] = useState(false);
@@ -941,6 +946,7 @@ export default function MobileAppointmentDetailSheet({
               {timeWindow}{hrs ? ` (${hrs})` : ''}
             </div>
           )}
+          {service.heldAt && <div style={{ marginTop: 6 }}><OnHoldChip service={service} /></div>}
           {/* What the customer was told (the feed's `told`). */}
           {toldBadgeText(service.told, service.scheduledDate) && (
             <div style={{ marginTop: 6 }}>
@@ -1116,6 +1122,12 @@ export default function MobileAppointmentDetailSheet({
               )}
             </>
           )}
+          <VisitHoldControls
+            service={service}
+            enabled={visitHold}
+            adminActions={adminActions}
+            onChanged={(svc) => { onHoldChanged?.(svc); onClose?.(); }}
+          />
           {canRainOut && (
             <button
               type="button"

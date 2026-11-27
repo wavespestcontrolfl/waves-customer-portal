@@ -1583,10 +1583,11 @@ async function loadNextVisitSweep(conn, serviceId) {
     .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
     .whereNotIn('status', ['completed', 'cancelled'])
     .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id');
+    .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'date_exception', 'date_exception_cadence_date', 'auto_dispatch_locked', 'auto_dispatch_excluded', 'visit_id', ...require('./visit-hold').heldColumn());
   const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
   if (droppedIdx === -1) return null;
-  const swept = siblings.slice(droppedIdx);
+  // GATE_VISIT_HOLD: a held sibling is counted, never the next visit the move shifts (the writer classifies it the same way).
+  const swept = require('./visit-hold').markHeldSiblings(siblings.slice(droppedIdx), serviceId);
   const nextIdx = swept.findIndex((row, idx) => idx > 0 && RESCHEDULABLE_STATUSES.has(row.status));
   if (nextIdx === -1) return null;
   return { service, parent, swept, nextIdx, next: swept[nextIdx] };
@@ -1910,8 +1911,13 @@ class SmartRebooker {
   }
 
   async reschedule(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
+    // GATE_VISIT_HOLD backstop: a held visit moves only for a person who chose to (options.releaseHold). That move ends
+    // the hold in its own UPDATE (rescheduleOnce); every other write fences `held_at IS NULL`. Nothing is released here.
+    const releasing = await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
     try {
-      return await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
+      const moved = await this.rescheduleOnce(serviceId, newDate, newWindow, reason, initiatedBy, options);
+      if (releasing) await require('./visit-hold').closeHoldBell(serviceId, 'released');
+      return moved;
     } catch (err) {
       // The single-row CAS found the row grouped AFTER the pre-read (codex
       // #3609 r13 P2): re-enter once so the fresh read routes through the
@@ -2136,11 +2142,16 @@ class SmartRebooker {
     // Combine then has nothing to un-confirm. A live row still rewinds.
     const landedStatus = options.pendingConfirmation === true ? 'pending'
       : (options.keepStatus === true && !lifecycleRewound ? service.status : 'confirmed');
+    // GATE_VISIT_HOLD: a person's move of a held visit ends the hold in this same UPDATE; any other move fences held_at IS NULL.
+    const visitHold = require('./visit-hold');
+    const releasesHold = visitHold.rowIsHeld(service) && options.releaseHold === true;
+    const holdFence = visitHold.visitHoldLive() && !releasesHold;
     const updates = {
       scheduled_date: newDate,
       window_start: win.start || service.window_start,
       window_end: windowEnd,
       status: landedStatus,
+      ...(releasesHold ? { held_at: null, hold_released_at: new Date() } : {}),
       ...(options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
       ...(!isNightWriter(initiatedBy) ? recurringDispatchDuePatch(service, {
         scheduled_date: newDate, window_start: win.start || service.window_start,
@@ -2419,9 +2430,9 @@ class SmartRebooker {
         }
       }
       if (keptTechId && updates.window_start && occupancyGateEnd && !useArrivalWindows) {
-        const overlap = await trx('scheduled_services')
+        const overlap = await require('./visit-hold').excludeHeld(trx('scheduled_services')
           .where('scheduled_date', newDateStr)
-          .where('technician_id', keptTechId)
+          .where('technician_id', keptTechId), 'scheduled_services')
           // Visit members move together (moveVisitAsUnit passes them in
           // excludeServiceIds) — a chained sibling's OLD slot is not a
           // conflict for the shifted primary (codex #3609 r1).
@@ -2660,6 +2671,7 @@ class SmartRebooker {
           property_id: service.property_id ?? null,
           // the account the log row is filed under (a racing customer merge repoints it)
           customer_id: service.customer_id ?? null,
+          ...(holdFence ? { held_at: null } : {}),
         })
         // Ungrouped at the pre-read ⇒ must still be ungrouped at the write
         // (knex renders null as IS NULL); see membershipFenced above.
@@ -2975,9 +2987,20 @@ class SmartRebooker {
   // inside the same trx, so a direct UPDATE + history INSERT keeps
   // the audit trail consistent without re-introducing racing checks
   // designed for a different access pattern.
+  // GATE_VISIT_HOLD backstop for every series caller: a held anchor is refused unless a person chose the move; when the
+  // move commits, the day-14 bell of a released hold closes.
   async rescheduleSeries(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
+    const releasing = await require('./visit-hold').guardHeldMove(serviceId, { releaseHold: options.releaseHold === true });
+    const moved = await this.rescheduleSeriesCore(serviceId, newDate, newWindow, reason, initiatedBy, options);
+    if (releasing) await require('./visit-hold').closeHoldBell(serviceId, 'released');
+    return moved;
+  }
+
+  async rescheduleSeriesCore(serviceId, newDate, newWindow, reason, initiatedBy, options = {}) {
     const service = await db('scheduled_services').where({ id: serviceId }).first();
     if (!service) throw new Error('Service not found');
+    // GATE_VISIT_HOLD: the anchor's hold ends in this move's own UPDATE when a person chose the move (see guardHeldMove).
+    const releasesHold = require('./visit-hold').rowIsHeld(service) && options.releaseHold === true;
     // Direct series callers (customer pull-forward, explicit admin series
     // branch) reach the visit-unit choke point too (codex #3609 r1/r3): a
     // grouped anchor is REFUSED with guidance (VISIT_SERIES_MOVE_UNSUPPORTED)
@@ -3278,7 +3301,7 @@ class SmartRebooker {
       // deliberately exceptional date: a later occurrence pulled before the
       // anchor is still a later occurrence, and two rows never swap index
       // because one of them was moved across the other.
-      const readSiblings = () => trx('scheduled_services')
+      const readSiblingsRaw = () => trx('scheduled_services')
         .whereRaw('(id = ? OR (recurring_parent_id = ? AND is_recurring = true))', [parentId, parentId])
         .where('customer_id', service.customer_id)
         .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
@@ -3304,8 +3327,10 @@ class SmartRebooker {
           // sibling can still carry stale tracker stamps (or SMS guards)
           // from an aborted attempt that a partial reset left behind.
           'track_state', 'en_route_at', 'arrived_at', 'actual_start_time', 'check_in_time',
-          'track_sms_sent_at', 'arrival_sms_sent_at',
+          'track_sms_sent_at', 'arrival_sms_sent_at', ...require('./visit-hold').heldColumn(),
         );
+      // GATE_VISIT_HOLD: a held sibling other than the anchor is counted for cadence but never moved.
+      const readSiblings = async () => require('./visit-hold').markHeldSiblings(await readSiblingsRaw(), serviceId);
       // Read once UNLOCKED — only to learn the dates rung 1 must cover —
       // and again under the locks (below) for the rows the sweep writes.
       let siblings = await readSiblings();
@@ -4269,6 +4294,7 @@ class SmartRebooker {
         const updateData = {
           scheduled_date: date,
           window_start: occurrenceWindow.start,
+          ...(isAnchor && releasesHold ? { held_at: null, hold_released_at: new Date() } : {}),
           window_end: occurrenceWindow.end,
           status: isAnchor ? (options.pendingConfirmation === true ? 'pending' : (options.keepStatus === true && !sibRewound ? sib.status : 'confirmed')) : sib.status,
           ...(isAnchor && options.pendingConfirmation === true ? { customer_confirmed: false, confirmed_at: null } : {}),
@@ -4359,9 +4385,9 @@ class SmartRebooker {
               'SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))',
               ['slot-reserve', `${options.technicianId}:${String(date).split('T')[0]}`],
             );
-            const overlap = useArrivalWindows ? null : await trx('scheduled_services')
+            const overlap = useArrivalWindows ? null : await require('./visit-hold').excludeHeld(trx('scheduled_services')
               .where('scheduled_date', date)
-              .where('technician_id', options.technicianId)
+              .where('technician_id', options.technicianId), 'scheduled_services')
               // Carried visit partners move with the anchor: their old slot is
               // not a clash for it (the plain whereNot when nothing is carried).
               [carry.partnerIds.length ? 'whereNotIn' : 'whereNot']('id', carry.partnerIds.length ? [sib.id, ...carry.partnerIds] : sib.id)
@@ -4587,6 +4613,8 @@ class SmartRebooker {
               status: sib.status,
               scheduled_date: sib.scheduled_date,
               window_start: sib.window_start,
+              // GATE_VISIT_HOLD: no occurrence moves once held, except the anchor a person is releasing.
+              ...(require('./visit-hold').visitHoldLive() && !(isAnchor && releasesHold) ? { held_at: null } : {}),
               // window_end and technician_id are overwritten by this sweep
               // (duration + the conflict-unassign decision were computed from
               // the values read above) — a concurrent resize/reassignment
@@ -5097,7 +5125,7 @@ class SmartRebooker {
       .whereRaw('COALESCE(date_exception_cadence_date, scheduled_date) >= ?::date', [seriesPosition(service)])
       .whereNotIn('status', TERMINAL)
       .orderByRaw('COALESCE(date_exception_cadence_date, scheduled_date) asc, scheduled_date asc')
-      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id', 'technician_id');
+      .select('id', 'status', 'customer_confirmed', 'scheduled_date', 'window_start', 'window_end', 'estimated_duration_minutes', 'date_exception', 'date_exception_cadence_date', 'property_id', 'technician_id', ...require('./visit-hold').heldColumn());
     const droppedIdx = siblings.findIndex((s) => String(s.id) === String(serviceId));
     if (droppedIdx === -1) return empty;
     // Every caller applies this preview as a staff ('admin') move (dispatch
@@ -5106,7 +5134,8 @@ class SmartRebooker {
     const { deltaDays, cadenceSlotDate, projectOccurrenceDate } = await makeSeriesProjector({
       service, parent, newDate, seriesDateStr, conn, closedDays: await loadSeriesClosedDays(conn, { initiatedBy: 'admin' }),
     });
-    const swept = siblings.slice(droppedIdx);
+    // GATE_VISIT_HOLD: the preview classifies a held sibling as immovable, as the writer does.
+    const swept = require('./visit-hold').markHeldSiblings(siblings.slice(droppedIdx), serviceId);
     // Staff surfaces move a live anchor (allowLive); every other live/skipped
     // row is counted-but-not-moved, exactly as the sweep does.
     const movable = swept.filter((row, idx) => RESCHEDULABLE_STATUSES.has(row.status)
@@ -5295,6 +5324,7 @@ module.exports = new SmartRebooker();
 // (same status/hold/window rules, narrowed to one technician_id).
 module.exports.probeMoveConflicts = probeMoveConflicts;
 module.exports.occupancyProbeEnd = occupancyProbeEnd;
+module.exports.loadNextVisitSweep = loadNextVisitSweep;
 // Shared with the IB schedule tools + bulk admin movers so every reschedule
 // path applies the same live-lifecycle rewind (see comment on the constant).
 module.exports.LIVE_LIFECYCLE_RESET = LIVE_LIFECYCLE_RESET;

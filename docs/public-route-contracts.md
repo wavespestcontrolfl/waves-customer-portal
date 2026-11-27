@@ -1300,6 +1300,17 @@ rounds a year and a customer move stays inside the round the visit sits in:
     stay inside its round. Contact the office if you need a different date." The
     picker filter above already hides such dates, so this fires only on a race
     or a direct call that got past the anti-forgery re-check.
+- **Visit on hold (`GATE_VISIT_HOLD`, owner 2026-11-27).** The rebooker refuses a held
+  visit (`409 VISIT_ON_HOLD`) unless the caller says a person chose the move
+  (`releaseHold`). This route says so: the customer's own reschedule link is the
+  "I will call you when ready" call, so the move ends the hold and commits as
+  usual. The route's request and response shapes do not change, and a customer
+  never reads `VISIT_ON_HOLD` here. Gate off: no key is passed.
+- **Held visit on the appointment page (`GATE_VISIT_HOLD`).** `GET /api/public/appointment/:token` answers
+  `state: 'on_hold'` for a visit the customer asked us to hold: no date, no window, and the page says "We will call
+  to set a time". The calendar file answers 404, and `POST /:token/confirm` answers its existing 409
+  `NOT_CONFIRMABLE` (any state but `upcoming`). The authenticated app's `POST /api/schedule/:id/confirm` answers the
+  same 404 as an unknown appointment. No new text or email. Gate off: no key is read and nothing changes.
 - A series re-anchor keeps each later visit in its own round: a visit keeps its
   distance in rounds from the moved visit, so a skipped or cancelled round stays
   empty, and a date exception stays in the round of its own place in the

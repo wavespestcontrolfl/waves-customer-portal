@@ -247,7 +247,7 @@ async function countStopsAhead(db, serviceId, today) {
           AND ${placedOrLegacySql('s')}
           AND (s.reservation_expires_at IS NULL OR s.reservation_expires_at > NOW())
           AND s.status NOT IN (${routeExcl})
-          AND (s.track_state IS NULL OR s.track_state <> 'cancelled')
+          AND (s.track_state IS NULL OR s.track_state <> 'cancelled')${require('./visit-hold').heldSqlGuard('s')}
      ),
      ranked AS (
        SELECT dr.*,

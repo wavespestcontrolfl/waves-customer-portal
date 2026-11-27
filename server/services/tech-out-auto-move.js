@@ -134,12 +134,12 @@ async function fitsWindow(stop, tech, date, conn = db) {
     });
     if (!fit.feasible) return { fits: false, conflict_reason: fit.reason };
   } else {
-    const others = await conn('scheduled_services')
+    const others = await require('./visit-hold').excludeHeld(conn('scheduled_services')
       .where({ scheduled_date: date, technician_id: tech.id })
       .whereNot('id', stop.id)
       // Same status set as the rebooker's commit probe: a finished visit
       // occupies nothing (never stricter than the commit, Codex r9 P2).
-      .whereNotIn('status', FIT_EXCLUDE_STATUSES)
+      .whereNotIn('status', FIT_EXCLUDE_STATUSES), 'scheduled_services')
       // A lapsed estimate hold occupies nothing — same predicate as the
       // rebooker's kept-tech check and scheduling/occupancy.js.
       .where((q) => q.whereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
