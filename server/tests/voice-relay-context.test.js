@@ -1299,6 +1299,67 @@ describe('GATE ON — get_pricing (estimator read path only)', () => {
     expect(generateEstimate).not.toHaveBeenCalled();
   });
 
+  // Pest above the 5,500 sq ft footprint table (owner 2026-11-26): the footprint is the living area over the stories, so a large
+  // home's story count is asked for before a price is stated. Without it a two-story 12,000 sq ft home would be quoted as a
+  // 12,000 sq ft footprint. The lot size is asked for with it: on the tool's stand-in lot (4 x the home size) the engine holds
+  // every home this size for review. The exchange runs on the real engine in pest-above-table-new-quotes.test.js.
+  test('pest on a home above 5,500 sq ft asks for the story count and the lot size first, then prices the footprint', async () => {
+    const asked = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000 }, { customerId: null });
+    expect(asked).toContain('how many stories the home has (stories) and the approximate lot size in square feet (lot_sqft)');
+    expect(asked).toMatch(/Do NOT guess/i);
+    expect(asked).not.toMatch(/\$\d/);
+    expect(generateEstimate).not.toHaveBeenCalled();
+
+    generateEstimate.mockReturnValue({
+      lineItems: [{
+        service: 'pest_control', perApp: 132, monthly: 44, annual: 528, monthlyAfterDiscount: 44, annualAfterDiscount: 528,
+        frequency: 'quarterly', visitsPerYear: 4, initialFee: 99, requiresManualReview: false,
+      }],
+      summary: {},
+    });
+    const out = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, lot_sqft: 15000, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 12000, stories: 2 }));
+    expect(out).toContain('$132 per application');
+    // A story count outside 1 to 3 is clamped, as on the website.
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, lot_sqft: 15000, stories: 5 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 3 }));
+    // A split level said as 1.5 stories reaches the engine as 1.5, as on the website quote (an 8,000 sq ft footprint, not 6,000).
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, lot_sqft: 15000, stories: 1.5 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 12000, stories: 1.5 }));
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, lot_sqft: 15000, stories: '0.5' }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ stories: 1 }));
+    // A value that is not a count (true, a list, text, zero) is no answer: the tool asks again and states no price.
+    generateEstimate.mockClear();
+    for (const junk of [true, [2], 'two', 0, -1, '', null, { value: 2 }]) {
+      const again = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 12000, lot_sqft: 15000, stories: junk }, { customerId: null });
+      expect(again).toContain('how many stories the home has');
+    }
+    expect(generateEstimate).not.toHaveBeenCalled();
+  });
+
+  test('at or under 5,500 sq ft the story count is not asked for, but a stated one is used; other plans never use it', async () => {
+    generateEstimate.mockReturnValue({ lineItems: [], summary: {} });
+    // No count given: priced at once, with no story count on the engine input (one floor, as always).
+    const priced = await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5500 }, { customerId: null });
+    expect(priced).not.toContain('how many stories');
+    expect(generateEstimate).toHaveBeenCalledTimes(1);
+    expect(generateEstimate.mock.calls[0][0]).not.toHaveProperty('stories');
+    // A count the caller gave is used on both sides of 5,500 sq ft, so the price never falls across the line.
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5500, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 5500, stories: 2 }));
+    // Above the line the tool also needs the lot size before it prices (see the test above), so this call states one.
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 5501, stories: 2, lot_sqft: 15000 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 5501, stories: 2 }));
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 2400, stories: 2 }, { customerId: null });
+    expect(generateEstimate).toHaveBeenLastCalledWith(expect.objectContaining({ homeSqFt: 2400, stories: 2 }));
+    // A value that is not a count is dropped under the table (nothing is asked there).
+    await executeTool('get_pricing', { service: 'pest_control', home_sqft: 2400, stories: true }, { customerId: null });
+    expect(generateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('stories');
+    // Another plan: never forwarded.
+    await executeTool('get_pricing', { service: 'termite_bait', home_sqft: 12000, stories: 2 }, { customerId: null });
+    expect(generateEstimate.mock.calls.at(-1)[0]).not.toHaveProperty('stories');
+  });
+
   test('a building beyond the residential bounds refuses instead of clamping down', async () => {
     const out = await executeTool('get_pricing', {
       service: 'pest_control', home_sqft: 50000,

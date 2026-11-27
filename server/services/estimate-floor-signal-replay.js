@@ -352,6 +352,19 @@ function storedRequestsPest(estData) {
       && !!(carrier.services.pest || carrier.services.oneTimePest));
 }
 
+// Pest above the 5,500 sq ft footprint table (owner 2026-11-26: +$8 per visit at quarterly for each 1,000 sq ft above it, no cap),
+// new quotes only. Its own stamp, read by the same reader: true = priced before the rule (flat at the last bracket, the existing
+// code), false = priced under it. An estimate with priced lines and no stamp predates the rule; one with no priced lines pins
+// nothing. An estimate that kept only its inputs but asks for pest or one-time pest was saved before the rule too, on a first
+// send, a resend and every replay (a fresh draft the engine priced carries its stamp, false). Plan-wide, no per-service marker:
+// a pest service a revision adds to a legacy estimate stays on the old rule, so a replay never raises a sold price.
+function savedLegacyPestAboveTableSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { flag } = readRuleStamp(estData, 'legacyPestAboveTable');
+  if (flag === undefined && (storedRequestsPest(estData) || storedPestServices(estData).size > 0)) return { legacyPestAboveTable: true };
+  return { legacyPestAboveTable: flag };
+}
+
 // Which pest services a stored estimate priced (or asked for), from EVERY shape the estimate page's choice and breakdown readers read
 // (routes/estimate-public.js: oneTimePestChoiceAmountFromResultStats / FromRecurringServices / FromBreakdown, normalizeOneTimeBreakdown,
 // recurringServicesWithSupplements). One list of shapes, kept here so the stamp reader and the page cannot drift (a table test names each).
@@ -459,6 +472,7 @@ const FROZEN_RULE_STAMPS = [
   ['legacyPricingRules', (data) => readRuleStamp(data, 'legacyPricingRules').flag],
   ['legacyTwoStoryRoof', (data) => savedLegacyTwoStoryRoofSignal(data).legacyTwoStoryRoof],
   ['legacyOneTimePestBuffer', (data) => savedLegacyOneTimePestBufferSignal(data).legacyOneTimePestBuffer],
+  ['legacyPestAboveTable', (data) => savedLegacyPestAboveTableSignal(data).legacyPestAboveTable],
   ['legacySpecialty1126', (data) => savedLegacySpecialty1126Signal(data).legacySpecialty1126],
 ];
 
@@ -528,6 +542,7 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLegacyPricingRulesSignal(estData));
   Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData));
   Object.assign(signals, savedLegacyOneTimePestBufferSignal(estData));
+  Object.assign(signals, savedLegacyPestAboveTableSignal(estData));
   Object.assign(signals, savedLegacySpecialty1126Signal(estData));
   const currentSpecialty = savedSpecialty1126CurrentServices(estData);
   if (currentSpecialty.length) signals.specialty1126CurrentServices = currentSpecialty;
@@ -555,6 +570,7 @@ module.exports = {
   savedLegacyPricingRulesSignal,
   savedLegacyTwoStoryRoofSignal,
   savedLegacyOneTimePestBufferSignal,
+  savedLegacyPestAboveTableSignal,
   savedLegacySpecialty1126Signal,
   savedSpecialty1126CurrentServices,
   savedOneTimePestRuleLegacy,

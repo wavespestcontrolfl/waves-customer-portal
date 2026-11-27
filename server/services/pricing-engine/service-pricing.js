@@ -45,6 +45,20 @@ function roundRatio(value) {
   return Math.round((Number(value) || 0) * 1000) / 1000;
 }
 
+// Pest footprint step. The footprint table is live as on main (Settings edits move its prices). Above 5,500 sq ft a NEW quote adds a
+// premium on top of the table price (owner 2026-11-26): +$8 per visit at quarterly for each 1,000 sq ft above the start point,
+// pro-rated to the square foot, no cap. The start point and the rate are CODE constants (PEST.aboveTableStartSqFt,
+// PEST.aboveTablePer1000), never read from the table, so a Settings edit of the last bracket cannot move the premium on a quote
+// already sent. A quote saved before the rule (legacyPestAboveTable stamp) carries no premium, as it was sold.
+function pestFootprintAdjustment(footprint, brackets, legacyPestAboveTable = false) {
+  const table = interpolate(footprint, brackets);
+  if (legacyPestAboveTable) return table;
+  const start = Number(PEST.aboveTableStartSqFt);
+  const per1000 = Number(PEST.aboveTablePer1000);
+  if (!Number.isFinite(start) || !Number.isFinite(per1000) || per1000 <= 0) return table;
+  return table + per1000 * Math.max(0, footprint - start) / 1000;
+}
+
 // ── Utility: Linear interpolation between brackets ────────────
 function interpolate(value, brackets, valueKey = 0, resultKey = 1) {
   if (!brackets.length) return 0;
@@ -1544,9 +1558,10 @@ function pricePestControl(property, options = {}) {
     ...pestAgeMeta.pestAgeAdjWarnings,
     ...poolCageMeta.warnings,
   ]);
-  const footprintAdj = interpolate(
+  const footprintAdj = pestFootprintAdjustment(
     footprint,
-    PEST.footprintBrackets.map(b => [b.sqft, b.adj])
+    PEST.footprintBrackets.map(b => [b.sqft, b.adj]),
+    options.legacyPestAboveTable === true
   );
 
   let additionalAdj = 0;
@@ -6516,7 +6531,13 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'recurringPestPerApp';
   } else {
     if (hasValue(recurringPestPerApp)) warnings.push('invalid_recurring_pest_per_app_ignored');
-    baselinePest = pricePestControl(property, { frequency: 'quarterly', roachType: 'none', legacyOneTimePestBuffer: legacy });
+    baselinePest = pricePestControl(property, {
+      frequency: 'quarterly',
+      roachType: 'none',
+      legacyOneTimePestBuffer: legacy,
+      // A quote saved before the above-table rule keeps the flat footprint step for its own baseline too.
+      legacyPestAboveTable: options.legacyPestAboveTable === true,
+    });
     base = baselinePest.basePrice;
     baseSource = 'computed_quarterly_baseline';
   }

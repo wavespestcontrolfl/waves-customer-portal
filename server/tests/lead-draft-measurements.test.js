@@ -77,6 +77,70 @@ describe('county sizes a lead draft may use', () => {
     expect(countyMeasurements(lookup)).toBeNull();
   });
 
+  test('the county record\'s own story count rides with its home size; an estimated count does not', () => {
+    // The record search's count with its own field evidence is a looked-up fact (the estimator's grader, storiesSourceForPricing).
+    const bigHome = (over = {}) => countyRecord({ squareFootage: 8000, stories: 2, ...over, _fieldEvidence: { squareFootage: { sourceType: 'county' }, ...over._fieldEvidence } });
+    const countyStories = { stories: { sourceType: 'county', fieldVerify: false } };
+    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' };
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }))))
+      .toEqual({ ...sizesOnly, stories: 2 });
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: { stories: [{ sourceType: 'listing' }] } })))).toEqual({ ...sizesOnly, stories: 2 });
+    // A count that names no evidence, an unknown source, or a count the lookup marked for a check is left out; the sizes stand.
+    for (const evidence of [undefined, { stories: { sourceType: 'unknown' } }, { stories: { sourceType: 'model_inference' } },
+      { stories: { sourceType: 'county', fieldVerify: true } }, { stories: [] }, { stories: null }]) {
+      expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: evidence })))).toEqual(sizesOnly);
+    }
+    // The lookup's own verify flag on the count does the same (an 8,000 sq ft home is $122 on two floors and $148 on one).
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }), { fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH' }] })))
+      .toEqual(sizesOnly);
+    expect(countyMeasurements(lookupOf(bigHome({ _fieldEvidence: countyStories }), { fieldVerifyFlags: [{ field: 'lotSize', priority: 'LOW' }] })))
+      .toEqual({ ...sizesOnly, stories: 2 });
+    // The AI fallback's estimate (an inference, low confidence, or no source page) is not carried.
+    for (const evidence of [
+      { basis: 'inferred', confidence: 'high', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
+      { basis: 'direct', confidence: 'low', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
+      { basis: 'direct', confidence: 'high', sourceUrl: 'the county site', sourceType: 'county' },
+    ]) {
+      expect(countyMeasurements(lookupOf(countyRecord({ squareFootage: 8000, stories: 2, _storiesEvidence: evidence }))))
+        .toEqual({ homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' });
+    }
+    // A direct, attributable answer is.
+    expect(countyMeasurements(lookupOf(countyRecord({
+      squareFootage: 8000, stories: 2, _storiesEvidence: { basis: 'direct', confidence: 'high', sourceUrl: 'https://example.com/parcel', sourceType: 'county' },
+    })))).toMatchObject({ stories: 2 });
+    // A count outside 1 to 3 is no count (a 12-story "home" is another building's record); a split level is kept. The record's
+    // raw value is read: [2] and true are not counts, though Number() turns them into 2 and 1.
+    for (const stories of [12, 4, 0.5, [2], true, '2 stories', {}]) {
+      expect(countyMeasurements(lookupOf(bigHome({ stories, _fieldEvidence: countyStories })))).toEqual(sizesOnly);
+    }
+    expect(countyMeasurements(lookupOf(bigHome({ stories: 1.5, _fieldEvidence: countyStories })))).toMatchObject({ stories: 1.5 });
+    expect(countyMeasurements(lookupOf(bigHome({ stories: '2', _fieldEvidence: countyStories })))).toMatchObject({ stories: 2 });
+  });
+
+  test('a technician\'s verified count stands over the AI fallback\'s older estimate left on the record', () => {
+    const { applyVerifiedOverrides } = require('../services/property-lookup/lookup-cache');
+    // The cached record after an AI fallback inferred one floor; a technician then verified two. The override writes the count and its
+    // own field evidence, and the lookup restamps the source (property-lookup-v2 buildResultFromCachedLookup). The fallback's evidence stays.
+    const verifiedRecord = (count = 2) => {
+      const record = applyVerifiedOverrides(countyRecord({
+        squareFootage: 8000, stories: 1, _storiesSource: 'ai',
+        _storiesEvidence: { basis: 'inferred', confidence: 'medium', sourceUrl: 'https://example.com/listing', sourceType: 'listing' },
+      }), { stories: { value: count } });
+      record._storiesSource = 'verified';
+      return record;
+    };
+    const sizesOnly = { homeSqFt: 8000, lotSqFt: 9200, source: 'county_assessed' };
+    expect(verifiedRecord()._storiesEvidence).toBeTruthy();
+    expect(countyMeasurements(lookupOf(verifiedRecord()))).toEqual({ ...sizesOnly, stories: 2 });
+    // The range and the lookup's own verify flag still apply to a verified count.
+    expect(countyMeasurements(lookupOf(verifiedRecord(12)))).toEqual(sizesOnly);
+    expect(countyMeasurements(lookupOf(verifiedRecord(), { fieldVerifyFlags: [{ field: 'stories', priority: 'HIGH' }] }))).toEqual(sizesOnly);
+    // The same record without the verified stamp is still the fallback's estimate: left out.
+    const unstamped = verifiedRecord();
+    unstamped._storiesSource = 'ai';
+    expect(countyMeasurements(lookupOf(unstamped))).toEqual(sizesOnly);
+  });
+
   test('only an address with no unit, in any position, describes one house', () => {
     expect(wholeHomeAddress(ADDRESS)).toBe(true);
     for (const unit of [
@@ -151,6 +215,120 @@ describe('the draft builder\'s cache read', () => {
     const both = await buildAutomatedLeadDraftEstimate({ ...readyLead({ customer: { lot_sqft: 7000, home_sqft: 1500 } }), measurements: county });
     expect(both.automation.sizeSource).toBe('lead');
     expect(both.automation.engineInput).toMatchObject({ homeSqFt: 1500, lotSqFt: 7000 });
+  });
+
+  test('a customer row\'s treated lawn area (property_sqft) is never the home size: pest is priced on the home, not the lawn', async () => {
+    // customers.property_sqft is treated lawn area by schema. A house with 20,000 sq ft of lawn is not a 20,000 sq ft building:
+    // pest keeps rising with the footprint above 5,500 sq ft (owner 2026-11-26), so that size would more than double the price.
+    const pestPerApp = (draft) => draft.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control').perApp;
+    const noSize = await buildAutomatedLeadDraftEstimate(readyLead());
+    const lawnOnly = readyLead({ customer: { property_sqft: 20000, lot_sqft: 30000 } });
+    const draft = await buildAutomatedLeadDraftEstimate(lawnOnly);
+    expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 2000, lotSqFt: 30000 });
+    expect(pestPerApp(draft)).toBe(pestPerApp(noSize));
+    // The home size is still unknown, so the draft says so (the auto-send lane parks it for a person).
+    expect(lawnOnly.readiness.review).toContain('property_measurements_defaulted');
+    expect(draft.automation.review).toContain('property_measurements_defaulted');
+    // A home size the lead states is used as before, beside the same lawn area.
+    const stated = await buildAutomatedLeadDraftEstimate(readyLead({ customer: { property_sqft: 20000, lot_sqft: 30000 }, body: { homeSqFt: 8000 } }));
+    expect(stated.automation.engineInput.homeSqFt).toBe(8000);
+    expect(pestPerApp(stated)).toBe(148);
+  });
+
+  test('a stated home above 20,000 sq ft is never an automatic price: the draft parks for a hand price and saves no total', async () => {
+    // The webhook body is unauthenticated and pest has no flat top any more: a junk size would price a premium no column can hold.
+    for (const homeSqFt of [20001, 45000, 1e9, 1e12, 1e300, '25,000,000']) {
+      const lead = readyLead({ body: { homeSqFt, lotSqFt: 9000 } });
+      const draft = await buildAutomatedLeadDraftEstimate(lead);
+      expect(draft.automation).toMatchObject({
+        status: 'manual_review_required', generated: false, quoteRequired: true, quoteRequiredReason: 'home_size_above_public_limit',
+      });
+      expect(draft.automation.review).toContain('home_size_above_public_limit');
+      expect([draft.monthly, draft.annual, draft.oneTimeTotal]).toEqual([0, 0, 0]);
+      expect(draft.estimateData).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'home_size_above_public_limit', annual: 0 });
+      // The size staff see is bounded (ten times the limit), so the provisional figure is a number a decimal(10,2) column can hold.
+      expect(draft.automation.engineInput.homeSqFt).toBeLessThanOrEqual(200000);
+      expect(draft.automation.provisionalTotals.annual).toBeLessThan(100000);
+    }
+    // At the bound and under it the draft prices as entered (with its story count): 20,000 sq ft on one floor is $128 + $8 x 14.5.
+    const atLimit = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 20000, lotSqFt: 9000, stories: 1 } }));
+    expect(atLimit.automation).toMatchObject({ quoteRequired: false, quoteRequiredReason: null });
+    expect(atLimit.automation.review).not.toContain('home_size_above_public_limit');
+    expect(atLimit.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control').perApp).toBe(244);
+  });
+
+  test('a big home is priced on its footprint: the county count is used, and with no known count the pest price waits for a person', async () => {
+    const pest = (draft) => draft.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control');
+    const county = (stories) => ({ homeSqFt: 8000, lotSqFt: 12000, ...(stories ? { stories } : {}), source: 'county_assessed' });
+    // County size + county count: 8,000 sq ft on two floors is a 4,000 sq ft footprint, $122, not $148 for an 8,000 sq ft footprint.
+    const twoStory = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: county(2) });
+    expect(twoStory.automation.engineInput).toMatchObject({ homeSqFt: 8000, stories: 2 });
+    expect(twoStory.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(twoStory.automation.measurements).toEqual({ source: 'county_assessed', homeSqFt: 8000, lotSqFt: 12000, stories: 2 });
+    expect(pest(twoStory).perApp).toBe(122);
+    expect(twoStory.quoteRequired).toBe(false);
+    // County size, no count: the footprint is not known, so the engine's own stories_estimated review holds the draft.
+    const noCount = await buildAutomatedLeadDraftEstimate({ ...readyLead(), measurements: county() });
+    expect(noCount.automation.engineInput).toMatchObject({ homeSqFt: 8000, stories: 1, storiesSource: 'default' });
+    expect(noCount.automation).toMatchObject({ status: 'manual_review_required', generated: false, quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+    expect([noCount.monthly, noCount.annual]).toEqual([0, 0]);
+    // A size the lead states: its own count is used; with none the same hold applies.
+    const stated = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000, stories: 2 } }));
+    expect(pest(stated).perApp).toBe(122);
+    expect(stated.quoteRequired).toBe(false);
+    const statedNoCount = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000 } }));
+    expect(statedNoCount.automation).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+    // A county count is never mixed with a size the lead stated.
+    const mixed = await buildAutomatedLeadDraftEstimate({ ...readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000 } }), measurements: county(2) });
+    expect(mixed.automation.engineInput).toMatchObject({ stories: 1, storiesSource: 'default' });
+    // At or under 5,500 sq ft nothing changes: one floor is assumed with no count and the draft prices as before.
+    const small = await buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt: 5500, lotSqFt: 12000 } }));
+    expect(small.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(small.quoteRequired).toBe(false);
+    expect(pest(small).perApp).toBe(128);
+    // A draft with no pest line takes no mark: termite bait reads the same source for a staff note, and any line note parks a
+    // lead draft, so a bait-only draft for the same big home would otherwise save zero totals. It prices as before.
+    const baitLead = readyLead({ body: { homeSqFt: 8000, lotSqFt: 12000 } });
+    baitLead.intake.serviceInterest = 'Termite bait monitoring';
+    baitLead.readiness = evaluateLeadEstimateAutomationReadiness({ intake: baitLead.intake, customer: {}, body: baitLead.body, phone: '+19415550142' });
+    const baitOnly = await buildAutomatedLeadDraftEstimate(baitLead);
+    expect(Object.keys(baitOnly.automation.services)).toEqual(['termite']);
+    expect(baitOnly.automation.engineInput).toMatchObject({ homeSqFt: 8000, stories: 1 });
+    expect(baitOnly.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(baitOnly.automation).toMatchObject({ status: 'generated', quoteRequired: false });
+    expect(baitOnly.annual).toBeGreaterThan(0);
+  });
+
+  test('a story count is a number from 1 to 3 or it is no count: junk never clears the big-home hold or shrinks the footprint', async () => {
+    const pest = (draft) => draft.estimateData.engineResult.lineItems.find((l) => l.service === 'pest_control');
+    const draftFor = (stories, homeSqFt = 12000) => buildAutomatedLeadDraftEstimate(readyLead({ body: { homeSqFt, lotSqFt: 16000, stories } }));
+    // The webhook body is unauthenticated. Read as a count, 12 (or [12]) priced a 12,000 sq ft home as a 1,000 sq ft footprint.
+    for (const junk of [12, [12], '12', [2], true, 0.5, 0, -2, 4, '2 stories', {}, 'abc', '0x10']) {
+      const draft = await draftFor(junk);
+      expect(draft.automation.engineInput).toMatchObject({ homeSqFt: 12000, stories: 1, storiesSource: 'default' });
+      expect(draft.automation).toMatchObject({ status: 'manual_review_required', quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+      expect([draft.monthly, draft.annual]).toEqual([0, 0]);
+    }
+    // A real count prices, whole or split level, as a number or as form text: 12,000 sq ft on 1, 1.5, 2 and 3 floors.
+    for (const [stories, perApp] of [[1, 180], ['1', 180], [1.5, 148], ['1.5', 148], [2, 132], [' 2 ', 132], [3, 122]]) {
+      const draft = await draftFor(stories);
+      expect(draft.automation.engineInput).toMatchObject({ stories: Number(stories) });
+      expect(draft.automation.engineInput).not.toHaveProperty('storiesSource');
+      expect(draft.quoteRequired).toBe(false);
+      expect(pest(draft).perApp).toBe(perApp);
+    }
+    // A county count from the background lookup is held to the same bounds.
+    const countyJunk = await buildAutomatedLeadDraftEstimate({
+      ...readyLead(), measurements: { homeSqFt: 8000, lotSqFt: 12000, stories: 12, source: 'county_assessed' },
+    });
+    expect(countyJunk.automation.engineInput).toMatchObject({ stories: 1, storiesSource: 'default' });
+    expect(countyJunk.automation).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'stories_estimated' });
+    // At or under the table junk is no count either: the draft prices one floor, as it does with no count at all.
+    const smallJunk = await draftFor(12, 3000);
+    expect(smallJunk.automation.engineInput).toMatchObject({ stories: 1 });
+    expect(smallJunk.automation.engineInput).not.toHaveProperty('storiesSource');
+    expect(smallJunk.quoteRequired).toBe(false);
+    expect(pest(smallJunk).perApp).toBe(pest(await draftFor(undefined, 3000)).perApp);
   });
 
   test('measurements passed in (the background lookup) skip the cache read', async () => {
