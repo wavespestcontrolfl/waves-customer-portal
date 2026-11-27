@@ -47,7 +47,9 @@ function stubDb() {
       whereIn: () => b,
       orderBy: () => b,
       forUpdate: () => { order.push(`rowlock:${table}`); return b; },
-      select: async () => [],
+      select: async () => (table === 'multi_home_family_members' && q.where?.family_id
+        ? Object.keys(families).filter((id) => families[id] === q.where.family_id).map((id) => ({ customer_id: id }))
+        : []),
       count: () => { q.count = true; return b; },
       first: async () => {
         if (table === 'customers') return row(q.where.id);
@@ -94,8 +96,9 @@ beforeEach(() => {
   });
   stubDb();
   process.env.GATE_IB_PLATFORM = 'true';
+  process.env.GATE_IB_OWNER_DIRECT = 'true';
 });
-afterAll(() => { delete process.env.GATE_IB_PLATFORM; });
+afterAll(() => { delete process.env.GATE_IB_PLATFORM; delete process.env.GATE_IB_OWNER_DIRECT; });
 
 const link = (input = { customer_id: A, other_customer_id: B }, ctx = ADMIN) => executeFamilyLinkTool('link_customer_family', input, ctx);
 const confirmLink = (card, input = { customer_id: A, other_customer_id: B }, ctx = ADMIN) => executeFamilyLinkTool('link_customer_family',
@@ -116,6 +119,11 @@ describe('registration', () => {
     expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers', fullAccess: true })).toBe(true);
     expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers' })).toBe(false);
     expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'technician', context: 'tech' })).toBe(false);
+    // Owner-direct off: a task holds one customer, so no link card could ever pass its target check; it is not offered.
+    delete process.env.GATE_IB_OWNER_DIRECT;
+    expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers', fullAccess: true })).toBe(false);
+    expect(registry.allowed(registry.actions.get('unlink_customer_family'), { role: 'admin', context: 'customers', fullAccess: true })).toBe(true);
+    process.env.GATE_IB_OWNER_DIRECT = 'true';
     delete process.env.GATE_IB_PLATFORM;
     expect(registry.allowed(registry.actions.get('link_customer_family'), { role: 'admin', context: 'customers', fullAccess: true })).toBe(false);
   });
@@ -145,6 +153,8 @@ describe('link_customer_family', () => {
     const card = await link();
     expect(card.joins_existing).toBe(true);
     expect(card.family_after).toHaveLength(3);
+    // The undo names the profile that joins (unlinking an original member would leave the newcomer linked).
+    expect(cardLines('link_customer_family', card).map((l) => l.text)).toContain('Undo: Unlink Robin Sample (the profile that joins) in its Same family section, or ask the bar to unlink it.');
   });
 
   it.each([

@@ -100,6 +100,11 @@ async function loadProfile(database, rawId, label) {
     'address_line1', 'address_line2', 'city', 'state', 'zip', 'active', 'deleted_at');
   if (!row || row.deleted_at) return refusal(`The ${label} profile was not found. Nothing was changed.`, 'customer_not_found');
   const family = await require('../multi-home-family').familyMembers(database, id);
+  // Every membership row of the family, a soft-deleted profile's included (familyMembers hides those): the confirm locks
+  // all of them, so a restored profile can never join the family between the card and the write unseen.
+  const memberIds = family.familyId
+    ? (await database('multi_home_family_members').where({ family_id: family.familyId }).select('customer_id')).map((r) => String(r.customer_id)).sort()
+    : [];
   return {
     profile: {
       id,
@@ -107,12 +112,13 @@ async function loadProfile(database, rawId, label) {
       address: displayAddress(row),
       active: row.active === true,
       family_id: family.familyId,
+      member_ids: memberIds,
       members: family.members.map(({ id: memberId, name, address, active }) => ({ id: memberId, name, address, active })),
     },
   };
 }
 
-const pinOf = (p) => ({ id: p.id, name: p.name, address: p.address, active: p.active, family_id: p.family_id, members: p.members.map((m) => [m.id, m.name, m.address, m.active]) });
+const pinOf = (p) => ({ id: p.id, name: p.name, address: p.address, active: p.active, family_id: p.family_id, member_ids: p.member_ids, members: p.members.map((m) => [m.id, m.name, m.address, m.active]) });
 
 async function buildLinkPlan(input, { database = db } = {}) {
   const a = await loadProfile(database, input.customer_id, 'account');
@@ -141,6 +147,8 @@ async function buildLinkPlan(input, { database = db } = {}) {
   for (const m of [...mine.members, ...other.members]) byId.set(m.id, m);
   for (const p of [mine, other]) if (!byId.has(p.id)) byId.set(p.id, { id: p.id, name: p.name, address: p.address, active: p.active });
   const after = [...byId.values()];
+  // The profile that joins: the one with no family yet (both new: the family member).
+  const joiner = other.family_id ? mine : other;
   return {
     preview: true,
     tool: 'link_customer_family',
@@ -155,7 +163,7 @@ async function buildLinkPlan(input, { database = db } = {}) {
       { kind: 'operational', text: 'Together they count as one multi-home family: the 10% Multi-Home Discount can apply across their homes under its usual rules.' },
       NO_MONEY,
       NOTHING_SENT,
-      { kind: 'operational', text: 'Undo: Unlink in the profile\'s Same family section, or ask the bar to unlink it.' },
+      { kind: 'operational', text: `Undo: Unlink ${joiner.name} (the profile that joins) in its Same family section, or ask the bar to unlink it.` },
     ],
     sends_to_customer: false,
     _version: { op: 'link', account: pinOf(mine), other: pinOf(other) },
@@ -217,7 +225,7 @@ async function commit(toolName, input, actionContext) {
       await Family.lockFamilyChanges(trx);
       // Then every profile the card named, in id order (the service's own order), so a name or address edit cannot land
       // between this re-read and the write.
-      const shown = new Set([plan._version.account, plan._version.other].filter(Boolean).flatMap((p) => [p.id, ...p.members.map((m) => m[0])]));
+      const shown = new Set([plan._version.account, plan._version.other].filter(Boolean).flatMap((p) => [p.id, ...p.member_ids, ...p.members.map((m) => m[0])]));
       await trx('customers').whereIn('id', [...shown].sort()).orderBy('id').forUpdate().select('id');
       const locked = await buildPlan(toolName, input, { database: trx });
       if (locked.error || JSON.stringify(locked._version) !== JSON.stringify(plan._version)) throw changedError();
