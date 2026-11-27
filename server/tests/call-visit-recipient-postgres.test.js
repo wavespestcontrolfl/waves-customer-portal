@@ -595,6 +595,21 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
       });
 
+      test('a NEW list entry for the same number never revives an old copy or its link: the copy is rebound and its token cleared', async () => {
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        const [copy] = await otherRows();
+        await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'b'.repeat(48)}` });
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await db('customer_reminder_contacts').insert({ customer_id: customerId, phone_key: BOB.slice(-10), phone_e164: BOB, consent_version: 'x' });
+        // before the next copy: the old copy names a gone entry, so it grants nothing and its token resolves nowhere
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
+        await VisitRecipient.materializeForVisit(otherVisitId);
+        const [rebound] = await otherRows();
+        const [entryNow] = await listed();
+        expect(rebound).toMatchObject({ id: copy.id, reminder_contact_id: entryNow.id, track_token: null });
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+      });
+
       test('a fresh call replaces a list copy the customer no longer lists (new id, call-recorded), and keeps one that is listed', async () => {
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [copy] = await otherRows();
@@ -602,12 +617,14 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
         expect((await otherRows())[0].id).toBe(copy.id);
         await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'c'.repeat(48)}`, deliveries: { [`confirmation:${OTHER_DATE}T09:00`]: 'sent' } });
+        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toEqual([]);
         const fresh = await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
         expect(fresh.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: true }]);
         const [row] = await otherRows();
-        expect(row.id).not.toBe(copy.id);
-        expect(row.source).toBe('call_caller_provided');
-        expect(row.deliveries).toEqual(copy.deliveries);
+        // taken over in place: same id and claims (nothing sent twice), no old link, no longer a copy
+        expect(row).toMatchObject({ id: copy.id, source: 'call_caller_provided', track_token: null, reminder_contact_id: null });
+        expect(row.deliveries).toEqual({ [`confirmation:${OTHER_DATE}T09:00`]: 'sent' });
         expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
       });
 

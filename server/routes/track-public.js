@@ -748,11 +748,11 @@ function withRecipientRow(query, hit, token) {
       this.on('r.scheduled_service_id', '=', 's.id').andOn('r.customer_id', '=', 's.customer_id');
     })
     .where({ 'r.id': hit.recipientId, 'r.track_token': token })
-    // A copy of the customer's every-visit list stands only while that customer still lists the number (call-visit-recipient.js).
+    // A copy of the customer's every-visit list stands only while the exact entry it was made from is still that customer's.
     .where(function listedWhenCopied() {
       this.whereNot('r.source', 'customer_reminder_contact').orWhereExists(function stillListed() {
         this.select(db.raw('1')).from('customer_reminder_contacts as l')
-          .whereRaw('l.customer_id = s.customer_id AND l.phone_key = r.phone_key');
+          .whereRaw('l.id = r.reminder_contact_id AND l.customer_id = s.customer_id');
       });
     });
 }

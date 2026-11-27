@@ -190,16 +190,21 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
-      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source', 'deliveries');
-      // A list copy the customer no longer lists (its entry stayed on another account in a merge) grants nothing, so a fresh
-      // call replaces it like any ineligible row.
-      const deadCopy = existing && existing.source === REMINDER_SOURCE && !(await listedNow(visit.customer_id, entry.phoneKey, trx));
-      if (existing && !deadCopy && existing.customer_id && String(existing.customer_id) === String(visit.customer_id)) return 'kept';
-      if (existing) await trx(TABLE).where({ id: existing.id }).del();
-      // A replaced dead copy of THIS customer keeps its delivery claims (a text it already sent is not sent again); the new id
-      // still voids its tracker token and anything queued under the old id.
-      const keepClaims = deadCopy && String(existing.customer_id || '') === String(visit.customer_id);
-      await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id, ...(keepClaims ? { deliveries: JSON.stringify(existing.deliveries || {}) } : {}) });
+      const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source', 'reminder_contact_id');
+      const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
+      if (sameCustomer && existing.source === REMINDER_SOURCE && !(await copyLive(existing, visit.customer_id, trx))) {
+        // A list copy whose entry is gone (it stayed on another account in a merge) grants nothing. This call's own grant takes
+        // the row over IN PLACE: same customer, so its delivery claims stay (nothing is sent twice); its tracker token is
+        // cleared (an old link never comes back) and it is no longer a copy.
+        await trx(TABLE).where({ id: existing.id }).update({
+          source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null, track_token: null,
+          first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,
+        });
+      } else {
+        if (sameCustomer) return 'kept';
+        if (existing) await trx(TABLE).where({ id: existing.id }).del();
+        await trx(TABLE).insert({ ...fresh, customer_id: visit.customer_id });
+      }
       // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ONLY the pass that
       // CREATES this visit's row for the number may list them: a reprocess of any call, or a second call about the same visit,
       // finds the row and lists nobody, so no replay order can widen a "just this visit" answer (the cost: a later call that
@@ -269,9 +274,20 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
           AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id)`,
       [scheduledServiceId, owner],
     );
+    // A copy of THIS customer whose entry is gone, for a number the customer lists again under a NEW entry: rebound in place
+    // to that entry with its tracker token cleared (an entry id is never reused, so an old link never revives; the delivery
+    // claims stay, so nothing is sent twice).
     await trx.raw(
-      `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
-       SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
+      `UPDATE ${TABLE} r SET reminder_contact_id = c.id, track_token = NULL
+         FROM scheduled_services s, ${REMINDER_TABLE} c
+        WHERE s.id = ? AND s.customer_id = ? AND r.scheduled_service_id = s.id AND r.customer_id = s.customer_id
+          AND r.source = ? AND c.customer_id = s.customer_id AND c.phone_key = r.phone_key
+          AND r.reminder_contact_id IS DISTINCT FROM c.id`,
+      [scheduledServiceId, owner, REMINDER_SOURCE],
+    );
+    await trx.raw(
+      `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id, reminder_contact_id)
+       SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id, c.id
          FROM scheduled_services s
          JOIN ${REMINDER_TABLE} c ON c.customer_id = s.customer_id
         WHERE s.id = ? AND s.customer_id = ? AND s.status IN (${LIVE_STATUSES.map(() => '?').join(', ')})
@@ -288,9 +304,10 @@ async function materializeForVisit(scheduledServiceId, conn = db) {
   });
 }
 
-// The customer lists the number for every visit right now.
-async function listedNow(customerId, phoneKey, conn) {
-  return !!(await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).first('id'));
+// A list copy grants only while the EXACT entry it was made from exists and belongs to the visit's current customer.
+async function copyLive(row, visitCustomerId, conn) {
+  if (!row.reminder_contact_id) return false;
+  return !!(await conn(REMINDER_TABLE).where({ id: row.reminder_contact_id, customer_id: visitCustomerId }).first('id'));
 }
 
 /**
@@ -364,9 +381,9 @@ function rowBelongsToVisitCustomer(row, visit) {
 // visit was reassigned) or to none, or a person who has declined.
 async function ownedContact(row, visit, kind, conn, taken) {
   if (taken.has(row.phone_key) || !rowBelongsToVisitCustomer(row, visit)) return null;
-  // A copy of the every-visit list stands only while the visit's CURRENT customer still lists the person (a merge undo can
-  // move the list entry away while the copy stays on the visit). A missing entry is no permission.
-  if (row.source === REMINDER_SOURCE && !(await listedNow(visit.customer_id, row.phone_key, conn))) return null;
+  // A copy of the every-visit list stands only while the entry it was made from still exists for the visit's CURRENT
+  // customer (a merge leaves the entry on the other account). A missing entry is no permission.
+  if (row.source === REMINDER_SOURCE && !(await copyLive(row, visit.customer_id, conn))) return null;
   if (await declinedByRecipient({ customerId: visit.customer_id, phoneKey: row.phone_key, phoneE164: row.phone_e164, purpose: KINDS[kind].purpose, conn })) return null;
   const windowStart = visit.window_start ? String(visit.window_start).slice(0, 5) : null;
   const scheduledDate = dateOnlyString(visit.scheduled_date);
