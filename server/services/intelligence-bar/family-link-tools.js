@@ -80,13 +80,19 @@ const NOTHING_SENT = { kind: 'comms', text: 'Confirming sends nothing: no text, 
 
 // What the Multi-Home Discount jobs may do LATER because of the link (multi-home-discount-apply.js and
 // multi-home-discount-email.js), read from their own gates at call time so the card states only what is switched on.
-function laterEffects() {
+function laterEffects(op = 'link') {
   const gates = require('../../config/feature-gates');
   if (!gates.multiHomeAllHomesLive()) return [];
+  const email = gates.multiHomeDiscountEmailLive();
+  if (op === 'unlink') {
+    return email
+      ? [{ kind: 'comms', text: 'Later, automatically: if a home in this family is waiting on its Multi-Home Discount, taking this profile out can let the discount email go to the paying address of the homes that stay (one email per accepted plan and paying address).' }]
+      : [];
+  }
   return [
-    { kind: 'billing', text: 'Later, automatically: if either profile started a plan with the Multi-Home Discount in the last 14 days, a job runs every 15 minutes and may add the same 10% to the other profile\'s upcoming visits. Unlinking does not take an added discount off.' },
-    gates.multiHomeDiscountEmailLive()
-      ? { kind: 'comms', text: 'Later, automatically: once that job has added the discount to every home, the paying address gets one "Your Multi-Home Discount is on" email.' }
+    { kind: 'billing', text: 'Later, automatically: if any profile in the family after the link started a plan with the Multi-Home Discount in the last 14 days, a job runs every 15 minutes and may add the same 10% to the upcoming visits of every other home in the family. Unlinking does not take an added discount off.' },
+    email
+      ? { kind: 'comms', text: 'Later, automatically: once that job has added the discount to every home, each paying address gets one "Your Multi-Home Discount is on" email per such plan.' }
       : null,
   ].filter(Boolean);
 }
@@ -211,9 +217,10 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
       { kind: 'operational', text: `${mine.name} no longer counts in that multi-home family for the 10% Multi-Home Discount. A discount already on a visit stays.` },
       NO_MONEY,
       NOTHING_SENT,
+      ...laterEffects('unlink'),
     ],
     sends_to_customer: false,
-    _version: { op: 'unlink', account: pinOf(mine), rows: rowCount },
+    _version: { op: 'unlink', account: pinOf(mine), rows: rowCount, later: laterEffects('unlink').map((e) => e.text) },
     note: 'PREVIEW ONLY — nothing was changed. Confirm unlinks exactly this profile; if anything changed it refuses.',
   };
 }
