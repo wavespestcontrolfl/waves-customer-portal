@@ -179,6 +179,15 @@ const STEP_WAIT = 20000; // bounded wait for the next checkout step
 const CONFIRMATION_WAIT = 30000; // bounded wait for the order number after the click
 const SETTLE_MS = 2500;
 const PO_PATTERN = /^[A-Z0-9-]{1,20}$/;
+// Price check before the buy click (owner 2026-11-27, "build fixes"): a total divided by the package count is
+// the unit price SiteOne shows now. More than this many percent above the price on file parks the order
+// `price_jump` (nothing clicked; the dispatcher retries it on the next daily run). It runs inside `gate`, so
+// EVERY total that reaches the cap check is checked: the cart total, the review total and the final total
+// re-asserted at the click. Tax: the page has no tax or subtotal node walked live (SELECTORS), so the totals
+// are compared WITH tax against the price on file, which has none. That is the strict side: a real jump of
+// about 8% (at roughly 7% tax) already trips it, and a trip only parks and retries; it never lets a total
+// above the limit through.
+const PRICE_JUMP_LIMIT_PERCENT = 15;
 
 class RefusedError extends Error {
   // cents: the vendor total a cap refusal was decided on — the dispatcher
@@ -604,6 +613,21 @@ async function readTotal(scope, selector, what, evidence) {
   return cents;
 }
 
+// Compares the unit price SiteOne shows (a total over the package count) with the price on file (the eligible
+// vendor_pricing row the dispatcher chose, in cents per package). No price on file = no check, as before,
+// noted in evidence. A total that cannot be read never reaches here: readTotal already refuses it.
+// The price on file is in millionths of a dollar (priceOnFileMicros, exact) and is never rounded: the limit is
+// quantity x price x 1.15 in whole micro-dollars against the total in cents x 10,000 (integers, all well under 2^53).
+function checkPriceJump({ priceOnFileMicros, quantity, evidence }, totalCents, what) {
+  if (!(priceOnFileMicros > 0)) { evidence.priceCheck = 'no_price_on_file'; return; }
+  const seenUnitCents = Math.round(totalCents / quantity);
+  evidence.priceCheck = { onFileMicros: priceOnFileMicros, seenUnitCents, limitPercent: PRICE_JUMP_LIMIT_PERCENT, checked: what };
+  if (totalCents * 10000 * 100 <= priceOnFileMicros * quantity * (100 + PRICE_JUMP_LIMIT_PERCENT)) return;
+  const dollars = (c) => `$${(c / 100).toFixed(2)}`;
+  const onFile = `$${(priceOnFileMicros / 1e6).toFixed(4).replace(/(\.\d{2}\d*?)0*$/, '$1')}`; // 4 decimals, trailing zeros past cents dropped
+  throw new RefusedError('price_jump', `SiteOne's ${what} shows ${dollars(seenUnitCents)} a package (total with tax over ${quantity}), more than ${PRICE_JUMP_LIMIT_PERCENT}% above the ${onFile} on file. The robot placed no order; check the SiteOne account before ordering by hand.`, evidence, totalCents);
+}
+
 async function verifyCartAndGate(run) {
   const { page, evidence } = run;
   await verifyOwnRow(run);
@@ -993,7 +1017,9 @@ async function place(args, opts = {}) {
   const evidence = { adapter: 'siteone-cdp', dryRun };
   // A { ok: false } verdict is an ordinary refusal. The cap check THROWING is
   // the environment's problem (run-level), never a parked order.
+  const priceOnFileMicros = Number(args.priceOnFileMicros) || null;
   const gate = async (cents, what) => {
+    checkPriceJump({ priceOnFileMicros, quantity: qty, evidence }, cents, what); // before the cap check: a jump never reserves money
     let verdict;
     try { verdict = await args.beforeSubmit(cents); } catch (e) { throw runLevel(`siteone cdp: cap check failed at the ${what}: ${String(e.message).slice(0, 120)}`); }
     if (!verdict || verdict.ok !== true) throw new RefusedError(verdict?.reason || 'over_cap', verdict?.message || `cap check refused the ${what}`, evidence, cents);
@@ -1024,11 +1050,12 @@ module.exports = {
   loginRequired: false,
   quotesAtPlace: true,
   packagedQuantity: true,
+  checksPrice: true, // the dispatcher passes priceOnFileMicros (the eligible price row, millionths of a dollar per package) to this adapter
   acceptsPoNumber: true, // the dispatcher passes WAVES-<ledger id>: the order can be found by it after an ambiguous click
   preSubmitTotal: 'vendor', // the review total is read live, immediately before the click
   configured,
   quote: () => null,
   place,
   RefusedError,
-  _internals: { SELECTORS, URLS, PATHS, confirmationCodeOf, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl },
+  _internals: { PRICE_JUMP_LIMIT_PERCENT, SELECTORS, URLS, PATHS, confirmationCodeOf, parseMoney, itemNumberAfterColon, orderNumberIn, numberTokens, hasToken, hasEveryToken, isDryRun, isLocalCdpUrl },
 };
