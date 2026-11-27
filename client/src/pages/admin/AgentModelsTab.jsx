@@ -108,12 +108,13 @@ export default function AgentModelsTab() {
   // moment the primary does.
   const noBackupMoving = data ? data.lanes.filter((l) => laneChanged(l) && (!l.fallback || effectiveLeg(l.fallback) !== l.fallback.model)).map((l) => l.name) : [];
 
-  // Inbound-content lanes that a change lands on Gemini (the adapter folds the
-  // system prompt into the user turn — no instruction boundary yet).
+  // Direct-fetch inbound-content lanes that still fold instructions into the
+  // Gemini user turn (no native systemInstruction yet). Lanes routed through
+  // services/llm/call.js send systemInstruction natively and are excluded.
   const geminiInboundLanes = useMemo(() => {
     if (!data) return [];
     return data.lanes
-      .filter((l) => l.inbound && laneChanged(l))
+      .filter((l) => l.inbound && l.geminiFoldsSystem && laneChanged(l))
       .filter((l) => legsOf(l).some((leg) => { const id = effectiveLeg(leg); return id && id !== leg.model && catalog[id]?.provider === "gemini"; }))
       .map((l) => l.name);
   }, [data, laneChanged, effectiveLeg, catalog]);
@@ -388,8 +389,8 @@ export default function AgentModelsTab() {
           </ul>
           {geminiInboundLanes.length > 0 && (
             <div className="text-13 text-alert-fg" role="alert">
-              Moves inbound customer content onto Gemini: {geminiInboundLanes.join(", ")}. The Gemini adapter has no system-instruction
-              boundary yet, so this widens the prompt-injection surface until that is fixed.
+              Moves inbound customer content onto a direct-fetch Gemini lane: {geminiInboundLanes.join(", ")}. These callers still fold
+              instructions into the user turn without systemInstruction, which widens the prompt-injection surface.
             </div>
           )}
           <pre className="m-0 overflow-x-auto rounded-sm border-hairline border-zinc-200 bg-zinc-50 p-3 text-12 text-zinc-900 u-nums">{envBlock}</pre>

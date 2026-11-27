@@ -344,4 +344,72 @@ describe("AgentModelsTab", () => {
     expect(within(dialog).getByText("Report copy")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "Draft eligible" })).toBeEnabled();
   });
+
+  it("warns on inbound Gemini moves only for direct-fetch lanes that fold instructions into the user turn", async () => {
+    adminFetch.mockImplementation(async (path, init) => {
+      if (path === "/admin/agents/models") {
+        const data = makeData();
+        data.models.g1 = { label: "Gemini 3.8", provider: "gemini", caps: ["text"], status: "current" };
+        data.models.g2 = { label: "Gemini 4", provider: "gemini", caps: ["text"], status: "current" };
+        data.lanes = [
+          {
+            id: "shared_inbound",
+            name: "Shared Gemini lane",
+            describe: "Routes through shared adapter",
+            area: "sms",
+            continuity: "verified",
+            inbound: true,
+            geminiFoldsSystem: false,
+            lock: null,
+            fanout: false,
+            applies: "restart",
+            primary: { model: "g1", selector: null, pinEnv: "PIN_SHARED_G", setEnv: "PIN_SHARED_G", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: false },
+            fallback: null,
+            retry: null,
+            also: [],
+          },
+          {
+            id: "direct_inbound",
+            name: "Direct Gemini lane",
+            describe: "Direct-fetch caller",
+            area: "sms",
+            continuity: "verified",
+            inbound: true,
+            geminiFoldsSystem: true,
+            lock: null,
+            fanout: false,
+            applies: "restart",
+            primary: { model: "g1", selector: null, pinEnv: "PIN_DIRECT_G", setEnv: "PIN_DIRECT_G", pinned: true, unpinnedModel: "g1", accepts: { providers: ["gemini"], cap: "text", deep: false }, live: false },
+            fallback: null,
+            retry: null,
+            also: [],
+          },
+        ];
+        return data;
+      }
+      if (path.startsWith("/admin/agents/models/search")) return { newest: [], results: [], unavailable: [] };
+      if (path === "/admin/agents/models/probe") return { ok: true, provider: JSON.parse(init.body).provider, id: JSON.parse(init.body).id };
+      throw new Error(path);
+    });
+    renderTab();
+    const sharedCard = (await screen.findByText("Shared Gemini lane")).closest(".p-4");
+    fireEvent.click(within(sharedCard).getByRole("button", { name: /Change/ }));
+    let dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    expect(await screen.findByText("PIN_SHARED_G=g2")).toBeInTheDocument();
+    expect(screen.queryByText(/direct-fetch Gemini|systemInstruction/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+
+    const directCard = screen.getByText("Direct Gemini lane").closest(".p-4");
+    fireEvent.click(within(directCard).getByRole("button", { name: /Change/ }));
+    dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getAllByRole("button", { name: "Use" })[0]); // Gemini 4
+    fireEvent.click(await screen.findByRole("button", { name: "Review changes" }));
+    const warning = await screen.findByText(/Moves inbound customer content onto a direct-fetch Gemini lane/);
+    expect(warning).toHaveAttribute("role", "alert");
+    expect(warning).toHaveTextContent(/Direct Gemini lane/);
+    expect(warning).toHaveTextContent(/systemInstruction/);
+    expect(warning).not.toHaveTextContent(/Shared Gemini lane/);
+  });
 });

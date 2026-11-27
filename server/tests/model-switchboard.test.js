@@ -842,4 +842,17 @@ describe('voice_relay — picker vs runtime allowlist, and blast-radius attribut
       expect(collections.primary.model).toBe(expected);
     });
   });
+
+  it('marks only direct-fetch Gemini lanes with geminiFoldsSystem (shared llm/call.js lanes send systemInstruction)', () => {
+    const { lanes } = require('../services/model-switchboard').getSwitchboard();
+    const byId = Object.fromEntries(lanes.map((l) => [l.id, l]));
+    for (const id of ['pest_id', 'lawn_assess', 'tree_shrub', 'treatment_zone', 'turf_ocr', 'address_recovery', 'call_extraction_v1', 'transcription']) {
+      expect(byId[id].inbound).toBe(true);
+      expect(byId[id].geminiFoldsSystem).toBe(true);
+    }
+    for (const id of ['pest_id_app', 'plant_id_app', 'contact_dictation', 'call_extraction', 'sms_draft']) {
+      expect(byId[id].inbound).toBe(true);
+      expect(byId[id].geminiFoldsSystem).toBe(false);
+    }
+  });
 });
