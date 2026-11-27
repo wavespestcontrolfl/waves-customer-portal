@@ -139,7 +139,7 @@ describe('POST /sms', () => {
       to: '+19415550100', body: 'On my way.', channel: 'sms', audience: 'customer', purpose: 'conversational',
       customerId: 'c1', identityTrustLevel: 'phone_matches_customer', entryPoint: 'tech_line_text',
       providerHandoffReservation: expect.any(Object),
-      metadata: expect.objectContaining({ original_message_type: 'manual', tech_line: true, scheduled_service_id: VISIT, adminUserId: 'tech-1', fromNumber: '+19413529161', parkedDecisionIds: ['dec-1'] }),
+      metadata: expect.objectContaining({ original_message_type: 'manual', humanAuthored: true, tech_line: true, scheduled_service_id: VISIT, adminUserId: 'tech-1', fromNumber: '+19413529161', parkedDecisionIds: ['dec-1'] }),
     }));
     expect(require('../services/messaging/provider-handoff-reservation')
       .isProviderHandoffHandle(sendCustomerMessage.mock.calls[0][0].providerHandoffReservation)).toBe(true);
@@ -481,7 +481,7 @@ describe('POST /set-text', () => {
     expect(r.body).toEqual({ success: true, from: LINE, kind: 'gate_locked', body: GATE_TEXT });
     expect(sendCustomerMessage).toHaveBeenCalledWith(expect.objectContaining({
       to: '+19415550100', body: GATE_TEXT, channel: 'sms', purpose: 'conversational', entryPoint: 'tech_line_text',
-      metadata: expect.objectContaining({ set_text_kind: 'gate_locked', scheduled_service_id: VISIT, tech_line: true, original_message_type: 'manual', fromNumber: LINE.number }),
+      metadata: expect.objectContaining({ set_text_kind: 'gate_locked', humanAuthored: false, scheduled_service_id: VISIT, tech_line: true, original_message_type: 'manual', fromNumber: LINE.number }),
     }));
     const [, claimBindings] = db.raw.mock.calls.find((c) => CLAIM_SQL.test(String(c[0])));
     expect(claimBindings[0]).toBe(`tech-set-text:${VISIT}:gate_locked`);

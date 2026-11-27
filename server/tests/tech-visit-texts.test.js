@@ -71,8 +71,8 @@ describe('textVerdict', () => {
   });
 
   test('an outbound text shows only in a state that reached the customer (allow-list, normalized)', () => {
-    for (const status of ['sent', 'SENT', 'delivered', 'queued', 'accepted', 'read', '', null]) expect(textVerdict(outbound({ status }))).toBe('show');
-    for (const status of ['failed', 'undelivered', 'held', 'draft', 'skipped', 'suppressed', 'new_status_2027']) expect(textVerdict(outbound({ status }))).toBe('skip');
+    for (const status of ['sent', 'SENT', 'delivered', 'queued', 'accepted', 'read']) expect(textVerdict(outbound({ status }))).toBe('show');
+    for (const status of ['', null, undefined, '  ', 'failed', 'undelivered', 'held', 'draft', 'skipped', 'suppressed', 'new_status_2027']) expect(textVerdict(outbound({ status }))).toBe('skip');
   });
 
   test('an inbound text a spam screen enforced is neither shown nor counted', () => {
@@ -352,6 +352,24 @@ describe('visitTexts', () => {
     ]);
     expect(sign).not.toHaveBeenCalled();
     expect(JSON.stringify(out)).not.toMatch(/twilio/);
+  });
+
+  test('a card number sent four digits at a time: every contributing text is hidden with its photo, a lone gate code still shows', async () => {
+    const sign = jest.fn(async (items) => items.map((m) => ({ ...m, url: `https://signed.example/${m.key}` })));
+    const img = (k) => ({ media: [{ key: `sms-media/inbound/${k}`, contentType: 'image/jpeg' }] });
+    const parts = ['4111', '1111', '1111', '1111'];
+    const rows = [
+      ...parts.map((digits, i) => row(`c${i}`, `2026-11-22T1${i}:00:00Z`, { message_body: digits, metadata: img(`c${i}`) })),
+      row('after', '2026-11-23T10:00:00Z', { message_body: 'see you Tuesday' }),
+      row('gate', '2026-11-23T11:00:00Z', { message_body: 'the gate code is 1234' }),
+    ];
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
+    expect(out.texts.map((t) => t.id)).toEqual(['after', 'gate']);
+    expect(out.hidden).toBe(4);
+    expect(sign).not.toHaveBeenCalled();
+    expect(JSON.stringify(out)).not.toMatch(/4111|1111/);
+    const alone = await visitTexts(fakeDb([rows[rows.length - 1]]), SVC, { now: NOW, sign });
+    expect(alone.texts.map((t) => t.id)).toEqual(['gate']);
   });
 
   test('a visit with no customer reads nothing', async () => {

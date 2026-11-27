@@ -10,7 +10,7 @@
  */
 const { addETDays, etDateString, parseETDateTime } = require('../utils/datetime-et');
 const { dateOnlyString } = require('../utils/date-only');
-const { scrubPansDetailed } = require('../utils/pan-scrub');
+const { scrubPansDetailed, scrubSegments } = require('../utils/pan-scrub');
 const { scrubNoteText } = require('../utils/note-secret-scrubber');
 const { scrubSecretText } = require('../utils/secret-text-scrubber');
 const { isSmsReaction } = require('./sms-intent');
@@ -43,8 +43,9 @@ const QUIET_TYPES = new Set([
 ]);
 // Statuses an outbound text may carry once it left (customer-activity-timeline.js OUTBOUND_LEFT).
 const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'read', 'failed', 'undelivered'];
-// An outbound text is shown only in a state that reached the customer: the timeline's list without its two failure states.
-const SENT_STATUSES = new Set(OUTBOUND_LEFT.filter((status) => status !== 'failed' && status !== 'undelivered'));
+// An outbound text is shown only in a state that reached the customer: the timeline's list without its two failure states and without
+// the blank legacy status (a blank status proves nothing reached anyone).
+const SENT_STATUSES = new Set(OUTBOUND_LEFT.filter((status) => status !== '' && status !== 'failed' && status !== 'undelivered'));
 
 // bill, invoice, charge, card, payment, pay, paid, refund, price, cost, balance, owe, a dollar amount; plus the plain
 // forms of the same words a customer types (autopay, receipt, deposit, cash, venmo, zelle, fee).
@@ -214,6 +215,16 @@ async function windowRows(db, customerId, start, now) {
   return withoutQueueParents(rows);
 }
 
+// A card number sent a few digits at a time passes every per-row check. The repo's cross-segment detector reads the customer's
+// inbound texts in order as segments; each text it masks or empties took part in a card number and is withheld with its photos.
+function cardSegmentRowIds(rows) {
+  const inbound = rows
+    .filter((row) => row.direction === 'inbound' && typeof row.message_body === 'string' && row.message_body)
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) || String(a.id).localeCompare(String(b.id)));
+  const { segments } = scrubSegments(inbound.map((row) => ({ text: row.message_body })));
+  return new Set(inbound.filter((row, i) => segments[i].text !== row.message_body).map((row) => row.id));
+}
+
 async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos = false } = {}) {
   const start = windowStart(svc.scheduled_date);
   if (!svc.customer_id || !start) return { texts: [], hidden: 0 };
@@ -221,8 +232,9 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   const rows = await windowRows(db, svc.customer_id, start, now);
   let hidden = 0;
   const shown = [];
+  const cardRows = cardSegmentRowIds(rows);
   for (const row of rows) {
-    const verdict = textVerdict(row, { withPhotos });
+    const verdict = cardRows.has(row.id) ? 'hidden' : textVerdict(row, { withPhotos });
     if (verdict === 'hidden') hidden += 1;
     else if (verdict === 'show') shown.push(row);
   }
