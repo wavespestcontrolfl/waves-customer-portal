@@ -651,3 +651,70 @@ describe('the spring pre-emergent catch-up on the tank sheet', () => {
     expect(operatingLayer.getProtocolWindowContext.mock.calls.every((call) => !call[1].roundStep?.catchUp)).toBe(true);
   });
 });
+
+// Owner 2026-11-27: the tank sheet shows every product's amount; spot work gets the 4 gal FlowZone amount. The fill amounts
+// (lawn-tank-reference.js) read the staged row's rate, the line's own spray volume, else the sprayer's calibration.
+describe('the tank sheet fill amounts on the v13 program', () => {
+  const BACKPACK = {
+    id: 'cal-bp', equipment_system_id: 'backpack', system_name: 'FlowZone Typhoon Backpack', system_type: 'backpack',
+    carrier_gal_per_1000: 1.33, tank_capacity_gal: 4, calibration_status: 'estimated', expires_at: '2099-01-01T00:00:00Z',
+  };
+  beforeEach(() => {
+    const base = db.getMockImplementation();
+    db.mockImplementation((table) => {
+      const query = base(table);
+      if (table !== 'equipment_calibrations as ec') return query;
+      query.where = jest.fn((key, value) => {
+        if (key === 'es.system_type' && value === 'backpack') query.catch = (onRejected) => Promise.resolve([BACKPACK]).catch(onRejected);
+        return query;
+      });
+      return query;
+    });
+  });
+
+  test('May: Tetrino per 100 gal and per 110 gal; Arena on its line\'s 4 gal; Celsius on the FlowZone test; the surfactant as 0.25% of the fill', async () => {
+    const body = await lawnMix({ month: '5' });
+    // amount = rate per 1,000 sq ft x (tank gallons / carrier gal per 1,000 sq ft)
+    expect(itemFor(body, TETRINO).tankAmounts).toMatchObject({
+      application: 'spray', bigTank: true, ratePer1000: 0.367, rateSource: 'protocol_rate', applyAlone: true, mixWith: null,
+      per100Gal: { gallons: 100, amount: 36.7, amountUnit: 'fl oz', carrierGalPer1000: 1, carrierSource: 'calibration' },
+      fullTank: { gallons: 110, amount: 40.37 },
+      backpack4Gal: { gallons: 4, amount: 1.104, carrierGalPer1000: 1.33 },
+    });
+    // A spot row (the plan gives it no job quantity) still has its fill amounts on the sheet, and its plan state rides along.
+    const arena = itemFor(body, 'Arena 50 WDG');
+    expect(arena.jobMix).toBeNull();
+    expect(arena.tankAmounts).toMatchObject({
+      planState: 'spot', bigTank: false, per100Gal: null, fixedCarrierGalPer1000: 4, fixedCarrierSource: 'line',
+      // The label-rate row states no rate: the recipe line's 0.147 oz, never the catalog's 0.29 oz.
+      ratePer1000: 0.147, rateSource: 'recipe_line_rate',
+      backpack4Gal: { amount: 0.147, amountUnit: 'oz', metricAmount: 4.2, metricUnit: 'g', carrierGalPer1000: 4, carrierSource: 'line' },
+      // The FlowZone was tested at 1.33, not the line's 4 gal: the card warns; the spot row needs no big-tank check.
+      volumeChecks: [{ use: null, sprayerName: 'FlowZone Typhoon Backpack', labelGalPer1000: 4, testedGalPer1000: 1.33, passes: 3, otherSprayerName: null }],
+    });
+    expect(itemFor(body, 'Celsius WG').tankAmounts).toMatchObject({
+      ratePer1000: 0.085, backpack4Gal: { amount: 0.256, amountUnit: 'oz', carrierGalPer1000: 1.33, carrierSource: 'calibration' },
+    });
+    expect(itemFor(body, 'LESCO 90/10 Nonionic Surfactant').tankAmounts).toMatchObject({
+      concentrationPercent: 0.25, mixWith: 'Celsius WG', backpack4Gal: { amount: 1.28, amountUnit: 'fl oz', carrierSource: 'concentration' },
+      surfactantNote: 'Leave the surfactant out if it is 90°F or hotter.',
+    });
+    expect(body.warnings).toContainEqual(expect.objectContaining({
+      code: 'backpack_calibration_overdue_or_estimated',
+      message: 'Sprayer not field tested: FlowZone Typhoon Backpack at 1.33 gal per 1,000 sq ft (estimated, not field tested). Amounts below assume that. Test the sprayer.',
+    }));
+  });
+
+  test('a granular bag is a spreader line: its rate, no tank amount', async () => {
+    const body = await lawnMix({ month: '2' });
+    const bag = itemFor(body, F24).tankAmounts;
+    expect(bag).toMatchObject({ application: 'spreader', rateUnit: 'lb', per100Gal: null, fullTank: null, backpack4Gal: null });
+    expect(bag.ratePer1000).toBeCloseTo(3.125, 3);
+  });
+
+  test('a technician gets the same fill amounts with no price field in them', async () => {
+    const body = await lawnMix({ month: '5' }, { techRole: 'technician' });
+    expect(JSON.stringify(itemFor(body, 'Celsius WG').tankAmounts)).not.toMatch(/cost|price/i);
+    expect(itemFor(body, 'Celsius WG').tankAmounts.backpack4Gal).toMatchObject({ amount: 0.256 });
+  });
+});

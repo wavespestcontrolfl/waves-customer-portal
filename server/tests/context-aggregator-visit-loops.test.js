@@ -66,14 +66,15 @@ describe('getContextForCustomer visitLoops', () => {
     expect(context.visitLoops).toEqual({ lateAlert: null, pastWindow: null, weOwe: [], customerWaiting: [] });
   });
 
-  test('attaches the loader result, passing customer id and the aggregator deriveWindow (the loader reads all of today itself)', async () => {
+  test('attaches the loader result, passing customer id, the aggregator deriveWindow and the listed upcoming visits', async () => {
     const loops = { lateAlert: { visitId: 'visit-1', type: 'tech_late' }, pastWindow: null, weOwe: [], customerWaiting: [] };
     loadVisitLoops.mockResolvedValue(loops);
     const context = await ContextAggregator.getContextForCustomer(customer, { includeVisitLoops: true });
     expect(context.visitLoops).toBe(loops);
     const args = loadVisitLoops.mock.calls[0][0];
     expect(args.customerId).toBe(customer.id);
-    expect(args).not.toHaveProperty('upcomingServices');
+    // the visits UPCOMING SERVICES lists ride along for SCHEDULE CHANGES only (the same rows, the same order)
+    expect(args.upcomingServices).toEqual(context.upcomingServices.filter((s) => s && s.date));
     expect(args.deriveWindow({ window_start: '09:00:00' })).toBe('9:00 AM–11:00 AM');
   });
 

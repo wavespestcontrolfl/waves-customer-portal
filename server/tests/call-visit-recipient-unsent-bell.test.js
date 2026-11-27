@@ -1,9 +1,11 @@
 // A recipient lookup that throws is not "nobody is owed" (GATE_CALL_GIVEN_VISIT_TEXTS): ONE admin bell per visit and notice tells
 // someone to text the person named on the call. No retry, no phone number, name or link in the bell, and the holder's result is
 // unchanged (the function still answers true).
-jest.mock('../models/db', () => jest.fn(() => {
-  throw Object.assign(new Error(`select * from "scheduled_services" where "id" = 'visit-1' and phone '+19415550002' - connection terminated`), { code: '57P01' });
-}));
+jest.mock('../models/db', () => {
+  const fail = () => { throw Object.assign(new Error(`select * from "scheduled_services" where "id" = 'visit-1' and phone '+19415550002' - connection terminated`), { code: '57P01' }); };
+  // The every-visit copy (materializeForVisit) runs first, in a transaction: it fails the same way.
+  return Object.assign(jest.fn(fail), { transaction: jest.fn(async () => fail()) });
+});
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/notification-service', () => ({ notifyAdmin: jest.fn(async () => ({ id: 'n-1' })) }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
