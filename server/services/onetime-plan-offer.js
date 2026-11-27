@@ -72,6 +72,7 @@ const JOB_SERVICE_KEYS = ['one_time_pest_control', 'cockroach_control'];
 // (never auto-sending the general-pest "first plan visit" email or auto-minting a pest-only plan).
 const EXPANDED_JOB_SERVICE_KEYS = Object.freeze(['wdo_inspection', 'rodent_trapping', 'bee_wasp_removal', 'lawn_inspection']);
 const FREE_ASSESSMENT_SERVICE_KEYS = Object.freeze(['lawn_inspection']);
+const INSPECTION_SERVICE_KEYS = Object.freeze(['wdo_inspection', 'lawn_inspection']);
 const EXPANDED_SERVICE_WHY_LABELS = Object.freeze({
   wdo_inspection: 'WDO inspection',
   rodent_trapping: 'rodent trapping job',
@@ -226,6 +227,24 @@ const PERFORMED_DAY_JOIN = `JOIN LATERAL (
       AND ${PERFORMED_RECORD_SQL.replace(/%VISIT%/g, 's')}
   ) AS done ON TRUE`;
 
+// Expanded mode: inspection visits (WDO inspection, Waves Assessment) legitimately complete
+// with visitOutcome = 'inspection_only', while treatment jobs keep the strict performed filter.
+const INSPECTION_KEYS_SQL = INSPECTION_SERVICE_KEYS.map((k) => `'${k}'`).join(', ');
+const PERFORMED_DAY_JOIN_EXPANDED = `JOIN LATERAL (
+    SELECT MAX(r.service_date) AS service_day
+    FROM service_records r
+    WHERE r.scheduled_service_id = s.id
+      AND r.customer_id = s.customer_id
+      AND r.status = 'completed'
+      AND (
+        COALESCE(r.structured_notes->>'visitOutcome', '') NOT IN (${NON_PERFORMED_VISIT_OUTCOMES.map(() => '?').join(', ')})
+        OR (
+          COALESCE(s.service_key_snapshot, sv.service_key) IN (${INSPECTION_KEYS_SQL})
+          AND COALESCE(r.structured_notes->>'visitOutcome', '') = 'inspection_only'
+        )
+      )
+  ) AS done ON TRUE`;
+
 // The day the job's included follow-up was done, if it was: a follow-up row of the same customer, linked to the
 // job by followup_source_service_id or parent_service_id (package-followup-booking.js sets both), closed
 // 'completed' with a service record that says the service was performed (the same test as PERFORMED_DAY_JOIN).
@@ -250,10 +269,11 @@ const OFFER_DAY_SQL = 'GREATEST(done.service_day, COALESCE(follow.service_day, d
 // The jobs the offer can follow, on any day: a completed one-time pest or cockroach visit with the record that
 // its service was performed. dueJobsPage adds the day window; planOfferJobOf asks about one job.
 function qualifyingJobs(database, { includeExpanded = false } = {}) {
-  const keys = includeExpanded ? activeJobServiceKeys() : JOB_SERVICE_KEYS;
-  return database('scheduled_services as s')
+  const expanded = includeExpanded && expandedServicesOn();
+  const keys = expanded ? activeJobServiceKeys() : JOB_SERVICE_KEYS;
+  const query = database('scheduled_services as s')
     .leftJoin('services as sv', 's.service_id', 'sv.id')
-    .joinRaw(PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
+    .joinRaw(expanded ? PERFORMED_DAY_JOIN_EXPANDED : PERFORMED_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
     .joinRaw(FOLLOWUP_DAY_JOIN, [...NON_PERFORMED_VISIT_OUTCOMES])
     .where('s.status', 'completed')
     .whereRaw('done.service_day IS NOT NULL')
@@ -263,6 +283,12 @@ function qualifyingJobs(database, { includeExpanded = false } = {}) {
     .whereRaw("COALESCE(s.recurring_pattern, '') IN ('', 'one_time')")
     .whereRaw('s.is_callback IS DISTINCT FROM true')
     .whereRaw('s.followup_included IS DISTINCT FROM true');
+  if (expanded) {
+    // Exclude inspections/assessments already marked won in consultation_outcomes
+    // (e.g. customer accepted a one-time estimate before another visit was booked).
+    query.whereRaw("NOT EXISTS (SELECT 1 FROM consultation_outcomes co WHERE co.scheduled_service_id = s.id AND co.outcome = 'won')");
+  }
+  return query;
 }
 
 // The qualifying jobs that are due their offer today: the offer day was FIRST_DAY to LAST_DAY days ago (ET).
@@ -514,13 +540,17 @@ async function owesMoney({ job, deps }) {
   return false;
 }
 
+function isZeroOrBlankAmount(val) {
+  if (val == null || val === '') return true;
+  const n = Number(val);
+  return Number.isFinite(n) && n === 0;
+}
+
 function isUnpricedFreeAssessment(job) {
   if (!FREE_ASSESSMENT_SERVICE_KEYS.includes(job?.service_key)) return false;
-  const hasEstimated = job?.estimated_price != null && job.estimated_price !== '';
-  const hasPrimary = job?.primary_line_price != null && job.primary_line_price !== '';
-  const price = hasEstimated ? Number(job.estimated_price) : (hasPrimary ? Number(job.primary_line_price) : 0);
-  const prepaid = job?.prepaid_amount != null && job.prepaid_amount !== '' ? Number(job.prepaid_amount) : 0;
-  return Number.isFinite(price) && price <= 0 && Number.isFinite(prepaid) && prepaid <= 0;
+  return isZeroOrBlankAmount(job?.estimated_price)
+    && isZeroOrBlankAmount(job?.primary_line_price)
+    && isZeroOrBlankAmount(job?.prepaid_amount);
 }
 
 // The job is paid, its price can be read, and nothing else is owed.
@@ -1281,12 +1311,15 @@ async function officeItemWithdrawn({ customerId, jobId }, { now, deps }) {
 // for a job that no longer qualifies for this customer (cancelled, its service record taken back): no offer stands on
 // it. An item with no job (none is raised so) keeps its stored day.
 async function currentOffer(database, meta) {
-  if (!meta.jobId) return { offerDay: null, lastDay: meta.lastDay || null };
+  if (!meta.jobId) return { offerDay: null, lastDay: meta.lastDay || null, serviceKey: meta.serviceKey || null };
   const row = await qualifyingJobs(database, { includeExpanded: true }).where('s.id', meta.jobId).where('s.customer_id', meta.customerId)
-    .first(database.raw(`${OFFER_DAY_SQL} AS service_day`));
+    .first(
+      database.raw(`${OFFER_DAY_SQL} AS service_day`),
+      database.raw('COALESCE(s.service_key_snapshot, sv.service_key) AS service_key'),
+    );
   if (!row) return { gone: true };
   const offerDay = dateOnlyString(row.service_day);
-  return { offerDay, lastDay: offerTerms(offerDay).lastDay };
+  return { offerDay, lastDay: offerTerms(offerDay).lastDay, serviceKey: row.service_key || meta.serviceKey || null };
 }
 
 // The open office items, closed when their job is handled: an estimate of the customer made after the item (a person
@@ -1327,7 +1360,14 @@ async function closeOrRefreshOfficeItem(row, { today, now, deps, episodes }) {
   // quietly (raiseOfficeItem's refresh), so staff never read an older deadline than the one the close uses.
   else if (offer.offerDay && offer.lastDay !== meta.lastDay) {
     const customer = await deps.db('customers').where({ id: meta.customerId }).first('id', 'first_name', 'last_name');
-    if (customer) await deps.raiseOfficeItem({ job: { id: meta.jobId }, customer, offerDay: offer.offerDay, reason: meta.reason });
+    if (customer) {
+      await deps.raiseOfficeItem({
+        job: { id: meta.jobId, ...(offer.serviceKey ? { service_key: offer.serviceKey } : {}) },
+        customer,
+        offerDay: offer.offerDay,
+        reason: meta.reason,
+      });
+    }
   }
 }
 

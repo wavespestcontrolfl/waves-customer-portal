@@ -2571,8 +2571,15 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         reason: 'expanded_service_review',
       }));
 
-      // A priced or prepaid lawn_inspection with no invoice MUST hold as no_invoice (never bypass paid-invoice rule).
-      for (const pricedPatch of [{ estimated_price: 49 }, { estimated_price: null, primary_line_price: 49 }, { prepaid_amount: 25 }]) {
+      // A priced, conflicting, negative, or prepaid lawn_inspection with no invoice MUST hold as no_invoice.
+      for (const pricedPatch of [
+        { estimated_price: 49 },
+        { estimated_price: null, primary_line_price: 49 },
+        { estimated_price: 0, primary_line_price: 49 },
+        { estimated_price: -10 },
+        { prepaid_amount: 25 },
+        { prepaid_amount: -5 },
+      ]) {
         const pricedDeps = liveWorld({
           tables: {
             'scheduled_services as s': [{ ...assessmentJob, ...pricedPatch }],
@@ -2586,6 +2593,9 @@ describe('GATE_ONETIME_PLAN_OFFER=live', () => {
         expect(pricedSummary.reasons.no_invoice).toBe(1);
         expect(pricedDeps.raiseOfficeItem).not.toHaveBeenCalled();
       }
+      // Expanded query allows inspection_only for inspections and excludes won consultation_outcomes.
+      expect(onQueries[0].calls.some(([m, sql]) => m === 'joinRaw' && String(sql).includes("visitOutcome', '') = 'inspection_only'"))).toBe(true);
+      expect(onQueries[0].calls.some(([m, sql]) => m === 'whereRaw' && String(sql).includes("consultation_outcomes"))).toBe(true);
 
       // Expanded service with has_plan blocker is held (not sent to office).
       const blockerDeps = liveWorld({
