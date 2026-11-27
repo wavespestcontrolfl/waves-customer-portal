@@ -524,8 +524,8 @@ const SERVICE_DETAILS_COPY = {
         ],
       },
       {
-        heading: 'Mowing',
-        paragraphs: ['Ask your technician for the right mowing height for your lawn. Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites weeds.'],
+        heading: 'Mowing heights (UF/IFAS starting points)',
+        paragraphs: ['Standard St. Augustine (Floratam, Palmetto, Raleigh) 3.5–4"; dwarf St. Augustine (Seville, Captiva) 2–2.5"; Bermuda 1–2"; Zoysia 1.5–2"; Bahia 3–4". Never remove more than a third of the blade in one mowing. Keep blades sharp. Scalping looks like pest damage and invites Bermuda and weeds.'],
       },
       {
         heading: 'Bermuda removal from St. Augustine (Recognition + Fusilade II)',
