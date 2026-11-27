@@ -4,7 +4,7 @@
  * tech-visit-texts-route.test.js.
  */
 const { isPaymentScopedText } = require('../services/payment-status-contract');
-const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
+const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
 
 const inbound = (over = {}) => ({ direction: 'inbound', message_type: 'inbound', status: 'received', message_body: 'The gate code changed', metadata: null, ...over });
 const outbound = (over = {}) => ({ direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: { human_authored: true }, ...over });
@@ -121,10 +121,22 @@ describe('textVerdict', () => {
     expect(textVerdict(outbound({ message_body: body }))).toBe('hidden');
   });
 
-  test.each(['the gate code is 1234', 'gate code is 1234, side door 5566', 'garage code 7788 please', 'use the keypad at the gate, code 2468'])(
-    'an ordinary gate or door code instruction still shows: %s', (body) => {
-      expect(textVerdict(inbound({ message_body: body }))).toBe('show');
-    });
+  test.each([
+    'the gate code is 1234', 'gate code is 1234, side door 5566', 'garage code 7788 please', 'use the keypad at the gate, code 2468', 'code 12 34', 'code 1-2-3',
+    'code 1.2.3.4', '\uff11\uff12\uff13\uff14', 'we are at 123 Palm Ave', 'call 941 555 0100', 'ZIP 34205', 'arrive 1030am',
+  ])('a text with a number of 3 or more digits is hidden, either direction: %s', (body) => {
+    expect(hasNumberRun(body)).toBe(true);
+    expect(textVerdict(inbound({ message_body: body }))).toBe('hidden');
+    expect(textVerdict(outbound({ message_body: body }))).toBe('hidden');
+  });
+
+  test.each([
+    'see you at 10:30 on 11/26', 'see you 9:15 am', 'Tuesday 11/26/2026 works', 'Nov 26 works for us', 'December 3rd is fine', '2 dogs in the yard', 'only 12 minutes',
+    'the 2nd gate', 'we have 3 cats and 2 dogs',
+  ])('a time, a date or a small count is not a credential and shows: %s', (body) => {
+    expect(hasNumberRun(body)).toBe(false);
+    expect(textVerdict(inbound({ message_body: body }))).toBe('show');
+  });
 
   test.each(['All done.Thanks', 'Finished the front.Please call', 'Tuesday works.See you then', 'dogs are out.Ok'])(
     'prose with a dot and no space is not a link: %s', (body) => {
@@ -151,9 +163,9 @@ describe('textVerdict', () => {
     expect(textVerdict(inbound({ message_type: 'reschedule_reply', message_body: 'Thursday morning works' }))).toBe('show');
   });
 
-  test('an ordinary number is not a card number', () => {
+  test('an ordinary number is not a card number, but the number rule still hides it', () => {
     expect(hasCardCredentials('gate code 4521, call 941 555 0100')).toBe(false);
-    expect(textVerdict(inbound({ message_body: 'gate code is 4521' }))).toBe('show');
+    expect(textVerdict(inbound({ message_body: 'gate code is 4521' }))).toBe('hidden');
   });
 
   test('a tapback stored as an ordinary inbound is dropped, never shown or counted', () => {
@@ -336,13 +348,13 @@ describe('visitTexts', () => {
     const img = { media: [{ key: 'sms-media/inbound/otp', contentType: 'image/jpeg' }] };
     const rows = [
       row('otp', '2026-11-22T15:00:00Z', { message_body: 'My OTP is 123456', metadata: img }),
-      row('gate', '2026-11-22T16:00:00Z', { message_body: 'the gate code is 1234', metadata: { media: [{ key: 'sms-media/inbound/gate', contentType: 'image/jpeg' }] } }),
+      row('patch', '2026-11-22T16:00:00Z', { message_body: 'Brown patch by the gate', metadata: { media: [{ key: 'sms-media/inbound/patch', contentType: 'image/jpeg' }] } }),
     ];
     const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
-    expect(out.texts.map((t) => t.id)).toEqual(['gate']);
+    expect(out.texts.map((t) => t.id)).toEqual(['patch']);
     expect(out.hidden).toBe(1);
     expect(sign).toHaveBeenCalledTimes(1);
-    expect(sign).toHaveBeenCalledWith([{ key: 'sms-media/inbound/gate', contentType: 'image/jpeg' }]);
+    expect(sign).toHaveBeenCalledWith([{ key: 'sms-media/inbound/patch', contentType: 'image/jpeg' }]);
     expect(JSON.stringify(out)).not.toMatch(/123456|otp/i);
   });
 
@@ -362,7 +374,7 @@ describe('visitTexts', () => {
     expect(JSON.stringify(out)).not.toMatch(/twilio/);
   });
 
-  test('a card number sent four digits at a time: every contributing text is hidden with its photo, a lone gate code still shows', async () => {
+  test('a card number sent four digits at a time: every contributing text is hidden with its photo; a gate code is hidden too', async () => {
     const sign = jest.fn(async (items) => items.map((m) => ({ ...m, url: `https://signed.example/${m.key}` })));
     const img = (k) => ({ media: [{ key: `sms-media/inbound/${k}`, contentType: 'image/jpeg' }] });
     const parts = ['4111', '1111', '1111', '1111'];
@@ -372,12 +384,36 @@ describe('visitTexts', () => {
       row('gate', '2026-11-23T11:00:00Z', { message_body: 'the gate code is 1234' }),
     ];
     const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
-    expect(out.texts.map((t) => t.id)).toEqual(['after', 'gate']);
-    expect(out.hidden).toBe(4);
+    expect(out.texts.map((t) => t.id)).toEqual(['after']);
+    expect(out.hidden).toBe(5);
     expect(sign).not.toHaveBeenCalled();
-    expect(JSON.stringify(out)).not.toMatch(/4111|1111/);
-    const alone = await visitTexts(fakeDb([rows[rows.length - 1]]), SVC, { now: NOW, sign });
-    expect(alone.texts.map((t) => t.id)).toEqual(['gate']);
+    expect(JSON.stringify(out)).not.toMatch(/4111|1111|1234/);
+  });
+
+  test('a card number split across four texts in full-width digits is hidden, photos never signed', async () => {
+    const sign = jest.fn();
+    const img = (k) => ({ media: [{ key: `sms-media/inbound/${k}`, contentType: 'image/jpeg' }] });
+    const parts = ['\uff14\uff11\uff11\uff11', '\uff11\uff11\uff11\uff11', '\uff11\uff11\uff11\uff11', '\uff11\uff11\uff11\uff11'];
+    const rows = parts.map((digits, i) => row(`f${i}`, `2026-11-22T1${i}:00:00Z`, { message_body: digits, metadata: img(`f${i}`) }));
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
+    expect(out).toEqual({ texts: [], hidden: 4 });
+    expect(sign).not.toHaveBeenCalled();
+  });
+
+  test('a one or two digit reply right after a text a credential screen held back is hidden; a plain count is not', async () => {
+    const rows = [
+      row('a1', '2026-11-22T10:00:00Z', { message_body: 'my verification code is' }),
+      row('a2', '2026-11-22T10:01:00Z', { message_body: '48' }),
+      row('a3', '2026-11-22T10:02:00Z', { message_body: '1' }),
+      row('b1', '2026-11-22T11:00:00Z', { message_body: 'how many dogs do you need to know about' }),
+      row('b2', '2026-11-22T11:01:00Z', { message_body: '2' }),
+      row('c1', '2026-11-22T12:00:00Z', { message_body: 'my code is' }),
+      row('c2', '2026-11-22T12:01:00Z', { message_body: '481' }),
+    ];
+    const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign: async () => [] });
+    expect(out.texts.map((t) => t.id)).toEqual(['b1', 'b2', 'c1']);
+    expect(out.hidden).toBe(4); // a1 (verification code), a2 + a3 (short replies after it), c2 (3 digits)
+    expect(JSON.stringify(out)).not.toMatch(/481|"48"/);
   });
 
   test('a visit with no customer reads nothing', async () => {

@@ -88,9 +88,29 @@ function hasSignInCode(body) {
   return SIGN_IN_CODE.test(text) || require('./access-code-capture').VERIFICATION_CONTEXT.test(text);
 }
 
+// One reading of a body for every number screen: NFKC (full-width digits and letters), zero-width characters removed, typographic
+// dashes as "-".
+function normalizedBody(body) {
+  return String(body || '').normalize('NFKC').replace(/[\u00ad\u200b-\u200f\u2060\ufeff]/g, '').replace(/[\u2010-\u2015\u2212]/g, '-');
+}
+
+// What cannot be a credential: a clock time (h:mm, h:mm am/pm), a numeric date (11/26, 11/26/2026) and a month-name date (Nov 26).
+// "1030am" is not exempt.
+const TIME_OF_DAY = /\b\d{1,2}:\d{2}(?:\s?[ap]\.?m\.?)?(?!\d)/gi;
+const NUMERIC_DATE = /\b\d{1,2}\/\d{1,2}(?:\/\d{2,4})?(?!\d)/g;
+const NAMED_DATE = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?(?!\d)/gi;
+
+// A run of 3 or more digits, spaces, dashes and dots between digits collapsed first ("12 34", "1-2-3"). A gate or door code, a house
+// number, a phone number or a ZIP all land here: the texts list never carries a number that could open something, and the brief's own
+// access block (which enforces property and visit) is where a technician gets a code.
+function hasNumberRun(body) {
+  const text = normalizedBody(body).replace(NAMED_DATE, ' x ').replace(NUMERIC_DATE, ' x ').replace(TIME_OF_DAY, ' x ');
+  return /\d{3,}/.test(text.replace(/(?<=\d)[\s.-]{1,3}(?=\d)/g, ''));
+}
+
 function hasCardCredentials(body) {
   // Typographic dashes and full-width digits read as the plain ones, as the card and SSN screens expect.
-  const text = String(body || '').normalize('NFKC').replace(/[\u2010-\u2015\u2212]/g, '-');
+  const text = normalizedBody(body);
   // scrubNoteText reads a normalized copy (typographic dashes, full-width digits) and also finds SSNs, tokens and keys.
   // scrubSecretText: labelled secrets in prose ("My OTP is 123456", "password: x", a PIN) and known secret formats.
   return CREDENTIAL_WORDS.test(text) || hasSignInCode(text) || scrubSecretText(text).removed > 0 || scrubPansDetailed(text).count > 0 || scrubNoteText(text).removed > 0;
@@ -144,7 +164,7 @@ function isNoise(row) {
 function isHeldBack(row) {
   if (!(row.direction === 'inbound' ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(row.message_type || '')) return true;
   const body = row.message_body;
-  return hasMoneyWords(body) || hasCardCredentials(body) || hasLink(body) || isPaymentScopedText(body);
+  return hasMoneyWords(body) || hasCardCredentials(body) || hasNumberRun(body) || hasLink(body) || isPaymentScopedText(body);
 }
 
 // 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
@@ -221,14 +241,25 @@ async function windowRows(db, customerId, start, now) {
   return withoutQueueParents(rows);
 }
 
-// A card number sent a few digits at a time passes every per-row check. The repo's cross-segment detector reads the customer's
-// inbound texts in order as segments; each text it masks or empties took part in a card number and is withheld with its photos.
-function cardSegmentRowIds(rows) {
+// Inbound texts that must be withheld because of the texts around them: a card number sent a few digits at a time (the repo's
+// cross-segment detector reads the customer's inbound texts in order, on normalized bodies; each text it masks or empties took part), and
+// a reply of only 1-2 digits right after an inbound text that a credential, secret, sign-in, card or number screen held back ("my
+// verification code is" ... "48").
+const SHORT_DIGITS_ONLY = /^[^\p{L}\p{N}]*\d{1,2}[^\p{L}\p{N}]*$/u;
+function sequenceHeldIds(rows) {
   const inbound = rows
     .filter((row) => row.direction === 'inbound' && typeof row.message_body === 'string' && row.message_body)
     .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0) || String(a.id).localeCompare(String(b.id)));
-  const { segments } = scrubSegments(inbound.map((row) => ({ text: row.message_body })));
-  return new Set(inbound.filter((row, i) => segments[i].text !== row.message_body).map((row) => row.id));
+  const bodies = inbound.map((row) => normalizedBody(row.message_body));
+  const { segments } = scrubSegments(bodies.map((text) => ({ text })));
+  const held = new Set();
+  let previousHeld = false;
+  inbound.forEach((row, i) => {
+    const sequence = segments[i].text !== bodies[i] || (SHORT_DIGITS_ONLY.test(bodies[i]) && previousHeld);
+    if (sequence) held.add(row.id);
+    previousHeld = sequence || hasCardCredentials(bodies[i]) || hasNumberRun(bodies[i]);
+  });
+  return held;
 }
 
 async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos = false } = {}) {
@@ -238,9 +269,9 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   const rows = await windowRows(db, svc.customer_id, start, now);
   let hidden = 0;
   const shown = [];
-  const cardRows = cardSegmentRowIds(rows);
+  const sequenceRows = sequenceHeldIds(rows);
   for (const row of rows) {
-    const verdict = cardRows.has(row.id) ? 'hidden' : textVerdict(row, { withPhotos });
+    const verdict = sequenceRows.has(row.id) ? 'hidden' : textVerdict(row, { withPhotos });
     if (verdict === 'hidden') hidden += 1;
     else if (verdict === 'show') shown.push(row);
   }
@@ -255,4 +286,4 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   return { texts, hidden };
 }
 
-module.exports = { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };
+module.exports = { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, WINDOW_DAYS, MAX_TEXTS, MAX_PAGES, PAGE_SIZE };
