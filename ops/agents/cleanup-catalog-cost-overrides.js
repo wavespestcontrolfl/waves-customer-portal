@@ -35,6 +35,8 @@ const {
   convertToOz,
   normalizeUnit,
   packageMeasure,
+  parsePackCount,
+  countUnitsCompatible,
   costLineFromUsage,
 } = require('../../server/services/product-costing');
 const { eligibleVendorPricing } = require('../../server/services/vendor-pricing-eligibility');
@@ -137,6 +139,21 @@ function planStaleOverrideClears(catalogRows, approvedVendorPricingIds, usageByP
   return { planned, skippedCountItems };
 }
 
+function explicitSingleContainerMatch(product, best) {
+  const unitSizeOz = numberOrNull(product?.unit_size_oz);
+  // Measured products MUST scale per oz; an unscalable case/pack quote can
+  // never fill a measured container's best_price.
+  if (unitSizeOz > 0) return false;
+  const vendorPack = parsePackCount(best?.row?.quantity);
+  if (!vendorPack || vendorPack.count !== 1) return false;
+  const catalogPack = parsePackCount(product?.container_size);
+  if (catalogPack) {
+    return catalogPack.count === 1 && countUnitsCompatible(vendorPack.unit, catalogPack.unit);
+  }
+  const costUnit = normalizeUnit(product?.cost_unit);
+  return Boolean(costUnit && countUnitsCompatible(vendorPack.unit, costUnit));
+}
+
 function previewBestVendorLink(product, rows, scoreVendorRows) {
   if (!rows.length) return null;
   const { mode, pool, catalogCount, unitSizeOz } = scoreVendorRows(rows, product);
@@ -144,8 +161,11 @@ function previewBestVendorLink(product, rows, scoreVendorRows) {
   if (!best) return null;
   const countScalable = mode === 'count';
   const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
-  // Mirror recalcBestPriceLocked's incompatible-unit guard: never overwrite an
-  // existing catalog price with an unscalable raw vendor pack price.
+  // Require a package that scales to the catalog container (oz or count) OR
+  // explicitly matches one unmeasured container, so an unscalable multi-unit
+  // case price can never populate a single container's best_price (even when
+  // best_price is currently null).
+  if (!scalable && !explicitSingleContainerMatch(product, best)) return null;
   if (!scalable && numberOrNull(product?.best_price) != null) return null;
   const bestPrice = countScalable
     ? Math.round(best.perUnit * catalogCount * 100) / 100
@@ -205,8 +225,9 @@ function brokenLiquidBottleCandidate(row) {
     serviceType: row.service_type,
     productId: row.product_id,
     productName: row.product_name,
-    fromAmount: hasAmount ? amount : null,
-    fromPer1000: hasPer1000 ? per1000 : null,
+    // Preserve exact original numeric values (including 0) for in-transaction revalidation.
+    fromAmount: amount,
+    fromPer1000: per1000,
     fromUnit: row.usage_unit,
     toAmount,
     toPer1000,

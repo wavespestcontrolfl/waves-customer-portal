@@ -53,42 +53,59 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
     expect(isCountBasedProduct({ unit_size_oz: 78, cost_unit: 'fl_oz' })).toBe(false);
   });
 
-  test('planMissingVendorLinks scales packages via scoreVendorRows and refuses to overwrite valid single-unit prices with unscalable pack prices', () => {
+  test('planMissingVendorLinks scales packages via scoreVendorRows and refuses unscalable pack/case quotes even when best_price is null', () => {
     const unlinked = [
       // Scalable measured product (50 lb bag = 800 oz): scales vendor pack price cleanly.
       { id: 'p-lesco', name: 'LESCO Dimension 0.21% 18-0-10', active: true, unit_size_oz: 800, container_size: '50 lb', best_price: null, best_vendor_pricing_id: null },
+      // Measured product with null best_price whose only quote is an unscalable case price: MUST SKIP!
+      { id: 'p-case-only', name: 'Liquid Concentrate', active: true, unit_size_oz: 64, container_size: '64 fl oz', best_price: null, best_vendor_pricing_id: null },
       // Count item with valid existing single-station price ($8.69) and unscalable pack row ($86.94 / "1 box"): MUST NOT overwrite!
       { id: 'p-hexpro', name: 'HexPro Station', active: true, unit_size_oz: null, container_size: '1 station', best_price: 8.69, best_vendor_pricing_id: null },
+      // Unmeasured count product with null best_price and explicit 1-station match: allowed!
+      { id: 'p-single', name: 'Single Station', active: true, unit_size_oz: null, container_size: '1 station', best_price: null, best_vendor_pricing_id: null },
       { id: 'p-already', name: 'Already Linked', active: true, unit_size_oz: 64, best_vendor_pricing_id: 'vp-existing' },
     ];
     const eligible = [
       { id: 'vp-hi', product_id: 'p-lesco', vendor_id: 'v-2', vendor_name: 'SiteOne', price_amount: 49.50, quantity: '50 lb', shipping_cost: 0 },
       { id: 'vp-lo', product_id: 'p-lesco', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 42.25, quantity: '50 lb', shipping_cost: 0 },
+      { id: 'vp-case', product_id: 'p-case-only', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 480.00, quantity: '1 case', shipping_cost: 0 },
       { id: 'vp-pack', product_id: 'p-hexpro', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 86.94, quantity: '1 box', shipping_cost: 0 },
+      { id: 'vp-single', product_id: 'p-single', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 9.50, quantity: '1 station', shipping_cost: 0 },
     ];
     const planned = planMissingVendorLinks(unlinked, eligible);
-    expect(planned).toEqual([{
-      productId: 'p-lesco',
-      productName: 'LESCO Dimension 0.21% 18-0-10',
-      bestVendorPricingId: 'vp-lo',
-      vendorId: 'v-1',
-      vendorName: 'Target Specialty',
-      mode: 'oz',
-      bestPrice: 42.25,
-    }]);
+    expect(planned).toEqual([
+      {
+        productId: 'p-lesco',
+        productName: 'LESCO Dimension 0.21% 18-0-10',
+        bestVendorPricingId: 'vp-lo',
+        vendorId: 'v-1',
+        vendorName: 'Target Specialty',
+        mode: 'oz',
+        bestPrice: 42.25,
+      },
+      {
+        productId: 'p-single',
+        productName: 'Single Station',
+        bestVendorPricingId: 'vp-single',
+        vendorId: 'v-1',
+        vendorName: 'Target Specialty',
+        mode: 'count',
+        bestPrice: 9.5,
+      },
+    ]);
   });
 
-  test('converts ONLY broken liquid "bottle" mappings (both usage_amount and usage_per_1000sf) and skips dry weight or working bottle prices', () => {
+  test('converts ONLY broken liquid "bottle" mappings (preserving zero base usage for revalidation) and skips dry weight or working bottle prices', () => {
     const usage = [
       // Broken liquid bottle with BOTH usage_amount and usage_per_1000sf -> converts both!
       {
         id: 'u-1', service_type: 'Liquid Termite Perimeter', product_id: 'p-termidor', product_name: 'Termidor SC',
         usage_amount: 1, usage_per_1000sf: 0.5, usage_unit: 'bottle', unit_size_oz: 78, container_size: '78 fl oz', best_price: 174.72,
       },
-      // Area-rate-only broken liquid bottle (usage_amount null, usage_per_1000sf 0.25) -> converts area rate!
+      // Area-rate-only broken liquid bottle with explicit 0 usage_amount -> preserves fromAmount: 0 for revalidation!
       {
         id: 'u-area', service_type: 'Liquid Barrier', product_id: 'p-taurus', product_name: 'Taurus SC',
-        usage_amount: null, usage_per_1000sf: 0.25, usage_unit: 'bottle', unit_size_oz: 78, container_size: '78 fl oz', best_price: 86.00,
+        usage_amount: 0, usage_per_1000sf: 0.25, usage_unit: 'bottle', unit_size_oz: 78, container_size: '78 fl oz', best_price: 86.00,
       },
       // Dry weight bottle (container_size '16 lb') -> NEVER relabel to fl_oz!
       {
@@ -110,7 +127,7 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       },
       {
         usageId: 'u-area', serviceType: 'Liquid Barrier', productId: 'p-taurus', productName: 'Taurus SC',
-        fromAmount: null, fromPer1000: 0.25, fromUnit: 'bottle', toAmount: null, toPer1000: 19.5, toUnit: 'fl_oz', unitSizeOz: 78,
+        fromAmount: 0, fromPer1000: 0.25, fromUnit: 'bottle', toAmount: null, toPer1000: 19.5, toUnit: 'fl_oz', unitSizeOz: 78,
       },
     ]);
   });
@@ -212,37 +229,38 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
 });
 
 describe('inventory-margin-watchdog (one-way read-only alerting with normalized pack prices)', () => {
-  test('detectVendorCostSpikes compares normalized pack prices against prior history/previous_price and ignores cheaper generics & larger-pack same-unit quotes', () => {
+  test('detectVendorCostSpikes compares consecutive winning costs (ignoring $100->$150->$130 cuts) and catches approved worker snapshot spikes', () => {
     const catalog = [
       { id: 'p-taurus', name: 'Taurus SC', active: true, best_price: 86.63, unit_size_oz: 78, container_size: '78 fl oz' },
       { id: 'p-termidor', name: 'Termidor SC', active: true, best_price: 210.00, unit_size_oz: 78, container_size: '78 fl oz' },
       { id: 'p-pack', name: 'Bifen I/T', active: true, best_price: 120.00, unit_size_oz: 64, container_size: '64 fl oz' },
       { id: 'p-switched', name: 'Demand CS', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
+      { id: 'p-cut-after-spike', name: 'Suspend PolyZone', active: true, best_price: 130.00, unit_size_oz: 32, container_size: '32 fl oz' },
       { id: 'p-small-bump', name: 'Alpine WSG', active: true, best_price: 84.00, unit_size_oz: 17.6, container_size: '500 g' },
     ];
     const vendorRows = [
-      // Cheaper generic substitute ($86.63 down from $95): MUST be ignored!
       { id: 'vp-1', product_id: 'p-taurus', vendor_id: 'v-1', price_amount: 86.63, quantity: '78 fl oz' },
-      // Upward vendor spike ($174.72 -> $210, +20.2%): best_price already updated to $210 in same trx, caught via price_history!
       { id: 'vp-2', product_id: 'p-termidor', vendor_id: 'v-1', price_amount: 210.00, quantity: '78 fl oz' },
-      // Larger container at IDENTICAL $/oz (32 fl oz @ $60 -> 64 fl oz @ $120): 0% change, MUST NOT alert!
       { id: 'vp-3', product_id: 'p-pack', vendor_id: 'v-1', price_amount: 120.00, quantity: '64 fl oz' },
-      // Cheaper $100 vendor expired, leaving unchanged $130 backup vendor (+30%): caught via catalog-wide history!
       { id: 'vp-5', product_id: 'p-switched', vendor_id: 'v-2', price_amount: 130.00, quantity: '32 fl oz' },
-      // Tiny +5% bump (<=10%): ignored.
+      // $100 -> $150 -> $130: final step is a price CUT, MUST NOT report a 30% spike!
+      { id: 'vp-6', product_id: 'p-cut-after-spike', vendor_id: 'v-1', price_amount: 130.00, quantity: '32 fl oz' },
       { id: 'vp-4', product_id: 'p-small-bump', vendor_id: 'v-1', price_amount: 84.00, quantity: '500 g' },
     ];
     const priceHistory = [
-      { product_id: 'p-taurus', vendor_id: 'v-1', price: 86.63, quantity: '78 fl oz' },
-      { product_id: 'p-taurus', vendor_id: 'v-1', price: 95.00, quantity: '78 fl oz' },
-      { product_id: 'p-termidor', vendor_id: 'v-1', price: 210.00, quantity: '78 fl oz' },
-      { product_id: 'p-termidor', vendor_id: 'v-1', price: 174.72, quantity: '78 fl oz' },
-      { product_id: 'p-pack', vendor_id: 'v-1', price: 120.00, quantity: '64 fl oz' },
-      { product_id: 'p-pack', vendor_id: 'v-1', price: 60.00, quantity: '32 fl oz' },
-      { product_id: 'p-switched', vendor_id: 'v-2', price: 130.00, quantity: '32 fl oz' },
-      { product_id: 'p-switched', vendor_id: 'v-1', price: 100.00, quantity: '32 fl oz' },
-      { product_id: 'p-small-bump', vendor_id: 'v-1', price: 84.00, quantity: '500 g' },
-      { product_id: 'p-small-bump', vendor_id: 'v-1', price: 80.00, quantity: '500 g' },
+      { product_id: 'p-taurus', vendor_id: 'v-1', price: 86.63, quantity: '78 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-taurus', vendor_id: 'v-1', price: 95.00, quantity: '78 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-termidor', vendor_id: 'v-1', price_amount: 210.00, quantity: '78 fl oz', approved_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-termidor', vendor_id: 'v-1', price_amount: 174.72, quantity: '78 fl oz', approved_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-pack', vendor_id: 'v-1', price: 120.00, quantity: '64 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-pack', vendor_id: 'v-1', price: 60.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-switched', vendor_id: 'v-2', price: 130.00, quantity: '32 fl oz', recorded_at: '2026-11-01T00:00:00Z' },
+      { product_id: 'p-switched', vendor_id: 'v-1', price: 100.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-cut-after-spike', vendor_id: 'v-1', price: 130.00, quantity: '32 fl oz', recorded_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-cut-after-spike', vendor_id: 'v-1', price: 150.00, quantity: '32 fl oz', recorded_at: '2026-11-01T00:00:00Z' },
+      { product_id: 'p-cut-after-spike', vendor_id: 'v-1', price: 100.00, quantity: '32 fl oz', recorded_at: '2026-10-01T00:00:00Z' },
+      { product_id: 'p-small-bump', vendor_id: 'v-1', price: 84.00, quantity: '500 g', recorded_at: '2026-11-20T00:00:00Z' },
+      { product_id: 'p-small-bump', vendor_id: 'v-1', price: 80.00, quantity: '500 g', recorded_at: '2026-10-01T00:00:00Z' },
     ];
     const spikes = detectVendorCostSpikes(catalog, vendorRows, priceHistory);
     expect(spikes.map((s) => s.productId)).toEqual(['p-termidor', 'p-switched']);
@@ -259,23 +277,49 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
     });
   });
 
-  test('evaluateServiceMargins covers stinging_insect, trenching, bora_care, amortizes fixedCost on recurring services, and flags missing revenue', () => {
+  test('evaluateServiceMargins verifies both required mosquito mappings, recognizes Liquid Termite Perimeter in trenching, amortizes fixedCost, and flags missing revenue', () => {
+    const { inventoryCostFromRows: realInventoryCostFromRows } = require('../services/estimate-pricing-audit');
+    const trenchingCogs = realInventoryCostFromRows('trenching', { homeSqFt: 2000 }, {
+      available: true,
+      rows: [{
+        service_type: 'Liquid Termite Perimeter',
+        product_id: 'p-termidor',
+        product_name: 'Termidor SC',
+        usage_amount: 78,
+        usage_unit: 'fl_oz',
+        unit_size_oz: 78,
+        best_price: 174.72,
+      }],
+    });
+    expect(trenchingCogs.status).toBe('ok');
+    expect(trenchingCogs.matchedServiceType).toBe('Liquid Termite Perimeter');
+    expect(trenchingCogs.totalPerVisit).toBeCloseTo(174.72, 2);
     expect(WATCHED_SERVICES.map((s) => s.engineServiceKey)).toEqual(
       expect.arrayContaining(['pest_control', 'mosquito', 'tree_shrub', 'one_time_pest', 'rodent_trapping', 'stinging_insect', 'trenching', 'bora_care']),
     );
     const generateEstimate = ({ services }) => {
-      if (services.pest) return { lineItems: [{ service: 'pest_control', perVisit: 40 }] }; // $10/visit + $120 fixed / 4 = $40 material -> <35% GM!
+      if (services.pest) return { lineItems: [{ service: 'pest_control', perVisit: 40 }] };
       if (services.mosquito) return { lineItems: [{ service: 'mosquito', perVisit: 75 }] };
       if (services.treeShrub) return { lineItems: [{ service: 'tree_shrub', perVisit: 90 }] };
       if (services.oneTimePest) return { lineItems: [{ service: 'one_time_pest', price: 250 }] };
       if (services.rodentTrapping) return { lineItems: [{ service: 'rodent_trapping', price: 350 }] };
       if (services.stinging) return { lineItems: [{ service: 'stinging_insect', price: 175 }] };
       if (services.trenching) return { lineItems: [{ service: 'trenching', price: 1800 }] };
-      if (services.boraCare) return { lineItems: [] }; // missing revenue -> incompleteChecks!
+      if (services.boraCare) return { lineItems: [] };
       return { lineItems: [] };
     };
     const inventoryCostFromRows = (serviceKey) => {
-      if (serviceKey === 'pest_control') return { status: 'ok', totalPerVisit: 10, fixedCost: 40, lines: [], warnings: [] }; // +$10/visit amortized -> $20 mat + $15.75 labor = $35.75 on $40 -> 10.6% GM!
+      if (serviceKey === 'pest_control') return { status: 'ok', totalPerVisit: 10, fixedCost: 40, lines: [], warnings: [] };
+      // Only IGR mapped (Barrier missing!) -> MUST flag missingCogs on mosquito!
+      if (serviceKey === 'mosquito') {
+        return {
+          status: 'ok',
+          totalPerVisit: 3,
+          fixedCost: 0,
+          lines: [{ serviceType: 'Mosquito Treatment - IGR', cost: 3, warning: null }],
+          warnings: [],
+        };
+      }
       if (serviceKey === 'rodent_trapping' || serviceKey === 'stinging') {
         return { status: 'missing_cogs', totalPerVisit: 0, fixedCost: 0, lines: [], warnings: ['No inventory COGS rows mapped'] };
       }
@@ -289,22 +333,25 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
     });
     expect(lowMargins.map((m) => m.serviceKey)).toEqual(['pest_control']);
     expect(lowMargins[0].materialCost).toBe(20);
-    expect(missingCogs.map((m) => m.serviceKey)).toEqual(['rodent_trapping', 'stinging']);
+    expect(missingCogs.map((m) => m.serviceKey)).toEqual(['mosquito', 'rodent_trapping', 'stinging']);
+    expect(missingCogs[0].missingServiceTypes).toEqual(['Mosquito Treatment - Essential Barrier']);
     expect(incompleteChecks.map((c) => c.serviceKey)).toEqual(['bora_care']);
   });
 
-  test('runInventoryMarginWatchdog respects gate, keeps alert open on sync/inventory outage, closes when clean, and fails if alert persistence returns null', async () => {
+  test('runInventoryMarginWatchdog respects gate, loads approved price_snapshots, keeps alert open on outage, closes when clean, and fails on null alert receipt', async () => {
     const offRes = await runInventoryMarginWatchdog({ deps: { isLive: () => false } });
     expect(offRes).toEqual({ skipped: true, reason: 'gate_off' });
 
-    const makeDb = (catalogRows, vpRows, histRows = []) => {
+    const makeDb = (catalogRows, vpRows, histRows = [], snapshotRows = []) => {
       const makeChain = (rows) => {
         const chain = {
           where: () => chain,
           whereNotNull: () => chain,
           whereIn: () => chain,
           whereRaw: () => chain,
+          join: () => chain,
           orderBy: () => chain,
+          orderByRaw: () => chain,
           select: () => Promise.resolve(rows),
         };
         return chain;
@@ -312,6 +359,7 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       const fn = (table) => {
         if (table === 'products_catalog') return makeChain(catalogRows);
         if (table === 'price_history') return makeChain(histRows);
+        if (String(table).startsWith('price_approval_events')) return makeChain(snapshotRows);
         return makeChain(vpRows);
       };
       fn.schema = { hasTable: async () => true };
@@ -328,7 +376,18 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
       };
       return { lineItems: [{ service: map[key], perVisit: 120, price: 850 }] };
     };
-    const healthyCogs = () => ({ status: 'ok', totalPerVisit: 5, fixedCost: 0, lines: [], warnings: [] });
+    const healthyCogs = (serviceKey) => ({
+      status: 'ok',
+      totalPerVisit: 5,
+      fixedCost: 0,
+      lines: serviceKey === 'mosquito'
+        ? [
+          { serviceType: 'Mosquito Treatment - Essential Barrier', cost: 3, warning: null },
+          { serviceType: 'Mosquito Treatment - IGR', cost: 2, warning: null },
+        ]
+        : [],
+      warnings: [],
+    });
 
     // Clean run -> closes any prior alert, raises none.
     const clean = await runInventoryMarginWatchdog({
@@ -350,6 +409,33 @@ describe('inventory-margin-watchdog (one-way read-only alerting with normalized 
     expect(clean.alerted).toBe(false);
     expect(closeAdminAlertKeys).toHaveBeenCalledWith(expect.any(Function), [WATCHDOG_ALERT_KEY], 'margin_watchdog_clean', expect.any(Object));
     expect(raiseAdminAlert).not.toHaveBeenCalled();
+
+    // Approved worker price_snapshots spike with empty price_history -> MUST alert!
+    raiseAdminAlert.mockClear();
+    const snapSpike = await runInventoryMarginWatchdog({
+      deps: {
+        isLive: () => true,
+        db: makeDb(
+          [{ id: 'p-1', name: 'Taurus SC', active: true, best_price: 130, unit_size_oz: 78, container_size: '78 fl oz' }],
+          [{ id: 'vp-1', product_id: 'p-1', vendor_id: 'v-1', price_amount: 130, quantity: '78 fl oz' }],
+          [],
+          [
+            { product_id: 'p-1', vendor_id: 'v-1', price_amount: 130, quantity: '78 fl oz', approved_at: '2026-11-25T00:00:00Z' },
+            { product_id: 'p-1', vendor_id: 'v-1', price_amount: 100, quantity: '78 fl oz', approved_at: '2026-10-01T00:00:00Z' },
+          ],
+        ),
+        syncConstantsFromDB: async () => true,
+        loadInventoryCostRows: async () => ({ available: true, rows: [] }),
+        inventoryCostFromRows: healthyCogs,
+        generateEstimate: healthyEstimate,
+        laborRate: 35,
+        raiseAdminAlert,
+        closeAdminAlertKeys,
+      },
+    });
+    expect(snapSpike.alerted).toBe(true);
+    expect(snapSpike.spikes).toHaveLength(1);
+    expect(snapSpike.spikes[0].pctIncrease).toBe(30);
 
     // Unavailable inventory table -> MUST NOT close alert; raises incomplete-check alert!
     closeAdminAlertKeys.mockClear();

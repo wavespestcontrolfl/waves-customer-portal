@@ -23,7 +23,7 @@
 
 const db = require('../models/db');
 const logger = require('./logger');
-const { numberOrNull } = require('./product-costing');
+const { numberOrNull, parsePackCount } = require('./product-costing');
 const { eligibleVendorPricing } = require('./vendor-pricing-eligibility');
 
 const WATCHDOG_ALERT_KEY = 'inventory-margin-watchdog:daily';
@@ -126,32 +126,87 @@ function normalizedCostBasis(scoredEntry, mode) {
   return Number.isFinite(scoredEntry.price) && scoredEntry.price > 0 ? scoredEntry.price : null;
 }
 
+function historyRowUnitNormalized(row) {
+  if (row.unit_normalized) return row.unit_normalized;
+  if (row.normalized_unit) return row.normalized_unit;
+  const uom = String(row.uom || '').trim();
+  return uom && parsePackCount(`1 ${uom}`) ? uom.toLowerCase() : null;
+}
+
 function normalizedHistoryRowCost(prod, row, mode, scoreVendorRows) {
-  const hPrice = numberOrNull(row?.price);
+  if (!row) return null;
+  const hPrice = numberOrNull(row.price_amount != null ? row.price_amount : row.price);
   if (!(Number.isFinite(hPrice) && hPrice > 0)) return null;
-  // Require each historical entry's own package quantity (never reuse the current
-  // package size on an older price, which would distort unit costs on pack changes).
-  if (mode !== 'raw' && !String(row?.quantity || '').trim()) return null;
-  const scored = scoreVendorRows([{ price_amount: hPrice, price: hPrice, quantity: row.quantity }], prod);
-  if (scored.mode !== mode) return null;
-  return normalizedCostBasis(scored.pool[0], mode);
+  const unitNorm = historyRowUnitNormalized(row);
+  const hasStoredNorm = numberOrNull(row.normalized_unit_price) > 0 || numberOrNull(row.landed_unit_price) > 0;
+  // Require each historical entry's own package quantity or normalized unit price
+  // (never reuse the current package size on an older bare price).
+  if (mode !== 'raw' && !String(row.quantity || '').trim() && !(hasStoredNorm && unitNorm)) return null;
+  const scored = scoreVendorRows([{
+    price_amount: hPrice,
+    price: hPrice,
+    quantity: row.quantity || null,
+    unit_normalized: unitNorm,
+    normalized_unit_price: row.normalized_unit_price || null,
+    landed_unit_price: row.landed_unit_price || null,
+  }], prod);
+  return scored.mode === mode ? normalizedCostBasis(scored.pool[0], mode) : null;
+}
+
+function eventTimestampMs(row) {
+  const raw = row?.recorded_at ?? row?.approved_at ?? row?.captured_at ?? row?.fetched_at ?? row?.created_at;
+  if (raw == null) return null;
+  const ms = raw instanceof Date ? raw.getTime() : Date.parse(String(raw));
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows) {
+  const list = Array.isArray(historyRows) ? historyRows : [];
+  const events = [];
+  // Queries return newest-first (DESC); iterate reverse so untimestamped rows stay chronological.
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const row = list[i];
+    const cost = normalizedHistoryRowCost(prod, row, mode, scoreVendorRows);
+    if (!(cost > 0)) continue;
+    events.push({
+      vendorKey: String(row?.vendor_id || `row:${i}`),
+      cost,
+      ts: eventTimestampMs(row),
+      ord: list.length - 1 - i,
+    });
+  }
+  events.sort((a, b) => {
+    if (a.ts != null && b.ts != null && a.ts !== b.ts) return a.ts - b.ts;
+    return a.ord - b.ord;
+  });
+  return events;
 }
 
 function priorNormalizedCostForProduct(prod, winner, mode, historyRows, scoreVendorRows) {
   const currentCost = normalizedCostBasis(winner, mode);
   if (!(currentCost > 0)) return null;
-  // Compare against the previous catalog-wide normalized price across ALL vendors
-  // in price_history (newest-first), so both a winning vendor's own increase AND
-  // a cheaper vendor expiring (promoting a pricier backup vendor) are detected.
-  let bestPrior = null;
-  for (const h of historyRows || []) {
-    const hCost = normalizedHistoryRowCost(prod, h, mode, scoreVendorRows);
-    if (!(hCost > 0)) continue;
-    // Skip rows recording the current winning price itself.
-    if (Math.abs(hCost - currentCost) / currentCost < 1e-6) continue;
-    if (bestPrior == null || hCost < bestPrior) bestPrior = hCost;
+  // Reconstruct consecutive eligible winning costs chronologically across all
+  // vendors (from price_history + approved price_snapshots). Comparing against
+  // the immediately preceding winning cost catches both increases and expired
+  // cheaper vendors without mistaking a price cut ($100 -> $150 -> $130) for a spike.
+  const events = chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows);
+  if (!events.length) return null;
+  const latestByVendor = new Map();
+  const winningSequence = [];
+  for (const ev of events) {
+    latestByVendor.set(ev.vendorKey, ev.cost);
+    let win = Infinity;
+    for (const c of latestByVendor.values()) if (c < win) win = c;
+    const prevWin = winningSequence[winningSequence.length - 1];
+    if (prevWin == null || Math.abs(win - prevWin) / prevWin >= 1e-6) {
+      winningSequence.push(win);
+    }
   }
-  return bestPrior;
+  const lastWin = winningSequence[winningSequence.length - 1];
+  if (Math.abs(lastWin - currentCost) / currentCost < 1e-6) {
+    return winningSequence.length >= 2 ? winningSequence[winningSequence.length - 2] : null;
+  }
+  return lastWin;
 }
 
 function detectVendorCostSpikes(catalogRows, approvedVendorRows, priceHistoryRows = [], { scoreVendorRows } = {}) {
@@ -211,6 +266,16 @@ function resolveServiceRevenuePerVisit(line, visitsPerYear) {
   return oneTime > 0 ? oneTime : null;
 }
 
+function missingRequiredServiceTypes(spec, cogs) {
+  if (!Array.isArray(spec.serviceTypesOverride) || !spec.serviceTypesOverride.length) return [];
+  const pricedTypes = new Set(
+    (cogs?.lines || [])
+      .filter((l) => l && !l.warning && Number(l.cost) > 0 && l.serviceType)
+      .map((l) => l.serviceType),
+  );
+  return spec.serviceTypesOverride.filter((st) => !pricedTypes.has(st));
+}
+
 function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventoryCostFromRows, laborRate }) {
   const est = generateEstimate({ ...REFERENCE_PROPERTY, services: spec.engineServices });
   const line = (est?.lineItems || []).find((li) => li.service === spec.engineServiceKey);
@@ -231,11 +296,13 @@ function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventory
     }
     return out;
   }
-  if (cogs.status === 'warning') {
+  const missingTypes = missingRequiredServiceTypes(spec, cogs);
+  if (cogs.status === 'warning' || missingTypes.length > 0) {
     out.missingCogs = {
       serviceKey: spec.inventoryServiceKey,
       label: spec.label,
-      reason: 'partial_cogs',
+      reason: missingTypes.length > 0 ? 'missing_required_service_types' : 'partial_cogs',
+      ...(missingTypes.length > 0 ? { missingServiceTypes: missingTypes } : {}),
       warnings: cogs.warnings || [],
     };
   }
@@ -316,11 +383,45 @@ function buildWatchdogWhy({ spikes, lowMargins, missingCogs, incompleteChecks = 
   return `${plural(incompleteChecks.length, 'margin check')} could not be verified.`;
 }
 
+async function loadApprovedSnapshotHistory(dbc) {
+  const canCheck = typeof dbc?.schema?.hasTable === 'function';
+  if (canCheck) {
+    const [hasEvents, hasSnaps] = await Promise.all([
+      dbc.schema.hasTable('price_approval_events'),
+      dbc.schema.hasTable('price_snapshots'),
+    ]);
+    if (!hasEvents || !hasSnaps) return [];
+  }
+  const rows = await dbc('price_approval_events as pae')
+    .join('price_snapshots as ps', 'ps.id', 'pae.snapshot_id')
+    .whereIn('pae.approval_status', ['approved', 'auto_approved'])
+    .orderByRaw('COALESCE(pae.approved_at, pae.created_at, ps.captured_at, ps.fetched_at) DESC')
+    .select(
+      'pae.product_id',
+      'pae.vendor_id',
+      'ps.price',
+      'ps.price_amount',
+      'ps.quantity',
+      'ps.uom',
+      'ps.normalized_unit_price',
+      'ps.normalized_unit',
+      'ps.landed_unit_price',
+      'pae.approved_at',
+      'pae.created_at',
+      'ps.captured_at',
+      'ps.fetched_at',
+    );
+  return (rows || []).map((r) => ({
+    ...r,
+    recorded_at: r.approved_at || r.created_at || r.captured_at || r.fetched_at || null,
+  }));
+}
+
 async function loadWatchdogInputs(deps) {
   const hasPriceHistory = typeof deps.db?.schema?.hasTable === 'function'
     ? await deps.db.schema.hasTable('price_history')
     : true;
-  const [catalogRows, approvedVendorRows, priceHistoryRows, inventory] = await Promise.all([
+  const [catalogRows, approvedVendorRows, priceHistoryRows, approvedSnapshotRows, inventory] = await Promise.all([
     deps.db('products_catalog')
       .where('active', true)
       .whereNotNull('best_price')
@@ -332,9 +433,15 @@ async function loadWatchdogInputs(deps) {
         .orderBy('recorded_at', 'desc')
         .select('product_id', 'vendor_id', 'price', 'quantity', 'recorded_at')
       : Promise.resolve([]),
+    loadApprovedSnapshotHistory(deps.db),
     deps.loadInventoryCostRows(),
   ]);
-  return { catalogRows, approvedVendorRows, priceHistoryRows, inventory };
+  return {
+    catalogRows,
+    approvedVendorRows,
+    priceHistoryRows: [...(priceHistoryRows || []), ...(approvedSnapshotRows || [])],
+    inventory,
+  };
 }
 
 async function runMarginVerification(deps, inventory) {
