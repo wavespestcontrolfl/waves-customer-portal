@@ -312,6 +312,17 @@ describe('a malformed amount is refused with a 400 for every role, and the parse
     expect(mockCalls.filter((c) => c.write)).toEqual([]);
   });
 
+  test('the storage bound applies to the row that is stored: a too-large duplicate of a product already recorded is discarded, not refused', async () => {
+    const rowIdentity = (p) => `${p.productId}|`;
+    const products = [{ productId: CELSIUS, totalAmount: 4, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: 100000, amountUnit: 'lb' }];
+    canonicalizeProductLines(products);
+    expect(await vetProductAmounts(require('../models/db'), { products, rowIdentity })).toBeNull();
+    // A malformed amount on the duplicate is still unreadable input.
+    const bad = [{ productId: CELSIUS, totalAmount: 4, amountUnit: 'lb' }, { productId: CELSIUS, totalAmount: '99999junk', amountUnit: 'lb' }];
+    canonicalizeProductLines(bad);
+    expect(await vetProductAmounts(require('../models/db'), { products: bad, rowIdentity })).toMatchObject({ status: 400, body: { code: 'INVALID_PRODUCT_AMOUNT' } });
+  });
+
   test('the column maximum itself is storable: 99999.999 is marked over the ceiling, never refused', async () => {
     expect(await marked(line(99999.999))).toEqual({ out: null, over: [true] });
     expect(await marked(line(99999.9994))).toEqual({ out: null, over: [true] });

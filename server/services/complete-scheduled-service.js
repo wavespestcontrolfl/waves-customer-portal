@@ -1783,14 +1783,6 @@ function strictProductAmount(raw) {
 function normalizeProductAmounts(lines, nameOf) {
   for (const line of lines) {
     const amount = strictProductAmount(line.totalAmount);
-    // service_products.total_amount and the FDACS ledger's quantity_applied are NUMERIC(8,3): a larger amount cannot be stored, so
-    // the insert would abort the whole completion. It is unreadable input like a malformed one, refused before any write.
-    if (amount >= MAX_STORABLE_AMOUNT) {
-      return { status: 400, body: {
-        error: `The amount for ${nameOf(line)} is too large to record. The most one line can hold is ${MAX_STORABLE_AMOUNT_TEXT}. Check the amount and submit again.`,
-        code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: line.productId,
-      } };
-    }
     if (Number.isNaN(amount)) {
       return { status: 400, body: {
         error: `The amount for ${nameOf(line)} is not a number. Enter the amount as a plain number and submit again.`,
@@ -1855,7 +1847,8 @@ async function vetProductAmounts(database, { products, skip = false, rowIdentity
   const ids = [...new Set(lines.map((p) => p.productId).filter((id) => UUID_SHAPE.test(id)))];
   const rows = ids.length ? await database('products_catalog').whereIn('id', ids).select('id', 'name', 'inventory_unit') : [];
   const rowById = new Map(rows.map((row) => [canonicalProductId(row.id), row]));
-  const invalid = normalizeProductAmounts(lines, (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product');
+  const nameOf = (line) => rowById.get(line.productId)?.name || line.name || line.product_name || 'a product';
+  const invalid = normalizeProductAmounts(lines, nameOf);
   if (invalid) return invalid;
   // The ceiling judges what the completion records: the products loop keeps the FIRST row of each product and add-on
   // (rowIdentity, the same rule) and drops the rest, so a dropped duplicate is neither summed nor flagged. The default
@@ -1863,6 +1856,16 @@ async function vetProductAmounts(database, { products, skip = false, rowIdentity
   const seenRows = new Set();
   const recorded = new Set(products.filter((p) => p?.productId && !seenRows.has(rowIdentity(p)) && seenRows.add(rowIdentity(p))));
   const recordedLines = lines.filter((line) => recorded.has(line));
+  // service_products.total_amount and the FDACS ledger's quantity_applied are NUMERIC(8,3): an amount past it cannot be stored, so the
+  // insert would abort the whole completion. Like a malformed amount it is unreadable input, refused before any write, but only for
+  // a row that will be inserted (a discarded duplicate is never stored).
+  const tooLarge = recordedLines.find((line) => line.totalAmount >= MAX_STORABLE_AMOUNT);
+  if (tooLarge) {
+    return { status: 400, body: {
+      error: `The amount for ${nameOf(tooLarge)} is too large to record. The most one line can hold is ${MAX_STORABLE_AMOUNT_TEXT}. Check the amount and submit again.`,
+      code: 'PRODUCT_AMOUNT_TOO_LARGE', productId: tooLarge.productId,
+    } };
+  }
   const overGroups = overVisitLimitGroups(recordedLines, rowById);
   if (overGroups.size) {
     for (const line of recordedLines) {
