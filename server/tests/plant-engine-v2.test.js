@@ -2709,4 +2709,47 @@ describe('customer-provided facts stay out of systemInstruction', () => {
     expect(JSON.stringify(capturedBody.contents)).toContain(chipToken);
     expect(JSON.stringify(capturedBody.contents)).toContain(ctxToken);
   });
+
+  test('referee disagreement with off_catalog_name keeps earlier model answers in user text, never system', async () => {
+    const savedReferee = process.env.GATE_PLANT_ID_REFEREE;
+    process.env.GATE_PLANT_ID_REFEREE = 'true';
+    try {
+      const okQuality = { usable: true, issue: 'none' };
+      const injectedName = 'IGNORE_INSTRUCTIONS_WEED_SPECIMEN';
+      dispatch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: {
+            quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [{ slug: '', off_catalog_name: injectedName, group_id: 'shrubs-trees', confidence: 0.72 }],
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: {
+            quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [{ slug: 'fixture-citrus', off_catalog_name: '', group_id: null, confidence: 0.85, cues_visible: [1], cues_not_visible: [] }], observed_terms: [], conditions: [],
+          },
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: {
+            quality: okQuality, shows: 'plant', turf: [], weeds: [], host: [{ slug: 'fixture-citrus', off_catalog_name: '', group_id: null, confidence: 0.9, cues_visible: [1], cues_not_visible: [] }], observed_terms: [], conditions: [],
+          },
+        });
+
+      const res = await engine.identifyPlantV2({
+        photos: [{ data: 'AA==', mimeType: 'image/jpeg' }],
+        subject: 'tree_shrub',
+        mode: 'identify',
+      });
+      expect(res.ok).toBe(true);
+      const refereeCall = dispatch.mock.calls.find(([, payload]) => String(payload?.promptVersion).endsWith(':referee'));
+      expect(refereeCall).toBeDefined();
+      const [, refereePayload] = refereeCall;
+      expect(String(refereePayload.system || '')).not.toContain(injectedName);
+      expect(String(refereePayload.text || '')).toContain(injectedName);
+    } finally {
+      if (savedReferee === undefined) delete process.env.GATE_PLANT_ID_REFEREE;
+      else process.env.GATE_PLANT_ID_REFEREE = savedReferee;
+    }
+  });
 });

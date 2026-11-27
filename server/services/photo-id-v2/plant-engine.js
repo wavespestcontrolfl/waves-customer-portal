@@ -2003,10 +2003,10 @@ async function runReferee(run, identity, conditions, escalation, { skip = false 
 
   const promptArgs = escalationPromptArgs(run, identity, conditions);
   const earlierReads = earlierReadsFor(escalation, unsureScopes);
-  const system = `${buildEscalationPrompt(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}`;
+  const system = buildEscalationPrompt(promptArgs);
   const result = await callWithProvider(MODELS.ROUTES.plantIdReferee, {
     system,
-    text: `${buildCustomerFactsBlock(promptArgs)}\n\nIdentify and assess these photos fresh, as the deciding vote.`,
+    text: `${buildCustomerFactsBlock(promptArgs)}\n\n${buildRefereePrompt(earlierReads)}\n\nIdentify and assess these photos fresh, as the deciding vote.`,
     images: run.images,
     jsonMode: true,
     jsonSchema: ESCALATION_SCHEMA,
