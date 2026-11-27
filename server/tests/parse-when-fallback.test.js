@@ -68,6 +68,105 @@ describe('fallbackParse', () => {
       dateFrom: null, dateTo: null, understood: false,
     });
   });
+
+  it('parses explicit calendar dates (month+day, M/D, ISO) and rejects impossible dates', () => {
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    expect(fallbackParse('Dec 3', nov27)).toMatchObject({
+      dateFrom: '2026-12-03', dateTo: '2026-12-03', timeOfDay: 'any', understood: true,
+    });
+    expect(fallbackParse('December 3rd afternoon', nov27)).toMatchObject({
+      dateFrom: '2026-12-03', dateTo: '2026-12-03', timeOfDay: 'afternoon', understood: true,
+    });
+    expect(fallbackParse('3rd of December morning', nov27)).toMatchObject({
+      dateFrom: '2026-12-03', dateTo: '2026-12-03', timeOfDay: 'morning', understood: true,
+    });
+    expect(fallbackParse('12/3', nov27)).toMatchObject({
+      dateFrom: '2026-12-03', dateTo: '2026-12-03', understood: true,
+    });
+    expect(fallbackParse('2026-12-03', nov27)).toMatchObject({
+      dateFrom: '2026-12-03', dateTo: '2026-12-03', understood: true,
+    });
+    // Jan 15 asked on Nov 27 rolls into next calendar year (2027-01-15).
+    expect(fallbackParse('Jan 15', nov27)).toMatchObject({
+      dateFrom: '2027-01-15', dateTo: '2027-01-15', understood: true,
+    });
+    // Impossible calendar dates must stop as ununderstood instead of falling through to a full month.
+    expect(fallbackParse('2026-02-30', nov27)).toMatchObject({ dateFrom: null, dateTo: null, understood: false });
+    expect(fallbackParse('Feb 30', nov27)).toMatchObject({ dateFrom: null, dateTo: null, understood: false });
+    expect(fallbackParse('2/30', nov27)).toMatchObject({ dateFrom: null, dateTo: null, understood: false });
+  });
+});
+
+describe('parseWhen fast deterministic path and interactive AI policy', () => {
+  const llmCall = require('../services/llm/call');
+  const MODELS = require('../config/models');
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it.each([
+    ['Tomorrow morning', { dateFrom: '2026-11-28', dateTo: '2026-11-28', timeOfDay: 'morning' }],
+    ['This weekend', { dateFrom: '2026-11-28', dateTo: '2026-11-29', timeOfDay: 'any' }],
+    ['Sunday', { dateFrom: '2026-11-29', dateTo: '2026-11-29', timeOfDay: 'any' }],
+    ['Dec 3', { dateFrom: '2026-12-03', dateTo: '2026-12-03', timeOfDay: 'any' }],
+    ['12/3 afternoon', { dateFrom: '2026-12-03', dateTo: '2026-12-03', timeOfDay: 'afternoon' }],
+    ['next tuesday morning', { dateFrom: '2026-12-01', dateTo: '2026-12-01', timeOfDay: 'morning' }],
+  ])('handles clean query %s deterministically without calling the LLM', async (query, expected) => {
+    const spy = jest.spyOn(llmCall, 'dispatchWithFallback');
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    const res = await parseWhen(query, { now: nov27, minDaysOut: 0, maxDaysOut: 90, defaultWindowDays: 14 });
+    expect(res).toMatchObject({ ...expected, understood: true, source: 'deterministic' });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('routes complex phrasing to fastStructuredInteractive with a 4s timeout and rejects impossible AI dates', async () => {
+    const spy = jest.spyOn(llmCall, 'dispatchWithFallback').mockResolvedValueOnce({
+      ok: true,
+      json: { date_from: '2026-12-01', date_to: '2026-12-04', time_of_day: 'afternoon', understood: true },
+    });
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    const ok = await parseWhen('Next week afternoon', { now: nov27, minDaysOut: 0, maxDaysOut: 90 });
+    expect(ok).toMatchObject({
+      dateFrom: '2026-12-01', dateTo: '2026-12-04', timeOfDay: 'afternoon', understood: true, source: 'ai',
+    });
+    expect(spy).toHaveBeenCalledWith(
+      MODELS.TEXT_POLICIES.fastStructuredInteractive,
+      expect.objectContaining({ laneId: 'parse_when', timeoutMs: 4000 }),
+    );
+
+    // Impossible calendar date from AI (2026-02-30) is rejected and falls back.
+    spy.mockResolvedValueOnce({
+      ok: true,
+      json: { date_from: '2026-02-30', date_to: '2026-02-30', time_of_day: 'any', understood: true },
+    });
+    const bad = await parseWhen('after 2pm except wednesday', { now: nov27, minDaysOut: 1, maxDaysOut: 90 });
+    expect(bad.source).toBe('fallback');
+    expect(bad.dateFrom).toBe('2026-11-28');
+  });
+
+  it.each([
+    "Can't do Friday",
+    '12/3 and 12/4',
+    'Friday or Saturday morning',
+    'Not Monday please',
+  ])('sends partial/ambiguous/negated query %s to AI instead of fast-pathing a fragment', async (query) => {
+    const spy = jest.spyOn(llmCall, 'dispatchWithFallback').mockResolvedValueOnce({
+      ok: true,
+      json: { date_from: '2026-12-03', date_to: '2026-12-04', time_of_day: 'any', understood: true },
+    });
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    const res = await parseWhen(query, { now: nov27, minDaysOut: 0, maxDaysOut: 90 });
+    expect(res.source).toBe('ai');
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('fallbackParse does not return Friday for "Can\'t do Friday"', () => {
+    const nov27 = new Date('2026-11-27T17:00:00Z');
+    expect(fallbackParse("Can't do Friday", nov27)).toMatchObject({
+      dateFrom: null, dateTo: null, understood: false,
+    });
+  });
 });
 
 describe('parseWhen clamp + defaults', () => {

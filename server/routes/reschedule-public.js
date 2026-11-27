@@ -960,6 +960,7 @@ async function buildAvailabilityForService(svc, { rangeFrom, rangeTo, config, ti
     ...pickSlotCount(svc),
     // The visit's own technician, else the line and territory ranking.
     ...(await offerTechnicianScope(svc)),
+    mintSignedOffers: false,
   });
   // A seasonal (Feb–Oct) series visit must not be OFFERED a Nov–Jan target —
   // the commit path (SmartRebooker.reschedule / rescheduleSeries) refuses

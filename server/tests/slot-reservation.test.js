@@ -10,6 +10,7 @@ jest.mock('../services/logger', () => ({
 }));
 jest.mock('../services/estimate-slot-availability', () => ({
   invalidateEstimate: jest.fn(),
+  invalidateAllEstimates: jest.fn(),
   async resolveCatalogSlotProfile(estimate, options) { return this.resolveEstimateSlotProfile(estimate, options); },
   resolveEstimateSlotProfile: jest.fn(() => ({
     durationMinutes: 90,
@@ -2621,8 +2622,9 @@ describe('reserveSlot signed-offer gate (booking-audit round 2)', () => {
       expect(travel).not.toHaveBeenCalled();
       // Pre-transaction rejections must still drop the wrapper cache so the
       // public 409 recovery payload re-signs fresh slots instead of re-serving
-      // the stale list (codex #4346 P2).
+      // the stale list (codex #4346 P2), without flushing unrelated estimates.
       expect(estimateSlotAvailability.invalidateEstimate).toHaveBeenCalledWith('estimate-456');
+      expect(estimateSlotAvailability.invalidateAllEstimates).not.toHaveBeenCalled();
     } finally {
       travel.mockRestore();
       delete estimateSlotAvailability.resolveEstimateCoords;
@@ -3004,5 +3006,55 @@ describe('commitReservation enforces a configured close in capacity mode (Codex 
       await expect(commit(trx)).rejects.not.toMatchObject({ message: 'slot runs past the end of the working day' });
       expect(updateBuilder.update).not.toHaveBeenCalled();
     } finally { jest.useRealTimers(); }
+  });
+});
+
+describe('global estimate cache invalidation on hold lifecycle writes', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  test('releaseReservation and releaseEstimateHolds flush all estimate caches when rows are deleted', async () => {
+    const delBuilder = {
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValueOnce(1).mockResolvedValueOnce(0).mockResolvedValueOnce(2),
+    };
+    db.mockReturnValue(delBuilder);
+    const r1 = await slotReservation.releaseReservation({ scheduledServiceId: 'hold-1', estimateId: 'est-1' });
+    expect(r1).toEqual({ released: true });
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
+
+    // No-op delete does not unnecessarily flush.
+    const r2 = await slotReservation.releaseReservation({ scheduledServiceId: 'hold-missing', estimateId: 'est-1' });
+    expect(r2).toEqual({ released: false });
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
+
+    const r3 = await slotReservation.releaseEstimateHolds({ estimateId: 'est-2' });
+    expect(r3).toEqual({ released: 2 });
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(2);
+  });
+
+  test('transactional releaseEstimateHolds defers cache flush until the outer transaction commits', async () => {
+    let resolveCommit;
+    const executionPromise = new Promise((resolve) => { resolveCommit = resolve; });
+    const trx = jest.fn(() => ({
+      where: jest.fn().mockReturnThis(),
+      whereNull: jest.fn().mockReturnThis(),
+      whereNotNull: jest.fn().mockReturnThis(),
+      del: jest.fn().mockResolvedValue(1),
+    }));
+    trx.isTransaction = true;
+    trx.executionPromise = executionPromise;
+
+    const r = await slotReservation.releaseEstimateHolds({ estimateId: 'est-tx', database: trx });
+    expect(r).toEqual({ released: 1 });
+    expect(estimateSlotAvailability.invalidateAllEstimates).not.toHaveBeenCalled();
+
+    resolveCommit();
+    await executionPromise;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(estimateSlotAvailability.invalidateAllEstimates).toHaveBeenCalledTimes(1);
   });
 });

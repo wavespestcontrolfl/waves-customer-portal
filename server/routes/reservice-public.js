@@ -306,6 +306,7 @@ async function buildAvailabilityForCustomer(customer, { rangeFrom, rangeTo, conf
     // same gate and grace value.
     bookArrivalGrace: true,
     ...(timeOfDay ? { timeOfDay } : {}),
+    mintSignedOffers: false,
   });
 }
 

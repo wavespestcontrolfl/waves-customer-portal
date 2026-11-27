@@ -962,6 +962,32 @@ async function findAccountPropertyByAddress(customer, { address, zip, unit }, co
   return (accountRows || []).find(row => addressMatchesCustomer(row, address, zip, unit)) || null;
 }
 
+function normalizeUsPhoneLast10(raw) {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('1')) return digits.slice(1);
+  return digits.length === 10 ? digits : '';
+}
+
+function queryActiveCustomerByPhone(rawDigits) {
+  const phone10 = normalizeUsPhoneLast10(rawDigits);
+  const query = phone10
+    ? db('customers').whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') IN (?, ?)", [phone10, `1${phone10}`])
+    : db('customers').whereRaw("regexp_replace(COALESCE(phone, ''), '[^0-9]', '', 'g') = ?", [rawDigits]);
+  return query
+    .where(function () {
+      this.whereNull('deleted_at');
+    })
+    .andWhere(function () {
+      this.whereNull('active').orWhere('active', true);
+    });
+}
+
+function invalidateEstimateSlotCaches() {
+  try {
+    require('../services/estimate-slot-availability').invalidateAllEstimates();
+  } catch { /* best-effort */ }
+}
+
 // GET /api/booking/customer-lookup?phone=9415551234 OR ?address=...&city=...&zip=...
 router.get('/customer-lookup', async (req, res, next) => {
   try {
@@ -971,19 +997,10 @@ router.get('/customer-lookup', async (req, res, next) => {
     let customer = null;
 
     if (phone) {
-      const digits = String(phone).replace(/\D/g, '');
-      if (digits.length !== 10) return res.json({ customer: null });
+      const digits = normalizeUsPhoneLast10(phone);
+      if (!digits) return res.json({ customer: null });
 
-      const query = db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [digits])
-        .where(function () {
-          this.whereNull('deleted_at');
-        })
-        .andWhere(function () {
-          this.whereNull('active').orWhere('active', true);
-        });
-
-      customer = await query.select(phoneCustomerFields).first();
+      customer = await queryActiveCustomerByPhone(digits).select(phoneCustomerFields).first();
       // SECURITY: never disclose a customer's PII (name/email/address) on a
       // phone number alone — that lets anyone enumerate identities from a
       // number they merely possess. Require a matching address before
@@ -1750,7 +1767,29 @@ function crewSlots(slots, crew) {
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly }) {
+// Surfaces that never redeem offers through POST /api/booking/confirm run
+// their own auth/revalidation paths; omitting `slot_sig` blocks cross-surface
+// replay onto /api/booking/confirm.
+const NON_REDEEMABLE_OFFER_SURFACES = new Set([
+  'reschedule', 'reservice', 'inspection', 'commercial_first_visit', 'voice',
+]);
+
+function applySignedOfferPolicy(response, { mintSignedOffers, surface }) {
+  if (mintSignedOffers !== false && !NON_REDEEMABLE_OFFER_SURFACES.has(surface)) {
+    return response;
+  }
+  const omitSig = ({ slot_sig: _omitted, ...slot }) => slot;
+  return {
+    ...response,
+    slots: (response.slots || []).map(omitSig),
+    days: (response.days || []).map((day) => ({
+      ...day,
+      slots: (day.slots || []).map(omitSig),
+    })),
+  };
+}
+
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly, mintSignedOffers }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -2267,7 +2306,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     ...rankProfileFields,
   };
   detachVoiceRouteCheck(routeCheck, stampedCandidates);
-  return response;
+  return applySignedOfferPolicy(response, { mintSignedOffers, surface });
 }
 
 // The /book funnel's default offer window — anchored to ET calendar days so it
@@ -3155,15 +3194,7 @@ async function createSelfBooking(payload = {}) {
       }
     }
     if (!custId && phoneDigits) {
-      const existing = await db('customers')
-        .whereRaw("regexp_replace(phone, '[^0-9]', '', 'g') = ?", [phoneDigits])
-        .where(function () {
-          this.whereNull('deleted_at');
-        })
-        .andWhere(function () {
-          this.whereNull('active').orWhere('active', true);
-        })
-        .first();
+      const existing = await queryActiveCustomerByPhone(phoneDigits).first();
       if (existing) {
         if (!customer_id) {
           // NOTE: a new_customer double-submit retry lands here (the first
@@ -4949,6 +4980,7 @@ async function createSelfBooking(payload = {}) {
     // map would pick beside the one saved. Post-commit, never awaited, never throws;
     // gate off = returns at once. A double-submit replay has no serviceRow: no row.
     if (txResult?.serviceRow) {
+      invalidateEstimateSlotCaches();
       const row = txResult.serviceRow;
       void require('../services/scheduling/line-technician').recordLinePickShadow({
         source: 'book', scheduledServiceId: row.id, customerId: row.customer_id, date: row.scheduled_date,
