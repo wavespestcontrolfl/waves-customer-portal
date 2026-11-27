@@ -670,12 +670,25 @@ describe('GET /:id detail never exposes the raw token', () => {
     spy.mockRestore();
   });
 
-  test('detail carries interview_url, not interview_token', async () => {
+  test('detail carries interview_url for owner only (not interview_token) and redacts url for non-owner admin', async () => {
     mockDb.__setRows([appRow({ interview_token: 'd'.repeat(64), status: 'interview' })]);
-    const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
-    const body = await res.json();
-    expect(body.application.interview_token).toBeUndefined();
-    expect(body.application.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'d'.repeat(64)}`);
+    mockStaffEmail = null;
+    const nonOwnerRes = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
+    const nonOwnerBody = await nonOwnerRes.json();
+    expect(nonOwnerBody.application.interview_token).toBeUndefined();
+    expect(nonOwnerBody.application.interview_url).toBeNull();
+    expect(nonOwnerBody.application.has_interview_link).toBe(true);
+
+    mockStaffEmail = 'contact@wavespestcontrol.com';
+    try {
+      const res = await fetch(`${base}/api/admin/careers/aaaaaaaa-0000-4000-8000-000000000001`);
+      const body = await res.json();
+      expect(body.application.interview_token).toBeUndefined();
+      expect(body.application.has_interview_link).toBe(true);
+      expect(body.application.interview_url).toBe(`https://portal.wavespestcontrol.com/careers/interview/${'d'.repeat(64)}`);
+    } finally {
+      mockStaffEmail = null;
+    }
   });
 
   test('no token yet -> interview_url null', async () => {

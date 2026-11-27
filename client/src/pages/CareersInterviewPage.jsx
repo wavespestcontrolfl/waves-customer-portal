@@ -455,7 +455,7 @@ function InterviewBookingPanel({ token, data, onDataChange, onInactiveLink }) {
 
       <div style={{ marginTop: 20 }}>
         <div style={EYEBROW}>{t.pickTime}</div>
-        <p style={{ ...BODY_STYLE, fontSize: 13, color: MUTED, marginBottom: 10 }}>{t.tzNote}</p>
+        <p style={{ ...BODY_STYLE, fontSize: 14, color: MUTED, marginBottom: 10 }}>{t.tzNote}</p>
         {groups.length === 0 ? (
           <p style={BODY_STYLE}>
             {t.noSlots}<HelpPhoneLink tone="dark" inline />.

@@ -324,11 +324,77 @@ function StageChangeResult({ sendResult }) {
   return <ActionFeedback>{summarizeSent(sendResult)}</ActionFeedback>;
 }
 
+function StageSmsSection({ preview, sendingEnabled, smsChecked, onSmsCheckedChange, smsBody, onSmsBodyChange, moveWithoutNotifying }) {
+  const smsAvailable = Boolean(preview?.channels?.sms?.available);
+  return (
+    <>
+      <Checkbox
+        id="stage-notify-sms"
+        label={channelLabel("sms", preview.channels?.sms)}
+        checked={smsChecked}
+        disabled={!sendingEnabled || !smsAvailable || moveWithoutNotifying}
+        onChange={(e) => onSmsCheckedChange(e.target.checked)}
+      />
+      {smsChecked && !moveWithoutNotifying && (
+        <div>
+          <Field label="Text message">
+            <Textarea
+              value={smsBody}
+              disabled={!sendingEnabled}
+              onChange={(e) => onSmsBodyChange(e.target.value.slice(0, 320))}
+              rows={3}
+              maxLength={320}
+            />
+          </Field>
+          <div className="text-14 text-zinc-400 text-right mt-0.5">
+            {smsBody.length}/320
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
+function StageEmailSection({ preview, sendingEnabled, emailChecked, onEmailCheckedChange, emailSubject, onEmailSubjectChange, emailBody, onEmailBodyChange, moveWithoutNotifying }) {
+  const emailAvailable = Boolean(preview?.channels?.email?.available);
+  return (
+    <>
+      <Checkbox
+        id="stage-notify-email"
+        label={channelLabel("email", preview.channels?.email)}
+        checked={emailChecked}
+        disabled={!sendingEnabled || !emailAvailable || moveWithoutNotifying}
+        onChange={(e) => onEmailCheckedChange(e.target.checked)}
+      />
+      {emailChecked && !moveWithoutNotifying && (
+        <div className="flex flex-col gap-2">
+          <Field label="Subject">
+            <Input
+              value={emailSubject}
+              disabled={!sendingEnabled}
+              onChange={(e) => onEmailSubjectChange(e.target.value.slice(0, 150))}
+              maxLength={150}
+              placeholder="Subject"
+            />
+          </Field>
+          <Field label="Email message">
+            <Textarea
+              value={emailBody}
+              disabled={!sendingEnabled}
+              onChange={(e) => onEmailBodyChange(e.target.value.slice(0, 4000))}
+              rows={6}
+              maxLength={4000}
+            />
+          </Field>
+        </div>
+      )}
+    </>
+  );
+}
+
 // The channel-editing form: note + (when the target stage is templated) the
 // SMS/email checkboxes and their editable bodies, plus "move without
-// notifying". Owns none of the values itself (the workflow hook does, so
-// Confirm can read them) but is a substantive, self-contained piece of the
-// dialog with its own well-defined props.
+// notifying".
 function StageChangeForm({
   preview,
   note,
@@ -349,8 +415,6 @@ function StageChangeForm({
 }) {
   const templated = Boolean(preview?.templated);
   const sendingEnabled = preview?.sending_enabled !== false;
-  const smsAvailable = Boolean(preview?.channels?.sms?.available);
-  const emailAvailable = Boolean(preview?.channels?.email?.available);
 
   return (
     <>
@@ -370,61 +434,26 @@ function StageChangeForm({
               Automatic applicant messaging is currently turned off.
             </div>
           )}
-
-          <Checkbox
-            id="stage-notify-sms"
-            label={channelLabel("sms", preview.channels?.sms)}
-            checked={smsChecked}
-            disabled={!sendingEnabled || !smsAvailable || moveWithoutNotifying}
-            onChange={(e) => onSmsCheckedChange(e.target.checked)}
+          <StageSmsSection
+            preview={preview}
+            sendingEnabled={sendingEnabled}
+            smsChecked={smsChecked}
+            onSmsCheckedChange={onSmsCheckedChange}
+            smsBody={smsBody}
+            onSmsBodyChange={onSmsBodyChange}
+            moveWithoutNotifying={moveWithoutNotifying}
           />
-          {smsChecked && !moveWithoutNotifying && (
-            <div>
-              <Field label="Text message">
-                <Textarea
-                  value={smsBody}
-                  disabled={!sendingEnabled}
-                  onChange={(e) => onSmsBodyChange(e.target.value.slice(0, 320))}
-                  rows={3}
-                  maxLength={320}
-                />
-              </Field>
-              <div className="text-14 text-zinc-400 text-right mt-0.5">
-                {smsBody.length}/320
-              </div>
-            </div>
-          )}
-
-          <Checkbox
-            id="stage-notify-email"
-            label={channelLabel("email", preview.channels?.email)}
-            checked={emailChecked}
-            disabled={!sendingEnabled || !emailAvailable || moveWithoutNotifying}
-            onChange={(e) => onEmailCheckedChange(e.target.checked)}
+          <StageEmailSection
+            preview={preview}
+            sendingEnabled={sendingEnabled}
+            emailChecked={emailChecked}
+            onEmailCheckedChange={onEmailCheckedChange}
+            emailSubject={emailSubject}
+            onEmailSubjectChange={onEmailSubjectChange}
+            emailBody={emailBody}
+            onEmailBodyChange={onEmailBodyChange}
+            moveWithoutNotifying={moveWithoutNotifying}
           />
-          {emailChecked && !moveWithoutNotifying && (
-            <div className="flex flex-col gap-2">
-              <Field label="Subject">
-                <Input
-                  value={emailSubject}
-                  disabled={!sendingEnabled}
-                  onChange={(e) => onEmailSubjectChange(e.target.value.slice(0, 150))}
-                  maxLength={150}
-                  placeholder="Subject"
-                />
-              </Field>
-              <Field label="Email message">
-                <Textarea
-                  value={emailBody}
-                  disabled={!sendingEnabled}
-                  onChange={(e) => onEmailBodyChange(e.target.value.slice(0, 4000))}
-                  rows={6}
-                  maxLength={4000}
-                />
-              </Field>
-            </div>
-          )}
-
           <Checkbox
             id="stage-move-without-notifying"
             label="Move without notifying"
@@ -978,6 +1007,77 @@ function ContactEditor({ contact, onSave, onCancel }) {
   );
 }
 
+function AiScreenCard({ detail, rescreening, rescreenError, onRescreen }) {
+  const screen = detail?.ai_screen || null;
+  if (!screen) {
+    return (
+      <div className="mb-4 border-hairline border rounded p-3 flex items-center justify-between gap-3 flex-wrap">
+        <div>
+          <div className="text-14 text-zinc-600">Not screened yet</div>
+          {rescreenError && <ActionFeedback error className="mt-1.5">{rescreenError}</ActionFeedback>}
+        </div>
+        <Button size="sm" variant="secondary" onClick={onRescreen} disabled={rescreening}>
+          {rescreening ? "Screening…" : "Run AI screen"}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="mb-4 border-hairline border rounded p-3">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-1.5">
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className={cn("text-20 tabular-nums font-medium", scoreTone(detail.ai_score))}>
+            {detail.ai_score}
+          </span>
+          <RecommendationBadge recommendation={detail.ai_recommendation} />
+          <span className="text-14 text-zinc-400">AI screen — ranking assist only</span>
+        </div>
+        <Button size="sm" variant="ghost" onClick={onRescreen} disabled={rescreening}>
+          {rescreening ? "Screening…" : "Re-screen"}
+        </Button>
+      </div>
+      {screen.summary && <div className="text-14 text-zinc-700 mb-1.5">{screen.summary}</div>}
+      {screen.strengths?.length > 0 && (
+        <div className="text-14 text-zinc-600">Strengths: {screen.strengths.join(" · ")}</div>
+      )}
+      {screen.flags?.length > 0 && (
+        <div className="text-ui-body text-ink-secondary mt-0.5">Probe: {screen.flags.join(" · ")}</div>
+      )}
+      {rescreenError && <ActionFeedback error className="mt-2">{rescreenError}</ActionFeedback>}
+    </div>
+  );
+}
+
+function StageActionFooter({ status, refreshError, offerPending, onStageButton, onClose }) {
+  return (
+    <DialogFooter>
+      <div className="flex flex-wrap gap-1.5">
+        {STATUS_TABS.filter(({ key }) => key !== status).map(({ key, label }) => {
+          const variant = key === NEXT_STAGE[status]
+            ? "primary"
+            : TERMINAL_STAGES.has(key)
+              ? "ghost"
+              : "secondary";
+          return (
+            <Button
+              key={key}
+              size="sm"
+              variant={variant}
+              onClick={() => onStageButton(key)}
+              disabled={Boolean(refreshError) || (key === "offer" && offerPending)}
+            >
+              {label}
+            </Button>
+          );
+        })}
+        <Button size="sm" variant="ghost" onClick={onClose}>
+          Close
+        </Button>
+      </div>
+    </DialogFooter>
+  );
+}
+
 // The Offer button opens the Offer form while the offer flow is on for a
 // technician application, and is today's status-only move only when the
 // server said the flow is off (or for a non-technician).
@@ -1000,14 +1100,10 @@ function ApplicationDetailContent({
   const [rescreenError, setRescreenError] = useState(null);
   const contact = detail?.contact_snapshot || {};
   const technician = detail.role === "technician";
-  // A closed application cannot take an offer: Offer is the plain status move there, whatever the offer read says (the
-  // stage preview and the move check it).
   const closed = isClosed(detail);
   const offerForm = offerFlow.enabled && technician && !closed;
-  // Until the offer read confirms on or off, a technician in an open application has no Offer move.
   const offerPending = technician && !closed && (offerFlow.loading || Boolean(offerFlow.error) || Boolean(offerFlow.refreshError));
   const onStageButton = (key) => (key === "offer" && offerForm ? offerFlow.openForm() : onOpenStageDialog(key));
-  const screen = detail?.ai_screen || null;
   const callSummary = detail?.source?.call_summary || null;
 
   useEffect(() => {
@@ -1043,26 +1139,16 @@ function ApplicationDetailContent({
         <div className="flex flex-wrap items-center gap-3 mb-4">
           {CONTACT_LINKS.filter(({ key }) => contact[key]).map(
             ({ key, scheme, Icon, label }) => (
-              <a
-                key={scheme}
-                className={contactLinkClass}
-                href={`${scheme}:${contact[key]}`}
-              >
+              <a key={scheme} className={contactLinkClass} href={`${scheme}:${contact[key]}`}>
                 <Icon className="w-4 h-4" />
                 {label || contact[key]}
               </a>
             ),
           )}
-          {contact.city && (
-            <span className="text-14 text-zinc-500">{contact.city}</span>
-          )}
+          {contact.city && <span className="text-14 text-zinc-500">{contact.city}</span>}
           <Badge>{detail.status}</Badge>
           {!editingContact && (
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={() => setEditingContact(true)}
-            >
+            <Button size="sm" variant="ghost" onClick={() => setEditingContact(true)}>
               Edit contact
             </Button>
           )}
@@ -1083,115 +1169,166 @@ function ApplicationDetailContent({
             <div className="text-ui-caption font-medium text-ink-secondary mb-1">
               Phone call summary
             </div>
-            <div className="text-14 text-zinc-800 whitespace-pre-wrap">
-              {callSummary}
-            </div>
+            <div className="text-14 text-zinc-800 whitespace-pre-wrap">{callSummary}</div>
           </div>
         )}
 
-        {screen ? (
-          <div className="mb-4 border-hairline border rounded p-3">
-            <div className="flex items-center justify-between gap-3 flex-wrap mb-1.5">
-              <div className="flex items-center gap-3 flex-wrap">
-                <span
-                  className={cn(
-                    "text-20 tabular-nums font-medium",
-                    scoreTone(detail.ai_score),
-                  )}
-                >
-                  {detail.ai_score}
-                </span>
-                <RecommendationBadge
-                  recommendation={detail.ai_recommendation}
-                />
-                <span className="text-14 text-zinc-400">
-                  AI screen — ranking assist only
-                </span>
-              </div>
-              <Button size="sm" variant="ghost" onClick={handleRescreen} disabled={rescreening}>
-                {rescreening ? "Screening…" : "Re-screen"}
-              </Button>
-            </div>
-            {screen.summary && (
-              <div className="text-14 text-zinc-700 mb-1.5">
-                {screen.summary}
-              </div>
-            )}
-            {screen.strengths?.length > 0 && (
-              <div className="text-14 text-zinc-600">
-                Strengths: {screen.strengths.join(" · ")}
-              </div>
-            )}
-            {screen.flags?.length > 0 && (
-              <div className="text-ui-body text-ink-secondary mt-0.5">
-                Probe: {screen.flags.join(" · ")}
-              </div>
-            )}
-            {rescreenError && <ActionFeedback error className="mt-2">{rescreenError}</ActionFeedback>}
-          </div>
-        ) : (
-          <div className="mb-4 border-hairline border rounded p-3 flex items-center justify-between gap-3 flex-wrap">
-            <div>
-              <div className="text-14 text-zinc-600">Not screened yet</div>
-              {rescreenError && <ActionFeedback error className="mt-1.5">{rescreenError}</ActionFeedback>}
-            </div>
-            <Button size="sm" variant="secondary" onClick={handleRescreen} disabled={rescreening}>
-              {rescreening ? "Screening…" : "Run AI screen"}
-            </Button>
-          </div>
-        )}
+        <AiScreenCard
+          detail={detail}
+          rescreening={rescreening}
+          rescreenError={rescreenError}
+          onRescreen={handleRescreen}
+        />
 
         <div className="flex flex-col gap-2.5 mb-4">
           {Object.entries(ANSWER_LABELS)
             .filter(([key]) => detail.answers?.[key])
             .map(([key, label]) => (
               <div key={key}>
-                <div className="text-ui-caption font-medium text-ink-secondary">
-                  {label}
-                </div>
-                <div className="text-14 text-zinc-800 whitespace-pre-wrap">
-                  {detail.answers[key]}
-                </div>
+                <div className="text-ui-caption font-medium text-ink-secondary">{label}</div>
+                <div className="text-14 text-zinc-800 whitespace-pre-wrap">{detail.answers[key]}</div>
               </div>
             ))}
         </div>
 
         <InterviewSchedulingBlock detail={detail} onOpenStageDialog={onOpenStageDialog} disabled={Boolean(refreshError)} />
-
         <OfferSection detail={detail} offerFlow={offerFlow} onChanged={onOfferChanged} detailStale={Boolean(refreshError)} />
-
         <StatusHistoryList history={detail.status_history} />
-
         <MessagesList history={detail.comms_history} replyMedia={replyMedia} />
       </DialogBody>
-      <DialogFooter>
-        <div className="flex flex-wrap gap-1.5">
-          {STATUS_TABS.filter(({ key }) => key !== detail.status).map(
-            ({ key, label }) => {
-              const variant = key === NEXT_STAGE[detail.status]
-                ? "primary"
-                : TERMINAL_STAGES.has(key)
-                  ? "ghost"
-                  : "secondary";
-              return (
-                <Button
-                  key={key}
-                  size="sm"
-                  variant={variant}
-                  onClick={() => onStageButton(key)}
-                  disabled={Boolean(refreshError) || (key === "offer" && offerPending)}
-                >
-                  {label}
-                </Button>
-              );
-            },
-          )}
-          <Button size="sm" variant="ghost" onClick={onClose}>
-            Close
+      <StageActionFooter
+        status={detail.status}
+        refreshError={refreshError}
+        offerPending={offerPending}
+        onStageButton={onStageButton}
+        onClose={onClose}
+      />
+    </>
+  );
+}
+
+function RecruitingFilterBar({
+  searchInput,
+  onSearchInputChange,
+  onSubmitSearch,
+  roleFilter,
+  onRoleFilterChange,
+  activeFilters,
+  onClear,
+  detailLoading,
+}) {
+  return (
+    <form className="flex flex-wrap items-center gap-2 mb-4" onSubmit={onSubmitSearch}>
+      <Input
+        aria-label="Search applicants"
+        placeholder="Search name, phone, email, city…"
+        value={searchInput}
+        onChange={onSearchInputChange}
+        className="w-full sm:w-64"
+      />
+      <select
+        aria-label="Filter by role"
+        value={roleFilter}
+        onChange={(e) => onRoleFilterChange(e.target.value)}
+        className="min-h-11 md:min-h-9 rounded-md border border-hairline bg-white px-3 text-14 text-zinc-800 u-focus-ring"
+      >
+        <option value="">All roles</option>
+        {Object.entries(ROLE_LABELS).map(([key, label]) => (
+          <option key={key} value={key}>{label}</option>
+        ))}
+      </select>
+      <Button type="submit" size="sm" variant="secondary">
+        Search
+      </Button>
+      {activeFilters && (
+        <Button type="button" size="sm" variant="ghost" onClick={onClear}>
+          Clear
+        </Button>
+      )}
+      {detailLoading && (
+        <span className="text-14 text-zinc-500 ml-auto" role="status">
+          Loading applicant…
+        </span>
+      )}
+    </form>
+  );
+}
+
+function ApplicantCard({ app, onOpen }) {
+  const c = app.contact_snapshot || {};
+  return (
+    <Card>
+      <CardBody>
+        <button
+          type="button"
+          className="min-h-11 w-full text-left appearance-none border-0 bg-transparent p-0 cursor-pointer rounded-md u-focus-ring"
+          onClick={(event) => {
+            event.currentTarget.focus({ preventScroll: true });
+            onOpen(app.id);
+          }}
+        >
+          <div className="flex flex-col items-start justify-between gap-3 lg:flex-row lg:items-center">
+            <div className="min-w-0 max-w-full">
+              <div className="text-14 font-medium text-zinc-900 truncate">
+                {c.name || "Unknown"}
+                <span className="text-zinc-400 font-normal"> · {roleLabel(app.role)}</span>
+                {app.language === "es" && <span className="text-zinc-400 font-normal"> · ES</span>}
+                {RECORD_ORIGIN_LABEL[app.origin] && (
+                  <span className="text-zinc-400 font-normal"> · {RECORD_ORIGIN_LABEL[app.origin]}</span>
+                )}
+              </div>
+              {app.ai_summary && (
+                <div className="text-14 text-zinc-500 mt-0.5 truncate">{app.ai_summary}</div>
+              )}
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <RecommendationBadge recommendation={app.ai_recommendation} />
+              <span className={cn("text-16 tabular-nums font-medium", scoreTone(app.ai_score))}>
+                {app.ai_score != null ? app.ai_score : "—"}
+              </span>
+              {app.interview_at && (
+                <span className="text-14 text-zinc-500">
+                  {app.interview_mode === "in_person" ? "In person" : "Phone"} · {formatETDateTime(app.interview_at)}
+                </span>
+              )}
+              <span className="text-14 text-zinc-400">{formatETDateTime(app.created_at)}</span>
+            </div>
+          </div>
+        </button>
+      </CardBody>
+    </Card>
+  );
+}
+
+function ApplicationListSection({ loading, loadedStatus, tab, applications, counts, loadingMore, onOpen, onLoadMore }) {
+  if (loading) {
+    return <div className="text-14 text-zinc-500 p-8 text-center">Loading applications…</div>;
+  }
+  if (loadedStatus !== tab) return null;
+  if (applications.length === 0) {
+    return (
+      <Card>
+        <CardBody>
+          <div className="text-14 text-zinc-500 text-center py-6">
+            No {STATUS_TABS.find((t) => t.key === tab)?.label.toLowerCase()} applications.
+          </div>
+        </CardBody>
+      </Card>
+    );
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {applications.map((app) => (
+        <ApplicantCard key={app.id} app={app} onOpen={onOpen} />
+      ))}
+      {applications.length < (counts[tab] || 0) && (
+        <div className="text-center mt-1">
+          <Button size="sm" variant="secondary" disabled={loadingMore} onClick={onLoadMore}>
+            {loadingMore ? "Loading…" : `Load more (${applications.length} of ${counts[tab]})`}
           </Button>
         </div>
-      </DialogFooter>
-    </>
+      )}
+    </div>
   );
 }
 
@@ -1306,51 +1443,38 @@ export default function RecruitingPage() {
   // An explicit open (a list click, a bell link) of the applicant already on screen
   // also reads in place with ?peek=1 (cancelling any pending switch to another
   // applicant) so replies are never silently acknowledged behind a nested dialog.
+  const applyLoadedDetail = useCallback((data, inPlace) => {
+    setDetail(data.application);
+    setReplyMedia(data.reply_media || {});
+    setSamePhone(data.same_phone || []);
+    setDetailRefreshError(null);
+    if (!inPlace) resetForNewApplicant();
+  }, [resetForNewApplicant]);
+
   const openDetail = useCallback(async (id, { refresh } = {}) => {
-    // An action that finished after the owner opened another applicant: its
-    // re-read is for one no longer on screen, and it must not cancel the open
-    // applicant's own re-read (refreshSeq).
     if (refresh && detailIdRef.current !== id) return;
     const inPlace = refresh || detailIdRef.current === id;
     const seq = refresh ? detailSeq.current : ++detailSeq.current;
-    // Whether the page still wants this read: no other open, no close, and an in-place read's applicant still on screen.
     const wanted = () => seq === detailSeq.current && (!inPlace || detailIdRef.current === id);
-    // An in-place read takes its version when its request starts: an answer that reaches the applicant after that (a
-    // stage move's, a later re-read) outranks it.
     let fresh = 0;
     const newest = () => wanted() && (!inPlace || fresh === refreshSeq.current);
     if (!inPlace) setDetailLoading(true);
     try {
-      // An explicit open of the applicant on screen re-reads the offer card first: a date request or an answer changes
-      // the offer without changing the stage. The offer, then the application, as after an offer action, so the stage
-      // shown is never older than the offer. Another applicant's offer is read when it opens.
       if (inPlace && !refresh) {
         await reloadOfferFor(id);
-        // The application read below marks replies read: never for an open the owner closed or left meanwhile.
         if (!wanted()) return;
       }
       if (inPlace) fresh = ++refreshSeq.current;
-      // An open of another applicant marks the replies it shows as read. A read in place never does (?peek=1): the
-      // page's own re-reads (after an offer action, or a Try again) and an open of the applicant already on screen,
-      // whose answer may land behind a dialog, after another open, or be dropped. The next open marks those replies.
       const data = await adminFetch(`/admin/careers/${id}${inPlace ? "?peek=1" : ""}`);
-      if (!newest()) return;
-      setDetail(data.application);
-      setReplyMedia(data.reply_media || {});
-      setSamePhone(data.same_phone || []);
-      setDetailRefreshError(null);
-      // Only another applicant resets the stage workflow: for the one on screen, an open stage dialog, its typed note
-      // and a move in flight all still belong to it.
-      if (!inPlace) resetForNewApplicant();
+      if (newest()) applyLoadedDetail(data, inPlace);
     } catch (err) {
       if (!newest()) return;
-      // A failed in-place read stays on the detail with Try again (the list reload clears the page error).
       if (inPlace) setDetailRefreshError(err.message);
       else setError(err.message);
     } finally {
       if (!inPlace && seq === detailSeq.current) setDetailLoading(false);
     }
-  }, [resetForNewApplicant, reloadOfferFor]);
+  }, [applyLoadedDetail, reloadOfferFor]);
 
   // The offer read returns the stage it read with the offers (applicationStatus). The application is read on its own,
   // and a first open reads it before the offer, so an answer between the two reads leaves the stage behind the offer
@@ -1451,58 +1575,27 @@ export default function RecruitingPage() {
         </TabList>
       </Tabs>
 
-      <form
-        className="flex flex-wrap items-center gap-2 mb-4"
-        onSubmit={(e) => {
+      <RecruitingFilterBar
+        searchInput={searchInput}
+        onSearchInputChange={(e) => {
+          const v = e.target.value;
+          setSearchInput(v);
+          if (!v.trim() && searchQuery) setSearchQuery("");
+        }}
+        onSubmitSearch={(e) => {
           e.preventDefault();
           setSearchQuery(searchInput);
         }}
-      >
-        <Input
-          aria-label="Search applicants"
-          placeholder="Search name, phone, email, city…"
-          value={searchInput}
-          onChange={(e) => {
-            const v = e.target.value;
-            setSearchInput(v);
-            if (!v.trim() && searchQuery) setSearchQuery("");
-          }}
-          className="w-full sm:w-64"
-        />
-        <select
-          aria-label="Filter by role"
-          value={roleFilter}
-          onChange={(e) => setRoleFilter(e.target.value)}
-          className="min-h-11 md:min-h-9 rounded-md border border-hairline bg-white px-3 text-14 text-zinc-800 u-focus-ring"
-        >
-          <option value="">All roles</option>
-          {Object.entries(ROLE_LABELS).map(([key, label]) => (
-            <option key={key} value={key}>{label}</option>
-          ))}
-        </select>
-        <Button type="submit" size="sm" variant="secondary">
-          Search
-        </Button>
-        {activeFilters && (
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            onClick={() => {
-              setRoleFilter("");
-              setSearchInput("");
-              setSearchQuery("");
-            }}
-          >
-            Clear
-          </Button>
-        )}
-        {detailLoading && (
-          <span className="text-14 text-zinc-500 ml-auto" role="status">
-            Loading applicant…
-          </span>
-        )}
-      </form>
+        roleFilter={roleFilter}
+        onRoleFilterChange={setRoleFilter}
+        activeFilters={activeFilters}
+        onClear={() => {
+          setRoleFilter("");
+          setSearchInput("");
+          setSearchQuery("");
+        }}
+        detailLoading={detailLoading}
+      />
 
       {error && (
         <ActionFeedback
@@ -1513,108 +1606,16 @@ export default function RecruitingPage() {
           {error}
         </ActionFeedback>
       )}
-      {loading ? (
-        <div className="text-14 text-zinc-500 p-8 text-center">
-          Loading applications…
-        </div>
-      ) : loadedStatus !== tab ? null : applications.length === 0 ? (
-        <Card>
-          <CardBody>
-            <div className="text-14 text-zinc-500 text-center py-6">
-              No {STATUS_TABS.find((t) => t.key === tab)?.label.toLowerCase()}{" "}
-              applications.
-            </div>
-          </CardBody>
-        </Card>
-      ) : (
-        <div className="flex flex-col gap-2">
-          {applications.map((app) => {
-            const c = app.contact_snapshot || {};
-            return (
-              <Card key={app.id}>
-                <CardBody>
-                  <button
-                    type="button"
-                    className="min-h-11 w-full text-left appearance-none border-0 bg-transparent p-0 cursor-pointer rounded-md u-focus-ring"
-                    onClick={(event) => {
-                      event.currentTarget.focus({ preventScroll: true });
-                      openDetail(app.id);
-                    }}
-                  >
-                    <div className="flex flex-col items-start justify-between gap-3 lg:flex-row lg:items-center">
-                      {/* max-w-full: in the stacked (phone) layout this
-                          block is as wide as its longest line, so the
-                          summary's truncate needs a width to cut against. */}
-                      <div className="min-w-0 max-w-full">
-                        <div className="text-14 font-medium text-zinc-900 truncate">
-                          {c.name || "Unknown"}
-                          <span className="text-zinc-400 font-normal">
-                            {" "}
-                            · {roleLabel(app.role)}
-                          </span>
-                          {app.language === "es" && (
-                            <span className="text-zinc-400 font-normal">
-                              {" "}
-                              · ES
-                            </span>
-                          )}
-                          {RECORD_ORIGIN_LABEL[app.origin] && (
-                            <span className="text-zinc-400 font-normal">
-                              {" "}
-                              · {RECORD_ORIGIN_LABEL[app.origin]}
-                            </span>
-                          )}
-                        </div>
-                        {app.ai_summary && (
-                          <div className="text-14 text-zinc-500 mt-0.5 truncate">
-                            {app.ai_summary}
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap items-center gap-3">
-                        <RecommendationBadge
-                          recommendation={app.ai_recommendation}
-                        />
-                        <span
-                          className={cn(
-                            "text-16 tabular-nums font-medium",
-                            scoreTone(app.ai_score),
-                          )}
-                        >
-                          {app.ai_score != null ? app.ai_score : "—"}
-                        </span>
-                        {app.interview_at && (
-                          <span className="text-14 text-zinc-500">
-                            {app.interview_mode === "in_person" ? "In person" : "Phone"} ·{" "}
-                            {formatETDateTime(app.interview_at)}
-                          </span>
-                        )}
-                        <span className="text-14 text-zinc-400">
-                          {formatETDateTime(app.created_at)}
-                        </span>
-                      </div>
-                    </div>
-                  </button>
-                </CardBody>
-              </Card>
-            );
-          })}
-          {applications.length < (counts[tab] || 0) && (
-            <div className="text-center mt-1">
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={loadingMore}
-                onClick={() =>
-                  load(tab, { offset: applications.length, append: true })
-                }
-              >
-                {loadingMore ? "Loading…" : `Load more (${applications.length} of ${counts[tab]})`}
-              </Button>
-            </div>
-          )}
-        </div>
-      )}
+      <ApplicationListSection
+        loading={loading}
+        loadedStatus={loadedStatus}
+        tab={tab}
+        applications={applications}
+        counts={counts}
+        loadingMore={loadingMore}
+        onOpen={openDetail}
+        onLoadMore={() => load(tab, { offset: applications.length, append: true })}
+      />
 
       <Dialog open={Boolean(detail)} onClose={closeDetail}>
         {detail && (

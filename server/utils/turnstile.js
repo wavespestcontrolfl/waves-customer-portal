@@ -101,7 +101,7 @@ function parseWidgetSecrets(raw) {
               .filter(Boolean)
           ),
         }));
-    } catch (_e) {
+    } catch {
       logger.warn('[turnstile] TURNSTILE_SECRET_KEY is not valid JSON — ignoring');
       return [];
     }

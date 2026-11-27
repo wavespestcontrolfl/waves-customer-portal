@@ -829,49 +829,60 @@ async function changePassword(req, res, next) {
 
 router.post('/change-password', adminAuthenticate, changePasswordLimiter, changePassword);
 
+function parseRegisterLicenseFields({ fl_applicator_license, license_expiry }) {
+  let applicatorLicense = null;
+  if (fl_applicator_license !== undefined && fl_applicator_license !== null && fl_applicator_license !== '') {
+    if (typeof fl_applicator_license !== 'string' || !fl_applicator_license.trim() || fl_applicator_license.trim().length > 50) {
+      return { status: 400, body: { error: 'fl_applicator_license must be a string of at most 50 characters' } };
+    }
+    applicatorLicense = fl_applicator_license.trim();
+  }
+  let licenseExpiry = null;
+  if (license_expiry !== undefined && license_expiry !== null && license_expiry !== '') {
+    if (!validDateOnly(license_expiry)) {
+      return { status: 400, body: { error: 'license_expiry must be a valid YYYY-MM-DD date' } };
+    }
+    licenseExpiry = license_expiry;
+  }
+  return { applicatorLicense, licenseExpiry };
+}
+
+function parseRegisterRequest(req) {
+  const { name, email, password, role, fl_applicator_license, license_expiry } = req.body || {};
+  if (typeof name !== 'string' || !name.trim() || !email || !password) {
+    return { status: 400, body: { error: 'Name, email, password required' } };
+  }
+  const normalizedName = name.trim();
+  const normalizedEmail = normalizeStaffEmail(email);
+  if (!normalizedEmail) return { status: 400, body: { error: 'A valid staff email is required' } };
+  const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: null, toEmail: normalizedEmail });
+  if (fullAccessEmailGuard) return { status: 403, body: fullAccessEmailGuard };
+  const staffRole = role || 'technician';
+  if (!['admin', 'technician'].includes(staffRole)) {
+    return { status: 400, body: { error: 'Role must be admin or technician' } };
+  }
+  if (staffRole === 'admin' && !ibFullAccess(req)) {
+    return { status: 403, body: { error: 'Only the owner account can create an admin account.' } };
+  }
+  const policyError = validateStaffPassword(password);
+  if (policyError) return { status: 400, body: { error: policyError } };
+  const license = parseRegisterLicenseFields({ fl_applicator_license, license_expiry });
+  if (license.status) return license;
+  return {
+    normalizedName,
+    normalizedEmail,
+    password,
+    staffRole,
+    applicatorLicense: license.applicatorLicense,
+    licenseExpiry: license.licenseExpiry,
+  };
+}
+
 async function register(req, res, next) {
   try {
-    const { name, email, password, role, fl_applicator_license, license_expiry } = req.body || {};
-    if (typeof name !== 'string' || !name.trim() || !email || !password) {
-      return res.status(400).json({ error: 'Name, email, password required' });
-    }
-    const normalizedName = name.trim();
-    const normalizedEmail = normalizeStaffEmail(email);
-    if (!normalizedEmail) return res.status(400).json({ error: 'A valid staff email is required' });
-    // Owner-only access model (owner ruling 2026-09-28): this is the other
-    // way (besides admin-timetracking.js) a new technicians row's email is
-    // set, and ibFullAccess() keys authorization on that column — a
-    // brand-new row has nothing to strip (fromEmail: null), only a possible
-    // assignment of the owner's email to a fresh admin account.
-    const fullAccessEmailGuard = assertMayChangeFullAccessEmail(req, { fromEmail: null, toEmail: normalizedEmail });
-    if (fullAccessEmailGuard) return res.status(403).json(fullAccessEmailGuard);
-    const staffRole = role || 'technician';
-    if (!['admin', 'technician'].includes(staffRole)) {
-      return res.status(400).json({ error: 'Role must be admin or technician' });
-    }
-    if (staffRole === 'admin' && !ibFullAccess(req)) {
-      return res.status(403).json({ error: 'Only the owner account can create an admin account.' });
-    }
-    const policyError = validateStaffPassword(password);
-    if (policyError) return res.status(400).json({ error: policyError });
-
-    // Licensing is captured AT provisioning (both optional) so the daily
-    // license-expiry watch sees the hire from day one — nothing else in the
-    // product populates these fields for a new account.
-    let applicatorLicense = null;
-    if (fl_applicator_license !== undefined && fl_applicator_license !== null && fl_applicator_license !== '') {
-      if (typeof fl_applicator_license !== 'string' || !fl_applicator_license.trim() || fl_applicator_license.trim().length > 50) {
-        return res.status(400).json({ error: 'fl_applicator_license must be a string of at most 50 characters' });
-      }
-      applicatorLicense = fl_applicator_license.trim();
-    }
-    let licenseExpiry = null;
-    if (license_expiry !== undefined && license_expiry !== null && license_expiry !== '') {
-      if (!validDateOnly(license_expiry)) {
-        return res.status(400).json({ error: 'license_expiry must be a valid YYYY-MM-DD date' });
-      }
-      licenseExpiry = license_expiry;
-    }
+    const parsed = parseRegisterRequest(req);
+    if (parsed.status) return res.status(parsed.status).json(parsed.body);
+    const { normalizedName, normalizedEmail, password, staffRole, applicatorLicense, licenseExpiry } = parsed;
 
     const hash = await bcrypt.hash(password, 12);
     const outcome = await db.transaction(async (trx) => {

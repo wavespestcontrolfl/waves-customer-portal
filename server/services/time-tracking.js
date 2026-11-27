@@ -588,20 +588,13 @@ function autoCloseReviewedBy(entry, updates, editedBy) {
 const ALLOWED_ENTRY_TYPES = new Set(['shift', 'job', 'break', 'drive']);
 const MAX_EDITED_ENTRY_MINUTES = 24 * 60;
 
-/**
- * Admin edit an entry — preserves originals.
- */
-async function adminEditEntry(entryId, {
-  clock_in, clock_out, entry_type, notes, edit_reason, edited_by,
-  target_duration_minutes, expected_updated_at,
-}) {
+function validateAdminEditInput({ clock_in, clock_out, entry_type, edit_reason }) {
   if (entry_type !== undefined && entry_type !== null && !ALLOWED_ENTRY_TYPES.has(entry_type)) {
     throw staffTimeHttpError(400, 'entry_type must be shift, job, break, or drive.');
   }
   if (edit_reason !== undefined && (typeof edit_reason !== 'string' || !edit_reason.trim())) {
     throw staffTimeHttpError(400, 'edit_reason cannot be empty.');
   }
-  const normalizedReason = typeof edit_reason === 'string' ? edit_reason.trim() : edit_reason;
   const parsedClockIn = clock_in ? new Date(clock_in) : null;
   if (clock_in && Number.isNaN(parsedClockIn.getTime())) {
     throw staffTimeHttpError(400, 'clock_in must be a valid date and time.');
@@ -610,6 +603,75 @@ async function adminEditEntry(entryId, {
   if (clock_out && Number.isNaN(parsedClockOut.getTime())) {
     throw staffTimeHttpError(400, 'clock_out must be a valid date and time.');
   }
+  return {
+    normalizedReason: typeof edit_reason === 'string' ? edit_reason.trim() : edit_reason,
+    parsedClockIn,
+    parsedClockOut,
+  };
+}
+
+function buildAdminEditUpdates(entry, {
+  parsedClockIn, parsedClockOut, clock_out, entry_type, notes,
+  normalizedReason, edited_by, target_duration_minutes,
+}) {
+  const updates = {
+    status: 'edited',
+    // An admin edit is the resolution transition for a disputed entry.
+    // Keep the entry and its day reviewable so the corrected week can be
+    // signed and approved again.
+    approval_status: 'pending',
+    approved_by: null,
+    approved_at: null,
+    approval_notes: null,
+    edit_reason: normalizedReason,
+    edited_by,
+    edited_at: new Date(),
+    updated_at: new Date(),
+  };
+
+  if (!entry.original_clock_in) {
+    updates.original_clock_in = entry.clock_in;
+    updates.original_clock_out = entry.clock_out;
+  }
+  if (parsedClockIn) updates.clock_in = parsedClockIn;
+  if (parsedClockOut) updates.clock_out = parsedClockOut;
+
+  // Duration-based edit: derive clock_out from the locked row's start (or new
+  // clock_in) and reject durations that would fabricate future paid time.
+  if (!clock_out && Number.isFinite(Number(target_duration_minutes)) && Number(target_duration_minutes) > 0) {
+    const baseIn = updates.clock_in || entry.clock_in;
+    const derivedOut = new Date(new Date(baseIn).getTime() + Number(target_duration_minutes) * 60000);
+    if (derivedOut.getTime() > Date.now()) {
+      throw staffTimeHttpError(400, 'Target duration extends the entry into the future; correct the timer manually once the interval has elapsed.');
+    }
+    updates.clock_out = derivedOut;
+  }
+  if (entry_type) updates.entry_type = entry_type;
+  if (notes !== undefined) updates.notes = notes;
+  Object.assign(updates, autoCloseReviewedBy(entry, updates, edited_by));
+
+  const finalIn = new Date(updates.clock_in || entry.clock_in);
+  const finalOut = new Date(updates.clock_out || entry.clock_out);
+  updates.duration_minutes = Math.round(((finalOut - finalIn) / 60000) * 100) / 100;
+  if (!isCompletedEntryIntervalValid({ ...entry, ...updates, clock_in: finalIn, clock_out: finalOut })) {
+    throw staffTimeHttpError(400, 'clock_out must be after clock_in and match a finite positive duration.');
+  }
+  if ((parsedClockIn || parsedClockOut) && finalOut.getTime() > Date.now() + 60000) {
+    throw staffTimeHttpError(400, 'clock_out cannot be in the future.');
+  }
+  return { updates, finalIn, finalOut };
+}
+
+/**
+ * Admin edit an entry — preserves originals.
+ */
+async function adminEditEntry(entryId, {
+  clock_in, clock_out, entry_type, notes, edit_reason, edited_by,
+  target_duration_minutes, expected_updated_at,
+}) {
+  const { normalizedReason, parsedClockIn, parsedClockOut } = validateAdminEditInput({
+    clock_in, clock_out, entry_type, edit_reason,
+  });
 
   const updated = await db.transaction(async (trx) => {
     // Read without a row lock first so we can acquire the advisory week locks
@@ -618,11 +680,8 @@ async function adminEditEntry(entryId, {
     const preview = await trx('time_entries').where({ id: entryId }).first();
     if (!preview) throw staffTimeHttpError(404, 'Entry not found.');
     const previewWorkDate = staffWorkDate(preview.clock_in);
-    const requestedWorkDate = parsedClockIn
-      ? staffWorkDate(parsedClockIn)
-      : previewWorkDate;
-    const lockedWeeks = [previewWorkDate, requestedWorkDate]
-      .map(staffWeekStartForWorkDate);
+    const requestedWorkDate = parsedClockIn ? staffWorkDate(parsedClockIn) : previewWorkDate;
+    const lockedWeeks = [previewWorkDate, requestedWorkDate].map(staffWeekStartForWorkDate);
     await lockStaffWeeks(trx, preview.technician_id, lockedWeeks);
 
     const entry = await trx('time_entries').where({ id: entryId }).forUpdate().first();
@@ -632,12 +691,7 @@ async function adminEditEntry(entryId, {
       staffWorkDate(entry.clock_in),
       requestedWorkDate,
     ], finalType === 'shift' ? requestedWorkDate : null);
-    // Optimistic version check (codex P2 #3152 round 22): an automated
-    // caller (the time-on-site linked-timer sync) states the updated_at it
-    // observed — if a payroll admin edited the entry between that snapshot
-    // and this locked read, the edit is rejected instead of silently
-    // replacing the newer manual correction. Callers that pass nothing
-    // (the interactive admin edit route) keep last-write-wins.
+
     if (expected_updated_at !== undefined) {
       const observed = expected_updated_at ? new Date(expected_updated_at).getTime() : null;
       const current = entry.updated_at ? new Date(entry.updated_at).getTime() : null;
@@ -646,74 +700,10 @@ async function adminEditEntry(entryId, {
       }
     }
 
-    const updates = {
-      status: 'edited',
-      // An admin edit is the resolution transition for a disputed entry.
-      // Keep the entry and its day reviewable so the corrected week can be
-      // signed and approved again.
-      approval_status: 'pending',
-      approved_by: null,
-      approved_at: null,
-      approval_notes: null,
-      edit_reason: normalizedReason,
-      edited_by,
-      edited_at: new Date(),
-      updated_at: new Date(),
-    };
-
-    // Preserve originals (only on first edit)
-    if (!entry.original_clock_in) {
-      updates.original_clock_in = entry.clock_in;
-      updates.original_clock_out = entry.clock_out;
-    }
-
-    if (parsedClockIn) updates.clock_in = parsedClockIn;
-    if (parsedClockOut) updates.clock_out = parsedClockOut;
-    // Duration-based edit (codex P1 #3152, pre-push audit): the caller
-    // states the INTERVAL and the clock_out is derived from the LOCKED
-    // row's start (or the clock_in supplied in this same edit) — a
-    // clock_out precomputed from an unlocked snapshot races a concurrent
-    // clock_in edit and saves a duration different from the one intended.
-    // Explicit clock_out wins when both are passed.
-    if (!clock_out && Number.isFinite(Number(target_duration_minutes)) && Number(target_duration_minutes) > 0) {
-      const baseIn = updates.clock_in || entry.clock_in;
-      const derivedOut = new Date(new Date(baseIn).getTime() + Number(target_duration_minutes) * 60000);
-      // Never fabricate future paid time (codex P1 #3152 round 24): a
-      // corrected duration exceeding the elapsed span since clock_in would
-      // derive a clock_out ahead of the wall clock — the visit lifecycle
-      // clamps ITS end for exactly this input, and payroll must not record
-      // minutes that have not happened. Rejected, not clamped: a clamped
-      // timer would silently disagree with the operator's stated minutes.
-      if (derivedOut.getTime() > Date.now()) {
-        throw staffTimeHttpError(400, 'Target duration extends the entry into the future; correct the timer manually once the interval has elapsed.');
-      }
-      updates.clock_out = derivedOut;
-    }
-    if (entry_type) updates.entry_type = entry_type;
-    if (notes !== undefined) updates.notes = notes;
-    Object.assign(updates, autoCloseReviewedBy(entry, updates, edited_by));
-
-    // A completed/edited payroll interval must be positive and internally
-    // consistent. Recompute the duration from the final timestamps so edits
-    // cannot introduce a negative or stale paid interval.
-    const finalIn = new Date(updates.clock_in || entry.clock_in);
-    const finalOut = new Date(updates.clock_out || entry.clock_out);
-    const durationMinutes = (finalOut - finalIn) / 60000;
-    updates.duration_minutes = Math.round(durationMinutes * 100) / 100;
-    if (!isCompletedEntryIntervalValid({
-      ...entry,
-      ...updates,
-      clock_in: finalIn,
-      clock_out: finalOut,
-    })) {
-      throw staffTimeHttpError(
-        400,
-        'clock_out must be after clock_in and match a finite positive duration.',
-      );
-    }
-    if ((parsedClockIn || parsedClockOut) && finalOut.getTime() > Date.now() + 60000) {
-      throw staffTimeHttpError(400, 'clock_out cannot be in the future.');
-    }
+    const { updates, finalIn, finalOut } = buildAdminEditUpdates(entry, {
+      parsedClockIn, parsedClockOut, clock_out, entry_type, notes,
+      normalizedReason, edited_by, target_duration_minutes,
+    });
     if ((parsedClockIn || parsedClockOut || target_duration_minutes) && updates.duration_minutes > MAX_EDITED_ENTRY_MINUTES) {
       throw staffTimeHttpError(400, 'An edited time entry cannot exceed 24 hours. Check the dates and AM/PM.');
     }

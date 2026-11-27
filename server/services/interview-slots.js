@@ -78,7 +78,7 @@ function loadWindows() {
   let parsed;
   try {
     parsed = JSON.parse(raw);
-  } catch (err) {
+  } catch {
     logger.warn(`[interview-slots] RECRUITING_INTERVIEW_WINDOWS is not valid JSON — using default windows`);
     return DEFAULT_WINDOWS;
   }

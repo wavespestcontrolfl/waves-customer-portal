@@ -708,7 +708,7 @@ function SignBlock({ name, onName, onAccept, busy, saving, frozen }) {
         onChange={(e) => onName(e.target.value)}
         style={FIELD_STYLE}
       />
-      <p style={{ ...BODY_STYLE, fontSize: 13, color: MUTED, marginTop: 8 }}>
+      <p style={{ ...BODY_STYLE, fontSize: 14, color: MUTED, marginTop: 8 }}>
         By typing your full name and selecting Accept and sign, you agree to sign this offer electronically with the same legal effect as a handwritten signature. You can print or save a copy after signing, or call us at {WAVES_SUPPORT_PHONE_DISPLAY} for a paper copy.
       </p>
       <BrandButton fullWidth disabled={!valid || busy} onClick={onAccept} style={{ marginTop: 12 }}>
