@@ -5210,10 +5210,23 @@ function resolveMistingBasis({ tier, solution }, knobs) {
     && (!knobs.tier || knobs.tier === tier)
     && (!knobs.refillSolution || knobs.refillSolution === solution);
   const knob = mistingKnobReader(matches ? knobs : null);
+  // Smart-never-below-Essential floor (owner 2026-11-27): on fresh smart quotes,
+  // carry the comparable Essential tier basis so Smart never undercuts Essential
+  // at 29+ nozzles. On a legacy replay (matching knobs without essentialTierPrice),
+  // keep both null so already-sent quotes replay verbatim at their stamped price.
+  const essentialCfg = M.tiers.essential;
+  const essentialTierPrice = tier === 'smart'
+    ? (matches ? knob('essentialTierPrice', null) : (essentialCfg ? essentialCfg.price : null))
+    : null;
+  const essentialIncludedNozzles = tier === 'smart'
+    ? (matches ? knob('essentialIncludedNozzles', null, { positive: true, whole: true }) : (essentialCfg ? essentialCfg.includedNozzles : null))
+    : null;
   return {
     tierPrice: knob('tierPrice', tierCfg.price),
     hardwareCost: knob('hardwareCost', tierCfg.hardwareCost),
     includedNozzles: knob('includedNozzles', tierCfg.includedNozzles, { positive: true, whole: true }),
+    essentialTierPrice,
+    essentialIncludedNozzles,
     extraNozzlePrice: knob('extraNozzlePrice', M.extraNozzlePrice),
     extraNozzleCost: knob('extraNozzleCost', M.extraNozzleCost),
     includedRisers: knob('includedRisers', M.includedRisers, { whole: true }),
@@ -5279,6 +5292,12 @@ function mistingPricingKnobs(choice, basis) {
     tierPrice: basis.tierPrice,
     hardwareCost: basis.hardwareCost,
     includedNozzles: basis.includedNozzles,
+    ...(choice.tier === 'smart' && basis.essentialTierPrice != null && basis.essentialIncludedNozzles != null
+      ? {
+        essentialTierPrice: basis.essentialTierPrice,
+        essentialIncludedNozzles: basis.essentialIncludedNozzles,
+      }
+      : {}),
     extraNozzlePrice: basis.extraNozzlePrice,
     extraNozzleCost: basis.extraNozzleCost,
     includedRisers: basis.includedRisers,
@@ -5319,7 +5338,17 @@ function mistingOversizeResult(base, reasons) {
 function buildMistingPricedResult(base, basis, reasons) {
   const { extraNozzles, extraRisers } = base;
   // Cents are kept: the DB-authoritative row may hold fractional tier or overage prices (Codex #6503 r11).
-  const price = Math.round((basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice) * 100) / 100;
+  const rawPrice = Math.round((basis.tierPrice + extraNozzles * basis.extraNozzlePrice + extraRisers * basis.extraRiserPrice) * 100) / 100;
+  const essentialComparablePrice = base.tier === 'smart'
+    && basis.essentialTierPrice != null
+    && basis.essentialIncludedNozzles != null
+    ? Math.round((
+      basis.essentialTierPrice
+      + Math.max(0, base.nozzles - basis.essentialIncludedNozzles) * basis.extraNozzlePrice
+      + extraRisers * basis.extraRiserPrice
+    ) * 100) / 100
+    : null;
+  const price = essentialComparablePrice != null ? Math.max(rawPrice, essentialComparablePrice) : rawPrice;
   const materialCost = Math.round((basis.hardwareCost + extraNozzles * basis.extraNozzleCost + extraRisers * basis.extraRiserCost) * 100) / 100;
   const laborCost = Math.round(basis.installTechs * basis.installHours * basis.laborRate * 100) / 100;
   const totalCost = Math.round((materialCost + laborCost) * 100) / 100;

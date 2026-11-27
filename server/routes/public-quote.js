@@ -3433,6 +3433,8 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
               ...(typeof estimate.pricingMetadata.legacySpecialty1126 === 'boolean'
                 ? { legacySpecialty1126: estimate.pricingMetadata.legacySpecialty1126 }
                 : {}),
+              // Year-1 no-5% annual prepay stamp (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27).
+              ...require('../services/estimate-floor-signal-replay').savedYear1PrepayNoPercentSignal({ pricingMetadata: estimate.pricingMetadata }),
             } }
             : {}),
           lineItems: (estimate?.lineItems || []).map(item => ({

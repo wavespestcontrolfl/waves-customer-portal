@@ -70,6 +70,8 @@ const CLIENT_IDENTITY_FIELDS = Object.freeze([
   'palmMinPerVisitReplay',
   // The services a legacy estimate priced under the current rules (added by a revision): server-derived from its stamp.
   'currentRulesServices',
+  // Year-1 no-5% annual prepay policy (GATE_NO_YEAR1_PREPAY_DISCOUNT, 2026-11-27): server-derived from the gate or saved stamp.
+  'year1PrepayNoPercent',
 ]);
 
 // Deletes every server-owned field from `obj` IN PLACE (plain objects only;

@@ -3795,7 +3795,28 @@ function lawnProgramMinimumProtectedAnnual(estimateData = {}, { discountRate = 0
 // module invoices when the annual changes — multiplying a new annual by a
 // previously-computed flat "effective rate" goes stale immediately, because
 // the effective rate is itself a function of the annual.
+function estimateHasNoYear1PrepayPercent(estimateData = {}) {
+  if (!estimateData || typeof estimateData !== 'object') return false;
+  const carriers = [
+    estimateData.result && estimateData.result.pricingMetadata,
+    estimateData.engineResult && estimateData.engineResult.pricingMetadata,
+    estimateData.pricingMetadata,
+    estimateData.sendSnapshot,
+    estimateData.sendSnapshot && estimateData.sendSnapshot.pricingBundle,
+  ];
+  return carriers.some((carrier) => Boolean(carrier && carrier.year1PrepayNoPercent === true));
+}
+
 function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
+  // Owner ruling 2026-11-05 + 2026-11-27 (GATE_NO_YEAR1_PREPAY_DISCOUNT):
+  // New estimates stamped year1PrepayNoPercent = true carry 0% annual prepay
+  // discount in Year 1 across all mixes (unwaived solo pest/mosquito keep the
+  // $99 setup waiver; setup-waived offers like One-Time→Plan and multi-service
+  // bundles get 0% in Year 1; 5% starts on Year 2+ renewals). Pre-gate quotes
+  // without the stamp keep their exact historical 5% replay math.
+  if (estimateHasNoYear1PrepayPercent(estimateData)) {
+    return { discountRate: 0, protectedFloor: 0 };
+  }
   // Solo pest/mosquito mixes normally earn NO prepay % — their incentive is
   // the fee-waived-with-prepay. Owner ruling 2026-07-23: when the operator
   // has already waived the setup fee outright, the mix converts to the
@@ -9575,6 +9596,7 @@ module.exports.resolveLawnProgramMinimumMonthlyIgnoringBreach = resolveLawnProgr
 module.exports.estimateLawnProgramMinimumSignal = estimateLawnProgramMinimumSignal;
 module.exports.estimateManualDiscountFloorBreachAcknowledged = estimateManualDiscountFloorBreachAcknowledged;
 module.exports.annualPrepayDiscountComponents = annualPrepayDiscountComponents;
+module.exports.estimateHasNoYear1PrepayPercent = estimateHasNoYear1PrepayPercent;
 module.exports.annualPrepayDiscountPctLabel = annualPrepayDiscountPctLabel;
 module.exports.resolveCommercialPrepayTaxRate = resolveCommercialPrepayTaxRate;
 module.exports.resolveCommercialPrepayBaseRate = resolveCommercialPrepayBaseRate;

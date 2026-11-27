@@ -6,6 +6,7 @@
  * Adam manually enables them after verifying each one works.
  *
  * Set these as environment variables on Railway:
+ *   GATE_NO_YEAR1_PREPAY_DISCOUNT=true (owner 2026-11-05 + 2026-11-27: new estimates carry 0% Year-1 annual prepay discount across all mixes — solo pest/mosquito still waive the $99 setup fee, setup-waived offers like One-Time-to-Plan and multi-service bundles get 0% in Year 1, and 5% starts on Year 2+ renewals; pre-gate quotes replay unchanged; strict `=== 'true'`, read at call time via noYear1PrepayDiscountLive(); dark by default; kill: unset.)
  *   GATE_CUSTOMER_PROFILE_EDIT=true (owner 2026-11-26 "yes do all these fixes": a signed-in account holder edits their own first name, last name and email in the Waves app and the portal, from the Account menu (PUT /api/customer/profile). A phone number can never be changed there (it is the login). It has a gate because a change emails the customer: an email change sends an "account updated" notice to the OLD address and to the NEW address, so a takeover shows; a name-only change sends one notice to the current address. A contact login and a cancelled account are refused. Off, the route answers 404 {enabled:false} and /api/auth/me reports profileEdit:false, so the app hides the Edit control. Strict `=== 'true'`, read at call time via customerProfileEditLive(); dark by default. Kill: unset.)
  *   GATE_ONE_TIME_PEST_NO_HOME_AGE=true (owner 2026-11-26 "both older homes and newer home should have the same one time price": a one-time pest price no longer carries the home-age adjustment of the pest plan. On, a new pest plan quote saves the quarterly rate without the age adjustment; a one-time pest line on the same estimate and the one-time choice the estimate page shows beside the plan are priced from it. A one-time job priced alone never carried the adjustment. The plan price keeps it. A quote already priced keeps its one-time amount when the gate changes. It changes a price, so the owner flips it. Off or unset = new quotes price as before. Kill = unset.)
  *   GATE_RETURNING_SETUP_FEE_GAP=true (owner 2026-11-24 "make this a rule", 2026-11-25 "I'd like to automate this": a customer who cancelled and comes back pays the $99 WaveGuard setup fee again only when the gap from the last completed visit of the same plan (pest or mosquito) to the day of the quote is longer than one plan cycle plus 30 days: quarterly over 121 days, bi-monthly over 91, monthly over 60. Inside that window the quote carries no fee, with no staff step: the estimate tool shows why, the page leaves the fee out and the accept bill never charges it. Covers quotes the staff or a technician save, a customer's own service change on the estimate page, the customer's own plan-restart quote, the website quote with its self-booking, and the quotes drafted from a call or a text thread. It decides each time a quote is priced, so a quote already saved keeps its fee until it is priced again. It lowers a price, so the owner flips it. Read at call time via returningSetupFeeGapLive(), strict 'true', dark by default. Off = the fee is charged exactly as before. Kill: unset.)
@@ -9251,3 +9252,14 @@ function customerProfileEditLive() {
 }
 // GATE_CUSTOMER_PROFILE_EDIT reader, on its own line so gate PRs never conflict.
 module.exports.customerProfileEditLive = customerProfileEditLive;
+
+// GATE_NO_YEAR1_PREPAY_DISCOUNT read at CALL time (owner 2026-11-05 + 2026-11-27): strict 'true', dark by default.
+// It has a gate because it changes first-year annual-prepay pricing on new estimates. When on, new estimates carry
+// pricingMetadata.year1PrepayNoPercent = true so annualPrepayDiscountComponents applies 0% in Year 1 across all mixes
+// (solo pest/mosquito still waive the $99 setup fee; Year 2+ renewals keep 5%; pre-gate estimates replay unchanged).
+// Kill = unset (no redeploy).
+function noYear1PrepayDiscountLive() {
+  return process.env.GATE_NO_YEAR1_PREPAY_DISCOUNT === 'true';
+}
+// GATE_NO_YEAR1_PREPAY_DISCOUNT reader, on its own line so gate PRs never conflict.
+module.exports.noYear1PrepayDiscountLive = noYear1PrepayDiscountLive;

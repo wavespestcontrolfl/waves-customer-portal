@@ -1951,9 +1951,16 @@ const SPECIALTY = {
     trenchDepthPremiumPerHalfFt: 0.15,
     // High/problem-soil (0.125%) application rate install premium (+12%).
     highRatePriceMultiplier: 1.12,
+    // One-way inventory cost ratchet (owner 2026-11-27): db-bridge raises a
+    // bottle's containerCost/containerOz when its approved products_catalog
+    // $/oz exceeds the config basis (protecting margin against vendor price
+    // spikes without auto-cutting retail prices when generics save money).
+    // Kill switch: link_container_costs_to_catalog = false on onetime_trenching.
+    linkContainerCostsToCatalog: true,
     products: {
       termidor_sc: {
         label: 'Termidor SC - Fipronil',
+        catalogProductName: 'Termidor SC',
         activeIngredient: 'fipronil',
         chemistryType: 'non_repellent',
         positioning: 'premium_non_repellent',
@@ -1974,6 +1981,7 @@ const SPECIALTY = {
       },
       taurus_sc: {
         label: 'Taurus SC - Fipronil',
+        catalogProductName: 'Taurus SC',
         activeIngredient: 'fipronil',
         chemistryType: 'non_repellent',
         positioning: 'standard_non_repellent',
@@ -1997,6 +2005,7 @@ const SPECIALTY = {
       // the bottle once (talstar_p).
       bifen_it: {
         label: 'Crosscheck Plus - Bifenthrin',
+        catalogProductName: 'LESCO Crosscheck Plus',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',
@@ -2026,6 +2035,7 @@ const SPECIALTY = {
       // out atticus talak for lesco crosscheck"). The talstar_p key stays so saved estimates replay.
       talstar_p: {
         label: 'Crosscheck Plus - Bifenthrin',
+        catalogProductName: 'LESCO Crosscheck Plus',
         activeIngredient: 'bifenthrin',
         chemistryType: 'repellent_pyrethroid',
         positioning: 'standard_repellent',

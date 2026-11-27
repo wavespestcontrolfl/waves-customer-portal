@@ -1016,6 +1016,52 @@ async function syncPreSlabContainerCostsFromCatalog(db) {
   }
 }
 
+// One-way upward catalog ratchet for trenching termiticide bottle costs
+// (owner 2026-11-27): raises containerCost/containerOz when the approved
+// products_catalog $/oz rises above the configured basis (within the same
+// [0.5x, 2x] sanity band as pre-slab), never auto-lowering retail quotes when
+// generic swaps reduce wholesale cost. Kill switch: link_container_costs_to_catalog = false.
+function firstDefinedKey(obj, keys) {
+  for (const key of keys) {
+    if (obj && obj[key] != null) return obj[key];
+  }
+  return undefined;
+}
+
+async function syncTrenchingContainerCostsFromCatalog(db) {
+  const trenching = constants.SPECIALTY.trenching;
+  if (trenching?.linkContainerCostsToCatalog !== true) return;
+  const entries = Object.entries(trenching.products || {}).filter(
+    ([, product]) => typeof product?.catalogProductName === 'string' && product.catalogProductName.trim()
+  );
+  if (!entries.length) return;
+  try {
+    const byName = await loadApprovedCatalogRows(
+      db,
+      entries.map(([, product]) => product.catalogProductName.trim()),
+      ['name', 'best_price', 'unit_size_oz', 'best_vendor_pricing_id'],
+    );
+    for (const [key, product] of entries) {
+      const row = byName.get(product.catalogProductName.trim());
+      if (!row) continue;
+      const price = Number(row.best_price);
+      const oz = Number(row.unit_size_oz);
+      if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(oz) || oz <= 0) continue;
+      const configPerOz = Number(product.containerCost) / Number(product.containerOz);
+      const catalogPerOz = price / oz;
+      if (catalogPerOz <= configPerOz) continue;
+      if (!withinCatalogSanityBand(catalogPerOz, configPerOz)) {
+        warnCatalogRefusalOnce(`trenching.${key}.band`, `[pricing-engine] trenching ${key}: catalog $${catalogPerOz.toFixed(4)}/oz outside sanity band of config $${configPerOz.toFixed(4)}/oz — keeping config value`);
+        continue;
+      }
+      product.containerCost = price;
+      product.containerOz = oz;
+    }
+  } catch (err) {
+    console.warn('[pricing-engine] trenching inventory-price link skipped:', err.message);
+  }
+}
+
 // Catalog rows the pricing engine may price from: ACTIVE, priced rows whose
 // best_price is backed by an ELIGIBLE vendor_pricing row (the repo's one
 // predicate: positive, active, approved/auto-approved, unexpired). Some
@@ -2150,6 +2196,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.SPECIALTY.wdo.brackets = mapped;
       }
     }
+    constants.SPECIALTY.trenching.linkContainerCostsToCatalog = true;
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
       if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));
@@ -2170,11 +2217,13 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       setNumber(constants.SPECIALTY.trenching, 'baselineTrenchDepthFt', ot.baselineTrenchDepthFt ?? ot.baseline_trench_depth_ft, Number);
       setNumber(constants.SPECIALTY.trenching, 'trenchDepthPremiumPerHalfFt', ot.trenchDepthPremiumPerHalfFt ?? ot.trench_depth_premium_per_half_ft, Number);
       setNumber(constants.SPECIALTY.trenching, 'highRatePriceMultiplier', ot.highRatePriceMultiplier ?? ot.high_rate_price_multiplier, Number);
+      setBoolean(constants.SPECIALTY.trenching, 'linkContainerCostsToCatalog', firstDefinedKey(ot, ['link_container_costs_to_catalog', 'linkContainerCostsToCatalog']));
       const trenchingProducts = ot.products || ot.product_costs || {};
       const applyTrenchingProductOverlay = (key, data = {}) => {
         const target = constants.SPECIALTY.trenching.products?.[key];
         if (!target || !data || typeof data !== 'object') return;
         setString(target, 'label', data.label);
+        setString(target, 'catalogProductName', firstDefinedKey(data, ['catalogProductName', 'catalog_product_name']));
         setString(target, 'activeIngredient', data.activeIngredient ?? data.active_ingredient);
         setString(target, 'chemistryType', data.chemistryType ?? data.chemistry_type);
         setString(target, 'positioning', data.positioning);
@@ -2201,12 +2250,12 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
     if (config.onetime_boracare) {
       const bc = config.onetime_boracare;
-      setNumber(constants.SPECIALTY.boraCare, 'galCost', bc.bc_gal ?? bc.galCost, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'coverage', bc.bc_cov ?? bc.coverage, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'equipCost', bc.bc_equip ?? bc.equipCost, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', bc.marginDivisor ?? bc.margin_divisor, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', bc.min_job_price ?? bc.minJobPrice, Number);
-      setNumber(constants.SPECIALTY.boraCare, 'surfaceLaborSqFtPerHour', bc.surface_labor_sqft_per_hr ?? bc.surfaceLaborSqFtPerHour, Number);
+      setNumber(constants.SPECIALTY.boraCare, 'galCost', firstDefinedKey(bc, ['bc_gal', 'galCost', 'gal_cost']), Number);
+      setNumber(constants.SPECIALTY.boraCare, 'coverage', firstDefinedKey(bc, ['bc_cov', 'coverage', 'coverage_sqft']), Number);
+      setNumber(constants.SPECIALTY.boraCare, 'equipCost', firstDefinedKey(bc, ['bc_equip', 'equipCost', 'equip_cost']), Number);
+      setNumber(constants.SPECIALTY.boraCare, 'marginDivisor', firstDefinedKey(bc, ['marginDivisor', 'margin_divisor']), Number);
+      setNumber(constants.SPECIALTY.boraCare, 'minJobPrice', firstDefinedKey(bc, ['min_job_price', 'minJobPrice']), Number);
+      setNumber(constants.SPECIALTY.boraCare, 'surfaceLaborSqFtPerHour', firstDefinedKey(bc, ['surface_labor_sqft_per_hr', 'surfaceLaborSqFtPerHour']), Number);
     }
     // Pre-slab step/link kill switches mutate in place across syncs, so EVERY
     // sync restores the in-code defaults before the row (if any) is applied —
@@ -2474,6 +2523,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     await syncPreSlabContainerCostsFromCatalog(db);
+    await syncTrenchingContainerCostsFromCatalog(db);
     await syncTermiteStationCostsFromCatalog(db);
     await syncMosquitoProductCostsFromCatalog(db);
 
