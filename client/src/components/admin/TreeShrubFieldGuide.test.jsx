@@ -83,11 +83,18 @@ test('the Zylam tank amount is named foliar-only, so it is never read as the dre
   render(<TreeShrubFieldGuide guide={{ ...december.fieldGuide, month: 'Dec', ...reference }} mode="tech" />);
   const row = screen.getByRole('button', { name: /Zylam/ });
   expect(within(row).getByText(/^Foliar spray only: /)).toBeTruthy();
-  // A held mix shows the hold, not a labelled amount.
+  // A mix with a check against it still shows its amount, with the warning beside it (owner 2026-11-26).
   cleanup();
-  const held = { ...reference.products, zylam: { ...reference.products.zylam, mix: null, summary: 'Mix withheld · see product checks' } };
+  const warned = { ...reference.products, zylam: { ...reference.products.zylam, mixWarning: 'Label rate not yet verified' } };
+  render(<TreeShrubFieldGuide guide={{ ...december.fieldGuide, month: 'Dec', ...reference, products: warned }} mode="tech" />);
+  const warnedRow = screen.getByRole('button', { name: /Zylam/ });
+  expect(within(warnedRow).getByText(/^Foliar spray only: /)).toBeTruthy();
+  expect(within(warnedRow).getByText('Warning: Label rate not yet verified')).toBeTruthy();
+  // A product with no mix at all (no number exists) still shows its summary.
+  cleanup();
+  const held = { ...reference.products, zylam: { ...reference.products.zylam, mix: null, summary: 'See the product label for the mix' } };
   render(<TreeShrubFieldGuide guide={{ ...december.fieldGuide, month: 'Dec', ...reference, products: held }} mode="tech" />);
-  expect(within(screen.getByRole('button', { name: /Zylam/ })).getByText('Mix withheld · see product checks')).toBeTruthy();
+  expect(within(screen.getByRole('button', { name: /Zylam/ })).getByText('See the product label for the mix')).toBeTruthy();
 });
 
 test('palm-type table lists every palm, says type does not change price or fertilizer, and cites UF', () => {

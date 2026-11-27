@@ -256,48 +256,52 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     expect(result.ratePerGallon).toEqual({ lo: 0.5, hi: 2, unit: 'fl_oz' });
   });
 
-  test('a flea add-on at another rate withholds the dose instead of taking the first card', async () => {
+  test('a flea add-on at another rate shows the dose with a warning naming each service (owner 2026-11-26)', async () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     const result = await mix();
+    // One labeled amount per service, never one headline from the first card (owner 2026-11-26): 2 gal at 2 and at 0.66 fl oz per gallon.
     expect(result.amount).toBeNull();
-    // The hold names each service's own rate with the spray volume it holds at, so the tech can mix a tank for each.
-    expect(result.reason).toBe('Tekko Pro IGR has a different rate on each service on this visit: German Roach Cleanout 2 fl oz per gallon at 1 gal per 1,000 sq ft; Flea Treatment 0.66 fl oz per gallon at 1 gal per 1,000 sq ft. Mix a separate tank for each');
+    expect(result.serviceAmounts.map((row) => [row.service, row.amount, row.fromCard])).toEqual([['German Roach Cleanout', 4, true], ['Flea Treatment', 1.32, true]]);
+    // The warning names each service's own rate with the spray volume it holds at, so the tech can mix a tank for each.
+    expect(result.warnings).toContain('Tekko Pro IGR is on more than one service on this visit, each with its own rate or conditions: German Roach Cleanout 2 fl oz per gallon at 1 gal per 1,000 sq ft; Flea Treatment 0.66 fl oz per gallon at 1 gal per 1,000 sq ft');
   });
 
-  test('a held flea line holds the dose whichever service is the visit and whichever the add-on', async () => {
+  test('a held flea line warns beside the dose whichever service is the visit and whichever the add-on (owner 2026-11-26)', async () => {
     const other = [{ ...TEKKO, epa_reg_number: '53883-444', category: 'insecticide', label_verified_at: '2026-11-01' }];
     // A mosquito visit (its card mixes Tekko Pro at the catalog's 1) with a flea add-on.
     tables.scheduled_services = [{ ...visit, service_type: 'Mosquito Barrier Treatment', service_key: 'mosquito_barrier' }];
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     tables.products_catalog = other;
     const mosquitoFirst = await mix();
-    expect(mosquitoFirst.amount).toBeNull();
-    expect(mosquitoFirst.reason).toContain('53883-335');
+    // The mosquito card declares Tekko Pro at 1 fl oz per gallon and the flea line holds: two services, two tanks, a row each.
+    expect(mosquitoFirst.serviceAmounts).toHaveLength(2);
+    expect(mosquitoFirst.serviceAmounts.every((row) => row.amount != null)).toBe(true);
+    expect(mosquitoFirst.warnings.join(' ')).toContain('53883-335');
     // The flea visit with a mosquito add-on.
     tables.scheduled_services = [{ ...visit, service_type: 'Flea Treatment', service_key: 'flea_tick' }];
     tables.scheduled_service_addons = [{ service_name: 'Mosquito Barrier Treatment', category: 'mosquito', service_key: 'mosquito_barrier' }];
     const fleaFirst = await mix();
-    expect(fleaFirst.amount).toBeNull();
-    expect(fleaFirst.reason).toContain('53883-335');
-    // The card's registration on the same two visits: no hold from the flea line.
+    expect(fleaFirst.serviceAmounts).toHaveLength(2);
+    expect(fleaFirst.warnings.join(' ')).toContain('53883-335');
+    // The card's registration on the same two visits: no warning from the flea line.
     tables.products_catalog = [{ ...TEKKO, category: 'insecticide', label_verified_at: '2026-11-01' }];
-    expect((await mix()).reason || '').not.toContain('53883-335');
+    expect((await mix()).warnings.join(' ')).not.toContain('53883-335');
   });
 
-  test('an unverified label withholds with its own reason, never the per-service rates', async () => {
+  test('an unverified label warns first, beside the dose (owner 2026-11-26)', async () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     tables.products_catalog = [{ ...TEKKO, category: 'insecticide', label_verified_at: null }];
     const result = await mix();
-    expect(result.amount).toBeNull();
-    expect(result.reason).toBe('Label rate not yet verified');
+    expect(result.serviceAmounts.every((row) => row.amount != null)).toBe(true);
+    // Warnings keep the old guard order: the label warning comes first, the per-service rates after it.
+    expect(result.warnings[0]).toBe('Label rate not yet verified');
   });
 
-  test('a service rate that fails the label check is never printed in the hold', async () => {
+  test('a service rate that fails the label check is never printed in the warning', async () => {
     tables.scheduled_service_addons = [{ service_name: 'Flea Treatment', category: 'pest_control', service_key: 'flea_tick' }];
     // A catalog band in another unit: neither card rate passes the single-dose check.
     tables.products_catalog = [{ ...TEKKO, default_unit: 'ml/gal', category: 'insecticide', label_verified_at: '2026-11-01' }];
     const result = await mix();
-    expect(result.amount).toBeNull();
-    expect(result.reason).not.toMatch(/fl oz per gallon/);
+    expect(result.warnings.join(' ')).not.toMatch(/fl oz per gallon/);
   });
 });

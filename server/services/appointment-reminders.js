@@ -866,6 +866,7 @@ async function dispatchVisitOnlyLeg({ kind, customerId, scheduledServiceId, dayO
     await visitRecipients.notifyVisitRecipients({
       scheduledServiceId,
       kind: recipientKind,
+      customerId,
       // Only the numbers the notice really TEXTED: a holder on email, or a contact whose text was held or failed, is not covered.
       excludePhones: servedPhones,
       dayOnly: dayOnly === true,

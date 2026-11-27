@@ -24,10 +24,11 @@ describe("area add-on label text on the job card", () => {
     expect(screen.getByText("Safety: The applicator must carry the 2(ee) sheet.")).toBeInTheDocument();
   });
 
-  it("with no grass evidence the rate is replaced by the reason; area, limit and safety stay", () => {
-    render(<JobCardGoverned D={D} governed={{ ...base, sold: "Sold: up to 1,000 sq ft of treated lawn", grass: null, rate: null, rateNote: "Grass on the estimate is not on this visit (the rate is St. Augustine only) — rate withheld" }} />);
-    expect(screen.getByText(/Grass on the estimate is not on this visit/)).toBeInTheDocument();
-    expect(screen.queryByText(/^Rate:/)).toBeNull();
+  // Owner 2026-11-26: "EVERYTHING SHOULD ONLY BE WARNED, NEVER BLOCKED FROM USING": the rate shows with the reason beside it.
+  it("with no grass evidence the rate still shows, with the reason as a warning; area, limit and safety stay", () => {
+    render(<JobCardGoverned D={D} governed={{ ...base, sold: "Sold: up to 1,000 sq ft of treated lawn", grass: null, rate: "0.147 oz per 1,000 sq ft", rateNote: "Grass on the estimate is not on this visit (the rate is St. Augustine only)" }} />);
+    expect(screen.getByText(/Warning: Grass on the estimate is not on this visit/)).toBeInTheDocument();
+    expect(screen.getByText("Rate: 0.147 oz per 1,000 sq ft")).toBeInTheDocument();
     expect(screen.queryByText(/Grass on the estimate: /)).toBeNull();
     expect(screen.getByText("Area: Treated square feet.")).toBeInTheDocument();
     expect(screen.getByText(/Safety:/)).toBeInTheDocument();
@@ -151,5 +152,19 @@ describe("the heat safety line on the job card", () => {
   it("shows no line when the server sends none", () => {
     render(<JobCardTab card={cardWith(null)} D={theme} />);
     expect(screen.queryByTestId("job-card-heat-safety")).toBeNull();
+  });
+});
+
+// Owner 2026-11-26: the warning rides beside the amount wherever the amount shows.
+describe("a card's warning beside its planned amount", () => {
+  const theme = { ...D, card: "#fff", border: "#ddd", input: "#fff", inputBorder: "#ccc", white: "#fff" };
+  const product = { id: "p1", rowId: "p1", name: "Celsius WG", role: "base", conditional: false, verdict: "ok", verdictReason: null, planned: { amount: 6, unit: "fl oz" }, amountNote: "Label rate not yet verified", short: false, onHand: null, lowStock: false, line: "Celsius WG 1 oz" };
+  const card = { serviceId: "visit-1", strip: { name: "Synthetic Customer", program: "Lawn" }, tank: { calibrated: true, rigs: [] }, sprayCheck: { window: "today", forecast: null }, products: [product], addons: [] };
+
+  it("shows the warning in the collapsed header next to the amount", () => {
+    render(<JobCardTab card={card} D={theme} />);
+    const toggle = document.getElementById("job-card-product-p1");
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle).toHaveTextContent("Warning: Label rate not yet verified");
   });
 });
