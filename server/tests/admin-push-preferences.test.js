@@ -280,7 +280,7 @@ describe('a technician login (owner 2026-11-04)', () => {
           onConflict: jest.fn(() => ({
             merge: jest.fn(async (patch) => {
               opOrder.push(`${tag}:write:${table}`);
-              if (tag === 'tx1') {
+              if (tag === 'tx2') {
                 firstWriteEntered();
                 await new Promise((r) => { releaseFirstWrite = r; });
               }
@@ -295,7 +295,7 @@ describe('a technician login (owner 2026-11-04)', () => {
           const prev = lockChain;
           lockChain = new Promise((r) => { releaseLock = r; });
           await prev;
-          opOrder.push(`${tag}:lock`);
+          opOrder.push(`${tag}:${/lock_shared/.test(sql) ? 'shared-lock' : 'lock'}`);
         }
         return { rows: [] };
       });
@@ -331,6 +331,10 @@ describe('a technician login (owner 2026-11-04)', () => {
       },
     }, res1, jest.fn());
     await firstWriteReady;
+    // Launch a concurrent retry GET (e.g. after a 504) AND a stale overlapping PUT
+    // while PUT 1 still holds its advisory lock.
+    const retryGetRes = { json: jest.fn() };
+    const pGet = preferencesHandler({ technicianId: 'admin-1', techRole: 'admin' }, retryGetRes, jest.fn());
     const p2 = putHandler({
       technicianId: 'admin-1',
       techRole: 'admin',
@@ -341,18 +345,21 @@ describe('a technician login (owner 2026-11-04)', () => {
     }, res2, jest.fn());
     await new Promise((r) => setTimeout(r, 10));
     releaseFirstWrite();
-    await Promise.all([p1, p2]);
+    await Promise.all([p1, pGet, p2]);
 
-    // Advisory lock precedes reads in both transactions, and tx2 waits for tx1 to commit.
-    expect(opOrder.indexOf('tx1:lock')).toBeLessThan(opOrder.indexOf('tx1:read:notification_preferences'));
+    // Advisory locks precede reads in every transaction, and both retry GET and tx2 wait for tx1 to commit.
     expect(opOrder.indexOf('tx2:lock')).toBeLessThan(opOrder.indexOf('tx2:read:notification_preferences'));
-    expect(opOrder.indexOf('tx1:write:notification_preferences')).toBeLessThan(opOrder.indexOf('tx2:lock'));
+    expect(opOrder.indexOf('tx3:shared-lock')).toBeLessThan(opOrder.indexOf('tx3:read:notification_preferences'));
+    expect(opOrder.indexOf('tx4:lock')).toBeLessThan(opOrder.indexOf('tx4:read:notification_preferences'));
+    expect(opOrder.indexOf('tx2:write:notification_preferences')).toBeLessThan(opOrder.indexOf('tx3:shared-lock'));
+    expect(opOrder.indexOf('tx2:write:notification_preferences')).toBeLessThan(opOrder.indexOf('tx4:lock'));
 
-    // Exactly one save succeeds (with a new version V2 != V1), and the overlapping stale PUT gets 409.
+    // Exactly one save succeeds (with a new version V2 != V1), retry GET observes V2, and the stale PUT gets 409.
     expect(res1.status).not.toHaveBeenCalled();
     const v2 = res1.json.mock.calls[0][0].version;
     expect(v2).toBeTruthy();
     expect(v2).not.toBe(v1);
+    expect(retryGetRes.json.mock.calls[0][0].version).toBe(v2);
     expect(res2.status).toHaveBeenCalledWith(409);
     expect(res2.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'VERSION_CONFLICT', version: v2 }));
     expect(store.get('new_lead').push_enabled).toBe(true);

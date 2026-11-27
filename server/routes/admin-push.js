@@ -304,6 +304,21 @@ function preferencesVersion(rows) {
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }
 
+// Acquire the shared per-user advisory lock inside a read transaction so a
+// retry GET after a gateway timeout waits for any in-flight PUT transaction
+// to commit before loading rows and computing the revision hash.
+async function readAdminPreferencesRows(adminUserId) {
+  if (typeof db.transaction !== 'function') {
+    return db('notification_preferences').where({ admin_user_id: adminUserId });
+  }
+  return db.transaction(async (trx) => {
+    if (typeof trx.raw === 'function') {
+      await trx.raw('SELECT pg_advisory_xact_lock_shared(hashtext(?))', [`admin_push_prefs:${adminUserId}`]);
+    }
+    return trx('notification_preferences').where({ admin_user_id: adminUserId });
+  });
+}
+
 router.get('/preferences', async (req, res, next) => {
   try {
     const adminUserId = req.technicianId;
@@ -313,7 +328,7 @@ router.get('/preferences', async (req, res, next) => {
     const visibleTriggers = listTriggers().filter((t) => !denylisted.has(t.key));
     const triggers = req.techRole === 'admin' ? visibleTriggers : visibleTriggers.filter((t) => techMayMute(t.key));
 
-    const rows = await db('notification_preferences').where({ admin_user_id: adminUserId });
+    const rows = await readAdminPreferencesRows(adminUserId);
 
     const byKey = new Map(rows.map((r) => [r.trigger_key, r]));
     const merged = triggers.map((t) => {
