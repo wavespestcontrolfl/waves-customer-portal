@@ -7409,6 +7409,10 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
             )}
+            {/* A card's label rate holds only at its own spray volume (Tekko Pro on cockroaches: 1 gal per 1,000 sq ft). */}
+            {!busy && mix?.amount != null && mix.sprayVolumeGalPer1000 > 0 && (
+              <div style={{ fontSize: 14, color: D.text }}>Spray {mix.sprayVolumeGalPer1000} gal per 1,000 sq ft. More water per area puts down more than the label amount, less water puts down less.</div>
+            )}
             {!busy && mix?.amount != null && mix.rotationWarnings?.length > 0 && (
               <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
                 {mix.rotationWarnings.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
@@ -14279,10 +14283,10 @@ export function CompletionPanel({
     // after the typed findings/companion sections, never inside an
     // isTypedFindings guard) — cockroach_control IS a typed visit
     // (findingsType 'cockroach'), and it is the one program this hook is
-    // FOR today. bed bug stays excluded (it carries no
-    // completionDefaultProducts, so this is belt-and-suspenders, not load-
-    // bearing); lawn keeps its own governed mechanism.
-    if (isBedBugVisit || isLawn) return;
+    // FOR today. Bed bug seeds too: its treatment 1 card lists Crossfire
+    // and Antapex; the inspection and the follow-up card list nothing, so
+    // those visits start empty. Lawn keeps its own governed mechanism.
+    if (isLawn) return;
     // "Completed" only — a declined or inspection-only visit applied no
     // products, so it must not seed a Products list that implies it did.
     if (visitOutcome !== "completed") return;
@@ -14306,7 +14310,7 @@ export function CompletionPanel({
     protocolCompletionDefaultsSeededRef.current = true;
     protocolCompletionDefaultsSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [protocolCompletionDefaults, products, service, isBedBugVisit, isLawn, isRegularPestVisit, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
+  }, [protocolCompletionDefaults, products, service, isLawn, isRegularPestVisit, visitOutcome, selectedProducts, draftLoading, showDraftPrompt, protocolCompletionDefaultsRemovedIds]);
   // Pre-push audit P1, PR #5049 r1 (cockroach/protocol rows) + Codex r3 P1
   // (pest-mix rows): an inspection_only / customer_declined outcome bills
   // as NOTHING applied (shared/specialty-service-closeouts.js's own
@@ -17534,7 +17538,7 @@ export function CompletionPanel({
 
   function buildSelectedProduct(catalogProduct, { applicationMethodOverride: methodOverride } = {}) {
     // A card-rate product (Tekko Pro on the cockroach card) keeps its card's rate and method however it lands on the form.
-    const { product, applicationMethodOverride } = cardRateRow(protocolCompletionDefaults, catalogProduct, methodOverride);
+    const { product, applicationMethodOverride, startRate } = cardRateRow(protocolCompletionDefaults, catalogProduct, methodOverride);
     // The protocol visit's own method for this line (e.g. Alpine WSG's
     // crack-and-crevice work on the German-roach protocol) wins over the
     // catalog-inferred default — Codex r2, PR #5049: Alpine WSG and
@@ -17555,7 +17559,7 @@ export function CompletionPanel({
     // resolver ServiceRecapModal uses, so both completion paths prefill
     // identically (codex P1 r6).
     const {
-      rate: prefillRate,
+      rate: catalogPrefillRate,
       rateUnit: prefillRateUnit,
       amountUnit: prefillAmountUnit,
       perBasisUnit,
@@ -17565,6 +17569,11 @@ export function CompletionPanel({
       applicationMethod,
       serviceLine: serviceLineFromType(rowType),
     });
+    // The visit card's own tank rate (Antapex at 20 g per gallon on the bed bug card) starts a per-gallon row, never above
+    // the label band's top. A rate two booked cards disagree on starts blank. Any other row starts from the catalog as before.
+    const prefillRate = startRate === undefined || !isPerGallonUnit(prefillRateUnit) ? catalogPrefillRate
+      : startRate === "" ? ""
+        : labelMaxRate == null || startRate <= labelMaxRate ? startRate : catalogPrefillRate;
     // Lawn broadcast/granular products treat the whole measured lawn: start
     // the Sq ft field at the turf profile's treatable area and derive Total =
     // rate × area / 1,000 in the rate's own unit. Both stay editable; a

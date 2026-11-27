@@ -69,6 +69,8 @@ Single source of truth for what this engine prices, how, and with what constants
 
 **Footprint anchors (linear interpolation; code defaults):** 800 −$15 · 1200 −$10 · 1500 −$5 · 1750 −$5 · 2000 $0 · 2500 +$3 · 3000 +$6 · 4000 +$10 · 5500 +$16
 
+**Above the table (new quotes only, owner 2026-11-26):** a footprint over 5,500 sq ft keeps rising: +$8 per visit at quarterly for each 1,000 sq ft above 5,500, pro-rated to the square foot and rounded like the table (`footprintAdj = 16 + 8 x (footprint - 5500) / 1000`), no cap: 6,000 sq ft = $132, 8,000 = $148, 10,000 = $164, 15,000 = $204 at quarterly with no other adjustment. The premium is added to the live table price: `8 x max(0, footprint - 5500) / 1000`. Both the $8 (`PEST.aboveTablePer1000`) and the 5,500 start point (`PEST.aboveTableStartSqFt`) are code constants, not Settings rows, and there is no migration; a Settings edit of the table moves the table price as on main and never the premium. Bi-monthly, monthly and the one-time pest price follow through the quarterly price (one-time anchors on it). A quote saved before the rule keeps the flat last bracket (the old $128 top): the engine stamps `pricingMetadata.legacyPestAboveTable` on every run (false on a fresh run), and a priced estimate with no stamp, or one that kept only inputs requesting pest, reads as saved before (`estimate-floor-signal-replay.js savedLegacyPestAboveTableSignal`). The stamp is plan-wide: a pest service added to a legacy estimate stays on the old rule. Bedroom-band (unit) pest is a separate path and is untouched.
+
 **Additional adjustments:** indoor +$15 · shrubs light −$5 / moderate $0 / heavy +$6 · pool no-cage $0 · pool cage small +$5 / medium +$8 / large +$12 / oversized +$18 · complexity simple −$5 / complex +$3 · nearWater +$3 · attached garage +$5
 
 Tree density is excluded from pest control entirely: prices since 2026-07-16, and the production-diagnostics minutes model plus the heavy-vegetation review flag since 2026-07-30 (owner directive — shrubs alone trigger `complex_heavy_vegetation` now). The observation remains property context and still feeds non-pest models (lawn complexity score, tree & shrub count fallback, and mosquito pressure). Large driveway is retired from the estimator entirely (owner directive 2026-07-30): it no longer affects any engine output — hardscape/turf estimation, complexity score, termite trenching, lawn cost-floor minutes, or production diagnostics — and survives only as property context outside the estimator (satellite/property-lookup detection).
@@ -485,7 +487,7 @@ Required inputs: positive integer `rooms`, `method`, `severity` (`light`, `moder
 
 Heat and hybrid require `equipment` (`INHOUSE` or `SUBCONTRACT`) and `heatScope` (`ROOMS_ONLY` or `WHOLE_HOME`). Subcontract heat requires positive `subcontractCost`.
 
-Chemical is a 35% cost-ratio model: `price = directCost / 0.35`, which produces roughly 65% gross margin before modifiers. Light chemical infestations include 2 visits; moderate and heavy include 3 visits. Severe infestations require quote/inspection.
+Chemical is a 35% cost-ratio model: `price = directCost / 0.35`, which produces roughly 65% gross margin before modifiers. Light chemical infestations include 2 visits; moderate and heavy include 3 visits. Severe infestations require quote/inspection. Since 2026-11-26 (new quotes only, estimate stamp `legacySpecialty1126`) the price is the one-room price (with the modifiers below) plus `BED_BUG.chemical.addedRoomPrice` ($349, flat, no modifier) for each room after the first.
 
 Modifiers apply after base price: footprint, severity, prep, occupancy, stories, then urgency. Prep refused requires quote/inspection. Poor prep adds a callback-risk warning.
 
@@ -542,11 +544,11 @@ tiers, bracket tables, or fixed floors as identified below.
 | Pre-slab Termidor | 55% | — | bottle $152.10, 1250 sqft; volume disc 10+ 15% / 5+ 10% |
 | Foam-drill | 55% | none (default floor 0) | cost/margin formula; tiered by treatment points (5/10/15/20) |
 | German roach cleanout (`german_roach`) | fixed tiers | $350/$450/$550 all-in | light/moderate/heavy include 2/3/4 visits; no setup or footprint factor |
-| Bed bug chemical/IPM | 65% gross margin from 35% cost ratio | $400 base + $250/extra room | 2 visits light; 3 visits moderate/heavy; severe quote |
+| Bed bug chemical/IPM | 65% gross margin from 35% cost ratio | room 1: cost-ratio price or $400 minimum, with the modifiers; +$349 flat per extra room on that final price (new quotes from 2026-11-26; older quotes: $400 + $250/extra room curve) | 2 visits light; 3 visits moderate/heavy; severe quote |
 | Bed bug heat | — | $1000/$850/$750 by room count | requires equipment and heat scope; post-inspection included |
 | Bed bug hybrid | — | heat base + $175 + $75/room residual add-on | explicit method only; not full heat + full chemical |
 | Flea initial | — | floor $185 (base $225) | follow-up floor $95 |
-| Wasp | — | tiered $150/$250/$435/$775 | free with recurring pest |
+| Wasp / hornet / yellow jacket | — | tiered $150/$275/$435/$775 (level 2 was $250 before 2026-11-26) | free with recurring pest (tier-1 paper wasp / mud dauber only) |
 | Rodent exclusion V2 | fixed item/bracket model | $195 point-only; $295 with linear mesh | mesh points, bird boxes, and linear feet from `RODENT.exclusionV2`; $75 inspection subject to waiver rules |
 | Legacy exclusion V1 | fixed item/bracket model | home-size minimums from $395 | $50/$95/$195 simple/moderate/advanced points from `SPECIALTY.exclusion`; $75 inspection subject to waiver rules |
 | WDO inspection | table | $150 to $275 | new quotes (2026-11-26): by footprint and construction, `SPECIALTY.wdo.sizeTable`; quotes saved before keep the $250 flat default (`legacyWdoFlat` stamp), which database pricing may override |

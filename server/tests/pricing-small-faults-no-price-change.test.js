@@ -135,26 +135,26 @@ describe('fix 3: a barrel tile roof with no eave footage is held for review', ()
 
 describe('fix 5: wasp urgent covers the removal and wins over same-day', () => {
   test('urgent multiplies base plus removal', () => {
-    // Tier 2 is $250. Large removal is $250. Urgent is x1.5 on the sum.
-    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'large' }).price).toBe(750);
-    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'small' }).price).toBe(488);
+    // Tier 2 is $275 (owner 2026-11-26 evening; it was $250). Large removal is $250. Urgent is x1.5 on the sum.
+    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'large' }).price).toBe(788);
+    expect(sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'small' }).price).toBe(525);
   });
 
   test('URGENT wins over same-day when both are set', () => {
-    expect(sp.priceWasp({}, { tier: 2, urgency: 'URGENT', sameDay: true }).price).toBe(375);
-    expect(sp.priceWasp({}, { tier: 2, urgent: true, sameDay: true }).price).toBe(375);
+    expect(sp.priceWasp({}, { tier: 2, urgency: 'URGENT', sameDay: true }).price).toBe(413);
+    expect(sp.priceWasp({}, { tier: 2, urgent: true, sameDay: true }).price).toBe(413);
   });
 
   test('non-urgent prices do not change', () => {
-    expect(sp.priceWasp({}, { tier: 2 }).price).toBe(250);
-    expect(sp.priceWasp({}, { tier: 2, sameDay: true }).price).toBe(325);
-    expect(sp.priceWasp({}, { tier: 2, urgency: 'SOON' }).price).toBe(325);
-    expect(sp.priceWasp({}, { tier: 2, sameDay: true, removalType: 'large' }).price).toBe(575);
-    expect(sp.priceWasp({}, { tier: 2, removalType: 'large' }).price).toBe(500);
+    expect(sp.priceWasp({}, { tier: 2 }).price).toBe(275);
+    expect(sp.priceWasp({}, { tier: 2, sameDay: true }).price).toBe(350);
+    expect(sp.priceWasp({}, { tier: 2, urgency: 'SOON' }).price).toBe(350);
+    expect(sp.priceWasp({}, { tier: 2, sameDay: true, removalType: 'large' }).price).toBe(600);
+    expect(sp.priceWasp({}, { tier: 2, removalType: 'large' }).price).toBe(525);
   });
 
   test('urgent without removal is the same as before', () => {
-    expect(sp.priceWasp({}, { tier: 2, urgent: true }).price).toBe(375);
+    expect(sp.priceWasp({}, { tier: 2, urgent: true }).price).toBe(413);
   });
 
   test('priceWasp has no quote caller, so no stored price depends on its old order', () => {
@@ -168,7 +168,7 @@ describe('fix 5: wasp urgent covers the removal and wins over same-day', () => {
     const result = sp.priceWasp({}, { tier: 2, urgent: true, removalType: 'large' });
     expect(result.addOns.filter((addOn) => addOn.name === 'removal_large')).toHaveLength(1);
     expect(result.pricingBreakdown.removal).toBe(250);
-    expect(result.pricingBreakdown.subtotal).toBe(750);
+    expect(result.pricingBreakdown.subtotal).toBe(788);
   });
 });
 

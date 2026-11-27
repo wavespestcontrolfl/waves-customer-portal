@@ -213,7 +213,11 @@ function pestAgeAdjOf() {
 function expectPest({ homeSqFt, stories = 1, features = {}, propertyType = 'single_family', frequency = 'quarterly', yearBuilt = null }) {
   const { PEST, PROPERTY_TYPE_ADJ } = constants;
   const footprint = footprintOf(homeSqFt, stories);
-  const footprintAdj = Math.round(interp(footprint, PEST.footprintBrackets.map((b) => [b.sqft, b.adj])));
+  const pestBrackets = PEST.footprintBrackets.map((b) => [b.sqft, b.adj]);
+  // The live table price, plus the new-quote premium above PEST.aboveTableStartSqFt (owner 2026-11-26): PEST.aboveTablePer1000 per
+  // 1,000 sq ft, pro-rated, no cap; one rounding at the end, as the engine does.
+  const footprintAdj = Math.round(interp(footprint, pestBrackets)
+    + PEST.aboveTablePer1000 * Math.max(0, footprint - PEST.aboveTableStartSqFt) / 1000);
   const a = PEST.additionalAdjustments;
   let featureAdj = 0;
   if (features.indoor) featureAdj += a.indoor;
@@ -426,7 +430,22 @@ function expectMosquito({ homeSqFt, stories = 1, lotSqFt, propertyType = 'single
   else if (pricingSqFt >= rampStart) pressure += ((pricingSqFt - rampStart) / (halfStart - rampStart)) * f.lot_half;
   if (waterMult > 1) pressure *= waterMult;
   pressure = Math.min(pressure, M.pressureCap);
-  const perVisit = Math.round(base * pressure);
+  let perVisit = Math.round(base * pressure);
+  // Owner 2026-11-26 (evening): a lot above 2 acres (87,120 sq ft, gross lot or treatable) is priced, not held for a hand price: this
+  // model's own answer for the SAME home on exactly 2 acres (its own hardscape, treatable area and pressure), plus $85 a visit for
+  // each acre past the second (pro-rated), the monthly program at its ratio to seasonal at 2 acres (seasonal 9-visit at the default
+  // pressure: 2 ac $117, 3 ac $202, 4 ac $287). A quote made before this keeps the flat price.
+  // A lot of exactly 200,000 sq ft is the property-record cap ("4.59 acres or more", not a size): the engine keeps the flat price
+  // and the hand-price hold for it, so no added acre is charged there. A larger number (typed or tech-verified) is priced.
+  const lotUsedSqFt = Math.max(lotSqFt, treatable);
+  const lotAtRecordCap = lotSqFt === 200000 || lotUsedSqFt === 200000;
+  if (lotUsedSqFt > 87120 && !lotAtRecordCap) {
+    const args = { homeSqFt, stories, propertyType, features, stationCount, dunkCount };
+    const twoSeasonal = expectMosquito({ ...args, lotSqFt: Math.min(lotSqFt, 87120), program: 'seasonal9' }).perVisit;
+    const twoProgram = expectMosquito({ ...args, lotSqFt: Math.min(lotSqFt, 87120), program }).perVisit;
+    const seasonalAbove = twoSeasonal + 85 * ((lotUsedSqFt - 87120) / 43560);
+    perVisit = Math.round(program === 'seasonal9' || !(twoSeasonal > 0) ? seasonalAbove : seasonalAbove * (twoProgram / twoSeasonal));
+  }
   const visits = M.tierVisits[program];
   // Recurring add-ons are ANNUAL charges (station $39/yr, dunk $4/yr), never
   // per visit; counts round to integers and clamp at 0 (codex r10 P2).
@@ -974,7 +993,8 @@ function runMosquitoMatrix() {
   // maxSqFt and the next band's first foot; 43,560 / 60,000 are extra samples (codex r15 P2).
   const edges = [...new Set(constants.MOSQUITO.lotCategories.filter((c) => Number.isFinite(c.maxSqFt)).flatMap((c) => [c.maxSqFt, c.maxSqFt + 1])), 43560, 60000].sort((a, b) => a - b);
   // choose lots so treatable lands near edges: treatable = lot - 2000 - hardscape(lot)
-  const lots = new Set([3000, 5000, 8000, 10500, 12000, 15000, 20000, 25000, 35000, 40000, 45000, 60000, 90000]);
+  // 90,000 to 250,000 are above 2 acres (priced per added acre); 200,000 is the property-record cap (flat price, hand-price hold).
+  const lots = new Set([3000, 5000, 8000, 10500, 12000, 15000, 20000, 25000, 35000, 40000, 45000, 60000, 90000, 130680, 199999, 200000, 200001, 250000]);
   for (const lot of [...lots].sort((a, b) => a - b)) {
     for (const program of ['seasonal9', 'monthly12']) {
       const exp = expectMosquito({ homeSqFt: 2000, lotSqFt: lot, program });

@@ -1486,11 +1486,15 @@ async function serverRecomputeFromEstimateData(estimateData, deps = {}) {
   }
 }
 
+// Staff revisions re-price on current rules; customer replays keep the sent price. A revision of a delivered estimate runs a fresh
+// engine pass on the posted inputs (no replaySavedPricingKnobs, so no stored rule stamp is read): every 2026-11-26 rule, including
+// pest above 5,500 sq ft, applies to it as it does on main. Only the public replay and the persisted-estimate recompute
+// (replaySavedPricingKnobs) read the stored stamps.
 // Decide the authoritative totals + audit columns for a save. Fails OPEN to the
 // client preview (so a broken engine never blocks Virginia's save) but LOUDLY:
 // every non-authoritative save is stamped CLIENT_FALLBACK (queryable column) and
 // an engine error is logged at error level.
-async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord }) {
+async function resolveServerAuthoritativePricing({ estimateData, clientPreview, quoteRequired, now, recompute, priorQualifyingServices, setupWaiverPriorQualifyingServices, recurringCustomer, areaAddOnHistory, returningVisitHistory, returningAnswerHeld, fleaRecord, storedEstimateData = null }) {
   const recomputeFn = recompute || serverRecomputeFromEstimateData;
   const audit = {
     pricing_authority: null,
@@ -1579,6 +1583,18 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   // fallbackReason rides OUTSIDE audit (audit spreads into the row): the
   // route rings the admin bell for ENGINE_ERROR only after the save's
   // transaction committed, never from a dryRun preflight (pre-push codex P1).
+  // The server could not price this save, so the browser's price stands. The browser prices the flat top of the pest table and
+  // mirrors none of the specialty rules (the $349 bed bug rooms, the $85 mosquito acres, the wasp levels). So the save may not name
+  // a building above 5,500 sq ft (assertPestAboveTableClientFallbackSave) or carry a bed bug, mosquito or wasp row
+  // (assertSpecialtyClientFallbackSave), and its rule stamps are the server's. A staff revision that the server CAN price re-prices
+  // on the CURRENT rules by design (owner 2026-09-26 ruling, the same decision as #8626, #8631 and both of these rules): the stored
+  // stamps are not wired into that path, so a delivered wasp quote revised by staff goes $250 -> $275. A customer replay of the sent
+  // quote (replaySavedPricingKnobs) keeps the sent price. All four sit AFTER the log lines above: a refused save commits nothing, so
+  // the route's engine-error bell never rings, and the error-level line is then the only trace of a broken engine.
+  assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData });
+  assertSpecialtyClientFallbackSave(estimateData);
+  stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData });
+  stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
   // No server price, so the client's totals are stored: the returning-customer rule only confirms what those
   // totals already say (returningWaiverForUnpricedSave). A result priced without the fee by the rule (a fresh
   // preview, or a reopened estimate's stored result), for a customer the rule no longer waives, would store
@@ -2072,6 +2088,137 @@ function assertLivePestBaseForClientPayload(estimateData, { liveConfigVerified =
   }
 }
 
+// Pest above the 5,500 sq ft footprint table (owner 2026-11-26, new quotes only: +$8 per visit at quarterly for each 1,000 sq ft above
+// it). The browser fallback prices the flat top of the table. So a save the server could not price (the CLIENT_FALLBACK authority: no
+// replayable engine input, or an engine error) is refused when it names a BUILDING above the table: whatever rows it holds, whatever
+// stamp it posts, and whether or not it changed (no unchanged-resave exception, so nothing to compare). At or under 5,500 sq ft the
+// premium is zero and the browser's price is the server's price. The check sits where the pricing authority is decided, not behind a
+// browser-shape test.
+// The check reads NO rows. On this branch the server verified nothing, so a row cannot prove what it is or how it was priced: a list
+// of pest row shapes is never complete (a row known by serviceKey, a catalog key, a display name), and a marker that exempts a row
+// (commercial, a unit priced by its bedroom count) is a marker that hides one. Both were tried and dropped for that reason. The size
+// alone decides. The cost is a reload while the engine is broken, for a big building with no pest row too. Production holds no
+// browser-priced estimate at all (pricing_authority CLIENT_FALLBACK: 0 rows, read 2026-11-26), about 1 estimate in 100 names a
+// building above the table, and the first send of a browser-priced estimate is already refused (GATE_SEND_REQUIRES_SERVER_PRICING).
+const isPlainRecord = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+// Every footprint the saved blob names, anywhere in it (inputs, engine inputs and request, a result's own property or line): a key
+// that names a footprint or a building area as it is, a living area over the stories beside it (the engine's own arithmetic; the
+// builder profile calls the living area squareFootage). A size is a number or a numeric string, bare or in the estimators' wrapped
+// measurement form { value, source } (measurementObject; the termite bait row's measurements.footprintSqFt). All readings are kept,
+// so a stale field can refuse a save and never pass one.
+const PEST_LIVING_AREA_KEY = /^(home_?sq_?ft|square_?footage|living_?area(_?sq_?ft)?|living_?sq_?ft|heated_?sq_?ft)$/i;
+const PEST_FOOTPRINT_KEY = /footprint|^buildingSqFt$/i;
+// The engine also takes a building footprint from two service blocks' own `sqft` (services.exclusionV2.sqft and
+// services.rodentGuaranteeCombo.sqft, estimate-engine.js). A bare `sqft` anywhere else is another area (a lawn, a bed), so only
+// these two blocks are read; a test fails when the engine reads a third.
+const PEST_SERVICE_FOOTPRINT_BLOCK_KEY = /^(exclusionV2|rodentGuaranteeCombo)$/;
+function savedPestFootprints(estimateData) {
+  const { resolvePestFootprint } = require('./pricing-engine/service-pricing');
+  const unwrap = (raw) => (isPlainRecord(raw) && Object.prototype.hasOwnProperty.call(raw, 'value') ? raw.value : raw);
+  const sizeOf = (raw) => {
+    const value = unwrap(raw);
+    return ['number', 'string'].includes(typeof value) && Number.isFinite(Number(value)) && Number(value) > 0 ? Number(value) : null;
+  };
+  const found = [];
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || typeof node !== 'object' || seen.has(node)) return;
+    seen.add(node);
+    if (Array.isArray(node)) { node.forEach(walk); return; }
+    for (const [key, value] of Object.entries(node)) {
+      const size = sizeOf(value);
+      if (size !== null && PEST_FOOTPRINT_KEY.test(key)) found.push(size);
+      else if (size !== null && PEST_LIVING_AREA_KEY.test(key)) found.push(resolvePestFootprint({ homeSqFt: size, stories: unwrap(node.stories) }).footprint);
+      else if (PEST_SERVICE_FOOTPRINT_BLOCK_KEY.test(key) && isPlainRecord(value) && sizeOf(value.sqft) !== null) found.push(sizeOf(value.sqft));
+      walk(value);
+    }
+  };
+  walk(estimateData);
+  return found;
+}
+
+function assertPestAboveTableClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  // The stored estimate's size counts beside the posted one (revise only): a save that drops or shrinks its size fields is still
+  // read at the size the server already holds. Both are read whatever shape was posted (a list, or no blob at all), so the posted
+  // shape can never skip the stored size.
+  const footprints = [...savedPestFootprints(estimateData), ...savedPestFootprints(storedEstimateData)];
+  if (!footprints.some((footprint) => footprint > Number(pricingEngine.constants.PEST.aboveTableStartSqFt))) return;
+  throw errorWithStatus('The server could not price this estimate, and a browser price is not accepted for a building above 5,500 sq ft (pest keeps rising with the size there) — reload the page and regenerate the estimate so the server prices it.', 409);
+}
+// The stamp of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's (a quote sold before
+// the rule stays on it), a first save is new. A save that passed the check above names no building the two rules price differently,
+// so both are true to its prices. Written on every result container, so the reader finds it whichever one it picks.
+function stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isPlainRecord(estimateData)) return;
+  const legacy = !!storedEstimateData
+    && require('./estimate-floor-signal-replay').savedLegacyPestAboveTableSignal(storedEstimateData).legacyPestAboveTable === true;
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyPestAboveTable: legacy };
+  }
+}
+
+// Specialty prices (2026-11-26 evening: bed bug added rooms, mosquito above 2 acres, wasp level; new quotes only). A save the server
+// could not price (the CLIENT_FALLBACK authority: no replayable engine input, or an engine error) keeps the BROWSER's price, and the
+// browser mirrors none of these rules (the $349 rooms, the $85 acres, the wasp levels). So such a save is refused (409, reload and
+// let the server price it) when it NAMES bed bug, mosquito, wasp, hornet, yellow jacket or a stinging insect anywhere outside its
+// inputs: priced or $0, in any result container or shape, whatever stamp it posts, and whether or not it changed (no
+// unchanged-resave exception, so nothing to compare). The check sits where the pricing authority is decided, not behind any
+// browser-shape test.
+const SPECIALTY_ROW_WORDS = /bed[ _-]?bug|mosquito|wasp|hornet|yellow[ _-]?jacket|stinging/i;
+const SPECIALTY_SAVE_INPUT_CARRIER_KEY = /^(inputs|engineInputs?|engineRequest)$/;
+// True when the saved blob names one of the three anywhere outside its input carriers, in `result`, `engineResult`, the bare data or
+// the send snapshot. A row is known by whatever names it: its service key or its name under ANY field (service, serviceKey,
+// service_key, key, name, label, displayName, title, n, a detail line), or the key it sits under (a results.mosquito block, a bedBug
+// item, the browser's `mq` tier rows). So every string is read, and every key that holds a block or a list: there is no list of
+// identity fields or row shapes to keep complete. No product is left out by its label either (the misting system and the one-time
+// mosquito visit are refused too): on this branch the server verified nothing, so a row cannot prove what it is.
+// A NUMBER or a word under such a key is not a row: every priced estimate carries the home's own mosquito measurements
+// (property.mosquitoTreatableSqFt, property.mosquitoLotCategory, modifiers.mosquitoWaterMult). A real browser estimate and the
+// server's own result with none of the three services hold none of the words in a string, and no block under such a key
+// (specialty-prices-20261126.test.js prices both and checks).
+const specialtyKeyHoldsRows = (value) => !!value && typeof value === 'object' && Object.keys(value).length > 0;
+function saveHoldsSpecialtyRow(estimateData) {
+  const seen = new Set();
+  const walk = (node) => {
+    if (typeof node === 'string') return SPECIALTY_ROW_WORDS.test(node);
+    if (!node || typeof node !== 'object' || seen.has(node)) return false;
+    seen.add(node);
+    if (Array.isArray(node)) return node.some(walk);
+    return Object.entries(node).some(([key, value]) => {
+      if (SPECIALTY_SAVE_INPUT_CARRIER_KEY.test(key)) return false;
+      if ((key === 'mq' || SPECIALTY_ROW_WORDS.test(key)) && specialtyKeyHoldsRows(value)) return true;
+      return walk(value);
+    });
+  };
+  return walk(estimateData);
+}
+
+function assertSpecialtyClientFallbackSave(estimateData) {
+  if (!isPlainRecord(estimateData) || !saveHoldsSpecialtyRow(estimateData)) return;
+  throw errorWithStatus('This estimate has a bed bug, mosquito or wasp price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
+}
+// The rule evidence of a browser-priced save is the server's, never the browser's: a revision keeps the stored estimate's stamp and
+// its per-service list (a quote sold before the rule stays on it), a first save is new. A save that passed the check above holds
+// none of the three rows, so either is true to its prices. Written on every result container, so the reader finds it whichever
+// one it picks.
+function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
+  if (!isPlainRecord(estimateData)) return;
+  const replay = require('./estimate-floor-signal-replay');
+  const legacy = !!storedEstimateData && replay.savedLegacySpecialty1126Signal(storedEstimateData).legacySpecialty1126 === true;
+  const current = storedEstimateData ? replay.savedSpecialty1126CurrentServices(storedEstimateData) : [];
+  const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
+  for (const container of containers.length ? containers : [estimateData]) {
+    const metadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacySpecialty1126: legacy };
+    if (legacy && current.length) metadata.specialty1126CurrentServices = current; else delete metadata.specialty1126CurrentServices;
+    container.pricingMetadata = metadata;
+    if (isPlainRecord(container.routingMetadata)) {
+      const { legacySpecialty1126: _flag, specialty1126CurrentServices: _list, ...rest } = container.routingMetadata;
+      container.routingMetadata = rest;
+    }
+  }
+}
+
 // Client-priced saves can't server-recompute (the legacy builder ships no
 // replayable engineRequest), so a stale client bundle could persist
 // yesterday's bond rates after an admin edits pricing_config.termite_bond
@@ -2319,6 +2466,9 @@ async function resolveEstimateWritePayload({
     areaAddOnHistory: await require('./area-addon-limits').quoteAreaAddOnHistoryForSave(database, trustedEstimateData, body, { technicianId }),
     returningVisitHistory,
     returningAnswerHeld,
+    // Revise only: the stored estimate. A save the server cannot price keeps its rule stamps (pest above 5,500 sq ft, the specialty
+    // prices), and is read at its size (pest above 5,500 sq ft).
+    storedEstimateData,
   });
   if (pricingOut && typeof pricingOut === 'object') pricingOut.fallbackReason = pricing.fallbackReason || null;
   // The rule's answer, stored as the operator waiver every setup-fee reader honors, with its evidence.
@@ -4156,6 +4306,10 @@ module.exports = {
   estimateEditVersion,
   detectUnlinkedMemberAddress,
   assertLivePestBaseForClientPayload,
+  assertPestAboveTableClientFallbackSave,
+  stampPestAboveTableOnClientFallbackSave,
+  assertSpecialtyClientFallbackSave,
+  stampSpecialtyOnClientFallbackSave,
   assertLiveTermiteBondRates,
   assertNoDarkTermiteBondPayload,
   assertNoDarkTermiteRentalPayload,

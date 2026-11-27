@@ -1659,8 +1659,21 @@ describe('R2 payment evidence (owner ruling 2026-09-25): money landing (a paid i
     expect(await verifySmsFulfillment(ask, { records: [first], failures: [] }, { eventOnly: true })).toMatchObject({ verdict: 'open' });
     // A text with no person's mark is never the shortcut; the model sees it as context.
     await verifySmsFulfillment(ask, { records: [reply('bare', '2040-03-11T15:00:00Z', 'You got it', { operator_sent: false })], failures: [] });
-    // Only a general ask takes the shortcut: a callback's call stays the model's to judge.
-    await verifySmsFulfillment({ ...ask, kind: 'callback' }, { records: [call], failures: [] });
+    // A customer's text asking for a call back (owner 2026-10-03): a call back
+    // that reached the customer, or a call in a person answered, closes it
+    // without the model; a text does not, and a call with no proof a person
+    // spoke stays the model's to judge.
+    const callback = { ...ask, kind: 'callback' };
+    expect(await verifySmsFulfillment(callback, { records: [first, call], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_type: 'call', record_id: 'call-1', basis: 'person_reply' });
+    const callIn = { id: 'call-in', ref: 'call:call-in', type: 'call', direction: 'inbound', status: 'completed', answered_by: 'human',
+      duration_seconds: 40, created_at: '2040-03-11T14:30:00Z', text: '' };
+    expect(await verifySmsFulfillment(callback, { records: [callIn], failures: [] }))
+      .toMatchObject({ verdict: 'fulfilled', record_id: 'call-in', basis: 'person_reply' });
+    // A call in is no evidence at all for a promise Waves made, or for an email ask.
+    expect(admissibleWitness(callIn, { ...callback, sms_context: { ...ask.sms_context, basis: 'promise' } })).toBe(false);
+    expect(admissibleWitness(callIn, { ...callback, sms_context: { ...ask.sms_context, channel: 'email' } })).toBe(false);
+    await verifySmsFulfillment(callback, { records: [{ ...call, source: 'collections_voice' }], failures: [] });
     // A promise Waves made: a text a PERSON wrote after it closes it without the
     // model (owner 2026-10-01; a call back or an automated notice stays the
     // model's to judge), and a text with no person's mark is the model's.

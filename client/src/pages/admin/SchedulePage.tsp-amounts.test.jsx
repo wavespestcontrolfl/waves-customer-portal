@@ -181,7 +181,7 @@ describe('tsp on the pest house seed', () => {
     const byId = Object.fromEntries(body.products.map((product) => [product.productId, product]));
     expect(byId.surfactant).toMatchObject({ totalAmount: 0.25, amountUnit: 'fl_oz' });
     expect(byId.taurus).toMatchObject({ totalAmount: '4', amountUnit: 'oz' });
-    expect(byId.crosscheck).toMatchObject({ totalAmount: 4, amountUnit: 'oz' });
+    expect(byId.crosscheck).toMatchObject({ totalAmount: 2.5, amountUnit: 'oz' });
   });
 });
 

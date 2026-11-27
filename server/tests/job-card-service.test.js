@@ -2218,7 +2218,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const protocols = require('../config/protocols.json');
     // The live catalog rows: Antapex 10-30 g per gallon; the growth regulator 1 fl oz per gallon (its label mix, sprayed at 1 gallon per 1,500 sq ft).
     const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
-    const tekko = { id: 'tekko', name: 'Tekko Pro IGR', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    // The card's 0.66 is the label rate of this registration (lineMeta.labelRatePerGallon), so the row carries its EPA number as live.
+    const tekko = { id: 'tekko', name: 'Tekko Pro IGR', default_rate: '1', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12', epa_reg_number: '53883-335' };
     const visit = { customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Flea Control Service', service_category: 'specialty', service_key: 'flea_tick' };
     const mix = (first, second, tank = 2) => {
       const rows = { scheduled_services: [visit], products_catalog: [first, second], equipment_calibrations: [], scheduled_service_addons: [], product_aliases: [] };
@@ -2243,10 +2244,12 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     }
     // Antapex is the card's 10 g per gallon, not the catalog's 10 to 30.
     expect(await mix(antapex, tekko)).toMatchObject({ amount: 20, amountMax: null, unit: 'g', ratePerGallon: { lo: 10, hi: 10 }, rateSource: 'protocol' });
-    // A declared rate above the label's top never governs: the label band stands.
+    // The card's rate is a label rate for one registration (each amount is pinned to its label in protocol-label-rate-lines.test.js).
+    // A plain declared tank rate above the label's top never governs: the label band stands.
     const strong = JSON.parse(JSON.stringify(protocols));
     const line = Object.values(strong.flea.visits[0].lineMeta).find((meta) => meta.catalogProductHints[0] === 'Tekko Pro IGR');
-    line.tankRatePerGallon.amount = 1.5;
+    delete line.labelRatePerGallon;
+    line.tankRatePerGallon = { amount: 1.5, unit: 'fl_oz' };
     const rows = await jobCard.mixForProduct('tekko', 2, {
       serviceId: 'svc1',
       dbh: Object.assign((t) => {
@@ -2263,6 +2266,12 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
       now: new Date('2026-12-08T14:00:00Z'),
     });
     expect(rows).toMatchObject({ amount: 2, ratePerGallon: { lo: 1, hi: 1 } });
+    // A row with another registration number, or none, gets no dose: not the card's 0.66 and not its stronger catalog rate.
+    for (const epa of ['53883-444', null]) {
+      expect(await mix({ ...tekko, epa_reg_number: epa }, antapex)).toMatchObject({ amount: null, ratePerGallon: null, reason: expect.stringContaining('53883-335') });
+    }
+    // The right registration with a weaker catalog band keeps that band.
+    expect(await mix({ ...tekko, default_rate: '0.5' }, antapex)).toMatchObject({ amount: 1, ratePerGallon: { lo: 0.5, hi: 0.5 }, rateSource: 'catalog' });
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {

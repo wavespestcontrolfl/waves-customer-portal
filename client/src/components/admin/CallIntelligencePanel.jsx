@@ -16,7 +16,8 @@
 //   - the customer link with its source (generated vs set by a person) and
 //     a way to repoint it;
 //   - recordings that arrived after processing, adoptable in one click;
-//   - later outcomes (lead, estimate, visit, invoice) as associations.
+//   - later outcomes (lead, estimate, visit, invoice) as associations;
+//   - the call sound check's notes (caller mood, talk-over, rushed, risky claim).
 import { renderWithDidYouMean } from "./DidYouMean";
 import { useEffect, useRef, useState } from "react";
 import { Badge, Button, Input, Select, cn } from "../ui";
@@ -86,6 +87,39 @@ function Row({ label, children }) {
       <span className="w-28 shrink-0 text-ink-tertiary">{label}</span>
       <span className="text-ink-secondary min-w-0 break-words">{children}</span>
     </div>
+  );
+}
+
+const SOUND_SKIP_LABEL = {
+  too_long: "recording too long",
+  not_mp3: "recording not in the usual format",
+  not_twilio_url: "recording not from the phone system",
+  already_heard: "this recording was already checked",
+};
+
+// The call sound check (server/services/call-sound-check.js): a model listened to the recording and noted what a
+// transcript cannot show. The intelligence route is admin-only. Notes, never a verdict.
+export function SoundCheckRows({ check }) {
+  if (!check) return null;
+  // A claim is saved before the model is asked. A job that stops mid-call leaves it for good (one attempt per
+  // recording), so this never claims the check is still running.
+  if (check.status === "started") return <Row label="Sound check">{["check started", fmtWhen(check.at), "no result saved"].filter(Boolean).join(" · ")}</Row>;
+  if (check.status === "failed") return <Row label="Sound check">could not check this call</Row>;
+  if (check.status === "skipped") return <Row label="Sound check">{`not checked: ${SOUND_SKIP_LABEL[check.reason] || humanize(check.reason) || "skipped"}`}</Row>;
+  if (check.no_conversation) return <Row label="Sound check">no conversation heard</Row>;
+  const mood = [check.caller_tone_start, check.caller_tone_end].filter(Boolean).join(" → ");
+  const staff = [
+    check.talk_over_count != null ? `talked over the caller ${check.talk_over_count} ${check.talk_over_count === 1 ? "time" : "times"}` : null,
+    check.agent_sounded_rushed === true ? "sounded rushed" : check.agent_sounded_rushed === false ? "did not sound rushed" : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <>
+      <Row label="Caller mood">{[mood || null, check.caller_upset === true ? "upset at some point" : null].filter(Boolean).join(" · ")}</Row>
+      <Row label="Staff">{staff}</Row>
+      {check.risky_claim?.flag === true && (
+        <Row label="Risky claim"><span className="text-alert-fg">{check.risky_claim.what || "flagged"}</span></Row>
+      )}
+    </>
   );
 }
 
@@ -257,6 +291,7 @@ export default function CallIntelligencePanel({ callId, onJumpToQuote, onPlayAt,
             <Row label="Objections">{view.objections.join("; ")}</Row>
             <Row label="Buying signals">{view.buying_signals.join("; ")}</Row>
             <Row label="Lead quality">{[humanize(view.outcome.lead_quality), humanize(view.outcome.sentiment), view.confidence?.overall != null && `confidence ${Math.round(view.confidence.overall * 100)}%`].filter(Boolean).join(" · ")}</Row>
+            <SoundCheckRows check={view.sound_check} />
           </div>
 
           {/* Next action */}

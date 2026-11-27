@@ -86,6 +86,26 @@ environment that carries the row (prod does), **editing
   `floor` and `multiplier` now price only quotes made before 11-26 and
   apartment/condo (bedroom-priced) quotes; new house quotes use a fixed
   $199 / 1.8x / 10% minimum.
+- **Pest above the 5,500 sq ft footprint table** (owner 2026-11-26, new quotes
+  only): +$8 per visit at quarterly for each 1,000 sq ft above 5,500,
+  pro-rated, no cap (8,000 = $148, 10,000 = $164); bi-monthly, monthly and
+  one-time pest follow the quarterly price. The $8 and the 5,500 start
+  point are CODE constants (`PEST.aboveTablePer1000`, `PEST.aboveTableStartSqFt`),
+  not Settings rows, so an edit of the `pest_footprint` table never moves the
+  premium on a sent quote; a change of it is a new code rule with its own stamp. Quotes
+  made before it keep the flat top (`pricingMetadata.legacyPestAboveTable`,
+  an unstamped priced estimate reads the same). The `pest_footprint` row still
+  ends at 5,500; editing it does not change the above-table step.
+- **Specialty prices of 2026-11-26 (evening, new quotes only; no gate, ships live)**: three CODE constants, not
+  Settings, behind ONE estimate stamp `pricingMetadata.legacySpecialty1126` (true = priced before; a priced
+  estimate with no stamp, or inputs-only asking for bed bug, mosquito or a stinging insect, reads true and keeps
+  its old price). (1) Bed bug chemical: room 1 as before (cost ratio or the $400 minimum, with the severity, prep,
+  occupancy, story, footprint and urgency factors), each added room a flat $349
+  (`BED_BUG.chemical.addedRoomPrice`) on that FINAL price; added rooms take no factor. (2) Mosquito above 2 acres (87,120 sq ft): priced, the 2-acre
+  per-visit price plus $85 per added acre, pro-rated, no cap; monthly keeps its ratio to seasonal; one-time
+  mosquito keeps its own ladder. (3) Wasp / hornet / yellow jacket level 2 is $275 (`SPECIALTY.wasp.tiers`, was
+  $250; `legacyTiers` keeps it): level 2 plus the $75 small removal = $350. Yellow jackets price through the
+  same `priceStingingInsect` levels as every species. A change of these numbers is a new code rule with its own stamp.
 - **One-time mosquito ladder** (owner 2026-10-25): starts at $199 and each
   extra 5,000 sq ft adds a little less than the one before. Keep the
   per-segment slope non-increasing, over-acre step included, when repricing.

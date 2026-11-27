@@ -303,7 +303,7 @@ export function prefillRateCeiling(resolved, product = {}) {
 }
 
 // The pest perimeter house default's rate: a product in the house mix starts at
-// that mix's own amount (Taurus 1.6, Crosscheck 4) so its rate and total agree;
+// that mix's own amount (Taurus 1.6, Crosscheck 2.5) so its rate and total agree;
 // every other liquid pest product starts at 4.
 const PEST_HOUSE_RATE_DEFAULT = 4;
 function pestHouseRate(product) {

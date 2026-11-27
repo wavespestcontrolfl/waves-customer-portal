@@ -309,6 +309,55 @@ function savedLegacyWdoFlatSignal(rawEstData) {
   return { legacyWdoFlat: flag };
 }
 
+// Specialty prices for NEW quotes (owner 2026-11-26 evening: bed bug chemical $349 per added room, a mosquito lot above 2 acres
+// priced instead of held, the wasp / hornet / yellow jacket second level $275). ONE stamp for the three, read by the same reader:
+// true = priced before them (old room curve, the hand-price hold, the $250 level), false = priced under them. An estimate with
+// priced lines and no stamp predates the rule; one with no priced lines pins nothing. An estimate that kept only its inputs but
+// asks for bed bug, mosquito or a stinging insect was saved before the rule too: it reads legacy on a first send, a resend and every
+// replay (a replay never raises a sold price); a fresh draft the engine priced carries its stamp, false.
+function storedRequestsSpecialty1126(estData) {
+  const data = normalizeStored(estData);
+  if (!data || typeof data !== 'object') return false;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  // The builder request names its services as tokens (BEDBUG, MOSQUITO, STING), as it names EXCLUSION and PEST.
+  if (request && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => ['BEDBUG', 'MOSQUITO', 'STING'].includes(String(key || '').toUpperCase()))) return true;
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
+      && !!(carrier.services.bedBug || carrier.services.mosquito || carrier.services.stinging));
+}
+
+// The services of the three priced under the specialty rule on an estimate that is otherwise old: a revision added them, and the
+// engine stamped the line legacySpecialty1126=false (or listed them in pricingMetadata.specialty1126CurrentServices, or the send
+// snapshot froze the list when its bundle went). That is the only evidence: the flat currentRulesServices list predates the rule.
+const SPECIALTY_1126_SERVICE_KEYS = ['bed_bug', 'mosquito', 'stinging_insect'];
+function savedSpecialty1126CurrentServices(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { container } = readRuleStamp(estData, 'legacySpecialty1126');
+  const snapshot = estData?.sendSnapshot && typeof estData.sendSnapshot === 'object' ? estData.sendSnapshot : null;
+  const listed = [container.pricingMetadata, container.routingMetadata, snapshot, snapshot?.pricingBundle]
+    .flatMap((holder) => (Array.isArray(holder?.specialty1126CurrentServices) ? holder.specialty1126CurrentServices : []));
+  const stamped = [].concat(container.lineItems || [])
+    .filter((line) => line && line.legacySpecialty1126 === false).map((line) => line.service);
+  return [...new Set([...listed, ...stamped])].filter((key) => SPECIALTY_1126_SERVICE_KEYS.includes(key));
+}
+
+function savedLegacySpecialty1126Signal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { container, flag, from } = readRuleStamp(estData, 'legacySpecialty1126');
+  // Only the lines carry the evidence (no metadata, no snapshot stamp): readRuleStamp took the FIRST stamped line, so the order of
+  // a mixed estimate decided the answer. For this rule ANY retained specialty line that is legacy (stamped true or unstamped) makes
+  // the estimate read legacy; which services are on the new prices comes only from the per-service list below (added by a revision, or
+  // a line stamped false), never from the estimate-wide flag.
+  if (from === 'lines' && [].concat(container.lineItems || [])
+    .some((line) => line && SPECIALTY_1126_SERVICE_KEYS.includes(line.service) && line.legacySpecialty1126 !== false)) {
+    return { legacySpecialty1126: true };
+  }
+  if (flag === undefined && storedRequestsSpecialty1126(estData)) return { legacySpecialty1126: true };
+  return { legacySpecialty1126: flag };
+}
+
 // One-time pest for NEW quotes (owner 2026-11-26, "only new estimtes": 1.8x, a 10% minimum over the first visit of a plan, no
 // home-age step). Its own stamp, read by the same reader: true = priced before the rule (the 2.2 multiple and the plan's age step,
 // the existing code path), false = priced under it. An estimate with priced lines and no stamp predates the rule; one with no priced
@@ -325,6 +374,19 @@ function storedRequestsPest(estData) {
   return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
     .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
       && !!(carrier.services.pest || carrier.services.oneTimePest));
+}
+
+// Pest above the 5,500 sq ft footprint table (owner 2026-11-26: +$8 per visit at quarterly for each 1,000 sq ft above it, no cap),
+// new quotes only. Its own stamp, read by the same reader: true = priced before the rule (flat at the last bracket, the existing
+// code), false = priced under it. An estimate with priced lines and no stamp predates the rule; one with no priced lines pins
+// nothing. An estimate that kept only its inputs but asks for pest or one-time pest was saved before the rule too, on a first
+// send, a resend and every replay (a fresh draft the engine priced carries its stamp, false). Plan-wide, no per-service marker:
+// a pest service a revision adds to a legacy estimate stays on the old rule, so a replay never raises a sold price.
+function savedLegacyPestAboveTableSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { flag } = readRuleStamp(estData, 'legacyPestAboveTable');
+  if (flag === undefined && (storedRequestsPest(estData) || storedPestServices(estData).size > 0)) return { legacyPestAboveTable: true };
+  return { legacyPestAboveTable: flag };
 }
 
 // Which pest services a stored estimate priced (or asked for), from EVERY shape the estimate page's choice and breakdown readers read
@@ -435,6 +497,8 @@ const FROZEN_RULE_STAMPS = [
   ['legacyTwoStoryRoof', (data) => savedLegacyTwoStoryRoofSignal(data).legacyTwoStoryRoof],
   ['legacyWdoFlat', (data) => savedLegacyWdoFlatSignal(data).legacyWdoFlat],
   ['legacyOneTimePestBuffer', (data) => savedLegacyOneTimePestBufferSignal(data).legacyOneTimePestBuffer],
+  ['legacyPestAboveTable', (data) => savedLegacyPestAboveTableSignal(data).legacyPestAboveTable],
+  ['legacySpecialty1126', (data) => savedLegacySpecialty1126Signal(data).legacySpecialty1126],
 ];
 
 // Before a send snapshot's pricing bundle is dropped (a tier change, a relabel), freeze the rule stamps its prices were read
@@ -450,6 +514,11 @@ function freezeSnapshotRuleStamps(estData) {
     if (typeof flag === 'boolean') frozen[key] = flag;
   }
   // The per-service one-time pest rule rides the bundle; keep it on the snapshot itself when the bundle goes.
+  // The services of the specialty rule that a revision priced under it: the list rides the snapshot itself once the bundle goes.
+  if (estData.sendSnapshot.pricingBundle && !Array.isArray(estData.sendSnapshot.specialty1126CurrentServices)) {
+    const currentSpecialty = savedSpecialty1126CurrentServices(estData);
+    if (currentSpecialty.length) frozen.specialty1126CurrentServices = currentSpecialty;
+  }
   const bundledChoice = estData.sendSnapshot.pricingBundle?.oneTimePestChoice;
   if (bundledChoice && !estData.sendSnapshot.oneTimePestChoice) frozen.oneTimePestChoice = bundledChoice;
   // The bedroom-band verdict rides the bundle the same way.
@@ -499,6 +568,10 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData));
   Object.assign(signals, savedLegacyWdoFlatSignal(estData));
   Object.assign(signals, savedLegacyOneTimePestBufferSignal(estData));
+  Object.assign(signals, savedLegacyPestAboveTableSignal(estData));
+  Object.assign(signals, savedLegacySpecialty1126Signal(estData));
+  const currentSpecialty = savedSpecialty1126CurrentServices(estData);
+  if (currentSpecialty.length) signals.specialty1126CurrentServices = currentSpecialty;
   // Only when a saved line carries the evidence; a posted copy in the stored inputs is stripped by the identity fields.
   // A removal prunes the plan's rows (and the line stamp with them); its server-recorded event kept the per-service stamp the
   // opt-out captured (provenance.floorSignals), so a restore prices the plan under the rule it was added on.
@@ -524,6 +597,9 @@ module.exports = {
   savedLegacyTwoStoryRoofSignal,
   savedLegacyWdoFlatSignal,
   savedLegacyOneTimePestBufferSignal,
+  savedLegacyPestAboveTableSignal,
+  savedLegacySpecialty1126Signal,
+  savedSpecialty1126CurrentServices,
   savedOneTimePestRuleLegacy,
   savedOneTimePestCurrentServices,
   storedPestServices,

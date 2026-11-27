@@ -27,8 +27,9 @@ const MATCH_RULES = [
     followupOf: ['bed_bug_treatment'],
     terms: [
       'bed bug follow', 'bed bug recheck', 'bed bug clearance', 'post treatment inspection',
-      'bed bug treatment 2', 'bed bug second treatment', 'second bed bug',
-      'bed bug treatment 3', 'bed bug third treatment', 'third bed bug',
+      // "Treatment 2" / "Treatment 3" are read by NUMBERED_STAGE_RE below, which tells a visit number from a count ("2 bedrooms").
+      'bed bug second treatment', 'second bed bug',
+      'bed bug third treatment', 'third bed bug',
     ],
   },
   {
@@ -51,7 +52,7 @@ const MATCH_RULES = [
     reason: 'flea_followup',
     explicitStage: true,
     followupOf: ['flea_service'],
-    terms: ['flea follow', 'flea recheck', 'flea treatment 2', 'flea second treatment', 'second flea'],
+    terms: ['flea follow', 'flea recheck', 'flea second treatment', 'second flea'],
   },
   {
     programKey: 'flea',
@@ -59,6 +60,24 @@ const MATCH_RULES = [
     reason: 'flea_service',
     serviceKeys: ['flea_tick'],
     terms: ['flea', 'fleas'],
+  },
+  // A car, truck or van job has its own cards: the house card's kitchens and appliance motors do not apply, and the
+  // labels' limits inside a vehicle do. The catalog key routes it whatever the visit is named. The add-on (the rider on
+  // a home German roach job) is gel bait and growth regulator only; the vehicle job adds the non-repellent treatment.
+  // Both sit before the German roach rule, whose terms their names also carry.
+  {
+    programKey: 'cockroach',
+    visit: 5,
+    reason: 'vehicle_roach_addon',
+    serviceKeys: ['vehicle_roach_addon'],
+    terms: ['vehicle roach add on', 'vehicle roach addon', 'vehicle german roach add on'],
+  },
+  {
+    programKey: 'cockroach',
+    visit: 4,
+    reason: 'vehicle_roach',
+    serviceKeys: ['vehicle_german_roach'],
+    terms: ['vehicle german roach', 'vehicle roach', 'vehicle cockroach'],
   },
   {
     programKey: 'cockroach',
@@ -215,13 +234,22 @@ const MATCH_RULES = [
     programKey: 'palm_injection',
     visit: 3,
     reason: 'palm_followup',
-    terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow'],
+    // Only palm rules are read for a palm name, so the bare stage words are enough ("Lethal Bronzing Follow Up").
+    terms: ['palm injection follow', 'palm injection follow up', 'palm injection recheck', 'palm follow', 'palm recheck', 'injection follow', 'follow up', 'followup', 'follow-up', 'recheck'],
   },
   {
     programKey: 'palm_injection',
     visit: 1,
     reason: 'palm_diagnosis',
-    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection'],
+    terms: ['palm injection assessment', 'palm injection diagnosis', 'manganese injection', 'magnesium injection', 'assessment', 'diagnosis', 'sample', 'sampling', 'test', 'testing', 'inspection', 'inspect', 'evaluation'],
+  },
+  // Lethal bronzing prevention, the main palm service (owner 2026-11-25, D8): its own Arbor-OTC card when the booking names it. After the
+  // assessment and follow-up rules: a booking that names both a stage and the disease keeps its stage card.
+  {
+    programKey: 'palm_injection',
+    visit: 4,
+    reason: 'palm_lethal_bronzing',
+    terms: ['lethal bronzing', 'bronzing', 'arbor otc', 'arbor-otc', 'oxytetracycline'],
   },
   {
     programKey: 'palm_injection',
@@ -418,7 +446,12 @@ function programKeyForService(serviceType) {
     normalized.includes('magnesium injection') ||
     normalized.includes('injection follow') ||
     normalized.includes('palm follow') ||
-    normalized.includes('palm recheck')
+    normalized.includes('palm recheck') ||
+    // Lethal bronzing prevention (D8): its own palm card.
+    normalized.includes('lethal bronzing') ||
+    normalized.includes('bronzing prevention') ||
+    normalized.includes('arbor otc') ||
+    normalized.includes('oxytetracycline')
   ) return 'palm_injection';
   if (
     normalized.includes('termite') ||
@@ -497,11 +530,50 @@ function mistingSystemMatchOverride(serviceType, serviceKey) {
   return null;
 }
 
+// Package programs whose later visit has its own card. A name that states a later stage anywhere ("Flea Control Service
+// Recheck", "German Roach Treatment 2", "Bed Bug Treatment Follow-Up") gets that card: the rule terms alone need the words
+// side by side ("flea recheck"), so such a name fell to the first treatment and its growth regulator.
+const STAGE_BY_NAME_RULES = { bed_bug: 'bed_bug_followup', flea: 'flea_followup', cockroach: 'cockroach_followup' };
+const LATER_STAGE_WORD = '(?:re-?check|follow[\\s-]?up|clearance)';
+const LATER_STAGE_RE = new RegExp(`\\b${LATER_STAGE_WORD}\\b`, 'i');
+// "Treatment 2", "Visit #3", "Treatment 2 Day 14", "2nd treatment", "third visit". The number must end the phrase or carry a day:
+// "Treatment 2 bedrooms" and "Treatment 2-bedroom apartment" count rooms.
+const NUMBERED_STAGE_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\b(?=\s*(?:$|[^a-z0-9\s-]|-(?![a-z])|(?:day|week)\b))|\b(?:second|third|2nd|3rd)\s+(?:treatment|visit|service)\b/i;
+// "Visit 2 of 3", "Treatment 2 of 2 Visits": read before the visit counts are taken out.
+const STAGE_OF_TOTAL_RE = /\b(?:treatment|visit|service)\s*#?\s*[23]\s+of\s+\d+\b/i;
+// What a package sold on the first visit says about its later visits. These phrases are taken out, and the rest of the name is
+// read for a stage, so "Visit 2 with Recheck" is still visit 2:
+//   - a later visit named as an extra or ruled out: "Cleanout + 14 Day Follow-up", "Service with a free follow-up", "(no
+//     follow-up)". Only filler words may sit between: "Flea & Tick Yard Treatment Service Recheck" is a recheck;
+//   - "(Follow-up included)", "recheck is included";
+//   - a count of visits sold: "(2 Visits)", "2-Visit Package", "3 treatments".
+const EXTRA_FILLER = '(?:an?|one|the|free|complimentary|included|\\d+|days?|weeks?|months?)';
+const PACKAGE_EXTRA_RES = [
+  new RegExp(`(?:\\+|&|\\b(?:and|with|without|plus|incl|includes|including|no)\\b)[^a-z0-9]*(?:${EXTRA_FILLER}[^a-z0-9]+){0,4}${LATER_STAGE_WORD}\\b(?:[^a-z0-9]*includ(?:ed|ing)\\b)?`, 'gi'),
+  new RegExp(`\\b${LATER_STAGE_WORD}\\b[^a-z0-9]*(?:is\\s+|are\\s+)?includ(?:ed|ing)\\b`, 'gi'),
+];
+const VISIT_COUNT_RE = /\b\d+\s*-?\s*(?:visits?|treatments?|services?|pack(?:age)?s?|x)\b/gi;
+
+// Whether the name itself states a later stage, and the name with its package phrases taken out (the older side-by-side terms read
+// that). Free text, so only its first 200 characters are read.
+function stageInName(serviceType) {
+  const noExtras = PACKAGE_EXTRA_RES.reduce((name, phrase) => name.replace(phrase, ' '), String(serviceType || '').slice(0, 200));
+  const own = noExtras.replace(VISIT_COUNT_RE, ' ');
+  return { own, later: STAGE_OF_TOTAL_RE.test(noExtras) || LATER_STAGE_RE.test(own) || NUMBERED_STAGE_RE.test(own) };
+}
+
 // The rule for a booking: the first rule of its program whose terms the name carries, or the rule that claims its catalog
-// service key. The key wins, except over a rule marked `explicitStage` (the name itself says "treatment 2" or "heat").
-function ruleFor(keyRule, rules, normalized) {
-  const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(normalized, term)));
-  return named?.explicitStage ? named : keyRule || named;
+// service key. The key wins, except over a rule marked `explicitStage` (the name itself says "second treatment" or "heat") and
+// over a later stage the name states. In a package program the later-stage rule reads the name without its package phrases:
+// "Flea Treatment (2 Visits)" is the first visit of two, not "flea treatment 2".
+function ruleFor(keyRule, rules, normalized, serviceType, programKey) {
+  const laterReason = STAGE_BY_NAME_RULES[programKey] || null;
+  const stage = laterReason ? stageInName(serviceType) : { own: '', later: false };
+  const ownNormalized = laterReason ? normalize(stage.own) : '';
+  const named = rules.find((rule) => rule.terms.some((term) => matchesTerm(laterReason && rule.reason === laterReason ? ownNormalized : normalized, term)));
+  if (named?.explicitStage) return named;
+  const later = stage.later ? rules.find((rule) => rule.reason === laterReason) : null;
+  return later || keyRule || named;
 }
 
 function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month = null } = {}) {
@@ -516,7 +588,7 @@ function matchServiceProtocol(protocols, serviceType, { serviceKey = null, month
     if (fallbackProgramKey === 'lawn') return false;
     return rule.programKey === fallbackProgramKey;
   });
-  const matchedRule = ruleFor(keyRule, rules, normalized);
+  const matchedRule = ruleFor(keyRule, rules, normalized, serviceType, fallbackProgramKey);
   const programKey = matchedRule?.programKey || fallbackProgramKey;
   const program = protocols?.[programKey] || null;
   if (!program) return { programKey, program: null, matchedVisit: null, matched: false, reason: 'program_missing' };

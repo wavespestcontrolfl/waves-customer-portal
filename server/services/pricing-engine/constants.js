@@ -118,6 +118,13 @@ const PEST = {
     { sqft: 4000, adj: r(10) },
     { sqft: 5500, adj: r(16) },
   ],
+  // Above 5,500 sq ft a NEW quote adds a premium on top of the table price: +$8 per visit (quarterly list price) for each 1,000 sq ft over
+  // aboveTableStartSqFt (5,500), pro-rated to the square foot, no cap (owner 2026-11-26: 8,000 sq ft = $148, 10,000 = $164). A CODE constant, not a
+  // pricing_config row: nothing a Settings edit does can move a sent quote. A quote saved before the rule stays flat at the last
+  // bracket (legacyPestAboveTable stamp). Bimonthly, monthly and one-time pest follow through the quarterly price.
+  aboveTablePer1000: 8,
+  // Where that premium starts: a code constant too, never read from the table, so a Settings edit of the last bracket cannot move it.
+  aboveTableStartSqFt: 5500,
   additionalAdjustments: {
     indoor: r(15),              // NEW. Interior treatment adds 10-15 min + $3-5 in product.
     shrubs_light: -r(5),        // Light shrubs = sparser perimeter, less spray time. Already on the admin Pricing Logic panel; pricer was missing the branch (drift bug).
@@ -2382,7 +2389,11 @@ const SPECIALTY = {
     },
   },
   wasp: {
-    tiers: [r(150), r(250), r(435), r(775)],
+    // Second level $250 -> $275 (owner 2026-11-26): a tier-2 nest with the $75 small removal is $350. Yellow jackets, hornets and
+    // paper wasps price through this one table (the species only names the line). CODE constants, not Settings: a quote sent before
+    // the change keeps the table it was priced with (estimate stamp legacySpecialty1126 -> legacyTiers), so nothing can move it.
+    tiers: [r(150), r(275), r(435), r(775)],
+    legacyTiers: [r(150), r(250), r(435), r(775)],
     addons: {
       aggressiveness: [r(75), r(150), r(200)],
       height: [r(75), r(150)],
@@ -2512,6 +2523,9 @@ const BED_BUG = {
     label: 'Bed Bug Chemical/IPM Program',
     includedVisits: 2,
     followUpDays: 14,
+    // Each room after the first adds this flat amount to the FINAL first-room price (owner 2026-11-26: room 1 as today, every added room $349;
+    // CODE constant: a quote sent before it keeps the old per-room cost curve, estimate stamp legacySpecialty1126).
+    addedRoomPrice: 349,
     materialPerRoomVisit1: 50.42,
     materialPerRoomVisit2Factor: 0.50,
     extraFollowUpMaterialFactor: 0.25,

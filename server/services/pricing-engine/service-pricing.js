@@ -46,6 +46,20 @@ function roundRatio(value) {
   return Math.round((Number(value) || 0) * 1000) / 1000;
 }
 
+// Pest footprint step. The footprint table is live as on main (Settings edits move its prices). Above 5,500 sq ft a NEW quote adds a
+// premium on top of the table price (owner 2026-11-26): +$8 per visit at quarterly for each 1,000 sq ft above the start point,
+// pro-rated to the square foot, no cap. The start point and the rate are CODE constants (PEST.aboveTableStartSqFt,
+// PEST.aboveTablePer1000), never read from the table, so a Settings edit of the last bracket cannot move the premium on a quote
+// already sent. A quote saved before the rule (legacyPestAboveTable stamp) carries no premium, as it was sold.
+function pestFootprintAdjustment(footprint, brackets, legacyPestAboveTable = false) {
+  const table = interpolate(footprint, brackets);
+  if (legacyPestAboveTable) return table;
+  const start = Number(PEST.aboveTableStartSqFt);
+  const per1000 = Number(PEST.aboveTablePer1000);
+  if (!Number.isFinite(start) || !Number.isFinite(per1000) || per1000 <= 0) return table;
+  return table + per1000 * Math.max(0, footprint - start) / 1000;
+}
+
 // ── Utility: Linear interpolation between brackets ────────────
 function interpolate(value, brackets, valueKey = 0, resultKey = 1) {
   if (!brackets.length) return 0;
@@ -1545,9 +1559,10 @@ function pricePestControl(property, options = {}) {
     ...pestAgeMeta.pestAgeAdjWarnings,
     ...poolCageMeta.warnings,
   ]);
-  const footprintAdj = interpolate(
+  const footprintAdj = pestFootprintAdjustment(
     footprint,
-    PEST.footprintBrackets.map(b => [b.sqft, b.adj])
+    PEST.footprintBrackets.map(b => [b.sqft, b.adj]),
+    options.legacyPestAboveTable === true
   );
 
   let additionalAdj = 0;
@@ -4816,10 +4831,23 @@ function mosquitoLotSizePressure(sqft) {
 // manualReviewReasons: public quote, lead automation, call-quote draft lane,
 // voice agent, add-service offers). The price below 2 acres is unchanged and
 // an admin can still set a price and send the estimate.
+// Owner 2026-11-26 (evening, supersedes the hand price above for NEW quotes): a lot above 2 acres is priced. The per-visit price is
+// the 2-acre visit price plus $85 for each added acre, pro-rated by the square foot (seasonal 9-visit: 2 ac $117, 3 ac $202,
+// 4 ac $287). The monthly program keeps its existing ratio to seasonal (mosquitoBoundedBasePrice), no cap. CODE constants, not
+// Settings; options.legacySpecialty1126 (estimate stamp legacySpecialty1126, estimate-engine.js) keeps the hand-price hold and the
+// flat curve for a quote priced before it.
+const MOSQUITO_ADDED_ACRE_PER_VISIT = 85;
+const MOSQUITO_SQFT_PER_ACRE = 43560;
 const MOSQUITO_LOT_ABOVE_2_ACRES_SQFT = 87120;
 const MOSQUITO_LOT_ABOVE_2_ACRES_REASON = 'mosquito_lot_above_2_acres';
 // Staff wording (draft lane reason, office bell, estimate tool). Never shown to a customer.
 const MOSQUITO_LOT_ABOVE_2_ACRES_TEXT = 'Lot above 2 acres: set the mosquito price by hand';
+// Property records stop a home lot at 200,000 sq ft (4.59 acres): the county and AI lookups (ai-property-lookup LOT_SQFT_MAX), the
+// website quote (public-quote LOT_CAP) and the customer's saved lot each store a larger parcel as exactly that number. So a lot AT
+// that number means "4.59 acres or more", not a size. Its added acres are not priced: it keeps the hand-price hold and the flat
+// price it has on main. A number above it can only be typed by staff or verified by a tech, and is priced as entered.
+const MOSQUITO_RECORD_LOT_CAP_SQFT = 200000;
+const MOSQUITO_LOT_AT_RECORD_CAP_TEXT = 'Lot is 4.59 acres or more (property records stop there): enter the real lot size to price mosquito, or set the price by hand';
 
 function priceMosquito(property, options = {}) {
   const {
@@ -4877,7 +4905,44 @@ function priceMosquito(property, options = {}) {
   if (tierWasForced) recommendationReasons.push('forced_by_request');
   const basePrice = mosquitoBoundedBasePrice(tierIndex, pricingSqFt);
 
-  const perVisit = Math.round(basePrice * pressure);
+  // The lot the pricer used: the gross parcel or the treatable area, whichever is larger (an explicit treatable area can stand
+  // without a parcel). An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
+  const lotSqFtUsed = Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0);
+  const lotAbove2Acres = options.lotSizeMeasured !== false && lotSqFtUsed > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
+  // A lot at the record cap is a truncated size (4.59 acres or more): hand price, as a quote priced before the rule. The gross
+  // parcel is checked on its own: a larger treatable area beside a parcel at the cap does not make the parcel's real size known.
+  const lotAtRecordCap = lotAbove2Acres
+    && (Number(property.lotSqFt) === MOSQUITO_RECORD_LOT_CAP_SQFT || lotSqFtUsed === MOSQUITO_RECORD_LOT_CAP_SQFT);
+  const legacyHandPrice = options.legacySpecialty1126 === true || lotAtRecordCap;
+  // The acres past the second (pro-rated), priced for a new quote; zero for a lot at or under 2 acres and for a legacy quote.
+  const addedAcres = lotAbove2Acres && !legacyHandPrice
+    ? (lotSqFtUsed - MOSQUITO_LOT_ABOVE_2_ACRES_SQFT) / MOSQUITO_SQFT_PER_ACRE
+    : 0;
+  // A lot above 2 acres is anchored at the 2-acre boundary: this pricer's own answer for the same home on exactly 2 acres (same
+  // footprint, features and pressure inputs; options.twoAcreProperty carries the profile re-derived at 2 acres, else the lot is capped
+  // here), then the seasonal visit plus $85 for each added acre, and the other program at its existing ratio to seasonal at 2 acres.
+  const seasonalIndex = MOSQUITO.programs.indexOf('seasonal9');
+  let perVisitForProgram = null;
+  if (addedAcres > 0 && seasonalIndex >= 0) {
+    const cappedProperty = options.twoAcreProperty && typeof options.twoAcreProperty === 'object'
+      ? options.twoAcreProperty
+      : {
+        ...property,
+        lotSqFt: Math.min(Number(property.lotSqFt) || 0, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT),
+        ...(Number(property.mosquitoTreatableSqFt) > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT ? { mosquitoTreatableSqFt: MOSQUITO_LOT_ABOVE_2_ACRES_SQFT } : {}),
+      };
+    const atTwoAcres = priceMosquito(cappedProperty, { ...options, twoAcreProperty: undefined, legacySpecialty1126: true });
+    const twoAcrePv = Object.fromEntries(atTwoAcres.tiers.map((t) => [t.tier, t.perVisit]));
+    const seasonalName = MOSQUITO.programs[seasonalIndex];
+    const seasonalAbove = twoAcrePv[seasonalName] + MOSQUITO_ADDED_ACRE_PER_VISIT * addedAcres;
+    perVisitForProgram = (programIndex) => {
+      const name = MOSQUITO.programs[programIndex];
+      if (programIndex === seasonalIndex || !(twoAcrePv[seasonalName] > 0)) return Math.round(seasonalAbove);
+      return Math.round(seasonalAbove * (twoAcrePv[name] / twoAcrePv[seasonalName]));
+    };
+  }
+
+  const perVisit = perVisitForProgram ? perVisitForProgram(tierIndex) : Math.round(basePrice * pressure);
   const visits = MOSQUITO.tierVisits[selectedProgram];
   const stationMeta = normalizeMosquitoAddOnCount(stationCount, 'station');
   const dunkMeta = normalizeMosquitoAddOnCount(dunkCount, 'dunk');
@@ -4907,8 +4972,7 @@ function priceMosquito(property, options = {}) {
   const marginFloorOk = margin >= GLOBAL.MARGIN_FLOOR;
 
   const tiers = MOSQUITO.programs.map((name, idx) => {
-    const bp = mosquitoBoundedBasePrice(idx, pricingSqFt);
-    const pv = Math.round(bp * pressure);
+    const pv = perVisitForProgram ? perVisitForProgram(idx) : Math.round(mosquitoBoundedBasePrice(idx, pricingSqFt) * pressure);
     const v = MOSQUITO.tierVisits[name];
     const ann = pv * v + annualAddOns;
     return {
@@ -4926,15 +4990,10 @@ function priceMosquito(property, options = {}) {
     };
   });
 
-  // The lot the pricer used: the gross parcel or the treatable area, whichever
-  // is larger (an explicit treatable area can stand without a parcel).
-  // An unmeasured lot (lotSizeMeasured:false) is not a size: the unverified-area hold below speaks for it.
-  const lotAbove2Acres = options.lotSizeMeasured !== false
-    && Math.max(Number(property.lotSqFt) || 0, areaResolution.mosquitoTreatableSqFt || 0) > MOSQUITO_LOT_ABOVE_2_ACRES_SQFT;
   const manualReviewReasons = uniqueList([
     // First, so the reason a customer-facing hold and the office read
-    // (manualReviewReasons[0]) names the real cause.
-    lotAbove2Acres ? MOSQUITO_LOT_ABOVE_2_ACRES_REASON : null,
+    // (manualReviewReasons[0]) names the real cause. A new quote prices the lot (addedAcres) and carries no hold for size.
+    lotAbove2Acres && legacyHandPrice ? MOSQUITO_LOT_ABOVE_2_ACRES_REASON : null,
     ...areaResolution.manualReviewReasons,
     ...categoryResolution.manualReviewReasons,
     // A synthetic/default lot (caller passed lotSizeMeasured:false) is not a
@@ -4981,6 +5040,10 @@ function priceMosquito(property, options = {}) {
     fallbackTreatableSqFt: areaResolution.fallbackTreatableSqFt,
     missingAreaData: areaResolution.missingAreaData,
     pricingSqFt,
+    // Acres past the second that this price carries ($85 per visit each, pro-rated); 0 on a lot at or under 2 acres.
+    ...(addedAcres > 0 ? { mosquitoAddedAcres: Math.round(addedAcres * 1000) / 1000, mosquitoAddedAcreAdder: MOSQUITO_ADDED_ACRE_PER_VISIT } : {}),
+    // The lot is the record cap, so the real lot may be larger: staff read MOSQUITO_LOT_AT_RECORD_CAP_TEXT beside the hold.
+    ...(lotAtRecordCap ? { mosquitoLotAtRecordCap: true } : {}),
     basePrice, pressureMultiplier: pressure,
     pressureBeforeCap,
     perVisit, visits, annual, monthly,
@@ -6469,7 +6532,13 @@ function priceOneTimePest(property, options = {}) {
     baseSource = 'recurringPestPerApp';
   } else {
     if (hasValue(recurringPestPerApp)) warnings.push('invalid_recurring_pest_per_app_ignored');
-    baselinePest = pricePestControl(property, { frequency: 'quarterly', roachType: 'none', legacyOneTimePestBuffer: legacy });
+    baselinePest = pricePestControl(property, {
+      frequency: 'quarterly',
+      roachType: 'none',
+      legacyOneTimePestBuffer: legacy,
+      // A quote saved before the above-table rule keeps the flat footprint step for its own baseline too.
+      legacyPestAboveTable: options.legacyPestAboveTable === true,
+    });
     base = baselinePest.basePrice;
     baseSource = 'computed_quarterly_baseline';
   }
@@ -8312,9 +8381,10 @@ function bedBugCommonResult(normalized, fields) {
   };
 }
 
-function resolveChemicalPrice(normalized) {
+// The direct cost and the cost-ratio base price of a chemical job of `rooms` rooms (visit minutes, material and the severity's visit
+// count). Room 1 of this curve is the first-room price of the added-room rule below.
+function bedBugChemicalCost(normalized, rooms) {
   const chemical = BED_BUG.chemical;
-  const rooms = normalized.rooms;
   const extraRooms = rooms - 1;
   const severityConfig = BED_BUG.severity[normalized.severity];
   const laborRate = getBedBugLaborRate();
@@ -8357,9 +8427,25 @@ function resolveChemicalPrice(normalized) {
 
   const costRatioPrice = directCost / chemical.targetCostRatio;
   const minimumPrice = chemical.minimumBase + chemical.minimumAdditionalRoom * extraRooms;
-  const baseChemicalPrice = Math.max(costRatioPrice, minimumPrice);
+  return { directCost, includedVisits, basePrice: Math.max(costRatioPrice, minimumPrice) };
+}
+
+// Chemical bed bug price (owner 2026-11-26, new quotes only): the first room is the price the engine already gives one room, with
+// every factor it has today (the cost-ratio price or the $400 minimum with the severity's visit count, then footprint, severity,
+// prep, occupancy, story and urgency), and each room after the first adds the flat BED_BUG.chemical.addedRoomPrice ($349) to that
+// FINAL price. The added rooms take no factor. options.legacySpecialty1126 (estimate stamp legacySpecialty1126, estimate-engine.js)
+// keeps the old per-room cost curve for a quote priced before the rule.
+function resolveChemicalPrice(normalized, { legacyRoomRate = false } = {}) {
+  const chemical = BED_BUG.chemical;
+  const rooms = normalized.rooms;
+  const extraRooms = rooms - 1;
+  const { directCost, includedVisits, basePrice: curvePrice } = bedBugChemicalCost(normalized, rooms);
+  const useFlatRooms = !legacyRoomRate && extraRooms > 0;
+  // The first-room base: the one-room cost curve under the new rule, the whole curve (all rooms) under the old one.
+  const baseChemicalPrice = useFlatRooms ? bedBugChemicalCost(normalized, 1).basePrice : curvePrice;
   const multipliers = getBedBugMultipliers(normalized, chemical.sizeModifiers);
-  const price = roundPrice(applyBedBugMultipliers(baseChemicalPrice, multipliers));
+  const addedRoomsTotal = useFlatRooms ? chemical.addedRoomPrice * extraRooms : 0;
+  const price = roundPrice(applyBedBugMultipliers(baseChemicalPrice, multipliers)) + addedRoomsTotal;
   const warnings = uniqueWarnings(chemical.warnings);
   const protocol = buildBedBugChemicalProtocol(includedVisits);
   const estimatedGrossMargin = price > 0 ? roundedRatio((price - directCost) / price) : 0;
@@ -8393,6 +8479,7 @@ function resolveChemicalPrice(normalized) {
       pricingModel: chemical.pricingModel,
       targetCostRatio: chemical.targetCostRatio,
       protocol,
+      ...(addedRoomsTotal > 0 ? { addedRoomsTotal, addedRoomPrice: chemical.addedRoomPrice } : {}),
     },
   });
 }
@@ -8569,7 +8656,7 @@ function priceBedBugTreatment(property, options) {
   }
 
   let result;
-  if (normalized.method === 'CHEMICAL') result = resolveChemicalPrice(normalized);
+  if (normalized.method === 'CHEMICAL') result = resolveChemicalPrice(normalized, { legacyRoomRate: options.legacySpecialty1126 === true });
   else if (normalized.method === 'HEAT') result = resolveHeatPrice(property, normalized);
   else result = resolveHybridPrice(property, normalized);
 
@@ -9965,16 +10052,23 @@ function priceStingingInsect(options = {}) {
     hasRecurringPest = false,
   } = options;
   const cfg = SPECIALTY.wasp;
+  // options.legacySpecialty1126 (estimate stamp legacySpecialty1126, estimate-engine.js): a quote priced before the 2026-11-26
+  // specialty prices keeps the $250 second level and the species names it was sold with.
+  const legacySpecialty = options.legacySpecialty1126 === true;
   const speciesNames = {
     PAPER_WASP: 'Paper Wasps', YJ_AERIAL: 'Yellow Jackets (aerial)',
     YJ_GROUND: 'Yellow Jackets (ground)', MUD_DAUBER: 'Mud Daubers',
     HONEYBEE_NEW: 'Honeybees (new)', HONEYBEE_EST: 'Honeybees (established)',
     CARPENTER: 'Carpenter Bees', BALDFACED: 'Baldfaced Hornets',
     AFRICANIZED: 'Africanized Bees',
+    // The estimator's call/Intelligence Bar intent names the species YELLOW_JACKET; it had no name here, so the line read
+    // "Stinging Insect - YELLOW_JACKET". It prices through the same levels as every species (the species only names the line).
+    ...(legacySpecialty ? {} : { YELLOW_JACKET: 'Yellow Jackets' }),
   };
 
   const tierNumber = assertPositiveInteger(assertNonNegativeQuantity(tier, 'stingingTier'), 'stingingTier');
-  let price = cfg.tiers[Math.min(cfg.tiers.length - 1, tierNumber - 1)];
+  const levelPrices = legacySpecialty && Array.isArray(cfg.legacyTiers) ? cfg.legacyTiers : cfg.tiers;
+  let price = levelPrices[Math.min(levelPrices.length - 1, tierNumber - 1)];
   const mods = [];
   // v2 parity: raw addon values (not r'd). Base tiers stay r'd-matched.
   if (aggressive === 'MILD') { price += 75; mods.push('+$75 aggressive'); }
@@ -10879,7 +10973,7 @@ module.exports = {
   priceCommercialLawn, priceCommercialTreeShrub, priceCommercialPest,
   priceCommercialMosquito, priceCommercialTermiteBait, priceCommercialRodentBait, pricePalmInjection,
   normalizeCommercialTermiteScope, COMMERCIAL_TERMITE_AUTO_SCOPES,
-  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
+  priceMosquito, MOSQUITO_LOT_ABOVE_2_ACRES_REASON, MOSQUITO_LOT_ABOVE_2_ACRES_TEXT, MOSQUITO_LOT_ABOVE_2_ACRES_SQFT, MOSQUITO_RECORD_LOT_CAP_SQFT, MOSQUITO_LOT_AT_RECORD_CAP_TEXT, priceMosquitoMisting, priceTermiteBait, priceTermiteBond, priceTermiteStationRental, termiteProgramAnnualCostForStations, termiteAnnualPlanFeeForStations,
   termiteMonitoringMonthlyForStations,
   priceRodentBait, rodentBaitBracketFor, priceRodentTrapping,
   priceRodentTrappingFollowups, priceSanitation, priceBaitSetup,

@@ -153,7 +153,7 @@ function buildRows() {
       TYPICAL_FOOTPRINTS.flatMap((f) => PEST_PROFILES.map((p) => ({ f, p }))),
       ({ f, p }) => sp.pricePestControl({ footprint: f, propertyType: 'single_family', ...p.property }, { frequency: 'quarterly' }),
       (r) => (r.tiers || []).map((t) => t.perApp)),
-    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher. WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
+    notes: `Quarterly, bi-monthly, or monthly cadence; priced by home size, landscaping, and property features — larger, more complex homes price higher (a footprint above 5,500 sq ft adds $${Math.round(constants.PEST.aboveTablePer1000)} per application on the quarterly plan for each additional 1,000 sq ft; bi-monthly and monthly plans follow their cadence multipliers, about $${(constants.PEST.aboveTablePer1000 * constants.PEST.frequencyDiscounts.v2.bimonthly).toFixed(2)} and $${(constants.PEST.aboveTablePer1000 * constants.PEST.frequencyDiscounts.v2.monthly).toFixed(2)} per application). WaveGuard bundle tiers discount qualifying recurring services up to ${maxWaveGuardPct}%. A one-time $${Math.round(constants.PEST.initialFee)} initial service fee applies to standalone pest service only — waived when bundled with another recurring service or with annual prepay.`,
   }));
 
   add('cockroach_treatment', () => rangeRow({
@@ -213,7 +213,7 @@ function buildRows() {
         { footprint, stories: 1 },
         { rooms, method: 'CHEMICAL', severity, prepStatus: 'ready', occupancyType: 'singleFamily' }),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : (r.total ?? r.price))),
-    notes: '1-3 rooms; priced by rooms, severity, and home size. More rooms, heavier infestations, larger or multi-story homes, in-house heat/hybrid treatment, apartment occupancy, and under-prepared jobs price higher or are quoted after inspection.',
+    notes: '1-3 rooms; priced by rooms, severity, and home size (the first room is priced with those factors; each room after it adds a flat $349). More rooms, heavier infestations, larger or multi-story homes, in-house heat/hybrid treatment, apartment occupancy, and under-prepared jobs price higher or are quoted after inspection.',
   }));
 
   // Base and heavier-pressure residential feature sets — the pricer's
@@ -244,18 +244,21 @@ function buildRows() {
 
   add('wasp_hornet_removal', () => rangeRow({
     key: 'wasp_hornet_removal',
-    name: 'Wasp / Hornet / Stinging Insect Removal',
+    name: 'Wasp / Hornet / Yellow Jacket / Stinging Insect Removal',
     unit: 'per job',
     // priceStingingInsect is the pricer the exact estimate branch uses —
     // typical scope: common species, the two lower difficulty tiers, no or
-    // small removal, standard access.
+    // small removal, standard access. Yellow jackets (aerial and ground) price
+    // through the same levels as wasps and hornets (the species only names the
+    // line), so the range is $150 (level 1) to $350 (level 2 at $275 + the $75
+    // small-nest removal, owner 2026-11-26).
     values: sweepValues(
       ['PAPER_WASP', 'YJ_AERIAL', 'YJ_GROUND', 'MUD_DAUBER'].flatMap((species) =>
         [1, 2].flatMap((tier) =>
           ['NONE', 'SMALL'].map((removal) => ({ species, tier, removal })))),
       (opts) => sp.priceStingingInsect(opts),
       (r) => (r.quoteRequired || r.requiresManualReview ? NaN : r.price)),
-    notes: 'Priced by species, nest difficulty, removal scope, aggressiveness, height, and access — a harder-to-reach or more aggressive nest, larger removal scope, or a less common species prices higher. Tier-1 paper wasp and mud dauber nests are included at no charge with an active recurring pest plan.',
+    notes: 'Wasps, hornets and yellow jackets price on the same levels — by nest difficulty, removal scope, aggressiveness, height, and access: a harder-to-reach or more aggressive nest, or a larger removal scope, prices higher. Tier-1 paper wasp and mud dauber nests are included at no charge with an active recurring pest plan.',
   }));
 
   add('flea_elimination', () => rangeRow({
