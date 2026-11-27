@@ -193,6 +193,8 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | PUT | `/api/admin/notifications/:id/read` | admin-notifications |
 | PUT | `/api/admin/notifications/read-all` | admin-notifications |
 | GET | `/api/admin/notifications/unread-count` | admin-notifications |
+| GET | `/api/admin/product-mix-rules` | admin-product-mix-rules |
+| GET | `/api/admin/product-mix-rules/check` | admin-product-mix-rules |
 | GET | `/api/admin/projects` | admin-projects |
 | POST | `/api/admin/projects` | admin-projects |
 | GET | `/api/admin/projects/:id` | admin-projects |

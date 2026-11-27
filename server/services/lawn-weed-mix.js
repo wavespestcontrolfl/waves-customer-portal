@@ -236,4 +236,4 @@ async function decideMix({ base, lead, members, replacement, all, capped, svc, r
   return leadMix({ base, lead, members, isCapped, svc, readTemp });
 }
 
-module.exports = { SURFACTANT_MAX_TEMP_F, weedMixGroup, buildWeedMix, currentTempF };
+module.exports = { SURFACTANT_MAX_TEMP_F, SURFACTANT_CHECK_NOTE, weedMixGroup, buildWeedMix, currentTempF };
