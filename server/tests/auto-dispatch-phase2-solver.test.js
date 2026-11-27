@@ -133,6 +133,10 @@ describe('Phase 2: chronological window insertion avoids 999 append penalty on n
       const groupedScored = scoreOnSharedModel(svc, NEAR_NORTH, groupedCand, groupedDayStops, [], { targets: [] });
       expect(groupedScored.route_order_ids).toEqual(['g1a', 'g1b', '__candidate__', 's2']);
       expect(groupedScored.detour_minutes).toBeLessThan(10);
+      // Splitting a merged physical stop around __candidate__ is rejected by routeOrderCovers.
+      const splitCand = { ...groupedCand, route_order_ids: ['g1a', '__candidate__', 'g1b', 's2'] };
+      const splitScored = scoreOnSharedModel(svc, NEAR_NORTH, splitCand, groupedDayStops, [], { targets: [] });
+      expect(splitScored.route_order_ids).toBeUndefined();
     } finally {
       if (prevAdmin === undefined) delete process.env.GATE_ADMIN_ARRIVAL_WINDOWS;
       else process.env.GATE_ADMIN_ARRIVAL_WINDOWS = prevAdmin;

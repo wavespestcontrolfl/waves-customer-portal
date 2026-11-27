@@ -1482,6 +1482,19 @@ async function evaluatePlacementInSavepoint(sp, { context, row, date, autoDispat
   });
 }
 
+function hasInsertionIncompatibleRow(context) {
+  return Boolean(context && Array.isArray(context.rows)
+    && context.rows.some((r) => r && r.status !== 'completed'
+      && (r.technician_id === null || (!r.window_start && Boolean(r.time_window)))));
+}
+
+function savepointContextRefusal(context, strictPlace) {
+  if (!context) return 'no_context';
+  if (context.grouped) return 'grouped';
+  if (strictPlace && hasInsertionIncompatibleRow(context)) return 'incompatible_day_stop';
+  return null;
+}
+
 async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, autoDispatchPlace = false, startPoints = false, vanDepartureMin, expectedNeighbours = null }) {
   const row = await sp('scheduled_services').where({ id: serviceId })
     .first('scheduled_date', 'technician_id', 'window_start', 'window_end');
@@ -1501,8 +1514,8 @@ async function placeInSavepoint(sp, { serviceId, source, staffSave, lateDays, au
     conn: sp, serviceId, date, technicianId: row.technician_id,
     ...savepointContextOptions({ autoDispatchPlace, startPoints, vanDepartureMin }),
   });
-  if (!context) return refuse('no_context');
-  if (context.grouped) return refuse('grouped');
+  const ctxRefusal = savepointContextRefusal(context, strictPlace);
+  if (ctxRefusal) return refuse(ctxRefusal);
   if (staffSave === true) context.travel = staffSaveTravel(date);
   const fit = await evaluatePlacementInSavepoint(sp, { context, row, date, autoDispatchPlace, lateDays });
   // A refused check still numbers the visit by its arrival time for ordinary

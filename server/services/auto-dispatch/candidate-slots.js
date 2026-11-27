@@ -1336,7 +1336,12 @@ async function findValidCandidateSlots(service, prefs, baseCtx) {
     // (`arrivalInsert: true`), allow mid-route insertion into numbered days,
     // matching apply.js placeInRoute -> arrival-route.js placeMovedVisit.
     arrivalSearch: ctx.arrivalSearch === true,
-    ...(ctx.arrivalSearch === true ? { providerTravel: false } : {}),
+    ...(ctx.arrivalSearch === true ? {
+      providerTravel: false,
+      ...(service.service_type ? { serviceType: service.service_type } : {}),
+      ...(service.is_recurring === true ? { isRecurring: true } : {}),
+      ...(service.is_callback === true ? { isCallback: true } : {}),
+    } : {}),
     ...(ctx.arrivalSearch === true && ctx.groupContext && canPlaceInRoute(ctx.groupContext.siblings) ? { arrivalInsert: true } : {}),
     // GATE_AUTO_DISPATCH_DAY_RULES (config.dayRules, carried on ctx by
     // index.js): Sundays are searched too (move-rules.js takes one only when

@@ -307,14 +307,15 @@ function travelAllowance(opts) {
   return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
-function dayHasUnassignedStop(context) {
+function dayIncompatibleWithInsertion(context) {
   return Boolean(context && Array.isArray(context.rows)
-    && context.rows.some((r) => r && r.technician_id === null && r.status !== 'completed'));
+    && context.rows.some((r) => r && r.status !== 'completed'
+      && (r.technician_id === null || (!r.window_start && Boolean(r.time_window)))));
 }
 
 function insertionOptionsFor(opts, context) {
   if (opts.capacityPlacement === true) return { allowInsertion: true };
-  if (opts.arrivalSearch === true && opts.arrivalInsert === true && !dayHasUnassignedStop(context)) {
+  if (opts.arrivalSearch === true && opts.arrivalInsert === true && !dayIncompatibleWithInsertion(context)) {
     return { allowInsertion: true, insertionMargin: true };
   }
   return { allowInsertion: false };
@@ -411,6 +412,8 @@ async function findCapacitySlots(opts) {
           unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
           service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' '),
+          ...(opts.isRecurring === true ? { is_recurring: true } : {}),
+          ...(opts.isCallback === true ? { is_callback: true } : {}),
           // Several services under one joined label name no single planning-minutes row (placedVisitMinutes).
           ...(requestedServices.length > 1 ? { combined_services: true } : {}) } }),
       });

@@ -94,19 +94,28 @@ function physicalStopIndexById(phys) {
   return map;
 }
 
-// Verify a 1-to-1 physical-stop correspondence between `stops` and the solver's
-// `routeOrderIds` (which flattens multi-row groups to every member ID).
+// Verify a 1-to-1 contiguous physical-stop correspondence between `stops` and
+// the solver's `routeOrderIds` (which flattens multi-row groups to every member ID).
 function routeOrderCovers(stops, routeOrderIds) {
   if (!Array.isArray(routeOrderIds) || !routeOrderIds.length) return false;
   const phys = physicalStops(stops);
   const byId = physicalStopIndexById(phys);
   const seenPhys = new Set();
+  const closed = new Set();
+  let lastIdx = null;
   let candCount = 0;
   for (const raw of routeOrderIds) {
     const id = String(raw);
-    if (id === '__candidate__') { candCount += 1; continue; }
+    if (id === '__candidate__') {
+      if (lastIdx != null) closed.add(lastIdx);
+      lastIdx = null;
+      candCount += 1;
+      continue;
+    }
     const idx = byId.get(id);
-    if (idx == null) return false;
+    if (idx == null || closed.has(idx)) return false;
+    if (lastIdx != null && idx !== lastIdx) closed.add(lastIdx);
+    lastIdx = idx;
     seenPhys.add(idx);
   }
   return candCount === 1 && seenPhys.size === phys.length;
