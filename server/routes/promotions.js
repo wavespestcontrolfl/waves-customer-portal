@@ -209,8 +209,9 @@ router.get('/relevant', async (req, res, next) => {
     // Property-based relevance scoring
     const propertyRelevance = {};
     // Wood frame or older home → termite protection critical
-    if (property.constructionMaterial === 'WOOD_FRAME' || (property.yearBuilt && property.yearBuilt < 1990)) {
-      propertyRelevance.termite = { boost: 3, reason: `Your ${property.constructionMaterial === 'WOOD_FRAME' ? 'wood frame' : 'pre-1990'} home has elevated termite risk` };
+    const woodFrame = ['WOOD_FRAME', 'MIXED'].includes(property.constructionMaterial);
+    if (woodFrame || (property.yearBuilt && property.yearBuilt < 1990)) {
+      propertyRelevance.termite = { boost: 3, reason: `Your ${woodFrame ? 'wood frame' : 'pre-1990'} home has elevated termite risk` };
     }
     // Large lot or treatable area → lawn care
     if (property.lotSqft > 8000) {
