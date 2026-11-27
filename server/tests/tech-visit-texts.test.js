@@ -4,7 +4,7 @@
  * tech-visit-texts-route.test.js.
  */
 const { isPaymentScopedText } = require('../services/payment-status-contract');
-const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
+const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, hasNumberRun, windowStart, textWindowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
 
 const inbound = (over = {}) => ({ direction: 'inbound', message_type: 'inbound', status: 'received', message_body: 'The gate code changed', metadata: null, ...over });
 const outbound = (over = {}) => ({ direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: { human_authored: true }, ...over });
@@ -186,6 +186,44 @@ describe('windowStart', () => {
   });
 });
 
+// service_records stub for the last-visit read: records the predicates and returns { last } (or throws).
+function lastVisitDb(last, { fail = false } = {}) {
+  const seen = { where: [], raw: [] };
+  const q = {
+    where: (...a) => { seen.where.push(a); return q; },
+    whereRaw: (sql) => { seen.raw.push(sql); return q; },
+    max: () => q,
+    first: async () => { if (fail) throw new Error('read failed'); return { last }; },
+  };
+  const db = (table) => { seen.table = table; return q; };
+  db.seen = seen;
+  return db;
+}
+
+describe('textWindowStart (owner 2026-11-27: since the last visit, or 7 days back)', () => {
+  const svc = { customer_id: 'cust-1', scheduled_date: '2026-11-26' };
+  test('starts at ET midnight of the last completed visit when that is more than 7 days back', async () => {
+    const db = lastVisitDb('2026-10-20');
+    expect((await textWindowStart(db, svc)).toISOString()).toBe('2026-10-20T04:00:00.000Z'); // EDT midnight
+    expect(db.seen.table).toBe('service_records');
+    expect(db.seen.where).toEqual(expect.arrayContaining([['customer_id', 'cust-1'], ['service_date', '<', '2026-11-26']]));
+    expect(db.seen.raw.join(' ')).toMatch(/COALESCE\(status, 'completed'\) = 'completed'/);
+  });
+  test('a last visit inside the 7 days keeps the 7-day start', async () => {
+    expect((await textWindowStart(lastVisitDb('2026-11-24'), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
+  });
+  test('no earlier visit, or a failed read, keeps the 7-day start', async () => {
+    expect((await textWindowStart(lastVisitDb(null), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
+    expect((await textWindowStart(lastVisitDb('2026-10-01', { fail: true }), svc)).toISOString()).toBe('2026-11-19T05:00:00.000Z');
+  });
+  test('never reaches more than 120 days back', async () => {
+    expect((await textWindowStart(lastVisitDb('2025-06-01'), svc)).toISOString()).toBe('2026-07-29T04:00:00.000Z');
+  });
+  test('a pg DATE object as the last visit reads as its calendar day', async () => {
+    expect((await textWindowStart(lastVisitDb(new Date('2026-10-20T00:00:00Z')), svc)).toISOString()).toBe('2026-10-20T04:00:00.000Z');
+  });
+});
+
 // A tiny sms_log: applies the customer, the created_at bounds, the order, the limit and the offset the service asks for.
 // The raw-SQL pieces (provider twin, recruiting and reservation filters) are only recorded; withoutQueueParents covers the twin in JS.
 const col = (name) => String(name).replace(/^sl\./, '');
@@ -199,7 +237,9 @@ function fakeDb(rows, { tables = {}, failTable = null } = {}) {
   };
   // property_preferences / customer_access_codes: the stored codes the reader matches against
   const other = (table) => {
-    const q = { where: () => q, whereNotNull: () => q, select: async () => { if (failTable === table) throw new Error('read failed'); return tables[table] || []; } };
+    const q = { where: () => q, whereNotNull: () => q, whereRaw: () => q, max: () => q,
+      first: async () => ({ last: tables.service_records_last || null }),
+      select: async () => { if (failTable === table) throw new Error('read failed'); return tables[table] || []; } };
     return q;
   };
   const db = (table) => {
@@ -339,9 +379,20 @@ describe('visitTexts', () => {
     expect(sign).toHaveBeenCalledWith([media[0]]);
   });
 
+  test('owner 2026-11-27: a last visit more than 7 days back starts the texts there; older texts stay out', async () => {
+    const rows = [
+      row('before', '2026-10-19T15:00:00Z', { message_body: 'before the last visit' }),
+      row('after', '2026-10-21T15:00:00Z', { message_body: 'ants came back in the kitchen' }),
+      row('recent', '2026-11-24T15:00:00Z', { message_body: 'see you thursday' }),
+    ];
+    const out = await visitTexts(fakeDb(rows, { tables: { service_records_last: '2026-10-20' } }), SVC, { now: NOW, sign: async () => [] });
+    expect(out.since).toBe('2026-10-20');
+    expect(out.texts.map((t) => t.id)).toEqual(['after', 'recent']);
+  });
+
   test('a tapback in the window is neither shown nor counted', async () => {
     const out = await visitTexts(fakeDb([row('tap', '2026-11-22T15:00:00Z', { message_body: 'Liked \u201cWe will be there Tuesday\u201d' })]), SVC, { now: NOW, sign: async () => [] });
-    expect(out).toEqual({ texts: [], hidden: 0 });
+    expect(out).toEqual({ texts: [], hidden: 0, since: '2026-11-19' });
   });
 
   test('photos: only a stored key is linked; a failed signature never falls back to a stored url or a provider url', async () => {
@@ -414,7 +465,7 @@ describe('visitTexts', () => {
     const parts = ['\uff14\uff11\uff11\uff11', '\uff11\uff11\uff11\uff11', '\uff11\uff11\uff11\uff11', '\uff11\uff11\uff11\uff11'];
     const rows = parts.map((digits, i) => row(`f${i}`, `2026-11-22T1${i}:00:00Z`, { message_body: digits, metadata: img(`f${i}`) }));
     const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
-    expect(out).toEqual({ texts: [], hidden: 4 });
+    expect(out).toEqual({ texts: [], hidden: 4, since: '2026-11-19' });
     expect(sign).not.toHaveBeenCalled();
   });
 
@@ -486,7 +537,7 @@ describe('visitTexts', () => {
     const card = ['\u0664\u0661\u0661\u0661', '\u0661\u0661\u0661\u0661', '\u0661\u0661\u0661\u0661', '\u0661\u0661\u0661\u0661'];
     const rows = card.map((digits, i) => row(`d${i}`, `2026-11-22T1${i}:00:00Z`, { message_body: digits, metadata: { media: [{ key: `sms-media/inbound/d${i}`, contentType: 'image/jpeg' }] } }));
     const out = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
-    expect(out).toEqual({ texts: [], hidden: 4 });
+    expect(out).toEqual({ texts: [], hidden: 4, since: '2026-11-19' });
     expect(sign).not.toHaveBeenCalled();
   });
 

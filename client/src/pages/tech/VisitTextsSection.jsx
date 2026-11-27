@@ -1,4 +1,4 @@
-// Visit Brief section: "Customer texts · last 7 days" (GATE_TECH_VISIT_TEXTS, owner 2026-11-26).
+// Visit Brief section: "Customer texts · since <day>" (GATE_TECH_VISIT_TEXTS, owner 2026-11-26; since the last visit, owner 2026-11-27).
 // One read of GET /admin/schedule/:id/visit-texts, which the server scopes to the technician's own visit. Gate off
 // (404), no texts and no hidden count render nothing; a failed read renders one muted line, never a banner.
 // Photos are short-lived signed links the server mints for this request; they open full size in a new tab.
@@ -76,6 +76,14 @@ function useVisitTexts(serviceId, query, key, enabled, request) {
   return state;
 }
 
+// The day the texts start (the last visit, or 7 days back), as "since Nov 3". An answer without it reads as before.
+function sinceLabel(since) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(since || ''));
+  if (!m) return 'last 7 days';
+  const day = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12));
+  return `since ${day.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })}`;
+}
+
 // The photos the server did not sign (the photo switch is off, or one failed): counted, never left as a silent gap.
 function PhotosNotShown({ missing }) {
   if (!(missing > 0)) return null;
@@ -109,7 +117,7 @@ export default function VisitTextsSection({ service, byService, request }) {
   if (!texts.length && !hidden) return null;
   return (
     <div data-testid="visit-texts">
-      <div style={labelStyle}>Customer texts · last 7 days</div>
+      <div style={labelStyle}>Customer texts · {sinceLabel(data.since)}</div>
       {texts.map((t) => (
         <div key={t.id} style={{ marginBottom: 8 }}>
           <p style={mutedStyle}>{t.direction === 'inbound' ? 'Customer' : 'Office'} · {whenLabel(t.at)}</p>
