@@ -115,6 +115,9 @@ describe('Bouncie payload normalization', () => {
     expect(pointFromPayload({ eventType: 'tripEnd', end: { lat: 27.5, lon: -82.5 }, location: { lat: 26.9, lon: -82.0, timestamp: '2026-11-25T12:22:00.000Z' } }, 'trip-end'))
       .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:22:00.000Z' });
     expect(tripEndTime({ ts: '2026-11-25T12:23:00.000Z', start: { lat: 1, lon: 1 } })).toBe('2026-11-25T12:23:00.000Z');
+    expect(pointFromPayload({ eventType: 'tripEnd', end: { lat: 27.5, lon: -82.5 }, location: { lat: 26.9, lon: -82.0, ts: '2026-11-25T12:24:00.000Z' } }, 'trip-end'))
+      .toMatchObject({ lat: 27.5, reported_at: '2026-11-25T12:24:00.000Z' });
+    expect(tripEndTime({ end: { gps: { lat: 1, lon: 1, ts: '2026-11-25T12:25:00.000Z' } } })).toBe('2026-11-25T12:25:00.000Z');
     expect(pointFromPayload({ eventType: 'tripEnd', connect: { lat: 27.1, lon: -82.1 } }, 'trip-end')).toBeNull();
     expect(pointFromPayload({ eventType: 'tripEnd', end: { timestamp: 'x' } }, 'trip-end')).toBeNull();
   });

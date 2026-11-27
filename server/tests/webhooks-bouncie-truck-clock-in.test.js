@@ -252,6 +252,16 @@ describe('Bouncie tracking webhook, engine-off arrival', () => {
     expect(point).toMatchObject({ lat: '27.4386000', lng: '-82.3719000', reported_at: ENDED_AT, engine_off: true, position_source: 'last_location' });
   });
 
+  test('an end.ts wins over the time of an envelope location sample', async () => {
+    installDb({ lastLocation: null });
+    const payload = { eventType: 'tripEnd', imei: 'imei-1', transactionId: 't-4', end: { ts: ENDED_AT }, location: { lat: 26.9, lon: -82.0, timestamp: msBefore(5 * 60 * 1000) } };
+
+    await router._test.processTrackingEvent({ logId: 25, eventType: 'tripEnd', payload });
+
+    const { point } = gpsArrivalDetector.maybeMarkArrivedFromGps.mock.calls[0][0];
+    expect(point).toMatchObject({ lat: 26.9, reported_at: ENDED_AT, engine_off: true });
+  });
+
   test('a trip-end with end GPS but no end time takes the time from the envelope location', async () => {
     installDb({ lastLocation: null });
     const payload = { eventType: 'tripEnd', imei: 'imei-1', transactionId: 't-3', end: { gps: { lat: 27.51, lon: -82.52 } }, location: { lat: 26.9, lon: -82.0, timestamp: ENDED_AT } };

@@ -94,15 +94,27 @@ function pickLatestSample(payload = {}) {
   return best;
 }
 
+// A block's own time, in every shape pointFromSource reads (timestamp / ts, also nested gps,
+// location or position).
+function timeFromSource(source) {
+  if (!source || typeof source !== 'object') return null;
+  const gps = source.gps || source.location || source.position || null;
+  return firstPresent(source.timestamp, source.ts, gps?.timestamp, gps?.ts) ?? null;
+}
+
+// The time the trip-end block itself states (end, else disconnect).
+function explicitTripEndTime(payload = {}) {
+  return firstPresent(timeFromSource(payload.end), timeFromSource(payload.disconnect)) ?? null;
+}
+
 // The time a trip-end happened, read apart from which block gave the coordinates.
 function tripEndTime(payload = {}) {
   return firstPresent(
-    payload.end?.timestamp,
-    payload.end?.ts,
+    explicitTripEndTime(payload),
     payload.timestamp,
     payload.ts,
-    payload.location?.timestamp,
-    payload.position?.timestamp
+    timeFromSource(payload.location),
+    timeFromSource(payload.position)
   ) ?? null;
 }
 
@@ -252,6 +264,7 @@ function webhookDedupeKey(payload = {}, canonicalEventType = eventTypeFromPayloa
 }
 
 module.exports = {
+  explicitTripEndTime,
   tripEndTime,
   eventTypeFromPayload,
   extractImei,
