@@ -272,6 +272,17 @@ describe('the open estimate\'s setup fee and pay-for-the-year total (payment-sta
     expect(bodyNeedsPaymentRecheck('Your next visit is Tuesday.', { inboundMessage: 'I paid for the year already, when is my next visit?' })).toBe(false);
     expect(bodyNeedsPaymentRecheck('We can come Tuesday.', { inboundMessage: 'Can you come Tuesday?' })).toBe(false);
   });
+  // The scheduler's fire-time pre-screen reads no decision, so it sees the body with no customer text. That is enough: each rendered
+  // sentence selects the full recheck and the billing fingerprint by itself (a reply with none states no term: the bare answers above are held).
+  test('each estimate sentence selects the send recheck and the fingerprint from the body alone, the gate on or off', () => {
+    const { bodyNeedsPaymentRecheck, bodyNeedsBillingBoundaryCheck } = require('../services/sms-amount-recheck');
+    for (const gate of ['true', null]) {
+      if (gate) process.env[GATE] = gate; else delete process.env[GATE];
+      for (const body of [PRICE, FEE, FEE_PREPAY, WAIVED, NO_FEE, UNNAMED_FEE, UNNAMED_WAIVED, UNNAMED_NO_FEE, TOTAL]) {
+        expect({ body, recheck: bodyNeedsPaymentRecheck(`Hi Sam, ${body} Thanks!`), fingerprint: bodyNeedsBillingBoundaryCheck(body) }).toEqual({ body, recheck: true, fingerprint: true });
+      }
+    }
+  });
 
   test.each([
     // a setup sentence against a question it does not answer
