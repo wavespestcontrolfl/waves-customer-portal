@@ -101,12 +101,13 @@ describe('fetchOpenTimesData with a website-engine offer', () => {
   });
 
   test('an empty service key, nothing offered, or an engine error leaves OPEN TIMES out and never throws', async () => {
-    await expect(drafter.fetchOpenTimesData(args({ schedulerOffer: offer({ serviceKey: '' }) }))).resolves.toEqual({ block: null, days: [] });
+    // gap 1: each empty result carries the reason code the draft row stores
+    await expect(drafter.fetchOpenTimesData(args({ schedulerOffer: offer({ serviceKey: '' }) }))).resolves.toEqual({ block: null, days: [], withheld: 'no_book_service' });
     expect(textOfferDays).not.toHaveBeenCalled();
     textOfferDays.mockResolvedValueOnce(null);
-    await expect(drafter.fetchOpenTimesData(args())).resolves.toEqual({ block: null, days: [] });
+    await expect(drafter.fetchOpenTimesData(args())).resolves.toEqual({ block: null, days: [], withheld: 'no_picker_times:website_engine' });
     textOfferDays.mockRejectedValueOnce(new Error('engine down'));
-    await expect(drafter.fetchOpenTimesData(args())).resolves.toEqual({ block: null, days: [] });
+    await expect(drafter.fetchOpenTimesData(args())).resolves.toEqual({ block: null, days: [], withheld: 'fetch_failed' });
   });
 });
 
