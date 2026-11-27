@@ -3851,11 +3851,21 @@ function estimateHasNoYear1PrepayPercent(estimateData = {}) {
 function annualPrepayDiscountComponents({ recurringServices = [], estimateData = {} } = {}) {
   // Owner ruling 2026-11-05 + 2026-11-27 (GATE_NO_YEAR1_PREPAY_DISCOUNT):
   // New estimates stamped year1PrepayNoPercent = true carry 0% annual prepay
-  // discount in Year 1 across all mixes (unwaived solo pest/mosquito keep the
-  // $99 setup waiver; setup-waived offers like One-Time→Plan and multi-service
-  // bundles get 0% in Year 1; 5% starts on Year 2+ renewals). Pre-gate quotes
-  // without the stamp keep their exact historical 5% replay math.
-  if (estimateHasNoYear1PrepayPercent(estimateData)) {
+  // discount in Year 1 across monthly/quarterly/6-week mixes (unwaived solo
+  // pest/mosquito keep the $99 setup waiver; setup-waived offers like
+  // One-Time→Plan and multi-service bundles get 0% in Year 1; 5% starts on
+  // Year 2+ renewals). Mandatory-prepay Subterranean Termite Protection annual
+  // plans have no monthly alternative (TERMITE_ANNUAL_PLAN_REQUIRES_PREPAY),
+  // never stack WaveGuard bundle discounts, and freeze parent.prepay_amount as
+  // the legally disclosed Year 2+ renewal fee (termite-annual-renewal-charge),
+  // so they stay on their annual-plan pricing contract. Pre-gate quotes without
+  // the stamp keep their exact historical 5% replay math.
+  const isMandatoryTermiteAnnualPlan = selectedTermiteAnnualPlanRows(estimateData).length > 0
+    || (Array.isArray(recurringServices) && recurringServices.some(
+      (svc) => String(svc?.service || '').toLowerCase() === 'termite_bait'
+        && String(svc?.plan || '').toLowerCase() === 'annual_protection',
+    ));
+  if (estimateHasNoYear1PrepayPercent(estimateData) && !isMandatoryTermiteAnnualPlan) {
     return { discountRate: 0, protectedFloor: 0 };
   }
   // Solo pest/mosquito mixes normally earn NO prepay % — their incentive is

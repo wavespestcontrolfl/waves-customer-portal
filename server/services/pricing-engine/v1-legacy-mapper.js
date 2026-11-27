@@ -1571,6 +1571,7 @@ function mapV1ToLegacyShape(v1Result) {
           ...(s.retainerBilling ? { retainerBilling: s.retainerBilling } : {}),
           ...(s.atticSqFt !== undefined ? { atticSqFt: s.atticSqFt } : {}),
           ...(s.surfaceSqFt !== undefined ? { surfaceSqFt: s.surfaceSqFt } : {}),
+          ...(s.pricingKnobs && typeof s.pricingKnobs === 'object' ? { pricingKnobs: s.pricingKnobs } : {}),
           source: s.source,
           pricingModel: s.pricingModel,
           legacyPricingModel: s.legacyPricingModel,

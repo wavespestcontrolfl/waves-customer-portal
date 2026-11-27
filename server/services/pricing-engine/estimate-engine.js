@@ -2392,6 +2392,7 @@ function generateEstimate(input) {
     // fields into the options the engine reads. Legacy wall* keys still accepted.
     const result = priceBoraCare(property, {
       ...boraCareOptions,
+      ...(input.boraCarePricingKnobs && typeof input.boraCarePricingKnobs === 'object' ? { knobs: input.boraCarePricingKnobs } : {}),
       surfaceLinearFt: boraCareOptions.surfaceLinearFt ?? boraCareOptions.wallLinearFt
         ?? input.boraCareSurfaceLinearFt ?? input.boraCareWallLinearFt,
       surfaceHeightFt: boraCareOptions.surfaceHeightFt ?? boraCareOptions.wallHeightFt

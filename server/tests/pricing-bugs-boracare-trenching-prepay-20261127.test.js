@@ -227,6 +227,41 @@ describe('Termite trenching one-way upward catalog cost ratchet (db-bridge)', ()
     await expect(syncConstantsFromDB(dbDrop)).resolves.toBe(true);
     expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(174.72);
   });
+
+  test('keeps the last published trenching catalog cost active while a concurrent refresh awaits the catalog read', async () => {
+    const dbRise = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 250, unit_size_oz: 78, best_vendor_pricing_id: 'vp-rise' }],
+      approvedVendorPricingRows: [{ id: 'vp-rise' }],
+    });
+    await expect(syncConstantsFromDB(dbRise)).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
+
+    let releaseCatalog;
+    const catalogPaused = new Promise((resolve) => { releaseCatalog = resolve; });
+    let observedMidRefreshCost = null;
+    const dbSlow = makePricingDb({
+      pricingConfigRows: [{ config_key: 'onetime_trenching', data: {} }],
+      catalogRows: [{ name: 'Termidor SC', best_price: 260, unit_size_oz: 78, best_vendor_pricing_id: 'vp-next' }],
+      approvedVendorPricingRows: [{ id: 'vp-next' }],
+    });
+    const origHasTable = dbSlow.schema.hasTable;
+    dbSlow.schema.hasTable = jest.fn(async (table) => {
+      if (table === 'products_catalog') {
+        observedMidRefreshCost = constants.SPECIALTY.trenching.products.termidor_sc.containerCost;
+        await catalogPaused;
+      }
+      return origHasTable(table);
+    });
+
+    const syncPromise = syncConstantsFromDB(dbSlow);
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    expect(observedMidRefreshCost).toBe(250);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(250);
+    releaseCatalog();
+    await expect(syncPromise).resolves.toBe(true);
+    expect(constants.SPECIALTY.trenching.products.termidor_sc.containerCost).toBe(260);
+  });
 });
 
 describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates', () => {
@@ -584,5 +619,70 @@ describe('GATE_NO_YEAR1_PREPAY_DISCOUNT — no 5% Year-1 prepay on new estimates
     });
     expect(soloPestWaived.prepayLineDescription).toBe('WaveGuard Membership — 12 months prepaid (setup fee waived)');
     expect(soloPestWaived.prepayNotes).toContain('$99.00 setup fee waived');
+  });
+
+  test('mandatory-prepay Subterranean Termite annual plans keep their 5% annual prepay rate and renewal fee even under GATE_NO_YEAR1_PREPAY_DISCOUNT', () => {
+    const termiteAnnualData = {
+      pricingMetadata: { year1PrepayNoPercent: true },
+      result: {
+        results: { tmBait: { plan: 'annual_protection', annual: 1000 } },
+        recurring: { services: [{ service: 'termite_bait', plan: 'annual_protection', annual: 1000 }] },
+      },
+    };
+    const comps = annualPrepayDiscountComponents({
+      recurringServices: [{ service: 'termite_bait', plan: 'annual_protection', annual: 1000 }],
+      estimateData: termiteAnnualData,
+    });
+    expect(comps.discountRate).toBeCloseTo(0.05, 5);
+    const resolved = resolveAnnualPrepayInvoiceTotal({
+      baseAnnual: 1000,
+      recurringServices: [{ service: 'termite_bait', plan: 'annual_protection', annual: 1000 }],
+      estimateData: termiteAnnualData,
+    });
+    expect(resolved).toEqual({ amount: 950, discount: 50, rate: 0.05 });
+  });
+
+  test('pre-fix unstamped Bora-Care quote keeps its original base price when adding another service after snake_case DB sync', async () => {
+    const origBora = { ...constants.SPECIALTY.boraCare };
+    try {
+      // Price a Bora-Care attic quote under the historical pre-fix defaults (galCost 91.98, coverage 275, equip 17.50, margin 0.45).
+      const preFixEst = generateEstimate({
+        ...PROPERTY,
+        services: { boraCare: { atticSqFt: 1500 } },
+      });
+      const preFixLine = preFixEst.lineItems.find((l) => l.service === 'bora_care');
+      expect(preFixLine).toBeDefined();
+      // Strip pricingKnobs to simulate a quote persisted before the snake_case DB fix.
+      const { pricingKnobs: _stripped, ...unstampedLine } = preFixLine;
+      const savedQuote = {
+        estimate_data: {
+          inputs: { ...PROPERTY, services: { boraCare: { atticSqFt: 1500 } } },
+          engineResult: { ...preFixEst, lineItems: [unstampedLine] },
+        },
+        monthly_total: 0,
+        annual_total: 0,
+        onetime_total: preFixLine.price,
+        waveguard_tier: 'Bronze',
+      };
+
+      // Simulate snake_case DB config raising Bora-Care costs after the quote was saved.
+      constants.SPECIALTY.boraCare.galCost = 140;
+      constants.SPECIALTY.boraCare.equipCost = 50;
+      const freshAfterSync = generateEstimate({
+        ...PROPERTY,
+        services: { boraCare: { atticSqFt: 1500 } },
+      });
+      const higherLiveLine = freshAfterSync.lineItems.find((l) => l.service === 'bora_care');
+      expect(higherLiveLine.price).toBeGreaterThan(preFixLine.price);
+
+      const rev = await buildEstimateServiceRevisionDraft(savedQuote, 'lawn_care');
+      expect(rev.status).toBe('priced');
+      const oneTime = rev.draftEstimateData.result?.oneTime || {};
+      const revisedBora = [...(oneTime.items || []), ...(oneTime.specItems || [])].find((item) => item.service === 'bora_care');
+      expect(revisedBora).toBeDefined();
+      expect(revisedBora.price).toBe(preFixLine.price);
+    } finally {
+      Object.assign(constants.SPECIALTY.boraCare, origBora);
+    }
   });
 });

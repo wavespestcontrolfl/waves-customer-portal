@@ -7691,6 +7691,23 @@ function priceTrenching(property = {}, options = {}, replay) {
   };
 }
 
+function resolveBoraCareBasis(knobs) {
+  const k = knobs && typeof knobs === 'object' ? knobs : null;
+  const pick = (key, live, allowZero = false) => {
+    const v = k ? Number(k[key]) : NaN;
+    return Number.isFinite(v) && (allowZero ? v >= 0 : v > 0) ? v : live;
+  };
+  return {
+    galCost: pick('galCost', SPECIALTY.boraCare.galCost),
+    coverage: pick('coverage', SPECIALTY.boraCare.coverage),
+    equipCost: pick('equipCost', SPECIALTY.boraCare.equipCost, true),
+    marginDivisor: pick('marginDivisor', SPECIALTY.boraCare.marginDivisor),
+    minJobPrice: pick('minJobPrice', SPECIALTY.boraCare.minJobPrice, true),
+    surfaceLaborSqFtPerHour: pick('surfaceLaborSqFtPerHour', SPECIALTY.boraCare.surfaceLaborSqFtPerHour),
+    laborRate: pick('laborRate', GLOBAL.LABOR_RATE),
+  };
+}
+
 function priceBoraCare(input, options = {}) {
   const measurement = resolveBoraCareSqFt(input, options);
   const surface = resolveBoraCareSurfaceSqFt(input, options);
@@ -7768,18 +7785,19 @@ function priceBoraCare(input, options = {}) {
   // the attic-access overhead the floors were built for, so it prices on actual
   // gallons + actual labor and is floored at minJobPrice instead. Attic jobs
   // (attic-only or attic+surface) keep the proven 3-gallon / 2-hour floors.
+  const basis = resolveBoraCareBasis(options?.knobs);
   const surfaceOnly = !hasAttic;
   const gallonsFloor = surfaceOnly ? 1 : 3;
-  const gallons = Math.max(gallonsFloor, Math.ceil(totalSqFt / SPECIALTY.boraCare.coverage));
+  const gallons = Math.max(gallonsFloor, Math.ceil(totalSqFt / basis.coverage));
   const isMultiDay = totalSqFt > 4500;
   const laborHrs = isMultiDay
     ? Math.min(10, Math.max(6, 1.5 + totalSqFt / 800))
     : surfaceOnly
-      ? Math.min(6, totalSqFt / SPECIALTY.boraCare.surfaceLaborSqFtPerHour)
+      ? Math.min(6, totalSqFt / basis.surfaceLaborSqFtPerHour)
       : Math.min(6, Math.max(2, 1.5 + totalSqFt / 1000));
-  const cost = gallons * SPECIALTY.boraCare.galCost + laborHrs * GLOBAL.LABOR_RATE + SPECIALTY.boraCare.equipCost;
-  const rawPrice = Math.round(cost / SPECIALTY.boraCare.marginDivisor);
-  const price = surfaceOnly ? Math.max(SPECIALTY.boraCare.minJobPrice, rawPrice) : rawPrice;
+  const cost = gallons * basis.galCost + laborHrs * basis.laborRate + basis.equipCost;
+  const rawPrice = Math.round(cost / basis.marginDivisor);
+  const price = surfaceOnly ? Math.max(basis.minJobPrice, rawPrice) : rawPrice;
 
   return {
     ...baseResult,
@@ -7789,6 +7807,7 @@ function priceBoraCare(input, options = {}) {
     cost: Math.round(cost),
     price,
     quoteRequired: false,
+    pricingKnobs: basis,
   };
 }
 

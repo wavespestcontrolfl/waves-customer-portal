@@ -1056,18 +1056,61 @@ function trenchingConfigSignature(product) {
   return `${Number(product.containerCost)}:${Number(product.containerOz)}:${String(product.catalogProductName || '').trim()}`;
 }
 
-function resetTrenchingProductDefaults() {
-  const trenching = constants.SPECIALTY.trenching;
-  if (!trenching) return;
-  trenching.linkContainerCostsToCatalog = true;
+function applyTrenchingOverlayToStaged(staged, data) {
+  if (!data || typeof data !== 'object') return;
+  const strFields = [
+    ['label', ['label']],
+    ['catalogProductName', ['catalogProductName', 'catalog_product_name']],
+    ['activeIngredient', ['activeIngredient', 'active_ingredient']],
+    ['chemistryType', ['chemistryType', 'chemistry_type']],
+    ['positioning', ['positioning']],
+    ['defaultWarrantyPositioning', ['defaultWarrantyPositioning', 'default_warranty_positioning']],
+    ['warrantyRisk', ['warrantyRisk', 'warranty_risk']],
+    ['standardConcentrationLabel', ['standardConcentrationLabel', 'standard_concentration_label']],
+    ['highConcentrationLabel', ['highConcentrationLabel', 'high_concentration_label']],
+  ];
+  const numFields = [
+    ['containerCost', ['containerCost', 'container_cost']],
+    ['containerOz', ['containerOz', 'container_oz']],
+    ['productOzPerFinishedGallonAtStandardRate', ['productOzPerFinishedGallonAtStandardRate', 'product_oz_per_finished_gallon_at_standard_rate']],
+    ['productOzPerFinishedGallonAtHighRate', ['productOzPerFinishedGallonAtHighRate', 'product_oz_per_finished_gallon_at_high_rate']],
+  ];
+  for (const [targetKey, keys] of strFields) setString(staged, targetKey, firstDefinedKey(data, keys));
+  for (const [targetKey, keys] of numFields) setNumber(staged, targetKey, firstDefinedKey(data, keys), Number);
+  setStringArray(staged, 'warnings', data.warnings);
+}
+
+function stageTrenchingCatalogState(ot = null) {
+  const linkFlag = ot ? firstDefinedKey(ot, ['link_container_costs_to_catalog', 'linkContainerCostsToCatalog']) : undefined;
+  const linkContainerCostsToCatalog = typeof linkFlag === 'boolean' ? linkFlag : true;
+  const trenchingProducts = (ot && (ot.products || ot.product_costs)) || {};
+  const products = {};
   for (const [key, defaults] of Object.entries(TRENCHING_PRODUCT_DEFAULTS)) {
+    const live = constants.SPECIALTY.trenching?.products?.[key] || {};
+    const staged = {
+      ...live,
+      containerCost: defaults.containerCost,
+      containerOz: defaults.containerOz,
+      catalogProductName: defaults.catalogProductName,
+    };
+    delete staged.configuredContainerCost;
+    delete staged.configuredContainerOz;
+    applyTrenchingOverlayToStaged(staged, (ot && (trenchingProducts[key] || ot[key])) || null);
+    products[key] = staged;
+  }
+  return { linkContainerCostsToCatalog, products };
+}
+
+function publishStagedTrenchingCatalogState(staged) {
+  const trenching = constants.SPECIALTY.trenching;
+  if (!trenching || !staged) return;
+  trenching.linkContainerCostsToCatalog = staged.linkContainerCostsToCatalog;
+  for (const [key, nextProduct] of Object.entries(staged.products)) {
     const target = trenching.products?.[key];
     if (!target) continue;
-    target.containerCost = defaults.containerCost;
-    target.containerOz = defaults.containerOz;
-    target.catalogProductName = defaults.catalogProductName;
-    delete target.configuredContainerCost;
-    delete target.configuredContainerOz;
+    Object.assign(target, nextProduct);
+    if (nextProduct.configuredContainerCost === undefined) delete target.configuredContainerCost;
+    if (nextProduct.configuredContainerOz === undefined) delete target.configuredContainerOz;
   }
 }
 
@@ -1109,16 +1152,20 @@ function restoreLastSyncedTrenchingCatalogCosts(entries) {
   }
 }
 
-async function syncTrenchingContainerCostsFromCatalog(db) {
-  const trenching = constants.SPECIALTY.trenching;
-  if (trenching?.linkContainerCostsToCatalog !== true) {
+async function syncTrenchingContainerCostsFromCatalog(db, staged = null) {
+  const targetState = staged || stageTrenchingCatalogState(null);
+  if (targetState.linkContainerCostsToCatalog !== true) {
     lastSyncedTrenchingCatalogCost.clear();
+    publishStagedTrenchingCatalogState(targetState);
     return;
   }
-  const entries = Object.entries(trenching.products || {}).filter(
+  const entries = Object.entries(targetState.products || {}).filter(
     ([, product]) => typeof product?.catalogProductName === 'string' && product.catalogProductName.trim()
   );
-  if (!entries.length) return;
+  if (!entries.length) {
+    publishStagedTrenchingCatalogState(targetState);
+    return;
+  }
   try {
     const byName = await loadApprovedCatalogRows(
       db,
@@ -1132,6 +1179,9 @@ async function syncTrenchingContainerCostsFromCatalog(db) {
     restoreLastSyncedTrenchingCatalogCosts(entries);
     console.warn('[pricing-engine] trenching inventory-price link skipped (retaining last synced costs):', err.message);
   }
+  // Publish staged config + catalog costs synchronously in one step AFTER all awaits,
+  // so concurrent quote requests never see a transient pre-catalog reset value.
+  publishStagedTrenchingCatalogState(targetState);
 }
 
 // Catalog rows the pricing engine may price from: ACTIVE, priced rows whose
@@ -2268,7 +2318,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
         constants.SPECIALTY.wdo.brackets = mapped;
       }
     }
-    resetTrenchingProductDefaults();
+    const stagedTrenching = stageTrenchingCatalogState(config.onetime_trenching || null);
     if (config.onetime_trenching) {
       const ot = config.onetime_trenching;
       if (ot.per_lf_dirt != null) constants.SPECIALTY.trenching.dirtPerLF = r(Number(ot.per_lf_dirt));
@@ -2289,29 +2339,6 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
       setNumber(constants.SPECIALTY.trenching, 'baselineTrenchDepthFt', ot.baselineTrenchDepthFt ?? ot.baseline_trench_depth_ft, Number);
       setNumber(constants.SPECIALTY.trenching, 'trenchDepthPremiumPerHalfFt', ot.trenchDepthPremiumPerHalfFt ?? ot.trench_depth_premium_per_half_ft, Number);
       setNumber(constants.SPECIALTY.trenching, 'highRatePriceMultiplier', ot.highRatePriceMultiplier ?? ot.high_rate_price_multiplier, Number);
-      setBoolean(constants.SPECIALTY.trenching, 'linkContainerCostsToCatalog', firstDefinedKey(ot, ['link_container_costs_to_catalog', 'linkContainerCostsToCatalog']));
-      const trenchingProducts = ot.products || ot.product_costs || {};
-      const applyTrenchingProductOverlay = (key, data = {}) => {
-        const target = constants.SPECIALTY.trenching.products?.[key];
-        if (!target || !data || typeof data !== 'object') return;
-        setString(target, 'label', data.label);
-        setString(target, 'catalogProductName', firstDefinedKey(data, ['catalogProductName', 'catalog_product_name']));
-        setString(target, 'activeIngredient', data.activeIngredient ?? data.active_ingredient);
-        setString(target, 'chemistryType', data.chemistryType ?? data.chemistry_type);
-        setString(target, 'positioning', data.positioning);
-        setString(target, 'defaultWarrantyPositioning', data.defaultWarrantyPositioning ?? data.default_warranty_positioning);
-        setString(target, 'warrantyRisk', data.warrantyRisk ?? data.warranty_risk);
-        setString(target, 'standardConcentrationLabel', data.standardConcentrationLabel ?? data.standard_concentration_label);
-        setString(target, 'highConcentrationLabel', data.highConcentrationLabel ?? data.high_concentration_label);
-        setNumber(target, 'containerCost', data.containerCost ?? data.container_cost, Number);
-        setNumber(target, 'containerOz', data.containerOz ?? data.container_oz, Number);
-        setNumber(target, 'productOzPerFinishedGallonAtStandardRate', data.productOzPerFinishedGallonAtStandardRate ?? data.product_oz_per_finished_gallon_at_standard_rate, Number);
-        setNumber(target, 'productOzPerFinishedGallonAtHighRate', data.productOzPerFinishedGallonAtHighRate ?? data.product_oz_per_finished_gallon_at_high_rate, Number);
-        setStringArray(target, 'warnings', data.warnings);
-      };
-      ['termidor_sc', 'taurus_sc', 'bifen_it', 'talstar_p'].forEach((key) => {
-        applyTrenchingProductOverlay(key, trenchingProducts[key] || ot[key]);
-      });
       if (ot.applicationRates || ot.application_rates) {
         mergePlainObject(constants.SPECIALTY.trenching.applicationRates, ot.applicationRates || ot.application_rates);
       }
@@ -2595,7 +2622,7 @@ async function _syncConstantsFromDBUnserialized(dbInstance) {
     }
 
     await syncPreSlabContainerCostsFromCatalog(db);
-    await syncTrenchingContainerCostsFromCatalog(db);
+    await syncTrenchingContainerCostsFromCatalog(db, stagedTrenching);
     await syncTermiteStationCostsFromCatalog(db);
     await syncMosquitoProductCostsFromCatalog(db);
 

@@ -380,13 +380,50 @@ function trenchingKnobSignalForReplay(estData = {}) {
   return null;
 }
 
-// Both termiticide pins as engine-input overrides: only the ones the stored rows carry, so Object.assign adds nothing else.
+// Bora-Care quote-time knobs (owner 2026-11-27): wiring the DB's snake_case
+// Bora-Care settings (`bc_gal`, `bc_cov`, `bc_equip`, `margin_divisor`,
+// `min_job_price`, `surface_labor_sqft_per_hr`) changes live Bora-Care prices.
+// Stamped quotes replay verbatim; unstamped Bora-Care rows predate the fix and
+// replay the exact pre-fix in-code defaults so adding another service or
+// revising an existing quote never shifts its quoted Bora-Care base price.
+const PRE_SNAKE_CASE_BORACARE_KNOBS = Object.freeze({
+  galCost: 91.98,
+  coverage: 275,
+  equipCost: 17.50,
+  marginDivisor: 0.45,
+  minJobPrice: 150,
+  surfaceLaborSqFtPerHour: 640,
+  laborRate: 35,
+});
+
+function boraCareKnobSignalForReplay(estData = {}) {
+  const { storedBoraCareRows } = require('./estimate-result-container');
+  const rows = storedBoraCareRows(estData);
+  if (!rows.length) return null;
+  for (const row of rows) {
+    const k = row.pricingKnobs;
+    if (k && typeof k === 'object' && !Array.isArray(k)) {
+      const galCost = storedFigure(k.galCost);
+      const coverage = storedFigure(k.coverage);
+      const marginDivisor = storedFigure(k.marginDivisor);
+      if (Number.isFinite(galCost) && galCost > 0 && Number.isFinite(coverage) && coverage > 0
+        && Number.isFinite(marginDivisor) && marginDivisor > 0) {
+        return { ...PRE_SNAKE_CASE_BORACARE_KNOBS, ...k };
+      }
+    }
+  }
+  return { ...PRE_SNAKE_CASE_BORACARE_KNOBS };
+}
+
+// Termiticide and wood-treatment pins as engine-input overrides: only the ones the stored rows carry, so Object.assign adds nothing else.
 function termiticideReplayOverrides(estData = {}) {
   const preSlab = preSlabTermiticideKnobSignalForReplay(estData);
   const trenching = trenchingKnobSignalForReplay(estData);
+  const boraCare = boraCareKnobSignalForReplay(estData);
   return {
     ...(preSlab ? { preSlabTermiticidePricingKnobs: preSlab } : {}),
     ...(trenching ? { trenchingTermiticidePricingKnobs: trenching } : {}),
+    ...(boraCare ? { boraCarePricingKnobs: boraCare } : {}),
   };
 }
 
@@ -491,6 +528,7 @@ module.exports = {
   mistingKnobSignalForReplay,
   preSlabTermiticideKnobSignalForReplay,
   trenchingKnobSignalForReplay,
+  boraCareKnobSignalForReplay,
   termiticideReplayOverrides,
   PRE_STAMP_TERMITE_STATION_COST,
   treeShrubKnobSignalForReplay,

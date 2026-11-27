@@ -105,6 +105,7 @@ function storedMistingRows(estimateData, options = {}) {
 // wrote the same rows with a name and no service, 'Pre-Slab' and 'Trenching': a row of that shape is the line too.
 const PRE_SLAB_ROWS = { services: new Set(['pre_slab_termiticide', 'pre_slab_termidor']), clientName: 'Pre-Slab' };
 const TRENCHING_ROWS = { services: new Set(['trenching']), clientName: 'Trenching' };
+const BORA_CARE_ROWS = { services: new Set(['bora_care']), clientName: 'Bora-Care' };
 const isLineRow = (row, line) => isRecord(row) && (line.services.has(row.service) || (!row.service && row.name === line.clientName));
 function termiticideRowsIn(container, line) {
   const nested = container.results && container.results.oneTime;
@@ -123,6 +124,7 @@ function storedTermiticideRows(estimateData, options, line) {
 }
 const storedPreSlabTermiticideRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, PRE_SLAB_ROWS);
 const storedTrenchingRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, TRENCHING_ROWS);
+const storedBoraCareRows = (estimateData, options = {}) => storedTermiticideRows(estimateData, options, BORA_CARE_ROWS);
 
 // The stored rows of the rodent exclusion (whole-home terms replay, GATE_EXCLUSION_WHOLE_HOME), from the same
 // authoritative container and under every shape a row rides in, like the area add-on rows above.
@@ -256,5 +258,5 @@ function resolveEstimateLines(data, { pricingAuthority = null, collectors, setup
 const proposalIsAuthoritative = (data) => data?.proposal?.enabled === true;
 
 module.exports = {
-  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
+  proposalIsAuthoritative, authoritativeEstimateResult, resolveEstimateLines, containerPricesAnything, storedEstimateContainer, storedAreaAddOnRows, storedPreSlabTermiticideRows, storedTrenchingRows, storedBoraCareRows, storedMistingRows, storedRodentExclusionRows, exclusionRowsIn,
 };
