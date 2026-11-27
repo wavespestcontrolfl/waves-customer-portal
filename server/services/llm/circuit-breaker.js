@@ -87,11 +87,39 @@ function isAvailable(provider, { now = null } = {}) {
 }
 
 /**
- * Ask the breaker whether `provider` may be attempted right now.
- * Returns `{ allow: true, isProbe: boolean, probeId: number|null, generation: number|null }`
- * or `{ allow: false, reason: 'circuit_open', isProbe: false, probeId: null, generation: number|null }`.
+ * Reserve a usable downstream backup provider before skipping an open primary.
+ * A closed backup needs no probe reservation; an open/half-open backup whose
+ * cooldown elapsed has its single recovery probe claimed atomically so
+ * concurrent chains cannot all skip their primary onto the same backup.
  */
-function beforeAttempt(provider, { hasBackup = false, now = null } = {}) {
+function reserveBackup(providers = [], { now = null } = {}) {
+  for (const provider of providers) {
+    if (!provider) continue;
+    const breaker = breakers.get(provider);
+    if (!breaker || breaker.state === 'closed') {
+      return { available: true, reservation: null };
+    }
+    const gate = breaker.admitAttempt(now ?? Date.now(), { cooldownMs: cooldownMs() });
+    if (gate.allow) {
+      return { available: true, reservation: { provider, gate } };
+    }
+  }
+  return { available: false, reservation: null };
+}
+
+function releaseReservation(reservation) {
+  if (!reservation?.provider || reservation?.gate?.probeId == null) return;
+  const breaker = breakers.get(reservation.provider);
+  if (breaker) breaker.releaseProbe(reservation.gate.probeId);
+}
+
+/**
+ * Ask the breaker whether `provider` may be attempted right now.
+ * Callers may pass `backupProviders` (downstream routes able to serve the
+ * payload) so an open primary atomically verifies/reserves a backup before
+ * returning `{ allow: false, reason: 'circuit_open', backupReservation }`.
+ */
+function beforeAttempt(provider, { hasBackup = false, backupProviders = null, now = null } = {}) {
   if (!llmCircuitBreakerLive() || !provider) {
     return { allow: true, isProbe: false, probeId: null, generation: null };
   }
@@ -99,10 +127,19 @@ function beforeAttempt(provider, { hasBackup = false, now = null } = {}) {
   if (breaker.state === 'closed') {
     return { allow: true, isProbe: false, probeId: null, generation: breaker.generation };
   }
-  const gate = breaker.admitAttempt(now ?? Date.now(), { cooldownMs: cooldownMs() });
+  const ts = now ?? Date.now();
+  const gate = breaker.admitAttempt(ts, { cooldownMs: cooldownMs() });
+  if (gate.allow) return gate;
+  if (Array.isArray(backupProviders)) {
+    const reserved = reserveBackup(backupProviders, { now: ts });
+    if (reserved.available) {
+      return { ...gate, backupReservation: reserved.reservation };
+    }
+    return { allow: true, isProbe: false, probeId: null, generation: breaker.generation };
+  }
   // Mandatory/final legs always run, but still claim a free post-cooldown probe
   // so a failing backup re-opens instead of staying indefinitely available.
-  if (!hasBackup && !gate.allow) {
+  if (!hasBackup) {
     return { allow: true, isProbe: false, probeId: null, generation: breaker.generation };
   }
   return gate;
@@ -161,6 +198,8 @@ function resetCircuitBreakers() {
 
 module.exports = {
   isAvailable,
+  reserveBackup,
+  releaseReservation,
   beforeAttempt,
   afterAttempt,
   isProviderOutageReason,

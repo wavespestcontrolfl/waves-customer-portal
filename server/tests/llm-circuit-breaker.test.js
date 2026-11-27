@@ -205,6 +205,45 @@ describe('llm/circuit-breaker', () => {
       expect(res.provider).toBe('openai');
       expect(global.fetch).toHaveBeenCalledTimes(1);
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
+
+      // Concurrent chains when primary is cooling down and backup has one free probe:
+      // only the first chain atomically reserves the backup probe and skips primary;
+      // the second chain sees the probe claimed and keeps primary-first ordering.
+      cb.resetCircuitBreakers();
+      const now = Date.now();
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: now - 1_000 });
+      cb.afterAttempt('openai', { ok: false, reason: 'openai_503', now: now - 500 });
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529', now: now - 35_000 });
+      cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_529', now: now - 34_000 });
+
+      let releaseBackup;
+      const backupBlocked = new Promise((resolve) => { releaseBackup = resolve; });
+      mockAnthropicCreate.mockImplementationOnce(async () => {
+        await backupBlocked;
+        return {
+          id: 'msg_probe',
+          model: MODELS.WORKHORSE,
+          stop_reason: 'end_turn',
+          content: [{ type: 'text', text: '{"ok":true}' }],
+          usage: { input_tokens: 10, output_tokens: 5 },
+        };
+      });
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ id: 'resp_prim_second', status: 'completed', output_text: '{"ok":true}', usage: { input_tokens: 5, output_tokens: 5 } }),
+      });
+
+      const firstPromise = llm.dispatchWithFallback(policy, { text: 'first', jsonMode: true });
+      const secondPromise = llm.dispatchWithFallback(policy, { text: 'second', jsonMode: true });
+      const secondRes = await secondPromise;
+      expect(secondRes.ok).toBe(true);
+      expect(secondRes.provider).toBe('openai');
+      releaseBackup();
+      const firstRes = await firstPromise;
+      expect(firstRes.ok).toBe(true);
+      expect(firstRes.provider).toBe('anthropic');
+      expect(firstRes.failures[0]).toMatchObject({ provider: 'openai', reason: 'circuit_open' });
     } finally {
       global.fetch = savedFetch;
       jest.dontMock('@anthropic-ai/sdk');

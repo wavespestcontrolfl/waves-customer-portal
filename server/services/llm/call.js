@@ -955,11 +955,20 @@ function canRouteServePayload(route, payload = {}) {
   return typeof check === 'function' ? check(payload) : false;
 }
 
+function takeReservedGate(reservationRef, provider) {
+  if (reservationRef.current?.provider !== provider) return null;
+  const { gate } = reservationRef.current;
+  reservationRef.current = null;
+  return gate;
+}
+
 // Execute one route inside runFallbackChain with optional hardDeadline and
 // sliding-window circuit breaker (GATE_LLM_CIRCUIT_BREAKER, dark by default).
-async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, hasBackup, signal }) {
-  const gate = circuitBreaker.beforeAttempt(route.provider, { hasBackup });
+async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, backupProviders, reservationRef, signal }) {
+  const reservedGate = reservationRef ? takeReservedGate(reservationRef, route.provider) : null;
+  const gate = reservedGate || circuitBreaker.beforeAttempt(route.provider, { backupProviders });
   if (!gate.allow) {
+    if (reservationRef && gate.backupReservation) reservationRef.current = gate.backupReservation;
     return { ok: false, reason: gate.reason || 'circuit_open' };
   }
   let result;
@@ -1008,62 +1017,69 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
   const timeoutBudgetMs = explicitBudget ? payload.timeoutMs : DEFAULT_FALLBACK_BUDGET_MS;
   const attemptCapMs = Number.isFinite(maxAttemptMs) && maxAttemptMs > 0 ? maxAttemptMs : Infinity;
   const deadline = Date.now() + timeoutBudgetMs;
-  for (let index = 0; index < routes.length; index += 1) {
-    if (payload.signal?.aborted) break;
-    const route = routes[index];
-    const remainingMs = deadline - Date.now();
-    if (remainingMs <= 0) {
-      failures.push(legFailure(route, 'timeout_budget_exhausted'));
-      break;
-    }
-    const shareMs = explicitBudget && !reserveFallbackBudget
-      ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
-    const legMs = Math.min(shareMs, attemptCapMs);
-    const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
-    const hasBackup = routes.slice(index + 1)
-      .some((backup) => canRouteServePayload(backup, payload) && circuitBreaker.isAvailable(backup.provider));
-    const result = await executeFallbackLeg(route, routePayload, legMs, {
-      hardDeadline,
-      hasBackup,
-      signal: payload.signal,
-    });
-
-    if (!result.ok) {
-      failures.push(legFailure(route, result.reason || 'error', result));
-      continue;
-    }
-
-    // Empty text-mode answers fail in the adapters (`empty_text`), so an ok
-    // result here has content. The caller's validate hook owns its codes
-    // (`too_long`, `trade_name`, `missing_summary`…): a rejection from it is
-    // a model-quality failure, so the failure entry carries that provenance
-    // for classifyFailure.
-    let rejection = null;
-    if (typeof validate === 'function') {
-      try {
-        rejection = validate(result, route) || null;
-      } catch (err) {
-        rejection = `validator_error:${err.message}`;
+  const reservationRef = { current: null };
+  try {
+    for (let index = 0; index < routes.length; index += 1) {
+      if (payload.signal?.aborted) break;
+      const route = routes[index];
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        failures.push(legFailure(route, 'timeout_budget_exhausted'));
+        break;
       }
-    }
-    if (rejection) {
-      // A max_tokens-truncated Anthropic answer never reaches the validator:
-      // callAnthropic fails that leg as anthropic_incomplete first, so a
-      // rejection here is a judgement on a complete answer.
-      failures.push(legFailure(route, String(rejection), result, { validator: true }));
-      rejectLedgerCall(result, String(rejection), true);
-      continue;
-    }
+      const shareMs = explicitBudget && !reserveFallbackBudget
+        ? remainingMs : Math.ceil(remainingMs / (routes.length - index));
+      const legMs = Math.min(shareMs, attemptCapMs);
+      const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
+      const backupProviders = routes.slice(index + 1)
+        .filter((backup) => canRouteServePayload(backup, payload))
+        .map((backup) => backup.provider);
+      const result = await executeFallbackLeg(route, routePayload, legMs, {
+        hardDeadline,
+        backupProviders,
+        reservationRef,
+        signal: payload.signal,
+      });
 
-    const outcome = {
-      ...result,
-      provider: route.provider,
-      model: result.model || route.model,
-      fallbackUsed: index > 0,
-      failures,
-    };
-    recordDispatchOutcome(policy, outcome);
-    return outcome;
+      if (!result.ok) {
+        failures.push(legFailure(route, result.reason || 'error', result));
+        continue;
+      }
+
+      // Empty text-mode answers fail in the adapters (`empty_text`), so an ok
+      // result here has content. The caller's validate hook owns its codes
+      // (`too_long`, `trade_name`, `missing_summary`…): a rejection from it is
+      // a model-quality failure, so the failure entry carries that provenance
+      // for classifyFailure.
+      let rejection = null;
+      if (typeof validate === 'function') {
+        try {
+          rejection = validate(result, route) || null;
+        } catch (err) {
+          rejection = `validator_error:${err.message}`;
+        }
+      }
+      if (rejection) {
+        // A max_tokens-truncated Anthropic answer never reaches the validator:
+        // callAnthropic fails that leg as anthropic_incomplete first, so a
+        // rejection here is a judgement on a complete answer.
+        failures.push(legFailure(route, String(rejection), result, { validator: true }));
+        rejectLedgerCall(result, String(rejection), true);
+        continue;
+      }
+
+      const outcome = {
+        ...result,
+        provider: route.provider,
+        model: result.model || route.model,
+        fallbackUsed: index > 0,
+        failures,
+      };
+      recordDispatchOutcome(policy, outcome);
+      return outcome;
+    }
+  } finally {
+    circuitBreaker.releaseReservation(reservationRef.current);
   }
 
   const outcome = { ok: false, reason: 'all_providers_failed', failures };

@@ -1072,10 +1072,10 @@ async function loadStats(db, start, end) {
     .sum({ failed: db.raw('CASE WHEN ok THEN 0 ELSE 1 END') })
     // Legs actually attempted on the worst failed chain: pinned single-leg
     // policies (the sealed exams disable cross-provider fallback so provider
-    // A's exam can't be graded on provider B's draft) record exactly one
-    // failure entry, and the digest must not report their misses as "failed
-    // on BOTH providers".
-    .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE jsonb_array_length(COALESCE(failure_reasons, '[]'::jsonb)) END") })
+    // A's exam can't be graded on provider B's draft) and circuit-skipped
+    // chains where only the backup ran must not report as "failed on BOTH
+    // providers", so `circuit_open` skip entries are excluded from the count.
+    .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE (SELECT COUNT(*)::int FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE COALESCE(f->>'reason', '') <> 'circuit_open') END") })
     // Distinct ET days the policy actually ran — the cadence evidence the
     // gone-silent check splits on. Window bounds are already ET-day-aligned.
     .countDistinct({ active_days: db.raw("(created_at AT TIME ZONE 'America/New_York')::date") });
