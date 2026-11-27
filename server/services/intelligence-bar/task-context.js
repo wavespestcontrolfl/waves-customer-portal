@@ -1212,7 +1212,10 @@ const APPOINTMENT_SELECTORS = { get_closeout_status: 'service_id', get_closeout_
 // loads and version-stamps every one). The task must own ONE half directly;
 // the other is admitted only as an eligible duplicate-queue candidate under
 // that exact pairing (see the CUSTOMER_PAIR_SELECTORS use in validateRecordTarget).
-const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'] };
+// link_customer_family names its second profile as other_customer_id: read and version-stamped as a customer record
+// too, so a customer-scoped task must own both (no pair admission: that is the merge's duplicate check only; the tool
+// is owner login only, FULL_ACCESS_TWO_STEP_TOOL_NAMES).
+const CUSTOMER_PAIR_SELECTORS = { merge_customers: ['winner_customer_id', 'loser_customer_id'], link_customer_family: ['customer_id', 'other_customer_id'] };
 const customerPairIds = (params, toolName) => (CUSTOMER_PAIR_SELECTORS[toolName] || []).map(key => params[key]).filter(Boolean);
 
 // Address-bound readers (lookup_property, and find_available_slots inside a
@@ -1416,7 +1419,8 @@ async function validateRecordTarget(params, context = {}, { toolName, forApprova
   // winner/loser pairing — the canonical check customer-dedupe.js owns
   // (never re-derived here). Neither permitted, or the pair ineligible: the
   // missingTarget refusal below stands unchanged.
-  const pairSelectors = CUSTOMER_PAIR_SELECTORS[toolName];
+  // The duplicate-queue admission is the merge's own proof; no other pair tool inherits it.
+  const pairSelectors = toolName === 'merge_customers' ? CUSTOMER_PAIR_SELECTORS[toolName] : null;
   if (pairSelectors) {
     // Canonical lowercase (codex #4348 r5 P2): task targets and record ids
     // are stored lowercase; an uppercase-but-valid UUID pair must reach the

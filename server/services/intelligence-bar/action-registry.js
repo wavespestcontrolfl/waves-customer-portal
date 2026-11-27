@@ -89,6 +89,7 @@ const MODULES = [
   ['bill-to-tools', 'BILL_TO_TOOLS', 'executeBillToTool'],
   ['agent-review-tools', 'AGENT_REVIEW_TOOLS', 'executeAgentReviewTool'],
   ['dispatch-alert-tools', 'DISPATCH_ALERT_TOOLS', 'executeDispatchAlertTool'],
+  ['family-link-tools', 'FAMILY_LINK_TOOLS', 'executeFamilyLinkTool'],
   ['unblock-sender-tools', 'UNBLOCK_SENDER_TOOLS', 'executeUnblockSenderTool'],
   ['choice-tools', 'CHOICE_TOOLS', 'executeChoiceTool'],
   ['admin-read-tools', 'ADMIN_READ_TOOLS', 'executeAdminReadTool'],
@@ -182,6 +183,10 @@ const GATED_ACTIONS = {
   ignore_agent_review_draft: () => ibAgentReviewDraftsLive(),
   // No gate of its own; like the gated tools above it exists only on the platform path.
   resolve_dispatch_alert: () => gateEnvValue('GATE_IB_PLATFORM'),
+  // No gate of its own (IB gap #27): the customer page's Same family Link / Unlink; platform path only. The link names two
+  // customers and a task establishes one, so it is offered only while owner-direct is on too (it carries both).
+  link_customer_family: () => gateEnvValue('GATE_IB_PLATFORM') && gateEnvValue('GATE_IB_OWNER_DIRECT'),
+  unlink_customer_family: () => gateEnvValue('GATE_IB_PLATFORM'),
   unblock_sender: () => ibUnblockSenderLive(),
   find_admin_reads: () => adminReadLive(),
   read_admin_data: () => adminReadLive(),
