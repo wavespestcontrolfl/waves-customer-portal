@@ -29,7 +29,7 @@ const db = require('../models/db');
 const { loadPendingSmsConversations } = require('./sms-pending-conversations');
 const { deliveryInstantSql } = require('./self-serve-estimates');
 const { isInternalEmailRecipient } = require('../utils/internal-email-recipients');
-const { applyLeadsAwaitingContactFilter } = require('./lead-waiting-queue');
+const { applyLeadsAwaitingContactFilter, waitingPersonKey } = require('./lead-waiting-queue');
 const { judgeLeads } = require('./lead-contact-sync');
 const { estimateSends, estimateItems } = require('./lead-reach-stats');
 
@@ -572,17 +572,22 @@ function loadDigitalLeadCandidatesPage(cutoff, includeExpired, after = null) {
   );
 }
 
-async function loadStaffEstimateClearSet(leads) {
+async function loadStaffEstimateClearSet(leads, verdicts) {
   if (!leads.length) return new Set();
   const sends = await estimateSends(db, leads);
-  const firstById = new Map(leads.map((l) => [String(l.id), new Date(l.first_contact_at).getTime()]));
+  const minContactById = new Map(leads.map((l) => {
+    const firstAt = new Date(l.first_contact_at).getTime();
+    const reopenedAt = verdicts.get(String(l.id))?.reopenedAt;
+    return [String(l.id), Number.isFinite(reopenedAt) ? Math.max(firstAt, reopenedAt) : firstAt];
+  }));
   const cleared = new Set();
   for (const send of sends) {
-    const firstAt = firstById.get(String(send.leadId));
-    if (!Number.isFinite(firstAt)) continue;
-    // Only a proven human staff send (latest != null) clears the lead —
-    // automated autoSend/moveAutoSend deliveries and uncertain resends do not.
-    if (estimateItems(send, firstAt).some((item) => item.latest != null)) {
+    const minAt = minContactById.get(String(send.leadId));
+    if (!Number.isFinite(minAt)) continue;
+    // Only a proven human staff send (latest != null) after first contact (and
+    // after any manual reopen) clears the lead — automated autoSend/moveAutoSend
+    // deliveries and uncertain resends do not.
+    if (estimateItems(send, minAt).some((item) => item.latest != null)) {
       cleared.add(String(send.leadId));
     }
   }
@@ -590,17 +595,31 @@ async function loadStaffEstimateClearSet(leads) {
 }
 
 async function filterUnworkedDigitalLeadPage(candidates) {
-  const verdicts = await judgeLeads(db, candidates);
+  const verdicts = await judgeLeads(db, candidates, { humanOnlyCalls: true, allowPostReopenContact: true });
   const uncontacted = candidates.filter((lead) => {
     const verdict = verdicts.get(String(lead.id));
     return !verdict || Boolean(verdict.skip);
   });
   if (!uncontacted.length) return [];
-  // Preserve a staff member's manual reopen: reopened_by_person leads are never
-  // cleared by prior estimate deliveries.
-  const eligibleForEst = uncontacted.filter((lead) => verdicts.get(String(lead.id))?.skip !== 'reopened_by_person');
-  const estCleared = await loadStaffEstimateClearSet(eligibleForEst);
+  // Reopened leads with no recorded reopen timestamp stay conservative and are
+  // never cleared by estimate deliveries; those with a timestamp require a
+  // staff estimate delivery strictly after the reopen.
+  const eligibleForEst = uncontacted.filter((lead) => {
+    const verdict = verdicts.get(String(lead.id));
+    return verdict?.skip !== 'reopened_by_person' || Number.isFinite(verdict.reopenedAt);
+  });
+  const estCleared = await loadStaffEstimateClearSet(eligibleForEst, verdicts);
   return uncontacted.filter((lead) => !estCleared.has(String(lead.id)));
+}
+
+function dedupeWaitingLeadPeople(rows) {
+  const byPerson = new Map();
+  for (const row of rows) {
+    const key = waitingPersonKey(row);
+    // Candidates arrive newest-first; keep the newest row per waiting person.
+    if (!byPerson.has(key)) byPerson.set(key, row);
+  }
+  return [...byPerson.values()];
 }
 
 async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = false } = {}) {
@@ -617,9 +636,10 @@ async function loadUnworkedDigitalLeads(cutoff = new Date(), { includeExpired = 
       cursor = { at: last.cursor_at || String(last.first_contact_at), id: last.id };
     }
     const allIds = remaining.map((l) => String(l.id));
-    return remaining.slice(0, MAX_PER_SECTION).map((row) => ({
+    const distinctPeople = dedupeWaitingLeadPeople(remaining);
+    return distinctPeople.slice(0, MAX_PER_SECTION).map((row) => ({
       ...row,
-      total_count: remaining.length,
+      total_count: distinctPeople.length,
       all_ids: allIds,
     }));
   } catch (err) {

@@ -81,5 +81,6 @@ module.exports = {
   LEAD_RESPONSE_SLA_MINUTES,
   applyLeadsAwaitingContactFilter,
   excludeInternalTestLeads,
+  waitingPersonKey,
   countWaitingPeople,
 };

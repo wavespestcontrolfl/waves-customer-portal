@@ -441,8 +441,12 @@ describe('lane SQL binding integrity', () => {
       { id: 'lead-staff-est', lead_type: 'quote_wizard', first_name: 'Ben', last_name: 'Jones', phone: '+19415550102', email: 'ben@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-1', estimate_id: 'est-staff' },
       // Automated-only quote delivery (autoSend): MUST NOT clear the lead!
       { id: 'lead-auto-est', lead_type: 'form_submission', first_name: 'Cara', last_name: 'Lee', phone: '+19415550103', email: 'cara@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-2', estimate_id: 'est-auto' },
-      // Manually reopened by staff: MUST stay visible even if it had an earlier estimate send!
+      // Manually reopened by staff (no timestamp): MUST stay visible even if it had an earlier estimate send!
       { id: 'lead-reopened', lead_type: 'email_inquiry', first_name: 'Eve', last_name: 'Ray', phone: '+19415550105', email: 'eve@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-3', estimate_id: 'est-reopened' },
+      // Manually reopened at t1, then sent a human staff estimate AFTER t1: MUST clear!
+      { id: 'lead-reopened-cleared', lead_type: 'form_submission', first_name: 'Fay', last_name: 'Kim', phone: '+19415550106', email: 'fay@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-5', estimate_id: 'est-reopened-cleared' },
+      // Same person submitting a second form on Dan's phone: grouped as 1 waiting person, both IDs kept in all_ids.
+      { id: 'lead-unworked-dup', lead_type: 'form_submission', first_name: 'Dan', last_name: 'Ng', phone: '(941) 555-0104', email: 'dan@example.com', first_contact_at: t1, cursor_at: t1, customer_id: 'cust-4', estimate_id: null },
       // Truly unworked lead past the 200-row first page (proves keyset paging!)
       { id: 'lead-unworked', lead_type: 'voicemail', first_name: 'Dan', last_name: 'Ng', phone: '+19415550104', email: 'dan@example.com', first_contact_at: t0, cursor_at: t0, customer_id: 'cust-4', estimate_id: null },
     ];
@@ -469,22 +473,26 @@ describe('lane SQL binding integrity', () => {
       dbMock.raw = (sql, bindings) => ({ sql, bindings });
       return dbMock;
     });
-    const judgeLeads = jest.fn(async (_db, batch) => {
+    const t2Ms = Date.parse('2026-11-27T11:30:00Z');
+    const judgeLeads = jest.fn(async (_db, batch, opts) => {
+      expect(opts).toEqual({ humanOnlyCalls: true, allowPostReopenContact: true });
       const m = new Map();
       for (const l of batch) {
         if (l.id.startsWith('lead-p1-')) m.set(l.id, { evidenceType: 'staff_text', evidenceId: `sms-${l.id}`, at: new Date(t1) });
         else if (l.id === 'lead-reopened') m.set(l.id, { skip: 'reopened_by_person' });
+        else if (l.id === 'lead-reopened-cleared') m.set(l.id, { skip: 'reopened_by_person', reopenedAt: t1Ms });
         else m.set(l.id, { skip: 'no_contact_evidence' });
       }
       return m;
     });
     const { estimateItems: realEstimateItems } = require('../services/lead-reach-stats');
     const estimateSends = jest.fn(async (_db, eligibleLeads) => {
-      // Reopened leads must never be passed into estimateSends.
+      // Reopened leads without a reopen timestamp must never be passed into estimateSends.
       expect(eligibleLeads.map((l) => l.id)).not.toContain('lead-reopened');
       return [
         { leadId: 'lead-staff-est', at: t1Ms, lastAt: t1Ms, automated: false, groupAutomated: false, autoUnresolved: false, deliveries: 1, autoDeliveries: 0, personSends: [] },
         { leadId: 'lead-auto-est', at: t1Ms, lastAt: t1Ms, automated: true, groupAutomated: false, autoUnresolved: false, deliveries: 1, autoDeliveries: 1, personSends: [] },
+        { leadId: 'lead-reopened-cleared', at: t2Ms, lastAt: t2Ms, automated: false, groupAutomated: false, autoUnresolved: false, deliveries: 1, autoDeliveries: 0, personSends: [] },
       ];
     });
     jest.doMock('../services/lead-contact-sync', () => ({ judgeLeads }));
@@ -502,9 +510,10 @@ describe('lane SQL binding integrity', () => {
     expect(leadPageCall).toBe(2);
     expect(judgeLeads).toHaveBeenCalledTimes(2);
     expect(estimateSends).toHaveBeenCalledTimes(1);
-    expect(rows.map((r) => r.id)).toEqual(['lead-auto-est', 'lead-reopened', 'lead-unworked']);
+    // Dan's two leads share a phone -> grouped to 1 waiting person (3 distinct people, 4 underlying lead IDs).
+    expect(rows.map((r) => r.id)).toEqual(['lead-auto-est', 'lead-reopened', 'lead-unworked-dup']);
     expect(rows[0].total_count).toBe(3);
-    expect(rows[0].all_ids).toEqual(['lead-auto-est', 'lead-reopened', 'lead-unworked']);
+    expect(rows[0].all_ids).toEqual(['lead-auto-est', 'lead-reopened', 'lead-unworked-dup', 'lead-unworked']);
 
     // PII binding scrub: a Knex error carrying phone/email bindings must never surface in err.message.
     judgeLeads.mockRejectedValueOnce(Object.assign(
