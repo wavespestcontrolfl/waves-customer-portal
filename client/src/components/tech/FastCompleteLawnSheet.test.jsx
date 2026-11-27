@@ -331,7 +331,37 @@ describe('May Tetrino scouting', () => {
     await waitFor(() => expect(footerWarnings()).toEqual(['Update the plan with the recorded Tetrino decision. You can still complete.']));
     await waitFor(() => expect(completeButton().disabled).toBe(false));
     await submit();
-    expect(completeCalls().at(-1).body.lawnFast.tetrinoScout).toMatchObject({ target: 'chinch' });
+    // The record follows the final product list: Tetrino was removed, so it says not applied.
+    expect(completeCalls().at(-1).body.lawnFast.tetrinoScout).toMatchObject({ target: 'chinch', tetrinoApplied: false });
+  });
+
+  test('a scout-only decision with Tetrino then added through Search records it as applied', async () => {
+    const ctx = context({ plannedProducts: { source: 'plan', items: [], tetrinoScout: offer } });
+    const catalog = CATALOG.map((product) => (product.id === P_TETRINO ? { ...product, service_lines: ['lawn'] } : product));
+    await openSheet({ request: makeRequest({ ctx }), props: { catalog } });
+    fireEvent.click(screen.getByRole('button', { name: 'Scout only' }));
+    fireEvent.change(screen.getByPlaceholderText(/What you checked/), { target: { value: 'Checked damaged edges and roots; no current insects found' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Record scout-only decision' }));
+    await screen.findByText('Recorded');
+    await addProductByName('Tetrino Insecticide');
+    await analyzeAndComplete();
+    expect(completeCalls().at(-1).body.lawnFast.tetrinoScout).toMatchObject({ target: 'none', tetrinoApplied: true });
+  });
+
+  test('the high Tetrino rate without high chinch pressure recorded warns before Complete, which stays on; with the pressure recorded there is no warning', async () => {
+    const high = { ...offer, selected: true, ratePer1000: 0.735 };
+    const ctx = context({ plannedProducts: { source: 'plan', items: [...PLANNED, plannedTetrino(0.735)], tetrinoScout: high } });
+    await openSheet({ request: makeRequest({ ctx }) });
+    fireEvent.click(screen.getByRole('button', { name: 'Chinch bugs' }));
+    fireEvent.change(screen.getByPlaceholderText(/Counts at the damaged edge/), { target: { value: '2 counted at the south damaged edge' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Ordinary' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Use this decision in the plan' }));
+    await screen.findByText('Recorded');
+    await analyze();
+    await waitFor(() => expect(footerWarnings()).toEqual(['The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.']));
+    await waitFor(() => expect(completeButton().disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'High' }));
+    expect(footerWarnings()).toEqual(['Record the May insect scouting decision. You can still complete.', 'The high Tetrino rate needs high current chinch pressure recorded on this visit. You can still complete.']);
   });
 });
 

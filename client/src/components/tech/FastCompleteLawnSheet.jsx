@@ -1227,6 +1227,21 @@ function limitWarningsOf(rows) {
 // per row, naming the places picked, above the Complete button. The visit keeps the place the tech recorded.
 const HELD_PLACE_TAIL = 'You can still complete. The visit record keeps the place.';
 const TETRINO_WARNING_TAIL = 'You can still complete.';
+// Tetrino above this rate (fl oz per 1,000 sq ft) is the high rate: it wants high current chinch pressure on the record.
+const TETRINO_HIGH_RATE = 0.367;
+// The May scout warnings above the Complete button: the record is missing, the recorded decision's product is not on the sheet, or
+// the high rate is on the sheet without high chinch pressure recorded. None holds Complete (owner 2026-11-26).
+function tetrinoWarningsOf({ scout, decision, recorded, onSheet, rows }) {
+  if (!scout) return [];
+  const lines = [];
+  if (!recorded) lines.push('Record the May insect scouting decision.');
+  else if (decision.target !== 'none' && !onSheet) lines.push('Update the plan with the recorded Tetrino decision.');
+  const row = rows.find((other) => sameId(other.productId, scout.productId));
+  const highRate = Number(row && rateOf(row)?.rate) > TETRINO_HIGH_RATE;
+  const highPressure = recorded && decision.target === 'chinch' && String(decision.currentObservations || '').trim() && decision.pressure === 'high';
+  if (highRate && !highPressure) lines.push('The high Tetrino rate needs high current chinch pressure recorded on this visit.');
+  return lines.map((line) => `${line} ${TETRINO_WARNING_TAIL}`);
+}
 function heldPlaceWarningsOf(rows) {
   const lines = [];
   for (const row of rows.filter((other) => other.placeRule && other.placeBlock)) {
@@ -1342,7 +1357,8 @@ function completionBody({ newSod = null, form, rows, ctx, assessmentId, gaugeHei
         currentObservations: tetrinoScout.currentObservations,
         pressure: tetrinoScout.pressure || '',
         grubTimingEvidence: tetrinoScout.grubTimingEvidence || '',
-        tetrinoApplied: tetrinoScout.applied === true,
+        // What the visit applied, from the final product list (not the state the decision was saved in): the record never contradicts the ledger.
+        tetrinoApplied: !!ctx.tetrinoScout && rows.some((row) => sameId(row.productId, ctx.tetrinoScout.productId)),
       } } : {}),
       ...sodEcho(newSod),
     },
@@ -2034,13 +2050,11 @@ function LawnFastForm({ service, request, catalog, ctx, propertyAreas, submissio
   const tetrinoScoutOnly = tetrinoRecorded && tetrinoScout.target === 'none';
   // The May scout record only warns (owner 2026-11-26, "everything should only be warned, never blocked from using, for now"):
   // the prompt stays, the server accepts Tetrino without it, and Complete is not held.
-  const tetrinoWarning = !sheetCtx.tetrinoScout ? ''
-    : !tetrinoRecorded ? `Record the May insect scouting decision. ${TETRINO_WARNING_TAIL}`
-      : tetrinoScout.target !== 'none' && !tetrinoOnSheet ? `Update the plan with the recorded Tetrino decision. ${TETRINO_WARNING_TAIL}` : '';
+  const tetrinoWarnings = tetrinoWarningsOf({ scout: sheetCtx.tetrinoScout, decision: tetrinoScout, recorded: tetrinoRecorded, onSheet: tetrinoOnSheet, rows });
   // While the rooted tick is saved and the holds are read again, the sheet waits (a released line is not yet back).
   const missingReason = missingRequirement({ sodWait, noProductOk: noProductOkOf(newSod) || tetrinoScoutOnly, form, rows, guideHold, lawnSqft, areaHold, gaugeHeightIn, photos: progress.photos, assessed: progress.assessed, assessmentId, assessmentReady, ctx, unusable, typed, dictationPending, stockRow });
   const barAction = barActionFor({ missingReason, dictationPending, progress, block });
-  const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...(tetrinoWarning ? [tetrinoWarning] : [])];
+  const footerWarnings = [...limitWarningsOf(rows), ...heldPlaceWarningsOf(rows), ...tetrinoWarnings];
   const buildBody = () => completionBody({ newSod, form, rows, ctx: sheetCtx, assessmentId, gaugeHeightIn, lawnSqft, propertyAreas: propertyAreas.data, explicitArea: propertyAreas.explicit, typed, tipsAvailable, guideCards: guideCardsOf(guide), guideChecks, chinchTap, tetrinoScout: sheetCtx.tetrinoScout && tetrinoRecorded ? tetrinoScout : null, customerText: wrapUp.fields(CUSTOMER_TEXT_FLAGS) });
   usePrepareRecommendations({ base, request, ctx: sheetCtx, missingReason, locked, assessmentId, rows });
   const submit = async () => {
