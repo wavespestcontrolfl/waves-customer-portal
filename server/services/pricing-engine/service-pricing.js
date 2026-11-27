@@ -1826,7 +1826,9 @@ function pricePestInitialRoach(property, options = {}) {
   const margin = price > 0 ? (price - incrementalCost) / price : 0;
 
   const isGerman = roachType === 'german';
-  const unmeasuredFootprint = buildingSizeMeasured === false;
+  // The route's "no measured building" flag is about the size it POSTED (its 2,000 sq ft placeholder). When the server lookup's
+  // own measured home sized this line instead (whole-home basis only), the bracket is not a guess and the flag does not apply.
+  const unmeasuredFootprint = buildingSizeMeasured === false && footprintResolution.source !== 'lookup_measured_home';
   const manualReviewReasons = uniqueList([
     ...footprintResolution.manualReviewReasons,
     ...(unmeasuredFootprint ? ['building_size_unmeasured_pest_footprint'] : []),

@@ -692,6 +692,42 @@ describe('website quote: the server lookup\'s measured home replaces the wizard\
     for (const key of ['homeSizeBasis', 'footprintUsed', 'footprintSource', 'footprintWasDefaulted', 'fleaPostedHomeSqFt']) expect(legacy).not.toHaveProperty(key);
   });
 
+  test('the stand-alone cockroach size check: the lookup\'s measured home is a measurement, the posted placeholder is not', () => {
+    // public-quote.js sends buildingSizeMeasured false when the wizard kept its placeholder and posted no profile of its own.
+    const standalone = (input) => lineOf(generateEstimate({ ...input, buildingSizeMeasured: false }), 'pest_initial_roach');
+    const measured = standalone(website(ROACH_SERVICES));
+    expect(measured).toMatchObject({ price: 289, footprintUsed: 2800, footprintSource: 'lookup_measured_home', requiresManualReview: false });
+    expect(measured.manualReviewReasons).not.toContain('building_size_unmeasured_pest_footprint');
+    // No measurement behind the placeholder: the bracket is a guess and the line goes to the team, as before.
+    expect(standalone(placeholderOnly(ROACH_SERVICES))).toMatchObject({ requiresManualReview: true, manualReviewReasons: expect.arrayContaining(['building_size_unmeasured_pest_footprint']) });
+    // A quote priced before the rule never reads the measurement, so its size check is unchanged.
+    expect(standalone({ ...website(ROACH_SERVICES), legacyWholeHomeSizing: true }).manualReviewReasons).toContain('building_size_unmeasured_pest_footprint');
+  });
+
+  test('a mixed estimate: the measurement on one service\'s row is read even when another whole-home service sits in the other result container', () => {
+    const { storedEstimateContainer } = require('../services/estimate-result-container');
+    const measuredRoach = compact(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach'));
+    const placeholderRoach = compact(lineOf(generateEstimate(placeholderOnly(ROACH_SERVICES)), 'pest_initial_roach'));
+    const placeholderBedBug = compact(lineOf(generateEstimate(placeholderOnly(bedBugServices(1))), 'bed_bug'));
+    const container = (...rows) => ({ pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: rows });
+    const restored = (data) => fleaSizeReplayOverrides(data).fleaMeasuredHomeSqFt;
+    // Distinct services split across the two containers, either way round: the cockroach row's measurement is found.
+    expect(restored({ result: container(placeholderBedBug), engineResult: container(measuredRoach) })).toBe(2800);
+    expect(restored({ result: container(measuredRoach), engineResult: container(placeholderBedBug) })).toBe(2800);
+    // The same service in both containers: the authoritative container's row wins, the other copy is never read.
+    for (const data of [
+      { result: container(placeholderRoach), engineResult: container(measuredRoach) },
+      { result: container(measuredRoach), engineResult: container(placeholderRoach) },
+    ]) {
+      const chosenRow = storedEstimateContainer(data).lineItems[0];
+      expect(restored(data)).toBe(chosenRow.footprintSource === 'lookup_measured_home' ? 2800 : undefined);
+    }
+    // A SERVER reprice rewrote `result`: the other container's unmatched rows are removed or re-priced services, never evidence.
+    const repriced = { pricingAuthorityAtLock: 'SERVER', result: container(placeholderBedBug), engineResult: container(measuredRoach) };
+    expect(storedEstimateContainer(repriced)).toBe(repriced.result);
+    expect(restored(repriced)).toBeUndefined();
+  });
+
   test('a staff revision keeps the measured home while the home size is left alone, and re-prices when it is edited', () => {
     const row = compact(lineOf(generateEstimate(website(ROACH_SERVICES)), 'pest_initial_roach'));
     const stored = { engineInputs: placeholderOnly(ROACH_SERVICES), engineResult: { pricingMetadata: { legacyWholeHomeSizing: false }, lineItems: [row] } };

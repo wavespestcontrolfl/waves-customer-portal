@@ -63,6 +63,14 @@ jest.mock('../routes/property-lookup-v2', () => ({
   performPropertyLookup: jest.fn(async () => mockServerLookup),
 }));
 
+// The catalog gate of a keyed request (the stand-alone cockroach package is reachable only by its catalog key). A test sets the
+// rows it answers; with none set a key is unknown, as with the empty database above.
+let mockCatalogRows = {};
+jest.mock('../services/public-services-menu', () => ({
+  ...jest.requireActual('../services/public-services-menu'),
+  publicSelectableService: jest.fn(async (key) => mockCatalogRows[key] || null),
+}));
+
 const express = require('express');
 
 jest.setTimeout(30000);
@@ -79,7 +87,7 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
     server = app.listen(0, () => { base = `http://127.0.0.1:${server.address().port}/api/public/quote`; done(); });
   });
   afterAll((done) => { server.closeAllConnections(); server.close(done); });
-  beforeEach(() => { mockServerLookup = null; });
+  beforeEach(() => { mockServerLookup = null; mockCatalogRows = {}; });
 
   const quote = async (extra = {}) => {
     const res = await fetch(`${base}/calculate`, {
@@ -255,6 +263,56 @@ describe('POST /api/public/quote/calculate: flea size from the server lookup whe
       expect(revised.price).toBeGreaterThan(line(generateEstimate(cleared)).price);
       // Staff type a different home size: that size prices, the measurement is not forced over it.
       expect(line(generateWithFleaRecord(generateEstimate, { ...cleared, homeSqFt: 1700 }, record))).toMatchObject({ footprintUsed: 1700, footprintSource: 'homeSqFt' });
+    });
+
+    test('the stand-alone cockroach package (keyed): the lookup\'s measured home satisfies its size check, so it prices $289 instantly instead of parking as unmeasured', async () => {
+      mockCatalogRows = { cockroach_control: { service_key: 'cockroach_control', name: 'Cockroach Treatment Service', instant: true, booking_enabled: true } };
+      const keyed = (extra = {}) => quote({ serviceKey: 'cockroach_control', homeSqFt: 2000, stories: 2, buildingSizeConfirmed: false, enriched: {}, services: {}, ...extra });
+      // No lookup measurement: the 2,000 sq ft placeholder is a guess, so the package parks for the team (unchanged).
+      mockServerLookup = null;
+      const unmeasured = await keyed();
+      expect(unmeasured).toMatchObject({ quote_required: true });
+      expect(storedDraft().quoteRequiredReason).toBe('building_size_unmeasured_pest_footprint');
+      // The server lookup measured 2,800 sq ft: the measured bracket, an instant price, no size hold.
+      mockServerLookup = LOOKUP_2800;
+      const measured = await keyed();
+      expect(measured.quote_required).not.toBe(true);
+      expect(measured.one_time_total).toBe(289);
+      expect(storedDraft().quoteRequired).toBe(false);
+      expect(storedRow('pest_initial_roach')).toMatchObject({
+        price: 289, homeSizeBasis: 'total_living_area', footprintUsed: 2800, footprintSource: 'lookup_measured_home', fleaPostedHomeSqFt: 2000,
+      });
+      // A customer-confirmed 2,000 sq ft home is a measured size of its own: $239, the lookup is not read.
+      const confirmed = await keyed({ buildingSizeConfirmed: true });
+      expect(confirmed.one_time_total).toBe(239);
+      expect(storedRow('pest_initial_roach')).toMatchObject({ footprintUsed: 2000, footprintSource: 'homeSqFt' });
+    });
+
+    test('the public size ceiling applies to the measured home a line prices on: a 24,000 sq ft measurement behind the placeholder goes to the team, as a posted 24,000 does', async () => {
+      const LOOKUP_24000 = { enriched: { storiesSource: 'verified', stories: 2, footprint: 12000, homeSqFt: 24000 }, propertyRecord: null };
+      const LOOKUP_19000 = { enriched: { storiesSource: 'verified', stories: 2, footprint: 9500, homeSqFt: 19000 }, propertyRecord: null };
+      mockServerLookup = LOOKUP_24000;
+      for (const services of [BED_BUG, { flea: {} }, PLAN_WITH_ROACH]) {
+        const parked = await wizard(services);
+        expect(parked).toMatchObject({ quote_required: true });
+        expect(storedDraft()).toMatchObject({ quoteRequired: true, quoteRequiredReason: 'home_size_above_public_limit' });
+      }
+      // The same size posted directly parks the same way (unchanged).
+      mockServerLookup = null;
+      expect(await wizard(BED_BUG, { homeSqFt: 24000, buildingSizeConfirmed: true })).toMatchObject({ quote_required: true });
+      expect(storedDraft().quoteRequiredReason).toBe('home_size_above_public_limit');
+      // Under the ceiling the measured home still prices instantly.
+      mockServerLookup = LOOKUP_19000;
+      const under = await wizard(BED_BUG);
+      expect(under.quote_required).not.toBe(true);
+      expect(storedRow('bed_bug')).toMatchObject({ footprintUsed: 19000, footprintSource: 'lookup_measured_home' });
+      // A quote no line of which prices on the measurement is untouched by it (the pest plan stays on the posted size).
+      mockServerLookup = null;
+      const pestOnly = await wizard({ pest: { frequency: 'quarterly' } });
+      mockServerLookup = LOOKUP_24000;
+      const pestOnlyLooked = await wizard({ pest: { frequency: 'quarterly' } });
+      expect(pestOnlyLooked.quote_required).toBe(pestOnly.quote_required);
+      expect(pestOnlyLooked.monthly_total).toBe(pestOnly.monthly_total);
     });
 
     test('a commercial building keeps its measured footprint: a 6,000 sq ft one-story hotel, two rooms, light chemical, is $992 (not $962 on the 2,000 placeholder)', async () => {

@@ -97,11 +97,14 @@ function fleaSizeBasisSignalForReplay(estData) {
 // 'lookup_measured_home' and the measured area in footprintUsed on every row it priced with it, and the compact wizard writers carry
 // both. A browser-supplied copy in any stored input carrier is never read. A flea row backs it only while every stored flea row is
 // stamped whole-home; a cockroach, bed bug or rodent guarantee row carries that source only when it was priced on the whole home.
+// Each whole-home service is read on its own (storedRows per service), so the merged-line rule holds per SERVICE: the authoritative
+// container's row wins for a service both containers hold, and a service only the other retained container priced (a cockroach row
+// in engineResult beside a bed bug row in result) still supplies its measurement.
 function storedMeasuredHomeRow(estData) {
   const fleaRows = storedFleaRows(estData);
   const backing = [
     ...(fleaRows.every((row) => row.fleaSizeBasis === 'total_living_area') ? fleaRows : []),
-    ...storedRows(estData, isWholeHomeSizedRow),
+    ...[...WHOLE_HOME_ROW_SERVICES].flatMap((service) => storedRows(estData, (row) => isRecord(row) && row.service === service)),
   ];
   return backing.find((row) => row.footprintSource === 'lookup_measured_home' && Number(row.footprintUsed) > 0) || null;
 }

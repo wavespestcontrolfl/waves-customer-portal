@@ -2291,6 +2291,11 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       isManualQuoteLine(line)
     );
     const manualQuoteLine = manualQuoteLines[0] || null;
+    // The public ceiling is on the size a line PRICES on. When the server lookup's measured home replaced the placeholder on a line
+    // (flea, cockroach, bed bug: footprintSource 'lookup_measured_home') and that home is above the ceiling, the quote goes to the
+    // team, as it does when the same size is posted. A measurement no line priced on changes nothing.
+    const homeAbovePublicLimit = homeSizeAbovePublicLimit || (Number(fleaMeasuredHomeSqFt) > HOME_CAP
+      && (estimate?.lineItems || []).some((line) => line?.footprintSource === 'lookup_measured_home'));
     // A commercial auto-priced line whose driving area is estimated carries a LOW
     // pricing confidence. When the aggregate ±20% band is too wide to show a
     // useful number (> $300/mo swing), the quote is force-converted to a
@@ -2356,7 +2361,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
     // all assume the quote is wholly priced or wholly manual. A lawn-only or
     // tree-only commercial quote has no manual line, so it prices instantly.
     const quoteRequired = !!manualQuoteLine || lowConfidenceForcesSiteQuote || unitOnMultiUnitParcel
-      || lotFlagForcesSiteQuote || homeSizeAbovePublicLimit;
+      || lotFlagForcesSiteQuote || homeAbovePublicLimit;
     // A held pest line on a big home names its size hold, whatever the engine lists first on that line. A home with no measured lot
     // prices on a stand-in lot of 4 x the home size, and the engine lists that lot review (very_large_lot) first: reading reasons[0]
     // told the homeowner that commercial properties need a manual quote, and filed the lead as commercial. Above the 20,000 sq ft
@@ -2375,7 +2380,7 @@ router.post('/calculate', quoteLimiter, async (req, res) => {
       || (lowConfidenceForcesSiteQuote ? 'commercial_low_confidence_site_confirmation' : null)
       || (unitOnMultiUnitParcel ? 'unit_in_multi_unit_building' : null)
       || (lotFlagForcesSiteQuote ? 'lot_size_requires_verification' : null)
-      || (homeSizeAbovePublicLimit ? 'home_size_above_public_limit' : null);
+      || (homeAbovePublicLimit ? 'home_size_above_public_limit' : null);
     const quoteIsPricedByTeam = isPricedByTeamReason(quoteRequiredReason);
     const monthly = quoteRequired ? 0 : Number(estimate?.summary?.recurringMonthlyAfterDiscount || 0);
     const annual = quoteRequired ? 0 : Number(estimate?.summary?.recurringAnnualAfterDiscount || 0);

@@ -6270,7 +6270,11 @@ placeholder and the server's own lookup measured the home, the cockroach and bed
 bug treatments price on the measured living area, as flea does, and a
 customer-confirmed size still wins; a bed bug row held for inspection stores
 the same size fields, so a staff revision keeps the measured home; a
-commercial building is not a home and keeps its measured footprint); species / severity /
+commercial building is not a home and keeps its measured footprint; the
+measured home also satisfies the stand-alone package's "building size not
+measured" check, and a measured home above the 20,000 sq ft public ceiling
+that a line priced on parks the quote, `home_size_above_public_limit`, as a
+posted size above it does); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed
