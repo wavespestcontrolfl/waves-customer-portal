@@ -63,7 +63,7 @@ const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/
 const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../services/protocol-reader');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
-const { tankReferenceAcrossTanks, sprayerTestWarning } = require('../services/lawn-tank-reference');
+const { tankReferenceAcrossTanks, tanksDiffer, sprayerTestWarning } = require('../services/lawn-tank-reference');
 const { spreaderForLine } = require('../services/spreader-settings');
 
 // Only a spreader card (not a hand-shaker bait, a sprayed product or a SKIP line) gets a spreader number.
@@ -776,7 +776,7 @@ function otherTankLines(calibration, bigTanks, items) {
     .filter(Boolean);
 }
 
-// Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them); [] when none can be read.
+// Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them).
 async function getActiveBigTanks() {
   return db('equipment_calibrations as ec')
     .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
@@ -784,8 +784,8 @@ async function getActiveBigTanks() {
     .where('es.tank_capacity_gal', BIG_TANK_CAPACITY_GAL)
     .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
     .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 else 1 end")
-    .orderBy('es.name', 'asc')
-    .catch(() => []);
+    // No catch: a failed read fails the sheet, never one tank's number shown as if it were the only tank.
+    .orderBy('es.name', 'asc');
 }
 const BIG_TANK_CAPACITY_GAL = 110;
 
@@ -1064,6 +1064,15 @@ function lawnMixRig(calibration) {
   return { carrier, tankCoverageSqft, equipment };
 }
 
+// No sprayer picked while the big tanks are on different numbers (owner 2026-11-27): no single coverage or full-tank mix (each
+// tank's comes in equipment.tankOptions and the items' tankAmounts.tankOptions); else the one rig as lawnMixRig gives it.
+function lawnMixRigs(calibration, bigTanks) {
+  const rig = lawnMixRig(calibration);
+  if (!tanksDiffer(bigTanks) || !rig.equipment) return rig;
+  const tankOptions = bigTanks.map((tank) => lawnMixRig(tank).equipment);
+  return { ...rig, tankCoverageSqft: 0, equipment: { ...rig.equipment, tankCoverageSqft: null, tankOptions } };
+}
+
 // The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
 // selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
 // the restriction on every gated row), then the cadence and limit warnings.
@@ -1299,7 +1308,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     let resolvedLines = holdTetrinoWithoutScoutEvidence(matchedLines, v13Rows, scout);
     resolvedLines = holdUnresolvedTurfHerbicides(resolvedLines, v13Rows, unresolvedTurf);
     resolvedLines = holdNorthPortProducts(resolvedLines, v13Rows, municipality, ...(holdRoundsNitrogen ? [{ nitrogen: true }] : []));
-    const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
+    const { carrier, tankCoverageSqft, equipment } = lawnMixRigs(calibration, bigTanks);
     const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, ...roundsGateContext(rounds, holdRoundsNitrogen), municipality };
     const areaContext = {
       plan: req.query.plan,

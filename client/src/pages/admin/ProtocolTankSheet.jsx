@@ -4,6 +4,7 @@ import { productLabelLink } from "../../lib/product-label";
 import { FieldDocument, FieldDocumentBody, FieldFooter, FieldMasthead, FieldTitle } from "../../components/FieldDocument";
 import { Button, Card } from "../../components/ui";
 import "./protocol-tank-sheet.css";
+import { tankCoverageLines } from "./protocolTankOptions";
 
 const TANK_MIX_CATEGORIES = new Set([
   "water_conditioner", "dry_wg_wdg_wp_df", "liquid_flowable_sc", "ec_ew",
@@ -267,7 +268,8 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
           <p className="mt-2 font-medium">Reference amounts. Yearly and visit limits are checked on the job card, not here.</p>
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
-        {equipment?.carrierGalPer1000 > 0 && (
+        {tankCoverageLines(equipment).map((line) => <p key={line} className="protocol-tank-meta">{line}</p>)}
+        {equipment?.carrierGalPer1000 > 0 && !equipment.tankOptions && (
           <p className="protocol-tank-meta">
             Carrier: {equipment.carrierGalPer1000} gal per 1,000 sq ft · Full-tank coverage: {Number(equipment.tankCoverageSqft).toLocaleString("en-US")} sq ft
           </p>

@@ -5,6 +5,7 @@ import ProtocolTankSheet, { directionLines, itemMixWarnings, mixOrderWarnings, s
 import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
+import { tankCoverageLines, tankFillLines } from "./protocolTankOptions";
 import {
   MONTH_NAMES,
   PRODUCT_DESCRIPTIONS,
@@ -538,7 +539,7 @@ export function ProtocolMixCard({
   // the phone card's rate strip) are dropped in favour of one explanation.
   const hasAnyMix = items.some(
     (item) =>
-      item.jobMix || item.plannedMix || item.fullTankMix || item.plannedFullTankMix,
+      item.jobMix || item.plannedMix || item.fullTankMix || item.plannedFullTankMix || tankFillLines(item).length,
   );
   const rows = items.map((item, idx) => {
     const checked = item.conditional
@@ -664,7 +665,7 @@ export function ProtocolMixCard({
           </div>
         </>
       ) : (
-        dash
+        <TankFillList lines={tankFillLines(item)} numClass={numClass} dash={dash} />
       ),
     };
   });
@@ -751,7 +752,7 @@ export function ProtocolMixCard({
                 Tank Coverage
               </div>{" "}
               <div className="u-nums text-16 font-medium text-zinc-900">
-                {fmtNumber(plan.equipment?.tankCoverageSqft, " sq ft")}
+                <TankCoverage equipment={plan.equipment} />
               </div>{" "}
             </div>{" "}
             {!pricingRestricted && (
@@ -1007,6 +1008,17 @@ function ProductLabelsCard({ items }) {
       </div>{" "}
     </Card>
   );
+}
+
+// No sprayer picked and the big tanks differ: each tank's full-tank fill or coverage, named (protocolTankOptions.js).
+function TankFillList({ lines, numClass, dash }) {
+  if (!lines.length) return dash;
+  return lines.map((line) => <div key={line} className={numClass}>{line}</div>);
+}
+function TankCoverage({ equipment }) {
+  const lines = tankCoverageLines(equipment);
+  if (!lines.length) return fmtNumber(equipment?.tankCoverageSqft, " sq ft");
+  return lines.map((line) => <div key={line} className="text-12">{line}</div>);
 }
 
 export default function ProtocolReferenceTabV2() {
@@ -1328,10 +1340,7 @@ export default function ProtocolReferenceTabV2() {
                       Tank Coverage
                     </div>{" "}
                     <div className="u-nums text-14 font-medium text-zinc-900">
-                      {fmtNumber(
-                        mixPlan?.equipment?.tankCoverageSqft,
-                        " sq ft",
-                      )}
+                      <TankCoverage equipment={mixPlan?.equipment} />
                     </div>{" "}
                   </div>{" "}
                 </div>

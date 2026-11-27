@@ -302,12 +302,18 @@ describe("110-gallon tank reference", () => {
       { sprayerName: "110-Gallon Spray Tank #1", per100Gal: { ...fill(11.4), gallons: 100 }, fullTank: fill(12.5) },
       { sprayerName: "Udor tank #2", per100Gal: { ...fill(5.7), gallons: 100 }, fullTank: fill(6.25) },
     ];
+    plan.equipment = { ...plan.equipment, carrierGalPer1000: 2, tankCoverageSqft: null, tankOptions: [
+      { systemName: "110-Gallon Spray Tank #1", carrierGalPer1000: 2, tankCoverageSqft: 55000 },
+      { systemName: "Udor tank #2", carrierGalPer1000: 4, tankCoverageSqft: 27500 },
+    ] };
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Full 110 gal tank · 110-Gallon Spray Tank #1").nextSibling).toHaveTextContent(/^12\.5 oz$/);
       expect(within(surface).getByText("Full 110 gal tank · Udor tank #2").nextSibling).toHaveTextContent(/^6\.25 oz$/);
       expect(within(surface).getByText("100 gal tank · Udor tank #2").nextSibling).toHaveTextContent(/^5\.7 oz$/);
       expect(within(surface).queryByText("Full 110 gal tank")).not.toBeInTheDocument();
+      expect(within(surface).getByText("Udor tank #2: 4 gal per 1,000 sq ft, 27,500 sq ft per tank")).toBeInTheDocument();
+      expect(within(surface).queryByText(/Full-tank coverage/)).not.toBeInTheDocument();
       // The card heading names each tank's full tank, never one unnamed dose.
       expect(within(surface).getAllByText("12.5 oz / 110 gal 110-Gallon Spray Tank #1; 6.25 oz / 110 gal Udor tank #2").length).toBeGreaterThan(0);
     }

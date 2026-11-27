@@ -72,6 +72,7 @@ function readQuery(rows) {
   for (const method of ['where', 'orWhereNull', 'whereIn', 'join', 'select', 'orderByRaw', 'orderBy']) query[method] = jest.fn(() => query);
   query.first = jest.fn(async () => rows[0] || null);
   query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
+  query.then = (onFulfilled, onRejected) => Promise.resolve(rows).then(onFulfilled, onRejected);
   return query;
 }
 
@@ -719,10 +720,27 @@ describe('the tank sheet fill amounts on the v13 program', () => {
       expect.objectContaining({ code: 'sprayer_number', message: '110-Gallon Spray Tank #1: 2 gal per 1,000 sq ft, from tank counts.' }),
       expect.objectContaining({ code: 'other_tank_sprayer_number', message: 'Udor tank #2: 4 gal per 1,000 sq ft, owner estimate.' }),
     ]));
+    // No single coverage or full-tank mix: each tank's coverage, named.
+    expect(body.equipment.tankCoverageSqft).toBeNull();
+    expect(body.equipment.tankOptions.map((option) => [option.systemName, option.tankCoverageSqft])).toEqual([['110-Gallon Spray Tank #1', 55000], ['Udor tank #2', 27500]]);
+    expect(itemFor(body, TETRINO)).toMatchObject({ fullTankMix: null, plannedFullTankMix: null });
+    // A failed tank list read fails the sheet, never one tank's number alone.
+    db.mockImplementation((table) => {
+      if (table !== 'equipment_calibrations as ec') return base(table);
+      const query = readQuery(tanks);
+      query.then = (onFulfilled, onRejected) => Promise.reject(new Error('read failed')).then(onFulfilled, onRejected);
+      return query;
+    });
+    const res = { json: jest.fn(), status: jest.fn() };
+    const next = jest.fn();
+    await handler({ query: { track: 'bermuda', lawnSqft: '10000', month: '5' } }, res, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'read failed' }));
+    db.mockImplementation((table) => (table === 'equipment_calibrations as ec' ? readQuery(tanks) : base(table)));
     // A picked sprayer: its own amount only.
     const picked = await lawnMix({ month: '5', equipmentSystemId: 'tank1' });
     expect(itemFor(picked, TETRINO).tankAmounts.tankOptions).toBeUndefined();
     expect(picked.warnings.map((warning) => warning.code)).not.toContain('other_tank_sprayer_number');
+    expect(picked.equipment.tankOptions).toBeUndefined();
   });
 
   test('the FlowZone on the owner\'s standing number (no expiry, owner 2026-11-27) gets a neutral note, not a test prompt', async () => {

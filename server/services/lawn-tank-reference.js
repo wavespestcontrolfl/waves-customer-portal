@@ -316,4 +316,4 @@ function tankReferenceAcrossTanks({ tanks = [], ...args }) {
   };
 }
 
-module.exports = { tankReference, tankReferenceAcrossTanks, sprayerTestWarning, lineCarrierGalPer1000, BIG_TANK_GAL, BACKPACK_GAL };
+module.exports = { tankReference, tankReferenceAcrossTanks, tanksDiffer, sprayerTestWarning, lineCarrierGalPer1000, BIG_TANK_GAL, BACKPACK_GAL };

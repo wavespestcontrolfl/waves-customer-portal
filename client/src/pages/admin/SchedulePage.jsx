@@ -217,6 +217,7 @@ import { NEXT_VISIT_NOTE_MAX, nextVisitNoteFields } from "../../lib/completion-n
 import { rankTechTips, techTipSubtext, techTipSentLabel, pickableTipIds, rotatedTipGroups, techTipYardLine, techTipSourceLabels } from "../../lib/tech-tips";
 import { LAWN_TARGET_SUGGESTIONS, NUTRITION_TARGET_SUGGESTIONS, productControlsTargets, productTargetsNutrition } from "../../lib/lawn-targets";
 import { directionsHref } from "../../lib/directionsHref";
+import { tankCoverageLines, tankFillLines } from "./protocolTankOptions";
 // The marker under "Time on site" on a completed visit (server timeOnSite.evidence).
 const TIME_ON_SITE_SOURCE_LABEL = {
   gps_measured: "Measured by truck GPS",
@@ -8416,12 +8417,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                             <div>
                               {fmtProtocolNumber(lawnMix.areaSqft, " sq ft")}
                             </div>{" "}
-                            <div>
-                              {fmtProtocolNumber(
-                                lawnMix.equipment?.tankCoverageSqft,
-                                " sq ft/tank",
-                              )}
-                            </div>{" "}
+                            {tankCoverageLines(lawnMix.equipment, fmtProtocolNumber(lawnMix.equipment?.tankCoverageSqft, " sq ft/tank"))
+                              .map((line) => <div key={line}>{line}</div>)}{" "}
                           </div>{" "}
                         </div>
                         {(lawnMix.warnings || []).map((w) => (
@@ -8500,9 +8497,8 @@ export function ProtocolPanel({ service, onClose, initialSection = null }) {
                                   <div>
                                     {mixQuantityText(areaMix?.amount, areaMix?.amountUnit)}
                                   </div>{" "}
-                                  <div style={{ color: D.muted }}>
-                                    {mixQuantityText(tankMix?.amount, tankMix?.amountUnit)}/tank
-                                  </div>{" "}
+                                  {tankFillLines(item, `${mixQuantityText(tankMix?.amount, tankMix?.amountUnit)}/tank`)
+                                    .map((line) => <div key={line} style={{ color: D.muted }}>{line}</div>)}{" "}
                                 </div>{" "}
                               </div>{" "}
                             </div>
