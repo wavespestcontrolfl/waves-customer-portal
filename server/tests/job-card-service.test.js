@@ -2392,7 +2392,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
     expect(out.amount).toBeNull();
     expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.unit, row.fromCard])).toEqual([['Bed Bug Treatment Service', 40, 'g', true], ['Flea Control Service', 20, 'g', true]]);
-    expect(out.warnings.join(' ')).toMatch(/different rate on each service/);
+    expect(out.warnings.join(' ')).toMatch(/is on more than one service on this visit/);
   });
 
   // Owner 2026-11-26: an "if needed" line keeps its card's exact rate; the selection warning rides beside it.

@@ -1664,28 +1664,27 @@ function isConditionalLine(raw) {
 // "(Southern Ag 27.15%)"). Null when the line states no per-gallon rate —
 // "label rate", a dry weight, a per-1,000 sq ft rate.
 const LINE_RATE_RE = /(\d+(?:\.\d+)?)(?:\s*[-–]\s*(\d+(?:\.\d+)?))?\s*(%|(?:fl\.?\s?oz|oz|qts?|pts?|tsp|tbsp|ml|g)\b\.?)(\s*(?:\/|per)\s*(100\s*)?gal(?:lons?)?\b)?/i;
-const FL_OZ_PER = { floz: 1, qt: 32, pt: 16, tbsp: 0.5, tsp: 1 / 6 };
+const FL_OZ_PER = { floz: 1, qt: 32, pt: 16, tbsp: 0.5, tsp: 1 / 6, '%': 1.28 };
 // `conditional`: the whole line is an "if needed" line, so every clause is its use and the rate sits in the same clause as the condition
 // ("Distance IGR on live whitefly finds only: whiteflies 6-8 fl oz/100 gal"); the standard-rate filter would drop all of it.
+const lineRateMatch = (raw, conditional) => LINE_RATE_RE.exec(lineClauses(String(raw || '').replace(/\([^)]*\)/g, ' ')).filter((clause) => conditional || !CONDITIONAL_LINE_RE.test(clause)).join(', '));
 // True when the rate lineRate would read is a stated per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage (a product name's "6% Fe").
-function lineRateIsDilution(raw, { conditional = false } = {}) {
-  const text = lineClauses(String(raw || '').replace(/\([^)]*\)/g, ' ')).filter((clause) => conditional || !CONDITIONAL_LINE_RE.test(clause)).join(', ');
-  const m = LINE_RATE_RE.exec(text);
+function lineRateIsDilution(raw, conditional) {
+  const m = lineRateMatch(raw, conditional);
   return Boolean(m && m[3] !== '%' && m[4]);
 }
-function lineRate(raw, { conditional = false } = {}) {
-  const text = lineClauses(String(raw || '').replace(/\([^)]*\)/g, ' ')).filter((clause) => conditional || !CONDITIONAL_LINE_RE.test(clause)).join(', ');
-  const m = LINE_RATE_RE.exec(text);
+function lineRate(raw, conditional) {
+  const m = lineRateMatch(raw, conditional);
   if (!m) return null;
   const [, lo, hi, unitRaw, perGal, per100] = m;
   const unit = unitRaw.toLowerCase().replace(/[.\s]/g, '').replace(/s$/, '');
   if (unit !== '%' && !perGal) return null;
-  const factor = unit === '%' ? 1.28 : (FL_OZ_PER[unit] ?? 1) / (per100 ? 100 : 1);
+  const factor = (FL_OZ_PER[unit] ?? 1) / (per100 ? 100 : 1);
   const round = (v) => Math.round(v * 100000) / 100000;
   const a = round(Number(lo) * factor);
   const b = hi != null ? round(Number(hi) * factor) : a;
   if (!(a > 0)) return null;
-  return { lo: a, hi: Math.max(a, b), unit: unit === '%' || unit in FL_OZ_PER ? 'fl_oz' : unit };
+  return { lo: a, hi: Math.max(a, b), unit: unit in FL_OZ_PER ? 'fl_oz' : unit };
 }
 
 // A line may name more than one product ("Distance or Talus", "Iron Plus
@@ -2387,7 +2386,9 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     }),
     single: () => {
       const dose = perGallon ? perGallonDose({ band: perGallon, volume, lineCarrier, ...rigCtx }) : buildMixAmount({ ratePer1000, rateUnit, carrierGalPer1000: rowCarrier > 0 ? rowCarrier : (tank.calibrated ? tank.carrierGalPer1000 : null), gallons: volume });
-      return { mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null }, warnings: [rigVolumeWarning({ lineCarrier, ...rigCtx })].filter(Boolean) };
+      // At another spray volume the tank covers the rig's own area, and the card's volume would cover another: both are said, neither read as the other's.
+      const coverage = dose.labelCoversSqft ? `${rigCtx.rigName} sprays ${fmtGal(dose.rigSprayGalPer1000)} gal per 1,000 sq ft, so this tank covers ${dose.coversSqft.toLocaleString('en-US')} sq ft. At the card's ${fmtGal(dose.sprayVolumeGalPer1000)} gal per 1,000 sq ft the same tank would cover ${dose.labelCoversSqft.toLocaleString('en-US')} sq ft` : null;
+      return { mix: { ...dose, ratePerGallon: dose.amount != null ? perGallon : null }, warnings: [rigVolumeWarning({ lineCarrier, ...rigCtx }), coverage].filter(Boolean) };
     },
   }[doseMode]();
   const warnings = [...mixWarnings({ svc, protocolLine, treatment, primaryIsLawn, lawnAddon, planWide, productBlocks, product, tankMixable, sprayCheck, labelPerGallon, governedRows }), ...doseWarnings];
@@ -2549,8 +2550,7 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     .filter(({ hit }) => hit);
   const owners = hits.map(({ c }) => ({ name: c.name, serviceKey: c.serviceKey || null }));
   const selectedHits = hits.filter(({ hit }) => hit.selected !== false);
-  const [selected] = selectedHits;
-  const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, { conditional: hit.selected === false }));
+  const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, hit.selected === false));
   // The spray volume a line states for its own rate: a label-use card's carrier, or the protocol text's "at the label volume of N gal"
   // (the April Distance IGR line) or "N gallon(s) per 1,000 sq ft" (the flea Antapex and Onslaught lines). "At least N gal" is a floor,
   // not a volume, and is never read.
@@ -2580,43 +2580,34 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
       // The line itself states a per-gallon dilution ("6-8 fl oz/100 gal"), not a percentage read off a product name ("6% Fe").
-      explicitDilution: lineRateIsDilution(h.hit.raw, { conditional: h.hit.selected === false }),
+      explicitDilution: lineRateIsDilution(h.hit.raw, h.hit.selected === false),
       ...(h.hit.labelHold ? { labelHold: h.hit.labelHold } : {}),
       ...(h.hit.selected === false ? { useText: clean(stripPriceTokensFromText(String(h.hit.raw || '')).replace(/\s+/g, ' ').trim(), 2000) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
     };
   };
-  if (selected) {
-    // A chemical area add-on's dose is its booked rate over the area sold, not a tank amount; a tank line that names the same product
-    // (a Tree & Shrub visit's own Snapshot beside a Bed Pre-Emergent add-on) keeps its tank amount, and each add-on's booked rate and
-    // grass restriction ride under its service name (governedRows). Only when every selected line is an area add-on is the dose governed.
-    const tankHits = selectedHits.filter((h) => !h.hit.governed);
-    // With no selected tank line, an "if needed" tank line of the same product still leads the amount (marked for confirmation), and the
-    // booked area rate rides beside it under its service name.
-    const conditionalTankHits = hits.filter(({ hit }) => hit.selected === false && !hit.governed);
-    const lead = tankHits[0] || conditionalTankHits[0] || selected;
-    const rateHits = tankHits.length ? tankHits : (lead === selected ? selectedHits : conditionalTankHits);
-    const governedRows = selectedHits.filter((h) => h.hit.governed).map((h) => ({ service: h.c.name, ...governedRateOf(h.hit.governed, h.c.scope) })).filter((row) => row.ratePer1000);
-    // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
-    // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
-    // right one: the dose carries a warning. Each service's line goes along (conflictLines) so the warning can name the rates that pass the
-    // same label check a single dose does (conflictText).
-    // An "if needed" line of the same product on another booked service is a row of its own, marked as needing the call confirmed.
-    const conditionalHits = tankHits.length ? conditionalTankHits : [];
-    const conflictHits = [...rateHits, ...conditionalHits];
-    const ratesDisagree = conflictLinesOf(conflictHits);
-    // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
-    // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
-    const heldHit = selectedHits.find((h) => h.hit.labelHold);
-    const held = heldHit ? { labelHold: heldHit.hit.labelHold } : {};
-    const governed = Boolean(lead.hit.governed);
-    return found({ addon: lead.c.addon, selected: lead.hit.selected !== false, ...lineOf(lead), governed, ...(governed && governedRows[0] ? { governedRate: governedRows[0] } : {}), governedRows, ...held, ...ratesDisagree }, owners);
-  }
-  // A conditional ("if needed") line keeps its own rate, so the search shows the card's rate with the selection warning beside it.
-  const [conditional] = hits;
-  // Every service that lists the product only as "if needed" goes through the same per-service comparison as selected lines.
-  return found(conditional ? { addon: conditional.c.addon, selected: false, ...lineOf(conditional), ...(conditional.hit.labelHold ? { labelHold: conditional.hit.labelHold } : {}), ...conflictLinesOf(hits) } : null, owners);
+  if (!hits.length) return found(null, owners);
+  // Group the hits once. A chemical area add-on's dose is its booked rate over the area sold, not a tank amount, so its hits stay out of
+  // the tank lines and ride as governedRows under their service names (a Tree & Shrub visit's own Snapshot beside a Bed Pre-Emergent
+  // add-on keeps its tank amount). The tank lines that decide the amount are chosen once: the selected ones, else the "if needed" ones
+  // (marked for confirmation), else, when every line is an area add-on, the hits themselves (a governed dose).
+  const tankLines = hits.filter((h) => !h.hit.governed);
+  const usable = tankLines.filter((h) => h.hit.selected !== false);
+  const optional = tankLines.filter((h) => h.hit.selected === false);
+  const decisive = [usable, optional, hits].find((list) => list.length);
+  const [lead] = decisive;
+  const governedRows = selectedHits.filter((h) => h.hit.governed).map((h) => ({ service: h.c.name, ...governedRateOf(h.hit.governed, h.c.scope) })).filter((row) => row.ratePer1000);
+  // Two booked services can select the same product at different rates (a home cockroach visit with Tekko Pro at its label's
+  // 2 fl oz per gallon, plus a flea add-on at 0.66 in the shared tank). The request names only the product, so no one rate is the
+  // right one: the dose carries a warning. Each service's line goes along (conflictLines), with an "if needed" line of the same product
+  // on another booked service as a row of its own, so the warning and the amounts can name each service.
+  const ratesDisagree = conflictLinesOf(decisive === usable ? [...usable, ...optional] : decisive);
+  // A hold on any selected service's line holds the dose: the request names only the product, so another service's rate
+  // (the mosquito card's 1 fl oz per gallon beside a held flea add-on) must not stand in for it.
+  const held = [...selectedHits, lead].find((h) => h.hit.labelHold)?.hit.labelHold;
+  const governed = Boolean(lead.hit.governed);
+  return found({ addon: lead.c.addon, selected: lead.hit.selected !== false, ...lineOf(lead), governed, ...(governed ? { governedRate: governedRows[0] } : {}), governedRows, ...(held ? { labelHold: held } : {}), ...ratesDisagree }, owners);
 }
 
 // The booked add-on's own rate (protocols.json area_addon labelFacts: per 1,000 sq ft, in its unit) for a governed line, with the
@@ -2650,11 +2641,10 @@ function conflictText(product, label, conflictLines) {
   const volumeText = (line) => (line.labelUse && Number(line.carrier) > 0 ? ` at ${fmtGal(line.carrier)} gal per 1,000 sq ft` : '');
   const each = conflictLines.map((line) => {
     const band = protocolBand(label, line);
-    return `${line.name}${line.conditional ? ' (if needed)' : ''} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
+    return `${line.name} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
   });
-  // Same concentration on every service (a selected line beside an "if needed" one): no second tank, only each service's own conditions.
-  if (new Set(conflictLines.map((line) => JSON.stringify(line.rate))).size === 1) return `${product.name} is listed on more than one service on this visit: ${each.join('; ')}. Each service's own conditions are shown`;
-  return `${product.name} has a different rate on each service on this visit: ${each.join('; ')}. Mix a separate tank for each`;
+  // Each service has its own row below with its amount and conditions ("if needed", target, spray volume).
+  return `${product.name} is on more than one service on this visit, each with its own rate or conditions: ${each.join('; ')}`;
 }
 
 // The protocol band clipped to the verified label band, on one unit.

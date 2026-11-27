@@ -7131,7 +7131,7 @@ export function JobCardGoverned({ governed, D, pending = false }) {
   if (!governed) return null;
   const rate = (
     <>
-      {governed.rate && <div>Rate: {governed.rate}</div>}
+      <div>Rate: {governed.rate}</div>
       {governed.rateNote && <div role="alert" style={{ color: "#C8312F" }}>Warning: {governed.rateNote}</div>}
     </>
   );
@@ -7145,6 +7145,39 @@ export function JobCardGoverned({ governed, D, pending = false }) {
       {governed.use && <div>{governed.use}</div>}
       {governed.safety && <div style={{ fontWeight: 500 }}>Safety: {governed.safety}</div>}
     </div>
+  );
+}
+
+// One service's labeled amount in the Tank search, with the spray volume and both coverage figures (owner 2026-11-26).
+function JobCardServiceAmount({ row, gallons, rigName, D }) {
+  return (
+    <div style={{ fontSize: 16, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
+      {row.service}{row.conditional ? " (if needed, confirm the call)" : ""}: {row.amount != null ? formatMeasuredRange(row.amount, row.amountMax, row.unit) : "no amount"}{" "}
+      <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>
+        in {gallons} gal{rigName ? ` · ${rigName}` : ""}{row.sprayVolumeGalPer1000 ? ` · card spray ${row.sprayVolumeGalPer1000} gal per 1,000 sq ft` : ""}{row.coversSqft ? ` · covers ${row.coversSqft.toLocaleString()} sq ft` : ""}{row.fromCard ? "" : " · label rate, not this service's card rate"}
+      </span>
+    </div>
+  );
+}
+
+// What rides beside a searched product's amount (owner 2026-11-26): every check that used to withhold it as a warning (the dose's own, then
+// any chemical-group repeats), and each booked area add-on's rate under its service name in the same layout as the card's area add-on text.
+function JobCardMixNotes({ mix, D }) {
+  const notes = [mix?.warnings, mix?.rotationWarnings].flat().filter(Boolean);
+  return (
+    <>
+      {notes.length > 0 && (
+        <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
+          {notes.map((warning, i) => <div key={i}>Warning: {warning}</div>)}
+        </div>
+      )}
+      {mix?.governedRates?.map((row) => (
+        <div key={row.service} style={{ display: "grid", gap: 4 }}>
+          <div style={{ fontWeight: 500 }}>{row.service}</div>
+          <JobCardGoverned governed={{ rate: row.text, area: row.area, limit: row.limit, safety: row.safety }} D={D} />
+        </div>
+      ))}
+    </>
   );
 }
 
@@ -7205,7 +7238,7 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
       <JobCardChip tone={p.verdictLevel === "warning" ? "warning" : p.verdict} D={D} />
       {amount && <span style={{ fontSize: 13, color: D.text, fontVariantNumeric: "tabular-nums" }}>{amount}</span>}
       {/* The warning rides beside the amount wherever the amount shows, collapsed card included (owner 2026-11-26). */}
-      {amount && !pending && p.amountNote && <span role="alert" style={{ fontSize: 12, color: "#C8312F", maxWidth: 220 }}>Warning: {p.amountNote}</span>}
+      {p.amountNote && !pending && <span role="alert" style={{ fontSize: 12, color: "#C8312F", maxWidth: 220 }}>Warning: {p.amountNote}</span>}
       {pending && <span style={{ fontSize: 14, color: D.muted }}>Checking the amounts…</span>}
     </>
   );
@@ -7230,7 +7263,6 @@ function JobCardProduct({ p, serviceId, D, use = null, pending = false }) {
         {!short && !pending && p.onHand != null && (
           <div style={{ color: D.muted }}>On hand {fmtAmount(p.onHand, p.onHandUnit)}{p.lowStock ? " (low)" : ""}</div>
         )}
-        {p.amountNote && !pending && <div role="alert" style={{ color: "#C8312F" }}>Warning: {p.amountNote}</div>}
         {p.stockNote && <div style={{ color: D.muted }}>{p.stockNote}</div>}
         {p.rotation && <div style={{ color: D.muted }}>{p.rotation}</div>}
         {(p.labelUrl || p.sdsUrl) && (
@@ -7413,46 +7445,19 @@ function JobCardTank({ tank, serviceId, ticks = "", D }) {
               <div style={{ fontSize: 20, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
                 {formatMeasuredRange(mix.amount, mix.amountMax, mix.unit)} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{mix.coversSqft ? ` · covers ${mix.coversSqft.toLocaleString()} sq ft` : ""}</span>
               </div>
-            ) : mix?.serviceAmounts?.length > 0 ? (
+            ) : mix?.serviceAmounts ? (
               // Two services name the product at their own rates: one labeled amount for each, never one headline (owner 2026-11-26).
               <div style={{ display: "grid", gap: 6 }}>
-                {mix.serviceAmounts.map((row) => (
-                  <div key={row.service} style={{ fontSize: 16, fontWeight: 500, color: D.heading, fontVariantNumeric: "tabular-nums" }}>
-                    {row.service}{row.conditional ? " (if needed, confirm the call)" : ""}: {row.amount != null ? formatMeasuredRange(row.amount, row.amountMax, row.unit) : "no amount"} <span style={{ fontSize: 13, fontWeight: 400, color: D.muted }}>in {mix.gallons ?? gallons} gal{mix.rig?.name ? ` · ${mix.rig.name}` : ""}{row.sprayVolumeGalPer1000 ? ` · card spray ${row.sprayVolumeGalPer1000} gal per 1,000 sq ft` : ""}{row.coversSqft ? ` · covers ${row.coversSqft.toLocaleString()} sq ft` : ""}{row.labelCoversSqft ? ` (${mix.rig?.name || "this rig"} sprays ${row.rigSprayGalPer1000} gal per 1,000 sq ft; at the card's volume it would cover ${row.labelCoversSqft.toLocaleString()} sq ft)` : ""}{row.fromCard ? "" : " · label rate, not this service's card rate"}</span>
-                  </div>
-                ))}
+                {mix.serviceAmounts.map((row) => <JobCardServiceAmount key={row.service} row={row} gallons={mix.gallons ?? gallons} rigName={mix.rig?.name} D={D} />)}
               </div>
             ) : (
               <div style={{ fontSize: 13, color: "#C8312F" }}>{mix?.reason || "No mix available"}</div>
-            )}
-            {/* The selected rig's coverage is above; the card's own volume would cover another area (owner 2026-11-26). */}
-            {!busy && mix?.amount != null && mix.labelCoversSqft > 0 && (
-              <div style={{ fontSize: 14, color: D.text }}>{mix.rig?.name || "This rig"} sprays {mix.rigSprayGalPer1000} gal per 1,000 sq ft. At the card's {mix.sprayVolumeGalPer1000} gal per 1,000 sq ft the same tank would cover {mix.labelCoversSqft.toLocaleString()} sq ft.</div>
             )}
             {/* A card's label rate holds only at its own spray volume (Tekko Pro on cockroaches: 1 gal per 1,000 sq ft). */}
             {!busy && mix?.amount != null && mix.sprayVolumeGalPer1000 > 0 && (
               <div style={{ fontSize: 14, color: D.text }}>Spray {mix.sprayVolumeGalPer1000} gal per 1,000 sq ft. More water per area puts down more than the label amount, less water puts down less.</div>
             )}
-            {/* Every check that used to withhold the amount rides beside it as a warning (owner 2026-11-26). */}
-            {!busy && [...(mix?.warnings || []), ...(mix?.rotationWarnings || [])].length > 0 && (
-              <div role="alert" style={{ fontSize: 14, color: "#C8312F", display: "grid", gap: 4 }}>
-                {[...(mix.warnings || []), ...(mix.rotationWarnings || [])].map((warning, i) => <div key={i}>Warning: {warning}</div>)}
-              </div>
-            )}
-            {/* Each booked area add-on's rate under its service name, with the label's own words, area basis, limit and safety line. */}
-            {mix?.governedRates?.length > 0 ? (
-              <div style={{ fontSize: 13, color: D.text, display: "grid", gap: 8 }}>
-                {mix.governedRates.map((row) => (
-                  <div key={row.service} style={{ display: "grid", gap: 2 }}>
-                    <div style={{ fontWeight: 500 }}>{row.service}: {fmtAmount(row.ratePer1000, row.rateUnit)} per 1,000 sq ft</div>
-                    {row.text && <div style={{ color: D.muted }}>Booked rate: {row.text}</div>}
-                    {row.area && <div>Area: {row.area}</div>}
-                    {row.limit && <div>Limit: {row.limit}</div>}
-                    {row.safety && <div>Safety: {row.safety}</div>}
-                  </div>
-                ))}
-              </div>
-            ) : null}
+            {!busy && <JobCardMixNotes mix={mix} D={D} />}
             {mix && (mix.ratePer1000 != null || mix.ratePerGallon) && (
               <div style={{ fontSize: 12, color: D.muted }}>
                 Label rate {mix.ratePerGallon ? `${formatLabelRate(mix.ratePerGallon.lo, mix.ratePerGallon.hi, mix.ratePerGallon.unit)} per gallon` : `${fmtAmount(mix.ratePer1000, mix.unit)} per 1,000 sq ft`}{mix.rateVerified ? "" : " (not yet verified)"}

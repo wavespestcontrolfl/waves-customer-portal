@@ -263,7 +263,7 @@ describe('the tank calculator on a visit with two Tekko Pro cards', () => {
     expect(result.amount).toBeNull();
     expect(result.serviceAmounts.map((row) => [row.service, row.amount, row.fromCard])).toEqual([['German Roach Cleanout', 4, true], ['Flea Treatment', 1.32, true]]);
     // The warning names each service's own rate with the spray volume it holds at, so the tech can mix a tank for each.
-    expect(result.warnings).toContain('Tekko Pro IGR has a different rate on each service on this visit: German Roach Cleanout 2 fl oz per gallon at 1 gal per 1,000 sq ft; Flea Treatment 0.66 fl oz per gallon at 1 gal per 1,000 sq ft. Mix a separate tank for each');
+    expect(result.warnings).toContain('Tekko Pro IGR is on more than one service on this visit, each with its own rate or conditions: German Roach Cleanout 2 fl oz per gallon at 1 gal per 1,000 sq ft; Flea Treatment 0.66 fl oz per gallon at 1 gal per 1,000 sq ft');
   });
 
   test('a held flea line warns beside the dose whichever service is the visit and whichever the add-on (owner 2026-11-26)', async () => {

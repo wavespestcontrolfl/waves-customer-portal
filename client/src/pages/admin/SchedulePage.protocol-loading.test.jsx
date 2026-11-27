@@ -501,20 +501,20 @@ describe("Job card Tank search warnings (owner 2026-11-26: warned, never blocked
   it("shows the booked add-on rate's own words and its grass warning when a granular or governed product is searched", async () => {
     await searchAndPick({ amount: null, unit: "oz", reason: "Area add-on — apply the label rate on the card over the area sold; no tank amount", ratePer1000: 0.147, governedRates: [{ service: "Lawn Insect Spot Treatment", ratePer1000: 0.147, rateUnit: "oz", text: "0.147 oz per 1,000 sq ft in 4 gal of water per 1,000 sq ft." }], warnings: ["Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)"] });
     expect(await screen.findByText("Warning: Grass on the estimate is bermuda, not St. Augustine (this rate is St. Augustine only)")).toBeVisible();
-    expect(screen.getByText("Booked rate: 0.147 oz per 1,000 sq ft in 4 gal of water per 1,000 sq ft.")).toBeVisible();
+    expect(screen.getByText("Rate: 0.147 oz per 1,000 sq ft in 4 gal of water per 1,000 sq ft.")).toBeVisible();
   });
 
   it("lists each booked area add-on's rate under its service name beside a tank amount", async () => {
     await searchAndPick({ amount: 0.5, unit: "fl_oz", gallons: 1, governedRates: [{ service: "Bed Pre-Emergent Treatment", ratePer1000: 3.45, rateUnit: "lb", text: "3.45 lb per 1,000 sq ft of bed.", area: "Bed square feet treated.", limit: "Label limit 600 lb per acre in 12 months.", safety: "Certified applicator only." }] });
-    expect(await screen.findByText(/^Bed Pre-Emergent Treatment: .* per 1,000 sq ft$/)).toBeVisible();
-    expect(screen.getByText("Booked rate: 3.45 lb per 1,000 sq ft of bed.")).toBeVisible();
+    expect(await screen.findByText("Bed Pre-Emergent Treatment")).toBeVisible();
+    expect(screen.getByText("Rate: 3.45 lb per 1,000 sq ft of bed.")).toBeVisible();
     expect(screen.getByText("Limit: Label limit 600 lb per acre in 12 months.")).toBeVisible();
     expect(screen.getByText("Safety: Certified applicator only.")).toBeVisible();
   });
 
   it("keeps the picked rig's coverage and the card volume's coverage as two separate figures", async () => {
-    await searchAndPick({ amount: 220, unit: "fl_oz", gallons: 110, coversSqft: 55000, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1, rigSprayGalPer1000: 2, rig: { name: "Tank #1" }, warnings: ["The card's rate is for 1 gal per 1,000 sq ft."] });
-    expect(await screen.findByText(/covers 55,000 sq ft/)).toBeVisible();
-    expect(screen.getByText(/Tank #1 sprays 2 gal per 1,000 sq ft\. At the card's 1 gal per 1,000 sq ft the same tank would cover 110,000 sq ft\./)).toBeVisible();
+    await searchAndPick({ amount: 220, unit: "fl_oz", gallons: 110, coversSqft: 55000, labelCoversSqft: 110000, sprayVolumeGalPer1000: 1, rigSprayGalPer1000: 2, rig: { name: "Tank #1" }, warnings: ["Tank #1 sprays 2 gal per 1,000 sq ft, so this tank covers 55,000 sq ft. At the card's 1 gal per 1,000 sq ft the same tank would cover 110,000 sq ft"] });
+    expect(await screen.findByText(/· covers 55,000 sq ft/)).toBeVisible();
+    expect(screen.getByText(/the same tank would cover 110,000 sq ft/)).toBeVisible();
   });
 });
