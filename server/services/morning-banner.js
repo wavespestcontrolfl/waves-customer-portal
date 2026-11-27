@@ -142,25 +142,33 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
   }
 }
 
-async function legacyDayClaimed(day) {
+async function hasAudienceClaim(day) {
   const row = await db('sms_send_claims')
-    .where({ claim_key: `${CLAIM_PREFIX}${day}` })
+    .whereIn('claim_key', [`${CLAIM_PREFIX}${day}:owner`, `${CLAIM_PREFIX}${day}:shared`])
     .first('id');
   return Boolean(row);
 }
 
 // Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
 // alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
-// re-notify an audience that already received today's banner. Honor any legacy
-// bare-date claim (`morning_banner:<day>`) left by an earlier release during rollout.
+// re-notify an audience that already received today's banner. On the first run
+// of a day (no audience claim yet), also atomically reserve the legacy
+// bare-date key (`morning_banner:<day>`) so both rollout directions (old->new
+// and new->old) never duplicate a banner during a rolling deploy.
 async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
+  const legacyKey = `${CLAIM_PREFIX}${day}`;
+  let reservedLegacyHere = false;
   try {
-    if (await legacyDayClaimed(day)) {
-      logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
-      return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
+    const alreadyScoped = await hasAudienceClaim(day);
+    if (!alreadyScoped) {
+      reservedLegacyHere = await claimKey(legacyKey);
+      if (!reservedLegacyHere) {
+        logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
+        return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
+      }
     }
   } catch (err) {
-    logger.error(`[morning-banner] legacy claim check failed for ${day}: ${err?.code || err?.message || 'error'}`);
+    logger.error(`[morning-banner] legacy claim gate failed for ${day}: ${err?.code || err?.message || 'error'}`);
     return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
   }
   const { ownerIds, otherAdminIds } = await splitAdminIdsByOwnerAccess();
@@ -179,8 +187,15 @@ async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
       triggerOptions: { pushOnly: true, onlyUserIds: otherAdminIds },
     });
   }
-  if (audiences.length === 0) return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
+  if (audiences.length === 0) {
+    if (reservedLegacyHere) await releaseKey(legacyKey);
+    return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
+  }
   const outcomes = await Promise.all(audiences.map(sendClaimedAudience));
+  const anySucceededOrClaimed = outcomes.some((o) => o.status === 'sent' || o.status === 'already_claimed');
+  if (reservedLegacyHere && !anySucceededOrClaimed) {
+    await releaseKey(legacyKey);
+  }
   if (outcomes.some((o) => o.status === 'claim_failed')) return { count: ownerSummary.count, sent: false, error: 'claim_failed' };
   if (outcomes.some((o) => o.status === 'dispatch_failed')) return { count: ownerSummary.count, sent: false, error: 'dispatch_failed' };
   const sent = outcomes.find((o) => o.status === 'sent');

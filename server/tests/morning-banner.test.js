@@ -61,6 +61,9 @@ beforeEach(() => {
         first: async () => (claimed.has(key) ? { id: 1 } : null),
         del: async () => { claimed.delete(key); return del(); },
       }),
+      whereIn: (_col, keys) => ({
+        first: async () => (keys.some((k) => claimed.has(k)) ? { id: 1 } : null),
+      }),
     };
   });
   mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 1 } });
@@ -162,7 +165,7 @@ describe('once per ET day', () => {
     // Late in the evening ET it is still the same ET day.
     expect((await runMorningBanner({ now: new Date('2026-11-04T03:30:00Z') })).skipped).toBe('already_claimed');
     expect(mockTrigger).toHaveBeenCalledTimes(1);
-    expect([...claimed]).toEqual(['morning_banner:2026-11-03:owner']);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:owner']);
   });
 
   test('the next ET day sends again, across the November fall-back day too', async () => {
@@ -192,7 +195,7 @@ describe('once per ET day', () => {
     // Provider handoff may already have happened -> keep the claim so rerun does not duplicate.
     mockTrigger.mockResolvedValueOnce({ bellWritten: false, push: null, pushFailed: 'push_dispatch' });
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: true });
-    expect(claimed.size).toBe(1);
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
     mockTrigger.mockClear();
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ sent: false, skipped: 'already_claimed' });
     expect(mockTrigger).not.toHaveBeenCalled();
@@ -260,7 +263,7 @@ describe('once per ET day', () => {
       .mockResolvedValueOnce({ bellWritten: false, push: { sent: 1 } });
     const partial = await runMorningBanner({ now: MORNING });
     expect(partial).toEqual({ count: 2, sent: false, error: 'dispatch_failed' });
-    expect([...claimed]).toEqual(['morning_banner:2026-11-03:shared']);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:shared']);
 
     mockTrigger.mockClear();
     const retry = await runMorningBanner({ now: MORNING });
@@ -279,7 +282,7 @@ describe('once per ET day', () => {
     mockOpenRows.mockResolvedValue([row({ area: 'Comms' })]);
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 1, sent: true });
     expect(mockTrigger).toHaveBeenCalledTimes(2);
-    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03:owner', 'morning_banner:2026-11-03:shared']);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:owner', 'morning_banner:2026-11-03:shared']);
 
     mockTrigger.mockClear();
     mockOpenRows.mockResolvedValue([row({ area: 'Comms' }), row({ area: 'Billing', ownerOnly: true })]);
@@ -291,7 +294,7 @@ describe('once per ET day', () => {
     claimed.clear();
     mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true })]);
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 1, sent: true });
-    expect([...claimed]).toEqual(['morning_banner:2026-11-03:owner']);
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:owner']);
 
     mockTrigger.mockClear();
     mockOpenRows.mockResolvedValue([row({ area: 'Billing', ownerOnly: true }), row({ area: 'Comms' })]);
@@ -303,12 +306,21 @@ describe('once per ET day', () => {
       { pushOnly: true, onlyUserIds: [2] },
     );
 
-    // Rollout compatibility: a legacy bare-date claim (`morning_banner:<day>`) written by the
-    // previous release suppresses both per-audience banners on a same-day rerun.
+    // Rollout order 1 (old -> new): a legacy bare-date claim (`morning_banner:<day>`) written by
+    // the previous release suppresses both per-audience banners on a same-day rerun.
     mockTrigger.mockClear();
     claimed.clear();
     claimed.add('morning_banner:2026-11-03');
     await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, skipped: 'already_claimed' });
     expect(mockTrigger).not.toHaveBeenCalled();
+
+    // Rollout order 2 (new -> old): new release atomically reserves `morning_banner:<day>` too,
+    // so an older instance attempting takeSendClaim('morning_banner:2026-11-03') gets false.
+    mockTrigger.mockClear();
+    claimed.clear();
+    await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
+    expect(claimed.has('morning_banner:2026-11-03')).toBe(true);
+    const oldInstanceClaim = await mockDb.raw('INSERT INTO sms_send_claims (claim_key) VALUES (?) ON CONFLICT DO NOTHING RETURNING id', ['morning_banner:2026-11-03']);
+    expect(oldInstanceClaim.rows).toEqual([]);
   });
 });
