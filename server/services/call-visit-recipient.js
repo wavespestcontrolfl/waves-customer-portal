@@ -192,11 +192,13 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id', 'source', 'reminder_contact_id');
       const sameCustomer = existing && existing.customer_id && String(existing.customer_id) === String(visit.customer_id);
-      if (sameCustomer && existing.source === REMINDER_SOURCE) {
-        // A list copy on this visit becomes this call's own grant for the visit, IN PLACE: same customer, so its delivery
-        // claims stay (nothing is sent twice), and the visit keeps the person even if the list entry later goes. Its tracker
-        // token is always cleared (the next en-route text mints a new one), so no old link survives the change of grant, and a
-        // text queued under the copy (it carries the copy's entry id) drops. Not a created row: the list is not touched.
+      // A LIVE list copy already grants this visit: the call changes nothing (its link, claims and queued texts stand). A copy
+      // whose entry is gone (it stayed on another account in a merge) grants nothing, so the call takes it over as its own
+      // grant for this visit, IN PLACE: same customer, so its delivery claims stay (nothing is sent twice); its tracker token
+      // is cleared (no old link comes back) and a text queued under the copy (it carries the copy's entry id) drops. Not a
+      // created row: the list is not touched. Nothing in this change removes a list entry; the staff and portal list that
+      // will must keep the visit grants a call made.
+      if (sameCustomer && existing.source === REMINDER_SOURCE && !(await copyLive(existing, visit.customer_id, trx))) {
         await trx(TABLE).where({ id: existing.id }).update({
           source: SOURCE, consent_version: CONSENT_VERSION, call_log_id: callLogId, reminder_contact_id: null, track_token: null,
           first_name: fresh.first_name, last_name: fresh.last_name, role: fresh.role,

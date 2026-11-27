@@ -595,15 +595,14 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
       });
 
-      test('a call about a visit that has a LIVE list copy makes it the call\'s own visit grant: it survives the entry going', async () => {
+      test('a call about a visit that has a LIVE list copy leaves it as it is (link, claims, entry)', async () => {
         await VisitRecipient.materializeForVisit(otherVisitId);
         const [copy] = await otherRows();
         await db('visit_text_recipients').where({ id: copy.id }).update({ track_token: `vr_${'a'.repeat(48)}` });
-        await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
+        const again = await record({ scheduledServiceId: otherVisitId }, entry({ appointment_texts_scope: 'this_visit' }));
+        expect(again.recorded).toEqual([{ phoneKey: BOB.slice(-10), created: false }]);
         const [row] = await otherRows();
-        expect(row).toMatchObject({ id: copy.id, source: 'call_caller_provided', reminder_contact_id: null, track_token: null });
-        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
-        expect(await VisitRecipient.contactsForVisit(otherVisitId, 'confirmation')).toHaveLength(1);
+        expect(row).toMatchObject({ id: copy.id, source: 'customer_reminder_contact', reminder_contact_id: copy.reminder_contact_id, track_token: `vr_${'a'.repeat(48)}` });
       });
 
       test('a NEW list entry for the same number never revives an old copy or its link: the copy is rebound and its token cleared', async () => {
