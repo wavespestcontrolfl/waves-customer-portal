@@ -102,8 +102,13 @@ describe('CareersOfferPage — open state', () => {
   it('expands the terms inline and never injects raw HTML', async () => {
     globalThis.fetch = vi.fn().mockResolvedValueOnce(jsonResponse(openPayload()));
     renderPage();
-    fireEvent.click(await screen.findByRole('button', { name: /Read the Technician Terms/ }));
+    const toggle = await screen.findByRole('button', { name: /Read the Technician Terms/ });
+    const collapsedTerms = screen.getByTestId('offer-terms');
+    expect(collapsedTerms).toHaveClass('careers-offer-terms-collapsed');
+    expect(collapsedTerms).toHaveTextContent('Four 10-hour days.');
+    fireEvent.click(toggle);
     const terms = screen.getByTestId('offer-terms');
+    expect(terms).not.toHaveClass('careers-offer-terms-collapsed');
     expect(terms).toHaveTextContent('Four 10-hour days.');
     expect(terms.querySelector('script')).toBeNull();
     expect(terms).toHaveTextContent('<script>alert(1)</script>');
@@ -154,6 +159,10 @@ describe('CareersOfferPage — open state', () => {
     expect(accept).toBeEnabled();
     fireEvent.click(accept);
     expect(await screen.findByText(/You signed this offer on Sat, Dec 12, 2026\. Welcome to Waves\. Sam will contact you about your first day\./)).toBeInTheDocument();
+    const record = screen.getByTestId('offer-signature-record');
+    expect(record).toHaveTextContent('Signed by: Jordan Rivera');
+    expect(record).toHaveTextContent('Sat, Dec 12, 2026');
+    expect(screen.getByTestId('offer-terms')).toHaveTextContent('Four 10-hour days.');
     expect(screen.getByRole('button', { name: 'Print / Save PDF copy' })).toBeInTheDocument();
     expect(fetchMock.mock.calls[1][0]).toMatch(new RegExp(`/public/careers/offer/${TOKEN}/v2/accept$`));
     expect(bodyOf(fetchMock, 1)).toEqual({ signedName: 'Jordan Rivera', version: VERSION });

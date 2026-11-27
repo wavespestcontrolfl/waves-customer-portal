@@ -144,3 +144,20 @@ test('non-admin signing a signature agreement sees Sign this agreement, no due p
   await waitFor(() => expect(onSaved).toHaveBeenCalledWith('Agreement signed and saved.'));
   expect(screen.getByText(/Signed by Sample Hire/)).toBeInTheDocument();
 });
+
+test('an optional signed-name field does not activate agreement mode or label a blank record Signed', () => {
+  const base = detail();
+  base.rendered.metadata.fields = [
+    { id: 'vehicle', label: 'Assigned vehicle', type: 'text', required: false },
+    { id: 'signed-name', label: 'Typed name', type: 'text', required: false },
+  ];
+  base.records = [{
+    id: 'rec-blank', owner_id: 'hire', answers: { vehicle: 'Truck 7', 'signed-name': '' },
+    completed_steps: [], created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z',
+    due_at: '2026-11-02T12:00:00Z', completed_at: '2026-11-01T12:05:00Z',
+  }];
+  render(<DocumentRecord detail={base} people={people} selfId="hire" manage={false} canWrite onSaved={() => {}} />);
+  expect(screen.getByRole('heading', { name: 'Create a record' })).toBeInTheDocument();
+  expect(screen.getByRole('option', { name: /Completed/ })).toBeInTheDocument();
+  expect(screen.queryByRole('option', { name: /Signed/ })).not.toBeInTheDocument();
+});

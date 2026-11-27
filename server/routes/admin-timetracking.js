@@ -2348,6 +2348,7 @@ router.get('/documents/:id/download', requireAdmin, async (req, res, next) => {
         category: doc.category || null,
         technician_id: doc.technician_id || null,
       },
+      critical: true,
     });
 
     res.json({ url, fileName: doc.file_name });

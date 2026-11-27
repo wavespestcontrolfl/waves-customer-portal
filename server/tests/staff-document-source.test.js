@@ -1,5 +1,5 @@
 const { sourceSchema, policySchema, validate, renderSource, checkRelease, hash } = require('../services/staff-document-source');
-const { recordAnswers, parseSignedName } = require('../services/staff-documents');
+const { recordAnswers, parseSignedName, hasSignatureField } = require('../services/staff-documents');
 const { validateTemplatePayload } = require('../services/document-template-library');
 const starters = require('../services/staff-document-starters');
 
@@ -66,12 +66,26 @@ test('renders markdown pipe tables, ordered lists, and mixed paragraph+bullet bl
   expect(html).toMatch(/&(?:lt|#x3C);script/);
 });
 test('shared values cannot issue with embedded decision markers or merge placeholders', () => {
-  for (const pay_schedule of ['[DECISION: approve the pay dates]', '{{approved.pay_dates}}']) {
+  for (const pay_schedule of ['[DECISION: approve the pay dates]', '[DECISION: confirm payday', '[OWNER: pick one', '{{approved.pay_dates}}']) {
     expect(() => validate(policySchema, { ...values, pay_schedule })).toThrow(/Resolve placeholders/);
   }
   const draft = source('## Pay dates {#pay-dates}\n{{policy.pay_schedule}}');
   const rendered = renderSource(draft, { ...values, pay_schedule: '[DECISION: approve pay dates]' });
   expect(() => checkRelease(draft, rendered, new Date())).toThrow(/Resolve/);
+  const unterminated = renderSource(source('## Pay dates {#pay-dates}\nPaid [DECISION: confirm payday'), values);
+  expect(unterminated.unresolved).toEqual(['[DECISION: confirm payday']);
+  expect(() => checkRelease(draft, unterminated, new Date())).toThrow(/Resolve/);
+});
+test('oversized Markdown tables are rejected before HTML expansion', () => {
+  const wideHeaders = Array.from({ length: 13 }, (_, i) => `C${i}`).join(' | ');
+  const wideSep = Array.from({ length: 13 }, () => '---').join(' | ');
+  expect(() => renderSource(source(`## Wide {#wide}\n| ${wideHeaders} |\n| ${wideSep} |\n| ${wideHeaders} |`), values))
+    .toThrow(/maximum of 12 columns/);
+  const tenHeaders = Array.from({ length: 10 }, (_, i) => `C${i}`).join(' | ');
+  const tenSep = Array.from({ length: 10 }, () => '---').join(' | ');
+  const manyRows = Array.from({ length: 105 }, () => '| a |').join('\n');
+  expect(() => renderSource(source(`## Tall {#tall}\n| ${tenHeaders} |\n| ${tenSep} |\n${manyRows}`), values))
+    .toThrow(/maximum of 1000 rendered cells/);
 });
 test('HTML, scripts, images and unsafe links cannot become executable content', () => {
   const html = renderSource(source('## Example {#example}\n<img src=x onerror=alert(1)> [bad](javascript:alert) [good](https://example.com/?q="x") **Bold**')).sections[0].html;
@@ -102,6 +116,8 @@ test('signature fields require a full name (first and last) when completing a fo
   expect(parseSignedName('x')).toBeNull();
   expect(parseSignedName('Jordan')).toBeNull();
   expect(parseSignedName('  Jordan   Rivera  ')).toBe('Jordan Rivera');
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'text', required: false }])).toBe(false);
+  expect(hasSignatureField([{ id: 'signed-name', label: 'Typed name', type: 'text', required: true }])).toBe(true);
   const version = {
     staff_metadata: {
       fields: [

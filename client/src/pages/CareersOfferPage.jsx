@@ -38,6 +38,7 @@ import {
 } from '../components/careers/offerFormat';
 import { WAVES_SUPPORT_PHONE_DISPLAY, WAVES_SUPPORT_PHONE_TEL } from '../constants/business';
 import { isNativeApp } from '../native/nativeFile';
+import './careers-offer-print.css';
 
 const API_BASE = import.meta.env.VITE_API_URL || '/api';
 
@@ -252,6 +253,32 @@ function ResultState({ data, own }) {
           </p>
         )}
         <p style={BODY_STYLE} role="status">{resultMessage(data, own)}</p>
+        {data.state === 'signed' && (data.signedName || data.signedAt) && (
+          <div
+            data-testid="offer-signature-record"
+            style={{
+              marginTop: 12,
+              padding: '12px 14px',
+              borderRadius: 8,
+              background: '#F1F7FA',
+              border: '1px solid #D5DEE5',
+              fontFamily: FONTS.ui,
+              fontSize: 14,
+              color: TEXT,
+            }}
+          >
+            {data.signedName && (
+              <div>
+                <strong style={{ color: 'var(--brand, #04395E)' }}>Signed by:</strong> {data.signedName}
+              </div>
+            )}
+            {data.signedAt && (
+              <div style={{ color: MUTED, marginTop: 2 }}>
+                Signed on: {formatLongInstant(data.signedAt)}
+              </div>
+            )}
+          </div>
+        )}
         {showSignedCopy && (
           <>
             <OfferSummary data={data} />
@@ -304,6 +331,7 @@ function TermsSection({ terms }) {
     <div style={{ borderTop: '1px solid var(--border, #E2E8F0)', padding: '4px 0' }}>
       <button
         type="button"
+        className="waves-field-no-print"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         style={{
@@ -326,12 +354,15 @@ function TermsSection({ terms }) {
         <span>{open ? 'Hide the Technician Terms' : 'Read the Technician Terms'}</span>
         <span aria-hidden="true">{open ? '↑' : '→'}</span>
       </button>
-      {open && (
-        <div data-testid="offer-terms" style={{ padding: '4px 0 12px' }}>
-          {terms.title && <div style={{ ...LABEL_STYLE, marginTop: 8 }}>{terms.title}</div>}
-          <SafeMarkdown markdown={terms.markdown} />
-        </div>
-      )}
+      <div
+        data-testid="offer-terms"
+        className={open ? undefined : 'careers-offer-terms-collapsed'}
+        aria-hidden={!open}
+        style={{ padding: '4px 0 12px' }}
+      >
+        {terms.title && <div style={{ ...LABEL_STYLE, marginTop: 8 }}>{terms.title}</div>}
+        <SafeMarkdown markdown={terms.markdown} />
+      </div>
     </div>
   );
 }

@@ -25,10 +25,13 @@ const sourceSchema = Joi.object({
     fields: Joi.array().items(field).max(40).unique('id').required(),
   }).required(),
 });
-// Unresolved author placeholders that must be resolved before issuing any staff document or shared policy value.
-const UNRESOLVED_MARKER_RE = /\[(?:DECISION|OWNER|CPA|LAWYER(?:\/CPA)?|ATTORNEY|TO WRITE|TBD)(?::[^\]]*)?\]|\[BAR\]/gi;
+// Unresolved author placeholders (closed or unterminated) that must be resolved before issuing.
+const UNRESOLVED_MARKER_RE = /\[(?:DECISION|OWNER|CPA|LAWYER(?:\/CPA)?|ATTORNEY|TO WRITE|TBD)\s*:(?:[^\]]*\]|[^\n]*)|\[(?:DECISION|OWNER|CPA|LAWYER(?:\/CPA)?|ATTORNEY|TO WRITE|TBD|BAR)\]/gi;
 const ORDERED_ITEM_RE = /^(\d{1,9})[.)]\s+(.*)$/;
 const TABLE_SEP_RE = /^\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?$/;
+const MAX_TABLE_COLS = 12;
+const MAX_TABLE_ROWS = 200;
+const MAX_TABLE_CELLS = 1000;
 
 const policySchema = Joi.object({
   pay_frequency: Joi.string().valid('weekly', 'biweekly', 'semi-monthly', 'monthly').required(),
@@ -99,14 +102,18 @@ function isTableStart(lines, index) {
   return splitTableCells(lines[index]).length >= 2;
 }
 
-function renderTable(lines, startIndex) {
+function renderTable(lines, startIndex, budget) {
   const headers = splitTableCells(lines[startIndex]);
+  if (headers.length > MAX_TABLE_COLS) reject(`Table exceeds the maximum of ${MAX_TABLE_COLS} columns.`);
   const rows = [];
   let cursor = startIndex + 2;
   while (cursor < lines.length && lines[cursor].includes('|') && lines[cursor].trim()) {
+    if (rows.length >= MAX_TABLE_ROWS) reject(`Table exceeds the maximum of ${MAX_TABLE_ROWS} rows.`);
     rows.push(splitTableCells(lines[cursor]));
     cursor += 1;
   }
+  budget.cells += headers.length * (rows.length + 1);
+  if (budget.cells > MAX_TABLE_CELLS) reject(`Document tables exceed the maximum of ${MAX_TABLE_CELLS} rendered cells.`);
   const headHtml = `<thead><tr>${headers.map(cell => `<th>${inline(cell)}</th>`).join('')}</tr></thead>`;
   const bodyHtml = rows.length
     ? `<tbody>${rows.map(row => `<tr>${headers.map((_, idx) => `<td>${inline(row[idx] ?? '')}</td>`).join('')}</tr>`).join('')}</tbody>`
@@ -114,13 +121,13 @@ function renderTable(lines, startIndex) {
   return { html: `<div class="staff-table-wrap"><table>${headHtml}${bodyHtml}</table></div>`, nextIndex: cursor };
 }
 
-function renderParagraphBlock(paragraph) {
+function renderParagraphBlock(paragraph, budget) {
   const lines = paragraph.split('\n');
   const out = [];
   let i = 0;
   while (i < lines.length) {
     if (isTableStart(lines, i)) {
-      const table = renderTable(lines, i);
+      const table = renderTable(lines, i, budget);
       out.push(table.html);
       i = table.nextIndex;
     } else if (lines[i].startsWith('- ')) {
@@ -152,12 +159,13 @@ function renderParagraphBlock(paragraph) {
 
 function sections(markdown) {
   const result = [];
+  const budget = { cells: 0 };
   for (const block of markdown.trim().split(/\n(?=## )/)) {
     const match = /^## (.+?) \{#([a-z][a-z0-9-]{1,79})\}\n([\s\S]*)$/.exec(block);
     if (!match) reject('Each clause must start with ## Title {#stable-anchor}, followed by its text.');
     const [, title, id, body] = match;
     if (result.some(section => section.id === id)) reject(`Duplicate clause anchor: ${id}`);
-    const html = body.trim() ? body.trim().split(/\n\s*\n/).map(renderParagraphBlock).join('\n') : '';
+    const html = body.trim() ? body.trim().split(/\n\s*\n/).map(p => renderParagraphBlock(p, budget)).join('\n') : '';
     result.push({ id, number: result.length + 1, title, text: body.trim(), html });
   }
   if (result.length > 80) reject('Use at most 80 clauses per document.');

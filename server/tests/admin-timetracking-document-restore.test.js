@@ -153,6 +153,21 @@ describe('GET /documents/:id/download', () => {
         category: 'policy',
         technician_id: 'tech-1',
       },
+      critical: true,
     });
+  });
+
+  test('fails the request and does not return a presigned URL if the audit write fails', async () => {
+    const active = { ...ARCHIVED, is_archived: false, file_name: 'Jane_Doe_W4.pdf', technician_id: 'tech-1' };
+    db.mockReturnValueOnce(chain({ first: active }));
+    getSignedUrl.mockResolvedValueOnce('https://s3.example.test/signed');
+    recordAuditEvent.mockRejectedValueOnce(new Error('audit_log write failed'));
+
+    await expect(invoke('get', '/documents/:id/download', {
+      params: { id: DOC_ID },
+      technicianId: 'admin-1',
+      ip: '203.0.113.9',
+      get: () => undefined,
+    })).rejects.toThrow('audit_log write failed');
   });
 });

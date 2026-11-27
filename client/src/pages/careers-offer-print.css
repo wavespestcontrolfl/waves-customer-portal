@@ -1,0 +1,9 @@
+.careers-offer-terms-collapsed {
+  display: none;
+}
+
+@media print {
+  .careers-offer-terms-collapsed {
+    display: block !important;
+  }
+}

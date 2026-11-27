@@ -84,7 +84,7 @@ function SavedRecordsPicker({ visible, record, records, canWrite, isSignatureFor
         <option value="">{canWrite ? (isSignatureForm ? 'New signature' : 'New record') : 'Choose historical record'}</option>
         {records.map(item => (
           <option key={item.id} value={item.id}>
-            {item.completed_at ? (isSignatureForm ? 'Signed' : 'Completed') : 'Open'}
+            {item.completed_at ? (isSignatureForm && signedNameValid(item.answers?.['signed-name']) ? 'Signed' : 'Completed') : 'Open'}
             {item.owner_name ? ` · ${item.owner_name}` : ''} · {dateLabel(item.created_at)} · {item.id.slice(0, 8)}
           </option>
         ))}
@@ -127,10 +127,10 @@ function RecordCompletedBanner({ record, isSignatureForm }) {
 }
 
 function computeRecordState({ rendered, answers, owner, selfId, canWrite, record, records }) {
-  const isSignatureForm = rendered.kind === 'form' && rendered.metadata.fields.some(field => field.id === 'signed-name');
-  const signatureField = rendered.metadata.fields.find(field => field.id === 'signed-name');
+  const signatureField = rendered.metadata.fields.find(field => field.id === 'signed-name' && field.required === true);
+  const isSignatureForm = rendered.kind === 'form' && Boolean(signatureField);
   const signedName = String(answers['signed-name'] || '');
-  const signatureReady = !signatureField?.required || signedNameValid(signedName);
+  const signatureReady = !isSignatureForm || signedNameValid(signedName);
   const checkboxesReady = rendered.metadata.fields.every(field => field.type !== 'checkbox' || !field.required || answers[field.id] === true);
   const canSignNow = owner === selfId && (!isSignatureForm || (signatureReady && checkboxesReady));
   const locked = !canWrite || Boolean(record?.completed_at);
