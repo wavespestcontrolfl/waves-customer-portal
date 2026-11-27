@@ -164,10 +164,12 @@ const withRoad = (row, road) => ({ ...row, cand: { ...row.cand, [ROAD_RESULT]: r
 // later score-bar/positive-gain candidate exists, reserve the final slot for
 // that candidate so it is actually road-checked (never approved unchecked on an
 // estimate) while keeping total provider calls bounded at ROAD_CHECK_SLOTS.
-function slotsToMeasure(rankedRows) {
+function slotsToMeasure(rankedRows, isSundayDate) {
   const top = (rankedRows || []).slice(0, ROAD_CHECK_SLOTS);
   if (top.length < ROAD_CHECK_SLOTS || !top.every(needsConfirmedRoad)) return top;
-  const fallback = (rankedRows || []).slice(ROAD_CHECK_SLOTS).find((row) => !needsConfirmedRoad(row));
+  const tierSunday = isSundayDate(top[top.length - 1].cand && top[top.length - 1].cand.date);
+  const fallback = (rankedRows || []).slice(ROAD_CHECK_SLOTS)
+    .find((row) => !needsConfirmedRoad(row) && isSundayDate(row.cand && row.cand.date) === tierSunday);
   return fallback ? [...top.slice(0, ROAD_CHECK_SLOTS - 1), fallback] : top;
 }
 
@@ -178,7 +180,7 @@ async function confirmOnRoads(ranked, ctx) {
   if (!ranked.qualifies) return ranked;
   const floor = ctx.config.minDayMoveDriveSavingMinutes;
   const failed = [];
-  const toCheck = slotsToMeasure(ranked.rankedRows);
+  const toCheck = slotsToMeasure(ranked.rankedRows, moveRules.isSundayDate);
   try {
     for (const row of toCheck) {
       const road = await roadSavingOrNull(ctx.current, row.cand, ctx.travel);
