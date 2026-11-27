@@ -9772,6 +9772,8 @@ function CustomerReminderContacts({ customerId, isAdmin }) {
     }
   };
   const statusFor = (person) => {
+    // In an on-location contact spot: texts follow that contact, so no Stop here.
+    if (person.inContacts) return person.hasAppAccess ? "In on-location contacts (can sign in)" : "In on-location contacts";
     if (!person.stopped) return "Getting texts";
     return person.stoppedBy === "staff" ? "Stopped by staff" : "Stopped by customer";
   };
@@ -9788,7 +9790,7 @@ function CustomerReminderContacts({ customerId, isAdmin }) {
                 <div className="text-ui-label text-ink-secondary break-all">{person.phone}</div>
                 <div className="text-ui-label text-ink-secondary">{statusFor(person)}</div>
               </div>
-              {isAdmin && (
+              {isAdmin && !person.inContacts && (
                 <Button variant="ghost" disabled={!!busyId} onClick={() => toggle(person)} aria-label={`${person.stopped ? "Restart" : "Stop"} texts for ${name}`}>
                   {person.stopped ? "Restart" : "Stop"}
                 </Button>

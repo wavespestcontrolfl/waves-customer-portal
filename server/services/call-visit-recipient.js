@@ -944,8 +944,8 @@ function releaseDeferredClaim(meta, { conn = db } = {}) {
 
 /**
  * The customer's list of people a caller named for the visit texts, for the account holder's app and for staff.
- * `hasAppAccess`: the number already sits in one of the account's on-location contact slots (the app's own contacts,
- * which can sign in); the app hides "Give app access" for them. Read only.
+ * `inContacts`: the number sits in one of the account's on-location contact spots (its texts then follow that contact);
+ * `hasAppAccess`: that contact can sign in now (contact login on, the holder attested the number). Read only.
  */
 async function listReminderContacts(customerId, { conn = db } = {}) {
   if (!customerId) return [];
@@ -953,8 +953,9 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     .select('id', 'phone_key', 'phone_e164', 'first_name', 'last_name', 'stopped_at', 'stopped_by', 'created_at');
   if (!rows.length) return [];
   const customer = await conn('customers').where({ id: customerId }).first();
-  const { getServiceContactSlots, phoneKeyOf } = require('./customer-contact');
+  const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn } = require('./customer-contact');
   const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
+  const loginLive = require('../config/feature-gates').contactLoginLive();
   return rows.map((row) => ({
     id: row.id,
     firstName: row.first_name || '',
@@ -964,7 +965,11 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
     stoppedAt: row.stopped_at || null,
     stoppedBy: row.stopped_by || null,
     addedAt: row.created_at,
-    hasAppAccess: slotKeys.has(row.phone_key),
+    // In one of the account's on-location contact spots: their texts then follow that contact (its own choices and the
+    // holder's contacts editor), so a stop on this list is not offered for them.
+    inContacts: slotKeys.has(row.phone_key),
+    // Can actually sign in: the contact login is on and the holder attested this number (the same check the login uses).
+    hasAppAccess: loginLive && slotKeys.has(row.phone_key) && contactSlotMayLogIn(customer, row.phone_key),
   }));
 }
 

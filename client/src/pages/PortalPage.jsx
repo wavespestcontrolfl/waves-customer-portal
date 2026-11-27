@@ -5519,7 +5519,11 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
               <div style={{ fontSize: 16, fontWeight: 700, color: B.glassNavy }}>{name}</div>
               <div style={{ fontSize: 14, color: muted }}>{formatPhoneDisplay(person.phone)}</div>
               {person.stopped && <div style={{ fontSize: 14, fontWeight: 700, color: B.orange }}>Stopped</div>}
-              {person.hasAppAccess && !person.stopped && <div style={{ fontSize: 14, color: muted }}>Has app access</div>}
+              {person.inContacts && (
+                <div style={{ fontSize: 14, color: muted }}>
+                  {person.hasAppAccess ? 'Has app access. ' : ''}In your contacts above: their texts follow that contact.
+                </div>
+              )}
             </div>
             <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
               {!person.stopped && !person.hasAppAccess && (
@@ -5533,6 +5537,8 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
                   Give app access
                 </button>
               )}
+              {/* A person in the contact spots gets texts through that contact; a stop here would not stop them. */}
+              {!person.inContacts && (
               <button
                 type="button"
                 onClick={() => toggle(person)}
@@ -5543,6 +5549,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, muted, b
               >
                 {busy ? 'Saving...' : person.stopped ? 'Restart texts' : 'Stop texts'}
               </button>
+              )}
             </div>
           </div>
         );
@@ -5830,12 +5837,17 @@ function ScheduleTab({ customer, properties = [], activePropertyId: activeProper
     if (!property) return false;
     const current = displayContacts(property);
     const isBlank = (c) => !(c.firstName || '').trim() && !(c.lastName || '').trim() && !(c.phone || '').trim() && !(c.email || '').trim();
-    if (!current.some(isBlank) && current.length >= MAX_PROPERTY_CONTACTS) {
+    const digits = (v) => String(v || '').replace(/\D/g, '').slice(-10);
+    // Already in the editor (in a spot without sign-in, or a repeat tap before Save): nothing is added; the holder ticks
+    // the box and saves, which attests the number.
+    const already = current.some((c) => digits(c.phone) && digits(c.phone) === digits(person.phone));
+    if (!already && !current.some(isBlank) && current.length >= MAX_PROPERTY_CONTACTS) {
       showCustomerAlert('All 3 contact spots are in use. Remove one first.');
       return false;
     }
     const entry = { firstName: person.firstName || '', lastName: person.lastName || '', phone: person.phone || '', email: '' };
     setPropertyContacts(propertyId, (contacts) => {
+      if (contacts.some((c) => digits(c.phone) && digits(c.phone) === digits(person.phone))) return contacts;
       const at = contacts.findIndex(isBlank);
       if (at >= 0) return contacts.map((c, i) => (i === at ? entry : c));
       return contacts.length >= MAX_PROPERTY_CONTACTS ? contacts : [...contacts, entry];

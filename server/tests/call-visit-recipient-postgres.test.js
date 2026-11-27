@@ -560,13 +560,22 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           }
         });
 
-        test('the list says who already has app access (an on-location contact slot)', async () => {
+        test('the list says who is in the contact spots and who can sign in (the login\'s own checks)', async () => {
           await record();
           expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([
-            expect.objectContaining({ firstName: 'Bob', lastName: 'Roe', phone: BOB, stopped: false, hasAppAccess: false }),
+            expect.objectContaining({ firstName: 'Bob', lastName: 'Roe', phone: BOB, stopped: false, inContacts: false, hasAppAccess: false }),
           ]);
-          await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
-          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ hasAppAccess: true })]);
+          process.env.GATE_CONTACT_LOGIN = 'true';
+          try {
+            // in a spot, but the holder never attested it: no sign-in
+            await db('customers').where({ id: customerId }).update({ service_contact2_phone: BOB });
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false })]);
+            await db('customers').where({ id: customerId }).update({ service_contacts_consent_at: new Date() });
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: true })]);
+          } finally {
+            delete process.env.GATE_CONTACT_LOGIN;
+          }
+          expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false })]);
         });
       });
 
@@ -1568,6 +1577,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             await db('visit_text_recipients').where({ id }).update({ source: 'customer_reminder_contact' });
             await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
           },
+          // last: a stop is sticky for the rest of the loop
+          'the person stopped on the customer\'s list (a call-recorded row)': () => db('customer_reminder_contacts')
+            .where({ customer_id: customerId }).update({ stopped_at: new Date(), stopped_by: 'customer' }),
         };
         let spy;
         beforeEach(async () => {

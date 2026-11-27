@@ -95,6 +95,14 @@ describe('Customer 360 -> named on a call (texts only)', () => {
     expect(await within(block).findByText('Getting texts')).toBeInTheDocument();
   });
 
+  it('a person in the on-location contact spots shows that, with no Stop (texts follow the contact)', async () => {
+    stubFetch([person({ inContacts: true, hasAppAccess: true })]);
+    await openComms();
+    const block = await screen.findByTestId('reminder-contacts');
+    expect(await within(block).findByText('In on-location contacts (can sign in)')).toBeInTheDocument();
+    expect(within(block).queryByRole('button', { name: /texts for Bob Example/ })).not.toBeInTheDocument();
+  });
+
   it('hides the block when the list is empty', async () => {
     const fetchMock = stubFetch([]);
     await openComms();

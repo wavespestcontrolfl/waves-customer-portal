@@ -753,6 +753,11 @@ function withRecipientRow(query, hit, token) {
         this.select(db.raw('1')).from('customer_reminder_contacts as l')
           .whereRaw('l.customer_id = s.customer_id AND l.phone_key = r.phone_key');
       });
+    })
+    // A stop on the customer's list (owner 2026-11-27) closes the link for every row of the number, in this same final read.
+    .whereNotExists(function notStopped() {
+      this.select(db.raw('1')).from('customer_reminder_contacts as st')
+        .whereRaw('st.customer_id = s.customer_id AND st.phone_key = r.phone_key AND st.stopped_at IS NOT NULL');
     });
 }
 
