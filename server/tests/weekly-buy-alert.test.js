@@ -175,6 +175,38 @@ describe('numbers say their unit and source', () => {
   });
 });
 
+describe('a list-wide warning is never dropped', () => {
+  const KEY = 'weekly-buy:tech-a:2026-12-07';
+  const taurusWarning = 'Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.';
+
+  test('a list with nothing short but a warning keeps its alert: it is raised, and a standing alert is not closed as "nothing is short"', async () => {
+    const group = entry({ items: [], estTotalCents: null, warnings: [taurusWarning] });
+    const raised = notifier();
+    expect((await runWeeklyBuyList({ list: listOf([group]), io: fakeIo(), notify: raised })).raised).toBe(1);
+    expect(raised.mock.calls[0][1]).toBe("Inventory — check Alex's supplies, week of Dec 7");
+    expect(raised.mock.calls[0][3].detail).toContain(`Check:\n- ${taurusWarning}`);
+    const io = fakeIo({ standing: { [KEY]: { open: true, cleared: false, weeklyBuy: { signature: 'old', items: [{ productId: 'p1', packs: 1, packLabel: '2.5 gal', shortQty: 1.9 }] } } }, open: [KEY] });
+    const result = await runWeeklyBuyList({ list: listOf([group]), io, notify: notifier() });
+    expect(io.closed).toEqual([]);
+    expect(result.closed).toBe(0);
+  });
+
+  test('the warning shows once in the body (it is on the group, not appended again from the list)', () => {
+    const group = entry({ warnings: [taurusWarning] });
+    const text = detailFor(group, listOf([group], { warnings: [taurusWarning] }));
+    expect(text.split(taurusWarning)).toHaveLength(2);
+  });
+});
+
+describe('amounts are rounded for display only', () => {
+  test('a small pest-mix amount in gallons shows four places, a larger one two', () => {
+    const group = entry({ items: [item({ needQty: 0.0586, shortQty: 0.0586, onHand: 0.01, unit: 'gal' })] });
+    expect(detailFor(group, listOf([group]))).toContain('(need 0.0586 gal, on hand 0.01 gal)');
+    const big = entry({ items: [item({ needQty: 1234.5678, onHand: 0 })] });
+    expect(detailFor(big, listOf([big]))).toContain('need 1234.57 gal');
+  });
+});
+
 describe('growth compares like with like', () => {
   const prior = (over) => [{ productId: 'p1', packs: 2, packLabel: '2.5 gal', shortQty: 4, ...over }];
   const now = (over) => entry({ items: [item({ packs: 2, packLabel: '2.5 gal', shortQty: 4, ...over })] });

@@ -63,10 +63,19 @@ describe('TeamTab supply store', () => {
     expect(puts[0].supplyStore).toBe('  Synthetic Supply South ');
   });
 
-  it('a blank store is sent as empty text, which the server stores as none', async () => {
+  it('a store that was never set sends nothing; one the office clears sends empty text, which the server stores as none', async () => {
     const puts = setup(BASE_TECH);
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
     expect(screen.getByLabelText('Supply store')).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).not.toHaveProperty('supplyStore'); // left alone
+  });
+
+  it('clearing a saved store sends empty text', async () => {
+    const puts = setup({ ...BASE_TECH, supply_store: 'Synthetic Supply North' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Supply store'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Update' }));
     await waitFor(() => expect(puts).toHaveLength(1));
     expect(puts[0].supplyStore).toBe('');

@@ -111,6 +111,12 @@ jest.setTimeout(60000);
     expect(list.warnings).toEqual([]);
   });
 
+  test('the supply reads work in a snapshot of their own and inside a transaction the caller already holds', async () => {
+    const alone = await buildWeeklyBuyList({ knex: mockConn, now: NOW });
+    const inside = await mockConn.transaction((trx) => buildWeeklyBuyList({ knex: trx, now: NOW }));
+    expect(inside.technicians[0].items).toEqual(alone.technicians[0].items);
+  });
+
   test('the alert store: raise, rerun quietly, close when nothing is left, end last week', async () => {
     const list = await buildWeeklyBuyList({ knex: mockConn, now: NOW });
     const key = `weekly-buy:${techId}:2026-12-07`;

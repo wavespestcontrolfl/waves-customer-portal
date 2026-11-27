@@ -3495,7 +3495,7 @@ export function TeamTab({ showToast }) {
         : [0, 1, 2, 3, 4, 5, 6],
       shiftStart: tech.shift_start || "",
       shiftEnd: tech.shift_end || "",
-      supplyStore: tech.supply_store || "",
+      supplyStore: tech.supply_store,
       ...(tech.start_address && tech.start_lat != null && tech.start_lng != null
         ? {
             startMode: "home",
@@ -3701,7 +3701,8 @@ export function TeamTab({ showToast }) {
                 </label>{" "}
                 <input
                   id="tech-form-supply-store"
-                  value={form.supplyStore}
+                  key={editingId}
+                  defaultValue={form.supplyStore}
                   maxLength={120}
                   onChange={(e) =>
                     setForm((f) => ({ ...f, supplyStore: e.target.value }))

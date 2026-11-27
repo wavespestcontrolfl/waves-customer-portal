@@ -26,7 +26,8 @@ const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', '
 
 const keyFor = (group, weekStart) => `${KEY_PREFIX}${group.technicianId || UNASSIGNED}:${weekStart}`;
 const monthDay = (ymd) => { const [, m, d] = ymd.split('-').map(Number); return `${MONTHS[m - 1]} ${d}`; };
-const num = (n) => String(Number(Number(n).toFixed(2)));
+// Display only: amounts keep full precision everywhere else. Small amounts (a tank mix in gallons) show 4 places.
+const num = (n) => String(Number(Number(n).toFixed(Number(n) < 1 ? 4 : 2)));
 const money = (cents) => `$${(cents / 100).toFixed(2)}`;
 const plural = (n, one, many) => (n === 1 ? one : many);
 const hasContent = (group) => group.items.length > 0 || group.warnings.length > 0;
@@ -50,9 +51,9 @@ function detailFor(group, list) {
     ...group.items.map(itemLine),
   ];
   if (group.estTotalCents != null || group.unpricedLines) lines.push(`Estimated total: ${totalText(group)}`);
-  const check = [...group.warnings, ...list.warnings];
+  // List-wide warnings are already on every group they affect (weekly-buy-list.js warnGroups).
   if (group.notes.length) lines.push('Notes:', ...group.notes.map((n) => `- ${n}`));
-  if (check.length) lines.push('Check:', ...check.map((w) => `- ${w}`));
+  if (group.warnings.length) lines.push('Check:', ...group.warnings.map((w) => `- ${w}`));
   return lines.join('\n');
 }
 

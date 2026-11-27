@@ -29,7 +29,7 @@ const plan = (over = {}) => ({
   pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, tax: 0, floorKey: null, ...over,
 });
 const demand = (qty, unit = 'fl_oz', reasons = ['lawn_plan']) => ({ qty, unit, reasons: new Set(reasons) });
-const group = (entries, over = {}) => ({ demand: new Map(entries), firstDate: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), ...over });
+const group = (entries, over = {}) => ({ demand: new Map(entries), firstDate: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), extra: new Set(), ...over });
 const techs = new Map([['a', { name: 'Alex Sample', supplyStore: 'Synthetic Supply North' }], ['b', { name: 'Blake Sample', supplyStore: null }]]);
 const run = (groups, products) => planGroups({ groups, products: new Map(products.map((p) => [p.id, p])), techs });
 
@@ -240,6 +240,35 @@ describe('stock, packs and cost', () => {
     expect(out.get('b').items[0]).toMatchObject({ needQty: 150, onOrder: 100, shortQty: 100, packs: 1 }); // the remaining 50, then 100 to buy
   });
 
+  describe('no rounding before the pack ceiling', () => {
+    const gal = (over) => plan({ unit: 'gal', pack: { pack: 1 }, packLabel: '1 gal', ...over });
+    const shortOf = (need, over) => run(new Map([['a', group([['p1', demand(need, 'gal')]])]]), [gal(over)]).get('a').items[0];
+
+    test('a hair over one pack buys two: 1.00003 gal short is 2 one-gallon packs', () => {
+      expect(shortOf(1.00003)).toMatchObject({ shortQty: 1.00003, needQty: 1.00003, packs: 2 });
+      expect(shortOf(1.000001).packs).toBe(2);
+      expect(shortOf(0.00003).packs).toBe(1);
+    });
+
+    test('float noise is not a real amount: a need that is a pack plus 1e-10 buys one pack, and 0.1 + 0.2 meets 0.3', () => {
+      expect(shortOf(1 + 1e-10).packs).toBe(1);
+      expect(shortOf(0.1 + 0.2, { pack: { pack: 0.3 } }).packs).toBe(1);
+      // stock of 0.3 covers a need of 0.30000000000000004 exactly: nothing to buy
+      expect(run(new Map([['a', group([['p1', demand(0.1 + 0.2, 'gal')]])]]), [gal({ onHand: 0.3 })]).get('a').items).toEqual([]);
+    });
+
+    test('allocation, on-order and the spare floor keep the small amount too', () => {
+      // 0.00003 gal short after stock and an order, still one whole pack to buy
+      const small = run(new Map([['a', group([['p1', demand(2.00003, 'gal')]])]]), [gal({ onHand: 1, onOrder: 1 })]).get('a').items[0];
+      expect(small.packs).toBe(1);
+      expect(small.shortQty).toBeCloseTo(0.00003, 10);
+      // floor: 2.00003 left after the draw is two sealed gallons; 0.99997 left is none
+      const liquid = (over) => gal({ floorKey: 'crosscheck_plus', ...over });
+      expect(run(new Map([['a', group([['p1', demand(1, 'gal', ['pest_mix'])]])]]), [liquid({ onHand: 3.00003 })]).get('a').items).toEqual([]);
+      expect(run(new Map([['a', group([['p1', demand(1, 'gal', ['pest_mix'])]])]]), [liquid({ onHand: 1.99997 })]).get('a').items[0]).toMatchObject({ packs: 1, reasons: ['pest_mix', 'spare_floor'] });
+    });
+  });
+
   test('a need in another unit is converted to the stock unit', () => {
     const out = run(new Map([['a', group([['p1', demand(1.5, 'gal')]])]]), [plan()]).get('a');
     expect(out.items[0]).toMatchObject({ needQty: 192, shortQty: 192, packs: 2 });
@@ -367,6 +396,8 @@ describe('buildWeeklyBuyList read wiring', () => {
     const knex = jest.fn(make);
     knex.calls = calls;
     knex.raw = jest.fn(() => 'RAW');
+    // the supply reads run in one snapshot transaction: the fake runs them on itself
+    knex.transaction = jest.fn(async (read, options) => read(knex, options));
     return knex;
   }
 
@@ -464,6 +495,67 @@ describe('buildWeeklyBuyList read wiring', () => {
     expect(list.warnings).toEqual(['An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.']);
   });
 
+  test('stock, prices and what is on order are read in one REPEATABLE READ read-only snapshot; a caller\'s own transaction is kept', async () => {
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: ['v1'], serviceCount: 1, errors: [], skippedNonProgram: [],
+      products: [{ productId: 'cross', inventoryUnit: 'fl_oz', appointments: [{ serviceId: 'v1', inventoryAmount: 20 }], mismatchAppointments: [] }] });
+    const results = () => ({
+      'scheduled_services as ss': [[visit('v1', 'a', 'Lawn Care Treatment', '2026-12-09')]],
+      technicians: [[{ id: 'a', name: 'Alex Sample', supply_store: null }]],
+      products_catalog: [[], []],
+      'products_catalog as pc': [[{ id: 'cross', name: 'Synthetic Liquid', inventory_unit: 'fl_oz', inventory_on_hand: '5' }]],
+    });
+    const knex = fakeKnex(results());
+    await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    expect(knex.transaction).toHaveBeenCalledTimes(1);
+    expect(knex.transaction.mock.calls[0][1]).toEqual({ isolationLevel: 'repeatable read', readOnly: true });
+    // all three supply reads ran on the snapshot, after it opened
+    const order = knex.mock.invocationCallOrder;
+    const at = (table) => knex.calls.findIndex((c) => c.table === table);
+    expect(Math.min(order[at('products_catalog as pc')], order[at('vendor_pricing')], order[at('product_restock_requests as prr')])).toBeGreaterThan(knex.transaction.mock.invocationCallOrder[0]);
+    const own = fakeKnex(results());
+    own.isTransaction = true;
+    await buildWeeklyBuyList({ knex: own, now: new Date('2026-12-09T12:00:00Z') });
+    expect(own.transaction).not.toHaveBeenCalled();
+  });
+
+  test('a warning about the whole list is attached to every list it affects, so a list with nothing short still carries it', async () => {
+    taurusModule.projectTaurusEligibility.mockResolvedValue({ fits: new Map([['w1', false]]), failed: true });
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: [], serviceCount: 300, errors: [], skippedNonProgram: [], products: [] });
+    const mixRows = [
+      { id: 'taurus', name: 'Taurus SC', inventory_unit: 'fl_oz' }, { id: 'cross', name: 'LESCO CrossCheck Plus', inventory_unit: 'fl_oz' },
+      { id: 'surf', name: 'LESCO 90/10 Nonionic Surfactant', inventory_unit: 'fl_oz' },
+    ];
+    const knex = fakeKnex({
+      'scheduled_services as ss': [[
+        visit('w1', 'a', 'Quarterly Pest Control', '2026-12-09'), // a pest visit: the Taurus warning
+        visit('w2', 'b', 'Lawn Care Treatment', '2026-12-09'), // a lawn visit not read by the capped forecast: the cap warning
+        visit('w3', 'c', 'Quarterly Pest Control', '2026-12-09'), // a pest visit with plenty on hand: nothing short, still carries the warning
+      ]],
+      technicians: [[{ id: 'a', name: 'Alex Sample' }, { id: 'b', name: 'Blake Sample' }, { id: 'c', name: 'Casey Sample' }]],
+      products_catalog: [mixRows, []],
+      'products_catalog as pc': [mixRows.map((r) => ({ ...r, inventory_on_hand: 100000 }))],
+    });
+    const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    const warningsOf = (id) => list.technicians.find((t) => t.technicianId === id).warnings;
+    expect(warningsOf('a')).toContain('Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.');
+    expect(warningsOf('c')).toContain('Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.');
+    expect(list.technicians.find((t) => t.technicianId === 'c').items).toEqual([]); // nothing short, and still an alert's worth of content
+    expect(warningsOf('b')).toContain('The lawn forecast stopped at 300 visits, so lawn needs may read low.');
+    expect(warningsOf('b')).not.toContain('Taurus SC yearly counts could not be read, so Taurus is left out of every pest visit this week.'); // no pest visit
+    expect(warningsOf('a')).not.toContain('The lawn forecast stopped at 300 visits, so lawn needs may read low.'); // no lawn visit
+  });
+
+  test('a product with need that left the catalog is a warning on the lists that need it', async () => {
+    forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: ['v1'], serviceCount: 1, errors: [], skippedNonProgram: [],
+      products: [{ productId: 'gone', inventoryUnit: 'gal', appointments: [{ serviceId: 'v1', inventoryAmount: 1 }], mismatchAppointments: [] }] });
+    const knex = fakeKnex({
+      'scheduled_services as ss': [[visit('v1', 'a', 'Lawn Care Treatment', '2026-12-09')]],
+      technicians: [[{ id: 'a', name: 'Alex Sample' }]], products_catalog: [[], []], 'products_catalog as pc': [[]],
+    });
+    const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
+    expect(list.technicians[0].warnings).toEqual(['A product with scheduled need is no longer in the catalog, so its need is left out.']);
+  });
+
   test('a forecast that fails fails the list: lawn need is never left out silently', async () => {
     forecastModule.buildWaveGuardInventoryForecast.mockRejectedValue(new Error('forecast down'));
     const knex = fakeKnex({ 'scheduled_services as ss': [[]], technicians: [[]] });
@@ -474,6 +566,6 @@ describe('buildWeeklyBuyList read wiring', () => {
     forecastModule.buildWaveGuardInventoryForecast.mockResolvedValue({ serviceIds: [], serviceCount: 300, errors: [], skippedNonProgram: [], products: [] });
     const knex = fakeKnex({ 'scheduled_services as ss': [[]], products_catalog: [[], []] });
     const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-07T12:00:00Z') });
-    expect(list.warnings).toContain('The lawn forecast stopped at 300 visits, so lawn needs may read low.');
+    expect(list.warnings).toEqual(['The lawn forecast stopped at 300 visits, so lawn needs may read low.']); // also kept at list level
   });
 });

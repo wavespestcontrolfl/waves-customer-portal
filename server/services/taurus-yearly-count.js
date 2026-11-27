@@ -216,29 +216,37 @@ async function taurusYearlyCount(visit, { knex = db, now = new Date() } = {}) {
 
 const pairKey = (visit) => `${visit.customer_id}|${visit.property_id || ''}`;
 
+// Whether a projected application (at the home `app`) is one the ledger would count for `visit`'s home: the
+// SAME matching as LEDGER_SQL. An application is recorded at its own property (null when it has none). The
+// visit counts it when it has a property and the application is at that property (whoever the account is), or
+// when it is the same account and either side has no property.
+const countsFor = (visit, app) => Boolean(visit.property_id && app.property_id === visit.property_id)
+  || (app.customer_id === visit.customer_id && (!visit.property_id || !app.property_id));
+
 /**
  * Whether the house mix will still carry Taurus SC on each of these booked visits, projected: the ledger's count
  * for the home (the same rule as taurusYearlyCount, read once per year for every home), then each visit in date
- * order takes one 0.03% application when one fits, so two visits at one home in a week are judged one after the other.
+ * order takes one 0.03% application when one fits, and that application counts for EVERY home the ledger would
+ * count it for (two accounts at one property share it; a visit with no property charges the whole account).
+ * Each visit is judged in the ET calendar year of its own date only, so a December run covering a January 1 visit
+ * reads the new year (the one-visit count, which also asks about today's year, is the close-out's, not this).
  * An unknown history (no customer, or the read failed) leaves Taurus off, as the close-outs do.
  * @param {{ id: string, customer_id?: string|null, property_id?: string|null, scheduled_date?: string|Date|null }[]} visits
  * @returns {Promise<{ fits: Map<string, boolean>, failed: boolean }>}
  */
 async function projectTaurusEligibility(visits, { knex = db, now = new Date() } = {}) {
-  const nowBounds = etYearBounds(now);
+  const thisYear = etYearBounds(now).year;
   const plan = visits.map((visit) => {
-    const day = dateOnlyString(visit.scheduled_date);
-    const visitYear = Number(String(day).slice(0, 4)) || nowBounds.year; // a booked visit always has its date
-    return { visit, day: String(day), years: visitYear === nowBounds.year ? [nowBounds] : [yearBoundsOf(visitYear), nowBounds] };
+    const day = String(dateOnlyString(visit.scheduled_date));
+    return { visit, day, bounds: yearBoundsOf(Number(day.slice(0, 4)) || thisYear) };
   });
   const homes = plan.filter(({ visit }) => visit.customer_id);
   const fits = new Map(plan.map(({ visit }) => [visit.id, false]));
   const pairs = [...new Map(homes.map(({ visit }) => [pairKey(visit), { customer_id: visit.customer_id, property_id: visit.property_id || null }])).values()];
-  const yearOf = new Map(homes.flatMap(({ years }) => years).map((bounds) => [bounds.year, bounds]));
+  const years = new Map(homes.map(({ bounds }) => [bounds.year, bounds]));
   const counts = new Map();
   try {
-    for (const bounds of yearOf.values()) {
-      if (!pairs.length) break;
+    for (const bounds of years.values()) {
       const result = await knex.raw(BATCH_LEDGER_SQL, {
         pairs: JSON.stringify(pairs), yearStart: bounds.yearStart, nextYearStart: bounds.nextYearStart, namePattern: TAURUS_NAME_PATTERN,
       });
@@ -257,11 +265,13 @@ async function projectTaurusEligibility(visits, { knex = db, now = new Date() } 
     logger.warn(`[taurus-yearly] projected counts unavailable: ${err?.code || err?.name || 'Error'}`);
     return { fits, failed: true };
   }
-  for (const { visit, years } of homes.sort((a, b) => a.day.localeCompare(b.day) || String(a.visit.id).localeCompare(String(b.visit.id)))) {
-    const states = years.map((bounds) => counts.get(`${bounds.year}|${pairKey(visit)}`));
-    const fit = states.every((state) => taurusEligible(state));
+  const used = [];
+  for (const { visit, bounds } of homes.sort((a, b) => a.day.localeCompare(b.day) || String(a.visit.id).localeCompare(String(b.visit.id)))) {
+    const ledger = counts.get(`${bounds.year}|${pairKey(visit)}`);
+    const projected = used.filter((app) => app.year === bounds.year && countsFor(visit, app)).length;
+    const fit = taurusEligible({ high: ledger.high, low: ledger.low + projected });
     fits.set(visit.id, fit);
-    if (fit) for (const state of states) state.low += 1;
+    if (fit) used.push({ customer_id: visit.customer_id, property_id: visit.property_id || null, year: bounds.year });
   }
   return { fits, failed: false };
 }
