@@ -386,4 +386,35 @@ describe('once per ET day', () => {
     const oldInstanceClaim = await mockDb.raw('INSERT INTO sms_send_claims (claim_key) VALUES (?) ON CONFLICT DO NOTHING RETURNING id', ['morning_banner:2026-11-03']);
     expect(oldInstanceClaim.rows).toEqual([]);
   });
+
+  test('failed claim release reports claim_release_failed instead of a routine skip', async () => {
+    const fs = require('fs');
+    const path = require('path');
+    mockOpenRows.mockResolvedValue([row()]);
+    mockTrigger.mockResolvedValue({ bellWritten: false, push: { sent: 0, failed: 0, expired: 0, skipped: 0, subscriptions: 0 } });
+    mockDb.mockImplementation((table) => {
+      if (table === 'technicians') return { where: () => ({ select: async () => activeAdmins }) };
+      return {
+        where: ({ claim_key: key }) => ({
+          first: async () => (claimed.has(key) ? { id: 1 } : null),
+          del: async () => { throw Object.assign(new Error('delete failed'), { code: '57P01' }); },
+        }),
+        whereIn: (_col, keys) => ({
+          first: async () => (keys.some((k) => claimed.has(k)) ? { id: 1 } : null),
+          del: async () => 0,
+        }),
+      };
+    });
+
+    await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({
+      count: 1,
+      sent: false,
+      error: 'claim_release_failed',
+    });
+    expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
+
+    // Scheduler surfaces morning-banner result.error inside runExclusive for job health.
+    const schedulerSrc = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
+    expect(schedulerSrc).toMatch(/runExclusive\('morning-banner',[\s\S]*?if \(result\?\.error\) throw new Error\(`morning banner: \$\{result\.error\}`\)/);
+  });
 });

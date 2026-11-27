@@ -103,8 +103,10 @@ async function claimKey(key) {
 async function releaseKey(key) {
   try {
     await releaseSendClaim(key);
+    return true;
   } catch (err) {
     logger.error(`[morning-banner] claim release failed for ${key}: ${err?.code || err?.message || 'error'}`);
+    return false;
   }
 }
 
@@ -159,7 +161,11 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
     const { triggerNotification } = require('./notification-triggers');
     const result = await triggerNotification('waiting_summary', payload, triggerOptions);
     const outcome = classifyDelivery(result);
-    if (outcome.release) await releaseKey(key);
+    const released = outcome.release ? await releaseKey(key) : true;
+    if (outcome.release && !released) {
+      logger.error(`[morning-banner] ${key}: banner ${outcome.status} (${outcome.reason}) and claim release failed; claim kept`);
+      return { status: 'dispatch_failed', errorCode: 'claim_release_failed' };
+    }
     if (outcome.status === 'dispatch_failed') {
       logger.error(`[morning-banner] ${key}: banner not sent (${outcome.reason})`);
       return { status: 'dispatch_failed', errorCode: outcome.reason === 'push_not_configured' ? 'push_not_configured' : 'dispatch_failed' };
@@ -171,9 +177,9 @@ async function sendClaimedAudience({ key, payload, triggerOptions }) {
     }
     return { status: outcome.status, result };
   } catch (err) {
-    await releaseKey(key);
-    logger.error(`[morning-banner] ${key}: banner failed: ${err?.message || 'error'}`);
-    return { status: 'dispatch_failed', errorCode: 'dispatch_failed' };
+    const released = await releaseKey(key);
+    logger.error(`[morning-banner] ${key}: banner failed: ${err?.message || 'error'}${released ? '' : '; claim release failed'}`);
+    return { status: 'dispatch_failed', errorCode: released ? 'dispatch_failed' : 'claim_release_failed' };
   }
 }
 

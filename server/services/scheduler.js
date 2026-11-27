@@ -6127,8 +6127,14 @@ function initScheduledJobs() {
   // =========================================================================
   cron.schedule('0 8 * * *', async () => {
     try {
-      // runMorningBanner logs its own one line with the count.
-      await runExclusive('morning-banner', () => require('./morning-banner').runMorningBanner());
+      // runMorningBanner logs its own one line with the count and never throws;
+      // surface its fixed `error` code inside runExclusive so job health records
+      // delivery/claim failures instead of a false success.
+      await runExclusive('morning-banner', async () => {
+        const result = await require('./morning-banner').runMorningBanner();
+        if (result?.error) throw new Error(`morning banner: ${result.error}`);
+        return result;
+      });
     } catch (err) {
       logger.error(`Morning banner failed: ${err.message}`);
     }
