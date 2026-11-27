@@ -51,7 +51,7 @@ const RESCHEDULE_NOTE_RE = /Customer notes: ([\s\S]*)$/;
 // No prices on a technician screen (owner rule). An amount is a money sign, a dollar word, or a price-shaped number
 // (a comma thousand like 1,200, or two decimals like 49.95), or a whole number paired with a billing unit or a pricing
 // word ("149/month", "quoted 149", "for 149"); room numbers and counts ("room 149", "3 dogs") stay. The word screen adds what a message or an older
-// description must also pass: price, cost, charge, refund, invoice, quote and the like.
+// description must also pass.
 const BILLING_UNITS = 'month|mo|year|yr|visit|application|treatment|service|quarter|week|time|spray|trip|stop';
 const PRICING_WORDS = 'quoted?|priced?|prices?|cost|costs|costing|charged?|charges|fees?|rates?|paid|pay|owe|owed|deposit|balance|quote|estimate|dollars?|bucks?';
 const MONEY_AMOUNT_RES = [
@@ -61,9 +61,7 @@ const MONEY_AMOUNT_RES = [
   // A whole-number amount beside a pricing word, either order: "quoted 149", "149 total price", "for 149".
   new RegExp(`\\b(?:${PRICING_WORDS})\\b[^.\\n\\d]{0,20}\\b\\d{2,}\\b|\\b\\d{2,}\\b[^.\\n\\d]{0,12}\\b(?:${PRICING_WORDS})\\b|\\bfor\\s+\\d{3,}\\b`, 'i'),
 ];
-const MONEY_WORD_RE = /\b(?:price|prices|pricing|priced|cost|costs|costing|charge|charged|charges|refund\w*|invoice\w*|bill|billed|billing|pay|paid|payment\w*|fees?|quote\w*|estimate\w*|discount\w*|total|balance|deposit|owe|owed|credit|card)\b/i;
 const moneyFree = (text) => !MONEY_AMOUNT_RES.some((re) => re.test(text));
-const moneyWordFree = (text) => moneyFree(text) && !MONEY_WORD_RE.test(text);
 
 // A query builder never runs with a missing customer: knex turns { customer_id: null } into IS NULL.
 function requireCustomer(svc) {
@@ -86,20 +84,20 @@ const iso = (value) => {
   return value == null || Number.isNaN(d.getTime()) ? null : d.toISOString();
 };
 
-// The one link screen for every item kind: the screen the texts to a technician use (tech-visit-texts.js hasLink: a scheme, www,
-// a listed public suffix on any host, a shortener on any host). Loaded on first use.
-let linkScreen = null;
-const hasLink = (text) => {
-  if (!linkScreen) linkScreen = require('./tech-visit-texts').hasLink;
-  return linkScreen(text);
-};
+// The one body screen for every free-text item of every kind: the screen the texts to a technician use
+// (tech-visit-texts.js screenBodyForTechnician: money words, card / bank / credential / sign-in / secret cues, a run of 3+
+// digits with times and dates exempt, a link on any host, payment-scoped text, the customer's stored access codes), plus this
+// module's own price-shape screen (a whole-number amount beside a billing unit). Loaded on first use.
+function screenOk(text, codes) {
+  return moneyFree(text) && require('./tech-visit-texts').screenBodyForTechnician(text, { codes }) === 'ok';
+}
 
-// Every item of every kind passes the money-amount screen and the link screen, on the FULL text (a price or a link past
-// the 280-character cut must not slip through because the cut hid it): an item that fails is dropped.
-function entry(kind, at, text, extra = {}) {
+// Run on the FULL text, before the 280-character cut (a price or a link past the cut must not slip through because the cut
+// hid it): an item that fails is dropped.
+function entry(kind, at, text, extra = {}, codes = null) {
   const when = iso(at);
   const full = compact(text);
-  return when && full && moneyFree(full) && !hasLink(full) ? { kind, at: when, text: clip(full), ...extra } : null;
+  return when && full && screenOk(full, codes) ? { kind, at: when, text: clip(full), ...extra } : null;
 }
 
 async function safely(name, read) {
@@ -114,7 +112,7 @@ async function safely(name, read) {
 // The customer's words behind a re-service. The booking item is the reason; every other kept item is a later message.
 // skipCalls is the technician route's own rule: no call-derived item is returned, the booking paraphrase of a call
 // included.
-async function reserviceItems(svc, dbh) {
+async function reserviceItems(svc, dbh, codes) {
   if (!require('../config/feature-gates').reserviceAsksLive()) return [];
   const gathered = await require('./reservice-asks').gatherReserviceAsks(svc.id, { knex: dbh, skipCalls: true });
   if (!gathered?.ok) return [];
@@ -130,7 +128,7 @@ async function reserviceItems(svc, dbh) {
         // A text or email names no property: on an account that may have several, it may be about another home. The
         // technician route keeps such items with the flag; so does this list, and the screen says so.
         ...(item.accountWide ? { accountWide: true } : {}),
-      });
+      }, codes);
     });
 }
 
@@ -145,12 +143,12 @@ async function typedBookingRow(svc, dbh) {
 // Only on the visit the customer booked (linked to a public self-booking whose row proves the form wrote it): the
 // recurring seeder copies the parent's notes onto every follow-up it seeds, and the AI assistant's booking notes are
 // not the customer's typing. An unreadable row proves nothing, so nothing shows.
-async function bookingNoteItems(svc, dbh) {
+async function bookingNoteItems(svc, dbh, codes) {
   if (!svc.self_booking_id) return [];
   const row = await typedBookingRow(svc, dbh);
   if (!row) return [];
   const text = require('./reservice-asks').selfBookedNoteText(svc.notes, row.customer_notes);
-  return text ? [entry('booking_note', svc.created_at, text)] : [];
+  return text ? [entry('booking_note', svc.created_at, text, {}, codes)] : [];
 }
 
 // Does this account provably have ONE premises? The re-service asks' own fail-closed proof; a failed read is "no".
@@ -311,25 +309,23 @@ function rescheduleNote(description, createdAt, now = new Date()) {
 }
 
 // The words of a portal request row. A card or chat row carries a server-written description: its subject (the
-// service) only. A typed portal form row shows the customer's description, once it passes the money-amount screen;
-// the pricing flows ('portal_flow', and any older row with only the stamp) post a GENERATED description that holds
-// prices: the first shows its subject only, the second its description only if it passes the whole money screen. The
-// typed form's subject is the description's first 80 characters, so a description that starts with its subject is
-// shown alone.
-function requestRowText(row) {
+// service) only. A typed portal form row (and an older row with only the stamp) shows the customer's description once it
+// passes the body screen; a pricing flow ('portal_flow') posts a GENERATED description that holds prices: its subject
+// only. A description that fails the screen falls back to the subject, which entry() screens again. The typed form's
+// subject is the description's first 80 characters, so a description that starts with its subject is shown alone.
+function requestRowText(row, codes = null) {
   const subject = compact(row.subject);
   if (row.source) return subject;
   const description = compact(row.description);
   const writer = metaOf(row)?.writer;
-  const screened = writer === 'portal_form' ? moneyFree(description) : writer !== 'portal_flow' && moneyWordFree(description);
-  const shown = screened && !hasLink(description);
+  const shown = writer !== 'portal_flow' && screenOk(description, codes);
   if (!description || !shown) return subject;
   return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
 }
 
 // Open requests the customer made in the portal or the app. A reschedule request for this appointment shows only the
 // note the customer typed, dated by the update that supplied it.
-async function portalItems(svc, dbh, singleSoon) {
+async function portalItems(svc, dbh, singleSoon, codes) {
   const single = await singleSoon;
   const scope = await visitScope(svc, dbh);
   const [portalRows, rescheduleRows] = await Promise.all([
@@ -346,9 +342,9 @@ async function portalItems(svc, dbh, singleSoon) {
       if (row.source === RESCHEDULE_SOURCE) {
         const revised = rescheduleNote(row.description, row.created_at);
         // `appointment` marks a note that belongs to this one appointment, so a grouped stop keeps it with its service.
-        return revised ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }) : null;
+        return revised ? entry('portal_request', revised.at, revised.note, { source: 'portal', appointment: true }, codes) : null;
       }
-      return entry('portal_request', row.created_at, requestRowText(row), { source: 'portal' });
+      return entry('portal_request', row.created_at, requestRowText(row, codes), { source: 'portal' }, codes);
     })
     .filter(Boolean)
     .sort(newestFirst)
@@ -368,7 +364,6 @@ function pickItems(items) {
 // never read. A message about money, a link or a number run is left out, as is an office-only message (a refund, a
 // complaint). The portal names no home: on an account that may have several, it may be about another one.
 const PORTAL_MESSAGE_WINDOW_DAYS = 7;
-const NUMBER_RUN_RE = /\d{3,}/;
 
 function messageWindow(svc, now = new Date()) {
   const day = etCalendarDayOf(svc.scheduled_date) || etDateString(now);
@@ -378,10 +373,9 @@ function messageWindow(svc, now = new Date()) {
   return { since, until: dayEnd < now ? dayEnd : now };
 }
 
-const safeMessage = (text) => moneyWordFree(text) && !hasLink(text) && !NUMBER_RUN_RE.test(text)
-  && !require('./reservice-office-only').officeOnlyReason(text);
+const safeMessage = (text, codes = null) => screenOk(text, codes) && !require('./reservice-office-only').officeOnlyReason(text);
 
-async function portalMessageItems(svc, dbh, singleSoon) {
+async function portalMessageItems(svc, dbh, singleSoon, codes) {
   if (!svc?.customer_id) return [];
   if (!require('../config/feature-gates').portalMessagesLive()) return [];
   const { since, until } = messageWindow(svc);
@@ -395,9 +389,19 @@ async function portalMessageItems(svc, dbh, singleSoon) {
     .select('m.body', 'm.created_at');
   const accountWide = !(await singleSoon);
   return (rows || [])
-    .filter((row) => compact(row.body) && safeMessage(compact(row.body)))
+    .filter((row) => compact(row.body) && safeMessage(compact(row.body), codes))
     .slice(0, PORTAL_ROW_LIMIT)
-    .map((row) => entry('portal_message', row.created_at, row.body, { source: 'portal', ...(accountWide ? { accountWide: true } : {}) }));
+    .map((row) => entry('portal_message', row.created_at, row.body, { source: 'portal', ...(accountWide ? { accountWide: true } : {}) }, codes));
+}
+
+// The stored access codes (null = none stored, false = unreadable). One read for the whole call.
+async function safeCodes(svc, dbh) {
+  try {
+    return await require('./tech-visit-texts').readStoredCodes(dbh, svc.customer_id);
+  } catch (err) {
+    logger.warn(`[visit-customer-asked] stored codes unreadable: ${err?.code || err?.name || 'Error'}`);
+    return false;
+  }
 }
 
 /**
@@ -407,18 +411,26 @@ async function portalMessageItems(svc, dbh, singleSoon) {
 async function customerAskedFacts(svc, dbh) {
   // A hold or any visit with no customer reads nothing: no query may run on a missing customer id.
   if (!svc?.customer_id) return null;
+  // The customer's stored access codes, read once for every screen below (the texts feature's own reader: every property's
+  // codes and every filed code). A failed read returns no free-text item at all.
+  const codes = await safeCodes(svc, dbh);
+  if (codes === false) return null;
   // The premises proof is read once for both portal sources; it never rejects (a failed read is "not single").
   const single = singlePremises(svc, dbh);
   const lists = await Promise.all([
-    safely('re-service asks', () => reserviceItems(svc, dbh)),
-    safely('booking note', () => bookingNoteItems(svc, dbh)),
-    safely('portal requests', () => portalItems(svc, dbh, single)),
-    safely('portal messages', () => portalMessageItems(svc, dbh, single)),
+    safely('re-service asks', () => reserviceItems(svc, dbh, codes)),
+    safely('booking note', () => bookingNoteItems(svc, dbh, codes)),
+    safely('portal requests', () => portalItems(svc, dbh, single, codes)),
+    safely('portal messages', () => portalMessageItems(svc, dbh, single, codes)),
   ]);
   // One copy per wording within a scope, the newest kept. An item about this appointment (the return reason, the booking
   // note, a reschedule note) is a different thing from the same words said account-wide, so each scope dedupes alone.
+  // The return reason is never dropped: it goes first, so a booking or reschedule note with the same words is the copy that
+  // yields.
   const seen = new Set();
-  const items = lists.flat().filter(Boolean).sort(newestFirst).filter((item) => {
+  const flat = lists.flat().filter(Boolean).sort(newestFirst);
+  const ordered = [...flat.filter((item) => item.kind === 'reservice_reason'), ...flat.filter((item) => item.kind !== 'reservice_reason')];
+  const items = ordered.filter((item) => {
     const words = item.text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
     const key = `${belongsToAppointment(item) ? 'appointment' : 'account'}|${words}`;
     if (!words || seen.has(key)) return false;

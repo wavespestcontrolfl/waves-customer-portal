@@ -35,15 +35,19 @@ const SVC = {
 };
 
 // A stub dbh: service_requests resolves to `rows`, self_booked_appointments to `booking`; `fail` makes every read throw.
-function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct' }, props = [], customer, messages = [], fail = false } = {}) {
+function fakeDbh({ rows = [], booking = { customer_notes: null, source: 'direct' }, props = [], customer, messages = [], prefs = [], filed = [], codesFail = false, fail = false } = {}) {
   const calls = [];
   const dbh = (table) => {
     calls.push(['table', table]);
     const q = {};
-    for (const m of ['where', 'whereIn', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'join']) {
+    for (const m of ['where', 'whereIn', 'whereNotNull', 'whereRaw', 'orderBy', 'orderByRaw', 'limit', 'join']) {
       q[m] = (...args) => { calls.push([table, m, ...args]); if (m === 'where' && args[0]?.id) q.id = args[0].id; if (m === 'where' && args[0]?.is_primary) q.primary = true; if (m === 'where' && args[0]?.source === 'customer_portal_reschedule') q.resched = true; return q; };
     }
     q.select = async () => {
+      if (table === 'property_preferences' || table === 'customer_access_codes') {
+        if (codesFail) throw Object.assign(new Error('codes down'), { code: 'XX001' });
+        return table === 'property_preferences' ? prefs : filed;
+      }
       if (fail) throw Object.assign(new Error('boom with customer text'), { code: 'ECONNRESET' });
       if (table === 'messages as m') return messages;
       if (table === 'service_requests') return rows.filter((r) => (r.source === 'customer_portal_reschedule') === Boolean(q.resched));
@@ -438,9 +442,11 @@ describe('customerAskedFacts: no prices on a technician screen', () => {
   const flow = (over) => formRow({ subject: 'Service pricing review requested', description: 'Customer asked WAVES AI: "lawn price". Lawn care is $149.00 per visit.', metadata: { writer: 'portal_flow', propertyId: 'prop-1' }, ...over });
   const stamped = (description) => formRow({ subject: 'Lawn plan', description, metadata: { propertyId: 'prop-1' } });
 
-  test('a pricing-flow row shows its requested service only, never the generated description', async () => {
-    const facts = await customerAskedFacts(SVC, fakeDbh({ rows: [flow()] }));
-    expect(facts.items.map((i) => i.text)).toEqual(['Service pricing review requested']);
+  test('a pricing-flow row never shows its generated description: its subject only, and only if the subject passes the screen', async () => {
+    // The generic subject names pricing, so the body screen holds it: nothing shows.
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [flow()] }))).toBeNull();
+    const facts = await customerAskedFacts(SVC, fakeDbh({ rows: [flow({ subject: 'Lawn care review requested' })] }));
+    expect(facts.items.map((i) => i.text)).toEqual(['Lawn care review requested']);
     expect(JSON.stringify(facts)).not.toMatch(/149|WAVES AI/);
   });
 
@@ -552,8 +558,8 @@ describe('customerAskedFacts: whole-number amounts with a pricing word or billin
   ])('"%s" stays', (text) => expect(_test.moneyFree(text)).toBe(true));
 
   test('an item with such a phrase is dropped by the shared screen', async () => {
-    mockGather.mockResolvedValue(asks([askItem({ id: 'text:1', text: 'They quoted 149 per application for ants.' }), askItem({ id: 'text:2', text: 'Ants in room 149.' })]));
-    expect((await customerAskedFacts(SVC, fakeDbh())).items.map((i) => i.text)).toEqual(['Ants in room 149.']);
+    mockGather.mockResolvedValue(asks([askItem({ id: 'text:1', text: 'They quoted 149 per application for ants.' }), askItem({ id: 'text:2', text: 'Ants in room 12.' })]));
+    expect((await customerAskedFacts(SVC, fakeDbh())).items.map((i) => i.text)).toEqual(['Ants in room 12.']);
   });
 });
 
@@ -677,6 +683,76 @@ describe('customerAskedFacts: one copy per wording within a scope, the newest ke
     ];
     const facts = await customerAskedFacts(SVC, fakeDbh({ rows }));
     expect(facts.items).toHaveLength(2);
+  });
+});
+
+describe('customerAskedFacts: the texts feature\'s body screen on every free-text item', () => {
+  const VISIT = { ...SVC, scheduled_date: '2026-11-27' };
+  const prefs = [{ neighborhood_gate_code: null, property_gate_code: '#7788', garage_code: null, lockbox_code: 'blue42' }];
+  const card = 'My card is 4111 1111 1111 1111 for the deposit';
+
+  test('a booking note with a card number is dropped', async () => {
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: `Self-booked. Notes: ${card}` };
+    expect(await customerAskedFacts(svc, fakeDbh({ booking: { customer_notes: card, source: 'direct' } }))).toBeNull();
+  });
+
+  test('a portal message that names another property\'s stored lockbox code is dropped, an ordinary one shows', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const messages = [
+      { body: 'The lockbox is blue42 at the rental', created_at: '2026-11-24T15:00:00.000Z' },
+      { body: 'Please come after noon', created_at: '2026-11-24T16:00:00.000Z' },
+    ];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages, prefs }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(facts.items.map((i) => i.text)).toEqual(['Please come after noon']);
+  });
+
+  test('a filed access code is a stored code too', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: [{ body: 'use the code zebra on the side door', created_at: '2026-11-24T15:00:00.000Z' }], filed: [{ code: 'zebra' }] }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(facts).toBeNull();
+  });
+
+  test('a request that says "gate 4521" is dropped, subject included', async () => {
+    const row = formRow({ subject: 'Gate 4521 is stuck', description: 'Gate 4521 is stuck', metadata: { writer: 'portal_form' } });
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).toBeNull();
+  });
+
+  test('a typed request whose description fails falls back to its subject only when the subject passes', async () => {
+    const row = formRow({ subject: 'Ants in the kitchen', description: 'Ants in the kitchen. The gate code is 4521 if needed.', metadata: { writer: 'portal_form' } });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [row] }))).items.map((i) => i.text)).toEqual(['Ants in the kitchen']);
+  });
+
+  test('credential, sign-in and payment cues are held; times, dates and plain asks are not', async () => {
+    process.env.GATE_PORTAL_MESSAGES = 'true';
+    const bodies = ['my verification code is on the way', 'password: hunter2', 'my account number is on file', 'the cvv is on the back', 'Please come between 9:30 and 11:00 on 11/30', 'Nov 30 works if the dog is inside'];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: bodies.map((body, n) => ({ body, created_at: `2026-11-24T1${n}:00:00.000Z` })) }));
+    delete process.env.GATE_PORTAL_MESSAGES;
+    expect(facts.items.map((i) => i.text).sort()).toEqual(['Nov 30 works if the dog is inside', 'Please come between 9:30 and 11:00 on 11/30']);
+  });
+
+  test('the stored codes are read once per call, and unreadable codes return no free-text item at all', async () => {
+    const dbh = fakeDbh({ rows: [formRow()], codesFail: true });
+    mockGather.mockResolvedValue(asks([askItem({ id: 'booking:svc-1', source: 'request_form', text: 'Ants in the kitchen.' })]));
+    expect(await customerAskedFacts(SVC, dbh)).toBeNull();
+    expect(dbh.calls.filter((c) => c[0] === 'service_requests')).toEqual([]);
+    expect(mockGather).not.toHaveBeenCalled();
+    const ok = fakeDbh({ rows: [formRow()] });
+    await customerAskedFacts(SVC, ok);
+    expect(ok.calls.filter((c) => c[0] === 'property_preferences' && c[1] === 'where')).toHaveLength(1);
+    expect(ok.calls.filter((c) => c[0] === 'customer_access_codes' && c[1] === 'where')).toHaveLength(1);
+  });
+});
+
+describe('customerAskedFacts: the return reason is never the copy that yields', () => {
+  test('a booking note or a reschedule note with the same words does not displace it', async () => {
+    mockGather.mockResolvedValue(asks([askItem({ id: 'booking:svc-1', source: 'request_form', at: '2026-11-20T15:00:00.000Z', text: 'Ants in the kitchen.' })]));
+    const rows = [formRow({ subject: 'Reschedule', source: 'customer_portal_reschedule', created_at: '2026-11-25T10:00:00.000Z', description: 'Appointment svc-1: Pest on 2026-12-01\nCustomer notes: Ants in the kitchen.' })];
+    const svc = { ...SVC, self_booking_id: 'sb-1', notes: 'Self-booked. Notes: Ants in the kitchen.' };
+    const facts = await customerAskedFacts(svc, fakeDbh({ rows, booking: { customer_notes: 'Ants in the kitchen.', source: 'direct' } }));
+    expect(facts.items.map((i) => i.kind)).toEqual(['reservice_reason']);
+    expect(facts.items[0].text).toBe('Ants in the kitchen.');
   });
 });
 
