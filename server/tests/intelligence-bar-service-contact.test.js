@@ -114,6 +114,7 @@ describe('set_customer_service_contact preview', () => {
     expect(refused.error).toMatch(/their current one: tenant/);
     const p = await preview({ action: 'change', slot: 1, relationship: 'tenant', name: 'New Person', email: 'new@example.invalid' });
     expect(p.contacts_after).toEqual(['New Person (tenant, new@example.invalid)']);
+    expect(p.summary).toBe('Change contact 1: Tess Tenant (tenant, tess@example.invalid) → New Person (tenant, new@example.invalid)');
     expect(effectText(p)).toMatch(/appointment emails but no service reports/);
   });
 
@@ -126,6 +127,12 @@ describe('set_customer_service_contact preview', () => {
     expect(p._version.roles).toEqual({ service_contact2_role: 'tenant' });
     expect(p._version.after[0]).toMatchObject({ name: 'Tess Tenant', role: 'tenant' });
     expect(effectText(p)).toMatch(/Tess Tenant becomes the first contact/);
+  });
+
+  test('a number that keeps its slot but loses its email says its email-only choices reset', async () => {
+    Object.assign(state.customer, { service_contact_name: 'Ava Example', service_contact_phone: '+19415550111', service_contact_email: 'ava@example.invalid' });
+    const p = await preview({ action: 'change', slot: 1, relationship: 'family_member', email: '' });
+    expect(effectText(p)).toMatch(/\+19415550111 has no email after this/);
   });
 
   test('a phone another slot still lists is not described as signed out', async () => {

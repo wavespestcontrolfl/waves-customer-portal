@@ -210,7 +210,13 @@ function planEffects({ account, name, before, after, target, plan, consentOnFile
   // Slot 1 is the one contact the single-recipient notices go to (customer-contact.js getServiceContact).
   const firstBefore = before.find(isFilled);
   if (after[0] && isFilled(after[0]) && (!firstBefore || describe(firstBefore) !== describe(after[0]))) {
-    lines.push({ kind: 'comms', text: `${after[0].name || 'The new first contact'} becomes the first contact, who gets the notices that go to one contact only (such as project emails and review requests).` });
+    lines.push({ kind: 'comms', text: `${after[0].name || 'The new first contact'} becomes the first contact. Some notices go to the first contact only, so those now reach them instead.` });
+  }
+  // A number that stays but has no email on any slot loses its email-only choices (pruneContactNotificationPrefs).
+  const emailOf = (slots, key) => slots.some((slot) => phoneKey(slot.phone) === key && slot.email);
+  const keptKey = phoneKey(before[plan.index].phone);
+  if (keptKey && emailOf(before, keptKey) && after.some((slot) => phoneKey(slot.phone) === keptKey) && !emailOf(after, keptKey)) {
+    lines.push({ kind: 'operational', text: `${before[plan.index].phone} has no email after this, so any email-only notification choices it made are reset.` });
   }
   lines.push(...textLines({ plan, consentOnFile, consentCleared }));
   // The handler prunes notification choices and push subscriptions, and revokes app sessions, only for a phone no
@@ -257,7 +263,9 @@ async function buildPlan(input, { database = db, lock = false } = {}) {
     customer_id: customer.id,
     customer_name: name,
     action: plan.action,
-    summary: `${verb} contact${plan.action === 'add' ? '' : ` ${plan.index + 1}`}: ${describe(target)}`,
+    summary: plan.action === 'change'
+      ? `Change contact ${plan.index + 1}: ${describe(before[plan.index])} → ${describe(target)}`
+      : `${verb} contact${plan.action === 'add' ? '' : ` ${plan.index + 1}`}: ${describe(target)}`,
     contacts_before: before.filter(isFilled).map(describe),
     contacts_after: after.filter(isFilled).map(describe),
     effects: planEffects({ account, name, before, after, target, plan, consentOnFile, consentCleared }).filter(Boolean),
