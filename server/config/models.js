@@ -308,6 +308,14 @@ const DEFAULTS = Object.freeze({
   // TEXT_POLICIES.reportAsk (this model first, OpenAI backup). Dark behind
   // GATE_REPORT_ASK_AI; override with MODEL_REPORT_ASK.
   REPORT_ASK: 'claude-sonnet-5-5',
+  // SMS operational extraction (sms-operational-extractor.js, the text
+  // channel only): office asks, promises and profile facts read from a
+  // customer's text. Moved off the FLAGSHIP (highStakes) leg after two replay
+  // runs on 150 real inbound texts each with a blind referee (2026-11-27):
+  // this model was at least as good both times (missed asks 4 vs 9 and 7 vs
+  // 9). The email channel was not tested and stays on highStakes. Override
+  // with MODEL_SMS_OPERATIONAL_ACTIONS (the old model: claude-opus-5-5).
+  SMS_OPERATIONAL_ACTIONS: 'claude-sonnet-5-5',
   GEMINI_VISION_BEST: 'gemini-3.8-flash',
   // Lawn visit assessment + paired recheck Gemini leg (owner 2026-10-24, lawn
   // scoring review): its own selector, off MODEL_GEMINI_VISION, so the lawn read
@@ -482,6 +490,7 @@ const SMS_SCHEDULING_DECIDE = process.env.MODEL_SMS_SCHEDULING_DECIDE || DEFAULT
 const AUTO_DISPATCH_PROOFREADER = process.env.MODEL_AUTO_DISPATCH_PROOFREADER || DEFAULTS.AUTO_DISPATCH_PROOFREADER;
 // Service report Ask Waves answer writer (owner 2026-10-05) — its own selector.
 const REPORT_ASK           = process.env.MODEL_REPORT_ASK          || DEFAULTS.REPORT_ASK;
+const SMS_OPERATIONAL_ACTIONS = process.env.MODEL_SMS_OPERATIONAL_ACTIONS || DEFAULTS.SMS_OPERATIONAL_ACTIONS;
 const GEMINI_VISION_BEST   = process.env.MODEL_GEMINI_VISION        || DEFAULTS.GEMINI_VISION_BEST;
 const GEMINI_PHOTO_ID_PLANT = process.env.MODEL_GEMINI_PHOTO_ID_PLANT || DEFAULTS.GEMINI_PHOTO_ID_PLANT;
 const GEMINI_PHOTO_ID_PEST = process.env.MODEL_GEMINI_PHOTO_ID_PEST || DEFAULTS.GEMINI_PHOTO_ID_PEST;
@@ -721,6 +730,15 @@ const TEXT_POLICIES = Object.freeze({
   // leg at low effort (a one-to-four sentence answer on a page the customer is
   // waiting on), the report-writer OpenAI model as the backup. A miss on both
   // legs falls to the report's fixed-rule answer, never to an empty reply.
+  // highStakes with its own model on the Anthropic leg and the same OpenAI
+  // backup: the text channel of the operational extraction only (see
+  // DEFAULTS.SMS_OPERATIONAL_ACTIONS). No effort override, so it thinks at the
+  // global MODEL_ANTHROPIC_EFFORT, as it did in the replay runs.
+  smsOperationalActions: Object.freeze({
+    name: 'smsOperationalActions',
+    primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: SMS_OPERATIONAL_ACTIONS }),
+    fallback: Object.freeze({ provider: PROVIDER.OPENAI, model: OPENAI_REPORT_WRITER }),
+  }),
   reportAsk: Object.freeze({
     name: 'reportAsk',
     primary: Object.freeze({ provider: PROVIDER.ANTHROPIC, model: REPORT_ASK, effort: 'low' }),
@@ -981,6 +999,7 @@ module.exports = {
   SMS_SCHEDULING_DECIDE,
   AUTO_DISPATCH_PROOFREADER,
   REPORT_ASK,
+  SMS_OPERATIONAL_ACTIONS,
   TYPESAFE_JEV,
   CLOUDFLARE_CLEF,
   OPENAI_SMS_DRAFT,

@@ -667,8 +667,14 @@ describe('profile safeguards independent of model labels', () => {
   test('uses the central cross-provider policy with a budget reserved for fallback', async () => {
     dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: extracted([], []) });
     await extractSmsOperations({ message: source('The controller is outside.'), properties });
-    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.highStakes);
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.smsOperationalActions);
     expect(dispatchWithFallback.mock.calls[0][1]).not.toHaveProperty('timeoutMs');
+  });
+
+  test('the email channel keeps the highStakes policy (only texts were replay-tested)', async () => {
+    dispatchWithFallback.mockReset().mockResolvedValue({ ok: true, json: extracted([], []) });
+    await extractSmsOperations({ channel: 'email', message: source('The controller is outside.'), properties });
+    expect(dispatchWithFallback.mock.calls[0][0]).toBe(require('../config/models').TEXT_POLICIES.highStakes);
   });
 });
 

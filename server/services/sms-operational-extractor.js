@@ -436,7 +436,9 @@ async function extractSmsOperations(context) {
     if (err.message === 'sms_operations_source_boundary_changed') return { obligations: [], facts: [], dropped: 1 };
     throw err;
   }
-  const result = await dispatchWithFallback(MODELS.TEXT_POLICIES.highStakes, {
+  // Texts run on their own policy (tested 2026-11-27); email was not tested and keeps highStakes.
+  const policy = channel === 'email' ? MODELS.TEXT_POLICIES.highStakes : MODELS.TEXT_POLICIES.smsOperationalActions;
+  const result = await dispatchWithFallback(policy, {
     system: prompt.system, text: prompt.text, cacheTtl: '1h', jsonSchema: SCHEMA, maxTokens: 4096,
     laneId: channel === 'email' ? 'email-operational-actions' : 'sms-operational-actions',
     promptVersion: channel === 'email' ? `${VERSION}:email` : VERSION,

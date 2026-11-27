@@ -351,13 +351,15 @@ describe('adapters project onto the canonical shape', () => {
     // the lane policy. SMS intake delegates its lock to the service.
     const scheduler = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'scheduler.js'), 'utf8');
     const mapped = Object.entries(LANE_RUNTIME).filter(([, p]) => p.workflow_id);
-    expect(mapped.map(([l]) => l).sort()).toEqual(['call-commitment-contact-check', 'call_incidents', 'call_research', 'call_self_audit', 'shadow_judge',
+    expect(mapped.map(([l]) => l).sort()).toEqual(['access-code-capture', 'call-commitment-contact-check', 'call_incidents', 'call_research', 'call_self_audit', 'shadow_judge',
       'sms-commitment-fulfillment', 'sms-operational-actions', 'voice_profile']);
     const smsIntake = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'sms-operational-actions.js'), 'utf8');
     expect(scheduler).toContain("require('./sms-operational-actions')");
     expect(scheduler).toContain('await runSmsOperationalActions()');
     for (const [laneId, policy] of mapped) {
-      const callsite = policy.workflow_id === 'sms-operational-actions' ? smsIntake : scheduler;
+      const accessNet = require('fs').readFileSync(require('path').join(__dirname, '..', 'services', 'access-code-capture.js'), 'utf8');
+      const delegated = { 'sms-operational-actions': smsIntake, 'access-code-net': accessNet };
+      const callsite = delegated[policy.workflow_id] || scheduler;
       expect(callsite).toContain(`runExclusive('${policy.workflow_id}'`);
       expect(jobHealth.laneForJob(policy.workflow_id)).toBe(laneId);
     }
