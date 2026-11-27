@@ -56,3 +56,17 @@ test('a booking-request text held in its original form never shows its scrubbed 
   const visit = { ...VISIT, customer_request: late, customer_request_source: 'text' };
   expect(await customerAskedFacts(visit, fakeKnex({ visit }))).toBeNull();
 });
+
+test('a pest report line followed by a health complaint on the next line is dropped whole (office-only on the original text)', async () => {
+  const text = 'Ants are back in the kitchen.\nMy dog got sick after your spray.';
+  expect(await customerAskedFacts(VISIT, fakeKnex({ smsRows: [sms('s1', text)] }))).toBeNull();
+  // The pest line alone still shows.
+  const facts = await customerAskedFacts(VISIT, fakeKnex({ smsRows: [sms('s2', 'Ants are back in the kitchen.')] }));
+  expect(facts.items.map((i) => i.text)).toEqual(['Ants are back in the kitchen.']);
+});
+
+test('a legacy request whose continuation line is a complaint is dropped whole', async () => {
+  const notes = 'Self-booked. Notes: Re-service request: ants are back\nMy dog got sick after your spray. — Unit: 5';
+  const visit = { ...VISIT, notes };
+  expect(await customerAskedFacts(visit, fakeKnex({ visit }))).toBeNull();
+});

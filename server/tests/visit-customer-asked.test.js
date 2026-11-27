@@ -871,6 +871,16 @@ describe('customerAskedFacts: the complete request text passes every screen on b
   });
 });
 
+describe('customerAskedFacts: a marked typed row with no description', () => {
+  test('shows its subject when the subject passes every screen; held or unmarked shows nothing', async () => {
+    const empty = (subject, metadata = { writer: 'portal_form' }) => formRow({ subject, description: '', metadata });
+    expect((await customerAskedFacts(SVC, fakeDbh({ rows: [empty('Ants in the kitchen')] }))).items.map((i) => i.text)).toEqual(['Ants in the kitchen']);
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [empty('Gate 4521 problem')] }))).toBeNull();
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [empty('My dog got sick after your spray')] }))).toBeNull();
+    expect(await customerAskedFacts(SVC, fakeDbh({ rows: [empty('Ants in the kitchen', { propertyId: 'prop-1' })] }))).toBeNull();
+  });
+});
+
 describe('customerAskedFacts: the return reason is never the copy that yields', () => {
   test('a booking note or a reschedule note with the same words does not displace it', async () => {
     mockGather.mockResolvedValue(asks([askItem({ id: 'booking:svc-1', source: 'request_form', at: '2026-11-20T15:00:00.000Z', text: 'Ants in the kitchen.' })]));

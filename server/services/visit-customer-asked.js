@@ -117,8 +117,8 @@ async function safely(name, read) {
 // included.
 async function reserviceItems(svc, dbh, codes) {
   if (!require('../config/feature-gates').reserviceAsksLive()) return [];
-  // holdText: the body screen runs on each message's ORIGINAL text, before the gather scrubs and caps it.
-  const gathered = await require('./reservice-asks').gatherReserviceAsks(svc.id, { knex: dbh, skipCalls: true, holdText: (text) => !screenOk(compact(text), codes) });
+  // holdText: the body screen and the office-only screen run on each message's ORIGINAL text, before the gather scrubs and caps it.
+  const gathered = await require('./reservice-asks').gatherReserviceAsks(svc.id, { knex: dbh, skipCalls: true, holdText: (text) => !screenOk(compact(text), codes) || officeOnly(compact(text)) });
   if (!gathered?.ok) return [];
   const bookingId = `booking:${svc.id}`;
   return gathered.items
@@ -325,8 +325,10 @@ function requestRowText(row, codes = null) {
   // its subject shows only if it passes every screen.
   if (row.source || metaOf(row)?.writer === 'portal_flow') return passes(subject) ? subject : '';
   const description = compact(row.description);
+  // A marked typed row with no description at all shows its subject, once the subject passes every screen.
+  if (!description) return metaOf(row)?.writer === 'portal_form' && passes(subject) ? subject : '';
   // The complete outgoing request text, subject and description together, passes every screen or nothing shows.
-  if (!description || !passes(compact(`${subject} ${description}`))) return '';
+  if (!passes(compact(`${subject} ${description}`))) return '';
   return description.toLowerCase().startsWith(subject.toLowerCase()) ? description : `${subject}: ${description}`;
 }
 
