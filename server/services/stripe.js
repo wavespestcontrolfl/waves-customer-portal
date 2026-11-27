@@ -885,24 +885,11 @@ const StripeService = {
       // sentinel phone with deleted_at), so a merge that commits while this
       // write waits on the row lock is seen on the re-check. An archive is not
       // a merge: an archived row still links, as before.
-      // The link and, when the email changed while Stripe was creating the customer (an app email change whose sync
-      // found no link yet), the catch-up sync job commit together: one transaction, so neither can be lost alone.
-      const linkAndQueue = async (h) => {
-        const n = await h('customers')
-          .where({ id: customerId })
-          .whereNull('stripe_customer_id')
-          .whereRaw("NOT (deleted_at IS NOT NULL AND phone LIKE ? || '%')", [MERGE_RETIRED_PHONE_PREFIX])
-          .update({ stripe_customer_id: stripeCustomerId });
-        if (n) {
-          const now = await h('customers').where({ id: customerId }).first('email');
-          if (String(now?.email || '').trim() !== String(customer.email || '').trim()) {
-            await require('./stripe-email-sync').enqueue(h, customerId, 'stripe_link');
-          }
-        }
-        return n;
-      };
-      const linked = database.isTransaction || typeof database.transaction !== 'function'
-        ? await linkAndQueue(database) : await database.transaction(linkAndQueue);
+      const linked = await database('customers')
+        .where({ id: customerId })
+        .whereNull('stripe_customer_id')
+        .whereRaw("NOT (deleted_at IS NOT NULL AND phone LIKE ? || '%')", [MERGE_RETIRED_PHONE_PREFIX])
+        .update({ stripe_customer_id: stripeCustomerId });
 
       if (!linked) {
         const current = await database('customers').where({ id: customerId }).first('stripe_customer_id', 'deleted_at', 'phone');

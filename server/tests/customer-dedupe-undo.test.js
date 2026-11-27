@@ -491,9 +491,6 @@ describe('executeMerge repointed_ids journal record', () => {
     const result = await dedupe.executeMerge({ winnerId: WINNER, loserId: LOSER, performedBy: 'test' });
 
     expect(result.backfills.stripe_customer_id).toBe('cus_derived');
-    // The kept customer takes over the Stripe profile here, so a Stripe email sync job for it is queued in the merge.
-    expect(trx.raw.mock.calls.some(([sql, b]) => String(sql).includes('INSERT INTO stripe_email_sync_jobs')
-      && Array.isArray(b) && b[0] === WINNER && b[1] === 'merge')).toBe(true);
     const recorded = JSON.parse(state.journal.repointed_ids);
     expect(recorded.stripe_transferred_id).toBe('cus_derived');
     // Loser cards alone identified it — the undo may restore it to the
@@ -808,6 +805,7 @@ describe('revertMerge', () => {
     invoice_followup_sequences: ['created_at', 'updated_at'],
     newsletter_subscribers: ['created_at', 'updated_at'],
     customer_properties: ['created_at', 'updated_at'],
+    home_notes: ['created_at', 'updated_at'],
     customer_refresh_tokens: ['created_at', 'updated_at'],
     // created_at ONLY — the regression class.
     customer_credit_ledger: ['created_at'],
@@ -1378,10 +1376,6 @@ describe('revertMerge', () => {
     expect(state.loserRestore.phone).toBe('5550000001');
     expect(state.loserRestore.email).toBe('loser.testcase@example.com');
     expect(state.loserRestore.stripe_customer_id).toBe('cus_only');
-    // The Stripe profile goes back to the restored customer, so a Stripe email sync job for them is queued in this
-    // undo transaction (the kept customer's email may sit on the profile now).
-    expect(state.rawCalls.some(([sql, bindings]) => String(sql).includes('INSERT INTO stripe_email_sync_jobs')
-      && Array.isArray(bindings) && bindings[1] === 'merge_undo')).toBe(true);
     // Financial rows verify under FOR UPDATE; history rows don't need the lock.
     expect(state.verified).toEqual(expect.arrayContaining([
       { table: 'invoices', forUpdate: true },
@@ -3046,6 +3040,41 @@ describe('revertMerge', () => {
       .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/estimates row\(s\) recorded by this merge were updated after it/) });
     expect(state.repointedBack).toHaveLength(0);
     expect(state.journalUpdate).toBe(null);
+  });
+
+  it('home note: a note that moved with the merge and was edited afterwards blocks the undo; an untouched one moves back', async () => {
+    const edited = baseJournal();
+    edited.repointed_ids.tables['home_notes.customer_id'] = ['note-1'];
+    const refused = buildRevertTrx({
+      journal: edited,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        home_notes: { stillOnWinner: ['note-1'], verifiedRows: [{ id: 'note-1', updated_at: '2026-07-30T09:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(refused.trx));
+    await expect(dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' }))
+      .rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/home_notes row\(s\) recorded by this merge were updated after it/) });
+    expect(refused.state.repointedBack).toHaveLength(0);
+
+    const untouched = baseJournal();
+    untouched.repointed_ids.tables['home_notes.customer_id'] = ['note-1'];
+    const ok = buildRevertTrx({
+      journal: untouched,
+      winner: baseWinner(),
+      loser: baseLoser(),
+      tables: {
+        leads: { stillOnWinner: ['lead-1', 'lead-2'] },
+        invoices: { stillOnWinner: ['inv-1'] },
+        home_notes: { stillOnWinner: ['note-1'], verifiedRows: [{ id: 'note-1', created_at: '2026-06-01T00:00:00Z', updated_at: '2026-06-01T00:00:00Z' }] },
+      },
+    });
+    db.transaction.mockImplementation(async (fn) => fn(ok.trx));
+    const result = await dedupe.revertMerge({ journalId: JOURNAL, performedBy: 'admin:test' });
+    expect(result.repointedBack['home_notes.customer_id']).toBe(1);
   });
 
   it("refuses on each unjournaled child an accepted estimate mints (card hold, deposit, booked visit)", async () => {

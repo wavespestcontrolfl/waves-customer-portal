@@ -1,16 +1,18 @@
 /**
- * Stripe email sync (owner 2026-11-27 "build"): after a customer's email changes, their linked Stripe customer gets the
- * same email. The work is a durable row (stripe_email_sync_jobs) written in the change's own transaction; drainDue()
- * runs every minute (scheduler.js).
+ * Stripe email sync (owner 2026-11-27 "build"): after a customer confirms a new email in the app, their linked Stripe
+ * customer gets the same email. The work is a durable row (stripe_email_sync_jobs) written in the confirm's own
+ * transaction; drainDue() runs every minute (scheduler.js).
  *
- * Fencing: each job runs in one transaction that locks the customer row FOR UPDATE first (the same order as an email
- * confirm, which updates the customer row and then inserts the job), then claims the job row, and holds both through
- * the Stripe call. Customer merges and their undo lock the customers rows they move a Stripe id between
- * (customer-dedupe.js, sorted ids), so no transfer can land between the ownership check and the Stripe write. The email
- * is read under that lock, so the write always carries the address on file now; a later change re-queues the row.
- * A Stripe id that another customer row also holds (dedupe can leave two rows on one id) is never changed here: the job
- * is skipped and the office gets an alert. Errors retry with backoff; after MAX_ATTEMPTS the office gets an alert.
- * The Stripe call has a short timeout, so the row lock is held for seconds at most.
+ * Conservative by design: the app only writes a Stripe profile it can prove belongs to this one record.
+ *  - Locks: the customer row FOR UPDATE first (the confirm's order: it updates the customer, then inserts the job), then
+ *    the job, both held through one short Stripe call (10 s, no SDK retries). A merge or its undo must lock this
+ *    customer row to move its Stripe id, so nothing moves between the checks and the write.
+ *  - Skipped with an office alert: a Stripe id another record also holds or another record's saved card uses, and any
+ *    record that was ever part of a merge (either side). Merges move Stripe profiles between records; the office sorts
+ *    those out by hand instead of the app guessing.
+ *  - No Stripe profile yet: re-checked twice a few minutes apart (a profile being created at the moment of the change
+ *    links within seconds and was made with the old email), then finished.
+ *  - Stripe errors retry with backoff; after MAX_ATTEMPTS the office gets an alert.
  */
 const db = require('../models/db');
 const logger = require('./logger');
@@ -20,15 +22,17 @@ const MAX_ATTEMPTS = 6;
 const STRIPE_TIMEOUT_MS = 10000;
 const MERGE_RETIRED_PHONE_PREFIX = 'merged-';
 
-// Queue a job on the caller's transaction handle, unless one is already pending for this customer (it will read the
-// newest email anyway). The callers hold the customer row lock (they just wrote it), so two of them cannot both insert.
+// Queue a job on the caller's transaction handle. A pending job for this customer is re-armed instead (a fresh change
+// gets a fresh retry budget, and the job reads the newest email anyway). The caller holds the customer row lock (it
+// just wrote the row), so two callers cannot both insert.
 async function enqueue(trx, customerId, source) {
-  await trx.raw(
-    `INSERT INTO ${TABLE} (customer_id, source)
-     SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM ${TABLE} WHERE customer_id = ? AND status = 'pending')`,
-    [customerId, source, customerId],
-  );
+  const rearmed = await trx(TABLE).where({ customer_id: customerId, status: 'pending' })
+    .update({ attempts: 0, last_error: null, source, next_attempt_at: trx.fn.now(), updated_at: trx.fn.now() });
+  if (!rearmed) await trx(TABLE).insert({ customer_id: customerId, source });
 }
+
+const NOT_LINKED_RECHECKS = 2;
+const NOT_LINKED_RECHECK_MINUTES = 3;
 
 const backoffMinutes = (attempts) => Math.min(60, 2 ** attempts);
 
@@ -42,9 +46,9 @@ const OFFICE_COPY = {
     why: 'Another customer record uses the same Stripe profile, so the app left its email alone.',
     next: 'Do not change the Stripe email yet. First work out which customer record owns this Stripe profile; the other record may need its own.',
   },
-  undo_no_email: {
-    why: 'A merge undo gave this record its Stripe profile back, but the record has no email to put on it.',
-    next: 'Stripe may still carry the email of the record it was merged into. Check the Stripe profile email and clear or fix it by hand.',
+  merged: {
+    why: 'This record was part of a customer merge, so the app left its Stripe email alone.',
+    next: 'Check which customer record owns this Stripe profile, then fix the Stripe email by hand only if it is wrong.',
   },
   gave_up: {
     why: 'Stripe did not take the new email after several tries.',
@@ -89,13 +93,25 @@ async function processJob(jobId) {
       await finish(trx, job, 'skipped', 'gone');
       return 'gone';
     }
-    if (!customer.stripe_customer_id) { await finish(trx, job, 'done', 'not_linked'); return 'not_linked'; }
+    if (!customer.stripe_customer_id) {
+      if (job.attempts < NOT_LINKED_RECHECKS) {
+        await trx(TABLE).where({ id: job.id }).update({
+          attempts: job.attempts + 1, last_error: 'not_linked', updated_at: trx.fn.now(),
+          next_attempt_at: trx.raw(`now() + (? * interval '1 minute')`, [NOT_LINKED_RECHECK_MINUTES]),
+        });
+        return 'recheck';
+      }
+      await finish(trx, job, 'done', 'not_linked');
+      return 'not_linked';
+    }
     const email = String(customer.email || '').trim();
-    if (!email) {
-      await finish(trx, job, 'done', 'no_email');
-      // After a merge undo the profile may still carry the kept customer's email: the office must look.
-      if (job.source === 'merge_undo') await alertOffice(trx, job, customer, 'undo_no_email');
-      return 'no_email';
+    if (!email) { await finish(trx, job, 'done', 'no_email'); return 'no_email'; }
+    const merged = await trx('customer_merge_journal')
+      .where((q) => q.where({ winner_customer_id: customer.id }).orWhere({ loser_customer_id: customer.id })).first('id');
+    if (merged) {
+      await finish(trx, job, 'skipped', 'merged');
+      await alertOffice(trx, job, customer, 'merged');
+      return 'merged';
     }
     // Shared ownership, checked without locking other rows (locking them after our own row could invert a merge's
     // sorted lock order): another customer row on the same Stripe id, or another customer's saved card on it (the
