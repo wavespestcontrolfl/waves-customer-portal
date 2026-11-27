@@ -1148,12 +1148,23 @@ function liveEtaGroupFor(members, result, state = 'en_route', customer = null) {
 // and has a technician. One read per physical stop (technician + arrival slot); grouped siblings share it. A
 // failed read is no sentence. Returns per-row sentences (null = none), the send-time snapshot groups, and the
 // keys getContextForCustomer spreads in (none when the caller did not opt in: no read, no key).
-async function routeStatusContextKeys(upcomingServices, enabled) {
+async function routeStatusContextKeys(upcomingServices, enabled, customerId) {
   if (!enabled) return { context: {}, rows: [] };
-  const { perRow, groups } = await loadRouteStatusFacts(upcomingServices);
+  const { perRow, groups } = await loadRouteStatusFacts(upcomingServices, customerId);
   return { context: { routeStatusGroups: groups }, rows: perRow.map((sentence) => (sentence ? { routeStatus: sentence } : {})) };
 }
-async function loadRouteStatusFacts(upcomingServices, todayStr = etDateString()) {
+// The route read's stop identity must be the visit row the prompt shows (technician, customer, day, slot): a
+// dispatch change between the visit list read and the route read would otherwise hand the old line the new
+// stop's sentence. Any difference = no sentence.
+function routeFactMatchesRow(fact, row, customerId) {
+  const stop = fact?.stop;
+  return Boolean(stop)
+    && String(stop.technicianId ?? '') === String(row.technician_id ?? '')
+    && String(stop.customerId ?? '') === String(customerId ?? '')
+    && String(stop.date ?? '') === String(calendarDay(row.scheduled_date) ?? '')
+    && String(stop.windowStart ?? '') === String(row.window_start ?? '');
+}
+async function loadRouteStatusFacts(upcomingServices, customerId, todayStr = etDateString()) {
   const { customerTrackState } = require('./track-transitions');
   const { routeStatusFactFor } = require('./sms-route-status');
   const keyOf = (s) => (s && s.technician_id && calendarDay(s.scheduled_date) === todayStr && (customerTrackState(s) || 'scheduled') === 'scheduled'
@@ -1165,7 +1176,8 @@ async function loadRouteStatusFacts(upcomingServices, todayStr = etDateString())
     const members = upcomingServices.filter((s, i) => keys[i] === key);
     // One read: the sentence, the stop identity it is about, and the single-open-stop-today rule (no sentence
     // when the customer has two physical stops today, or the read fails).
-    const fact = await routeStatusFactFor(db, members[0].id);
+    const read = await routeStatusFactFor(db, members[0].id);
+    const fact = read && routeFactMatchesRow(read, members[0], customerId) ? read : null;
     sentenceByKey.set(key, fact ? fact.sentence : null);
     if (fact) groups.push({ scheduledServiceId: members[0].id, scheduledServiceIds: members.map((m) => m.id), sentence: fact.sentence, stop: fact.stop });
   }
@@ -1680,7 +1692,7 @@ class ContextAggregator {
     // ids each distinct minutes figure actually came from. Threaded through
     // generateGroundedDraft's context param, never persisted here.
     const liveEtaGroups = buildLiveEtaGroups({ upcomingServices, liveEtaKeys, uniqueLiveEtaKeys, liveEtaResultByKey, includeLiveEta, customer });
-    const routeStatus = await routeStatusContextKeys(upcomingServices, includeRouteStatus);
+    const routeStatus = await routeStatusContextKeys(upcomingServices, includeRouteStatus, customer.id);
 
     // GATE_DAY_ONLY_PROMISE (part D): ONE bulk read for the listed visits. A visit whose customer was told only the day
     // carries the date and DAY_ONLY_ARRIVAL_NOTE in place of the hour. Gate off: no read, the same context as today.

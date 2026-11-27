@@ -42,6 +42,9 @@ const POSITION = `(?:before|ahead\\s+of|in\\s+front\\s+of|until|prior\\s+to|then
 const STOP_COUNT_WORDING_RE = new RegExp([
   `${COUNT}[\\s,]+${GAP}stops?\\b`,
   `stops?\\s+(?:away|out|ahead|left|to\\s+go)\\b`,
+  // "the stop before yours": a stop placed relative to the customer, with or without a count (the module's own
+  // "working at the stop before yours" sentence included)
+  `stops?\\s+(?:before|ahead\\s+of|in\\s+front\\s+of|prior\\s+to)\\s+(?:you|yours|your)\\b`,
   `${COUNT}[\\s,]+${GAP}${ROUTE_NOUN}\\b[\\s,]+${GAP}${POSITION}`,
   `${ROUTE_NOUN}\\b[\\s,]+${GAP}(?:then|and\\s+then|after\\s+that)\\s+${TO_YOU}`,
   "(?:you're|you\\s+are|your\\s+(?:visit|home|house|appointment|stop)(?:'s|\\s+is)?)\\s+(?:up\\s+)?(?:next|first|last)\\b(?!\\s+(?:week|month|year|time|monday|tuesday|wednesday|thursday|friday|saturday|sunday|thing))",

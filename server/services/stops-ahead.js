@@ -289,7 +289,8 @@ async function countStopsAhead(db, serviceId, today) {
        -- snapshot as the count: an empty target (the visit was cancelled,
        -- reassigned or advanced since the eligibility read) still yields an
        -- all-zero aggregate row, and a sibling line that advanced since then
-       -- makes the planned count a lie. Both mean "no count" there.
+       -- makes the planned count a lie. Both mean "no count" there. A sibling the TRACKER
+       -- cancelled (status still confirmed) counts as moved on too, and is not an open line below.
        (SELECT COUNT(*) FROM target)::int AS target_rows,
        (SELECT COUNT(*) FROM scheduled_services sib, target_row tr
          WHERE sib.technician_id = tr.technician_id
@@ -299,7 +300,7 @@ async function countStopsAhead(db, serviceId, today) {
            AND sib.id <> tr.id
            AND ${placedOrLegacySql('sib')}
            AND (sib.status IN ('en_route', 'on_site', 'completed')
-                OR sib.track_state IN ('en_route', 'on_property', 'complete')))::int AS sibling_advanced,
+                OR sib.track_state IN ('en_route', 'on_property', 'complete', 'cancelled')))::int AS sibling_advanced,
        -- Also for the peek, still the same snapshot: the target's stop identity, its open member lines, and
        -- how many physical stops (technician + slot) the customer has open that day, by the customer-facing
        -- tracker rule (track-transitions customerTrackState + context-aggregator liveServicesQuery): a
@@ -314,7 +315,8 @@ async function countStopsAhead(db, serviceId, today) {
            AND m.scheduled_date = tr.scheduled_date
            AND m.customer_id = tr.customer_id
            AND m.window_start IS NOT DISTINCT FROM tr.window_start
-           AND m.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')) AS member_ids,
+           AND m.status NOT IN ('completed', 'cancelled', 'skipped', 'no_show', 'rescheduled')
+           AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled', 'no_show'))) AS member_ids,
        (SELECT COUNT(DISTINCT (COALESCE(o.technician_id::text, ''), COALESCE(o.window_start::text, '')))
           FROM scheduled_services o, target_row tr
          WHERE o.customer_id = tr.customer_id

@@ -45,6 +45,20 @@ describe('routeStatusSentence', () => {
   });
 });
 
+describe('the guard recognizes every ROUTE STATUS sentence shape', () => {
+  const shapes = [{ stopsAhead: 0 }, { stopsAhead: 1, atStop: true }, { stopsAhead: 1 }, { stopsAhead: 2 }, { stopsAhead: 3 }]
+    .map((r) => routeStatus.routeStatusSentence(r));
+  const variants = shapes.flatMap((t) => [t, t.replace(/\.$/, '!'), t.replace(/\.$/, ''), t.replace(/\.$/, '?'), t.toUpperCase(), `Hi! ${t.replace(/\.$/, '.. ')}`]);
+  test('three shapes, every count', () => {
+    expect(new Set(shapes.map((t) => t.replace(/\d/, 'N'))).size).toBe(4); // next stop, at the stop before, 1 stop, N stops
+  });
+  test.each(variants)('%p is route wording (a claim without the fact is refused)', async (text) => {
+    expect(routeStatus.mentionsStopCount(text)).toBe(true);
+    expect(routeStatus.routeStatusDraftViolation(text, '')).toMatch(/ROUTE STATUS/);
+    expect(await routeStatus.routeStatusBlockReason({ liveEtaSnapshot: { entries: [], routeStatus: [] }, outgoingBody: text, dbh: 'db' })).toBe('route_status_unbound');
+  });
+});
+
 describe('routeStatusDraftViolation', () => {
   const facts = `UPCOMING SERVICES:\n- Quarterly Pest TODAY on Thu, Nov 26, window 10-12pm, tech Sam, no live tech location known, ROUTE STATUS (copy word for word): "${TWO}"\n`;
   test('a word-for-word copy passes; no stop wording passes', () => {
@@ -197,7 +211,7 @@ describe('context-aggregator loadRouteStatusFacts', () => {
   const { loadRouteStatusFacts } = require('../services/context-aggregator');
   const TODAY = etDateString();
   test('today + technician + not yet en route only; one read per stop; siblings share it', async () => {
-    peekStopsAhead.mockResolvedValue(P(2));
+    peekStopsAhead.mockResolvedValue(P(2, { stop: { ...STOP, date: TODAY } }));
     const rows = [
       { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
       { id: 'b', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: null },
@@ -205,19 +219,26 @@ describe('context-aggregator loadRouteStatusFacts', () => {
       { id: 'd', technician_id: 't1', scheduled_date: TODAY, window_start: '14:00:00', status: 'en_route', track_state: 'en_route' },
       { id: 'e', technician_id: 't1', scheduled_date: '2099-01-01', window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' },
     ];
-    const out = await loadRouteStatusFacts(rows, TODAY);
+    const out = await loadRouteStatusFacts(rows, 'c1', TODAY);
     expect(peekStopsAhead).toHaveBeenCalledTimes(1);
     expect(out.perRow).toEqual([TWO, TWO, null, null, null]);
-    expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO, stop: STOP }]);
+    expect(out.groups).toEqual([{ scheduledServiceId: 'a', scheduledServiceIds: ['a', 'b'], sentence: TWO, stop: { ...STOP, date: TODAY } }]);
+  });
+  test('a route read whose stop identity is not the visit row shown (dispatch moved it in between): no sentence', async () => {
+    const row = { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' };
+    for (const moved of [{ technicianId: 't2' }, { windowStart: '13:00:00' }, { customerId: 'c9' }, { date: '2099-01-01' }]) {
+      peekStopsAhead.mockResolvedValueOnce(P(2, { stop: { ...STOP, date: TODAY, ...moved } }));
+      expect(await loadRouteStatusFacts([row], 'c1', TODAY)).toEqual({ perRow: [null], groups: [] });
+    }
   });
   test('more than one open physical stop today (from the same read): no sentence', async () => {
     peekStopsAhead.mockResolvedValue(P(2, { openStopsToday: 2 }));
     const row = { id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' };
-    expect(await loadRouteStatusFacts([row], TODAY)).toEqual({ perRow: [null], groups: [] });
+    expect(await loadRouteStatusFacts([row], 'c1', TODAY)).toEqual({ perRow: [null], groups: [] });
   });
   test('a failed read is no sentence and no snapshot group', async () => {
     peekStopsAhead.mockRejectedValue(new Error('down'));
-    const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], TODAY);
+    const out = await loadRouteStatusFacts([{ id: 'a', technician_id: 't1', scheduled_date: TODAY, window_start: '10:00:00', status: 'confirmed', track_state: 'scheduled' }], 'c1', TODAY);
     expect(out).toEqual({ perRow: [null], groups: [] });
   });
 });

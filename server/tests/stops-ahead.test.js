@@ -438,6 +438,9 @@ describe('peekStopsAhead', () => {
     // the open-stop count uses the customer-facing tracker rule, not raw status alone
     expect(countSql).toContain("COALESCE(o.track_state, 'scheduled') NOT IN ('complete', 'cancelled', 'no_show')");
     expect(countSql).toContain("(o.status <> 'rescheduled' OR o.track_state IN ('en_route', 'on_property'))");
+    // a sibling the tracker cancelled is not an open line, and counts as moved on
+    expect(countSql).toContain("AND (m.track_state IS NULL OR m.track_state NOT IN ('complete', 'cancelled', 'no_show'))");
+    expect(countSql).toContain("sib.track_state IN ('en_route', 'on_property', 'complete', 'cancelled')");
     expect(db.raw).toHaveBeenCalledTimes(2); // the eligibility read + the one count statement
   });
   test('a floor below the real count (a stop was added ahead) gives no count, never the lower number', async () => {
