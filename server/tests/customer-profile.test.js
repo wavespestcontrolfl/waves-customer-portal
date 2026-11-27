@@ -76,6 +76,11 @@ jest.mock('../services/customer-email-change-code', () => ({
 }));
 const mockSend = jest.fn(async () => ({ ok: true }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: (...a) => mockSend(...a) }));
+// The real composer (its rules throw in tests), with the bell write captured.
+const mockNotifyAdmin = jest.fn(async () => ({ id: 'n1' }));
+jest.mock('../services/notification-service', () => ({ notifyAdmin: (...a) => mockNotifyAdmin(...a) }));
+const mockStripeSync = jest.fn(async () => 'updated');
+jest.mock('../services/stripe', () => ({ syncStripeCustomerEmail: (...a) => mockStripeSync(...a) }));
 
 const express = require('express');
 const auth = require('../middleware/auth');
@@ -386,6 +391,9 @@ describe('PUT /api/customer/profile', () => {
     await flush();
     expect(mockSend).toHaveBeenCalledTimes(1);
     expectGenericNotice(mockSend.mock.calls[0][0], OLD_EMAIL);
+    // The office alert and the Stripe sync are for an EMAIL change only.
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockStripeSync).not.toHaveBeenCalled();
   });
 
   test('a name-only edit for a customer with no email on file saves and sends nothing', async () => {
@@ -496,6 +504,53 @@ describe('POST /api/customer/profile/confirm-email', () => {
     expect(JSON.stringify(toOld)).not.toContain(NEW_EMAIL);
     expect(JSON.stringify(toNew)).not.toContain(OLD_EMAIL);
     expect(toOld.idempotencyKey).not.toBe(toNew.idempotencyKey);
+  });
+
+  // Owner 11-27 "add both": the office hears about every confirmed email change, and Stripe's copy follows.
+  test('a confirmed change raises one office alert with the old and new address, and syncs the Stripe email', async () => {
+    mockNotifyAdmin.mockClear(); mockStripeSync.mockClear();
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => changed());
+    expect((await confirm('123456')).status).toBe(200);
+    await flush();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    const [category, title, body, opts] = mockNotifyAdmin.mock.calls[0];
+    expect(category).toBe('customer');
+    expect(title).toBe('Customers — Email changed in the app');
+    expect(body).toContain(OLD_EMAIL);
+    expect(body).toContain(NEW_EMAIL);
+    expect(opts).toMatchObject({
+      bell: true,
+      link: `/admin/customers?customerId=${CUSTOMER_ID}`,
+      dedupeKey: `profile_email_change:${CUSTOMER_ID}:req-1`,
+      metadata: expect.objectContaining({ oldEmail: OLD_EMAIL, newEmail: NEW_EMAIL, severity: 'needs-you', doneWhen: 'email_change_reviewed' }),
+    });
+    expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
+    expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
+    expect(mockStripeSync).toHaveBeenCalledWith(CUSTOMER_ID);
+  });
+
+  test('a failed alert or Stripe sync never undoes or fails the change', async () => {
+    mockNotifyAdmin.mockClear().mockRejectedValueOnce(new Error('bell down'));
+    mockStripeSync.mockClear().mockRejectedValueOnce(Object.assign(new Error('stripe down'), { type: 'StripeConnectionError' }));
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => changed());
+    expect((await confirm('123456')).status).toBe(200);
+    await flush();
+    expect(mockNotifyAdmin).toHaveBeenCalledTimes(1);
+    expect(mockStripeSync).toHaveBeenCalledTimes(1);
+  });
+
+  test('an unchanged address and a wrong code raise no alert and no Stripe call', async () => {
+    mockNotifyAdmin.mockClear(); mockStripeSync.mockClear();
+    mockCode.checkCode.mockResolvedValue(okCheck());
+    mockApplyEmail.mockImplementation(async () => ({ outcome: 'unchanged', before: { ...mockRow } }));
+    await confirm('123456');
+    mockCode.checkCode.mockResolvedValue({ outcome: 'wrong', attemptsLeft: 3 });
+    await confirm('123456');
+    await flush();
+    expect(mockNotifyAdmin).not.toHaveBeenCalled();
+    expect(mockStripeSync).not.toHaveBeenCalled();
   });
 
   test('the rowAllowed it hands the writer refuses an inactive row and a row on another account', async () => {

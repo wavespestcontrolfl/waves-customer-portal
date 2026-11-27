@@ -219,6 +219,41 @@ function sendChangeNotices({ customerId, before, after, changes }) {
   });
 }
 
+// After a confirmed email change (owner 11-27, "add both"): one office alert with the old and new address, and the
+// linked Stripe customer's email brought up to date. Both run after commit, fire-and-forget: a failure is logged by
+// code and never undoes the change. The alert is internal (the admin bell), so it carries the addresses; the office
+// checks the change looks right (a customer who says "this was not me" calls about it).
+// One sentence of at most 110 characters (the alert rule); both addresses always ride the detail lines too.
+function emailChangeWhy(name, oldEmail, newEmail) {
+  const full = `${name} moved from ${oldEmail || 'no email'} to ${newEmail}.`;
+  if (full.length <= 110) return full;
+  const short = `${name} now uses ${newEmail}.`;
+  return short.length <= 110 ? short : `${name} changed their email; both addresses are in the details.`;
+}
+
+function afterEmailChange({ customerId, before, after, requestId }) {
+  const name = [after.first_name, after.last_name].filter(Boolean).join(' ') || 'A customer';
+  const oldEmail = clean(before.email);
+  const newEmail = clean(after.email);
+  void Promise.resolve(require('../services/admin-alert-compose').raiseAdminAlert('customer', {
+    area: 'Customers',
+    action: 'Email changed in the app',
+    why: emailChangeWhy(name, oldEmail, newEmail),
+    severity: 'needs-you',
+    link: `/admin/customers?customerId=${customerId}`,
+    subject: { type: 'customer', id: String(customerId) },
+    doneWhen: 'email_change_reviewed',
+    who: 'person',
+  }, {
+    bell: true,
+    dedupeKey: `profile_email_change:${customerId}:${requestId}`,
+    detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.`,
+    metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
+  })).catch((err) => logger.warn(`[customer-profile] office email-change alert failed for ${customerId}: ${err.code || err.name || 'alert_failed'}`));
+  void Promise.resolve(require('../services/stripe').syncStripeCustomerEmail(customerId))
+    .catch((err) => logger.warn(`[customer-profile] Stripe email sync failed for ${customerId}: ${err.code || err.type || err.name || 'sync_failed'}`));
+}
+
 function holderOnly(req, res) {
   if (req.contactSession) { res.status(403).json({ error: 'This part of the portal is for the account holder.', code: 'ACCOUNT_HOLDER_ONLY' }); return false; }
   if (req.customerInactive) { res.status(403).json({ error: 'This account is not active.' }); return false; }
@@ -353,7 +388,7 @@ async function confirmInTransaction(trx, { customerId, code, email, req }) {
   if (result.outcome === 'unchanged') return { edit: { before: result.before, after: result.before, changes: {}, emailSync: null } };
   const changes = { email: request.new_email };
   await auditStep(trx, { customerId, action: AUDIT_SAVED, detail: { fields: Object.keys(changes) }, req });
-  return { edit: { before: result.before, after: { ...result.before, ...changes }, changes, emailSync: result.emailSync } };
+  return { edit: { before: result.before, after: { ...result.before, ...changes }, changes, emailSync: result.emailSync, requestId: request.id } };
 }
 
 router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res, next) => {
@@ -372,9 +407,10 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
       return res.status(status).json({ error: message, code, ...(outcome.refused.attemptsLeft !== undefined ? { attemptsLeft: outcome.refused.attemptsLeft } : {}) });
     }
 
-    const { before, after, changes, emailSync } = outcome.edit;
+    const { before, after, changes, emailSync, requestId } = outcome.edit;
     runPostCommitFanout(emailSync, customerId);
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
+    if (changes.email !== undefined) afterEmailChange({ customerId, before, after, requestId });
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {
     if (err.profileStatus) return sendProfileError(res, err);

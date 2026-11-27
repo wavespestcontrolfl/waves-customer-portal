@@ -815,6 +815,24 @@ const StripeService = {
   // =========================================================================
 
   /**
+   * Copy the customer's CURRENT email (read now, so a later edit wins) onto the linked Stripe customer. The Stripe
+   * customer's email is set only at creation, so a changed email would otherwise stay stale there (owner 11-27,
+   * "add both"). No Stripe customer linked yet: nothing to do (ensureStripeCustomer copies the email when it creates
+   * one). Returns 'updated' | 'not_linked' | 'no_email' | 'not_configured'. Throws on a Stripe or read failure; callers
+   * run it after commit and log a failure.
+   */
+  async syncStripeCustomerEmail(customerId, { database = db } = {}) {
+    const customer = await database('customers').where({ id: customerId }).first('id', 'email', 'stripe_customer_id');
+    if (!customer?.stripe_customer_id) return 'not_linked';
+    const email = String(customer.email || '').trim();
+    if (!email) return 'no_email';
+    const stripe = getStripe();
+    if (!stripe) return 'not_configured';
+    await stripe.customers.update(customer.stripe_customer_id, { email });
+    return 'updated';
+  },
+
+  /**
    * Create or retrieve a Stripe customer, store stripe_customer_id on customers table.
    * Returns the Stripe customer ID.
    */
