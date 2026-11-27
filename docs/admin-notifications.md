@@ -326,9 +326,11 @@ customer's message by this rule.
    model names the record that answers the bell; code checks it is in this bell's after-timeline, later than the bell, and a person's or
    a real record (never an automated text, an expired link or an unsent Gmail draft). An "ok" or "yes" to an offered time closes
    only when the model names the booking or held staff move that puts the visit at the offered day and time (no plain rule closes
-   it, and the day-and-time match is the model's: offers are free text, so the model is shown the offer and the reply; a visit
-   waiting for the customer to pick a time is no booking; with no booking or staff move after the yes, it stays owed and no model
-   call is made), and a finished visit never answers a question about its result. A visit move (a new day or a new start)
+   it, and the day-and-time match is the model's: offers are free text, so the model is shown the offer, when it was sent, and the
+   reply, and each visit's day with its weekday and the arrival window the customer is told; a visit waiting for the customer to
+   pick a time is no booking; with no booking or staff move after the yes, it stays owed and no model call is made). A bare "ok" or
+   "yes" to any other message is the model's to judge too (no plain rule closes it; an owed bell, which never goes to the model,
+   keeps the plain rule), and a finished visit never answers a question about its result. A visit move (a new day or a new start)
    answers only when a person at Waves made it and the visit still holds that day and start; a move by an automatic job or by the
    customer, a hand-off for the customer to pick a time (no time is booked), or a move on a visit that now waits for the
    customer's pick, is never an answer.

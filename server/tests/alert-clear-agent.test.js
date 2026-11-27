@@ -550,19 +550,53 @@ describe('the booking requirement holds on every path', () => {
 
   // The offer comes from its own query and can be older than the context lines (3 days, 12 texts; 4 thread emails), so the model is
   // shown the pair whole, redacted, and the pair is in the fingerprint.
-  test('the model is shown the offer and the reply, redacted, and a changed offer changes the fingerprint', () => {
-    const tl = (prevOutbound) => timelineOf([staffMove], { reply: { lastBody: 'Yes', prevOutbound }, ctx: ['CUSTOMER TEXT: thanks'] });
-    const input = agent.judgeInput(alertRow(), tl('We could come Friday at 10 am. Does that work?'), agent.computeFacts(tl('x')));
-    expect(input).toMatch(/THE YES AND THE OFFER IT ANSWERS/);
-    expect(input).toMatch(/- WAVES OFFER: We could come Friday at 10 am\. Does that work\?$/m);
-    expect(input).toMatch(/- CUSTOMER REPLY: Yes$/m);
+  // The offer's send time comes with it: "tomorrow" sent on Wednesday is Thursday, whenever the customer replies.
+  test('the model is shown the offer with its send time and the reply, redacted, and a changed offer changes the fingerprint', () => {
+    const sent = new Date('2026-11-25T20:10:00Z');
+    const tl = (prevOutbound, prevAt = sent) => timelineOf([staffMove], { reply: { lastBody: 'Yes', prevOutbound, prevAt }, ctx: ['CUSTOMER TEXT: thanks'] });
+    const input = agent.judgeInput(alertRow(), tl('We could come tomorrow at 10 am. Does that work?'), agent.computeFacts(tl('x')));
+    expect(input).toMatch(/THE YES AND THE MESSAGE IT ANSWERS/);
+    expect(input).toMatch(/^- WAVES MESSAGE \(sent Wednesday 2026-11-25 3:10 PM\): We could come tomorrow at 10 am\. Does that work\?$/m);
+    expect(input).toMatch(/^- CUSTOMER REPLY \(Thursday 2026-11-26 9:00 AM\): Yes$/m);
     const coded = agent.judgeInput(alertRow(), tl('Friday at 10 am works? Our tech will use the gate code 4821 at the front.'), agent.computeFacts(tl('x')));
     expect(coded).not.toMatch(/4821/);
     const plain = agent.judgeInput(alertRow(), timelineOf([staffMove], { reply: { lastBody: 'Can you come later?', prevOutbound: 'Friday at 10 am?' } }), agent.computeFacts(timelineOf()));
-    expect(plain).not.toMatch(/THE YES AND THE OFFER/);
-    const fp = (prevOutbound) => agent.fingerprintOf(alertRow(), tl(prevOutbound), NOW);
+    expect(plain).not.toMatch(/THE YES AND THE MESSAGE/);
+    const fp = (prevOutbound, prevAt) => agent.fingerprintOf(alertRow(), tl(prevOutbound, prevAt), NOW);
     expect(fp('We could come Friday at 10 am?')).not.toBe(fp('We could come Tuesday at 2 pm?'));
+    expect(fp('We could come tomorrow at 10 am?')).not.toBe(fp('We could come tomorrow at 10 am?', new Date('2026-11-24T20:10:00Z')));
     expect(fp('We could come Friday at 10 am?')).toBe(fp('We could come Friday at 10 am?'));
+  });
+
+  // The audit's case: a numeric offer, a yes, and an unrelated staff reply. The word list now reads M/D dates, hour ranges, month
+  // days and ordinals, so the booking requirement is enforced in code; with nothing that could answer it, no model is paid.
+  test.each([
+    'Can we visit 12/4 between 9 and 11?', 'We have 9-11 open on the 4th, ok?', 'How about Dec 4, 1 to 3?',
+  ])('a yes to "%s" with only a staff reply after it stays owed by rule', async (prevOutbound) => {
+    const { deps, row } = await run([staffText()], { reply: { lastBody: 'yes', prevOutbound } }, judgeNames('E1'));
+    expect(deps.judge).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+  });
+
+  // An offer the word list misses is language, so the model judges it, shown the message: a staff reply never closes the yes by
+  // rule. A reply that is not a bare yes still closes by the staff reply.
+  test('a bare yes to a message the word list does not read as an offer goes to the model, not to a plain rule', async () => {
+    const missed = { lastBody: 'Yes', prevOutbound: 'Shall we pencil you in for early next month?' };
+    const judge = jest.fn(async () => ({ outcome: 'still_owed', why: 'yes to a proposed visit, nothing booked', proof: null, model: 'm' }));
+    const { deps, row } = await run([staffText()], { reply: missed }, judge);
+    expect(deps.judge).toHaveBeenCalledTimes(1);
+    expect(deps.judge.mock.calls[0][0]).toMatch(/- WAVES MESSAGE: Shall we pencil you in for early next month\?$/m);
+    expect(row).toMatchObject({ outcome: 'still_owed', source: 'ai' });
+    const asked = await run([staffText()], { reply: { lastBody: 'Can you call me instead?', prevOutbound: missed.prevOutbound } });
+    expect(asked.row).toMatchObject({ outcome: 'answered', source: 'rule', rule: 'staff_text' });
+  });
+
+  test('an owed alert never goes to the model, so a staff text still closes a bare yes to a message that offers no time', async () => {
+    const owed = alertRow({ title: 'Pat texted back — we still owe a quote' });
+    const deps = makeDeps({ candidates: async () => [owed], timeline: async () => timelineOf([staffText()], { reply: { lastBody: 'ok', prevOutbound: 'We will send your quote.' } }) });
+    await agent.runAlertClearAgent({ now: NOW, deps });
+    expect(deps.judge).not.toHaveBeenCalled();
+    expect(saved(deps)[0]).toMatchObject({ outcome: 'answered', rule: 'staff_text' });
   });
 
   test('the booking or the held staff move the model names answers it', async () => {
@@ -583,8 +617,9 @@ describe('a visit waiting for the customer to pick a time books nothing', () => 
     const waiting = agent.visitEvent(row);
     expect(waiting.proof).toBeNull();
     expect(waiting.line).toMatch(/now waiting for the customer to pick a time .*; no time is booked, so this is no answer$/);
+    // A one-hour job at 10 is the 10-to-12 arrival window the customer was offered (window_start + 2 hours), never 10-11.
     const placed = agent.visitEvent({ ...row, window_start: '10:00:00', window_end: '11:00:00' });
-    expect(placed).toMatchObject({ proof: 'booking', line: 'VISIT created after the alert, for 2026-11-30 10:00-11:00 (pending)' });
+    expect(placed).toMatchObject({ proof: 'booking', line: 'VISIT created after the alert, for Monday 2026-11-30, arrival 10:00-12:00 (pending)' });
   });
 });
 
@@ -887,7 +922,8 @@ describe('a visit move answers only when Waves staff made it and the visit still
   test('a staff move the visit still holds is a date change, and the model reads where it went', () => {
     const e = agent.rescheduleEvent(move());
     expect(e.proof).toBe('date_change');
-    expect(e.line).toBe('VISIT MOVED by Waves staff after the alert (admin_series), from 2026-11-23 09:00-10:00 to 2026-11-27 15:00-16:00; the visit still holds that time');
+    // Each slot as the customer is told it: the weekday, and the arrival window (start + 2 hours), never the logged service end.
+    expect(e.line).toBe('VISIT MOVED by Waves staff after the alert (admin_series), from Monday 2026-11-23, arrival 09:00-11:00 to Friday 2026-11-27, arrival 15:00-17:00; the visit still holds that time');
   });
 
   // The package follow-up date edit logs a day with no time. The visit's time now may come from a later job, so the move proves the
@@ -895,7 +931,7 @@ describe('a visit move answers only when Waves staff made it and the visit still
   test('a staff move that set no time is day-only evidence, whatever time the visit shows now', () => {
     const e = agent.rescheduleEvent(move({ reason_code: 'admin_edit', original_window: null, new_window: null }));
     expect(e.proof).toBe('date_change');
-    expect(e.line).toMatch(/to 2026-11-27; the visit is still on that day; this move set no time$/);
+    expect(e.line).toMatch(/to Friday 2026-11-27; the visit is still on that day; this move set no time$/);
   });
 
   test.each([
@@ -903,8 +939,8 @@ describe('a visit move answers only when Waves staff made it and the visit still
     ['auto-dispatch moved it', { initiated_by: 'auto_dispatch' }, /by an automatic job \(auto_dispatch\)/],
     ['the customer moved it', { initiated_by: 'customer_self_serve' }, /by the customer .*; not an answer from Waves$/],
     ['no mover is named', { initiated_by: null }, /by an unknown mover/],
-    ['the visit moved to another day since', { visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' }, /not an answer now, as the visit has moved since, to 2026-12-05 12:00-13:00$/],
-    ['the visit moved to another time that day since', { window_start: '08:00:00', window_end: '09:00:00' }, /moved since, to 2026-11-27 08:00-09:00$/],
+    ['the visit moved to another day since', { visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' }, /not an answer now, as the visit has moved since, to Saturday 2026-12-05, arrival 12:00-14:00$/],
+    ['the visit moved to another time that day since', { window_start: '08:00:00', window_end: '09:00:00' }, /moved since, to Friday 2026-11-27, arrival 08:00-10:00$/],
   ])('no proof when %s', (_n, over, line) => {
     const e = agent.rescheduleEvent(move(over));
     expect(e.proof).toBeNull();
@@ -924,7 +960,7 @@ describe('a visit move answers only when Waves staff made it and the visit still
     const parked = { reason_code: 'admin_edit', original_window: null, new_window: null, window_start: null, window_end: null, visit_pick_by: after(1440) };
     const e = agent.rescheduleEvent(move(parked));
     expect(e.proof).toBeNull();
-    expect(e.line).toMatch(/^VISIT MOVED by Waves staff after the alert \(admin_edit\), from 2026-11-23 to 2026-11-27; not an answer now, as the visit waits for the customer to pick a time$/);
+    expect(e.line).toMatch(/^VISIT MOVED by Waves staff after the alert \(admin_edit\), from Monday 2026-11-23 to Friday 2026-11-27; not an answer now, as the visit waits for the customer to pick a time$/);
     // A pick-by left on a visit that has its time again is no wait.
     expect(agent.rescheduleEvent(move({ visit_pick_by: after(1440) })).proof).toBe('date_change');
   });
@@ -945,7 +981,7 @@ describe('a visit move answers only when Waves staff made it and the visit still
     for (const initiatedBy of ['admin', 'tech', 'rain_out']) {
       const e = agent.rescheduleEvent(move({ initiated_by: initiatedBy, pick_handoff: true, new_window: null, window_start: null, window_end: null }));
       expect(e.proof).toBeNull();
-      expect(e.line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by .+ after the alert \(admin_series\), from 2026-11-23 09:00-10:00; no time is booked, so this is no answer$/);
+      expect(e.line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by .+ after the alert \(admin_series\), from Monday 2026-11-23, arrival 09:00-11:00; no time is booked, so this is no answer$/);
     }
   });
 

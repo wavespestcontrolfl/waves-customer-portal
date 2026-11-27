@@ -122,7 +122,8 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const found = timeline.events.filter((e) => e.proof).map((e) => `${e.proof}:${e.id}`).sort();
     expect(found).toEqual([`booking:${live}`, `estimate_sent:${handed}`].sort());
     // The booking's line states the day and time the visit holds, so the model can judge a yes to an offered time.
-    expect(timeline.events.find((e) => e.id === String(live)).line).toBe('VISIT created after the alert, for 2027-01-10 09:00-10:00 (pending)');
+    // ...as the customer is told it: the weekday and the arrival window (start + 2 hours), not the job's 09:00-10:00.
+    expect(timeline.events.find((e) => e.id === String(live)).line).toBe('VISIT created after the alert, for Sunday 2027-01-10, arrival 09:00-11:00 (pending)');
     expect(timeline.events.find((e) => e.id === String(waiting))).toMatchObject({ proof: null, line: expect.stringMatching(/waiting for the customer to pick a time/) });
   });
 
@@ -201,7 +202,8 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
     const timeline = await agent.buildTimeline(row);
     expect(timeline.complete).toBe(true);
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' });
+    // The offer's send time comes with it, so the model can read "tomorrow" from it.
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?', prevAt: at(-30) });
     expect(timeline.ctx[timeline.ctx.length - 1]).toMatch(/the text this alert is about\): Yes/);
   });
 
@@ -221,6 +223,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const timeline = await agent.buildTimeline(row);
     expect(timeline.reply.lastBody.trim()).toBe('Yes');
     expect(timeline.reply.prevOutbound).toBe('Can we come Friday at 10 am?');
+    expect(timeline.reply.prevAt).toEqual(at(-60));
   });
 
   test('a hold voicemail bell: top-level call id, fragment link, judged from the bell\'s own time (a call during the hold answers nothing)', async () => {
@@ -297,8 +300,8 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     const moves = (await agent.buildTimeline(row)).events.filter((e) => e.type === 'reschedule');
     expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since, handoff, dayOnly].sort());
     expect(moves.filter((e) => e.proof === 'date_change').map((e) => e.id).sort()).toEqual([held, sameDay, dayOnly].sort());
-    expect(moves.find((e) => e.id === dayOnly).line).toMatch(/to 2027-01-12; the visit is still on that day; this move set no time$/);
-    expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now, as the visit has moved since, to 2027-01-12 15:00-16:00$/);
+    expect(moves.find((e) => e.id === dayOnly).line).toMatch(/to Tuesday 2027-01-12; the visit is still on that day; this move set no time$/);
+    expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now, as the visit has moved since, to Tuesday 2027-01-12, arrival 15:00-17:00$/);
     expect(moves.find((e) => e.id === handoff).line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by Waves staff .*no time is booked, so this is no answer$/);
   });
 
@@ -536,7 +539,7 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     for (let i = 0; i < 15; i += 1) await sms({ customer_id: cid, direction: 'inbound', message_body: `chatter ${i}`, created_at: at(-500 + i), status: 'received' });
     await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'Yes', created_at: T0, status: 'received' });
     const timeline = await agent.buildTimeline(await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`));
-    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Friday at 10 am works for the visit?' });
+    expect(timeline.reply).toEqual({ lastBody: 'Yes', prevOutbound: 'Friday at 10 am works for the visit?', prevAt: at(-600) });
   });
 
   test('a visit that ran is filtered, ordered and dated by completed_at; a cancelled one and one with no completed_at are not', async () => {
