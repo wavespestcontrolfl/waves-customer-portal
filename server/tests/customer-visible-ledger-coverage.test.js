@@ -233,6 +233,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
 
   describe('provider verdicts and JSON-null rejection in ledgerCall', () => {
     const origGem = process.env.GEMINI_API_KEY;
+    const origGoogle = process.env.GOOGLE_API_KEY;
     const origAnth = process.env.ANTHROPIC_API_KEY;
     const origFetch = global.fetch;
     const origGate = process.env.GATE_LLM_CALL_LEDGER;
@@ -243,6 +244,8 @@ describe('customer_visible direct_sdk ledger closure', () => {
     afterEach(() => {
       if (origGem === undefined) delete process.env.GEMINI_API_KEY;
       else process.env.GEMINI_API_KEY = origGem;
+      if (origGoogle === undefined) delete process.env.GOOGLE_API_KEY;
+      else process.env.GOOGLE_API_KEY = origGoogle;
       if (origAnth === undefined) delete process.env.ANTHROPIC_API_KEY;
       else process.env.ANTHROPIC_API_KEY = origAnth;
       if (origGate === undefined) delete process.env.GATE_LLM_CALL_LEDGER;
@@ -408,10 +411,11 @@ describe('customer_visible direct_sdk ledger closure', () => {
       }), { laneId: 'lawn_diag_writer' });
       ledgerCallRejected(oaiRefusal, 'invalid_json');
 
-      // Non-object HTTP 200 envelopes (e.g. JSON null) cannot be tracked in ledgerCallIdOf
-      // and must be recorded as failed rows immediately.
+      // Non-object HTTP 200 envelopes (e.g. JSON null) and malformed envelopes
+      // whose parser throws (e.g. OpenAI {"output":{}}) must record as failed rows.
       await ledgerCall('gemini', 'gemini-3.8-flash', async () => null, { laneId: 'pest_id' });
       await ledgerCall('openai', 'gpt-5.5', async () => null, { laneId: 'lawn_diag_writer' });
+      await ledgerCall('openai', 'gpt-5.5', async () => ({ id: 'resp_bad_output', output: {} }), { laneId: 'lawn_diag_writer' });
 
       await new Promise((r) => setImmediate(r));
       expect(inserted.map((r) => ({ ok: r.ok, error_code: r.error_code, provider_ref: r.provider_ref }))).toEqual([
@@ -421,6 +425,7 @@ describe('customer_visible direct_sdk ledger closure', () => {
         { ok: false, error_code: 'openai_refusal', provider_ref: 'resp_ref' },
         { ok: false, error_code: 'invalid_response', provider_ref: null },
         { ok: false, error_code: 'invalid_response', provider_ref: null },
+        { ok: false, error_code: 'invalid_response', provider_ref: 'resp_bad_output' },
       ]);
       // None of the already-classified provider failures should be overwritten by ledgerCallRejected.
       expect(updated).toEqual([]);
@@ -428,7 +433,9 @@ describe('customer_visible direct_sdk ledger closure', () => {
 
     test('Claude stop_reason max_tokens is rejected in lawn_assess and tree_shrub even with schema-valid JSON', async () => {
       delete process.env.GEMINI_API_KEY;
+      delete process.env.GOOGLE_API_KEY;
       process.env.ANTHROPIC_API_KEY = 'test-anth';
+      global.fetch = jest.fn(() => { throw new Error('unexpected live fetch'); });
       jest.resetModules();
       const mockLedgerCall = jest.fn((p, m, fn) => fn());
       const mockLedgerCallRejected = jest.fn();

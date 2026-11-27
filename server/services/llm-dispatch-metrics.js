@@ -572,22 +572,25 @@ function anthropicResponseErrorCode(value) {
 }
 
 function geminiResponseErrorCode(value) {
-  if (!value || typeof value !== 'object') return null;
+  if (!value || typeof value !== 'object') return 'invalid_response';
+  let geminiVerdict;
+  try { ({ geminiVerdict } = require('./llm/call')); } catch { return null; }
+  if (typeof geminiVerdict !== 'function') return null;
   try {
-    const { geminiVerdict } = require('./llm/call');
-    if (typeof geminiVerdict !== 'function') return null;
     return geminiVerdict(value, value.candidates?.[0] || {}, null) || null;
-  } catch { return null; }
+  } catch { return 'invalid_response'; }
 }
 
 function openAIResponseErrorCode(value) {
-  if (!value || typeof value !== 'object') return null;
+  if (!value || typeof value !== 'object') return 'invalid_response';
+  let openAIVerdict;
+  let extractOpenAIText;
+  try { ({ openAIVerdict, extractOpenAIText } = require('./llm/call')); } catch { return null; }
+  if (typeof openAIVerdict !== 'function') return null;
   try {
-    const { openAIVerdict, extractOpenAIText } = require('./llm/call');
-    if (typeof openAIVerdict !== 'function') return null;
     const out = typeof extractOpenAIText === 'function' ? extractOpenAIText(value) : '';
     return openAIVerdict(value, out)?.code || null;
-  } catch { return null; }
+  } catch { return 'invalid_response'; }
 }
 
 function providerResponseErrorCode(provider, value) {
