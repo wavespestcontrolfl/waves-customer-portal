@@ -2653,6 +2653,8 @@ function conflictText(product, label, conflictLines) {
     const band = protocolBand(label, line);
     return `${line.name}${line.conditional ? ' (if needed)' : ''} ${band ? `${rateText(band)}${volumeText(line)}` : 'see its card'}`;
   });
+  // Same concentration on every service (a selected line beside an "if needed" one): no second tank, only each service's own conditions.
+  if (new Set(conflictLines.map((line) => JSON.stringify(line.rate))).size === 1) return `${product.name} is listed on more than one service on this visit: ${each.join('; ')}. Each service's own conditions are shown`;
   return `${product.name} has a different rate on each service on this visit: ${each.join('; ')}. Mix a separate tank for each`;
 }
 
