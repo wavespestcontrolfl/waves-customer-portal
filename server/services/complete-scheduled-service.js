@@ -16637,6 +16637,7 @@ async function completeScheduledService(completionInput, packetContext = null) {
           serviceDate: serviceDateOnly(svc.scheduled_date),
         }, packetEffects ? {
           dedupeKey: `visit_member_complete:${record.id}`,
+          pushOnDedupe: true,
           beforePush: async ({ dispatching }) => {
             if (!dispatching) return true;
             try {
