@@ -738,7 +738,8 @@ function recipientHit(token) {
 }
 
 // The FINAL read of a recipient link names the recipient row in the SAME query that returns the visit: the row the token
-// resolved (its id), still carrying THIS token, still on THIS visit, and bound to the visit's CURRENT customer. A row deleted,
+// resolved (its id), still carrying THIS token, still on THIS visit, bound to the visit's CURRENT customer, and (for a copy of
+// the every-visit list) still listed by that customer. A row deleted,
 // given a new token, moved to another visit or rebound after the permission reads matches nothing, so the link answers as an
 // unknown token. `query` reads 'scheduled_services as s' already narrowed to the visit's id.
 function withRecipientRow(query, hit, token) {
@@ -746,7 +747,14 @@ function withRecipientRow(query, hit, token) {
     .join('visit_text_recipients as r', function onRecipientRow() {
       this.on('r.scheduled_service_id', '=', 's.id').andOn('r.customer_id', '=', 's.customer_id');
     })
-    .where({ 'r.id': hit.recipientId, 'r.track_token': token });
+    .where({ 'r.id': hit.recipientId, 'r.track_token': token })
+    // A copy of the customer's every-visit list stands only while that customer still lists the number (call-visit-recipient.js).
+    .where(function listedWhenCopied() {
+      this.whereNot('r.source', 'customer_reminder_contact').orWhereExists(function stillListed() {
+        this.select(db.raw('1')).from('customer_reminder_contacts as l')
+          .whereRaw('l.customer_id = s.customer_id AND l.phone_key = r.phone_key');
+      });
+    });
 }
 
 // A resolved recipient link names a visit, a row and a customer; anything less answers as an unknown token.

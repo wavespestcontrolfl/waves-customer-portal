@@ -595,21 +595,9 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'confirmation')).toHaveLength(1);
       });
 
-      test('a customer merge folds a shared number into one winner row; the loser\'s other numbers move', async () => {
-        const { UNIQUE_COLLISION_HANDLERS } = require('../services/customer-dedupe')._test;
-        const [{ id: loserId }] = await db('customers').insert({ first_name: 'Phyl', last_name: 'Roe', phone: phone(45) }).returning('id');
-        try {
-          const base = { phone_e164: BOB, phone_key: BOB.slice(-10), consent_version: 'x' };
-          await db('customer_reminder_contacts').insert([
-            { ...base, customer_id: loserId },
-            { ...base, customer_id: loserId, phone_e164: phone(46), phone_key: phone(46).slice(-10) },
-          ]);
-          await UNIQUE_COLLISION_HANDLERS.customer_reminder_contacts(db, 'customer_reminder_contacts', 'customer_id', customerId, loserId);
-          expect((await listed()).map((r) => r.phone_key).sort()).toEqual([BOB.slice(-10), phone(46).slice(-10)].sort());
-          expect(await db('customer_reminder_contacts').where({ customer_id: loserId })).toHaveLength(0);
-        } finally {
-          await db('customers').where({ id: loserId }).del();
-        }
+      test('a customer merge never moves the list: the loser\'s entries stay on the loser', async () => {
+        const { REPOINT_EXCLUDED_TABLES } = require('../services/customer-dedupe');
+        expect(REPOINT_EXCLUDED_TABLES.has('customer_reminder_contacts')).toBe(true);
       });
 
     });
@@ -1454,6 +1442,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           'the row given a new token': ({ id }) => db('visit_text_recipients').where({ id }).update({ track_token: `vr_${'9'.repeat(48)}` }),
           'the row rebound to another customer': ({ id }) => db('visit_text_recipients').where({ id }).update({ customer_id: otherCustomerId }),
           'the row moved to another visit': ({ id }) => db('visit_text_recipients').where({ id }).update({ scheduled_service_id: otherVisitId }),
+          'a list copy whose list entry is gone': async ({ id }) => {
+            await db('visit_text_recipients').where({ id }).update({ source: 'customer_reminder_contact' });
+            await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+          },
         };
         let spy;
         beforeEach(async () => {

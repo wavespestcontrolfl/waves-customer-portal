@@ -1455,7 +1455,11 @@ async function lockedPairAutoEligibility(trx, winner, loser) {
 // Geocode reviews describe one customer's primary-address snapshot. Keep the
 // retired account's evidence attached to it: inheriting it would assert a new
 // verification, and two singleton rows must not abort an ordinary merge.
-const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews']);
+// The every-visit list of people a call named (customer_reminder_contacts, call-visit-recipient.js) stays on the account
+// the call was about: a merge never moves a texting grant onto another account, and an undo has nothing to restore. The
+// merged account lists nobody until a call names the person again; the list's copies that move with their visits stand
+// only while the visit's customer lists the number, so they send nothing.
+const REPOINT_EXCLUDED_TABLES = new Set(['customer_merge_journal', 'customer_duplicate_dismissals', 'customer_plan_rates', 'field_credit_allocations', 'customer_geocode_reviews', 'customer_reminder_contacts']);
 
 // Above this many rows in one table the journal records count-only instead of
 // per-row ids (an unbounded id list would bloat the journal row); the revert
@@ -2278,9 +2282,6 @@ async function pruneDiscardedContactPrefs(trx, winnerId, finalWinner) {
 
 const UNIQUE_COLLISION_HANDLERS = {
   customer_pin_suggestions: repointPinSuggestions,
-  // UNIQUE(customer_id, phone_key): the every-visit list of people a call named (call-visit-recipient.js). Both duplicates
-  // listing the same number is the same grant twice; the loser's copy drops. The row carries no stop of its own.
-  customer_reminder_contacts: repointRowwiseDropCollisions,
   service_contact_notification_prefs: foldContactNotificationPrefs,
   notification_prefs: mergeSingletonPrefRow,
   property_preferences: mergeSingletonPrefRow,
@@ -7737,11 +7738,6 @@ async function predictCollisionFolds(database, winner, loser) {
   const winnerThreads = new Set(convRows.filter((r) => String(r.customer_id) === String(winnerId) && r.channel != null && r.our_endpoint_id != null).map(key));
   const sharedThreads = [...new Set(convRows.filter((r) => String(r.customer_id) === String(loserId) && r.channel != null && r.our_endpoint_id != null && winnerThreads.has(key(r))).map((r) => `${r.channel}:${r.our_endpoint_id}`))].sort();
   if (sharedThreads.length) details.conversations = { shared_threads: sharedThreads };
-  // The every-visit list: a number both records list folds into one row (a count only, never the number).
-  const reminderRows = await read('customer_reminder_contacts', ['customer_id', 'phone_key']);
-  const winnerReminderKeys = new Set(reminderRows.filter((r) => String(r.customer_id) === String(winnerId)).map((r) => r.phone_key));
-  const sharedReminders = new Set(reminderRows.filter((r) => String(r.customer_id) === String(loserId) && winnerReminderKeys.has(r.phone_key)).map((r) => r.phone_key)).size;
-  if (sharedReminders) details.customer_reminder_contacts = { shared_numbers: sharedReminders };
   return { tables: Object.keys(details).sort(), details };
 }
 

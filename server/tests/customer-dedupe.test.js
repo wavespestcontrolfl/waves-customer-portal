@@ -3824,7 +3824,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
       if (table === 'referral_promoters') return null;
       // The collision-fold prediction reads both sides' rows of each
       // unique-keyed table (predictCollisionFolds).
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts', 'customer_reminder_contacts'].includes(table)) return collisions[table] || [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return collisions[table] || [];
       if (table === 'payment_methods') {
         const owner = q.args('where')[0].customer_id;
         if (q.called('first')) return defaults[owner] ? { id: `${owner}-default` } : null;
@@ -3854,19 +3854,6 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     expect(JSON.parse(out.fingerprint).financial_effects.predicted_collision_folds).toEqual(out.financial_effects.predicted_collision_folds);
     // A pref row on ONE side only, tags that do not overlap, threads on different endpoints: nothing folds.
     install({}, { collisions: { property_preferences: [{ customer_id: 'L' }], customer_tags: [{ customer_id: 'W', tag: 'a' }, { customer_id: 'L', tag: 'b' }], conversations: [{ customer_id: 'W', channel: 'sms', our_endpoint_id: 'ep1' }, { customer_id: 'L', channel: 'sms', our_endpoint_id: 'ep2' }] } });
-    expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
-  });
-
-  it('predicts a number both records list for every-visit texts as a fold, as a count only (no number in the card)', async () => {
-    install({}, { collisions: { customer_reminder_contacts: [
-      { customer_id: 'W', phone_key: '9415550002' }, { customer_id: 'L', phone_key: '9415550002' }, { customer_id: 'L', phone_key: '9415550003' },
-    ] } });
-    const out = await dedupe.describeMergeEffects(db, winner, loser);
-    expect(out.financial_effects.predicted_collision_handlers).toEqual(['customer_reminder_contacts']);
-    expect(out.financial_effects.predicted_collision_folds.customer_reminder_contacts).toEqual({ shared_numbers: 1 });
-    expect(out.fingerprint).not.toContain('9415550002');
-    expect(out.financial_effects.revertible_from_queue).toBe(false);
-    install({}, { collisions: { customer_reminder_contacts: [{ customer_id: 'W', phone_key: '9415550002' }, { customer_id: 'L', phone_key: '9415550003' }] } });
     expect((await dedupe.describeMergeEffects(db, winner, loser)).financial_effects.predicted_collision_handlers).toEqual([]);
   });
 
@@ -4154,7 +4141,7 @@ describe('describeMergeEffects (the card\'s disclosure + fingerprint, engine-own
     const route = (counts) => (table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return q.called('first') ? null : [];
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts', 'customer_reminder_contacts'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       if (table === 'customer_plan_rates') return { n: 0 };
       return { n: counts[table] || 0 };
@@ -4280,7 +4267,7 @@ describe('previewCollectionCaseReconciliation (the executor\'s reconcile rule, d
     installDb((table, q) => {
       if (table === 'referral_promoters') return null;
       if (table === 'payment_methods') return [];
-      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts', 'customer_reminder_contacts'].includes(table)) return [];
+      if (['notification_prefs', 'property_preferences', 'customer_properties', 'customer_tags', 'conversations', 'customer_health_alerts'].includes(table)) return [];
       if (table === 'invoices' && !q.called('count')) return [];
       return { n: 0 };
     });
