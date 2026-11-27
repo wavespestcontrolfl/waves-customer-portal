@@ -126,6 +126,7 @@ beforeEach(() => {
     row('d', '2026-11-20T18:00:00Z', { direction: 'outbound', message_type: 'receipt', status: 'sent', message_body: 'Thanks for your visit' }),
     row('e', '2026-11-20T19:00:00Z', { direction: 'outbound', message_type: 'brand_new_type_2027', status: 'sent', message_body: 'hello there' }),
     row('f', '2026-11-20T20:00:00Z', { message_body: 'Brown patch by the gate', metadata: { media: [{ key: 'sms-media/inbound/k1', providerUrl: 'https://api.twilio.com/m/1', contentType: 'image/jpeg' }] } }),
+    row('h', '2026-11-20T20:30:00Z', { message_body: '', metadata: { media: [{ key: 'sms-media/inbound/k2', contentType: 'image/png' }] } }),
     row('g', '2026-11-20T21:00:00Z', { customer_id: 'cust-2', message_body: 'another customer' }),
   ];
 });
@@ -144,7 +145,8 @@ describe('GET /:id/visit-texts', () => {
     const { status, body } = await get('technician');
     expect(status).toBe(200);
     expect(body.enabled).toBe(true);
-    expect(body.texts.map((t) => t.id)).toEqual(['a', 'b', 'f']);
+    expect(body.texts.map((t) => t.id)).toEqual(['a', 'b', 'f', 'h']);
+    expect(body.texts[3].photos).toEqual([{ url: 'https://signed.example/sms-media/inbound/k2', contentType: 'image/png' }]);
     expect(body.texts[2].photos).toEqual([{ url: 'https://signed.example/sms-media/inbound/k1', contentType: 'image/jpeg' }]);
     expect(body.hidden).toBe(3); // c (bill word), d (receipt type), e (unknown type)
     const text = JSON.stringify(body);
@@ -155,6 +157,7 @@ describe('GET /:id/visit-texts', () => {
     mockPhotos.mockReturnValue(false);
     const { body } = await get('technician');
     expect(body.texts[2]).toMatchObject({ id: 'f', photos: [], photoCount: 1 });
+    expect(body.texts.map((t) => t.id)).toEqual(['a', 'b', 'f']); // a photo with no words waits for the photo switch
     expect(JSON.stringify(body)).not.toContain('signed.example');
   });
 
@@ -187,11 +190,18 @@ describe('GET /:id/visit-texts', () => {
     expect(JSON.stringify(body)).not.toMatch(/back yard|signed\.example/);
   });
 
+  test('a reschedule during the read (the visit date changed) withholds the whole answer', async () => {
+    onSmsRead = () => { visits[0].scheduled_date = '2026-11-27'; };
+    const { status, body } = await get('technician');
+    expect(status).toBe(404);
+    expect(JSON.stringify(body)).not.toMatch(/back yard|signed\.example/);
+  });
+
   test('an admin reaches any visit, whoever it is assigned to', async () => {
     visits[0].technician_id = 'tech-2';
     const res = await get('admin');
     expect(res.status).toBe(200);
-    expect(res.body.texts).toHaveLength(3);
+    expect(res.body.texts).toHaveLength(4);
   });
 });
 

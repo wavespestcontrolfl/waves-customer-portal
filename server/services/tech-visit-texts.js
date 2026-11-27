@@ -15,6 +15,7 @@ const { scrubNoteText } = require('../utils/note-secret-scrubber');
 const { isSmsReaction } = require('./sms-intent');
 const { excludeRecruitingSmsLog } = require('../utils/recruiting-thread-scope');
 const { excludeUnresolvedSendReservations } = require('./messaging/review-ask-reservation');
+const { isPaymentScopedText } = require('./payment-status-contract');
 
 const WINDOW_DAYS = 7;
 const MAX_TEXTS = 40;
@@ -38,8 +39,10 @@ const QUIET_TYPES = new Set([
   'appointment_reminder', 'appointment_reminder_72h', 'reminder', 'reminder_24h', 'reminder_72h',
   'confirmation', 'appointment_confirmation', 'tech_en_route', 'review_request', 'review', 'review_followup',
 ]);
-// An outbound text in one of these states never reached the customer (or has not yet).
-const UNSENT_STATUSES = new Set(['failed', 'undelivered', 'blocked', 'held', 'scheduled', 'pending', 'pending_review', 'sending', 'cancelled', 'canceled']);
+// Statuses an outbound text may carry once it left (customer-activity-timeline.js OUTBOUND_LEFT).
+const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'read', 'failed', 'undelivered'];
+// An outbound text is shown only in a state that reached the customer: the timeline's list without its two failure states.
+const SENT_STATUSES = new Set(OUTBOUND_LEFT.filter((status) => status !== 'failed' && status !== 'undelivered'));
 
 // bill, invoice, charge, card, payment, pay, paid, refund, price, cost, balance, owe, a dollar amount; plus the plain
 // forms of the same words a customer types (autopay, receipt, deposit, cash, venmo, zelle, fee).
@@ -94,17 +97,33 @@ function isPushProof(row) {
   return String(row.from_phone || '').toLowerCase() === 'push' || String(parseMetadata(row.metadata).channel || '').toLowerCase() === 'push';
 }
 
-// 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
-function textVerdict(row) {
-  const type = row.message_type || '';
+const isEnforcedSpam = (row) => parseMetadata(row.metadata).spam_verdict?.enforced === true;
+
+// Noise that is neither shown nor counted: quiet types, push records, tapbacks, screened spam, texts that never left.
+function isNoise(row) {
   const inbound = row.direction === 'inbound';
-  if (QUIET_TYPES.has(type) || isPushProof(row) || (inbound && isSmsReaction(row.message_body))) return 'skip';
-  if (!inbound && UNSENT_STATUSES.has(row.status)) return 'skip';
-  if (!(inbound ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(type)) return 'hidden';
-  if (hasMoneyWords(row.message_body) || hasCardCredentials(row.message_body) || hasLink(row.message_body)) return 'hidden';
-  if (type === 'manual' && !inbound && !row.admin_user_id) return 'hidden';
-  // A text with no words (a photo alone) is never shown: a photo of a card or a check has no caption to screen.
-  if (!String(row.message_body || '').trim()) return 'skip';
+  if (QUIET_TYPES.has(row.message_type || '') || isPushProof(row)) return true;
+  if (inbound) return isSmsReaction(row.message_body) || isEnforcedSpam(row);
+  return !SENT_STATUSES.has(String(row.status || '').toLowerCase());
+}
+
+// Held back and counted: a type off the allow-list, money, card or bank details, a link, or an unauthored `manual` send.
+function isHeldBack(row) {
+  const inbound = row.direction === 'inbound';
+  const type = row.message_type || '';
+  if (!(inbound ? SHOW_INBOUND_TYPES : SHOW_OUTBOUND_TYPES).has(type)) return true;
+  const body = row.message_body;
+  if (hasMoneyWords(body) || hasCardCredentials(body) || hasLink(body) || isPaymentScopedText(body)) return true;
+  return type === 'manual' && !inbound && !row.admin_user_id;
+}
+
+// 'show' | 'hidden' | 'skip' for one sms_log row ({ direction, message_type, status, message_body, metadata }).
+// `withPhotos` (GATE_TECH_VISIT_TEXT_PHOTOS): a customer's photo with no words shows, as its image only.
+function textVerdict(row, { withPhotos = false } = {}) {
+  if (isNoise(row)) return 'skip';
+  if (isHeldBack(row)) return 'hidden';
+  // No words: shown only as a customer's image, and only with the photo switch on. Words that a screen above hid keep the row hidden.
+  if (!String(row.message_body || '').trim()) return withPhotos && photosOf(row).length ? 'show' : 'skip';
   return 'show';
 }
 
@@ -134,9 +153,6 @@ function withoutQueueParents(rows) {
   const parents = new Set(rows.map((row) => parseMetadata(row.metadata).scheduled_sms_log_id).filter(Boolean).map(String));
   return rows.filter((row) => !parents.has(String(row.id)));
 }
-
-// Statuses an outbound text may carry once it left (customer-activity-timeline.js OUTBOUND_LEFT).
-const OUTBOUND_LEFT = ['', 'sent', 'queued', 'accepted', 'delivered', 'read', 'failed', 'undelivered'];
 
 // One customer's sms_log rows in the window, the way every sms_log reader builds them: no recruiting threads, no unresolved
 // send reservations, and a scheduled send's queue parent left out when its provider row is there.
@@ -183,7 +199,7 @@ async function visitTexts(db, svc, { now = new Date(), sign = null, withPhotos =
   let hidden = 0;
   const shown = [];
   for (const row of rows) {
-    const verdict = textVerdict(row);
+    const verdict = textVerdict(row, { withPhotos });
     if (verdict === 'hidden') hidden += 1;
     else if (verdict === 'show') shown.push(row);
   }

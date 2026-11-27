@@ -3,6 +3,7 @@
  * verdict + window rules and the sms_log read. Synthetic data only. The route's gate, ownership and payload are in
  * tech-visit-texts-route.test.js.
  */
+const { isPaymentScopedText } = require('../services/payment-status-contract');
 const { textVerdict, hasMoneyWords, hasCardCredentials, hasLink, windowStart, visitTexts, MAX_TEXTS, MAX_PAGES, PAGE_SIZE } = require('../services/tech-visit-texts');
 
 const inbound = (over = {}) => ({ direction: 'inbound', message_type: 'inbound', status: 'received', message_body: 'The gate code changed', metadata: null, ...over });
@@ -50,11 +51,40 @@ describe('textVerdict', () => {
     expect(textVerdict(inbound({ message_body: '' }))).toBe('skip');
   });
 
-  test('a photo with no words is never shown: nothing to screen it by, whatever its type', () => {
+  test('a photo with no words shows only with the photo switch on, and only as an allowed image type', () => {
     const media = (contentType) => JSON.stringify({ media: [{ key: 'sms-media/inbound/a', contentType }] });
+    const on = { withPhotos: true };
     expect(textVerdict(inbound({ message_body: '', metadata: media('image/jpeg') }))).toBe('skip');
-    expect(textVerdict(inbound({ message_body: '', metadata: media('application/pdf') }))).toBe('skip');
+    expect(textVerdict(inbound({ message_body: '', metadata: media('image/jpeg') }), on)).toBe('show');
+    expect(textVerdict(inbound({ message_body: '', metadata: media('image/heic') }), on)).toBe('show');
+    expect(textVerdict(inbound({ message_body: '', metadata: media('application/pdf') }), on)).toBe('skip');
+    expect(textVerdict(inbound({ message_body: '', metadata: media(null) }), on)).toBe('skip');
     expect(textVerdict(inbound({ message_body: 'Brown patch by the gate', metadata: media('image/jpeg') }))).toBe('show');
+  });
+
+  test('a photo whose caption a screen hides stays hidden with its row, switch on or off', () => {
+    const metadata = JSON.stringify({ media: [{ key: 'sms-media/inbound/a', contentType: 'image/jpeg' }] });
+    for (const body of ['here is my card 4111 1111 1111 1111', 'pay with this', 'see https://example.com/x', 'cvv 123']) {
+      expect(textVerdict(inbound({ message_body: body, metadata }), { withPhotos: true })).toBe('hidden');
+      expect(textVerdict(inbound({ message_body: body, metadata }))).toBe('hidden');
+    }
+  });
+
+  test('an outbound text shows only in a state that reached the customer (allow-list, normalized)', () => {
+    for (const status of ['sent', 'SENT', 'delivered', 'queued', 'accepted', 'read', '', null]) expect(textVerdict(outbound({ status }))).toBe('show');
+    for (const status of ['failed', 'undelivered', 'held', 'draft', 'skipped', 'suppressed', 'new_status_2027']) expect(textVerdict(outbound({ status }))).toBe('skip');
+  });
+
+  test('an inbound text a spam screen enforced is neither shown nor counted', () => {
+    expect(textVerdict(inbound({ metadata: { spam_verdict: { enforced: true } } }))).toBe('skip');
+    expect(textVerdict(inbound({ metadata: JSON.stringify({ spam_verdict: { enforced: true } }) }))).toBe('skip');
+    expect(textVerdict(inbound({ metadata: { spam_verdict: { enforced: false } } }))).toBe('show');
+  });
+
+  test('a payment-scoped text is hidden even with none of the plain money words', () => {
+    expect(isPaymentScopedText('did my autopay go through')).toBe(true);
+    expect(textVerdict(inbound({ message_body: 'did my autopay go through' }))).toBe('hidden');
+    expect(textVerdict(outbound({ message_body: 'Your statement is ready' }))).toBe(isPaymentScopedText('Your statement is ready') ? 'hidden' : 'show');
   });
 
   test.each([
@@ -208,6 +238,24 @@ describe('visitTexts', () => {
     const twin = row('twin', '2026-11-22T15:00:05Z', { direction: 'outbound', message_type: 'manual', admin_user_id: 'staff-1', status: 'sent', message_body: 'We will be there Tuesday', metadata: JSON.stringify({ scheduled_sms_log_id: 'parent' }) });
     const out = await visitTexts(fakeDb([parent, twin]), SVC, { now: NOW });
     expect(out.texts.map((t) => t.id)).toEqual(['twin']);
+  });
+
+  test('a photo with no words shows as an image only when photos are on; hidden caption rows never sign', async () => {
+    const sign = jest.fn(async (items) => items.map((m) => ({ ...m, url: `https://signed.example/${m.key}` })));
+    const img = (k) => ({ media: [{ key: `sms-media/inbound/${k}`, contentType: 'image/jpeg' }] });
+    const rows = [
+      row('bare', '2026-11-22T15:00:00Z', { message_body: '', metadata: img('bare') }),
+      row('card', '2026-11-22T16:00:00Z', { message_body: 'my card 4111 1111 1111 1111', metadata: img('card') }),
+    ];
+    const on = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign, withPhotos: true });
+    expect(on.texts.map((t) => t.id)).toEqual(['bare']);
+    expect(on.texts[0]).toMatchObject({ body: '', photoCount: 1, photos: [{ url: 'https://signed.example/sms-media/inbound/bare', contentType: 'image/jpeg' }] });
+    expect(on.hidden).toBe(1);
+    expect(sign).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(on)).not.toMatch(/card|4111/);
+    const off = await visitTexts(fakeDb(rows), SVC, { now: NOW, sign });
+    expect(off.texts).toEqual([]);
+    expect(off.hidden).toBe(1);
   });
 
   test('photos: off by default, so no photo is ever signed and the count says so', async () => {
