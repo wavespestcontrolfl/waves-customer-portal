@@ -146,6 +146,20 @@ describe('FastCompleteSheet', () => {
     expect(body.products.map((p) => p.productId).sort()).toEqual(['surfactant', 'talstar', 'taurus']);
   }, 15000);
 
+  test('the done view lists the server\'s completion advisories, and none when there are none', async () => {
+    const advisory = 'Taurus SC: 1.6 fl oz is over the label ceiling. It was recorded, not taken from stock, and the office will review it.';
+    const request = makeRequest({ completeResponse: { success: true, completionAdvisories: [advisory, advisory] } });
+    render(<FastCompleteSheet service={SERVICE} request={request} onClose={() => {}} onCompleted={() => {}} />);
+    await screen.findByRole('button', { name: /Taurus SC/ });
+    fireEvent.click(screen.getByRole('button', { name: 'Ants' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Roaches' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Inside' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Moderate' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Complete re-service' }));
+    expect(await screen.findByRole('button', { name: 'Next stop' })).toBeTruthy();
+    expect(screen.getAllByText(advisory)).toHaveLength(1);
+  }, 15000);
+
   test('submits the full-completion body shape and shows the done view', async () => {
     const request = makeRequest();
     const onCompleted = vi.fn();

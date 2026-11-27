@@ -960,3 +960,22 @@ describe('a visit already invoiced from the payment flow', () => {
     expect(onCompleted).toHaveBeenCalledWith(response);
   }, 20000);
 });
+
+describe('the finished screen', () => {
+  test('lists the server\'s completion advisories', async () => {
+    const advisory = 'Oxadiazon (Ronstar) is not meant for a home lawn. It was recorded and the office will review it.';
+    const request = makeRequest({ completeResponse: { success: true, completionAdvisories: [advisory] } });
+    await readyVisit(request);
+    await completeBody(request);
+    expect(await screen.findByText(advisory)).toBeTruthy();
+  }, 20000);
+
+  test('a completion with none shows no warning lines', async () => {
+    const request = makeRequest();
+    await readyVisit(request);
+    await completeBody(request);
+    expect(await screen.findByRole('button', { name: 'Next stop' })).toBeTruthy();
+    expect(document.querySelectorAll('.tech-visit-card .tech-visit-status--warn')).toHaveLength(0);
+  }, 20000);
+});
+

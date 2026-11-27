@@ -12,7 +12,7 @@ import useFastCompleteSubmit, * as Submit from '../../hooks/useFastCompleteSubmi
 
 const PARTS = [
   'Chip', 'ChoiceSection', 'VisitNote', 'TipSection', 'useTipLibrary', 'techTipsOf', 'toggleInSet',
-  'FastCompleteFrame', 'SheetHeader', 'SavedView', 'CompleteFooter', 'AmountEntry', 'OtherProductButton', 'useProductPicker',
+  'FastCompleteFrame', 'SheetHeader', 'SavedView', 'completionAdvisoriesOf', 'CompleteFooter', 'AmountEntry', 'OtherProductButton', 'useProductPicker',
   'visitChangedSinceSchedule', 'customerNameOf', 'CLOSED_VISIT_STATUSES',
   'AmountRow', 'ProductTileButton', 'usePhotoManager', 'withFreshStock', 'isSendableRateUnit', 'methodLabel', 'unitLabel',
 ];
@@ -102,5 +102,17 @@ describe('SheetHeader access codes', () => {
     expect(screen.queryByLabelText('Access codes')).toBeNull();
     rerender(header({ service: { ...service, propertyAlerts: [{ type: 'pet', text: '1 dog' }] } }));
     expect(screen.queryByLabelText('Access codes')).toBeNull();
+  });
+
+  it('SavedView lists the server\'s completion advisories once each, and nothing for none', () => {
+    const response = { completionAdvisories: ['Stock shortfall noted.', 'Stock shortfall noted.', '', 7, 'Ronstar is not for a home lawn.'] };
+    expect(Parts.completionAdvisoriesOf(response)).toEqual(['Stock shortfall noted.', 'Ronstar is not for a home lawn.']);
+    expect(Parts.completionAdvisoriesOf(null)).toEqual([]);
+    expect(Parts.completionAdvisoriesOf({ completionAdvisories: 'text' })).toEqual([]);
+    const { container, rerender } = render(<Parts.SavedView service={{ address: '1 Main' }} summary="Saved." response={response} />);
+    expect(screen.getByText('Stock shortfall noted.')).toBeTruthy();
+    expect(screen.getByText('Ronstar is not for a home lawn.')).toBeTruthy();
+    rerender(<Parts.SavedView service={{ address: '1 Main' }} summary="Saved." response={{ success: true }} />);
+    expect(container.querySelectorAll('.tech-visit-status--warn')).toHaveLength(0);
   });
 });
