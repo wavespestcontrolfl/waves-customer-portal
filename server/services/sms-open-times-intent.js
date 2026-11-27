@@ -29,8 +29,10 @@ const THREAD_WINDOW_MS = 72 * 60 * 60 * 1000;
 const THREAD_ROWS = 4;
 // A follow-up is short. A long text says what it wants on its own (the webhook's own test judges it).
 const FOLLOW_UP_MAX_CHARS = 160;
-// The words of a reply to "what day works?" or "would Monday at 9 work?". Whole words only.
-const FOLLOW_UP_RE = /\b(?:yes|yeah|yea|yep|yup|sure|ok|okay|k|please|pls|sounds good|that works|works|work for|fine|any ?time|any ?day|whenever|flexible|available|availability|free|open|either|prefer|better|earlier|later|asap|soon|soonest|first|next|morning|mornings|afternoon|afternoons|evening|after|before|between|week|weekend|am|pm)\b/i;
+// A reply to "what day works?" or "would Monday at 9 work?": it opens with a yes, or it answers with timing words. A new request
+// that merely contains a polite word ("Please email my receipt") is neither (Codex pre-push r3).
+const AFFIRM_START_RE = /^\W*(?:yes|yeah|yea|yep|yup|sure|ok|okay|k|sounds good|that works|perfect|great|absolutely|definitely)\b/i;
+const TIMING_ANSWER_RE = /\b(?:any ?time|any ?day|whenever|flexible|available|availability|either (?:day|one|time)|prefer|better|earlier|later|asap|soonest|mornings?|afternoons?|evenings?|after \d|before \d|between \d|next week|this week|weekends?|\d{1,2}(?::\d{2})?\s*(?:am|pm)|that'?s fine|that is fine|fine (?:by|with) me|works? for (?:me|us)|works)\b/i;
 // Booking words. The customer's earlier text must carry one (or the reschedule / away test of sms-intent); a bare
 // time word ("thanks for coming today") is not a booking ask. A staff question may carry one or any scheduling word.
 const BOOKING_RE = /\b(?:availab\w*|slots?|time ?frame|reschedul\w*|book\w*|schedul\w*|appointment|appt|works? for you|good time|good day|what day|which day|what time|come (?:out|back|by|over)|when can you|can you come|another (?:day|time))\b/i;
@@ -44,7 +46,8 @@ const STAFF_TIME_RE = /\b(?:\d{1,2}(?::\d{2})?\s*(?:a\.?m\b\.?|p\.?m\b\.?)|(?<!g
 function isFollowUpShape(text) {
   const body = String(text || '').trim();
   if (!body || body.length > FOLLOW_UP_MAX_CHARS || isSmsReaction(body)) return false;
-  return FOLLOW_UP_RE.test(body.replace(/[\u2018\u2019]/g, "'")) || namedDayMatcher(body) !== null;
+  const plain = body.replace(/[\u2018\u2019]/g, "'");
+  return AFFIRM_START_RE.test(plain) || TIMING_ANSWER_RE.test(plain) || namedDayMatcher(plain) !== null;
 }
 
 function isBookingAsk(body) {

@@ -3951,19 +3951,19 @@ function unnamedServiceIdentity(visits, openEstimate, { nextOfSeries = nextOfSer
 
 // Code accepts only an option it offered (the schema already constrains the
 // provider; this re-checks) — anything else is uncertain.
-function serviceIdentityFromAnswer(answer, visits, openEstimate, services, { threadCarried = false } = {}) {
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services, { threadCarried = false, pendingEstimate = null } = {}) {
   const visit = visits.find((v) => v.id === answer?.visit);
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
-  if (answer?.about === 'none') return threadCarried && threadJobAmbiguous(visits, openEstimate) ? { serviceType: null, certain: false, reason: 'thread_ambiguous' } : unnamedServiceIdentity(visits, openEstimate);
+  if (answer?.about === 'none') return threadCarried && threadJobAmbiguous(visits, openEstimate || pendingEstimate) ? { serviceType: null, certain: false, reason: 'thread_ambiguous' } : unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
 }
 
 // Gap 1 (Codex #8658 r1): a follow-up whose thread booking talk names no service may fall back to the visit ladder only when the
 // customer has one job it could mean: one service type across their listed visits (upcoming and last completed), and no open
-// estimate beside a visit. Otherwise ("can you come out?" from a customer with a pest visit booked and a lawn visit done) the
+// estimate beside a visit (the linked one, or the customer's pending estimate on the context: a live draft links none). Otherwise ("can you come out?" from a customer with a pest visit booked and a lawn visit done) the
 // draft withholds OPEN TIMES (identity_uncertain:thread_ambiguous) rather than offer the wrong job's times.
 function threadJobAmbiguous(visits, openEstimate) {
   return new Set(visits.map((v) => v.type)).size > 1 || Boolean(openEstimate && visits.length);
@@ -3985,7 +3985,7 @@ async function serviceIdentityFor(inboundMessage, context, { openEstimate = null
       maxTokens: 100,
       timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
     }, { reserveFallbackBudget: true });
-    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, { threadCarried: threadTexts.length > 0 });
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, { threadCarried: threadTexts.length > 0, pendingEstimate: context?.pendingEstimate || null });
   } catch (err) {
     logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
     return { serviceType: null, certain: false, reason: 'no_valid_answer' };
@@ -6225,15 +6225,19 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
   return fetched.withheld || 'no_location';
 }
 
-// Gap 1: the thread's booking talk, read only for a live real-answers draft that the webhook's own test did not already
-// call scheduling (a gratitude "thanks" never; sms-open-times-intent threadBookingIntent). asOf (a late draft) is the inbound time.
-function threadOpenTimesIntent({ frozen, liveOpenTimes, schedulingIntent, intent, context, inboundMessage, inboundPhone, asOf }) {
-  if (frozen || !liveOpenTimes || schedulingIntent || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null, texts: [], laneText: inboundMessage };
+// Gap 1: the thread's booking talk, read for a live real-answers draft (a gratitude "thanks" never; sms-open-times-intent
+// threadBookingIntent). A short reply the webhook already calls scheduling ("Thursday") reads it too, so the job and the day come
+// from the exchange it answers; its delivery flag is the webhook's either way. asOf (a late draft) is the inbound time.
+function threadOpenTimesIntent({ frozen, liveOpenTimes, intent, context, inboundMessage, inboundPhone, asOf }) {
+  if (frozen || !liveOpenTimes || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null, texts: [], laneText: inboundMessage, dayText: inboundMessage };
   const found = openTimesIntent.threadBookingIntent({ smsHistory: context?.smsHistory, inboundMessage, inboundPhone, now: asOf instanceof Date ? asOf : Date.now() });
   // laneText: what the re-service lane decision reads. A carried follow-up ("Anytime is fine" after "the ants are back, can you
   // come again?") is judged with the customer's own booking text, so a covered pest report still books through the free
   // re-service page (Codex pre-push r2).
-  return { ...found, laneText: found.carried ? [...found.customerTexts, inboundMessage].join('\n') : inboundMessage };
+  // dayText: where the named day is read. A reply that names none ("Yes, please" to "Would Thursday work?") accepts the day
+  // the exchange named.
+  const dayText = found.carried && !openTimesIntent.namedDayMatcher(inboundMessage) ? found.texts.join('\n') : inboundMessage;
+  return { ...found, laneText: found.carried ? [...found.customerTexts, inboundMessage].join('\n') : inboundMessage, dayText };
 }
 
 // What draftShadowReply stores and decides from the OPEN TIMES outcome: `stamp` = the intended_actions keys (open_times_withheld,
@@ -6363,7 +6367,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
   const missedRebook = missedVisitListed && smsPromptB1Live() && !estimateId;
   // Gap 1 (owner 2026-11-26): a live webhook draft (liveOpenTimes) also reads the booking talk of the thread, so a follow-up
   // ("Anytime is fine", "Yes, please!") to a booking question gets OPEN TIMES too (sms-open-times-intent threadBookingIntent).
-  const threadIntent = threadOpenTimesIntent({ frozen: presetFactsBlock, liveOpenTimes, schedulingIntent, intent, context, inboundMessage, inboundPhone, asOf });
+  const threadIntent = threadOpenTimesIntent({ frozen: presetFactsBlock, liveOpenTimes, intent, context, inboundMessage, inboundPhone, asOf });
   const timesAsked = Boolean(schedulingIntent) || threadIntent.carried
     || SAVE_SALE_INTENT_RE.test(String(intent?.intent || ''))
     || SAVE_SALE_TEXT_RE.test(String(inboundMessage || ''))
@@ -6423,7 +6427,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
-      schedulerOffer, namedDay: openTimesIntent.namedDayMatcher(inboundMessage),
+      schedulerOffer, namedDay: openTimesIntent.namedDayMatcher(threadIntent.dayText),
     });
   const openTimesFetch = { block: openTimesBlock, withheld: openTimesWithheldFetch };
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)

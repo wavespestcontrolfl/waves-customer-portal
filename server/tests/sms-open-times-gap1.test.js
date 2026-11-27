@@ -100,6 +100,14 @@ describe('threadBookingIntent: a follow-up carries the thread booking talk', () 
     expect(intent('ok', [q2]).carried).toBe(true);
   });
 
+  test('a new request after a booking question is not a follow-up (Codex pre-push r3)', () => {
+    const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'What day works for you?', date: ago(1) };
+    expect(intent('Please email my receipt', [q]).carried).toBe(false);
+    expect(intent('Can you send the invoice again', [q]).carried).toBe(false);
+    expect(intent('Yes please', [q]).carried).toBe(true);
+    expect(intent('Whenever works', [q]).carried).toBe(true);
+  });
+
   test('a bare date answers "what day works?" (Codex pre-push r2)', () => {
     const q = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'What day works for you?', date: ago(1) };
     expect(intent('12/3', [q]).carried).toBe(true);
@@ -233,7 +241,7 @@ describe('fetchOpenTimesData: a named day past the first three', () => {
 });
 
 describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reason is stored', () => {
-  async function runDraft({ gateOn = true, inboundMessage, smsHistory = [], schedulingIntent = false, city = 'Venice', days, upcomingServices = [], serviceHistory = [], services = [], identity = () => IDENTITY_NONE } = {}) {
+  async function runDraft({ gateOn = true, inboundMessage, smsHistory = [], schedulingIntent = false, city = 'Venice', days, upcomingServices = [], serviceHistory = [], services = [], identity = () => IDENTITY_NONE, pendingEstimate = null } = {}) {
     jest.resetModules();
     process.env.SHADOW_DRAFT_VERIFY = 'false';
     process.env.SHADOW_FEWSHOT = 'false';
@@ -253,7 +261,7 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
     jest.doMock('../services/availability', () => ({ getAvailableSlots }));
     jest.doMock('../services/context-aggregator', () => ({
       getContextForCustomer: jest.fn(async () => ({
-        summary: 'QA customer', flags: [], smsHistory, upcomingServices, serviceHistory,
+        summary: 'QA customer', flags: [], smsHistory, upcomingServices, serviceHistory, pendingEstimate,
         customer: { id: 'customer-1', billingLane: null },
         billing: { outstandingBalance: 0, recentPayments: [] },
       })),
@@ -368,6 +376,38 @@ describe('draftShadowReply: thread follow-ups get OPEN TIMES; the withhold reaso
       expect(getAvailableSlots).not.toHaveBeenCalled();
       expect(actions.open_times_withheld).toBe('identity_uncertain:thread_ambiguous');
       expect(row.scheduling_intent).toBe(true);
+    });
+
+    test('a pending estimate beside one booked visit makes a generic thread ambiguous: withheld (Codex pre-push r3)', async () => {
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'We can come out. What day works for you?', date: at(1) };
+      const { getAvailableSlots, actions } = await runDraft({
+        inboundMessage: 'Anytime is fine', smsHistory: [ask], upcomingServices: [pestVisit], services: [PEST, LAWN],
+        pendingEstimate: { id: 'est-1', service: 'Mosquito' },
+      });
+      expect(getAvailableSlots).not.toHaveBeenCalled();
+      expect(actions.open_times_withheld).toBe('identity_uncertain:thread_ambiguous');
+    });
+
+    test('a short reply the webhook already calls scheduling ("Thursday") still reads the lawn request it answers (Codex pre-push r3)', async () => {
+      const req = { direction: 'inbound', fromPhone: ME, body: 'Can you come out for a lawn treatment?', date: at(2) };
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Sure. What day works for you?', date: at(1) };
+      const { identityPrompts, getAvailableSlots, row } = await runDraft({
+        inboundMessage: 'Thursday', schedulingIntent: true, smsHistory: [ask, req], upcomingServices: [pestVisit], services: [PEST, LAWN],
+        identity: (prompt) => (prompt.includes('lawn treatment') ? { ok: true, json: { about: 'new_service', visit: null, service: 'lawn_care' } } : IDENTITY_NONE),
+      });
+      expect(identityPrompts[0]).toContain(JSON.stringify(req.body));
+      expect(getAvailableSlots).toHaveBeenCalledWith('Venice', null, { customerId: 'customer-1', serviceType: 'Lawn Care' });
+      expect(row.scheduling_intent).toBe(true);
+    });
+
+    test('"Yes, please" to "Would Thursday work?" shows that Thursday even past the first three days (Codex pre-push r3)', async () => {
+      const ask = { direction: 'outbound', type: 'manual', toPhone: ME, body: 'Would Thursday work?', date: at(1) };
+      const mk = (iso, label) => ({ date: iso, fullDate: label, slots: [{ startTime24: '09:00' }] });
+      const { row } = await runDraft({
+        inboundMessage: 'Yes, please', smsHistory: [ask], upcomingServices: [pestVisit],
+        days: [mk('2026-11-30', 'Monday, November 30'), mk('2026-12-01', 'Tuesday, December 1'), mk('2026-12-02', 'Wednesday, December 2'), mk('2026-12-03', 'Thursday, December 3')],
+      });
+      expect(row.facts_block).toContain('- Thursday, December 3: 9:00 AM - 11:00 AM');
     });
 
     test('the thread names no service and the customer has one job: the visit ladder still sizes it', async () => {
