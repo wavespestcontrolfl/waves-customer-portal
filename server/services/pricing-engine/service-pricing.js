@@ -7714,11 +7714,12 @@ function resolveBoraCareBasis(options) {
 function finalizeBoraCarePrice(options, { atticSqFt, surfaceSqFt, surfaceOnly, basis, rawPrice }) {
   const k = options && typeof options.knobs === 'object' && !Array.isArray(options.knobs) ? options.knobs : null;
   const pinned = k ? Number(k.pinnedPrice) : NaN;
-  if (Number.isFinite(pinned) && pinned > 0) {
-    const atticMatch = k.pinnedAtticSqFt === undefined || k.pinnedAtticSqFt === atticSqFt;
-    const surfaceMatch = k.pinnedSurfaceSqFt === undefined || k.pinnedSurfaceSqFt === surfaceSqFt;
+  const hasScope = k && (k.pinnedAtticSqFt !== undefined || k.pinnedSurfaceSqFt !== undefined);
+  if (Number.isFinite(pinned) && pinned > 0 && hasScope) {
+    const atticMatch = (k.pinnedAtticSqFt ?? 0) === (atticSqFt ?? 0);
+    const surfaceMatch = (k.pinnedSurfaceSqFt ?? 0) === (surfaceSqFt ?? 0);
     if (atticMatch && surfaceMatch) {
-      const price = Math.round(pinned);
+      const price = Math.round(pinned * 100) / 100;
       return {
         price,
         pricingKnobs: { ...basis, pinnedPrice: price, pinnedAtticSqFt: atticSqFt, pinnedSurfaceSqFt: surfaceSqFt },

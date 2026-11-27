@@ -1036,6 +1036,7 @@ const TRENCHING_PRODUCT_DEFAULTS = Object.freeze(Object.fromEntries(
     .map((key) => {
       const product = constants.SPECIALTY.trenching.products[key];
       return [key, Object.freeze({
+        label: product.label,
         containerCost: Number(product.containerCost),
         containerOz: Number(product.containerOz),
         catalogProductName: product.catalogProductName,
@@ -1095,7 +1096,14 @@ function stageTrenchingCatalogState(ot = null) {
     };
     delete staged.configuredContainerCost;
     delete staged.configuredContainerOz;
-    applyTrenchingOverlayToStaged(staged, (ot && (trenchingProducts[key] || ot[key])) || null);
+    const overlay = (ot && (trenchingProducts[key] || ot[key])) || null;
+    applyTrenchingOverlayToStaged(staged, overlay);
+    // Do not inherit the code default catalog link onto an admin-renamed bottle
+    // (e.g. retained Talak label without an explicit catalogProductName).
+    const explicitLink = overlay && firstDefinedKey(overlay, ['catalogProductName', 'catalog_product_name']);
+    if (!explicitLink && staged.label && defaults.label && staged.label !== defaults.label) {
+      staged.catalogProductName = null;
+    }
     products[key] = staged;
   }
   return { linkContainerCostsToCatalog, products };

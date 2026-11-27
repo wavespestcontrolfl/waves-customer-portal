@@ -413,7 +413,7 @@ function boraCareStoredScope(row, estData) {
       pinnedSurfaceSqFt: positiveOrNull(row.surfaceSqFt),
     };
   }
-  const storedInputs = estData?.inputs || estData?.engineInputs;
+  const storedInputs = estData?.engineInputs || estData?.inputs;
   if (!storedInputs || typeof storedInputs !== 'object') return {};
   const svc = storedInputs.services?.boraCare || storedInputs.services?.bora_care;
   const opts = svc && typeof svc === 'object' ? svc : {};
@@ -424,7 +424,8 @@ function boraCareStoredScope(row, estData) {
     surfaceLinearFt: firstFiniteVal(opts.surfaceLinearFt, opts.wallLinearFt, storedInputs.boraCareSurfaceLinearFt, storedInputs.boraCareWallLinearFt),
     surfaceHeightFt: firstFiniteVal(opts.surfaceHeightFt, opts.wallHeightFt, storedInputs.boraCareSurfaceHeightFt, storedInputs.boraCareWallHeightFt),
   });
-  const pinnedAtticSqFt = attic.value !== null ? attic.value : null;
+  const legacyBcSqFt = positiveOrNull(firstFiniteVal(storedInputs.bcSqft, storedInputs.bcSqFt, opts.bcSqft, opts.bcSqFt));
+  const pinnedAtticSqFt = attic.value !== null ? attic.value : legacyBcSqFt;
   const pinnedSurfaceSqFt = surface.surfaceSqFt > 0 ? surface.surfaceSqFt : null;
   return pinnedAtticSqFt !== null || pinnedSurfaceSqFt !== null ? { pinnedAtticSqFt, pinnedSurfaceSqFt } : {};
 }
@@ -447,7 +448,7 @@ function pinnedBoraCareKnobs(rows, estData) {
     if (pinnedPrice !== null) {
       return {
         ...PRE_SNAKE_CASE_BORACARE_KNOBS,
-        pinnedPrice: Math.round(pinnedPrice),
+        pinnedPrice: Math.round(pinnedPrice * 100) / 100,
         ...boraCareStoredScope(row, estData),
       };
     }
