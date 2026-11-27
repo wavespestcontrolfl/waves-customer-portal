@@ -1278,6 +1278,8 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
     expect(fieldGuideMixWarning({ blocks: [{ code: 'x' }], row: { label_verified_at: null }, verdict, labelSource: null }))
       .toBe('Plan blocked, see the plan blocks · Label rate not yet verified · Spray check: No limit on file');
     expect(fieldGuideMixWarning({ blocks: [], row: { label_verified_at: '2027-12-01' }, verdict: { verdict: 'ok' }, labelSource: null })).toBeNull();
+    // An active rain warning shows beside the guide's mix too (owner 2026-11-26).
+    expect(fieldGuideMixWarning({ blocks: [], row: { label_verified_at: '2027-12-01' }, verdict: { verdict: 'caution', level: 'warning', reason: 'rain 80% at 2 pm' }, labelSource: null })).toBe('Spray check: rain 80% at 2 pm');
     expect(fieldGuideMixWarning({ blocks: [{ code: 'x' }], row: null, verdict: undefined, labelSource: null }))
       .toBe('Plan blocked, see the plan blocks · Label rate not yet verified · No spray check for this product');
   });
@@ -2581,7 +2583,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
 
   // Owner 2026-11-26: an "if needed" tank use and a booked area rate of the same product show side by side, each under its own service.
   test('a Tree & Shrub visit with conditional Acelepryn and a yearly lawn insect preventive add-on shows both', async () => {
-    const acelepryn = { id: 'ac', name: 'Acelepryn Insecticide', default_rate: '0.02-0.16', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    // The seeded catalog shape: a per-area lawn rate only, no per-gallon band.
+    const acelepryn = { id: 'ac', name: 'Acelepryn Insecticide', default_rate_per_1000: 0.37, rate_unit: 'fl oz', label_verified_at: '2026-07-12' };
     const protocols = {
       tree_shrub: { visits: [{ visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal', secondary: 'Acelepryn Insecticide: 2 fl oz/100 gal for leaf-feeding caterpillars, live finds only; no more than 0.37 fl oz per 1,000 sq ft in one spray and 0.88 fl oz per 1,000 sq ft a year; at least 1 gal of mix per 1,000 sq ft; at least 7 days between sprays ($5.66)' }] },
       area_addon: require('../config/protocols.json').area_addon,
@@ -2599,7 +2602,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     };
     dbh.raw = (sql) => sql;
     const out = await jobCard.mixForProduct('ac', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
-    expect(out).toMatchObject({ amount: expect.any(Number), context: { line: null, conditional: true } });
+    // The line's own 2 fl oz per 100 gal, never the lawn rate through a rig: 100 gal x 0.02.
+    expect(out).toMatchObject({ amount: 2, unit: 'fl_oz', context: { line: null, conditional: true } });
     expect(out.governedRates).toEqual([expect.objectContaining({ service: 'Yearly Lawn Insect Preventive' })]);
     // The conditional use keeps its numeric limits and carrier floor; the owner-only price goes.
     const applies = out.warnings.find((w) => w.startsWith('Applies to: '));
@@ -2650,8 +2654,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     dbh.raw = (sql) => sql;
     const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
     const text = (out.warnings || []).join(' ');
-    // Whatever resolves, no condition of either service may be dropped: the long restriction survives whole.
-    if (out.serviceAmounts) expect(out.serviceAmounts.every((row) => row.conditional)).toBe(true);
+    // Each service keeps its own row: 20 g per gallon from the pest line, 10 from the flea card, at 2 gal.
+    expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.conditional])).toEqual([['Quarterly Pest Control', 40, true], ['Flea Control Service', 20, true]]);
     expect(text).toMatch(/never tank-mix with oil/);
   });
 
