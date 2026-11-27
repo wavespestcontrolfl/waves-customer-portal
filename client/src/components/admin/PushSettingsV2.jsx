@@ -423,11 +423,12 @@ export default function PushSettingsV2() {
             </div>{" "}
             <div className="px-3 pb-2 text-12 text-ink-tertiary">
               Customer communication (texts, emails, calls, voicemails, new
-              leads) rings by default. Most categories below start off;
-              categories that start on keep ringing the shared admin bell until
-              every active administrator turns them off here. Each toggle
-              controls that category&apos;s bell (and phone banner, for
-              categories that send push notifications).
+              leads) rings by default. Most categories below start off until an
+              administrator saves them on. For any category here, any saved on
+              choice keeps it ringing on the shared admin bell, and a saved off
+              choice silences it when no active administrator has saved it on.
+              Each toggle controls that category&apos;s bell (and phone banner,
+              for categories that send push notifications).
             </div>{" "}
             <div className="bg-white border-hairline rounded-md overflow-hidden">
               {catPrefs.map((c, i) => (

@@ -286,12 +286,19 @@ router.get('/subscription-status', async (req, res, next) => {
 // login (owner 2026-11-04). An admin sees every type, as before.
 const techMayMute = (key) => TRIGGER_REGISTRY?.[key]?.techVisible === true;
 
-// Stable revision hash of an admin's persisted notification_preferences rows
-// so a timed-out save that commits late cannot be silently overwritten by a
-// stale reload (PUT /preferences rejects a mismatched expectedVersion with 409).
+function rowUpdatedAtMs(row) {
+  if (!row?.updated_at) return 0;
+  const ms = new Date(row.updated_at).getTime();
+  return Number.isFinite(ms) ? ms : 0;
+}
+
+// Monotonic revision hash of an admin's persisted notification_preferences
+// rows (values + updated_at timestamps). Every accepted save advances
+// updated_at strictly past the prior max so even re-saving identical values
+// invalidates an earlier timed-out request carrying the old expectedVersion.
 function preferencesVersion(rows) {
   const canonical = (rows || [])
-    .map((r) => `${r.trigger_key}:${r.push_enabled ? 1 : 0}:${r.bell_enabled ? 1 : 0}:${r.sound_enabled ? 1 : 0}`)
+    .map((r) => `${r.trigger_key}:${r.push_enabled ? 1 : 0}:${r.bell_enabled ? 1 : 0}:${r.sound_enabled ? 1 : 0}:${rowUpdatedAtMs(r)}`)
     .sort()
     .join('|');
   return crypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
@@ -378,13 +385,18 @@ router.put('/preferences', async (req, res, next) => {
       if (typeof trx.raw === 'function') {
         await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`admin_push_prefs:${adminUserId}`]);
       }
+      const prefsTable = trx('notification_preferences');
+      const currentRows = typeof prefsTable?.where === 'function'
+        ? await prefsTable.where({ admin_user_id: adminUserId })
+        : null;
       if (expectedVersion) {
-        const currentRows = await trx('notification_preferences').where({ admin_user_id: adminUserId });
-        const currentVersion = preferencesVersion(currentRows);
+        const currentVersion = preferencesVersion(currentRows || []);
         if (currentVersion !== expectedVersion) {
           return { conflict: true, version: currentVersion };
         }
       }
+      const prevMaxMs = (currentRows || []).reduce((max, r) => Math.max(max, rowUpdatedAtMs(r)), 0);
+      const saveAt = new Date(Math.max(Date.now(), prevMaxMs + 1));
       for (const u of updates) {
         if (!u.key) continue;
         // A technician mutes only the types it can receive; any other key is skipped.
@@ -405,9 +417,11 @@ router.put('/preferences', async (req, res, next) => {
             admin_user_id: adminUserId,
             trigger_key: u.key,
             ...row,
+            created_at: saveAt,
+            updated_at: saveAt,
           })
           .onConflict(['admin_user_id', 'trigger_key'])
-          .merge({ ...row, updated_at: new Date() });
+          .merge({ ...row, updated_at: saveAt });
         if (isCategoryKey) touchedCategoryKey = true;
       }
       if (!expectedVersion) return { conflict: false, version: null };

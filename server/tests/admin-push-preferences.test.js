@@ -246,4 +246,73 @@ describe('a technician login (owner 2026-11-04)', () => {
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'VERSION_CONFLICT' }));
     expect(insert).not.toHaveBeenCalled();
   });
+
+  test('advances version even when saving identical values so a delayed request cannot overwrite confirmed settings', async () => {
+    const t0 = new Date('2026-11-27T12:00:00.000Z');
+    const store = new Map([
+      ['new_lead', {
+        admin_user_id: 'admin-1',
+        trigger_key: 'new_lead',
+        push_enabled: true,
+        bell_enabled: true,
+        sound_enabled: true,
+        created_at: t0,
+        updated_at: t0,
+      }],
+    ]);
+    let lockChain = Promise.resolve();
+    db.transaction = jest.fn(async (fn) => {
+      const prev = lockChain;
+      let release;
+      lockChain = new Promise((r) => { release = r; });
+      await prev;
+      try { return await fn(db); } finally { release(); }
+    });
+    db.raw = jest.fn(async () => ({ rows: [] }));
+    db.mockImplementation(() => ({
+      where: jest.fn(async () => [...store.values()].map((r) => ({ ...r }))),
+      insert: jest.fn((row) => ({
+        onConflict: jest.fn(() => ({
+          merge: jest.fn(async (patch) => {
+            const existing = store.get(row.trigger_key);
+            store.set(row.trigger_key, existing ? { ...existing, ...patch } : { ...row });
+          }),
+        })),
+      })),
+    }));
+
+    // Read initial version V1 (new_lead push_enabled=true).
+    const getRes = { json: jest.fn() };
+    await preferencesHandler({ technicianId: 'admin-1', techRole: 'admin' }, getRes, jest.fn());
+    const v1 = getRes.json.mock.calls[0][0].version;
+
+    // Request B (re-save of IDENTICAL original values) acquires the lock first and succeeds.
+    const resB = { json: jest.fn(), status: jest.fn(() => resB) };
+    await putHandler({
+      technicianId: 'admin-1',
+      techRole: 'admin',
+      body: {
+        expectedVersion: v1,
+        preferences: [{ key: 'new_lead', push_enabled: true, bell_enabled: true, sound_enabled: true }],
+      },
+    }, resB, jest.fn());
+    expect(resB.status).not.toHaveBeenCalled();
+    const v2 = resB.json.mock.calls[0][0].version;
+    expect(v2).toBeTruthy();
+    expect(v2).not.toBe(v1);
+
+    // Delayed Request A (carrying stale V1, trying to flip push_enabled=false) arrives next and is rejected with 409.
+    const resA = { json: jest.fn(), status: jest.fn(() => resA) };
+    await putHandler({
+      technicianId: 'admin-1',
+      techRole: 'admin',
+      body: {
+        expectedVersion: v1,
+        preferences: [{ key: 'new_lead', push_enabled: false, bell_enabled: true, sound_enabled: true }],
+      },
+    }, resA, jest.fn());
+    expect(resA.status).toHaveBeenCalledWith(409);
+    expect(resA.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'VERSION_CONFLICT', version: v2 }));
+    expect(store.get('new_lead').push_enabled).toBe(true);
+  });
 });
