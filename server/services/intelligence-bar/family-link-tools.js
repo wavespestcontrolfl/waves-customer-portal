@@ -212,7 +212,9 @@ async function buildUnlinkPlan(input, { database = db } = {}) {
     stays_alone: dissolves && others.length > 0,
     effects: [
       { kind: 'operational', text: `${mine.name} is taken out of the Same family link.` },
-      !others.length
+      !others.length && rowCount >= 2
+        ? { kind: 'operational', text: 'The only other profile in this family is deleted, so its leftover link is cleared too (restoring that profile later does not bring the link back).' }
+        : !others.length
         ? { kind: 'operational', text: 'No other profile is left in this family (the others were removed), so only this profile\'s leftover link is cleared.' }
         : dissolves
         ? { kind: 'operational', text: `${others[0].name} is then alone, so the family link is removed from both profiles.` }
