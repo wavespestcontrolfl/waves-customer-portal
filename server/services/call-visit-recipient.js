@@ -209,8 +209,15 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
         await trx.raw(
           `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (customer_id, phone_key) DO NOTHING`,
-          [visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
+          // The list is the CALLER's customer's (the call's own customer, verified against the visit above), never whoever the
+          // visit belongs to later: a visit moved after this read cannot carry the grant onto the other account.
+          [customerId || visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
         );
+        // The visit moved to another customer while this ran: undo both writes (the call's grant was for a visit of its own customer).
+        const after = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
+        if (!after || String(after.customer_id || '') !== String(visit.customer_id)) {
+          throw Object.assign(new Error('visit customer changed while recording'), { code: 'VISIT_CUSTOMER_CHANGED' });
+        }
       }
       return 'created';
     });
