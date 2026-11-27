@@ -47,7 +47,7 @@ wiki/              Dispatch/service protocols (seeded into the in-app knowledge 
 ## Development
 
 ```bash
-npm ci                       # on the owner's multi-session Mac, use ~/.claude/bin/npm-ci-serial
+if [ -x "$HOME/.claude/bin/npm-ci-serial" ]; then "$HOME/.claude/bin/npm-ci-serial"; else npm ci; fi
 npm run worktree:setup
 npm run dev:managed-client # assigned frontend port; no database needed
 ```
