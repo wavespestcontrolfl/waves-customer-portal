@@ -3221,6 +3221,8 @@ export function TeamTab({ showToast }) {
   // loaded sends no shiftHours, so saving another field never overwrites hours
   // another admin set meanwhile (the API keeps omitted hours).
   const [shiftLoaded, setShiftLoaded] = useState(null);
+  // The supply store as loaded: sent on save only when the admin changed it, so a stale form never overwrites another admin's edit.
+  const [storeLoaded, setStoreLoaded] = useState(null);
   // GATE_SERVICE_LINE_MAP=shadow: the server marks the roster response; off, the
   // Service lines card never renders and nothing is fetched.
   const [serviceLinesEnabled, setServiceLinesEnabled] = useState(false);
@@ -3352,6 +3354,7 @@ export function TeamTab({ showToast }) {
     try {
       if (editingId) {
         const { startMode, startText, startPoint, supplyStore, workDays, shiftStart, shiftEnd, googleEmail: _googleEmail, ...rest } = form;
+        const storeChanged = (supplyStore ?? "") !== (storeLoaded ?? "");
         const shiftChanged = !shiftLoaded || shiftStart !== shiftLoaded.start || shiftEnd !== shiftLoaded.end;
         const res = await adminFetch(`/admin/timetracking/technicians/${editingId}`, {
           method: "PUT",
@@ -3360,7 +3363,7 @@ export function TeamTab({ showToast }) {
             ...buildWorkDaysPayload(workDaysEnabled, workDays),
             ...(shiftChanged ? buildShiftHoursPayload(shiftHoursEnabled, shiftStart, shiftEnd) : {}),
             startPoint: buildStartPointPayload(form),
-            supplyStore,
+            ...(storeChanged ? { supplyStore } : {}),
           }),
         });
         // Leaving the dispatch pool through Edit (Employment → Inactive or
@@ -3467,6 +3470,7 @@ export function TeamTab({ showToast }) {
   const startEdit = (tech) => {
     setEditingId(tech.id);
     setShiftLoaded({ start: tech.shift_start || "", end: tech.shift_end || "" });
+    setStoreLoaded(tech.supply_store);
     setForm({
       name: tech.name,
       phone: tech.phone || "",

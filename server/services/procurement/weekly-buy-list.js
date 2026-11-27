@@ -241,10 +241,13 @@ function packCostCents(row, price) {
     };
   }
   const { scoreVendorRows, quantityToOz } = require('../../routes/admin-inventory');
-  const scored = scoreVendorRows([{ ...row, price_amount: price }], {}).ranked[0];
   const oz = quantityToOz(row.quantity);
-  if (scored.deliveredPerOz > 0 && oz > 0) return { cents: Math.round(scored.deliveredPerOz * oz * 100), plusShipping: false };
+  // A pack sold by item count ("25 ea"): the comparison ranks it per item. The catalog's own container is this pack, so one
+  // pack is the row's count of items; the delivered pack cost is the delivered per-item figure times that count.
+  const scored = scoreVendorRows([{ ...row, price_amount: price }], oz > 0 ? {} : { container_size: row.quantity }).ranked[0];
   const carriesDelivery = ['landed_unit_price', 'shipping_estimate', 'hazmat_fee_estimate', 'rebate_estimate'].some((c) => row[c] != null);
+  const delivered = oz > 0 ? scored.deliveredPerOz * oz : (scored.shipping != null || scored.rankPerUnit !== scored.perUnit) && scored.rankPerUnit * (price / scored.perUnit);
+  if (delivered > 0) return { cents: Math.round(delivered * 100), plusShipping: false };
   return { cents: carriesDelivery ? null : Math.round(price * 100), plusShipping: false };
 }
 
@@ -258,6 +261,8 @@ function costCents(product, packs) {
  * groups: from deriveDemand. products: Map(String(id) -> plan product).
  * techs: Map(id -> { name, supplyStore }). Returns Map(groupKey -> list entry).
  */
+const storeProduct = (products, pid, techs, key) => products.has(pid) && productForStore(products.get(pid), techs.get(key)?.supplyStore);
+
 function planGroups({ groups, products, techs }) {
   const order = [...groups.keys()].sort(compareGroups(groups));
   const stock = new Map();
@@ -266,7 +271,7 @@ function planGroups({ groups, products, techs }) {
   const sharing = new Map();
   for (const key of order) {
     for (const [pid, d] of groups.get(key).demand) {
-      const product = products.get(pid);
+      const product = storeProduct(products, pid, techs, key);
       if (!product) continue;
       const need = d.unit === product.unit ? d.qty : convertInventoryQuantity(d.qty, d.unit, product.unit);
       if (need == null) { groups.get(key).unitProblems.add(pid); continue; }
@@ -336,7 +341,7 @@ function itemOf(l, cents) {
   return {
     productId: l.pid, name: l.product.name, needQty: l.need, unit: l.product.unit,
     onHand: Math.max(0, l.product.onHand ?? 0), onOrder: l.product.onOrder, shortQty: l.short,
-    packs: l.packs, packLabel: l.label, estCostCents: cents, plusShipping: Boolean(cents != null && l.product.plusShipping),
+    packs: l.packs, packLabel: l.label, estCostCents: cents, plusShipping: Boolean(cents != null && l.product.plusShipping), otherBranch: Boolean(cents != null && l.product.otherBranch),
     vendorName: l.product.picked?.row?.vendor_name || l.product.picked?.vendorName || null, reasons: l.reasons,
   };
 }
@@ -371,22 +376,53 @@ function groupEntry({ key, group, lines, notes, sharing, techs }) {
 
 // One catalog row, its eligible price rows and the clock, as the planner reads it.
 function toPlanProduct({ row, pricing, now, floorKey = null, onOrder = 0 }) {
-  const unit = row.inventory_unit;
-  const picked = pickPriceRow(pricing, row);
+  return {
+    id: row.id, name: row.name, unit: row.inventory_unit,
+    onHand: row.inventory_on_hand == null || row.inventory_on_hand === '' ? null : Number(row.inventory_on_hand),
+    onOrder,
+    hold: fertilizerBlackoutHold(row, now),
+    floorKey,
+    catalogRow: row, pricingRows: pricing,
+    ...priceView(pickPriceRow(pricing, row), row.inventory_unit),
+  };
+}
+
+// The pack and the price of ONE picked price row: the pack in stock units, its label, its delivered cost.
+function priceView(picked, unit) {
   const { pack, countOrder } = packFor(picked, unit);
   const price = Number(picked.row?.price_amount ?? picked.row?.price);
   const cost = countOrder ? { cents: null, plusShipping: false } : packCostCents(picked.row, price);
   return {
-    id: row.id, name: row.name, unit,
-    onHand: row.inventory_on_hand == null || row.inventory_on_hand === '' ? null : Number(row.inventory_on_hand),
-    onOrder,
-    hold: fertilizerBlackoutHold(row, now),
     picked, pack, countOrder,
     packLabel: String(picked.row?.quantity || '').trim() || null,
     price: Number.isFinite(price) ? price : null,
     packCents: cost.cents, plusShipping: cost.plusShipping,
-    floorKey,
   };
+}
+
+// ---- the technician's branch -------------------------------------------------------------------------------------
+// A price row can be for one branch of a supplier (vendor_pricing.branch_name, e.g. "Sarasota"). A technician's supply
+// store is free text ("SiteOne Sarasota"). A row matches the store when its branch name, as whole words, is a run of
+// the store's words. Case, spacing and punctuation are ignored; nothing else is: no spelling or abbreviation matching.
+const wordsOf = (text) => String(text || '').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+function hasWordRun(haystack, run) {
+  return run.length > 0 && haystack.some((_, i) => run.every((w, j) => haystack[i + j] === w));
+}
+
+// The product as this store sees it: the price row of its branch when one exists (the catalog's vendor choice still
+// holds; the supplier the store names wins among several; then the lower price), else the product as picked, marked
+// `otherBranch` so the line says the price is not from the store's branch. No store: the product, unmarked.
+function productForStore(product, store) {
+  const storeWords = wordsOf(store);
+  if (!storeWords.length) return product;
+  const vendorId = product.catalogRow.auto_reorder_vendor_id;
+  const branchRows = product.pricingRows.filter((r) => (!vendorId || r.vendor_id === vendorId) && hasWordRun(storeWords, wordsOf(r.branch_name)));
+  if (!branchRows.length) return { ...product, otherBranch: true };
+  const supplierHit = (r) => (hasWordRun(storeWords, wordsOf(r.vendor_name)) ? 0 : 1);
+  const price = (r) => Number(r.price_amount ?? r.price) || Infinity;
+  const row = [...branchRows].sort((a, b) => supplierHit(a) - supplierHit(b) || price(a) - price(b))[0];
+  const picked = { row, vendorName: row.vendor_name, vendor: { code: row.vendor_code, name: row.vendor_name } };
+  return { ...product, ...priceView(picked, product.unit), otherBranch: false };
 }
 
 function weekVisits(knex, { fromDate, weekEnd }) {
@@ -450,8 +486,10 @@ function onOrderByProduct(orderRows, units, problems, unsettled) {
     const held = Number(asObject(row.request_payload).orderedQuantity);
     const qty = held > 0 ? held : Number(row.requested_quantity);
     const unit = units.get(String(row.product_id));
-    const same = normalizeInventoryUnit(row.unit) === normalizeInventoryUnit(unit);
-    const converted = same ? qty : convertInventoryQuantity(qty, row.unit, unit);
+    // Receive reads a request with no unit in the product's stock unit (inventory-operations restockActionPlan: request.unit || inventory_unit).
+    const rowUnit = row.unit || unit;
+    const same = normalizeInventoryUnit(rowUnit) === normalizeInventoryUnit(unit);
+    const converted = same ? qty : convertInventoryQuantity(qty, rowUnit, unit);
     if (converted == null || !(converted > 0)) {
       problems.add(String(row.product_id));
       continue;
@@ -475,7 +513,7 @@ async function readCatalog(knex, { ids, mixRows, now }) {
     ? await eligibleVendorPricing(
       knex('vendor_pricing').leftJoin('vendors as pv', 'pv.id', 'vendor_pricing.vendor_id').whereIn('vendor_pricing.product_id', ids),
     ).select('vendor_pricing.product_id', 'vendor_pricing.vendor_id', 'vendor_pricing.quantity', 'vendor_pricing.is_best_price',
-      'vendor_pricing.vendor_sku', 'vendor_pricing.price', 'vendor_pricing.price_amount', 'vendor_pricing.tax_rate',
+      'vendor_pricing.vendor_sku', 'vendor_pricing.branch_name', 'vendor_pricing.price', 'vendor_pricing.price_amount', 'vendor_pricing.tax_rate',
       'vendor_pricing.shipping_cost', 'vendor_pricing.shipping_estimate', 'vendor_pricing.hazmat_fee_estimate', 'vendor_pricing.rebate_estimate',
       'vendor_pricing.landed_unit_price', 'vendor_pricing.unit_normalized', 'vendor_pricing.normalized_unit_price', 'vendor_pricing.price_per_oz',
       'vendor_pricing.source_type', 'vendor_pricing.vendor_product_url',

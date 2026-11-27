@@ -3622,4 +3622,6 @@ Owner 2026-11-27: "once a week look at upcoming appts, and buy for the entire we
 
 **Cost estimate.** Each pack is costed the way the Inventory price comparison costs a row: stated shipping and tax, the price-sync worker's landed unit price, a shipping estimate, or a vendor shipping rule. A row whose delivery cannot be turned into a pack cost is left unpriced, with a note. The sticker price is never shown as the full cost. A row with stated shipping plus a delivery or hazmat estimate says "plus shipping".
 
+**Branch.** A technician's supply store picks the price row. A row whose branch name, as whole words, is part of the store text wins ("SiteOne Sarasota" matches "Sarasota"); there is no fuzzy matching. With no match the line keeps the usual price and says so.
+
 **Revisit if:** the owner wants the list ordered for him (that is a new, spend-bearing decision), a stock count per technician or per truck replaces the one company count, or the unplanned visit types need their own product plans.

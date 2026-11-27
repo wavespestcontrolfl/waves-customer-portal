@@ -166,6 +166,11 @@ describe('held lines, partial totals and a check-only list', () => {
     expect(whyFor(group)).toBe('1 product to buy, preferred store Synthetic Supply North, about $107.00 plus shipping.');
   });
 
+  test('a line priced from another branch says so', () => {
+    const group = entry({ items: [item({ otherBranch: true })] });
+    expect(detailFor(group, listOf([group]))).toMatch(/Synthetic Supply, price not from the store's branch \(/);
+  });
+
   test('a held line that is new does not ring a recheck; a held-only list still raises its check alert once', async () => {
     const group = entry({ items: [item(), held()] });
     expect(growth(group, [{ productId: 'p1', packs: 1, shortQty: 1.9 }])).toBe(false);

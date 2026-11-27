@@ -26,12 +26,12 @@ const noMix = { matched: [], missing: [] };
 const plan = (over = {}) => ({
   id: 'p1', name: 'Synthetic Liquid', unit: 'fl_oz', onHand: 0, onOrder: 0, hold: false,
   picked: { row: { vendor_name: 'Synthetic Supply', quantity: '1 gal' }, vendorName: 'Synthetic Supply' },
-  pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, packCents: 10000, plusShipping: false, floorKey: null, ...over,
+  pack: { pack: 128 }, countOrder: false, packLabel: '1 gal', price: 100, packCents: 10000, plusShipping: false, floorKey: null, catalogRow: {}, pricingRows: [], ...over,
 });
 const demand = (qty, unit = 'fl_oz', reasons = ['lawn_plan']) => ({ qty, unit, reasons: new Set(reasons) });
 const group = (entries, over = {}) => ({ demand: new Map(entries), firstAt: '2026-12-07', lawnNoPlan: 0, unplanned: 0, unitProblems: new Set(), mixMissing: new Set(), extra: new Set(), lawnMismatch: new Set(), ...over });
 const techs = new Map([['a', { name: 'Alex Sample', supplyStore: 'Synthetic Supply North' }], ['b', { name: 'Blake Sample', supplyStore: null }]]);
-const run = (groups, products) => planGroups({ groups, products: new Map(products.map((p) => [p.id, p])), techs });
+const run = (groups, products, techMap = techs) => planGroups({ groups, products: new Map(products.map((p) => [p.id, p])), techs: techMap });
 
 describe('the ET week', () => {
   const week = (iso) => weekBounds(new Date(iso));
@@ -376,6 +376,58 @@ describe('stock, packs and cost', () => {
     });
   });
 
+  describe('the technician\'s branch decides the price row', () => {
+    const NOW = new Date('2026-12-09T12:00:00Z');
+    const rowOf = (over) => ({ product_id: 'p1', vendor_id: 'v1', vendor_name: 'SiteOne', branch_name: null, quantity: '1 gal', is_best_price: false, price: '90', price_amount: '90', ...over });
+    const productOf = (rows) => ({ ...toPlanProduct({ row: { id: 'p1', name: 'Synthetic Liquid', inventory_unit: 'fl_oz', inventory_on_hand: '0' }, now: NOW, pricing: rows }), id: 'p1' });
+    const listFor = (store, rows) => run(new Map([['a', group([['p1', demand(10)]])]]), [productOf(rows)], new Map([['a', { name: 'Alex Sample', supplyStore: store }]])).get('a');
+    const rows = [
+      rowOf({ branch_name: 'Bradenton', price: '80', price_amount: '80', is_best_price: true }),
+      rowOf({ branch_name: 'Sarasota', price: '95', price_amount: '95' }),
+      rowOf({ vendor_id: 'v2', vendor_name: 'Other Supply', branch_name: 'Sarasota', price: '85', price_amount: '85' }),
+    ];
+
+    test('the store\'s branch row wins over the best-price row; a whole word of the store text, case and spacing ignored', () => {
+      expect(listFor('SiteOne Sarasota', rows).items[0]).toMatchObject({ estCostCents: 9500, otherBranch: false });
+      expect(listFor('  siteone   SARASOTA ', rows).items[0]).toMatchObject({ estCostCents: 9500 });
+      // no supplier in the text: the lower sticker price of the branch rows wins (85.00 + the comparison's 15.00 estimate for a vendor with no rule)
+      expect(listFor('Sarasota', rows).items[0]).toMatchObject({ estCostCents: 10000 });
+    });
+
+    test('no match: the current pick, and the line says it is not from the store\'s branch', () => {
+      const out = listFor('SiteOne Venice', rows);
+      expect(out.items[0]).toMatchObject({ estCostCents: 8000, otherBranch: true });
+      expect(listFor('Sarasotan Supply', rows).items[0]).toMatchObject({ estCostCents: 8000, otherBranch: true }); // a part of a word is not a match
+    });
+
+    test('no store: the current pick and no note', () => {
+      expect(listFor(null, rows).items[0]).toMatchObject({ estCostCents: 8000, otherBranch: false });
+      expect(listFor('   ', rows).items[0]).toMatchObject({ estCostCents: 8000, otherBranch: false });
+    });
+
+    test('a branch row of another vendor than the product\'s set vendor is not used', () => {
+      const own = { ...productOf(rows), catalogRow: { auto_reorder_vendor_id: 'v2' } };
+      const out = run(new Map([['a', group([['p1', demand(10)]])]]), [own], new Map([['a', { name: 'Alex Sample', supplyStore: 'SiteOne Sarasota' }]])).get('a');
+      expect(out.items[0]).toMatchObject({ estCostCents: 10000 }); // Other Supply's Sarasota row (85.00 + 15.00 estimate), not SiteOne's 95.00
+    });
+  });
+
+  describe('a pack sold by item count is costed with its delivery', () => {
+    const NOW = new Date('2026-12-09T12:00:00Z');
+    const countPack = (over) => toPlanProduct({
+      row: { id: 'p1', name: 'Synthetic Sign', inventory_unit: 'each', inventory_on_hand: '0' }, now: NOW,
+      pricing: [{ product_id: 'p1', vendor_id: 'v', quantity: '25 ea', is_best_price: true, price: '50', price_amount: '50', ...over }],
+    });
+
+    test('stated shipping and tax, a per-item landed price, or a shipping estimate is in the pack cost; unresolvable delivery is unpriced', () => {
+      expect(countPack({ shipping_cost: '5' }).packCents).toBe(5500);
+      expect(countPack({ landed_unit_price: '2.4', unit_normalized: 'each', source_type: 'price_report' }).packCents).toBe(6000); // 25 x 2.40
+      expect(countPack({ shipping_estimate: '10' }).packCents).toBe(6000);
+      expect(countPack({ landed_unit_price: '2.4', unit_normalized: 'lot', source_type: 'price_report' }).packCents).toBeNull();
+      expect(countPack({}).packCents).toBe(5000);
+    });
+  });
+
   test('an uncounted product is treated as none on hand, with a note; negative stock reads as none', () => {
     const uncounted = run(new Map([['a', group([['p1', demand(10)]])]]), [plan({ onHand: null })]).get('a');
     expect(uncounted.items[0]).toMatchObject({ onHand: 0, shortQty: 10 });
@@ -601,12 +653,13 @@ describe('buildWeeklyBuyList read wiring', () => {
         { product_id: 'cross', requested_quantity: '100', unit: 'fl_oz', request_payload: JSON.stringify({ orderedQuantity: 128 }) }, // dispatched order: what the packages hold
         { product_id: 'cross', requested_quantity: '1', unit: 'gal', request_payload: null }, // marked ordered by hand: 1 gal = 128 fl oz
         { product_id: 'cross', requested_quantity: '1', unit: 'lb', request_payload: null }, // does not convert: reported, not counted
+        { product_id: 'cross', requested_quantity: '20', unit: null, request_payload: null }, // no unit: read in the stock unit, as Receive does
       ]],
     });
     const list = await buildWeeklyBuyList({ knex, now: new Date('2026-12-09T12:00:00Z') });
     expect(knex.calls.filter((c) => c.table === 'product_restock_requests as prr')).toHaveLength(1);
-    // 50 on hand + 256 on order cover 306 of the 400 needed: 94 fl oz to buy, one 1 gal pack
-    expect(list.technicians[0].items).toMatchObject([{ needQty: 400, onHand: 50, onOrder: 256, shortQty: 94, packs: 1 }]);
+    // 50 on hand + 276 on order cover 326 of the 400 needed: 74 fl oz to buy, one 1 gal pack
+    expect(list.technicians[0].items).toMatchObject([{ needQty: 400, onHand: 50, onOrder: 276, shortQty: 74, packs: 1 }]);
     expect(list.warnings).toEqual(['An order already placed is in a unit that does not convert to its stock unit, so it is not counted as on order.']);
   });
 

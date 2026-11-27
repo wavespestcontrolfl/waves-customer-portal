@@ -80,4 +80,23 @@ describe('TeamTab supply store', () => {
     await waitFor(() => expect(puts).toHaveLength(1));
     expect(puts[0].supplyStore).toBe('');
   });
+
+  it('an edit of another field leaves the store out of the save, so a store another admin just set is never overwritten', async () => {
+    const puts = setup({ ...BASE_TECH, supply_store: 'Synthetic Supply North' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByDisplayValue('River Tech'), { target: { value: 'River T.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0].name).toBe('River T.');
+    expect(puts[0]).not.toHaveProperty('supplyStore');
+  });
+
+  it('typing the loaded store back unchanged sends nothing for it', async () => {
+    const puts = setup({ ...BASE_TECH, supply_store: 'Synthetic Supply North' });
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('Supply store'), { target: { value: 'Synthetic Supply North' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Update' }));
+    await waitFor(() => expect(puts).toHaveLength(1));
+    expect(puts[0]).not.toHaveProperty('supplyStore');
+  });
 });

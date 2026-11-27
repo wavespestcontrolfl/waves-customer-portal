@@ -54,7 +54,7 @@ jest.setTimeout(60000);
       { id: randomUUID(), restock_request_id: requests[4].id, adapter: 'synthetic', status: 'placed', placed_at: new Date(), request_payload: JSON.stringify({ orderedQuantity: 99 }), evidence: JSON.stringify({ revokedAt: '2026-12-01T00:00:00Z' }) },
     ]);
     await mockConn('vendor_pricing').insert([
-      { id: randomUUID(), product_id: cross.id, vendor_id: vendor.id, quantity: '2.5 gal', price: 100, price_amount: 100, is_best_price: true, is_active: true, approval_status: 'approved' },
+      { id: randomUUID(), product_id: cross.id, vendor_id: vendor.id, quantity: '2.5 gal', branch_name: 'North', price: 100, price_amount: 100, is_best_price: true, is_active: true, approval_status: 'approved' },
       { id: randomUUID(), product_id: cross.id, vendor_id: other.id, quantity: '1 gal', price: 1, price_amount: 1, is_best_price: false, is_active: true, approval_status: 'pending' },
     ]);
     const visit = (service_type, scheduled_date, status, technician_id) => ({ id: randomUUID(), service_type, scheduled_date, status, technician_id, is_callback: false });
@@ -100,7 +100,7 @@ jest.setTimeout(60000);
     // 0.01 gal on hand: the technician and the unassigned visit each buy a 2.5 gal pack; about 4.9 gal is left of
     // the 5 gal bought, which is over one pack, so no spare is added. 100.00 + the price comparison's 15.00 shipping
     // estimate for a vendor it has no rule for.
-    expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 11500, reasons: ['pest_mix'] });
+    expect(cross).toMatchObject({ unit: 'gal', packs: 1, packLabel: '2.5 gal', estCostCents: 11500, reasons: ['pest_mix'], otherBranch: false }); // the row's branch "North" is a word of the store "Synthetic Supply North"
     expect(list.unassigned.items.find((i) => i.name === 'LESCO CrossCheck Plus')).toMatchObject({ packs: 1, reasons: ['pest_mix'] });
     expect(cross.needQty).toBeCloseTo(7.5 / 128, 4);
     // The pending row at one dollar is not eligible: the approved 2.5 gal row decides the pack and the price.
