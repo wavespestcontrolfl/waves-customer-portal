@@ -3198,11 +3198,12 @@ router.post('/restock-requests/:id/action', async (req, res, next) => {
     const action = String(body.action || '').toLowerCase();
     const result = await inventoryOperations.updateRestockRequest(req.params.id, {
       action, note: body.note,
-      ...(action === 'receive' ? { quantity: body.quantity ?? undefined, unit: body.unit ?? undefined } : {}),
+      ...(action === 'receive' ? { quantity: body.quantity ?? undefined, unit: body.unit ?? undefined, confirm: body.confirm === true } : {}),
+      ...(['receive', 'close_counted'].includes(action) && typeof body.confirmFingerprint === 'string' ? { confirmFingerprint: body.confirmFingerprint } : {}),
     }, { actorId: req.technicianId, source: 'restock_request_receive' });
     res.json({ success: true, request: result.request, ...(result.movement ? { movement: result.movement } : {}) });
   } catch (err) {
-    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message });
+    if (err.statusCode) return res.status(err.statusCode).json({ error: err.message, ...(err.code ? { code: err.code } : {}), ...(err.details || {}) });
     next(err);
   }
 });

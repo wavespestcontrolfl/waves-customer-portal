@@ -1102,6 +1102,18 @@ function legacyWholeHomeSizing(input) {
   return input?.legacyWholeHomeSizing === true;
 }
 
+// One lawn price lane (owner 2026-11-26, "make these one type of grass"), new quotes only: a bermuda or zoysia lawn plan reads the
+// St. Augustine rows of the market table, and a one-time lawn treatment is 1.8 x the St. Augustine 6-visit per-application price
+// for every grass, +20% for insect or fungus work. Its own stamp (pricingMetadata.legacyLawnOneLane), same replay mechanism:
+// input.legacyLawnOneLane is derived from the estimate's own stamp (estimate-floor-signal-replay.js savedLegacyLawnOneLaneSignal), a
+// priced estimate with no stamp, or one that kept only inputs asking for lawn, predates the rule, and a legacy quote runs the
+// existing code unchanged (its own grass's rows, the Settings multiple and treatment factors). A fresh quote never sets it.
+// Plan-wide (no per-service marker): a lawn service a revision adds to a legacy estimate stays on the old rule.
+const LAWN_ONE_LANE_SERVICES = new Set(['lawn_care', 'one_time_lawn']);
+function legacyLawnOneLane(input) {
+  return input?.legacyLawnOneLane === true;
+}
+
 // The plan line's quarterly per-app rate without its home-age step (a new one-time visit has none): the one shared helper
 // (one-time-pest-home-age.js quarterlyPerAppWithoutHomeAge), also used by the estimate page, with the quote-time floor.
 function ageFreeQuarterly(planLine, floor) {
@@ -1390,6 +1402,8 @@ function generateEstimate(input) {
     legacyPestAboveTable: legacyPestAboveTable(input),
     // Whole-home sizing stamp (see legacyWholeHomeSizing above): true = priced before the rule (the ground-floor footprint basis).
     legacyWholeHomeSizing: legacyWholeHomeSizing(input),
+    // One lawn price lane stamp (see legacyLawnOneLane above): true = priced before the rule (each grass's own rows, 2.2 one-time).
+    legacyLawnOneLane: legacyLawnOneLane(input),
     // Specialty prices stamp (see legacySpecialty1126 above): true = priced before them (old room curve, hand-priced lots above 2
     // acres, $250 wasp level).
     legacySpecialty1126: legacySpecialty1126(input),
@@ -1660,6 +1674,8 @@ function generateEstimate(input) {
         lawnLaborMinutesBase: services.lawn.lawnLaborMinutesBase ?? input.lawnLaborMinutesBase,
         lawnLaborMinutesPerK: services.lawn.lawnLaborMinutesPerK ?? input.lawnLaborMinutesPerK,
         bermudaSuppression: services.lawn.bermudaSuppression === true,
+        // A quote priced before the one lawn price lane keeps its own grass's rows of the market table on replay.
+        legacyLawnOneLane: legacyLawnOneLane(input),
         // A stored estimate replayed as sold (extractEngineInputs, the persisted-replay recompute)
         // keeps its price; only a fresh bahia quote is parked under GATE_LAWN_V13.
         // A lawn line this replay's mutation adds (addedServiceKeys) was never sold: it is reviewed.
@@ -2220,6 +2236,8 @@ function generateEstimate(input) {
         lawnFreq: services.oneTimeLawn.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
         // An estimate priced before the flat-stretch rise (2026-11-26) keeps its one-time price on replay.
         legacyOneTimePlateau: legacyPricingRules(input),
+        // An estimate priced before the one lawn price lane keeps its grass's anchor, the 2.2 multiple and the old treatment factors.
+        legacyLawnOneLane: legacyLawnOneLane(input),
       });
       lineItems.push(result);
     }
@@ -2244,6 +2262,8 @@ function generateEstimate(input) {
         lawnFreq: services.lawnPestControl.lawnFreq || services.lawn?.lawnFreq || input.lawnFreq,
         // An estimate priced before the flat-stretch rise (2026-11-26) keeps its one-time price on replay.
         legacyOneTimePlateau: legacyPricingRules(input),
+        // The same for the one lawn price lane (the knockdown is the one-time lawn 'pest' treatment).
+        legacyLawnOneLane: legacyLawnOneLane(input),
       });
       // Distinct display name: persistence compacts lines to service + name,
       // so without this a lawn-pest row renders as generic one_time_lawn (and
@@ -3663,6 +3683,7 @@ function generateEstimate(input) {
     if (line && ONE_TIME_PEST_RULE_SERVICES.has(line.service)) line.legacyOneTimePestBuffer = legacyOneTimePestBuffer(input, line.service);
     if (line && PEST_ABOVE_TABLE_SERVICES.has(line.service)) line.legacyPestAboveTable = legacyPestAboveTable(input);
     if (line && WHOLE_HOME_SIZING_SERVICES.has(line.service)) line.legacyWholeHomeSizing = legacyWholeHomeSizing(input);
+    if (line && LAWN_ONE_LANE_SERVICES.has(line.service)) line.legacyLawnOneLane = legacyLawnOneLane(input);
     if (line && PRICE_RULE_FIX_SERVICES.has(line.service)) line.legacyPricingRules = legacyPricingRules(input, line.service === 'commercial_pest' ? 'pest_control' : null);
   }
 

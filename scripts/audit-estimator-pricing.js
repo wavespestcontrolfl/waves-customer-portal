@@ -280,6 +280,11 @@ function lawnMarketMonthly({ track, lawnSqFt, tier }) {
   }
   return monthly;
 }
+// One lawn price lane (owner 2026-11-26, new quotes): a bermuda or zoysia plan reads the St. Augustine rows of the market table.
+// Written here as a literal, not read from the engine's constant: this file is the independent check. Only the market rows move;
+// the cost stack, the suppression add-on and every other step below keep the real grass. Every track of LAWN_BRACKETS is listed,
+// so a new track fails loudly here instead of pricing on rows nobody checked.
+const LAWN_MARKET_ROWS_TRACK = { st_augustine: 'st_augustine', bermuda: 'st_augustine', zoysia: 'st_augustine', bahia: 'bahia' };
 // Sold price = market, lifted by the ARMED cost floor (annualCost ÷ (1 − target
 // margin), ceiled to a whole-dollar per-app), then the program minimum, then —
 // under armed floors inside the table — the cadence-ladder lift that keeps
@@ -295,7 +300,7 @@ function expectLawn({ track = 'st_augustine', lawnSqFt, tier = 'enhanced', bermu
   const legs = {};
   for (const t of ['standard', 'enhanced', 'premium']) {
     const freq = LAWN_TIERS[t].freq;
-    const marketMonthly = lawnMarketMonthly({ track, lawnSqFt, tier: t });
+    const marketMonthly = lawnMarketMonthly({ track: LAWN_MARKET_ROWS_TRACK[track], lawnSqFt, tier: t });
     const marketAnnual = Math.round(marketMonthly * 12);
     const floorAnnual = round2(lawnCostStack({ track, lawnSqFt, visits: freq, routeDensity: LAWN_PRICING_V2.defaultRouteDensity, property, routeDriveMinutes }).annualCost / (1 - LAWN_PRICING_V2.targetCollectedMarginFloor));
     const floored = useFloor && floorAnnual > marketAnnual;

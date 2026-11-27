@@ -50,14 +50,20 @@ describe('estimator rejects failed monetary calculations', () => {
 
   test('one-time lawn rejects an unsupported treatment instead of taking the cheapest multiplier', () => {
     expect(() => estimate({ oneTimeLawn: { treatmentType: 'pest_control' } })).toThrow(/treatmentType/);
-    expect(estimate({ oneTimeLawn: { treatmentType: 'pest' } }).lineItems[0].price).toBe(220);
-    expect(estimate({ oneTimeLawn: { treatmentType: 'fertilization' } }).lineItems[0].price).toBe(169);
+    // One lawn price lane (new quotes, 2026-11-26): 1.8 x the St. Augustine anchor, +20% for insect work, fertilizer at one price.
+    expect(estimate({ oneTimeLawn: { treatmentType: 'pest' } }).lineItems[0].price).toBe(167);
+    expect(estimate({ oneTimeLawn: { treatmentType: 'fertilization' } }).lineItems[0].price).toBe(139);
+    // A quote saved before the rule keeps the old multiple and factors.
+    const legacy = (services) => generateEstimate({ ...property, services, legacyLawnOneLane: true });
+    expect(legacy({ oneTimeLawn: { treatmentType: 'pest' } }).lineItems[0].price).toBe(220);
+    expect(legacy({ oneTimeLawn: { treatmentType: 'fertilization' } }).lineItems[0].price).toBe(169);
   });
 
   test.each(SERVICE_OPTION_SCHEMAS.oneTimeLawn.properties.treatmentType.enum)(
     'one-time lawn accepts the intent schema treatment %s', treatmentType => {
       expect(estimate({ oneTimeLawn: { treatmentType } }).lineItems[0]).toMatchObject({
-        service: 'one_time_lawn', price: { fertilizer: 169, weed: 189 }[treatmentType],
+        // One price for fertilizer and weed work under the one lawn price lane (2026-11-26).
+        service: 'one_time_lawn', price: { fertilizer: 139, weed: 139 }[treatmentType],
       });
     },
   );
@@ -66,8 +72,8 @@ describe('estimator rejects failed monetary calculations', () => {
     const { services, supported } = mapServiceInterestToEstimateServices('One-time lawn fertilization');
     expect(supported).toBe(true);
     const raw = estimate(services);
-    expect(raw.lineItems[0]).toMatchObject({ service: 'one_time_lawn', treatmentType: 'fert', price: 169 });
-    expect(mapV1ToLegacyShape(raw).totals.year1).toBe(169);
+    expect(raw.lineItems[0]).toMatchObject({ service: 'one_time_lawn', treatmentType: 'fert', price: 139 });
+    expect(mapV1ToLegacyShape(raw).totals.year1).toBe(139);
   });
 });
 

@@ -236,13 +236,13 @@ Use for: "put Bifen on the restock list", "request 2 lb of Prodiamine before Tue
   },
   {
     name: 'update_restock_request',
-    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), or cancel. Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
+    description: `Record a staff action on a restock request: mark_ordered (staff already placed the order; this tool does not buy), receive (arrived — ADDS the stock and logs a restock movement), close_counted (an invoice or hand entry already added this stock: closes the request and changes NO stock; use it, never receive, when an invoice or delivery already counted the order), or cancel (only when the order was cancelled or is no longer needed). Your call returns a preview; the operator confirms in the UI. Use get_restock_queue first to find the request id.
 Use for: "I ordered the Bifen", "the SiteOne order arrived", "cancel that Prodiamine request"`,
     input_schema: {
       type: 'object',
       properties: {
         request_id: { type: 'string', format: 'uuid', description: 'Restock request UUID (from get_restock_queue)' },
-        action: { type: 'string', enum: ['mark_ordered', 'receive', 'cancel'] },
+        action: { type: 'string', enum: ['mark_ordered', 'receive', 'cancel', 'close_counted'] },
         quantity: { type: 'number', description: 'Receive only: actual amount received, if different from requested' },
         unit: { type: 'string', description: 'Receive only: unit of the received amount' },
         note: { type: 'string' },
@@ -1640,6 +1640,31 @@ async function groundOperatorNamedProduct(rawPrompt, preview, actorId, threadId,
   return null;
 }
 
+// "Close, already counted" names its request the way the other restock actions do (this open request, or its id), but the
+// words must say the stock is already counted: a bare "close it" could mean cancel, so it never grounds this action.
+const COUNTED_PHRASE = '(?:already\\s+counted|counted|(?:since\\s+|because\\s+)?the\\s+invoice\\s+(?:already\\s+)?added\\s+it)';
+const CLOSE_REFERENCE = '(?:(this|that|current|selected|viewed|open|the)\\s+(?:restock\\s+)?request|(it)|(?:restock\\s+)?request)(?:\\s+([0-9a-f-]{36}))?';
+const CLOSE_COUNTED_RE = new RegExp(`^(?:close|mark|record)\\s+${CLOSE_REFERENCE}\\s*[,-]?\\s*(?:as\\s+)?${COUNTED_PHRASE}[.!]?$`, 'i');
+const COUNTED_THEN_CLOSE_RE = new RegExp(`^${COUNTED_PHRASE}\\s*[,-]?\\s*(?:so\\s+)?close\\s+${CLOSE_REFERENCE}[.!]?$`, 'i');
+
+function resolveCloseCountedTarget({ prompt, pageData = {}, preview }) {
+  const { targetClause, UUID_RE } = require('./task-context');
+  const clause = String(targetClause(prompt, true)).trim().replace(/^(?:(?:please|can you|could you|would you)\s+)+/i, '');
+  const match = clause.match(CLOSE_COUNTED_RE) || clause.match(COUNTED_THEN_CLOSE_RE);
+  // Groups: 1 = this/that/the..., 2 = it, 3 = a request id. A page word resolves only on the Restock tab (?tab=restock) with a selected request; anywhere else it asks.
+  const pageWord = match?.[2] || (match?.[1] && match[1].toLowerCase() !== 'the');
+  const query = new URLSearchParams(typeof pageData.search === 'string' ? pageData.search : '');
+  const onPage = pageWord && /^\/admin\/inventory(?:[/?]|$)/.test(pageData.route || '') && query.get('tab') === 'restock';
+  const reference = match?.[3] || (onPage ? pageData.requestId || pageData.request_id || query.get('requestId') : null);
+  if (!UUID_RE.test(String(reference || '')) || reference.toLowerCase() !== preview.request?.id) return TARGET_UNAVAILABLE;
+  return { productId: preview.product.id, requestId: preview.request.id };
+}
+
+// The one entry for write-target resolution: close_counted has its own grammar, every other action the original one.
+function resolveStockWriteTarget(args) {
+  return args.preview?.action === 'close_counted' ? resolveCloseCountedTarget(args) : resolveInventoryWriteTarget(args);
+}
+
 // Inventory noun slots come from the current operator request, never a model
 // selector, note body, attachment, or transcript. Keep formulation punctuation
 // intact: `10% SC` and `20% SC` are different products.
@@ -1921,7 +1946,7 @@ function groundedStockTarget(preview, grounded) {
 async function stockProposalTarget({ toolName, params, preview, prompt, pageData, actorId, threadId, threadSeq, grounded = null }) {
   if (grounded) return isToolFailure(preview) ? { failed: true, modelResult: preview } : groundedStockTarget(preview, grounded);
   if (isToolFailure(preview)) return (await offerProductChoice(toolName, preview, params, prompt)) || { failed: true, modelResult: preview };
-  const target = await resolveInventoryWriteTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq });
+  const target = await resolveStockWriteTarget({ toolName, prompt, pageData, preview, actorId, threadId, threadSeq });
   if (!target.error) return target;
   // A refused target leaves no card and writes nothing; the model is told so
   // in plain words, so its reply can never read as a recorded change.
@@ -2129,10 +2154,10 @@ async function updateRestockRequest(input, actionContext) {
   if (!actionContext.confirmed) return inventory.previewRestockAction(input.request_id, fields);
   const result = await inventory.updateRestockRequest(input.request_id, fields,
     inventoryWriteOptions(input, actionContext, 'intelligence_bar_restock_receive'));
-  const labels = { mark_ordered: 'Recorded as ordered', receive: 'Stock received', cancel: 'Request canceled' };
+  const labels = { mark_ordered: 'Recorded as ordered', receive: 'Stock received', cancel: 'Request canceled', close_counted: 'Closed, already counted' };
   const summary = result.movement
     ? `${toNumber(result.movement.quantity)} ${result.movement.unit} received; ${toNumber(result.movement.stock_after)} ${result.movement.unit} on hand.`
-    : { mark_ordered: 'Recorded the staff-placed order. Stock is unchanged.', cancel: 'The restock request is closed. No vendor order was canceled.' }[input.action];
+    : { mark_ordered: 'Recorded the staff-placed order. Stock is unchanged.', cancel: 'The restock request is closed. No vendor order was canceled.', close_counted: 'The restock request is closed as received. Stock is unchanged: it was already counted.' }[input.action];
   return { success: true, state: 'completed', request_id: result.request.id, product_id: result.request.product_id,
     status: result.request.status, verification: result.verification,
     ...(result.movement ? { movement_id: result.movement.id, stock_before: toNumber(result.movement.stock_before),
@@ -2140,5 +2165,5 @@ async function updateRestockRequest(input, actionContext) {
     receipt: { label: labels[input.action], summary, href: result.href } };
 }
 
-module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT,
+module.exports = { PROCUREMENT_TOOLS, executeProcurementTool, resolveInventoryWriteTarget, resolveStockWriteTarget, productChoicesFor, PRODUCT_CHOICE_LIMIT,
   productChoiceCard, stockProposalTarget, productIsActive };
