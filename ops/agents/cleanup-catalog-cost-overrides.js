@@ -154,6 +154,13 @@ function explicitSingleContainerMatch(product, best) {
   return Boolean(costUnit && countUnitsCompatible(vendorPack.unit, costUnit));
 }
 
+function measureFamilyCompatible(product, vendorQuantity) {
+  const prodMeasure = packageMeasure(product);
+  const vendorMeasure = packageMeasure({ container_size: vendorQuantity });
+  if (prodMeasure && vendorMeasure && prodMeasure !== vendorMeasure) return false;
+  return true;
+}
+
 function previewBestVendorLink(product, rows, scoreVendorRows) {
   if (!rows.length) return null;
   const { mode, pool, catalogCount, unitSizeOz } = scoreVendorRows(rows, product);
@@ -161,6 +168,9 @@ function previewBestVendorLink(product, rows, scoreVendorRows) {
   if (!best) return null;
   const countScalable = mode === 'count';
   const scalable = (best.perOz != null && unitSizeOz > 0) || countScalable;
+  // Verify weight vs volume measure compatibility so a pound quote can never
+  // populate a gallon liquid catalog price (both return perOz from scoreVendorRows).
+  if (mode === 'oz' && !measureFamilyCompatible(product, best.row?.quantity)) return null;
   // Require a package that scales to the catalog container (oz or count) OR
   // explicitly matches one unmeasured container, so an unscalable multi-unit
   // case price can never populate a single container's best_price (even when
@@ -200,13 +210,20 @@ function planMissingVendorLinks(unlinkedProducts, eligibleVendorRows, { scoreVen
   return planned;
 }
 
+const MULTIPACK_CONTAINER_RE = /\b(?:case|pack|box|kit)\b|\b[2-9]\d*\s*x\s*|\b\d{2,}\s*x\s*|\b[2-9]\d*\s+(?:bottles?|jugs?|gallons?|gal|quarts?|qt)\b/i;
+
+function isMultipackContainer(containerSize) {
+  const raw = String(containerSize || '').trim();
+  return Boolean(raw && MULTIPACK_CONTAINER_RE.test(raw));
+}
+
 function brokenLiquidBottleCandidate(row) {
   if (!row || normalizeUnit(row.usage_unit) !== 'bottle') return null;
   const unitSizeOz = numberOrNull(row.unit_size_oz);
   if (!(Number.isFinite(unitSizeOz) && unitSizeOz > 0)) return null;
-  // Only convert verified liquid packages (volume family). Dry weight bottles/jars
-  // or ambiguous packages are left untouched so weight is never relabeled fl_oz.
-  if (packageMeasure(row) !== 'volume') return null;
+  // Only convert verified single-bottle liquid packages (volume family, NOT
+  // multipacks/cases like "4 x 1 gal" where unit_size_oz is the whole case).
+  if (packageMeasure(row) !== 'volume' || isMultipackContainer(row.container_size)) return null;
   const amount = numberOrNull(row.usage_amount);
   const per1000 = numberOrNull(row.usage_per_1000sf);
   const hasAmount = Number.isFinite(amount) && amount > 0;

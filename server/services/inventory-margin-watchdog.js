@@ -133,10 +133,21 @@ function historyRowUnitNormalized(row) {
   return uom && parsePackCount(`1 ${uom}`) ? uom.toLowerCase() : null;
 }
 
-function normalizedHistoryRowCost(prod, row, mode, scoreVendorRows) {
+function normalizedPkgText(value) {
+  return String(value || '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function rawPackagesComparable(winnerRow, historyRow) {
+  const a = normalizedPkgText(winnerRow?.quantity);
+  const b = normalizedPkgText(historyRow?.quantity);
+  return Boolean(a && b && a === b);
+}
+
+function normalizedHistoryRowCost(prod, row, mode, scoreVendorRows, winnerRow = null) {
   if (!row) return null;
   const hPrice = numberOrNull(row.price_amount != null ? row.price_amount : row.price);
   if (!(Number.isFinite(hPrice) && hPrice > 0)) return null;
+  if (mode === 'raw' && winnerRow && !rawPackagesComparable(winnerRow, row)) return null;
   const unitNorm = historyRowUnitNormalized(row);
   const hasStoredNorm = numberOrNull(row.normalized_unit_price) > 0 || numberOrNull(row.landed_unit_price) > 0;
   // Require each historical entry's own package quantity or normalized unit price
@@ -160,13 +171,13 @@ function eventTimestampMs(row) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows) {
+function chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows, winnerRow = null) {
   const list = Array.isArray(historyRows) ? historyRows : [];
   const events = [];
   // Queries return newest-first (DESC); iterate reverse so untimestamped rows stay chronological.
   for (let i = list.length - 1; i >= 0; i -= 1) {
     const row = list[i];
-    const cost = normalizedHistoryRowCost(prod, row, mode, scoreVendorRows);
+    const cost = normalizedHistoryRowCost(prod, row, mode, scoreVendorRows, winnerRow);
     if (!(cost > 0)) continue;
     events.push({
       vendorKey: String(row?.vendor_id || `row:${i}`),
@@ -189,7 +200,7 @@ function priorNormalizedCostForProduct(prod, winner, mode, historyRows, scoreVen
   // vendors (from price_history + approved price_snapshots). Comparing against
   // the immediately preceding winning cost catches both increases and expired
   // cheaper vendors without mistaking a price cut ($100 -> $150 -> $130) for a spike.
-  const events = chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows);
+  const events = chronologicalHistoryEvents(prod, mode, historyRows, scoreVendorRows, winner?.row || null);
   if (!events.length) return null;
   const latestByVendor = new Map();
   const winningSequence = [];
@@ -276,6 +287,18 @@ function missingRequiredServiceTypes(spec, cogs) {
   return spec.serviceTypesOverride.filter((st) => !pricedTypes.has(st));
 }
 
+function zeroCostLineFound(cogs) {
+  return Array.isArray(cogs?.lines) && cogs.lines.some((l) => l && !(Number(l.cost) > 0));
+}
+
+function resolveModeledLaborPerVisit(line, spec, laborRate) {
+  const annualLabor = numberOrNull(line?.costs?.labor ?? line?.costs?.annualLabor);
+  if (annualLabor > 0) return annualLabor / Math.max(1, spec.visitsPerYear);
+  const directLabor = numberOrNull(line?.costs?.laborPerVisit ?? line?.laborCost);
+  if (directLabor > 0) return directLabor;
+  return spec.laborHoursPerVisit * laborRate;
+}
+
 function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventoryCostFromRows, laborRate }) {
   const est = generateEstimate({ ...REFERENCE_PROPERTY, services: spec.engineServices });
   const line = (est?.lineItems || []).find((li) => li.service === spec.engineServiceKey);
@@ -297,11 +320,14 @@ function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventory
     return out;
   }
   const missingTypes = missingRequiredServiceTypes(spec, cogs);
-  if (cogs.status === 'warning' || missingTypes.length > 0) {
+  const hasZeroLine = zeroCostLineFound(cogs);
+  if (cogs.status === 'warning' || missingTypes.length > 0 || hasZeroLine) {
     out.missingCogs = {
       serviceKey: spec.inventoryServiceKey,
       label: spec.label,
-      reason: missingTypes.length > 0 ? 'missing_required_service_types' : 'partial_cogs',
+      reason: missingTypes.length > 0
+        ? 'missing_required_service_types'
+        : (hasZeroLine ? 'zero_cost_material_line' : 'partial_cogs'),
       ...(missingTypes.length > 0 ? { missingServiceTypes: missingTypes } : {}),
       warnings: cogs.warnings || [],
     };
@@ -309,7 +335,7 @@ function evaluateOneServiceMargin(spec, { inventory, generateEstimate, inventory
   if (!(revPerVisit > 0)) return out;
   const fixedAmortized = Number(cogs.fixedCost || 0) / Math.max(1, spec.visitsPerYear);
   const materialCost = Number(cogs.totalPerVisit || 0) + fixedAmortized;
-  const laborCost = spec.laborHoursPerVisit * laborRate;
+  const laborCost = resolveModeledLaborPerVisit(line, spec, laborRate);
   const grossMargin = (revPerVisit - (materialCost + laborCost)) / revPerVisit;
   if (grossMargin < MIN_GROSS_MARGIN_FLOOR) {
     out.lowMargin = {

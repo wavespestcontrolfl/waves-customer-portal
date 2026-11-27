@@ -59,6 +59,8 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       { id: 'p-lesco', name: 'LESCO Dimension 0.21% 18-0-10', active: true, unit_size_oz: 800, container_size: '50 lb', best_price: null, best_vendor_pricing_id: null },
       // Measured product with null best_price whose only quote is an unscalable case price: MUST SKIP!
       { id: 'p-case-only', name: 'Liquid Concentrate', active: true, unit_size_oz: 64, container_size: '64 fl oz', best_price: null, best_vendor_pricing_id: null },
+      // Liquid product whose only quote is in pounds (weight vs volume clash): MUST SKIP!
+      { id: 'p-clash', name: 'Liquid Gal Chem', active: true, unit_size_oz: 128, container_size: '1 gal', best_price: null, best_vendor_pricing_id: null },
       // Count item with valid existing single-station price ($8.69) and unscalable pack row ($86.94 / "1 box"): MUST NOT overwrite!
       { id: 'p-hexpro', name: 'HexPro Station', active: true, unit_size_oz: null, container_size: '1 station', best_price: 8.69, best_vendor_pricing_id: null },
       // Unmeasured count product with null best_price and explicit 1-station match: allowed!
@@ -69,6 +71,7 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       { id: 'vp-hi', product_id: 'p-lesco', vendor_id: 'v-2', vendor_name: 'SiteOne', price_amount: 49.50, quantity: '50 lb', shipping_cost: 0 },
       { id: 'vp-lo', product_id: 'p-lesco', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 42.25, quantity: '50 lb', shipping_cost: 0 },
       { id: 'vp-case', product_id: 'p-case-only', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 480.00, quantity: '1 case', shipping_cost: 0 },
+      { id: 'vp-clash', product_id: 'p-clash', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 12.00, quantity: '1 lb', shipping_cost: 0 },
       { id: 'vp-pack', product_id: 'p-hexpro', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 86.94, quantity: '1 box', shipping_cost: 0 },
       { id: 'vp-single', product_id: 'p-single', vendor_id: 'v-1', vendor_name: 'Target Specialty', price_amount: 9.50, quantity: '1 station', shipping_cost: 0 },
     ];
@@ -106,6 +109,11 @@ describe('cleanup-catalog-cost-overrides (MUTATES with --execute, preserves coun
       {
         id: 'u-area', service_type: 'Liquid Barrier', product_id: 'p-taurus', product_name: 'Taurus SC',
         usage_amount: 0, usage_per_1000sf: 0.25, usage_unit: 'bottle', unit_size_oz: 78, container_size: '78 fl oz', best_price: 86.00,
+      },
+      // Multipack liquid case ("4 x 1 gal" with unit_size_oz = 512) -> MUST skip so 1 bottle never becomes 512 fl_oz!
+      {
+        id: 'u-multipack', service_type: 'Liquid Barrier', product_id: 'p-case', product_name: '4x1 Gal Case',
+        usage_amount: 1, usage_per_1000sf: null, usage_unit: 'bottle', unit_size_oz: 512, container_size: '4 x 1 gal', best_price: 240.00,
       },
       // Dry weight bottle (container_size '16 lb') -> NEVER relabel to fl_oz!
       {
