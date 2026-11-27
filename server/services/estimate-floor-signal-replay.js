@@ -285,6 +285,30 @@ function savedLegacyTwoStoryRoofSignal(rawEstData) {
   return { legacyTwoStoryRoof: flag };
 }
 
+// WDO inspection by home size and construction (owner 2026-11-26, $150 to $275, new quotes only). Its own stamp, read by the same
+// reader: true = priced before the rule (the $250 flat price), false = priced under it. An estimate with priced lines and no stamp
+// predates the rule; one with no priced lines pins nothing. An estimate that kept only its inputs but still asks for a WDO
+// inspection was saved before the rule: it reads legacy on a first send, a resend and every replay, so a replay never moves a sold
+// price (a fresh draft the engine priced carries its stamp, false).
+function storedRequestsWdo(estData) {
+  const data = normalizeStored(estData);
+  if (!data || typeof data !== 'object') return false;
+  const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
+  if (request && Array.isArray(request.selectedServices)
+    && request.selectedServices.some((key) => ['WDO', 'WDO_INSPECTION'].includes(String(key || '').toUpperCase()))) return true;
+  const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
+  return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
+    .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
+      && !!(carrier.services.wdo || carrier.services.wdoInspection));
+}
+
+function savedLegacyWdoFlatSignal(rawEstData) {
+  const estData = normalizeStored(rawEstData);
+  const { flag } = readRuleStamp(estData, 'legacyWdoFlat');
+  if (flag === undefined && storedRequestsWdo(estData)) return { legacyWdoFlat: true };
+  return { legacyWdoFlat: flag };
+}
+
 // Specialty prices for NEW quotes (owner 2026-11-26 evening: bed bug chemical $349 per added room, a mosquito lot above 2 acres
 // priced instead of held, the wasp / hornet / yellow jacket second level $275). ONE stamp for the three, read by the same reader:
 // true = priced before them (old room curve, the hand-price hold, the $250 level), false = priced under them. An estimate with
@@ -506,6 +530,7 @@ function savedOneTimePestRuleLegacy(rawEstData) {
 const FROZEN_RULE_STAMPS = [
   ['legacyPricingRules', (data) => readRuleStamp(data, 'legacyPricingRules').flag],
   ['legacyTwoStoryRoof', (data) => savedLegacyTwoStoryRoofSignal(data).legacyTwoStoryRoof],
+  ['legacyWdoFlat', (data) => savedLegacyWdoFlatSignal(data).legacyWdoFlat],
   ['legacyOneTimePestBuffer', (data) => savedLegacyOneTimePestBufferSignal(data).legacyOneTimePestBuffer],
   ['legacyPestAboveTable', (data) => savedLegacyPestAboveTableSignal(data).legacyPestAboveTable],
   ['legacyWholeHomeSizing', (data) => savedLegacyWholeHomeSizingSignal(data).legacyWholeHomeSizing],
@@ -577,6 +602,7 @@ function savedFloorReplaySignals(estData) {
   Object.assign(signals, savedLawnMinimumAfterDiscountSignal(estData));
   Object.assign(signals, savedLegacyPricingRulesSignal(estData));
   Object.assign(signals, savedLegacyTwoStoryRoofSignal(estData));
+  Object.assign(signals, savedLegacyWdoFlatSignal(estData));
   Object.assign(signals, savedLegacyOneTimePestBufferSignal(estData));
   Object.assign(signals, savedLegacyPestAboveTableSignal(estData));
   Object.assign(signals, savedLegacyWholeHomeSizingSignal(estData));
@@ -606,6 +632,7 @@ module.exports = {
   savedLawnMinimumAfterDiscountSignal,
   savedLegacyPricingRulesSignal,
   savedLegacyTwoStoryRoofSignal,
+  savedLegacyWdoFlatSignal,
   savedLegacyOneTimePestBufferSignal,
   savedLegacyPestAboveTableSignal,
   savedLegacyWholeHomeSizingSignal,

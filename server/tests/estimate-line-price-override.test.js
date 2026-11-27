@@ -259,7 +259,10 @@ describe('linePriceOverrides', () => {
       price: 400, priceOverridden: true, priceOverridable: true, enginePrice: expect.any(Number), priceOverrideReason: 'carpenter ant infestation',
     });
     const wdo = mapped.specItems.find((i) => i.service === 'wdo_inspection');
-    expect(wdo).toMatchObject({ price: 300, priceOverridden: true, priceOverridable: true, enginePrice: 250 });
+    // The engine number kept beside the override is what the same fixture prices without it (the WDO table, not a fixed $250).
+    const unoverridden = mapV1ToLegacyShape(price(['OT_PEST', 'WDO'])).specItems.find((i) => i.service === 'wdo_inspection');
+    expect(unoverridden.price).toBeGreaterThan(0);
+    expect(wdo).toMatchObject({ price: 300, priceOverridden: true, priceOverridable: true, enginePrice: unoverridden.price });
     expect(mapped.oneTime.total).toBe(700);
   });
 });

@@ -11,6 +11,7 @@ const {
   WAVEGUARD,
 } = require('./constants');
 const { newRuleListPrice } = require('./one-time-pest-price');
+const { normalizeConstruction, normalizeFoundation, wdoWallColumn, foundationIsCrawlClass } = require('./structural-facts');
 const { areaAddOnLimitVerdict, limitText } = require('./area-addon-limits');
 const { areaAddOnKnobsFor } = require('./area-addon-config');
 const { resolveLawnCostPlusBasis, costPlusFloorTuning, liveLawnMarketSchedule } = require('./lawn-cost-plus-knobs');
@@ -8741,38 +8742,97 @@ function priceBedBug(rooms, method = 'CHEMICAL', footprint = 2000) {
   });
 }
 
-function priceWDO(input) {
+// The home's living area on a property: the one helper the WDO table reads (homeSqFt first, then livingAreaSqFt).
+const wdoLivingArea = (property) => positiveFiniteNumber(property.homeSqFt) ?? positiveFiniteNumber(property.livingAreaSqFt);
+
+// Size = the home's living area, from the engine's own living-area inputs (homeSqFt, then livingAreaSqFt, the order the flea
+// pricer reads them); a quote with none prices on the footprint the legacy path reads. A wrong-premise lookup's sizes describe a
+// neighbouring parcel (homeSizeTrusted false, lookup-confidence): no size at all, so the smallest tier (`unconfirmed`).
+function wdoSizeTier(property, footprint) {
+  const tiers = SPECIALTY.wdo.sizeTable.tiers;
+  if (property.homeSizeTrusted === false) return { size: null, tier: tiers[0], unconfirmed: true };
+  const size = wdoLivingArea(property) || footprint;
+  return { size, tier: tiers.find((t) => size <= t.maxSqFt) || tiers[tiers.length - 1], unconfirmed: false };
+}
+
+// Walls: whatever text arrives is normalized by the shared normalizer (structural-facts.js), and a reading counts only when it is
+// stamped trusted (=== true). An unstamped, untrusted or unrecognised reading is unknown (null): block + a staff note, never a guess up.
+function wdoWallClass(property, options) {
+  if ((options.constructionTrusted ?? property.constructionTrusted) !== true) return null;
+  return wdoWallColumn(normalizeConstruction(options.constructionType ?? property.constructionMaterial));
+}
+
+// Foundation: same rule. An untrusted reading is not used (the home prices as on a slab); `dropped` = that discarded read claimed a
+// crawl space or raised foundation.
+function wdoFoundation(property, options) {
+  const claimsCrawl = foundationIsCrawlClass(normalizeFoundation(options.foundationType ?? property.foundationType));
+  const trusted = (options.foundationTrusted ?? property.foundationTrusted) === true;
+  return { crawl: claimsCrawl && trusted, dropped: claimsCrawl && !trusted };
+}
+
+// A trusted crawl space is a stated fact on its own and wins; the walls decide the rest.
+const wdoTableColumn = (crawl, wallClass) => (crawl ? 'crawl' : (wallClass === 'frame' ? 'frame' : 'block'));
+
+// An internal staff note that names the price chosen and what a confirmed alternative would cost. Three cases: the walls are
+// unknown or untrusted (and no trusted crawl space prices the home), a crawl-space / raised-foundation read was dropped as untrusted,
+// or both. A trusted crawl space with unknown walls is a stated fact: no note (null).
+function wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }) {
+  if (!((!wallsKnown && !crawl) || dropped)) return null;
+  let because = 'the home construction is not verified';
+  if (wallsKnown) because = 'the crawl space or raised foundation read is not verified';
+  else if (dropped) because = 'the home construction and the crawl space or raised foundation read are not verified';
+  const alternatives = [
+    column === 'block' ? `wood frame on a slab would be $${tier.frame}` : null,
+    `a confirmed crawl space or raised foundation would be $${tier.crawl}`,
+  ].filter(Boolean).join('; ');
+  const asPriced = `priced as ${column === 'frame' ? 'wood frame' : 'concrete block'} on a slab ($${tier[column]})`;
+  return `${SPECIALTY.wdo.sizeTable.staffNoteMarker} ${asPriced}: ${because}. If confirmed, ${alternatives}. Confirm before sending.`;
+}
+
+// options.legacyWdoFlat (from the quote's own rule stamp, see estimate-engine legacyWdoFlat) runs the flat price the quote was
+// sold at, unchanged. Otherwise the size + construction table. The construction and size read are the ones on the property passed
+// in: a replay passes the quote's stored inputs, never a live lookup. constructionTrusted / foundationTrusted === false marks a
+// lookup value the record's own evidence flags as weak; only a stamped-true reading is used, per field: never a guess up.
+function priceWDO(input, options = {}) {
   const property = typeof input === 'number' || typeof input === 'string'
     ? { footprint: input }
     : (input || {});
   const footprintResolution = resolvePestFootprint(property);
   const footprint = footprintResolution.footprint;
-  for (const bracket of SPECIALTY.wdo.brackets) {
-    if (footprint <= bracket.maxSqFt) {
-      return {
-        service: 'wdo_inspection',
-        price: bracket.price,
-        footprintUsed: footprint,
-        footprintSource: footprintResolution.source,
-        footprintWasDefaulted: footprintResolution.wasDefaulted,
-        requiresManualReview: footprintResolution.requiresManualReview,
-        manualReviewReasons: footprintResolution.manualReviewReasons,
-        warnings: footprintResolution.warnings,
-        bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}`,
-      };
-    }
-  }
-  const bracket = SPECIALTY.wdo.brackets[SPECIALTY.wdo.brackets.length - 1];
-  return {
+  const base = {
     service: 'wdo_inspection',
-    price: bracket.price,
     footprintUsed: footprint,
     footprintSource: footprintResolution.source,
     footprintWasDefaulted: footprintResolution.wasDefaulted,
     requiresManualReview: footprintResolution.requiresManualReview,
     manualReviewReasons: footprintResolution.manualReviewReasons,
     warnings: footprintResolution.warnings,
-    bracketLabel: '>3500',
+  };
+  if (options.legacyWdoFlat === true) {
+    const brackets = SPECIALTY.wdo.brackets;
+    const bracket = brackets.find((b) => footprint <= b.maxSqFt) || brackets[brackets.length - 1];
+    return { ...base, price: bracket.price, bracketLabel: bracket.maxSqFt === Infinity ? '>3500' : `<=${bracket.maxSqFt}` };
+  }
+  const { size, tier, unconfirmed } = wdoSizeTier(property, footprint);
+  const wallClass = wdoWallClass(property, options);
+  const { crawl, dropped } = wdoFoundation(property, options);
+  const column = wdoTableColumn(crawl, wallClass);
+  const wallsKnown = wallClass !== null;
+  const { tiers, staffNoteMarker } = SPECIALTY.wdo.sizeTable;
+  // An unconfirmed size sends the line to review, as a quote with no size does, with a note that says why.
+  const notes = [
+    unconfirmed ? `${staffNoteMarker} priced at the smallest size ($${tier[column]}): the address needs confirmation, so the looked-up home size is not used. Confirm the home size before sending.` : null,
+    wdoStaffNote({ tier, column, wallsKnown, crawl, dropped }),
+  ].filter(Boolean);
+  return {
+    ...base,
+    ...(unconfirmed ? { requiresManualReview: true, manualReviewReasons: [...base.manualReviewReasons, 'wdo_home_size_unconfirmed'] } : {}),
+    warnings: [...(base.warnings || []), ...notes],
+    price: tier[column],
+    sizeUsed: size,
+    bracketLabel: tier.maxSqFt === Infinity ? `>${tiers[tiers.length - 2].maxSqFt}` : `<=${tier.maxSqFt}`,
+    wdoConstructionClass: column,
+    wdoConstructionKnown: wallsKnown || crawl,
   };
 }
 
