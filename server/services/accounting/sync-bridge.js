@@ -496,12 +496,24 @@ async function loadInvoicesForLinks(conn, invoiceIds, piIds) {
   return { byId, byPi };
 }
 
-// ── 0. Standalone Customer Account Credits (2350 Customer Credits Issuances) ─
+// ── 0. Standalone & Refund-Restored Customer Account Credits (2350) ──────────
+
+const REFUND_CREDIT_NOTE_PREFIX = 'Account credit returned — invoice ';
+const REFUND_CREDIT_NOTE_SUFFIX = ' fully refunded';
+
+function isRefundCreditRestorationRow(row) {
+  if (String(row?.source || '').trim().toLowerCase() !== 'adjustment') return false;
+  if (row?.invoice_id == null || !(Number(row?.delta) > 0)) return false;
+  const note = String(row?.note || '');
+  return note.startsWith(REFUND_CREDIT_NOTE_PREFIX) && note.endsWith(REFUND_CREDIT_NOTE_SUFFIX);
+}
 
 function isInvoiceLinkedCreditRow(row) {
   const src = String(row?.source || '').trim().toLowerCase();
   if (src === 'invoice_application' || src === 'invoice_prepaid') return true;
-  // Invoice void/refund credit restores carry invoice_id and are already reversed/adjusted via invoice JEs.
+  // Full-refund credit restorations ARE synced (DR 4090 / DR 2100 tax -> CR 2350);
+  // void & payer-transfer restores are already reversed via the invoice JE reversal.
+  if (isRefundCreditRestorationRow(row)) return false;
   if (src === 'adjustment' && row?.invoice_id != null) return true;
   return false;
 }
@@ -511,7 +523,10 @@ async function syncCustomerCredits(conn, from, to, ctx) {
   const rows = await conn('customer_credit_ledger as cl')
     .leftJoin('customers as c', 'c.id', 'cl.customer_id')
     .whereNotIn('cl.source', ['invoice_application', 'invoice_prepaid'])
-    .whereRaw("NOT (cl.source = 'adjustment' AND cl.invoice_id IS NOT NULL)")
+    .whereRaw(
+      "NOT (cl.source = 'adjustment' AND cl.invoice_id IS NOT NULL AND NOT (cl.delta > 0 AND COALESCE(cl.note, '') LIKE ?))",
+      [`${REFUND_CREDIT_NOTE_PREFIX}%${REFUND_CREDIT_NOTE_SUFFIX}`],
+    )
     .whereRaw(
       "DATE(cl.created_at AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date",
       [from, to],
@@ -523,17 +538,44 @@ async function syncCustomerCredits(conn, from, to, ctx) {
       'c.first_name', 'c.last_name', 'c.email', 'c.phone',
     );
 
+  const refundCreditInvIds = rows
+    .filter((r) => isRefundCreditRestorationRow(r) && r.invoice_id)
+    .map((r) => r.invoice_id);
+  const invMaps = refundCreditInvIds.length
+    ? await loadInvoicesForLinks(conn, refundCreditInvIds, [])
+    : { byId: new Map() };
+
   for (const row of rows) {
     if (isTestCustomerRow(row) || isInvoiceLinkedCreditRow(row)) continue;
     const entryDate = timestampToEtDate(row.created_at);
     const deltaCents = dollarsToCents(row.delta);
     if (!entryDate || !deltaCents) continue;
 
+    let taxCents = 0;
+    let unearnedCents = 0;
+    let invoiceId = null;
+    let serviceLine = null;
+    if (isRefundCreditRestorationRow(row)) {
+      const linkedInv = invMaps.byId.get(String(row.invoice_id)) || null;
+      invoiceId = row.invoice_id;
+      taxCents = computeProratedRefundTaxCents(deltaCents, linkedInv, null);
+      if (linkedInv?.is_annual_prepay) {
+        unearnedCents = Math.max(0, deltaCents - taxCents);
+      }
+      if (linkedInv) {
+        serviceLine = isCommercialProperty(linkedInv.property_type) ? 'commercial' : (linkedInv.service_type || null);
+      }
+    }
+
     await postOrPreview(rules.buildCustomerCreditEntry({
       ledgerId: row.id,
       entryDate,
       signedDeltaCents: deltaCents,
       creditSource: row.source,
+      taxCents,
+      unearnedCents,
+      invoiceId,
+      serviceLine,
       customerId: row.customer_id,
       memo: row.note ? String(row.note).slice(0, 300) : null,
     }), ctx, 'customer_credits');
@@ -641,7 +683,8 @@ function buildInvoiceGlPayload(inv, prepayInvoiceIds) {
 
   const principalCents = billedInvoicePrincipalCents(inv);
   const appliedDepositCents = invoiceDepositCreditCents(inv);
-  const appliedCreditCents = Math.min(safeNonNegCents(inv.credit_applied), principalCents);
+  const restoredCreditCents = Math.max(0, intCents(inv.refund_restored_credit_cents));
+  const appliedCreditCents = Math.min(safeNonNegCents(inv.credit_applied) + restoredCreditCents, principalCents);
   const subtotalCents = Math.max(0, principalCents + appliedDepositCents - taxCents);
   if (subtotalCents + taxCents <= 0) return null;
 
@@ -688,7 +731,7 @@ async function loadBookedInvoiceState(conn, invoiceId) {
 async function reverseSupersededPrepayVisitIfAny(trx, inv, adjDate, ctx) {
   if (!inv.annual_prepay_covered_term_id || !inv.scheduled_service_id) return true;
   const visitJe = await trx('gl_journal_entries')
-    .where({ idempotency_key: `unearned-visit:${inv.scheduled_service_id}`, status: 'posted' })
+    .where({ source_type: 'unearned_recognition', source_id: `covered-visit:${inv.scheduled_service_id}`, status: 'posted' })
     .whereNull('reversed_by_entry_id')
     .first('id', 'reversed_by_entry_id', trx.raw('entry_date::text as entry_date'));
   if (!visitJe) return true;
@@ -771,6 +814,22 @@ async function reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements =
   }
 }
 
+async function loadRefundRestoredCreditsByInvoice(conn, refundedInvoiceIds) {
+  const map = new Map();
+  if (!refundedInvoiceIds.length || !(await conn.schema.hasTable('customer_credit_ledger'))) return map;
+  const rows = await conn('customer_credit_ledger')
+    .whereIn('invoice_id', refundedInvoiceIds)
+    .where({ source: 'adjustment' })
+    .where('delta', '>', 0)
+    .whereRaw("COALESCE(note, '') LIKE ?", [`${REFUND_CREDIT_NOTE_PREFIX}%${REFUND_CREDIT_NOTE_SUFFIX}`])
+    .select('invoice_id', 'delta');
+  for (const r of rows) {
+    const k = String(r.invoice_id);
+    map.set(k, (map.get(k) || 0) + safeNonNegCents(r.delta));
+  }
+  return map;
+}
+
 async function hasSchemaColumn(conn, table, column) {
   if (typeof conn?.schema?.hasColumn !== 'function') return true;
   return conn.schema.hasColumn(table, column);
@@ -802,7 +861,7 @@ async function syncInvoices(conn, from, to, ctx) {
   if (hasScheduledServices) q = q.leftJoin('scheduled_services as ss', 'ss.id', 'i.scheduled_service_id');
 
   const selectCols = [
-    'i.id', 'i.invoice_number', 'i.customer_id', 'i.scheduled_service_id', 'i.subtotal', 'i.discount_amount', 'i.tax_amount', 'i.total',
+    'i.id', 'i.invoice_number', 'i.status', 'i.customer_id', 'i.scheduled_service_id', 'i.subtotal', 'i.discount_amount', 'i.tax_amount', 'i.total',
     'i.credit_applied', 'i.line_items', 'i.service_type', 'i.annual_prepay_term_id', 'i.annual_prepay_covered_term_id',
     conn.raw('i.service_date::text as service_date'), 'i.sent_at', 'i.created_at', 'i.updated_at',
     'c.first_name', 'c.last_name', 'c.email', 'c.phone', 'c.property_type',
@@ -872,9 +931,16 @@ async function syncInvoices(conn, from, to, ctx) {
     })
     .select(...selectCols);
 
-  for (const inv of rows) {
-    if (isTestCustomerRow(inv)) continue;
-    await syncSingleInvoiceRow(inv, prepayInvoiceIds, ctx);
+  const nonTestRows = rows.filter((r) => !isTestCustomerRow(r));
+  const refundedIds = nonTestRows
+    .filter((r) => String(r.status || '').toLowerCase() === 'refunded')
+    .map((r) => r.id);
+  const restoredCreditByInv = await loadRefundRestoredCreditsByInvoice(conn, refundedIds);
+
+  for (const inv of nonTestRows) {
+    const restoredCents = restoredCreditByInv.get(String(inv.id)) || 0;
+    const enriched = restoredCents > 0 ? { ...inv, refund_restored_credit_cents: restoredCents } : inv;
+    await syncSingleInvoiceRow(enriched, prepayInvoiceIds, ctx);
   }
 
   await reconcileVoidedInvoices(conn, from, to, ctx, hasPayerStatements);
@@ -929,10 +995,19 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     .where('ss.status', 'completed')
     .whereNotNull('ss.annual_prepay_term_id')
     .whereNotIn('apt.status', EXCLUDED_PREPAY_TERM_STATUSES)
-    .whereRaw(
-      "COALESCE(DATE(ss.completed_at AT TIME ZONE 'America/New_York'), ss.scheduled_date) BETWEEN ?::date AND ?::date",
-      [from, to],
-    )
+    .where((win) => {
+      win.whereRaw(
+        "COALESCE(DATE(ss.completed_at AT TIME ZONE 'America/New_York'), ss.scheduled_date) BETWEEN ?::date AND ?::date",
+        [from, to],
+      ).orWhereExists(function voidedSupersedingInvoiceInWindow() {
+        this.select(conn.raw('1'))
+          .from('invoices as vci')
+          .whereRaw('vci.scheduled_service_id = ss.id')
+          .whereNotNull('vci.annual_prepay_covered_term_id')
+          .whereRaw("(vci.status IN ('void', 'cancelled', 'canceled') OR vci.archived_at IS NOT NULL)")
+          .whereRaw("DATE(COALESCE(vci.archived_at, vci.updated_at) AT TIME ZONE 'America/New_York') BETWEEN ?::date AND ?::date", [from, to]);
+      });
+    })
     .whereNotExists(function coveredInvoiceExists() {
       this.select(conn.raw('1'))
         .from('invoices as ci')
@@ -960,9 +1035,10 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
     if (!recognitionDate || amountCents <= 0) continue;
 
     const isCommercial = isCommercialProperty(visit.property_type);
-    const entry = rules.buildUnearnedRecognitionEntry({
+    const keyBase = `unearned-visit:${visit.id}`;
+    const buildEntry = (idempotencyKey) => rules.buildUnearnedRecognitionEntry({
       sourceId: `covered-visit:${visit.id}`,
-      idempotencyKey: `unearned-visit:${visit.id}`,
+      idempotencyKey,
       recognitionDate,
       amountCents,
       serviceLine: isCommercial ? 'commercial' : (visit.service_type || 'pest'),
@@ -977,7 +1053,7 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
         ctx.stats.invoices.skipped += 1;
         return;
       }
-      await postOrPreview(entry, ctx, 'invoices', { connOverride: trx });
+      await postOrRepostSettlement(trx, { keyBase, buildEntry, ctx, bucket: 'invoices' });
     };
 
     if (ctx.dryRun) {
@@ -989,7 +1065,7 @@ async function syncCompletedAnnualPrepayVisits(conn, from, to, ctx) {
 
   // Reverse any visit-level recognition whose visit was un-completed/canceled or whose term was voided/canceled.
   const revokedVisits = await conn('gl_journal_entries as e')
-    .join('scheduled_services as ss', conn.raw("e.idempotency_key = 'unearned-visit:' || ss.id::text"))
+    .join('scheduled_services as ss', conn.raw("e.source_type = 'unearned_recognition' AND e.source_id = 'covered-visit:' || ss.id::text"))
     .leftJoin('annual_prepay_terms as apt', 'apt.id', 'ss.annual_prepay_term_id')
     .where('e.status', 'posted')
     .whereNull('e.reversed_by_entry_id')
@@ -2003,6 +2079,128 @@ function buildStatementOutflowRefundEntry({ allocations, amountCents, txnKey, ex
     : rules.buildRefundReversalEntry({ ...common, txnId: txnKey, idempotencyKey: expectedKey, reversalDate: entryDate });
 }
 
+async function loadCombinedPaymentShares(conn, rows) {
+  const byPi = new Map();
+  if (!(await conn.schema.hasTable('payments'))) return byPi;
+  const candidatePis = [...new Set(
+    (rows || [])
+      .filter((r) => !r.invoice_id && r.payment_pi)
+      .map((r) => String(r.payment_pi)),
+  )];
+  if (!candidatePis.length) return byPi;
+
+  const payRows = await conn('payments')
+    .whereIn('stripe_payment_intent_id', candidatePis)
+    .whereNot('status', 'canceled')
+    .whereRaw("COALESCE(metadata->>'source', '') <> 'invoice_refund'")
+    .orderBy('created_at', 'asc')
+    .orderBy('id', 'asc')
+    .select('id', 'stripe_payment_intent_id', 'amount', 'base_amount_cents', 'surcharge_amount_cents', 'customer_id', 'metadata');
+
+  const grouped = new Map();
+  for (const p of payRows) {
+    const pi = String(p.stripe_payment_intent_id || '');
+    if (!pi) continue;
+    const list = grouped.get(pi) || [];
+    list.push(p);
+    grouped.set(pi, list);
+  }
+
+  const shareInvIds = [];
+  const multiGroups = [];
+  for (const [pi, list] of grouped.entries()) {
+    if (list.length <= 1) continue;
+    multiGroups.push([pi, list]);
+    for (const p of list) {
+      const meta = parseJsonObject(p.metadata);
+      if (meta.invoice_id) shareInvIds.push(meta.invoice_id);
+    }
+  }
+  if (!multiGroups.length || !shareInvIds.length) return byPi;
+
+  const invMaps = await loadInvoicesForLinks(conn, shareInvIds, []);
+  for (const [pi, list] of multiGroups) {
+    const shares = [];
+    for (const p of list) {
+      const meta = parseJsonObject(p.metadata);
+      const invoice = meta.invoice_id ? invMaps.byId.get(String(meta.invoice_id)) : null;
+      const shareCents = safeNonNegCents(p.amount);
+      if (invoice && shareCents > 0) {
+        shares.push({ invoice, shareCents, paymentAmount: p.amount });
+      }
+    }
+    if (shares.length > 1) byPi.set(pi, shares);
+  }
+  return byPi;
+}
+
+/**
+ * Pure: allocate a combined-charge refund (or refund reversal) across every invoice share
+ * covered by the combined PaymentIntent with cumulative per-invoice sales-tax allocation.
+ */
+function allocateCombinedRefundAcrossShares({ absCents, shares, priorByInvoice = new Map(), isReversal = false }) {
+  if (!Array.isArray(shares) || !shares.length || !(absCents > 0)) return null;
+  const weighted = shares.map((s) => {
+    const inv = s.invoice;
+    const prior = priorByInvoice.get(String(inv.id)) || { grossCents: 0, taxCents: 0, unearnedCents: 0 };
+    const shareAmt = Math.max(0, Math.trunc(Number(s.shareCents) || 0)) || billedInvoicePrincipalCents(inv);
+    const weight = isReversal ? (prior.grossCents > 0 ? prior.grossCents : 0) : shareAmt;
+    return { share: s, inv, prior, shareAmt, weight };
+  });
+  const useFallbackShare = weighted.every((w) => w.weight <= 0);
+  const active = weighted
+    .map((w) => ({ ...w, effWeight: useFallbackShare ? w.shareAmt : w.weight }))
+    .filter((w) => w.effWeight > 0);
+  if (!active.length) return null;
+
+  const weightTotal = active.reduce((s, w) => s + w.effWeight, 0);
+  let remaining = absCents;
+  const allocations = [];
+  for (let i = 0; i < active.length; i += 1) {
+    const item = active[i];
+    const part = i === active.length - 1
+      ? remaining
+      : Math.min(remaining, Math.round((absCents * item.effWeight) / weightTotal));
+    remaining -= part;
+    if (part <= 0) continue;
+
+    const signedDelta = isReversal ? -part : part;
+    const taxCents = computeIncrementalRefundTaxCents(
+      item.prior.grossCents, item.prior.taxCents, signedDelta, item.inv, item.share.paymentAmount,
+    );
+    const isCommercial = isCommercialProperty(item.inv.property_type);
+    allocations.push({
+      invoiceId: item.inv.id,
+      customerId: item.inv.customer_id || null,
+      serviceLine: isCommercial ? 'commercial' : (item.inv.service_type || 'pest'),
+      subtotalCents: part - taxCents,
+      unearnedCents: 0,
+      taxCents,
+      grossCents: part,
+    });
+  }
+  return allocations.length ? allocations : null;
+}
+
+async function enrichPrepayUnearnedOnAllocations(trx, allocations, invoiceById, priorMap, isReversal) {
+  const out = [];
+  for (const a of allocations || []) {
+    const inv = invoiceById.get(String(a.invoiceId));
+    if (!inv?.is_annual_prepay || a.subtotalCents <= 0) {
+      out.push(a);
+      continue;
+    }
+    const priorUnearnedCents = priorMap.get(String(a.invoiceId))?.unearnedCents || 0;
+    const unearnedCents = await resolveRefundUnearnedCents(trx, inv, {
+      isReversal,
+      subtotalCents: a.subtotalCents,
+      priorUnearnedCents,
+    });
+    out.push({ ...a, unearnedCents });
+  }
+  return out;
+}
+
 function updateDryRunStatementRefundCache(cumRefundsByInvoice, allocations, isReversal) {
   for (const a of allocations || []) {
     const k = String(a.invoiceId);
@@ -2011,34 +2209,95 @@ function updateDryRunStatementRefundCache(cumRefundsByInvoice, allocations, isRe
     cumRefundsByInvoice.set(k, {
       grossCents: Math.max(0, prev.grossCents + sign * a.grossCents),
       taxCents: Math.max(0, prev.taxCents + sign * a.taxCents),
-      unearnedCents: prev.unearnedCents || 0,
+      unearnedCents: Math.max(0, (prev.unearnedCents || 0) + sign * (a.unearnedCents || 0)),
     });
   }
 }
 
-async function applyStatementOutflowRefund({ trx, stmtChildren, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx }) {
-  const childIds = stmtChildren.map((c) => String(c.id));
+async function applyMultiInvoiceOutflowRefund({ trx, combinedShares, stmtChildren, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx }) {
+  const isReversal = amountCents > 0;
+  const invList = combinedShares?.length > 1
+    ? combinedShares.map((s) => s.invoice)
+    : (stmtChildren || []);
+  const childIds = invList.map((c) => String(c.id));
   const priorMap = ctx.dryRun
     ? cumRefundsByInvoice
     : await loadPriorRefundTotalsByInvoice(trx, childIds);
-  const allocations = allocateStatementRefundAcrossInvoices({
-    absCents,
-    childInvoices: stmtChildren,
-    priorByInvoice: priorMap,
-    isReversal: amountCents > 0,
-  });
-  if (!allocations) return { handled: false, posted: false };
+  const rawAllocs = combinedShares?.length > 1
+    ? allocateCombinedRefundAcrossShares({ absCents, shares: combinedShares, priorByInvoice: priorMap, isReversal })
+    : allocateStatementRefundAcrossInvoices({ absCents, childInvoices: stmtChildren, priorByInvoice: priorMap, isReversal });
+  if (!rawAllocs) return { handled: false, posted: false };
+
+  const invById = new Map(invList.map((inv) => [String(inv.id), inv]));
+  const allocations = await enrichPrepayUnearnedOnAllocations(trx, rawAllocs, invById, priorMap, isReversal);
   const entry = buildStatementOutflowRefundEntry({
     allocations, amountCents, txnKey, expectedKey, entryDate, customerId, reason,
   });
   const posted = await applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx);
   if (posted && ctx.dryRun) {
-    updateDryRunStatementRefundCache(cumRefundsByInvoice, allocations, amountCents > 0);
+    updateDryRunStatementRefundCache(cumRefundsByInvoice, allocations, isReversal);
   }
   return { handled: true, posted };
 }
 
-async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumRefundsByInvoice, ctx) {
+function resolveOutflowLockKey({ combinedShares, row, invKey, stmtChildren, txnKey }) {
+  if (combinedShares?.length > 1) return `gl-sync-refund-pi:${row.payment_pi}`;
+  if (invKey) return `gl-sync-refund-inv:${invKey}`;
+  if (stmtChildren?.length) return `gl-sync-refund-stmt:${row.payment_statement_id}`;
+  return `gl-sync-outflow:${txnKey}`;
+}
+
+async function applySingleInvoiceOutflowRefund({ trx, row, linkedInv, invKey, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx }) {
+  let cum = { grossCents: 0, taxCents: 0, unearnedCents: 0 };
+  if (invKey) {
+    if (ctx.dryRun) {
+      cum = cumRefundsByInvoice.get(invKey) || cum;
+    } else {
+      const freshMap = await loadPriorRefundTotalsByInvoice(trx, [invKey]);
+      cum = freshMap.get(invKey) || cum;
+    }
+  }
+  const signedDelta = amountCents < 0 ? absCents : -absCents;
+  const taxCents = computeIncrementalRefundTaxCents(cum.grossCents, cum.taxCents, signedDelta, linkedInv, row.payment_amount);
+  const subtotalCents = absCents - taxCents;
+  const unearnedCents = await resolveRefundUnearnedCents(trx, linkedInv, {
+    isReversal: amountCents > 0,
+    subtotalCents,
+    priorUnearnedCents: cum.unearnedCents || 0,
+  });
+  const entry = buildOutflowRefundEntry({
+    row, linkedInv, amountCents, absCents, taxCents, unearnedCents, txnKey, expectedKey, entryDate, customerId, reason,
+  });
+  const posted = await applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx);
+  if (posted && invKey && ctx.dryRun) {
+    const sign = amountCents < 0 ? 1 : -1;
+    cumRefundsByInvoice.set(invKey, {
+      grossCents: Math.max(0, cum.grossCents + signedDelta),
+      taxCents: Math.max(0, cum.taxCents + sign * taxCents),
+      unearnedCents: Math.max(0, (cum.unearnedCents || 0) + sign * unearnedCents),
+    });
+  }
+  return posted;
+}
+
+function resolveOutflowTarget(row, invoiceMaps, stmtMap, combinedSharesByPi) {
+  const combinedShares = !row.invoice_id && row.payment_pi
+    ? combinedSharesByPi.get(String(row.payment_pi))
+    : null;
+  const hasCombined = Boolean(combinedShares?.length > 1);
+  const linkedInv = hasCombined ? null : resolveOutflowLinkedInvoice(row, invoiceMaps);
+  const stmtChildren = !linkedInv && !hasCombined && row.payment_statement_id != null
+    ? stmtMap.get(String(row.payment_statement_id))
+    : null;
+  return {
+    combinedShares: hasCombined ? combinedShares : null,
+    linkedInv,
+    stmtChildren: stmtChildren?.length ? stmtChildren : null,
+    isUnlinked: !linkedInv && !hasCombined && row.payment_statement_id == null,
+  };
+}
+
+async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, combinedSharesByPi, cumRefundsByInvoice, ctx) {
   const amountCents = dollarsToCents(row.amount);
   const entryDate = timestampToEtDate(row.created_at_stripe);
   if (!entryDate || !amountCents) return;
@@ -2057,11 +2316,10 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumR
     return;
   }
 
-  const linkedInv = resolveOutflowLinkedInvoice(row, invoiceMaps);
-  const stmtChildren = !linkedInv && row.payment_statement_id != null
-    ? stmtMap.get(String(row.payment_statement_id))
-    : null;
-  if (!linkedInv && row.payment_statement_id == null) {
+  const { combinedShares, linkedInv, stmtChildren, isUnlinked } = resolveOutflowTarget(
+    row, invoiceMaps, stmtMap, combinedSharesByPi,
+  );
+  if (isUnlinked) {
     const handled = await tryHandleUnlinkedDepositOutflow({
       row, absCents, amountCents, txnKey, entryDate, customerId, reason, depositMaps, ctx,
     });
@@ -2070,9 +2328,7 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumR
 
   const expectedKey = amountCents < 0 ? `refund:spt:${txnKey}` : `refund-reversal:spt:${txnKey}`;
   const invKey = linkedInv ? String(linkedInv.id) : null;
-  const lockKey = invKey
-    ? `gl-sync-refund-inv:${invKey}`
-    : (stmtChildren?.length ? `gl-sync-refund-stmt:${row.payment_statement_id}` : `gl-sync-outflow:${txnKey}`);
+  const lockKey = resolveOutflowLockKey({ combinedShares, row, invKey, stmtChildren, txnKey });
 
   await runWithOutflowLock(ctx.conn, lockKey, ctx.dryRun, async (trx) => {
     const existing = await trx('gl_journal_entries').where({ idempotency_key: expectedKey }).first('id');
@@ -2081,42 +2337,16 @@ async function syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumR
       return false;
     }
 
-    if (stmtChildren?.length) {
-      const stmtRes = await applyStatementOutflowRefund({
-        trx, stmtChildren, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx,
+    if (combinedShares || stmtChildren) {
+      const multiRes = await applyMultiInvoiceOutflowRefund({
+        trx, combinedShares, stmtChildren, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx,
       });
-      if (stmtRes.handled) return stmtRes.posted;
+      if (multiRes.handled) return multiRes.posted;
     }
 
-    let cum = { grossCents: 0, taxCents: 0, unearnedCents: 0 };
-    if (invKey) {
-      if (ctx.dryRun) {
-        cum = cumRefundsByInvoice.get(invKey) || cum;
-      } else {
-        const freshMap = await loadPriorRefundTotalsByInvoice(trx, [invKey]);
-        cum = freshMap.get(invKey) || cum;
-      }
-    }
-    const signedDelta = amountCents < 0 ? absCents : -absCents;
-    const taxCents = computeIncrementalRefundTaxCents(cum.grossCents, cum.taxCents, signedDelta, linkedInv, row.payment_amount);
-    const subtotalCents = absCents - taxCents;
-    const unearnedCents = await resolveRefundUnearnedCents(trx, linkedInv, {
-      isReversal: amountCents > 0,
-      subtotalCents,
-      priorUnearnedCents: cum.unearnedCents || 0,
+    return applySingleInvoiceOutflowRefund({
+      trx, row, linkedInv, invKey, amountCents, absCents, txnKey, expectedKey, entryDate, customerId, reason, cumRefundsByInvoice, ctx,
     });
-    const entry = buildOutflowRefundEntry({
-      row, linkedInv, amountCents, absCents, taxCents, unearnedCents, txnKey, expectedKey, entryDate, customerId, reason,
-    });
-    const posted = await applyOutflowEntryAtomic(trx, txnKey, entry, entryDate, ctx);
-    if (posted && invKey && ctx.dryRun) {
-      cumRefundsByInvoice.set(invKey, {
-        grossCents: Math.max(0, cum.grossCents + signedDelta),
-        taxCents: Math.max(0, cum.taxCents + (amountCents < 0 ? taxCents : -taxCents)),
-        unearnedCents: Math.max(0, (cum.unearnedCents || 0) + (amountCents < 0 ? unearnedCents : -unearnedCents)),
-      });
-    }
-    return posted;
   });
 }
 
@@ -2143,19 +2373,21 @@ async function syncStripeRefundsAndOutflows(conn, from, to, ctx) {
   }));
   const { ids, pis, customerIds } = collectOutflowInvoiceRefs(nonTestRows);
   const statementIds = [...new Set(nonTestRows.map((r) => r.payment_statement_id).filter((id) => id != null))];
-  const [invoiceMaps, depositMaps, stmtMap] = await Promise.all([
+  const [invoiceMaps, depositMaps, stmtMap, combinedSharesByPi] = await Promise.all([
     loadInvoicesForLinks(conn, ids, pis),
     loadDepositsForOutflows(conn, customerIds),
     loadStatementChildInvoices(conn, statementIds),
+    loadCombinedPaymentShares(conn, nonTestRows),
   ]);
   const stmtChildIds = [...stmtMap.values()].flat().map((c) => String(c.id));
-  const resolvedInvIds = [...new Set([...invoiceMaps.byId.keys(), ...stmtChildIds])];
+  const combinedInvIds = [...combinedSharesByPi.values()].flat().map((s) => String(s.invoice.id));
+  const resolvedInvIds = [...new Set([...invoiceMaps.byId.keys(), ...stmtChildIds, ...combinedInvIds])];
   const cumRefundsByInvoice = ctx.dryRun
     ? await loadPriorRefundTotalsByInvoice(conn, resolvedInvIds)
     : new Map();
 
   for (const row of nonTestRows) {
-    await syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, cumRefundsByInvoice, ctx);
+    await syncSingleOutflowRow(row, invoiceMaps, depositMaps, stmtMap, combinedSharesByPi, cumRefundsByInvoice, ctx);
   }
 }
 
@@ -2478,31 +2710,66 @@ async function loadMatchedBankTxnsForExpenses(conn, expenseIds, bankCaps) {
 
 async function loadVendorLookup(conn) {
   const vendors = await conn('gl_vendors')
-    .where({ active: true })
-    .select('id', 'display_name', 'legal_name', 'default_account_id', 'is_1099_eligible');
-  const byDisplay = new Map();
-  const legalCounts = new Map();
-  const byLegal = new Map();
+    .select('id', 'display_name', 'legal_name', 'default_account_id', 'is_1099_eligible', 'active');
+  const byId = new Map();
+  const activeByDisplay = new Map();
+  const activeLegalCounts = new Map();
+  const activeByLegal = new Map();
+  const anyByName = new Map();
 
   for (const v of vendors) {
+    byId.set(String(v.id).toLowerCase(), v);
     const dKey = normalizeVendorName(v.display_name);
-    if (dKey) byDisplay.set(dKey, v);
     const lKey = normalizeVendorName(v.legal_name);
+    if (dKey && (!anyByName.has(dKey) || v.active)) anyByName.set(dKey, v);
+    if (lKey && (!anyByName.has(lKey) || v.active)) anyByName.set(lKey, v);
+    if (v.active === false) continue;
+    if (dKey) activeByDisplay.set(dKey, v);
     if (lKey) {
-      legalCounts.set(lKey, (legalCounts.get(lKey) || 0) + 1);
-      byLegal.set(lKey, v);
+      activeLegalCounts.set(lKey, (activeLegalCounts.get(lKey) || 0) + 1);
+      activeByLegal.set(lKey, v);
     }
   }
-  for (const [lKey, count] of legalCounts.entries()) {
-    if (count > 1) byLegal.delete(lKey);
+  for (const [lKey, count] of activeLegalCounts.entries()) {
+    if (count > 1) activeByLegal.delete(lKey);
   }
   return {
+    byId,
     match(vendorName) {
       const k = normalizeVendorName(vendorName);
       if (!k) return null;
-      return byDisplay.get(k) || byLegal.get(k) || null;
+      return activeByDisplay.get(k) || activeByLegal.get(k) || null;
+    },
+    matchAny(vendorName) {
+      const k = normalizeVendorName(vendorName);
+      if (!k) return null;
+      return activeByDisplay.get(k) || activeByLegal.get(k) || anyByName.get(k) || null;
     },
   };
+}
+
+/**
+ * Pure: decide whether an existing expense JE's vendor_id should be updated, cleared,
+ * or preserved. Preserves historical 1099 attribution when a vendor is deactivated or
+ * renamed in gl_vendors, and only replaces/clears on an actual source-expense change.
+ */
+function decideExpenseVendorAction({ expVendorName, existingVendorId, matchedActiveVendor, vendorById = null }) {
+  const existingId = existingVendorId ? String(existingVendorId).toLowerCase() : null;
+  if (matchedActiveVendor) {
+    const targetId = String(matchedActiveVendor.id).toLowerCase();
+    if (existingId === targetId) return { action: 'keep', vendorId: matchedActiveVendor.id };
+    return { action: 'set', vendorId: matchedActiveVendor.id };
+  }
+  if (!existingId) return { action: 'keep', vendorId: null };
+  const cleanName = normalizeVendorName(expVendorName);
+  if (!cleanName) {
+    const existingVendor = vendorById?.get(existingId) || null;
+    if (existingVendor && existingVendor.active === false) {
+      return { action: 'keep', vendorId: existingVendorId };
+    }
+    return { action: 'clear', vendorId: null };
+  }
+  return { action: 'keep', vendorId: existingVendorId };
 }
 
 function buildExpenseSplits(exp, mapped, matchedVendor, amountCents) {
@@ -2556,8 +2823,7 @@ async function loadBookedExpenseState(conn, expenseId) {
   return { bookedByCode, entryCount: activeEntryIds.size, totalEntryCount: allEntryIds.size };
 }
 
-async function reconcileExpenseVendorAttribution(exp, matchedVendor, trx, ctx) {
-  const targetVendorId = matchedVendor ? matchedVendor.id : null;
+async function reconcileExpenseVendorAttribution(exp, matchedVendor, vendorById, trx, ctx) {
   const existing = await trx('gl_journal_entries as e')
     .where({ 'e.source_type': 'expense', 'e.source_id': String(exp.id), 'e.status': 'posted' })
     .whereNull('e.reversed_by_entry_id')
@@ -2565,30 +2831,35 @@ async function reconcileExpenseVendorAttribution(exp, matchedVendor, trx, ctx) {
 
   let changed = false;
   for (const row of existing) {
-    let q = trx('gl_journal_lines as l')
+    const expLines = await trx('gl_journal_lines as l')
       .join('gl_accounts as a', 'a.id', 'l.account_id')
       .where('l.entry_id', row.id)
       .whereNull('l.reconciliation_id')
-      .whereIn('a.account_type', ['cogs', 'expense']);
-    if (targetVendorId) {
-      q = q.whereRaw('(l.vendor_id IS NULL OR l.vendor_id <> ?)', [targetVendorId]);
-    } else {
-      q = q.whereNotNull('l.vendor_id');
-    }
-    const mismatched = await q.first('l.id');
-    if (!mismatched) continue;
+      .whereIn('a.account_type', ['cogs', 'expense'])
+      .select('l.id', 'l.vendor_id');
+    if (!expLines.length) continue;
+
+    const decisions = expLines.map((l) => decideExpenseVendorAction({
+      expVendorName: exp.vendor_name,
+      existingVendorId: l.vendor_id,
+      matchedActiveVendor: matchedVendor,
+      vendorById,
+    }));
+    const actionable = decisions.find((d) => d.action === 'set' || d.action === 'clear');
+    if (!actionable) continue;
 
     changed = true;
     if (ctx.dryRun) {
       ctx.stats.expenses.would_link_vendors += 1;
     } else {
+      const isClear = actionable.action === 'clear';
       const res = await linkJournalEntryVendor(row.id, {
-        vendorId: targetVendorId,
-        allowReplace: true,
-        allowClear: true,
-        reason: targetVendorId
-          ? 'Subledger sync reconciled expense vendor attribution'
-          : 'Subledger sync cleared unregistered expense vendor attribution',
+        vendorId: isClear ? null : actionable.vendorId,
+        allowReplace: !isClear,
+        allowClear: isClear,
+        reason: isClear
+          ? 'Subledger sync cleared empty expense vendor attribution'
+          : 'Subledger sync reconciled expense vendor attribution',
         actorId: ctx.actorId,
         requestMeta: ctx.requestMeta,
         conn: trx,
@@ -2608,7 +2879,7 @@ function latestAdjustmentDate(entryDate, timestamps) {
   return latest;
 }
 
-async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, ctx) {
+async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, vendorById, ctx) {
   const entryDate = dateCellText(exp.expense_date);
   const amountCents = dollarsToCents(exp.amount);
   if (!entryDate || amountCents == null || amountCents < 0) return;
@@ -2646,7 +2917,7 @@ async function syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, 
       return;
     }
 
-    const vendorChanged = await reconcileExpenseVendorAttribution(exp, matchedVendor, trx, ctx);
+    const vendorChanged = await reconcileExpenseVendorAttribution(exp, matchedVendor, vendorById, trx, ctx);
     const adjEntry = buildDeltaEntry({
       sourceType: 'expense',
       sourceId: exp.id,
@@ -2773,9 +3044,10 @@ async function syncExpenses(conn, from, to, ctx, plaidGlLookup = null, bankCapsA
     const amountCents = dollarsToCents(exp.amount);
     const mapped = exp.category_id ? glByCatId.get(exp.category_id) : null;
     const matchedVendor = vendorLookup.match(exp.vendor_name);
+    const matchedAnyVendor = matchedVendor || vendorLookup.matchAny(exp.vendor_name);
     const matchedBankTxn = matchedBankByExpense.get(String(exp.id)) || null;
 
-    if (exp.vendor_name && !matchedVendor && amountCents > 0) {
+    if (exp.vendor_name && !matchedAnyVendor && amountCents > 0) {
       ctx.stats.expenses.unmatched_vendors += 1;
       const isContractorCat = mapped?.code === SYSTEM_CODES.COGS_SUBCONTRACTORS
         || /contract|subcontract|1099/i.test(String(exp.category_name || ''));
@@ -2788,7 +3060,7 @@ async function syncExpenses(conn, from, to, ctx, plaidGlLookup = null, bankCapsA
       }
     }
 
-    await syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, ctx);
+    await syncSingleExpenseRow(exp, mapped, matchedVendor, matchedBankTxn, plaidGlLookup, vendorLookup.byId, ctx);
   }
 
   ctx.stats.expenses.unmatched_contractor_vendors = Array.from(unmatchedContractors.values());
@@ -3365,17 +3637,20 @@ module.exports = {
   computePrepayRefundUnearnedCents,
   allocateStatementPrincipalAcrossInvoices,
   allocateStatementRefundAcrossInvoices,
+  allocateCombinedRefundAcrossShares,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
   computeGapReceiptAmounts,
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,
+  isRefundCreditRestorationRow,
   extractStripeDisputeTokens,
   resolveBankTxnGlAccount,
   classifyTaxFilingSettlement,
   isBankCheckSupersededByMercury,
   matchesSettlementKeyBase,
+  decideExpenseVendorAction,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,

@@ -497,11 +497,34 @@ function buildRefundReversalEntry({
  *     Uses basisScope 'accrual_only' because non-cash credit grants affect accrual earnings
  *     while cash-basis P&L reflects actual cash collected.
  */
+function buildCustomerCreditLines({ isGrant, abs, unearned, remainder, tax, counterpart, meta }) {
+  const pushSide = (lines, accountCode, amount, isDebit) => {
+    if (amount <= 0) return;
+    lines.push({
+      accountCode,
+      debitCents: isDebit ? amount : 0,
+      creditCents: isDebit ? 0 : amount,
+      ...meta,
+    });
+  };
+  const lines = [];
+  if (!isGrant) pushSide(lines, SYSTEM_CODES.CUSTOMER_CREDITS, abs, true);
+  pushSide(lines, SYSTEM_CODES.UNEARNED_REVENUE, unearned, isGrant);
+  pushSide(lines, counterpart, remainder, isGrant);
+  pushSide(lines, SYSTEM_CODES.SALES_TAX_PAYABLE, tax, isGrant);
+  if (isGrant) pushSide(lines, SYSTEM_CODES.CUSTOMER_CREDITS, abs, false);
+  return lines;
+}
+
 function buildCustomerCreditEntry({
   ledgerId,
   entryDate,
   signedDeltaCents,
   creditSource = 'manual',
+  taxCents = 0,
+  unearnedCents = 0,
+  invoiceId = null,
+  serviceLine = null,
   customerId = null,
   memo = null,
 }) {
@@ -510,19 +533,20 @@ function buildCustomerCreditEntry({
     throw new AccountingError(400, 'signedDeltaCents must be a non-zero integer in cents');
   }
   const abs = Math.abs(delta);
+  const tax = posInt(taxCents, 'taxCents');
+  const unearned = posInt(unearnedCents, 'unearnedCents');
+  if (tax + unearned > abs) {
+    throw new AccountingError(400, 'taxCents + unearnedCents cannot exceed credit amount');
+  }
   const src = String(creditSource || 'manual').trim().toLowerCase();
   const counterpart = src === 'referral'
     ? SYSTEM_CODES.OPEX_ADVERTISING
     : SYSTEM_CODES.REV_REFUNDS_ALLOWANCES;
-  const lines = delta > 0
-    ? [
-      { accountCode: counterpart, debitCents: abs, creditCents: 0, customerId },
-      { accountCode: SYSTEM_CODES.CUSTOMER_CREDITS, debitCents: 0, creditCents: abs, customerId },
-    ]
-    : [
-      { accountCode: SYSTEM_CODES.CUSTOMER_CREDITS, debitCents: abs, creditCents: 0, customerId },
-      { accountCode: counterpart, debitCents: 0, creditCents: abs, customerId },
-    ];
+  const meta = {
+    customerId,
+    serviceLine,
+    invoiceRef: invoiceId ? String(invoiceId) : null,
+  };
   return {
     entryDate,
     entryType: 'adjusting',
@@ -532,7 +556,9 @@ function buildCustomerCreditEntry({
     idempotencyKey: `customer-credit:${ledgerId}`,
     reference: String(ledgerId),
     memo: memo || (delta > 0 ? `Customer credit issued (${src})` : `Customer credit reversed (${src})`),
-    lines,
+    lines: buildCustomerCreditLines({
+      isGrant: delta > 0, abs, unearned, remainder: abs - tax - unearned, tax, counterpart, meta,
+    }),
   };
 }
 

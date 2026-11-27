@@ -79,12 +79,14 @@ const {
   computePrepayRefundUnearnedCents,
   allocateStatementPrincipalAcrossInvoices,
   allocateStatementRefundAcrossInvoices,
+  allocateCombinedRefundAcrossShares,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
   computeGapReceiptAmounts,
   isDisputeOutflow,
   isInvoiceLinkedCreditRow,
+  isRefundCreditRestorationRow,
   extractStripeDisputeTokens,
   buildExpenseSplits,
   buildInvoiceGlPayload,
@@ -93,6 +95,7 @@ const {
   classifyTaxFilingSettlement,
   isBankCheckSupersededByMercury,
   matchesSettlementKeyBase,
+  decideExpenseVendorAction,
   timestampToUtcDate,
 } = require('../services/accounting/sync-bridge');
 const migrationGl = require('../models/migrations/20261127140000_accounting_gl_core');
@@ -2210,5 +2213,139 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     expect(summary1099.vendors[0].total_paid_cents).toBe(250000);
     expect(summary1099.unlinked_contractor_count).toBe(0);
     expect(summary1099.ready_for_filing).toBe(true);
+  });
+
+  test('Codex R6: refunded account-credit restorations offset revenue/tax (not A/R), combined refunds allocate all shares, voided superseding invoices restore visits, and inactive vendors keep attribution', async () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // 1. Refunded account-credit restoration: $100 invoice paid $20 credit + $80 cash, then fully refunded
+    const restoreRow = {
+      source: 'adjustment',
+      invoice_id: 'inv-cred-ref-1',
+      delta: '20.00',
+      note: 'Account credit returned — invoice WPC-50 fully refunded',
+    };
+    expect(isRefundCreditRestorationRow(restoreRow)).toBe(true);
+    expect(isInvoiceLinkedCreditRow(restoreRow)).toBe(false);
+    expect(isInvoiceLinkedCreditRow({ source: 'adjustment', invoice_id: 'inv-void-1', delta: '20.00', note: 'Void invoice credit return' })).toBe(true);
+
+    // Cleared credit_applied + refund_restored_credit_cents keeps original $80 A/R + $20 Credit split (never reopens $20 A/R)
+    const invRefundedJe = buildInvoiceGlPayload({
+      id: 'inv-cred-ref-1',
+      invoice_number: 'WPC-50',
+      status: 'refunded',
+      subtotal: '100.00',
+      discount_amount: '0',
+      tax_amount: '0',
+      total: '100.00',
+      credit_applied: '0.00',
+      refund_restored_credit_cents: 2000,
+      service_type: 'pest',
+      service_date: '2026-11-01',
+      property_type: 'single_family',
+    }, new Set());
+    const credCycle = accumulateEntries(accounts, [
+      rules.buildCustomerCreditEntry({ ledgerId: 'cl-orig', entryDate: '2026-10-15', signedDeltaCents: 2000, creditSource: 'referral' }),
+      invRefundedJe,
+      rules.buildPaymentEntry({ paymentId: 'pay-cred-80', paymentDate: '2026-11-02', grossCents: 8000, method: 'stripe', invoiceId: 'inv-cred-ref-1' }),
+      rules.buildRefundEntry({ refundId: 'ref-cred-80', refundDate: '2026-11-05', subtotalCents: 8000, taxCents: 0, method: 'stripe', invoiceId: 'inv-cred-ref-1' }),
+      rules.buildCustomerCreditEntry({ ledgerId: 'cl-restore', entryDate: '2026-11-05', signedDeltaCents: 2000, creditSource: 'adjustment', invoiceId: 'inv-cred-ref-1' }),
+    ]);
+    expect(bal(credCycle, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(credCycle, SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+    expect(bal(credCycle, SYSTEM_CODES.CUSTOMER_CREDITS)).toBe(2000);
+    // Revenue ($100) minus $80 cash refund minus $20 credit refund allowance = $0 net revenue
+    expect(bal(credCycle, SYSTEM_CODES.REV_RESIDENTIAL_PEST) - bal(credCycle, SYSTEM_CODES.REV_REFUNDS_ALLOWANCES)).toBe(0);
+
+    // 2. Combined-charge refund ($321 = $107 inv1 [$7 tax] + $214 inv2 [$14 tax]) reverses full $21 tax across both shares
+    const inv1 = { id: 'comb-inv-1', customer_id: '00000000-0000-4000-8000-000000000301', subtotal: '100.00', discount_amount: '0', tax_amount: '7.00', total: '107.00', service_type: 'commercial', property_type: 'commercial' };
+    const inv2 = { id: 'comb-inv-2', customer_id: '00000000-0000-4000-8000-000000000301', subtotal: '200.00', discount_amount: '0', tax_amount: '14.00', total: '214.00', service_type: 'commercial', property_type: 'commercial' };
+    const shares = [
+      { invoice: inv1, shareCents: 10700, paymentAmount: '107.00' },
+      { invoice: inv2, shareCents: 21400, paymentAmount: '214.00' },
+    ];
+    const combAllocs = allocateCombinedRefundAcrossShares({ absCents: 32100, shares });
+    expect(combAllocs.reduce((s, a) => s + a.taxCents, 0)).toBe(2100);
+    expect(combAllocs.reduce((s, a) => s + a.subtotalCents, 0)).toBe(30000);
+    const combSums = accumulateEntries(accounts, [
+      rules.buildInvoiceEntry({ invoiceId: 'comb-inv-1', issueDate: '2026-11-01', subtotalCents: 10000, taxCents: 700, isCommercial: true }),
+      rules.buildInvoiceEntry({ invoiceId: 'comb-inv-2', issueDate: '2026-11-01', subtotalCents: 20000, taxCents: 1400, isCommercial: true }),
+      rules.buildPaymentEntry({ paymentId: 'comb-pay-1', paymentDate: '2026-11-02', grossCents: 10700, method: 'stripe', invoiceId: 'comb-inv-1' }),
+      rules.buildPaymentEntry({ paymentId: 'comb-pay-2', paymentDate: '2026-11-02', grossCents: 21400, method: 'stripe', invoiceId: 'comb-inv-2' }),
+      rules.buildRefundEntry({ refundId: 'comb-ref-full', refundDate: '2026-11-06', allocations: combAllocs, method: 'stripe' }),
+    ]);
+    expect(bal(combSums, SYSTEM_CODES.SALES_TAX_PAYABLE)).toBe(0);
+    expect(bal(combSums, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(combSums, SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+    expect(computeProfitAndLoss(accounts, combSums, { from: '2026-11-01', to: '2026-11-30' }).totals.net_income_cents).toBe(0);
+
+    // 3. Visit recognition reposts under :rev-1 after its superseding covered invoice is voided
+    const visitUuid = '00000000-0000-4000-8000-00000000f001';
+    const visitConn = (table) => {
+      const chain = {
+        leftJoin: () => chain,
+        join: () => chain,
+        where: () => chain,
+        whereIn: () => chain,
+        whereNotIn: () => chain,
+        whereNull: () => chain,
+        whereNotNull: () => chain,
+        whereBetween: () => chain,
+        whereRaw: () => chain,
+        whereNot: () => chain,
+        whereExists: () => chain,
+        whereNotExists: () => chain,
+        orWhere: () => chain,
+        orWhereIn: () => chain,
+        orWhereRaw: () => chain,
+        orderBy: () => chain,
+        select: () => {
+          if (table === 'gl_accounts') return Promise.resolve(accounts);
+          if (table === 'scheduled_services as ss') {
+            return Promise.resolve([{
+              id: visitUuid, customer_id: null, annual_prepay_term_id: 'term-1', service_type: 'pest',
+              prepaid_amount: '95.00', estimated_price: '100.00', completed_at: '2026-11-05T15:00:00Z',
+              scheduled_date: '2026-11-05', term_prepay_amount: '380.00', coverage_visit_count: 4,
+              property_type: 'single_family',
+            }]);
+          }
+          if (table === 'gl_journal_entries') {
+            return Promise.resolve([{ id: 'je-v-old', idempotency_key: `unearned-visit:${visitUuid}`, reversed_by_entry_id: 'je-v-rev' }]);
+          }
+          return Promise.resolve([]);
+        },
+        first: () => Promise.resolve(null),
+      };
+      return chain;
+    };
+    visitConn.raw = (sql) => sql;
+    visitConn.schema = { hasTable: () => Promise.resolve(true), hasColumn: () => Promise.resolve(true) };
+    const visitPreview = await syncSubledgersToGl({ fromDate: '2026-11-01', toDate: '2026-11-30', dryRun: true, conn: visitConn });
+    expect(visitPreview.invoices.would_post).toBe(1);
+    expect(visitPreview.invoices.errors).toEqual([]);
+
+    // 4. Historical vendor attribution is preserved when a vendor is deactivated or renamed
+    const vA = '00000000-0000-4000-8000-00000000a001';
+    const vB = '00000000-0000-4000-8000-00000000b002';
+    const vendorById = new Map([
+      [vA, { id: vA, display_name: 'Old Contractor', active: false }],
+      [vB, { id: vB, display_name: 'Active Contractor', active: true }],
+    ]);
+    expect(decideExpenseVendorAction({ expVendorName: 'Old Contractor', existingVendorId: vA, matchedActiveVendor: null, vendorById }))
+      .toEqual({ action: 'keep', vendorId: vA });
+    expect(decideExpenseVendorAction({ expVendorName: 'Renamed Old Name', existingVendorId: vB, matchedActiveVendor: null, vendorById }))
+      .toEqual({ action: 'keep', vendorId: vB });
+    expect(decideExpenseVendorAction({ expVendorName: 'Active Contractor', existingVendorId: vA, matchedActiveVendor: { id: vB }, vendorById }))
+      .toEqual({ action: 'set', vendorId: vB });
+    expect(decideExpenseVendorAction({ expVendorName: '', existingVendorId: vB, matchedActiveVendor: null, vendorById }))
+      .toEqual({ action: 'clear', vendorId: null });
+    expect(decideExpenseVendorAction({ expVendorName: '', existingVendorId: vA, matchedActiveVendor: null, vendorById }))
+      .toEqual({ action: 'keep', vendorId: vA });
   });
 });
