@@ -546,6 +546,40 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
         expect(await VisitRecipient.contactsForVisit(visitId, 'en_route', { anyVisitStatus: true })).toEqual([]);
       });
 
+      test('"just this visit" records the visit only and puts nobody on the list; it never narrows a listed person', async () => {
+        await db('customer_reminder_contacts').where({ customer_id: customerId }).del();
+        await record({}, entry({ phone_e164: phone(60), appointment_texts_scope: 'this_visit' }));
+        expect((await rows()).map((row) => row.phone_key)).toContain(phone(60).slice(-10));
+        expect(await listed()).toHaveLength(0);
+        // Bob is listed (every visit); a later "just this visit" call about him removes nothing
+        await record();
+        await record({}, entry({ appointment_texts_scope: 'this_visit' }));
+        const list = await listed();
+        expect(list.map((row) => row.phone_key)).toEqual([BOB.slice(-10)]);
+        expect(list[0].stopped_at).toBeNull();
+      });
+
+      test('a left-over row for the same number bound to another customer is replaced by a fresh row (new id, no token, no claims)', async () => {
+        const [{ id: otherCustomerId }] = await db('customers').insert({ first_name: 'Zed', last_name: 'Other', phone: phone(44) }).returning('id');
+        try {
+          const [{ id: staleId }] = await db('visit_text_recipients').insert({
+            scheduled_service_id: otherVisitId, customer_id: otherCustomerId, phone_key: BOB.slice(-10), phone_e164: BOB,
+            source: 'call_caller_provided', consent_version: 'x', track_token: `vr_${'f'.repeat(48)}`,
+            deliveries: { [`confirmation:${OTHER_DATE}T09:00`]: 'old' },
+          }).returning('id');
+          await VisitRecipient.notifyVisitRecipients({ scheduledServiceId: otherVisitId, kind: 'confirmation', excludePhones: [HOLDER] });
+          expect(sentTo()).toEqual([BOB]);
+          const copied = await otherRows();
+          expect(copied).toHaveLength(1);
+          expect(copied[0].id).not.toBe(staleId);
+          expect(copied[0]).toMatchObject({ customer_id: customerId, source: 'customer_reminder_contact' });
+          expect(copied[0].track_token).not.toBe(`vr_${'f'.repeat(48)}`);
+        } finally {
+          await db('visit_text_recipients').where({ scheduled_service_id: otherVisitId }).del();
+          await db('customers').where({ id: otherCustomerId }).del();
+        }
+      });
+
       test('a stopped person is never copied onto a new visit', async () => {
         await db('customer_reminder_contacts').where({ customer_id: customerId }).update({ stopped_at: db.fn.now(), stop_source: 'portal' });
         await VisitRecipient.materializeForVisit(otherVisitId);

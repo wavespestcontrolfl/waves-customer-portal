@@ -95,9 +95,15 @@ describe('eligibleEntries: one rule, judged on the V2 entry alone', () => {
 
   test('the appointment-text request on the entry that carries the phone makes it eligible, in E.164 with its name and role', () => {
     expect(eligible({ secondary_contacts: [entry()] })).toEqual([
-      { phoneKey: '9415550002', phoneE164: BOB, firstName: 'Bob', lastName: 'Roe', role: 'spouse_partner' },
+      { phoneKey: '9415550002', phoneE164: BOB, firstName: 'Bob', lastName: 'Roe', role: 'spouse_partner', thisVisitOnly: false },
     ]);
     expect(eligible({ secondary_contact: entry() })).toHaveLength(1);
+  });
+
+  test('only an explicit "this_visit" scope limits the person to the booked visit; ongoing, unspecified, missing or junk is every visit', () => {
+    const only = (scope) => eligible({ secondary_contacts: [entry({ appointment_texts_scope: scope })] })[0].thisVisitOnly;
+    expect(only('this_visit')).toBe(true);
+    for (const scope of ['ongoing', 'unspecified', undefined, null, 'This_Visit', 7]) expect(only(scope)).toBe(false);
   });
 
   test('a report-only request (wants_notifications) or a presence-only flag (on_site) is NOT a request to text them', () => {

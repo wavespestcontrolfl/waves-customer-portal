@@ -5,7 +5,10 @@
  * EVERY VISIT: a person recorded from a call also goes on the customer's list (customer_reminder_contacts). Before any
  * visit's text goes out, materializeForVisit copies that list onto the visit as ordinary visit rows, so everything below
  * applies to them unchanged. A stop on the list (stopped_at) is sticky and blocks every visit row for that number; a call
- * never clears it. The rest of this header describes the per-visit rows.
+ * never clears it. A caller who limits the texts to the booked visit ("just this visit": the extraction's
+ * appointment_texts_scope = this_visit) records that visit only and changes nobody on the list. Staff and the
+ * customer's portal set and clear stopped_at in a follow-up change (the list page); the gate stays off until it ships.
+ * The rest of this header describes the per-visit rows.
  *
  * A caller who books a visit and gives another person's number to be texted ("my husband Bob will
  * be home, text him too, here is his number") gives that person the texts for THAT ONE VISIT: its
@@ -41,7 +44,7 @@ const { randomUUID } = require('node:crypto');
 const db = require('../models/db');
 const logger = require('./logger');
 const { toE164, isValidNanpNumber } = require('../utils/phone');
-const { mapSecondaryContactToLegacy } = require('../utils/extraction-compat');
+const { mapSecondaryContactToLegacy, appointmentTextsScope } = require('../utils/extraction-compat');
 const { dateOnlyString, validDateOnly } = require('../utils/date-only');
 const { recipientLinkEligible } = require('./track-token-expiry');
 const { SCHEDULED_SMS_MAX_ATTEMPTS } = require('./messaging/scheduled-sms-limits');
@@ -114,6 +117,9 @@ function eligibleEntries(v2Extraction, { excludePhones = [] } = {}) {
       firstName: entry.first_name || null,
       lastName: entry.last_name || null,
       role: role && role !== 'unknown' ? role.slice(0, 30) : null,
+      // "this_visit": the caller limited the texts to the booked visit, so the person is not put on the customer's list.
+      // Anything else (ongoing, unspecified, missing) is every visit (owner 2026-11-24 PM).
+      thisVisitOnly: appointmentTextsScope(rawEntry && rawEntry.appointment_texts_scope) === 'this_visit',
     });
   }
   return out;
@@ -179,9 +185,10 @@ async function recordForVisit({ scheduledServiceId, customerId = null, callLogId
       const visit = await trx('scheduled_services').where({ id: scheduledServiceId }).first('customer_id');
       if (!visit || !visit.customer_id || (customerId && String(customerId) !== String(visit.customer_id))) return 'customer_mismatch';
       const existing = await trx(TABLE).where({ scheduled_service_id: scheduledServiceId, phone_key: entry.phoneKey }).first('id', 'customer_id');
-      // Every visit: the person also goes on the customer's list. ON CONFLICT DO NOTHING, so a later call never changes a
-      // listed person and never clears a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
-      await trx.raw(
+      // Every visit: the person also goes on the customer's list, unless the caller limited it to this visit. ON CONFLICT DO
+      // NOTHING, so a later call never changes a listed person, never narrows one ("just this visit" removes nobody) and never
+      // clears a stop (stopped_at); a stopped person is refused at every send (declinedByRecipient).
+      if (!entry.thisVisitOnly) await trx.raw(
         `INSERT INTO ${REMINDER_TABLE} (customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (customer_id, phone_key) DO NOTHING`,
         [visit.customer_id, fresh.phone_key, fresh.phone_e164, fresh.first_name, fresh.last_name, fresh.role, SOURCE, REMINDER_CONSENT_VERSION, callLogId],
@@ -223,14 +230,25 @@ async function recordForCall({ scheduledServiceId, customerId, call, contactPhon
 /**
  * Copy the customer's every-visit people onto this visit, so the visit's own rows drive the send exactly as a call-recorded
  * row does. One statement: the visit's CURRENT customer and live status are read in the same INSERT ... SELECT that writes,
- * so a visit moved to another customer gets that customer's people, never the old one's. A person already on the visit
- * (any row for that number) is left alone, and a stopped person is never copied. Serialized with recordForVisit by the same
+ * so a visit moved to another customer gets that customer's people, never the old one's. A person already on the visit for
+ * this customer is left alone; a row for the number bound to anyone else is replaced; a stopped person is never copied. Serialized with recordForVisit by the same
  * per-visit advisory lock. Throws on a database error (the sender treats it like an unreadable recipient list).
  */
 async function materializeForVisit(scheduledServiceId, conn = db) {
   if (!scheduledServiceId) return;
   await conn.transaction(async (trx) => {
     await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?), hashtext(?::text))', ['visit_text_recipient', String(scheduledServiceId)]);
+    // A row for a listed number that is NOT bound to the visit's current customer (never bound, or left over from a customer the
+    // visit was moved away from) would hold the unique key and block the copy: delete it first, so the copy is a fresh row with a
+    // NEW id and anything queued or minted under the old id (a held text, a claim, a tracker token) finds no row and drops.
+    await trx.raw(
+      `DELETE FROM ${TABLE} r
+        USING scheduled_services s
+        WHERE s.id = ? AND r.scheduled_service_id = s.id
+          AND r.customer_id IS DISTINCT FROM s.customer_id
+          AND r.phone_key IN (SELECT c.phone_key FROM ${REMINDER_TABLE} c WHERE c.customer_id = s.customer_id AND c.stopped_at IS NULL)`,
+      [scheduledServiceId],
+    );
     await trx.raw(
       `INSERT INTO ${TABLE} (scheduled_service_id, customer_id, phone_key, phone_e164, first_name, last_name, role, source, consent_version, call_log_id)
        SELECT s.id, s.customer_id, c.phone_key, c.phone_e164, c.first_name, c.last_name, c.role, ?, c.consent_version, c.call_log_id
