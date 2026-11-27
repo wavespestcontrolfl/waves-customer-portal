@@ -228,6 +228,11 @@ async function reportDeliveryStale({ customerId, text, humanEditedBody = false, 
 // photo_check_changed; no inbound text to bind to -> photo_check_no_inbound; a read that failed -> photo_check_recheck_failed (retryable). An AI body may say what a photo shows only through a live sentence: after the live sentences are
 // removed, a photo identification in its own words -> photo_check_unverified. A staff edit keeps its own wording: only a sentence of the
 // rendered forms is held to the live readings then.
+// The PHOTO CHECK sentences a fresh read renders for this inbound text (the drafter's own renderer over a fresh context); null = a read failed.
+async function livePhotoSentences(customerId, inboundSmsLogId, dbh) {
+  const [checks, context] = await Promise.all([photoFact.loadPhotoChecks(customerId, { db: dbh, smsLogId: inboundSmsLogId }), loadCustomerContext(customerId, dbh)]);
+  return checks && context ? [...new Set(checks.map((check) => photoFact.sentenceForContext(context, check)).filter(Boolean))] : null;
+}
 async function photoCheckStale({ customerId, inboundSmsLogId = null, text, humanEditedBody = false, aiBody = false, dbh = db }) {
   const flat = flatText(text);
   const claimed = photoFact.claimsPhotoCheck(flat);
@@ -238,9 +243,8 @@ async function photoCheckStale({ customerId, inboundSmsLogId = null, text, human
   if (!customerId) return { stale: true, reason: 'amount_recheck_no_customer' };
   if (!inboundSmsLogId) return { stale: true, reason: 'photo_check_no_inbound' };
   try {
-    const [checks, context] = await Promise.all([photoFact.loadPhotoChecks(customerId, { db: dbh, smsLogId: inboundSmsLogId }), loadCustomerContext(customerId, dbh)]);
-    if (!checks || !context) return { stale: true, reason: 'photo_check_recheck_failed' };
-    const live = [...new Set(checks.map((check) => photoFact.sentenceForContext(context, check)).filter(Boolean))];
+    const live = await livePhotoSentences(customerId, inboundSmsLogId, dbh);
+    if (!live) return { stale: true, reason: 'photo_check_recheck_failed' };
     // an AI body: every photo sentence it starts must be a live one, whole; a staff edit: only the rendered forms it carries
     const forms = humanEditedBody === true ? photoFact.allRenderableSentences().filter((sentence) => flat.includes(sentence)) : null;
     const rest = live.reduce((acc, sentence) => acc.split(sentence).join(' '), flat);
@@ -428,7 +432,7 @@ async function outgoingAmountsStale({
   // Owner ruling 2026-10-01: the body is a STAFF EDIT of the AI draft (callers compare it with the stored draft; auto-send never sets this).
   humanEditedBody = false,
   // The inbound sms_log row the decision answers (agent_decisions.sms_log_id): a copied PHOTO CHECK sentence is bound to its reading.
-  inboundSmsLogId = null,
+  inboundSmsLogId,
 } = {}) {
   const verified = await factSentencesStale({ customerId, inboundSmsLogId, body, promptVersion, humanEditedBody, dbh });
   if (verified.stale) return verified;
