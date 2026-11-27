@@ -35,19 +35,51 @@ function sharedTank(item, products, order) {
   const ids = steps.map((step) => String(step.productId));
   const stepItems = products.filter((other) => other.bermudaStep);
   if (!ids.includes(String(item.product.id)) || !stepItems.every((other) => mixReady(other) && ids.includes(String(other.product.id)))) return null;
-  return `Same tank: ${steps.map((step) => step.productName).join(" + ")}`;
+  return { text: `Same tank: ${steps.map((step) => step.productName).join(" + ")}`, tankIds: ids };
 }
 
+// A base product and every ready product added to its mix: one shared tank.
+const baseTank = (base, products) => [base, ...products.filter((other) => mixReady(other) && mixesInto(other, base))].map((tankItem) => String(tankItem.product.id));
+
+// The one mix-line helper: the line's text, and the product ids it puts in the same tank (tankIds; null for no shared tank).
 function applicationMethod(item, products, order) {
   const amounts = item.tankAmounts || {};
-  if (isSpreader(item)) return GRANULAR_METHOD[amounts.applicator] || "Spreader";
-  const neutral = amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
+  const line = (text, tankIds = null) => ({ text, tankIds });
+  if (isSpreader(item)) return line(GRANULAR_METHOD[amounts.applicator] || "Spreader");
+  const neutral = line(amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label");
   if (!mixReady(item)) return neutral;
   // A Bermuda step line never takes the name marks below (they point at each other): the shared tank, or neutral wording.
   if (item.bermudaStep) return sharedTank(item, products, order) || neutral;
-  if (products.some((base) => mixReady(base) && mixesInto(item, base))) return `Add to the ${amounts.mixWith} mix`;
+  const bases = products.filter((base) => mixReady(base) && mixesInto(item, base));
+  if (bases.length) return line(`Add to the ${amounts.mixWith} mix`, [...new Set(bases.flatMap((base) => baseTank(base, products)))]);
   const partners = products.filter((other) => mixReady(other) && mixesInto(other, item));
-  return partners.length ? `Tank with: ${partners.map((other) => other.product.name).join(", ")}` : neutral;
+  return partners.length ? line(`Tank with: ${partners.map((other) => other.product.name).join(", ")}`, baseTank(item, products)) : neutral;
+}
+
+// The mix safety table's answer (server: /lawn-mix mixCheck) for each pair in one shared tank: nothing for Yes, and
+// "Jar test first" whenever the pair's rule asks for one. A Never pair replaces the mix line on every card of that tank
+// ("Do not mix: <reason>"): no card tells staff to combine the pair. Every other answer shows under the line. Never in place of a product or an amount
+// (owner 2026-11-26). No check on the sheet (a failed check): nothing.
+const MIX_CHECK_TEXT = { caution: (pair) => `Caution: ${pair.reason}`, never: (pair) => `Do not mix: ${pair.reason}`, unknown: (pair) => pair.reason || "No rule on file" };
+function tankMixWarnings(tankIds, mixCheck) {
+  if (!tankIds || tankIds.length < 2 || !Array.isArray(mixCheck?.pairs)) return [];
+  const inTank = new Set(tankIds.map((id) => id.toLowerCase()));
+  const lines = mixCheck.pairs
+    .filter((pair) => inTank.has(String(pair.productAId).toLowerCase()) && inTank.has(String(pair.productBId).toLowerCase()))
+    .flatMap((pair) => {
+      // In a tank of three or more, each line names its pair.
+      const names = inTank.size > 2 ? ` (${pair.productAName} + ${pair.productBName})` : "";
+      return [
+        MIX_CHECK_TEXT[pair.verdict] && {
+          verdict: pair.verdict, text: `${MIX_CHECK_TEXT[pair.verdict](pair)}${names}`,
+          // A Never pair in the tank: the line takes the mix line's place on every card of the tank.
+          replacesLine: pair.verdict === "never",
+        },
+        // A rule can ask for a jar test whatever its verdict, a Yes included.
+        pair.jarTestRequired && { verdict: "caution", text: `Jar test first${names}` },
+      ].filter(Boolean);
+    });
+  return lines.filter((entry, index) => lines.findIndex((other) => other.text === entry.text) === index);
 }
 
 // The Celsius label's heat rule (server: lawn-weed-mix.js), on the surfactant card and the Celsius card whenever the sheet tells
@@ -176,6 +208,8 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
         const labelLink = productLabelLink(product);
         const exclusions = product.excludedTurfSpecies || [];
         const cautions = productCautions(item, exclusions, products);
+        const method = applicationMethod(item, products, plan.bermudaMixingOrder);
+        const tankWarnings = tankMixWarnings(method.tankIds, plan.mixCheck);
         const ppe = product.ppeText || (Array.isArray(product.ppeRequired) ? product.ppeRequired.join(", ").replaceAll("_", " ") : product.ppeRequired);
         const safety = [
           ["Active ingredient", product.activeIngredient],
@@ -196,7 +230,12 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
               <h3>{product.name}</h3>
               <span className="protocol-tank-meta font-mono">{heading}</span>
             </div>
-            <p className="mt-2 font-medium">{applicationMethod(item, products, plan.bermudaMixingOrder)}</p>
+            {tankWarnings.some((warning) => warning.replacesLine)
+              ? tankWarnings.filter((warning) => warning.replacesLine).map((warning) => <p key={warning.text} className="mt-2 font-medium text-alert-fg">{warning.text}</p>)
+              : <p className="mt-2 font-medium">{method.text}</p>}
+            {tankWarnings.filter((warning) => !warning.replacesLine).map((warning) => (
+              <p key={warning.text} className={`mt-1 ${warning.verdict === "unknown" ? "text-zinc-700" : "text-alert-fg"}`}>{warning.text}</p>
+            ))}
             <p className="mt-2 text-zinc-600">{item.selected ? "Selected." : "Not selected."}</p>
             {fills.length > 0 && <dl className="protocol-tank-meta mt-2 grid gap-x-4 gap-y-1 grid-cols-[auto_1fr]">{fills.map(([label, value]) => <React.Fragment key={label}><dt className="font-medium">{label}</dt><dd className="font-mono">{value}</dd></React.Fragment>)}</dl>}
             {cautions.map((caution) => <p key={caution} className="mt-2 text-alert-fg">{caution}</p>)}

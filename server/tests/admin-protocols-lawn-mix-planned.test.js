@@ -377,3 +377,45 @@ describe('the gate-off June LESCO Crosscheck Plus lines', () => {
     }
   });
 });
+
+// The mix safety table on the sheet (services/product-mix-rules.js checkMix): every pair of sprayed products, for the
+// sheet's mix-line helper to show under each shared tank. A warning only; a failed check is left out and logged.
+describe('lawn-mix mixCheck', () => {
+  const mixRules = require('../services/product-mix-rules');
+  const logger = require('../services/logger');
+
+  test('checks every sprayed product on the sheet and sends each pair\'s verdict and reason', async () => {
+    const check = jest.spyOn(mixRules, 'checkMix').mockResolvedValue({
+      products: [],
+      pairs: [{ productAId: 'kflow', productAName: 'LESCO K-Flow 0-0-25', productBId: 'arena', productBName: 'Arena 50 WDG', verdict: 'caution', reason: 'Jar test first.', source: 'owner', jarTestRequired: true, entries: [{ kind: 'pair' }] }],
+      catalogNotes: [],
+    });
+    const body = await lawnMix();
+    expect(check).toHaveBeenCalledWith(['kflow', 'arena', 'hydretain'], { max: 3 });
+    expect(body.mixCheck).toEqual({ pairs: [{ productAId: 'kflow', productAName: 'LESCO K-Flow 0-0-25', productBId: 'arena', productBName: 'Arena 50 WDG', verdict: 'caution', reason: 'Jar test first.', jarTestRequired: true }] });
+    // A warning only: every product keeps its amounts.
+    expect(body.items.map((item) => item.plannedMix?.amount)).toEqual([30, 2.9, 90]);
+    check.mockRestore();
+  });
+
+  test('a failed check leaves mixCheck out, logs, and the sheet still renders', async () => {
+    const check = jest.spyOn(mixRules, 'checkMix').mockRejectedValue(new Error('product_mix_rules is missing'));
+    const warn = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const body = await lawnMix();
+    expect(body.mixCheck).toBeNull();
+    expect(body.items).toHaveLength(3);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('product_mix_rules is missing'));
+    check.mockRestore();
+    warn.mockRestore();
+  });
+
+  test('a sheet with fewer than two sprayed products makes no check', async () => {
+    visit.primary = 'BLACKOUT — K-Flow 0-0-25 ($2.18)';
+    visit.secondary = '';
+    const check = jest.spyOn(mixRules, 'checkMix');
+    const body = await lawnMix();
+    expect(check).not.toHaveBeenCalled();
+    expect(body.mixCheck).toBeNull();
+    check.mockRestore();
+  });
+});

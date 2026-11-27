@@ -205,6 +205,10 @@ describe('audit round 3', () => {
 
   test.each([
     [{ formulation: 'granular' }, true],
+    [{ formulation: 'Granular' }, true],
+    [{ formulation: 'Granule' }, true],
+    [{ formulation: 'Spreadable granule' }, true],
+    [{ formulation: 'Spreadable Granules' }, true],
     [{ formulation: 'G' }, true],
     [{ formulation: 'GR' }, true],
     [{ formulation: 'granular bait' }, true],
@@ -319,7 +323,9 @@ describe('normalizeRuleInput', () => {
 test('the service groups and verdicts match the migration check lists', () => {
   const widened = require('../models/migrations/20261127200000_mix_rules_spray_fert_miticide');
   expect(widened._GROUPS_BEFORE).toEqual(migration._GROUPS);
-  expect(mix.GROUP_KEYS).toEqual(widened._GROUPS);
+  const fixes = require('../models/migrations/20261127240000_mix_rules_group_fixes');
+  expect(fixes._GROUPS_BEFORE).toEqual(widened._GROUPS);
+  expect(mix.GROUP_KEYS).toEqual(fixes._GROUPS);
   expect(mix.VERDICTS).toEqual(migration._VERDICTS);
 });
 
@@ -406,6 +412,26 @@ describe('groups for combination, sprayed and miticide products', () => {
     [SOLUBLE, { fertilizer: true, herbicide: false, spray_fertilizer: true }],
     [FLORAMITE, { miticide: true, insecticide: true, fertilizer: false }],
     [{ name: 'Hexygon IQ Miticide', category: 'insecticide' }, { miticide: true }],
+    // Whole words: a termiticide is not a miticide; Avid's abamectin is.
+    [{ name: 'Termidor SC', category: 'termiticide', active_ingredient: 'Fipronil' }, { miticide: false, insecticide: false }],
+    [{ name: 'Avid 0.15EC', category: 'insecticide', active_ingredient: 'Abamectin' }, { miticide: true }],
+    // A compound category is in every class it names.
+    [{ name: 'Mite and insect spray', category: 'Insecticide/Miticide' }, { insecticide: true, miticide: true, fungicide: false }],
+    [{ name: 'Rose spray', category: 'Insecticide + Fungicide' }, { insecticide: true, fungicide: true }],
+    [{ name: 'Barrier spray', category: 'termiticide / insecticide' }, { insecticide: true }],
+    [{ name: 'Combo', category: 'insecticide_miticide' }, { insecticide: true, miticide: true }],
+    // TriTek's barred actives, by active ingredient only (a sulfur-coated urea name is not a sulfur fungicide).
+    [{ name: 'Micro Sulf', category: 'fungicide', active_ingredient: 'Sulfur' }, { sulfur: true, captan: false }],
+    [{ name: 'Polyon sulfur coated urea', category: 'fertilizer', active_ingredient: null }, { sulfur: false }],
+    [{ name: 'Captan 50WP', category: 'fungicide', active_ingredient: 'Captan' }, { captan: true }],
+    // The TriTek card's "NPK foliar fertilizer": sprayed, with N, P or K on file (analysis or an N-P-K grade in the name).
+    [LIQUID_FERT, { npk_spray_fertilizer: true }],
+    [{ name: 'Foliar feed', category: 'fertilizer', mixing_order_category: 'liquid_fertilizer', analysis_k: 5 }, { npk_spray_fertilizer: true }],
+    [SOLUBLE, { spray_fertilizer: true, npk_spray_fertilizer: false }],
+    [{ name: 'LESCO 0-0-0 Iron', category: 'fertilizer', mixing_order_category: 'liquid_fertilizer' }, { npk_spray_fertilizer: false }],
+    [STONEWALL_G, { npk_spray_fertilizer: false }],
+    [{ name: 'Sevin SL', category: 'insecticide', active_ingredient: 'Carbaryl' }, { carbaryl: true }],
+    [{ name: 'Dimethoate 4E', category: 'insecticide', active_ingredient: 'Dimethoate' }, { dimethoate: true }],
     [{ name: 'Celsius WG', category: 'herbicide' }, { herbicide: true, miticide: false, fertilizer: false }],
   ])('%j', (product, expected) => {
     for (const [group, inIt] of Object.entries(expected)) expect([group, mix.inGroup(product, group)]).toEqual([group, inIt]);
@@ -425,4 +451,14 @@ describe('groups for combination, sprayed and miticide products', () => {
     expect((await mix.checkMix([RELIANT.id, LIQUID.id])).pairs[0]).toMatchObject({ verdict: 'caution', jarTestRequired: true });
     expect((await mix.checkMix([RELIANT.id, GRANULE.id])).pairs[0]).toMatchObject({ verdict: 'unknown', jarTestRequired: false });
   });
+});
+
+test('an insecticide group Never reaches a compound category and wins over a pair Yes', async () => {
+  const ROSE = { id: id(60), name: 'Rose spray', category: 'Insecticide + Fungicide' };
+  mockTables.products_catalog.push(ROSE);
+  mockTables.product_mix_rules.push(
+    rule(60, { product_a_id: COPPER.id, group_b: 'insecticide', verdict: 'never', reason: 'No insecticide with copper.' }),
+    rule(61, { product_a_id: COPPER.id, product_b_id: ROSE.id, verdict: 'ok', reason: 'Owner: fine.' }),
+  );
+  expect((await mix.checkMix([ROSE.id, COPPER.id])).pairs[0]).toMatchObject({ verdict: 'never', reason: 'No insecticide with copper.' });
 });
