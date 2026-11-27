@@ -3041,6 +3041,7 @@ module.exports = {
   v13VisitLimits,
   settleCatchUpForVisit,
   calculateNutrientLedgerFromRows,
+  calculateNutrientLedger,
   calculateNutrients,
   summarizeAnnualN,
   buildMixOrder,
