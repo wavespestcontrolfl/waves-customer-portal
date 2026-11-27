@@ -6589,36 +6589,7 @@ const AppointmentReminders = {
       if (noShowSent) {
         logger.info(`[appt-remind] No-show notice sent for customer ${svc.customer_id}`);
       } else if (noShowOutcome.retryable === true) {
-        // No retry rail carries a no-show notice (the dispatcher's one click
-        // is the send): say so loudly and bell the office rather than log
-        // "sent" over a hold (in-session review on f9945dc89).
-        logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: notification preferences unreadable — office to follow up`);
-        try {
-          const { raiseAdminAlert } = require('./admin-alert-compose');
-          const { fullName, fitAction } = require('./admin-alert-names');
-          const name = fullName(customer) || 'the customer';
-          await raiseAdminAlert('appointment', {
-            area: 'Schedule',
-            action: fitAction('Schedule', name, [
-              (w) => `send ${w}'s no-show text`,
-              (w) => `contact ${w} about a no-show`,
-              () => 'send a no-show text manually',
-            ]),
-            why: 'Notification preferences could not be read, so the no-show text was not sent.',
-            severity: 'needs-you',
-            link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
-            subject: { type: 'visit', id: String(scheduledServiceId) },
-            doneWhen: 'customer_contacted',
-            who: 'person',
-          }, {
-            bell: true,
-            dedupeKey: `no-show-notice-held:${scheduledServiceId}`,
-            detail: `The no-show text for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            metadata: { scheduledServiceId, customerId: svc.customer_id },
-          });
-        } catch (bellErr) {
-          logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
-        }
+        await alertHeldNoShowSms({ customer, scheduledServiceId, customerId: svc.customer_id, outcome: noShowOutcome });
       } else {
         logger.warn(`[appt-remind] No-show notice not sent for ${scheduledServiceId} (no eligible recipient, opted out, or blocked)`);
       }
@@ -6640,34 +6611,7 @@ const AppointmentReminders = {
           feeOutcome: options.feeOutcome
             || (options.feeCharged === true ? 'charged' : 'none'),
         });
-        // A HELD email (preferences unreadable at the provider handoff) has
-        // no retry rail here either — bell the office (GitHub codex r4 P1).
-        if (noShowEmail?.held) {
-          logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
-          const { raiseAdminAlert } = require('./admin-alert-compose');
-          const { fullName, fitAction } = require('./admin-alert-names');
-          const name = fullName(customer) || 'the customer';
-          await raiseAdminAlert('appointment', {
-            area: 'Schedule',
-            action: fitAction('Schedule', name, [
-              (w) => `send ${w}'s no-show email`,
-              (w) => `contact ${w} about a no-show`,
-              () => 'send a no-show email manually',
-            ]),
-            why: 'Notification preferences could not be read, so the no-show email was not sent.',
-            severity: 'needs-you',
-            link: `/admin/customers?customerId=${encodeURIComponent(svc.customer_id)}`,
-            subject: { type: 'visit', id: String(scheduledServiceId) },
-            doneWhen: 'customer_contacted',
-            who: 'person',
-          }, {
-            bell: true,
-            dedupeKey: `no-show-email-held:${scheduledServiceId}`,
-            detail: `The no-show email for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
-            metadata: { scheduledServiceId, customerId: svc.customer_id },
-          })
-            .catch((bellErr) => logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`));
-        }
+        await alertHeldNoShowEmail({ customer, scheduledServiceId, customerId: svc.customer_id, noShowEmail });
       } catch (e) {
         logger.error(`[appt-remind] no-show email failed for ${scheduledServiceId}: ${e.message}`);
       }
@@ -7703,4 +7647,91 @@ AppointmentReminders.REMINDER_BLOCKING_STATUSES = REMINDER_BLOCKING_STATUSES;
 AppointmentReminders.reminderRowCanSend = (row) => !!row
   && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true;
 
+async function alertHeldNoShowSms({ customer, scheduledServiceId, customerId, outcome }) {
+  const isIntentionalHold = outcome.blockedCode === 'STREET_LEVEL_HOLD'
+    || outcome.blockedCode === 'VISIT_ON_HOLD'
+    || outcome.blockedCode === 'MOVE_HOLD';
+  if (isIntentionalHold) {
+    logger.info(`[appt-remind] No-show notice intentionally held for ${scheduledServiceId} (${outcome.blockedCode})`);
+    return;
+  }
+  const isCallbackHold = outcome.lastCode === 'CALLBACK_NUMBER_HOLD' || outcome.blockedCode === 'CALLBACK_NUMBER_HOLD';
+  // No retry rail carries a no-show notice (the dispatcher's one click
+  // is the send): say so loudly and bell the office rather than log
+  // "sent" over a hold (in-session review on f9945dc89).
+  logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: ${isCallbackHold ? 'callback number hold' : 'notification preferences unreadable'} — office to follow up`);
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    const { fullName, fitAction } = require('./admin-alert-names');
+    const name = fullName(customer) || 'the customer';
+    await raiseAdminAlert('appointment', {
+      area: 'Schedule',
+      action: isCallbackHold
+        ? fitAction('Schedule', name, [
+          (w) => `verify ${w}'s number for no-show`,
+          () => 'verify number before no-show text',
+        ])
+        : fitAction('Schedule', name, [
+          (w) => `send ${w}'s no-show text`,
+          (w) => `contact ${w} about a no-show`,
+          () => 'send a no-show text manually',
+        ]),
+      why: isCallbackHold
+        ? 'The caller disclaimed this number, so the no-show text was held until staff confirm how to reach them.'
+        : 'Notification preferences could not be read, so the no-show text was not sent.',
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'visit', id: String(scheduledServiceId) },
+      doneWhen: isCallbackHold ? 'callback_number_verified' : 'customer_contacted',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `no-show-notice-held:${scheduledServiceId}`,
+      detail: isCallbackHold
+        ? `The no-show text for ${name} (visit ${scheduledServiceId}) was held because the caller disclaimed this number. Verify the right phone number before contacting the customer.`
+        : `The no-show text for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+      metadata: { scheduledServiceId, customerId, reason: isCallbackHold ? 'callback_number_hold' : 'preferences_unavailable' },
+    });
+  } catch (bellErr) {
+    logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+  }
+}
+
+// A HELD email due to unreadable preferences has no retry rail here either —
+// bell the office (GitHub codex r4 P1). Intentional holds (street_level_hold /
+// visit_on_hold / move_hold) deliberately suppress delivery and must not ask
+// staff to contact the customer.
+async function alertHeldNoShowEmail({ customer, scheduledServiceId, customerId, noShowEmail }) {
+  if (!noShowEmail?.held || noShowEmail.reason !== 'preferences_unavailable') return;
+  logger.warn(`[appt-remind] no-show email for ${scheduledServiceId} held: ${noShowEmail.reason}`);
+  try {
+    const { raiseAdminAlert } = require('./admin-alert-compose');
+    const { fullName, fitAction } = require('./admin-alert-names');
+    const name = fullName(customer) || 'the customer';
+    await raiseAdminAlert('appointment', {
+      area: 'Schedule',
+      action: fitAction('Schedule', name, [
+        (w) => `send ${w}'s no-show email`,
+        (w) => `contact ${w} about a no-show`,
+        () => 'send a no-show email manually',
+      ]),
+      why: 'Notification preferences could not be read, so the no-show email was not sent.',
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
+      subject: { type: 'visit', id: String(scheduledServiceId) },
+      doneWhen: 'customer_contacted',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `no-show-email-held:${scheduledServiceId}`,
+      detail: `The no-show email for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+      metadata: { scheduledServiceId, customerId },
+    });
+  } catch (bellErr) {
+    logger.error(`[appt-remind] no-show email hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
+  }
+}
+
+AppointmentReminders._alertHeldNoShowSms = alertHeldNoShowSms;
+AppointmentReminders._alertHeldNoShowEmail = alertHeldNoShowEmail;
 module.exports = AppointmentReminders;

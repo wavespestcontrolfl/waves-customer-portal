@@ -127,6 +127,79 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
         dedupeKey: 'en-route-email-held:visit-2',
       }),
     );
+
+    // Intentional holds (street_level_hold, visit_on_hold, move_hold) must NOT ring staff.
+    spy.mockClear();
+    for (const reason of ['street_level_hold', 'visit_on_hold', 'move_hold']) {
+      Prefs.prefsForVisit.mockResolvedValueOnce({ customer_id: 'cust-2', tech_en_route: true, sms_enabled: true, en_route_channel: 'email' });
+      AppointmentEmail.sendTechEnRouteEmail.mockResolvedValueOnce({ ok: false, held: true, reason });
+      sendCustomerMessage.mockResolvedValueOnce({ sent: true });
+      await TwilioService.sendTechEnRoute('cust-2', 'Sam', 15, 'tok-1', { scheduledServiceId: `visit-${reason}` });
+    }
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  test('no-show hold alerts distinguish CALLBACK_NUMBER_HOLD from prefs failures and ignore intentional holds', async () => {
+    const AppointmentReminders = require('../services/appointment-reminders');
+    const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n-ns' });
+    const customer = { first_name: 'Alex', last_name: 'Rivera' };
+
+    // Callback number hold asks staff to verify the phone number rather than claiming prefs failed.
+    await AppointmentReminders._alertHeldNoShowSms({
+      customer,
+      scheduledServiceId: 'visit-cb',
+      customerId: 'cust-cb',
+      outcome: { retryable: true, lastCode: 'CALLBACK_NUMBER_HOLD' },
+    });
+    expect(spy).toHaveBeenCalledWith(
+      'appointment',
+      expect.stringContaining('verify'),
+      'The caller disclaimed this number, so the no-show text was held until staff confirm how to reach them.',
+      expect.objectContaining({
+        bell: true,
+        dedupeKey: 'no-show-notice-held:visit-cb',
+      }),
+    );
+
+    // Intentional SMS holds never ring staff.
+    spy.mockClear();
+    for (const blockedCode of ['STREET_LEVEL_HOLD', 'VISIT_ON_HOLD', 'MOVE_HOLD']) {
+      await AppointmentReminders._alertHeldNoShowSms({
+        customer,
+        scheduledServiceId: `visit-${blockedCode}`,
+        customerId: 'cust-cb',
+        outcome: { retryable: true, blockedCode },
+      });
+    }
+    expect(spy).not.toHaveBeenCalled();
+
+    // No-show email holds ring ONLY on preferences_unavailable, not intentional holds.
+    for (const reason of ['street_level_hold', 'visit_on_hold', 'move_hold']) {
+      await AppointmentReminders._alertHeldNoShowEmail({
+        customer,
+        scheduledServiceId: `visit-${reason}`,
+        customerId: 'cust-cb',
+        noShowEmail: { ok: false, held: true, reason },
+      });
+    }
+    expect(spy).not.toHaveBeenCalled();
+
+    await AppointmentReminders._alertHeldNoShowEmail({
+      customer,
+      scheduledServiceId: 'visit-pref',
+      customerId: 'cust-cb',
+      noShowEmail: { ok: false, held: true, reason: 'preferences_unavailable' },
+    });
+    expect(spy).toHaveBeenCalledWith(
+      'appointment',
+      expect.stringContaining('no-show'),
+      'Notification preferences could not be read, so the no-show email was not sent.',
+      expect.objectContaining({
+        bell: true,
+        dedupeKey: 'no-show-email-held:visit-pref',
+      }),
+    );
     spy.mockRestore();
   });
 
@@ -172,8 +245,10 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     }
   });
 
-  test('source pin: all 4 combined-refund sites in stripe-webhook.js and no-show hold sites in appointment-reminders.js use raiseAdminAlert with bell: true', () => {
+  test('source pin: all 4 combined-refund sites queue post-commit raiseAdminAlert with bell:true and no-show hold sites use raiseAdminAlert with bell:true', () => {
     const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
+    expect(stripeSrc).toMatch(/for \(const combinedAlert of combinedRefundAlerts\) await alertCombinedRefund\(combinedAlert\);/);
+    expect(stripeSrc).toMatch(/async function alertCombinedRefund\(\{ spec, opts \}\)[\s\S]*?raiseAdminAlert\('billing', spec, opts\)/);
     for (const key of [
       'combined-partial-refund:',
       'combined-cumulative-refund:',
@@ -183,8 +258,9 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
       const idx = stripeSrc.indexOf(key);
       expect(idx).toBeGreaterThan(-1);
       const snippet = stripeSrc.slice(Math.max(0, idx - 950), idx + 120);
-      expect(snippet).toMatch(/raiseAdminAlert\('billing'/);
+      expect(snippet).toMatch(/combinedRefundAlerts\.push\(/);
       expect(snippet).toMatch(/bell:\s*true/);
+      expect(snippet).not.toMatch(/await\s+raiseAdminAlert\(/);
     }
 
     const apptSrc = fs.readFileSync(path.join(__dirname, '../services/appointment-reminders.js'), 'utf8');

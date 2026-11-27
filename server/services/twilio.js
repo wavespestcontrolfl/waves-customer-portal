@@ -2207,10 +2207,12 @@ const TwilioService = {
           trackUrl: trackUrl || longTrackUrl,
           idempotencyKey: `appointment.en_route:${trackToken || customerId}`,
         });
-        // A HELD email (preferences unreadable at the provider handoff) has
-        // no retry lane on this path — bell the office so an email-only
-        // service contact is not silently skipped (GitHub codex #4299 r4 P1).
-        if (res?.held) {
+        // A HELD email due to unreadable preferences has no retry lane on this
+        // path — bell the office so an email-only service contact is not
+        // silently skipped (GitHub codex #4299 r4 P1). Intentional holds
+        // (street_level_hold / visit_on_hold / move_hold) deliberately block
+        // delivery and must not ask staff to contact the customer.
+        if (res?.held && res.reason === 'preferences_unavailable') {
           const { raiseAdminAlert } = require('./admin-alert-compose');
           await raiseAdminAlert('appointment', {
             area: 'Schedule',
