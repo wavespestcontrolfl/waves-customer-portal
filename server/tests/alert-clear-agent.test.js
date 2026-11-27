@@ -241,7 +241,8 @@ describe('the model verdict and the proof check', () => {
   test('a bare yes to an offered time closes only when the model names the booking as the answer', async () => {
     const reply = { lastBody: 'Yes', prevOutbound: 'We could come Friday at 10 am. Does that work?' };
     const none = await runWith([], { outcome: 'nothing_to_answer', why: 'customer said yes', proof: null }, { reply });
-    expect(none.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
+    expect(none.row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+    expect(none.deps.judge).not.toHaveBeenCalled();
     // A booking exists, but "nothing to answer" names no record: the model never said the booking is the answer.
     const unnamed = await runWith([booking], { outcome: 'nothing_to_answer', why: 'yes to a booked time', proof: null }, { reply });
     expect(unnamed.row).toMatchObject({ outcome: 'still_owed', rule: 'yes_to_offer_no_booking' });
@@ -529,10 +530,39 @@ describe('the booking requirement holds on every path', () => {
 
   // An unrelated move (9 to 11 after a yes to 3 PM) once lifted this guard and let a plain staff text close the yes. No rule closes a
   // yes now: the model judges the offered day and time and must name the booking or move it judged.
-  test('no plain rule closes a bare yes to an offer: a staff text goes to the model, and an answer that names it is held', async () => {
+  test('no plain rule closes a bare yes to an offer: with a staff move it goes to the model, and an answer naming the staff text is held', async () => {
     const { deps, row } = await run([staffText(), staffMove], {}, judgeNames('E1'));
     expect(deps.judge).toHaveBeenCalledTimes(1);
     expect(row).toMatchObject({ outcome: 'still_owed', source: 'ai', rule: 'yes_to_offer_no_booking' });
+  });
+
+  // Nothing after the yes could answer it, so a model call could only say still_owed: it is never paid for, and a used-up cap
+  // still leaves a verdict.
+  test('a bare yes with no booking or staff move after it stays owed by rule, with no model call, even with the cap used up', async () => {
+    const { deps, row } = await run([staffText()], {}, judgeNames('E1'));
+    expect(deps.judge).not.toHaveBeenCalled();
+    expect(deps.reserve).not.toHaveBeenCalled();
+    expect(row).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+    const capped = makeDeps({ timeline: async () => timelineOf([staffText()], { reply }), aiCountToday: async () => 100000 });
+    await agent.runAlertClearAgent({ now: NOW, deps: capped });
+    expect(saved(capped)[0]).toMatchObject({ outcome: 'still_owed', source: 'rule', rule: 'yes_to_offer_no_booking' });
+  });
+
+  // The offer comes from its own query and can be older than the context lines (3 days, 12 texts; 4 thread emails), so the model is
+  // shown the pair whole, redacted, and the pair is in the fingerprint.
+  test('the model is shown the offer and the reply, redacted, and a changed offer changes the fingerprint', () => {
+    const tl = (prevOutbound) => timelineOf([staffMove], { reply: { lastBody: 'Yes', prevOutbound }, ctx: ['CUSTOMER TEXT: thanks'] });
+    const input = agent.judgeInput(alertRow(), tl('We could come Friday at 10 am. Does that work?'), agent.computeFacts(tl('x')));
+    expect(input).toMatch(/THE YES AND THE OFFER IT ANSWERS/);
+    expect(input).toMatch(/- WAVES OFFER: We could come Friday at 10 am\. Does that work\?$/m);
+    expect(input).toMatch(/- CUSTOMER REPLY: Yes$/m);
+    const coded = agent.judgeInput(alertRow(), tl('Friday at 10 am works? Our tech will use the gate code 4821 at the front.'), agent.computeFacts(tl('x')));
+    expect(coded).not.toMatch(/4821/);
+    const plain = agent.judgeInput(alertRow(), timelineOf([staffMove], { reply: { lastBody: 'Can you come later?', prevOutbound: 'Friday at 10 am?' } }), agent.computeFacts(timelineOf()));
+    expect(plain).not.toMatch(/THE YES AND THE OFFER/);
+    const fp = (prevOutbound) => agent.fingerprintOf(alertRow(), tl(prevOutbound), NOW);
+    expect(fp('We could come Friday at 10 am?')).not.toBe(fp('We could come Tuesday at 2 pm?'));
+    expect(fp('We could come Friday at 10 am?')).toBe(fp('We could come Friday at 10 am?'));
   });
 
   test('the booking or the held staff move the model names answers it', async () => {
@@ -873,7 +903,7 @@ describe('a visit move answers only when Waves staff made it and the visit still
     ['auto-dispatch moved it', { initiated_by: 'auto_dispatch' }, /by an automatic job \(auto_dispatch\)/],
     ['the customer moved it', { initiated_by: 'customer_self_serve' }, /by the customer .*; not an answer from Waves$/],
     ['no mover is named', { initiated_by: null }, /by an unknown mover/],
-    ['the visit moved to another day since', { visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' }, /not an answer now: the visit has moved since, to 2026-12-05 12:00-13:00$/],
+    ['the visit moved to another day since', { visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' }, /not an answer now, as the visit has moved since, to 2026-12-05 12:00-13:00$/],
     ['the visit moved to another time that day since', { window_start: '08:00:00', window_end: '09:00:00' }, /moved since, to 2026-11-27 08:00-09:00$/],
   ])('no proof when %s', (_n, over, line) => {
     const e = agent.rescheduleEvent(move(over));
@@ -886,6 +916,29 @@ describe('a visit move answers only when Waves staff made it and the visit still
     expect(agent.rescheduleEvent(move({ new_window: null })).proof).toBe('date_change');
     expect(agent.rescheduleEvent(move({ new_window: null, visit_date: day('2026-11-28') })).proof).toBeNull();
     expect(agent.rescheduleEvent(move({ visit_date: null })).proof).toBeNull();
+  });
+
+  // A staff day-only edit, then a hand-off that parks the visit on that same day with no time: the edit "still holds" its day, but
+  // the visit waits for the customer's pick, so the placeholder day is no answer.
+  test('a staff move on a visit that now waits for the customer to pick a time is no proof', () => {
+    const parked = { reason_code: 'admin_edit', original_window: null, new_window: null, window_start: null, window_end: null, visit_pick_by: after(1440) };
+    const e = agent.rescheduleEvent(move(parked));
+    expect(e.proof).toBeNull();
+    expect(e.line).toMatch(/^VISIT MOVED by Waves staff after the alert \(admin_edit\), from 2026-11-23 to 2026-11-27; not an answer now, as the visit waits for the customer to pick a time$/);
+    // A pick-by left on a visit that has its time again is no wait.
+    expect(agent.rescheduleEvent(move({ visit_pick_by: after(1440) })).proof).toBe('date_change');
+  });
+
+  // The stale-move note carries ": " no more, and the reason and mover are cleaned when the line is built: the label before the first
+  // ": " skips redactLine's second pass, so nothing from the request may sit there unredacted.
+  test('the reason and the mover logged with a move pass the redaction step before they join the line', () => {
+    const stale = { visit_date: day('2026-12-05'), window_start: '12:00:00', window_end: '13:00:00' };
+    const coded = agent.rescheduleEvent(move({ ...stale, reason_code: 'gate code 4821' }));
+    const job = agent.rescheduleEvent(move({ initiated_by: 'job gate code 5566' }));
+    expect(coded.line).not.toMatch(/4821/);
+    expect(job.line).not.toMatch(/5566/);
+    const input = agent.judgeInput(alertRow(), timelineOf([{ ...coded, at: after(60) }, { ...job, at: after(70) }]), agent.computeFacts(timelineOf()));
+    expect(input).not.toMatch(/4821|5566/);
   });
 
   test('a hand-off for the customer to pick a time books nothing: never a proof, whoever handed it off', () => {

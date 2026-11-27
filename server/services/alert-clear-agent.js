@@ -32,7 +32,8 @@
  * The facts are computed here and handed to the model as fixed inputs. The model names the timeline event that answers the alert;
  * CODE then checks that event is in this alert's timeline, later than the alert, and a person's or a real record (never automated,
  * never a draft). A miss is still_owed. A bare "ok" or "yes" to an offered time is answered only by the booking or held staff move the
- * model names as its proof, on every path: no plain rule closes it, and the model judges the offered day and time.
+ * model names as its proof, on every path: no plain rule closes it, and the model judges the offered day and time from the offer
+ * and reply it is shown. With no booking or staff move after the yes, a rule keeps it owed and no model call is made.
  * Any error, refusal, timeout or unreadable reply is still_owed (fail safe), logged with no message text.
  *
  * Proof and fingerprint are computed over EVERY eligible row after the alert (to a safety cap); only the excerpts sent to the model
@@ -116,7 +117,7 @@ Rules:
 - The FIXED FACTS are computed by Waves code. Do not question them.
 - "proof" is the id (E1, E2...) of the one AFTER event that answers the alert. It is required for "answered". It must be a delivered staff text, a sent staff email, a call a person answered, a booking, a visit move by Waves staff that the visit still holds, or a sent estimate. An automated text (reminder, en route, receipt, link), an unsent Waves DRAFT, a customer message, an expired link, or a visit move by the customer or an automatic job never answers anything.
 - A staff visit move answers a request to move the visit only when its new day and time fit what the customer asked.
-- "Ok" or "yes" to an offered time is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
+- "Ok" or "yes" to an offered time (the item then shows the offer and the reply) is answered only by the booking, or the staff move the visit still holds, after the alert that puts the visit on the offered day and time: name that record in "proof". A booking or move on another day or at another time, a move that set no time when a time was offered, or a visit waiting for the customer to pick a time does not answer it; then choose still_owed. A visit that finished does not answer a question about its result. A call is a person's answer only when the line says a person answered it; seconds alone prove nothing.
 - Never return nothing_to_answer for a question, a request, or a promise Waves made.
 Reply with ONLY this JSON object, no code fence: {"outcome": "answered" | "nothing_to_answer" | "still_owed", "why": "<${MAX_WHY_WORDS} words or fewer>", "proof": "<event id or null>"}`;
 
@@ -231,7 +232,7 @@ function moverText(row) {
   const who = String(row.initiated_by || '');
   if (isStaffMove(row)) return 'Waves staff';
   if (who.startsWith('customer')) return 'the customer';
-  return who ? `an automatic job (${who})` : 'an unknown mover';
+  return who ? `an automatic job (${clean(who, 40)})` : 'an unknown mover';
 }
 const startOfWindow = (window) => hhmm(String(window || '').split('-')[0]);
 function moveStillHolds(row) {
@@ -248,16 +249,22 @@ const realMove = (row) => dateOnlyString(row.new_date) !== dateOnlyString(row.or
 // customer picks one: it books nothing, so it is never a proof, whoever handed it off.
 // A move logged with a day and no time (the package follow-up date edit writes one) is day-only evidence: its line says it set no
 // time, whatever time the visit shows now, since a later job may have set that time.
+// A move on a visit that now waits for the customer to pick a time (a later hand-off parked it, maybe on that same day) books
+// nothing either: self-serve-notice.js awaitingCustomerPick, read on the visit as it stands now.
+// The reason and the mover come from the request that logged the move: they pass the one redaction step before they join the line.
 function rescheduleEvent(row) {
-  const answers = !row.pick_handoff && isStaffMove(row) && moveStillHolds(row);
+  const { awaitingCustomerPick } = require('./scheduling/self-serve-notice');
+  const waiting = awaitingCustomerPick({ customer_pick_by: row.visit_pick_by, scheduled_date: row.visit_date, window_start: row.window_start });
+  const answers = !row.pick_handoff && !waiting && isStaffMove(row) && moveStillHolds(row);
   const timed = !!startOfWindow(row.new_window);
   const [oldStart, oldEnd] = String(row.original_window || '').split('-');
   const [newStart, newEnd] = String(row.new_window || '').split('-');
   const from = slotText(row.original_date, oldStart, oldEnd);
-  const reason = row.reason_code || 'moved';
+  const reason = clean(row.reason_code, 60) || 'moved';
   let note = timed ? 'the visit still holds that time' : 'the visit is still on that day; this move set no time';
   if (!isStaffMove(row)) note = 'not an answer from Waves';
-  else if (!answers) note = `not an answer now: the visit has moved since, to ${slotText(row.visit_date, row.window_start, row.window_end)}`;
+  else if (waiting) note = 'not an answer now, as the visit waits for the customer to pick a time';
+  else if (!answers) note = `not an answer now, as the visit has moved since, to ${slotText(row.visit_date, row.window_start, row.window_end)}`;
   const line = row.pick_handoff
     ? `VISIT HANDED TO THE CUSTOMER TO PICK A TIME by ${moverText(row)} after the alert (${reason}), from ${from}; no time is booked, so this is no answer`
     : `VISIT MOVED by ${moverText(row)} after the alert (${reason}), from ${from} to ${slotText(row.new_date, newStart, newEnd)}; ${note}`;
@@ -415,7 +422,7 @@ async function customerRecordsAfter(r, anchor, customerId) {
       .whereRaw('COALESCE(s.status, \'\') NOT IN (' + VISIT_NEVER_RAN_STATUSES.map(() => '?').join(', ') + ')', VISIT_NEVER_RAN_STATUSES)
       .orderBy('rl.created_at', 'asc').limit(ROW_CAP)
       .select('rl.id', 'rl.created_at', 'rl.reason_code', 'rl.initiated_by', 'rl.original_date', 'rl.new_date', 'rl.original_window', 'rl.new_window',
-        's.scheduled_date as visit_date', 's.window_start', 's.window_end',
+        's.scheduled_date as visit_date', 's.window_start', 's.window_end', 's.customer_pick_by as visit_pick_by',
         conn.raw('COALESCE(rl.notes = ?, false) AS pick_handoff', [require('./rain-out').PICK_LOG_MARKER]))),
   ]);
   const handed = estimates.map((row) => ({ row, at: witnessAt(row, anchor) })).filter((x) => x.at).map((x) => estimateEvent(x.row, x.at));
@@ -674,7 +681,9 @@ function computeFacts(timeline) {
 // carries whether 24 hours have passed, so the "nothing from that number in 24 hours" rule gets one fresh look.
 function fingerprintOf(alert, timeline, now) {
   const contextHash = crypto.createHash('sha1').update((timeline.ctx || []).join('\n')).digest('hex');
-  const parts = [`rules:${RULES_VERSION}`, timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash,
+  // The offer and reply a bare yes is judged on: a changed offer gets a fresh look.
+  const replyHash = timeline.reply ? crypto.createHash('sha1').update(`${timeline.reply.prevOutbound || ''}\n${timeline.reply.lastBody || ''}`).digest('hex') : '';
+  const parts = [`rules:${RULES_VERSION}`, timeline.trigger || '', timeline.bellAt ? toDate(timeline.bellAt).toISOString() : '', toDate(timeline.alertAt).toISOString(), contextHash, replyHash,
     // Each event with a hash of what the model reads of it (body, summary, status notes), not just its id and state.
     ...(timeline.unreadable ? [] : timeline.events.map((e) => `${e.key}:${crypto.createHash('sha1').update(String(e.line || '')).digest('hex').slice(0, 12)}`).sort())];
   if (alert.category === 'missed_call') parts.push(now - timeline.alertAt >= DAY_MS ? 'q24' : 'q0', `tb:${timeline.call?.textBackState || ''}`);
@@ -708,8 +717,13 @@ function ruleVerdict(alert, timeline, owed, now) {
     if (quiet) return quiet;
   }
   const kinds = owed ? OWED_RULE_PROOFS : RULE_PROOFS;
-  // A bare yes to an offered time is the model's to judge (guardBareYes): no plain rule closes it.
-  const hit = bareYesToOffer(timeline) ? null : timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
+  // A bare yes to an offered time: no plain rule closes it (guardBareYes). With no booking or held staff move after it, nothing can,
+  // so it stays owed here and no model is paid; with one, the model judges whether it is the offered day and time.
+  const yes = bareYesToOffer(timeline);
+  if (yes && !timeline.events.some((e) => ANSWERS_A_YES.includes(e.proof) && e.at > timeline.alertAt)) {
+    return verdict('still_owed', 'rule', 'yes_to_offer_no_booking', 'a yes to an offered time, with no booking or staff move after it');
+  }
+  const hit = yes ? null : timeline.events.find((e) => kinds.includes(e.proof) && e.at > timeline.alertAt);
   if (hit) return answeredBy(hit, hit.proof);
   if (owed) return verdict('still_owed', 'rule', 'owed_open', 'we owe this and nothing answers it yet');
   return null;
@@ -718,9 +732,9 @@ function ruleVerdict(alert, timeline, owed, now) {
 // "Ok" or "yes" to an offered time is answered only by the booking, or the held staff move, that the model names as its proof: on
 // EVERY path. No plain rule closes that yes (ruleVerdict), and a text, an email, a call, an estimate or a "nothing to answer" never
 // answers it. Whether the record is on the offered day and time is language (the offer is free text; no offer is stored as data, and
-// word lists over offers kept missing phrasings), so the model judges it from lines that state each record's day and time. Code
-// checks only what records prove: a real booking (never a visit waiting for the customer to pick a time) or a staff move the visit
-// still holds.
+// word lists over offers kept missing phrasings), so the model judges it from the offer and the reply (shown to it whole, as the
+// context lines may not reach back to the offer) and lines that state each record's day and time. Code checks only what records
+// prove: a real booking (never a visit waiting for the customer to pick a time) or a staff move the visit still holds.
 const ANSWERS_A_YES = ['booking', 'date_change'];
 function bareYesToOffer(timeline) {
   const reply = timeline.reply;
@@ -775,6 +789,12 @@ function judgeInput(alert, timeline, facts) {
     `- the contact is a customer on file: ${yesNo(facts.customerOnFile)}`,
     'BEFORE AND AT THE ALERT:',
     timeline.ctx.map(redactLine).join('\n') || '(nothing recorded)',
+    // The pair a bare yes is judged on, whole: the offer can be older than the context lines reach.
+    ...(bareYesToOffer(timeline) ? [
+      'THE YES AND THE OFFER IT ANSWERS (the last message Waves sent before the reply, then the reply):',
+      `- WAVES OFFER: ${clean(timeline.reply.prevOutbound, 600)}`,
+      `- CUSTOMER REPLY: ${clean(timeline.reply.lastBody, 300)}`,
+    ] : []),
     'AFTER THE ALERT (id | time | what):',
     after,
   ].join('\n');

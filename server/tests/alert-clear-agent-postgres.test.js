@@ -298,8 +298,22 @@ postgres('alert clear-up agent: readers on a real schema', () => {
     expect(moves.map((e) => e.id).sort()).toEqual([held, sameDay, automatic, ownMove, since, handoff, dayOnly].sort());
     expect(moves.filter((e) => e.proof === 'date_change').map((e) => e.id).sort()).toEqual([held, sameDay, dayOnly].sort());
     expect(moves.find((e) => e.id === dayOnly).line).toMatch(/to 2027-01-12; the visit is still on that day; this move set no time$/);
-    expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now: the visit has moved since, to 2027-01-12 15:00-16:00$/);
+    expect(moves.find((e) => e.id === since).line).toMatch(/not an answer now, as the visit has moved since, to 2027-01-12 15:00-16:00$/);
     expect(moves.find((e) => e.id === handoff).line).toMatch(/^VISIT HANDED TO THE CUSTOMER TO PICK A TIME by Waves staff .*no time is booked, so this is no answer$/);
+  });
+
+  test('a staff day-only edit on a visit a later hand-off parked on that day (waiting for the customer\'s pick) is no proof', async () => {
+    const cid = await customer();
+    const sid = `SM${tag}p`;
+    await sms({ customer_id: cid, direction: 'inbound', twilio_sid: sid, message_body: 'yes', created_at: T0, status: 'received' });
+    // The visit as it stands now: parked on Jan 12 with no time, waiting for the customer to pick one.
+    const [visit] = await db('scheduled_services').insert({ customer_id: cid, scheduled_date: '2027-01-12', window_start: null, window_end: null, customer_pick_by: at(1440), service_type: 'Pest Control', status: 'pending', created_at: at(-600) }).returning('id');
+    made.visits.push(visit.id);
+    const [edit] = await db('reschedule_log').insert({ scheduled_service_id: visit.id, customer_id: cid, original_date: '2027-01-10', new_date: '2027-01-12', reason_code: 'admin_edit', initiated_by: 'admin', created_at: at(20) }).returning('id');
+    made.reschedules.push(edit.id);
+    const row = await alert('inbound_sms', 'Text from Test', `/admin/communications?thread=${cid}&message=${sid}`);
+    const moved = (await agent.buildTimeline(row)).events.find((e) => e.id === String(edit.id));
+    expect(moved).toMatchObject({ proof: null, line: expect.stringMatching(/; not an answer now, as the visit waits for the customer to pick a time$/) });
   });
 
   test('a known customer keeps a person\'s text to the resolved number even when that row has no customer id (number not shared)', async () => {
