@@ -561,7 +561,10 @@ async function loadInvoiceHistoryForCashBasis(conn, invoiceRefs, revIdByCode, ma
 function cashBasisReceiptWhere(q) {
   q.whereIn('e.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal', 'dispute', 'dispute_reversal'])
     .orWhere((rev) => rev.where('e.source_type', 'reversal')
-      .whereIn('orig.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal', 'dispute', 'dispute_reversal']));
+      .whereIn('orig.source_type', ['payment', 'deposit_refund', 'deposit_refund_reversal', 'dispute', 'dispute_reversal']))
+    .orWhere((prepayRef) => prepayRef.where('a.code', SYSTEM_CODES.UNEARNED_REVENUE)
+      .where((src) => src.whereIn('e.source_type', ['refund', 'refund_reversal'])
+        .orWhere((r) => r.where('e.source_type', 'reversal').whereIn('orig.source_type', ['refund', 'refund_reversal']))));
 }
 
 /**

@@ -5,6 +5,8 @@
  * representing net balances, non-negative on individual debit/credit lines).
  */
 
+const { dateOnlyString } = require('../../utils/date-only');
+
 const ACCOUNT_TYPES = ['asset', 'liability', 'equity', 'revenue', 'cogs', 'expense'];
 const NORMAL_BALANCE_BY_TYPE = {
   asset: 'debit',
@@ -702,8 +704,7 @@ function centsToDollars(cents) {
 function dateCellText(value) {
   if (value == null) return null;
   if (typeof value === 'string') {
-    const m = /^(\d{4}-\d{2}-\d{2})/.exec(value.trim());
-    return m ? m[1] : null;
+    return dateOnlyString(value.trim());
   }
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
     const y = value.getFullYear();

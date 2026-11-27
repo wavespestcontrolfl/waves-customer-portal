@@ -367,7 +367,7 @@ const NAV_SECTION_DEFINITIONS = [
   { section: "Operations", itemIds: ["today", "schedule", "jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"] },
   { section: "Sales", itemIds: ["customers", "gateCodes", "pipeline", "agentEstimate", "bids", "priceMatch", "contracts"] },
   { section: "Communications", itemIds: ["communications"] },
-  { section: "Finance", itemIds: ["invoices", "recovery", "payers", "books", "banking", "taxes"] },
+  { section: "Finance", itemIds: ["invoices", "recovery", "payers", "banking", "taxes", "books"] },
   { section: "People", itemIds: ["staff", "recruiting"] },
   { section: "Marketing", itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"] },
   { section: "System", itemIds: ["agents", "toolHealth", "settings"] },
@@ -470,7 +470,7 @@ const WORKSPACE_GROUPS = [
   { id: "operations", label: "Operations", icon: Wrench, itemIds: ["jobs", "assessments", "services", "pricing", "equipment", "inventory", "compliance", "knowledge"], section: "Manage" },
   { id: "marketing", label: "Marketing", icon: Megaphone, itemIds: ["ppc", "seo", "social", "blog", "newsletter", "reviews", "referrals"], section: "Manage" },
   { id: "team", label: "Team", icon: Users, itemIds: ["staff", "recruiting"], section: "Manage" },
-  { id: "accounting", label: "Accounting", icon: Landmark, itemIds: ["books", "banking", "taxes"], section: "Manage" },
+  { id: "accounting", label: "Accounting", icon: Landmark, itemIds: ["banking", "taxes", "books"], section: "Manage" },
   { id: "agents", label: "Agents", target: "agents", itemIds: ["agents"], section: "Manage" },
   { id: "settings", label: "Settings", target: "settings", itemIds: ["settings", "toolHealth"], section: "Preferences" },
 ];

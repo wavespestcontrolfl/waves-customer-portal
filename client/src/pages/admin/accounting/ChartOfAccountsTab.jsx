@@ -23,6 +23,61 @@ import {
 } from "../../../components/ui";
 import { getJson, postJson, formatCents, ACCOUNT_TYPE_LABELS, ACCOUNT_TYPE_ORDER } from "./api";
 
+const REGISTER_PAGE_SIZE = 100;
+
+const SUBTYPE_OPTIONS_BY_TYPE = {
+  asset: [
+    { value: "checking", label: "Checking Bank Account (Reconcilable)" },
+    { value: "savings", label: "Savings Account (Reconcilable)" },
+    { value: "stripe_clearing", label: "Payment Clearing (Reconcilable)" },
+    { value: "undeposited_funds", label: "Undeposited Funds (Reconcilable)" },
+    { value: "accounts_receivable", label: "Accounts Receivable" },
+    { value: "other_current_asset", label: "Other Current Asset" },
+    { value: "fixed_asset", label: "Fixed Asset (Vehicle / Equipment)" },
+    { value: "accumulated_depreciation", label: "Accumulated Depreciation (Contra)" },
+    { value: "other_asset", label: "Other Long-Term Asset" },
+  ],
+  liability: [
+    { value: "credit_card", label: "Credit Card (Reconcilable)" },
+    { value: "loan_payable", label: "Loan / Note Payable (Reconcilable)" },
+    { value: "accounts_payable", label: "Accounts Payable" },
+    { value: "sales_tax_payable", label: "Sales Tax Payable" },
+    { value: "payroll_liability", label: "Payroll Liability" },
+    { value: "unearned_revenue", label: "Unearned Revenue / Deposits" },
+    { value: "customer_credits", label: "Customer Account Credits" },
+    { value: "other_current_liability", label: "Other Current Liability" },
+  ],
+  equity: [
+    { value: "owner_equity", label: "Owner Equity / Capital" },
+    { value: "owner_draws", label: "Owner Draws (Contra)" },
+    { value: "retained_earnings", label: "Retained Earnings" },
+  ],
+  revenue: [
+    { value: "service_revenue", label: "Service Revenue" },
+    { value: "surcharge_revenue", label: "Processing Surcharge Revenue" },
+    { value: "contra_revenue", label: "Refunds & Allowances (Contra)" },
+    { value: "other_revenue", label: "Other Revenue" },
+  ],
+  cogs: [
+    { value: "field_labor", label: "Field Labor" },
+    { value: "materials", label: "Materials & Chemicals" },
+    { value: "subcontractors", label: "Subcontractors (1099)" },
+    { value: "merchant_fees", label: "Merchant Processing Fees" },
+    { value: "other_cogs", label: "Other Cost of Goods Sold" },
+  ],
+  expense: [
+    { value: "operating_expense", label: "Operating Expense" },
+    { value: "depreciation", label: "Depreciation Expense" },
+    { value: "interest_expense", label: "Interest Expense" },
+    { value: "meals", label: "Business Meals (50% Deductible)" },
+    { value: "nondeductible", label: "Non-Deductible Expense (0%)" },
+  ],
+};
+
+function defaultSubTypeFor(accountType) {
+  return SUBTYPE_OPTIONS_BY_TYPE[accountType]?.[0]?.value || "operating_expense";
+}
+
 const EMPTY_FORM = {
   code: "",
   name: "",
@@ -40,10 +95,13 @@ export default function ChartOfAccountsTab({ onChanged }) {
   const [search, setSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState("all");
 
-  // Register drawer / panel state
+  // Register drawer / panel state (paginated + date filterable)
   const [selectedAccount, setSelectedAccount] = useState(null);
   const [register, setRegister] = useState(null);
   const [registerLoading, setRegisterLoading] = useState(false);
+  const [registerOffset, setRegisterOffset] = useState(0);
+  const [registerFrom, setRegisterFrom] = useState("");
+  const [registerTo, setRegisterTo] = useState("");
 
   // New account modal
   const [createOpen, setCreateOpen] = useState(false);
@@ -68,18 +126,29 @@ export default function ChartOfAccountsTab({ onChanged }) {
     loadAccounts();
   }, [loadAccounts]);
 
-  const openRegister = async (acct) => {
+  const fetchRegisterPage = async (acct, { offset = 0, from = registerFrom, to = registerTo } = {}) => {
     setSelectedAccount(acct);
-    setRegister(null);
+    setRegisterOffset(offset);
     setRegisterLoading(true);
+    setError("");
     try {
-      const res = await getJson(`/accounts/${acct.id}/register?limit=150`);
+      const params = new URLSearchParams({ limit: String(REGISTER_PAGE_SIZE), offset: String(offset) });
+      if (from) params.set("from", from);
+      if (to) params.set("to", to);
+      const res = await getJson(`/accounts/${acct.id}/register?${params.toString()}`);
       setRegister(res);
     } catch (err) {
       setError(err.message || "Could not load account register.");
     } finally {
       setRegisterLoading(false);
     }
+  };
+
+  const openRegister = (acct) => {
+    setRegister(null);
+    setRegisterFrom("");
+    setRegisterTo("");
+    fetchRegisterPage(acct, { offset: 0, from: "", to: "" });
   };
 
   const handleCreate = async (e) => {
@@ -91,7 +160,7 @@ export default function ChartOfAccountsTab({ onChanged }) {
         code: form.code.trim(),
         name: form.name.trim(),
         accountType: form.accountType,
-        subType: form.subType.trim() || "operating_expense",
+        subType: form.subType || defaultSubTypeFor(form.accountType),
         scheduleCLine: form.scheduleCLine.trim() || null,
         deductiblePct: Number(form.deductiblePct),
         description: form.description.trim() || null,
@@ -156,6 +225,49 @@ export default function ChartOfAccountsTab({ onChanged }) {
             </div>
           </CardHeader>
           <CardBody className="p-0">
+            <div className="flex flex-wrap items-end justify-between gap-3 border-b border-hairline border-zinc-200 bg-zinc-50 px-4 py-3 text-14">
+              <div className="flex flex-wrap items-end gap-2">
+                <div>
+                  <label className="block text-14 text-zinc-600 mb-1" htmlFor="reg-from">From</label>
+                  <Input id="reg-from" type="date" value={registerFrom} onChange={(e) => setRegisterFrom(e.target.value)} />
+                </div>
+                <div>
+                  <label className="block text-14 text-zinc-600 mb-1" htmlFor="reg-to">To</label>
+                  <Input id="reg-to" type="date" value={registerTo} onChange={(e) => setRegisterTo(e.target.value)} />
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={registerLoading}
+                  onClick={() => fetchRegisterPage(selectedAccount, { offset: 0 })}
+                >
+                  Apply Dates
+                </Button>
+              </div>
+              {register && Number(register.total) > 0 ? (
+                <div className="flex items-center gap-2">
+                  <span className="text-zinc-600">
+                    Showing {registerOffset + 1}–{Math.min(registerOffset + (register.transactions?.length || 0), register.total)} of {register.total}
+                  </span>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={registerLoading || registerOffset <= 0}
+                    onClick={() => fetchRegisterPage(selectedAccount, { offset: Math.max(0, registerOffset - REGISTER_PAGE_SIZE) })}
+                  >
+                    Previous
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={registerLoading || registerOffset + REGISTER_PAGE_SIZE >= register.total}
+                    onClick={() => fetchRegisterPage(selectedAccount, { offset: registerOffset + REGISTER_PAGE_SIZE })}
+                  >
+                    Next
+                  </Button>
+                </div>
+              ) : null}
+            </div>
             {registerLoading ? (
               <div className="p-6 text-14 text-zinc-500">Loading register...</div>
             ) : (
@@ -257,10 +369,29 @@ export default function ChartOfAccountsTab({ onChanged }) {
               </div>
               <div>
                 <label className="block text-14 font-medium text-zinc-700 mb-1" htmlFor="coa-type">Account Type</label>
-                <Select id="coa-type" value={form.accountType} onChange={(e) => setForm({ ...form, accountType: e.target.value })}>
+                <Select
+                  id="coa-type"
+                  value={form.accountType}
+                  onChange={(e) => {
+                    const nextType = e.target.value;
+                    setForm({ ...form, accountType: nextType, subType: defaultSubTypeFor(nextType) });
+                  }}
+                >
                   {ACCOUNT_TYPE_ORDER.map((t) => <option key={t} value={t}>{ACCOUNT_TYPE_LABELS[t]}</option>)}
                 </Select>
               </div>
+            </div>
+            <div>
+              <label className="block text-14 font-medium text-zinc-700 mb-1" htmlFor="coa-subtype">Account Subtype</label>
+              <Select
+                id="coa-subtype"
+                value={form.subType}
+                onChange={(e) => setForm({ ...form, subType: e.target.value })}
+              >
+                {(SUBTYPE_OPTIONS_BY_TYPE[form.accountType] || []).map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </Select>
             </div>
             <div>
               <label className="block text-14 font-medium text-zinc-700 mb-1" htmlFor="coa-name">Account Name</label>

@@ -595,6 +595,15 @@ async function listAccounts({ includeInactive = false, conn = db } = {}) {
   });
 }
 
+const DEFAULT_SUBTYPE_BY_TYPE = {
+  asset: 'other_current_asset',
+  liability: 'other_current_liability',
+  equity: 'owner_equity',
+  revenue: 'service_revenue',
+  cogs: 'other_cogs',
+  expense: 'operating_expense',
+};
+
 function parseNewAccountInput(input = {}) {
   const code = String(input.code || '').trim();
   const name = String(input.name || '').trim();
@@ -614,11 +623,12 @@ function parseNewAccountInput(input = {}) {
   if (!Number.isInteger(deductiblePct) || deductiblePct < 0 || deductiblePct > 100) {
     throw new AccountingError(400, 'deductiblePct must be an integer between 0 and 100');
   }
+  const defaultSubType = DEFAULT_SUBTYPE_BY_TYPE[accountType] || 'operating_expense';
   return {
     code,
     name,
     account_type: accountType,
-    sub_type: optionalText(pickKey(input, 'subType', 'sub_type', 'operating_expense'), 40) || 'operating_expense',
+    sub_type: optionalText(pickKey(input, 'subType', 'sub_type', defaultSubType), 40) || defaultSubType,
     normal_balance: normalBalance,
     parent_account_id: assertOptionalUuid(pickKey(input, 'parentAccountId', 'parent_account_id'), 'parentAccountId'),
     plaid_account_id: assertOptionalUuid(pickKey(input, 'plaidAccountId', 'plaid_account_id'), 'plaidAccountId'),

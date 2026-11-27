@@ -154,11 +154,13 @@ function buildInvoiceEntry({
  */
 function buildUnearnedRecognitionEntry({
   sourceId,
+  idempotencyKey = null,
   recognitionDate,
   amountCents,
   serviceLine = 'pest',
   isCommercial = false,
   customerId = null,
+  scheduledServiceId = null,
   memo = null,
 }) {
   const amt = posInt(amountCents, 'amountCents');
@@ -169,11 +171,11 @@ function buildUnearnedRecognitionEntry({
     basisScope: 'accrual_only',
     sourceType: 'unearned_recognition',
     sourceId: String(sourceId),
-    idempotencyKey: `unearned-rec:${sourceId}:${recognitionDate}`,
+    idempotencyKey: idempotencyKey || `unearned-rec:${sourceId}:${recognitionDate}`,
     memo: memo || `Recognize earned service revenue (${serviceLine})`,
     lines: [
-      { accountCode: SYSTEM_CODES.UNEARNED_REVENUE, debitCents: amt, creditCents: 0, customerId, serviceLine },
-      { accountCode: revenueAccountCodeFor(serviceLine, isCommercial), debitCents: 0, creditCents: amt, customerId, serviceLine },
+      { accountCode: SYSTEM_CODES.UNEARNED_REVENUE, debitCents: amt, creditCents: 0, customerId, serviceLine, scheduledServiceId },
+      { accountCode: revenueAccountCodeFor(serviceLine, isCommercial), debitCents: 0, creditCents: amt, customerId, serviceLine, scheduledServiceId },
     ],
   };
 }
@@ -315,15 +317,51 @@ function buildStripeFeeEntry({
   };
 }
 
+function buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isReversal, meta }) {
+  const earned = sub - unearned;
+  const lines = [];
+  if (isReversal) {
+    lines.push({ accountCode: cashAccount, debitCents: total, creditCents: 0, ...meta });
+  }
+  if (unearned > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.UNEARNED_REVENUE,
+      debitCents: isReversal ? 0 : unearned,
+      creditCents: isReversal ? unearned : 0,
+      ...meta,
+    });
+  }
+  if (earned > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES,
+      debitCents: isReversal ? 0 : earned,
+      creditCents: isReversal ? earned : 0,
+      ...meta,
+    });
+  }
+  if (tax > 0) {
+    lines.push({
+      accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE,
+      debitCents: isReversal ? 0 : tax,
+      creditCents: isReversal ? tax : 0,
+      ...meta,
+    });
+  }
+  if (!isReversal) {
+    lines.push({ accountCode: cashAccount, debitCents: 0, creditCents: total, ...meta });
+  }
+  return lines;
+}
+
 /**
- * 4. Customer Refund / Dispute Reversal (properly reverses pass-through FL sales tax too).
- *    DR 4090 Refunds & Allowances (net of tax) + DR 2100 FL Sales Tax Payable (tax portion)
- *    / CR 1050 Stripe Clearing (or 1010 Checking)
+ * 4. Customer Refund (reverses pass-through FL sales tax and releases 2300 Unearned Revenue
+ *    for annual-prepay refunds before hitting 4090 Refunds & Allowances).
  */
 function buildRefundEntry({
   refundId,
   refundDate,
   subtotalCents,
+  unearnedCents = 0,
   taxCents = 0,
   method = 'stripe',
   customerId = null,
@@ -334,23 +372,16 @@ function buildRefundEntry({
   reason = 'Customer refund',
 }) {
   const sub = posInt(subtotalCents, 'subtotalCents');
+  const unearned = posInt(unearnedCents, 'unearnedCents');
   const tax = posInt(taxCents, 'taxCents');
+  if (unearned > sub) throw new AccountingError(400, 'unearnedCents cannot exceed subtotalCents');
   const total = sub + tax;
   if (total <= 0) throw new AccountingError(400, 'Refund total must be > 0');
 
   const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
     ? SYSTEM_CODES.STRIPE_CLEARING
     : SYSTEM_CODES.CHECKING_PRIMARY;
-  const invoiceRef = invoiceId ? String(invoiceId) : null;
-
-  const lines = [];
-  if (sub > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, debitCents: sub, creditCents: 0, customerId, serviceLine, invoiceRef });
-  }
-  if (tax > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: tax, creditCents: 0, customerId, serviceLine, invoiceRef });
-  }
-  lines.push({ accountCode: cashAccount, debitCents: 0, creditCents: total, customerId, serviceLine, invoiceRef });
+  const meta = { customerId, serviceLine, invoiceRef: invoiceId ? String(invoiceId) : null };
 
   return {
     entryDate: refundDate,
@@ -361,18 +392,18 @@ function buildRefundEntry({
     idempotencyKey: idempotencyKey || `refund:${refundId}`,
     reference: reference || String(refundId),
     memo: reason,
-    lines,
+    lines: buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isReversal: false, meta }),
   };
 }
 
 /**
- * 4b. Dispute Won / Bounced Refund Reinstatement (funds returned to Stripe Clearing).
- *     DR 1050 Stripe Clearing / CR 4090 Refunds & Allowances + CR 2100 FL Sales Tax Payable
+ * 4b. Bounced Refund Reinstatement (funds returned to Stripe Clearing; restores 2300/4090/2100).
  */
 function buildRefundReversalEntry({
   txnId,
   reversalDate,
   subtotalCents,
+  unearnedCents = 0,
   taxCents = 0,
   method = 'stripe',
   customerId = null,
@@ -380,27 +411,19 @@ function buildRefundReversalEntry({
   invoiceId = null,
   reference = null,
   idempotencyKey = null,
-  reason = 'Dispute won / refund reversed',
+  reason = 'Refund reversed',
 }) {
   const sub = posInt(subtotalCents, 'subtotalCents');
+  const unearned = posInt(unearnedCents, 'unearnedCents');
   const tax = posInt(taxCents, 'taxCents');
+  if (unearned > sub) throw new AccountingError(400, 'unearnedCents cannot exceed subtotalCents');
   const total = sub + tax;
   if (total <= 0) throw new AccountingError(400, 'Refund reversal total must be > 0');
 
   const cashAccount = String(method || 'stripe').toLowerCase() === 'stripe'
     ? SYSTEM_CODES.STRIPE_CLEARING
     : SYSTEM_CODES.CHECKING_PRIMARY;
-  const invoiceRef = invoiceId ? String(invoiceId) : null;
-
-  const lines = [
-    { accountCode: cashAccount, debitCents: total, creditCents: 0, customerId, serviceLine, invoiceRef },
-  ];
-  if (sub > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.REV_REFUNDS_ALLOWANCES, debitCents: 0, creditCents: sub, customerId, serviceLine, invoiceRef });
-  }
-  if (tax > 0) {
-    lines.push({ accountCode: SYSTEM_CODES.SALES_TAX_PAYABLE, debitCents: 0, creditCents: tax, customerId, serviceLine, invoiceRef });
-  }
+  const meta = { customerId, serviceLine, invoiceRef: invoiceId ? String(invoiceId) : null };
 
   return {
     entryDate: reversalDate,
@@ -411,6 +434,53 @@ function buildRefundReversalEntry({
     idempotencyKey: idempotencyKey || `refund-reversal:${txnId}`,
     reference: reference || String(txnId),
     memo: reason,
+    lines: buildRefundSplitLines({ sub, unearned, tax, total, cashAccount, isReversal: true, meta }),
+  };
+}
+
+/**
+ * 4e. Standalone Customer Account Credit Issuance / Clawback (from customer_credit_ledger).
+ *     - Referral grant (+):    DR 6200 Advertising & Marketing / CR 2350 Customer Credits
+ *     - Promo/manual grant (+): DR 4090 Refunds, Discounts & Allowances / CR 2350 Customer Credits
+ *     - Standalone clawback (-): exact mirror (DR 2350 / CR counterpart)
+ *     Uses basisScope 'accrual_only' because non-cash credit grants affect accrual earnings
+ *     while cash-basis P&L reflects actual cash collected.
+ */
+function buildCustomerCreditEntry({
+  ledgerId,
+  entryDate,
+  signedDeltaCents,
+  creditSource = 'manual',
+  customerId = null,
+  memo = null,
+}) {
+  const delta = Math.trunc(Number(signedDeltaCents));
+  if (!Number.isSafeInteger(delta) || delta === 0) {
+    throw new AccountingError(400, 'signedDeltaCents must be a non-zero integer in cents');
+  }
+  const abs = Math.abs(delta);
+  const src = String(creditSource || 'manual').trim().toLowerCase();
+  const counterpart = src === 'referral'
+    ? SYSTEM_CODES.OPEX_ADVERTISING
+    : SYSTEM_CODES.REV_REFUNDS_ALLOWANCES;
+  const lines = delta > 0
+    ? [
+      { accountCode: counterpart, debitCents: abs, creditCents: 0, customerId },
+      { accountCode: SYSTEM_CODES.CUSTOMER_CREDITS, debitCents: 0, creditCents: abs, customerId },
+    ]
+    : [
+      { accountCode: SYSTEM_CODES.CUSTOMER_CREDITS, debitCents: abs, creditCents: 0, customerId },
+      { accountCode: counterpart, debitCents: 0, creditCents: abs, customerId },
+    ];
+  return {
+    entryDate,
+    entryType: 'adjusting',
+    basisScope: 'accrual_only',
+    sourceType: 'customer_credit',
+    sourceId: String(ledgerId),
+    idempotencyKey: `customer-credit:${ledgerId}`,
+    reference: String(ledgerId),
+    memo: memo || (delta > 0 ? `Customer credit issued (${src})` : `Customer credit reversed (${src})`),
     lines,
   };
 }
@@ -1015,6 +1085,7 @@ module.exports = {
   buildDepositRefundReversalEntry,
   buildDisputeWithdrawalEntry,
   buildDisputeReinstatementEntry,
+  buildCustomerCreditEntry,
   buildStripePayoutEntry,
   buildExpenseEntry,
   buildTransferEntry,

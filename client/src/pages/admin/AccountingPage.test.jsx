@@ -87,6 +87,9 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
           account: { id: "acc-1010", code: "1010", name: "Capital One Operating Checking" },
           opening_balance_cents: 2500000,
           closing_balance_cents: 2651397,
+          total: 150,
+          limit: 100,
+          offset: 0,
           transactions: [
             { id: "l1", entry_id: "e1", entry_number: 7, entry_date: "2026-11-08", memo: "Stripe payout settled", debit_cents: 151397, credit_cents: 0, running_balance_cents: 2651397, reconciled: true },
           ],
@@ -106,6 +109,15 @@ describe("AccountingPage (QuickBooks-style General Ledger UI)", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "View Register" }));
     await waitFor(() => expect(screen.getByText("Stripe payout settled")).toBeTruthy());
+    expect(screen.getByText(/Showing 1–1 of 150/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Next" }).disabled).toBe(false);
+
+    // New Account dialog switches Account Subtype options to match selected Account Type
+    fireEvent.click(screen.getByRole("button", { name: "New Account" }));
+    fireEvent.change(screen.getByLabelText("Account Type"), { target: { value: "asset" } });
+    expect(screen.getByLabelText("Account Subtype").value).toBe("checking");
+    fireEvent.change(screen.getByLabelText("Account Type"), { target: { value: "liability" } });
+    expect(screen.getByLabelText("Account Subtype").value).toBe("credit_card");
   });
 
   it("switches from Profit & Loss to Balance Sheet without crashing and ignores stale responses", async () => {

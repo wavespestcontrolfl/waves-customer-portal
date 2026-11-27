@@ -70,12 +70,15 @@ const {
   resolvePaymentMethod,
   computeProratedRefundTaxCents,
   computeIncrementalRefundTaxCents,
+  computePrepayRefundUnearnedCents,
   allocateStatementPrincipalAcrossInvoices,
   splitDepositRefundCents,
   findMatchingDepositForOutflow,
   computePrepayVisitRecognitionCents,
   computeGapReceiptAmounts,
   isDisputeOutflow,
+  isInvoiceLinkedCreditRow,
+  extractStripeDisputeTokens,
   buildExpenseSplits,
   buildInvoiceGlPayload,
   buildInvoiceDeltaEntry,
@@ -1500,5 +1503,78 @@ describe('Round-0 Audit Regressions (Dates, Deposits, Surcharges, Fees, Cash Bas
     expect(canceled.canceled).toBe(true);
     expect(deletedRec).toBe(true);
     expect(audited.some((a) => a.row.action === 'accounting.reconciliation.cancel')).toBe(true);
+  });
+
+  test('Codex R1: visit recognition preserves canonical idempotencyKey, prepay refunds release 2300, and customer credit issuances fund 2350', () => {
+    const accounts = makeSyntheticAccounts();
+    const byCode = new Map(accounts.map((a) => [a.code, a]));
+    const bal = (sums, code) => {
+      const a = byCode.get(code);
+      const s = sums.get(a.id) || { debitCents: 0, creditCents: 0 };
+      return naturalBalanceCents(a, s.debitCents, s.creditCents);
+    };
+
+    // 1. buildUnearnedRecognitionEntry honors caller idempotencyKey & scheduledServiceId for reversal lookups
+    const visitId = '00000000-0000-4000-8000-000000000333';
+    const recJe = rules.buildUnearnedRecognitionEntry({
+      sourceId: `covered-visit:${visitId}`,
+      idempotencyKey: `unearned-visit:${visitId}`,
+      recognitionDate: '2026-11-18',
+      amountCents: 10000,
+      serviceLine: 'Quarterly Pest Control',
+      scheduledServiceId: visitId,
+    });
+    expect(recJe.idempotencyKey).toBe(`unearned-visit:${visitId}`);
+    expect(recJe.lines[0].scheduledServiceId).toBe(visitId);
+
+    // 2. Full $1,200 annual-prepay invoice + payment + full $1,200 refund releases 2300 Unearned (zero liability, zero accrual loss)
+    const unearnedFull = computePrepayRefundUnearnedCents({
+      isAnnualPrepay: true,
+      isReversal: false,
+      subtotalCents: 120000,
+      originalUnearnedCents: 120000,
+      recognizedCents: 0,
+      priorUnearnedRefundedCents: 0,
+    });
+    expect(unearnedFull).toBe(120000);
+    const prepayCycle = accumulateEntries(accounts, [
+      rules.buildInvoiceEntry({ invoiceId: 'inv-ap-1', issueDate: '2026-11-01', subtotalCents: 120000, taxCents: 0, isAnnualPrepay: true }),
+      rules.buildPaymentEntry({ paymentId: 'pay-ap-1', paymentDate: '2026-11-01', grossCents: 120000, method: 'stripe', invoiceId: 'inv-ap-1' }),
+      rules.buildRefundEntry({ refundId: 'ref-ap-1', refundDate: '2026-11-05', subtotalCents: 120000, unearnedCents: unearnedFull, taxCents: 0, invoiceId: 'inv-ap-1' }),
+    ]);
+    expect(bal(prepayCycle, SYSTEM_CODES.UNEARNED_REVENUE)).toBe(0);
+    expect(bal(prepayCycle, SYSTEM_CODES.REV_REFUNDS_ALLOWANCES)).toBe(0);
+    expect(bal(prepayCycle, SYSTEM_CODES.STRIPE_CLEARING)).toBe(0);
+
+    // Partial earned prepay refund: $1,200 prepay, $300 earned, $1,000 refunded -> $900 DR 2300 + $100 DR 4090
+    expect(computePrepayRefundUnearnedCents({
+      isAnnualPrepay: true,
+      isReversal: false,
+      subtotalCents: 100000,
+      originalUnearnedCents: 120000,
+      recognizedCents: 30000,
+      priorUnearnedRefundedCents: 0,
+    })).toBe(90000);
+
+    // 3. Standalone referral credit grant ($100) + invoice consuming $100 credit leaves 2350 = $0.00 and net accrual income = $0.00
+    const creditCycle = accumulateEntries(accounts, [
+      rules.buildCustomerCreditEntry({ ledgerId: 'cl-1', entryDate: '2026-11-01', signedDeltaCents: 10000, creditSource: 'referral' }),
+      rules.buildInvoiceEntry({ invoiceId: 'inv-cr-1', issueDate: '2026-11-02', subtotalCents: 10000, taxCents: 0, appliedCreditCents: 10000 }),
+    ]);
+    expect(bal(creditCycle, SYSTEM_CODES.CUSTOMER_CREDITS)).toBe(0);
+    expect(bal(creditCycle, SYSTEM_CODES.ACCOUNTS_RECEIVABLE)).toBe(0);
+    expect(bal(creditCycle, SYSTEM_CODES.OPEX_ADVERTISING)).toBe(10000);
+    expect(bal(creditCycle, SYSTEM_CODES.REV_RESIDENTIAL_PEST)).toBe(10000);
+    expect(isInvoiceLinkedCreditRow({ source: 'invoice_application', invoice_id: 'inv-1' })).toBe(true);
+    expect(isInvoiceLinkedCreditRow({ source: 'adjustment', invoice_id: 'inv-1' })).toBe(true);
+    expect(isInvoiceLinkedCreditRow({ source: 'referral', invoice_id: null })).toBe(false);
+    expect(isInvoiceLinkedCreditRow({ source: 'promo_code', invoice_id: null })).toBe(false);
+
+    // 4. Dispute description token parser extracts dispute/charge/PI references for unlinked dispute resolution
+    expect(extractStripeDisputeTokens('Chargeback withdrawal for dp_1ABC23 on ch_9XYZ89')).toEqual({
+      disputeId: 'dp_1ABC23',
+      chargeId: 'ch_9XYZ89',
+      piId: null,
+    });
   });
 });
