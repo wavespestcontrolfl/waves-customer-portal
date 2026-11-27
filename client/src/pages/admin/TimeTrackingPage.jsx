@@ -232,8 +232,8 @@ const OFFICE_ONLY_STAFF_TABS = new Set(["timesheet", "entries", "approvals", "an
 
 // Resolve the LEAF the page will actually render for a ?tab= deep link.
 // The payroll tab (GATE_PAYROLL) follows the same rule from its own status probe.
-// The Pay stubs tab (GATE_TECH_PAY_STUBS) is open to every staff role; it falls back to
-// Timesheet (Dashboard for a technician) when off and waits (null) while its one
+// The Pay stubs tab is open to every staff role; it falls back to
+// Timesheet (Dashboard for a technician) when it cannot load and waits (null) while its one
 // request is pending. A technician's link to an office-only leaf opens Dashboard.
 export function resolveStaffTab(rawTab, role, payrollAvailable = false, payStubsStatus = "off", scoreboardStatus = "off") {
   if (role !== "admin" && OFFICE_ONLY_STAFF_TABS.has(rawTab)) return "dashboard";

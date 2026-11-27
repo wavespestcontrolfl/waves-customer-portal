@@ -15,13 +15,12 @@ const WITHOUT_TAX = 'Visit bills do not read this box: this service is usually b
 const family = (taxable) => ({ taxable, inclusions: [], exclusions: [], responsibilities: [] });
 const line = (taxable, extra = {}) => ({ description: 'Monthly service', quantity: 1, unitPrice: 100, frequency: 'monthly', taxable, ...extra });
 const program = (taxable, extra = {}) => ({ service: 'pest', label: 'Pest control', frequencyPerYear: 4, pricePerApplication: 100, taxable, ...extra });
-const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, billToTaxBasis = 'self', accountCommercial = true, lawnSprayNoTaxLive = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
+const makeFixture = ({ buildingUse = 'nonresidential', buildingUseTaxLive = true, taxExemptVerified = false, billToTaxBasis = 'self', accountCommercial = true, status = 'draft', buildings, programs, correctiveWork, businessTaxRules } = {}) => ({
   bidToolsEnabled: true,
   buildingUseTaxLive,
   taxExemptVerified,
   billToTaxBasis,
   accountCommercial,
-  lawnSprayNoTaxLive,
   suggestedTaxRate: 0.07,
   suggestedTaxSource: 'Manatee County',
   familyRegistry: { pest: family(true), lawn: family(false), tree_shrub: family(false), other: family(true) },
@@ -134,11 +133,6 @@ it('an account type that could not be read (null) gives no basis: no warnings an
   await mount({ accountCommercial: null, buildings: [{ name: 'Office', lineItems: [line(false), line(true, { description: 'Second' })] }] });
   expect(warnings()).toEqual([]);
   expect(summary()).toBeNull();
-});
-
-it('with GATE_LAWN_SPRAY_NO_TAX off, an untaxed business rule gives no basis: a taxable lawn program is not warned, an untaxed pest one is', async () => {
-  await mount({ lawnSprayNoTaxLive: false, programs: [program(true, { service: 'lawn', label: 'Lawn care' }), program(false)] });
-  expect(warnings()).toEqual([WITH_TAX]);
 });
 
 it('residential with no taxable rows: no warning and no summary line', async () => {

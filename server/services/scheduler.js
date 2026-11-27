@@ -3358,11 +3358,10 @@ function initScheduledJobs() {
 
   // EVERY 15 MIN — the new-referral bell (owner 2026-10-29 "ok go"): one admin row per card waiting in
   // Referrals → Queue, with Confirm / Not a referral buttons; a row whose card was answered or left the list
-  // closes. Dark behind GATE_REFERRAL_INBOUND_BELL, read at each tick. The lease keeps one sweep at a time;
+  // closes. The lease keeps one sweep at a time;
   // each card's row is written under its own advisory lock. Logs counts only, never a name.
   cron.schedule('12,27,42,57 * * * *', async () => {
     try {
-      if (!require('../config/feature-gates').referralInboundBellLive()) return;
       const result = await runExclusive('referral-inbound-bell', () => require('./referral-inbound-bell').syncReferralInboundBells());
       if (result && (result.raised || result.closed || result.failed)) logger.info(`[referral-inbound-bell] ${JSON.stringify(result)}`);
     } catch (err) {

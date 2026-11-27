@@ -245,10 +245,10 @@ describe('legacyGeographicVeto: Punta Gorda', () => {
     })).toBeNull();
   });
 
-  // The not-yet-served branch stays wired into the veto (empty list today), and a veto closes the make-up gate and the booking branch.
-  test('the veto still reads the not-yet-served list, and a veto closes the make-up gate and the booking branch', () => {
+  // The not-yet-served branch stays wired into the veto (empty list today), and a veto closes the make-up move and the booking branch.
+  test('the veto still reads the not-yet-served list, and a veto closes the make-up move and the booking branch', () => {
     expect(source).toContain('cities.some(isNotYetServedLocality) || zips.some(isNotYetServedZip)');
-    expect(source).toMatch(/const makeupGateOn = isEnabled\('callMakeupMove'\) && !v2RoutingBlocked && !legacyGeoVeto/);
+    expect(source).toMatch(/const makeupMoveInPlay = !v2RoutingBlocked && !legacyGeoVeto/);
     expect(source).toContain('&& legacyGeoVeto) {');
   });
 
