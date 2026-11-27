@@ -139,16 +139,16 @@ describe("110-gallon tank reference", () => {
     }
   });
 
-  it("a product the program adds to another mix is an additive card, on screen and in print, never its own tank", () => {
+  it("an additive whose base product is not on the sheet gets neutral wording, never its own tank or an add instruction", () => {
     const plan = fixture();
     plan.items = [{ selected: true, conditional: true, product: { id: "nis", name: "Synthetic surfactant", labelVerifiedAt: "2026-01-01", mixingOrderCategory: "adjuvant_last" },
       tankAmounts: { application: "spray", concentrationPercent: 0.25, mixWith: "Celsius WG", per100Gal: null, fullTank: null,
         backpack4Gal: { gallons: 4, amount: 1.28, amountUnit: "fl oz", carrierSource: "concentration" } } }];
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
-      expect(within(surface).getByText("Add to the Celsius WG mix")).toBeInTheDocument();
+      expect(within(surface).getByText("Mixing: follow this card and the label")).toBeInTheDocument();
+      expect(within(surface).queryByText(/Add to the/)).not.toBeInTheDocument();
       expect(within(surface).queryByText("Separate single-product tank")).not.toBeInTheDocument();
-      expect(within(surface).queryByText(/Apply alone|Mixing: follow/)).not.toBeInTheDocument();
       expect(within(surface).getByText("0.25% of the spray volume")).toBeInTheDocument();
     }
   });
@@ -166,7 +166,7 @@ describe("110-gallon tank reference", () => {
     const spray = (id, name, extra) => ({ selected: false, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "dry_wg_wdg_wp_df" },
       tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
     plan.items = [
-      spray("cel", "Celsius WG", {}),
+      { ...spray("cel", "Celsius WG", {}), selected: true },
       { ...spray("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }), selected: true },
       // Partners that are not today's instruction: unselected, or selected but at a limit.
       spray("nis", "Synthetic surfactant", { mixWith: "Celsius WG" }),
@@ -177,7 +177,8 @@ describe("110-gallon tank reference", () => {
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("Tank with: Certainty Turf Herbicide")).toBeInTheDocument();
-      expect(within(surface).getAllByText("Add to the Celsius WG mix")).toHaveLength(3);
+      // Only the selected, uncapped partner is told to add itself; the others get neutral wording.
+      expect(within(surface).getAllByText("Add to the Celsius WG mix")).toHaveLength(1);
       expect(within(surface).getByText("Apply alone in its own tank")).toBeInTheDocument();
       expect(within(surface).getByText("Keep the synthetic 2(ee) sheet on hand.")).toHaveClass("text-alert-fg");
       expect(within(surface).queryByText("Synthetic note only.")).not.toBeInTheDocument();
@@ -200,6 +201,45 @@ describe("110-gallon tank reference", () => {
     const { container } = render(<ProtocolTankSheet plan={plan} />);
     for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
       expect(within(surface).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent("0.12 oz (3.4 g) · FlowZone Typhoon Backpack #2 test");
+    }
+  });
+
+  it("no mix instruction when the base product is unselected or capped", () => {
+    const plan = fixture();
+    const item = (id, name, extra, selected) => ({ selected, conditional: true, product: { id, name, labelVerifiedAt: "2026-01-01", mixingOrderCategory: "dry_wg_wdg_wp_df" },
+      tankAmounts: { ...tankAmounts(), bigTank: false, per100Gal: null, fullTank: null, ...extra } });
+    for (const base of [item("cel", "Celsius WG", {}, false), item("cel", "Celsius WG", { planState: "capped" }, true)]) {
+      plan.items = [base, item("cer", "Certainty Turf Herbicide", { mixWith: "Celsius WG" }, true)];
+      const { container, unmount } = render(<ProtocolTankSheet plan={plan} />);
+      expect(within(container).queryByText(/Add to the|Tank with/)).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it("says once, on screen and in print, that limits are checked on the job card", () => {
+    const { container } = render(<ProtocolTankSheet plan={fixture()} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getAllByText("Reference amounts. Yearly and visit limits are checked on the job card, not here.")).toHaveLength(1);
+    }
+  });
+
+  it("a volume stated for one use of the line shows that use's own fill beside the sprayer's", () => {
+    const plan = fixture();
+    plan.items[0].tankAmounts.useFills = [{ use: "mapped large patch", carrierGalPer1000: 2, per100Gal: null,
+      backpack4Gal: { gallons: 4, amount: 0.454, amountUnit: "oz", carrierGalPer1000: 2, carrierSource: "line" } }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    expect(within(container).getByText("FlowZone 4 gal, mapped large patch").nextSibling).toHaveTextContent("0.454 oz at 2 gal per 1,000 sq ft");
+    expect(within(container).getByText("FlowZone 4 gal").nextSibling).toHaveTextContent("0.12 oz (3.4 g)");
+  });
+
+  it("a hand-shaker bait says Hand shaker, on screen and in print", () => {
+    const plan = fixture();
+    plan.items = [{ selected: false, conditional: true, product: { id: "adv", name: "Synthetic bait granule", labelVerifiedAt: "2026-01-01" },
+      tankAmounts: { application: "spreader", applicator: "hand_shaker", ratePer1000: 3, rateUnit: "lb", per100Gal: null, fullTank: null, backpack4Gal: null } }];
+    const { container } = render(<ProtocolTankSheet plan={plan} />);
+    for (const surface of [container, document.querySelector(".protocol-print-sheet")]) {
+      expect(within(surface).getByText("Hand shaker")).toBeInTheDocument();
+      expect(within(surface).queryByText("Spreader")).not.toBeInTheDocument();
     }
   });
 

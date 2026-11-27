@@ -64,6 +64,27 @@ describe('the rate a recipe line states', () => {
   });
 });
 
+describe('a several-use line and a hand-shaker bait', () => {
+  const VELISTA_OCT = 'Velista — mapped large patch at 2 gal per 1,000 sq ft, with Artavia on a lawn mapped for large patch alone; fairy ring, 0.5 to 0.7 oz per 1,000 sq ft every 14 to 21 days, with a wetting agent; dollar spot on bermuda and zoysia, 0.3 to 0.5 oz per 1,000 sq ft';
+  const velista = { name: 'Velista', default_rate_per_1000: 0.5, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
+  test('October Velista: 2 gal per 1,000 sq ft is the large patch use\'s own fill; the other uses take the sprayer\'s volume', () => {
+    const ref = tankReference({ product: velista, item: conditional(VELISTA_OCT), backpack: BACKPACK });
+    expect(ref).toMatchObject({ fixedCarrierGalPer1000: null, backpack4Gal: { amount: 1.504, carrierGalPer1000: 1.33, carrierSource: 'calibration' } });
+    expect(ref.useFills).toEqual([expect.objectContaining({ use: 'mapped large patch', carrierGalPer1000: 2, backpack4Gal: expect.objectContaining({ amount: 1, carrierSource: 'line' }) })]);
+  });
+  test('a one-use line keeps its volume for the whole line (Arena: the clause after it is a note)', () => {
+    const arena = { name: 'Arena', default_rate_per_1000: 0.29, rate_unit: 'oz', mixing_order_category: 'dry_wg_wdg_wp_df' };
+    const ref = tankReference({ product: arena, item: conditional('Arena 50 WDG — chinch, 0.147 oz per 1,000 sq ft in 4 gal per 1,000 sq ft, recheck at 5 and 12 days; a second application no sooner than 8 weeks later'), backpack: BACKPACK });
+    expect(ref).toMatchObject({ fixedCarrierGalPer1000: 4, useFills: [], backpack4Gal: { amount: 0.147 } });
+  });
+  test('a bait the line puts down by hand shaker is a hand-shaker card; another granular is a spreader', () => {
+    const advion = { name: 'Advion Insect Granule', default_rate_per_1000: 3, rate_unit: 'lb' };
+    expect(tankReference({ product: advion, item: conditional('Advion Insect Granule — mole cricket spots, 3 lb per 1,000 sq ft of treated area by hand shaker') }))
+      .toMatchObject({ application: 'spreader', applicator: 'hand_shaker', ratePer1000: 3 });
+    expect(tankReference({ product: advion, item: conditional('Topchoice — 2 lb per 1,000 sq ft with a spreader') })).toMatchObject({ applicator: 'spreader' });
+  });
+});
+
 describe('the carrier the job calculation already uses', () => {
   const dimension = { name: 'Dimension 2EW', default_rate_per_1000: 0.5, rate_unit: 'fl oz', mixing_order_category: 'ec_ew' };
   test('the spring catch-up hose pass sizes on its row carrier (1 gal), not the rig at 2 gal, as roundsCatchUp.carrierFor does', () => {

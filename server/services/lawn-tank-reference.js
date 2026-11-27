@@ -105,9 +105,35 @@ function fixedCarrier(item, row) {
   const rowCarrier = roundsCatchUp.carrierFor(item, row, null)
     || (row?.applicationMode === 'spot' && Number(row?.ratePer1000) > 0 && Number(row?.carrierGalPer1000) > 0 ? Number(row.carrierGalPer1000) : null);
   if (rowCarrier) return [rowCarrier, 'row'];
-  const stated = lineCarrierGalPer1000(item.raw);
+  // A volume stated for one use of a several-use line belongs to that use only (lineUses); the line's other uses take the sprayer's.
+  const stated = lineUses(item.raw).length ? null : lineCarrierGalPer1000(item.raw);
   return stated ? [stated, 'line'] : [null, null];
 }
+
+// A line with several uses (its ';' clauses, where another clause states its own rate: October Velista's large patch at 2 gal per
+// 1,000 sq ft, then fairy ring and dollar spot at their own rates): each clause that states a spray volume, as its own use. [] for a
+// line whose one use the volume covers (Arena: the clause after the rate is a recheck note).
+function lineUses(raw) {
+  const text = String(raw || '');
+  const clauses = text.slice(text.indexOf(' \u2014 ') + 1).split(';').map((clause) => clause.trim()).filter(Boolean);
+  const withVolume = clauses.filter((clause) => lineCarrierGalPer1000(clause));
+  if (!clauses.some((clause) => !lineCarrierGalPer1000(clause) && LINE_RATE.test(clause))) return [];
+  return withVolume.map((clause) => ({
+    use: clause.split(',')[0].replace(/^\u2014\s*/, '').replace(/\s+(?:in|at)\s+\d[\s\S]*$/i, '').trim(),
+    carrier: lineCarrierGalPer1000(clause),
+    raw: clause,
+  }));
+}
+
+// The fills of one scoped use, on its own volume (and its own stated rate, when the clause states one).
+function useFill({ use, carrier, raw }, { product, row, nutrientTargets, tankFills }) {
+  const rateArgs = { product, ...nutrientTargets, ...recipeRateOptions(row, raw).options };
+  const sized = (gallons) => fill({ gallons, carrier, carrierSource: 'line', rateArgs });
+  return { use, carrierGalPer1000: carrier, per100Gal: tankFills ? sized(BIG_TANK_GAL) : null, backpack4Gal: sized(BACKPACK_GAL) };
+}
+
+// How a granular product goes on: a hand shaker when the line says so (Advion bait on mole cricket tunnels), else a spreader.
+const granularApplicator = (raw) => (/hand\s*shaker/i.test(String(raw || '')) ? 'hand_shaker' : 'spreader');
 
 // The selected rig's full tank as its own line: its gallons when it is a tank of another size than 100 gal (the 100 gal line covers
 // that one), else 0.
@@ -134,12 +160,12 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
   const rateArgs = { product, ...nutrientTargets, ...recipe.options };
   const rate = calculateProductAmount({ ...rateArgs, lawnSqft: 1000, carrierGalPer1000: 0 });
   const percent = concentrationPercent(row, item.raw);
-  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false };
+  const none = { bigTank: false, fixedCarrierGalPer1000: null, fixedCarrierSource: null, per100Gal: null, fullTank: null, backpack4Gal: null, backpackMissing: false, useFills: [] };
   const base = {
     ratePer1000: rate.ratePer1000, rateUnit: rate.rateUnit, rateSource: recipe.lineRate ? 'recipe_line_rate' : rate.rateSource,
     concentrationPercent: percent, planState: planState || null, ...mixFields(row), ...none,
   };
-  if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader' };
+  if (!percent && isSpreaderProduct(product, rate.rateUnit)) return { ...base, application: 'spreader', applicator: granularApplicator(item.raw) };
   const [lineCarrier, lineSource] = fixedCarrier(item, row);
   // A backpack picked as the rig is not the big tank: no 100 gal or full-tank fill, whatever sets the carrier.
   const tankRig = rig?.system_type === 'backpack' ? null : rig;
@@ -159,6 +185,7 @@ function tankReference({ product, item, v13Line, nutrientTargets, rig, backpack 
     per100Gal: tankFills ? sized(BIG_TANK_GAL, tankRig) : null,
     fullTank: bigTank && fullGallons > 0 ? sized(fullGallons, tankRig) : null,
     backpack4Gal,
+    useFills: percent ? [] : lineUses(item.raw).map((use) => useFill(use, { product, row, nutrientTargets, tankFills })),
     // The FlowZone has no sprayer test on file, so its amount cannot be sized (a rate exists, the line fixes no volume).
     backpackMissing: !backpack4Gal && rate.ratePer1000 > 0 && !(lineCarrier || percent || rigCarrier(backpack) > 0),
   };

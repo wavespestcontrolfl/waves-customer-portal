@@ -18,21 +18,29 @@ const isSpreader = (item) => item.tankAmounts?.application === "spreader";
 const nameKey = (name) => String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 // How a product goes on, from the program's own mix marks: a spreader; added to another product's mix (the surfactant and
 // Certainty in the Celsius weed mix); the base of a mix others are added to; applied alone. With no mark, neutral wording.
+// A mix instruction is for today only: both products selected for this sheet, neither at a limit.
+const mixable = (item) => item.selected && item.tankAmounts?.planState !== "capped";
+const mixesInto = (additive, base) => Boolean(additive.tankAmounts?.mixWith) && nameKey(base.product.name).startsWith(nameKey(additive.tankAmounts.mixWith));
+const GRANULAR_METHOD = { hand_shaker: "Hand shaker", spreader: "Spreader" };
 function applicationMethod(item, products) {
   const amounts = item.tankAmounts || {};
-  if (isSpreader(item)) return "Spreader";
-  if (amounts.mixWith) return `Add to the ${amounts.mixWith} mix`;
-  // Only partners selected for this sheet and not at a limit: "Tank with" is an instruction for today.
-  const partners = products.filter((other) => other.selected && other.tankAmounts?.planState !== "capped"
-    && other.tankAmounts?.mixWith && nameKey(item.product.name).startsWith(nameKey(other.tankAmounts.mixWith)));
-  if (partners.length) return `Tank with: ${partners.map((other) => other.product.name).join(", ")}`;
-  return amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
+  if (isSpreader(item)) return GRANULAR_METHOD[amounts.applicator] || "Spreader";
+  const neutral = amounts.applyAlone ? "Apply alone in its own tank" : "Mixing: follow this card and the label";
+  if (!mixable(item)) return neutral;
+  if (products.some((base) => mixable(base) && mixesInto(item, base))) return `Add to the ${amounts.mixWith} mix`;
+  const partners = products.filter((other) => mixable(other) && mixesInto(other, item));
+  return partners.length ? `Tank with: ${partners.map((other) => other.product.name).join(", ")}` : neutral;
 }
 const PLAN_STATE_NOTES = {
   capped: "Limit reached: do not apply at this visit.",
   held: "City hold: do not apply at this visit.",
   unavailable: "No program rate: catalog rate shown.",
 };
+
+// A volume stated for one use of the line (October Velista, large patch at 2 gal per 1,000 sq ft): that use's own fills.
+const useRows = (useFills = []) => useFills.flatMap((use) => [["100 gal", use.per100Gal], ["FlowZone 4 gal", use.backpack4Gal]]
+  .filter(([, fill]) => fill)
+  .map(([label, fill]) => [`${label}, ${use.use}`, `${fillText(fill)} at ${num(use.carrierGalPer1000)} gal per 1,000 sq ft`]));
 
 // One product's fill amounts (server: lawn-tank-reference.js) as [label, text] rows, and the one amount the heading shows.
 function amountRows(amounts) {
@@ -48,6 +56,7 @@ function amountRows(amounts) {
   if (amounts.backpack4Gal) rows.push(["FlowZone 4 gal", `${fillText(amounts.backpack4Gal)}${amounts.backpack4Gal.sprayerName ? ` · ${amounts.backpack4Gal.sprayerName} test` : ""}`]);
   else if (amounts.backpackMissing) rows.push(["FlowZone 4 gal", "No FlowZone test on file. Test it to show this."]);
   if (amounts.fixedCarrierGalPer1000) rows.push(["Spray volume", `${num(amounts.fixedCarrierGalPer1000)} gal per 1,000 sq ft (${CARRIER_SOURCE[amounts.fixedCarrierSource]})`]);
+  rows.push(...useRows(amounts.useFills));
   const main = amounts.fullTank || amounts.per100Gal || amounts.backpack4Gal;
   return { rows, heading: main ? `${fillText(main)} / ${num(main.gallons)} gal${main === amounts.backpack4Gal ? " FlowZone" : ""}` : "No amount" };
 }
@@ -92,6 +101,7 @@ export default function ProtocolTankSheet({ plan, safetyRules = [] }) {
             Follow each product label for mixing, PPE, application restrictions and re-entry.
           </p>
           <p className="mt-2">Products are not approved to be combined in one tank unless their card says so.</p>
+          <p className="mt-2 font-medium">Reference amounts. Yearly and visit limits are checked on the job card, not here.</p>
           <p className="mt-2">{plan.visit?.objective}</p>
         </div>
         {equipment?.carrierGalPer1000 > 0 && (
