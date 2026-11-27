@@ -145,7 +145,8 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     const spy = jest.spyOn(NotificationService, 'notifyAdmin').mockResolvedValue({ id: 'n-ns' });
     const customer = { first_name: 'Alex', last_name: 'Rivera' };
 
-    // Callback number hold asks staff to verify the phone number rather than claiming prefs failed.
+    // Callback number check hold asks staff to verify number + prefs (never asserts caller disclaimed)
+    // and refreshes on dedupe so an earlier generic instruction is replaced.
     await AppointmentReminders._alertHeldNoShowSms({
       customer,
       scheduledServiceId: 'visit-cb',
@@ -155,10 +156,49 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     expect(spy).toHaveBeenCalledWith(
       'appointment',
       expect.stringContaining('verify'),
-      'The caller disclaimed this number, so the no-show text was held until staff confirm how to reach them.',
+      'A callback-number check held the no-show text; verify the number and preferences before reaching out.',
       expect.objectContaining({
         bell: true,
+        refreshOnDedupe: true,
         dedupeKey: 'no-show-notice-held:visit-cb',
+      }),
+    );
+
+    // Confirmed preferences-unreadable hold keeps the manual no-show text instruction.
+    spy.mockClear();
+    await AppointmentReminders._alertHeldNoShowSms({
+      customer,
+      scheduledServiceId: 'visit-pref-sms',
+      customerId: 'cust-cb',
+      outcome: { retryable: true, lastCode: 'PREFERENCES_UNAVAILABLE', blockedCode: 'REMINDER_PREFERENCES_HOLD' },
+    });
+    expect(spy).toHaveBeenCalledWith(
+      'appointment',
+      expect.stringContaining('no-show'),
+      'Notification preferences could not be read, so the no-show text was not sent.',
+      expect.objectContaining({
+        bell: true,
+        refreshOnDedupe: true,
+        dedupeKey: 'no-show-notice-held:visit-pref-sms',
+      }),
+    );
+
+    // Unknown / provider / consent lookup retryable failure directs staff to check delivery & permissions.
+    spy.mockClear();
+    await AppointmentReminders._alertHeldNoShowSms({
+      customer,
+      scheduledServiceId: 'visit-provider',
+      customerId: 'cust-cb',
+      outcome: { retryable: true, lastCode: 'PROVIDER_TIMEOUT' },
+    });
+    expect(spy).toHaveBeenCalledWith(
+      'appointment',
+      expect.stringContaining('delivery'),
+      'The no-show text could not be delivered automatically; check delivery and contact permissions first.',
+      expect.objectContaining({
+        bell: true,
+        refreshOnDedupe: true,
+        dedupeKey: 'no-show-notice-held:visit-provider',
       }),
     );
 
@@ -245,7 +285,7 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
     }
   });
 
-  test('source pin: all 4 combined-refund sites queue post-commit raiseAdminAlert with bell:true and no-show hold sites use raiseAdminAlert with bell:true', () => {
+  test('source pin: combined-refund sites use raiseAdminAlert with bell:true (pre-settlement full commits in trx) and no-show hold sites use raiseAdminAlert with bell:true', () => {
     const stripeSrc = fs.readFileSync(path.join(__dirname, '../routes/stripe-webhook.js'), 'utf8');
     expect(stripeSrc).toMatch(/await emitCombinedRefundAlerts\(combinedRefundAlerts\);/);
     expect(stripeSrc).toMatch(/async function emitCombinedRefundAlerts\(alerts\)[\s\S]*?raiseAdminAlert\('billing', spec, opts\)/);
@@ -253,7 +293,6 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
       'combined-partial-refund:',
       'combined-cumulative-refund:',
       'combined-presettlement-partial:',
-      'combined-presettlement-full:',
     ]) {
       const idx = stripeSrc.indexOf(key);
       expect(idx).toBeGreaterThan(-1);
@@ -262,6 +301,13 @@ describe('rescued admin alerts ring under GATE_ADMIN_BELL_POLICY=true', () => {
       expect(snippet).toMatch(/bell:\s*true/);
       expect(snippet).not.toMatch(/await\s+raiseAdminAlert\(/);
     }
+    const preFullIdx = stripeSrc.indexOf('combined-presettlement-full:');
+    expect(preFullIdx).toBeGreaterThan(-1);
+    const preFullSnippet = stripeSrc.slice(Math.max(0, preFullIdx - 950), preFullIdx + 120);
+    expect(preFullSnippet).toMatch(/raiseAdminAlert\('billing'/);
+    expect(preFullSnippet).toMatch(/bell:\s*true/);
+    expect(preFullSnippet).toMatch(/\btrx,/);
+    expect(stripeSrc).toMatch(/await emitPreSettlementFullRefundAlert\(trx,/);
 
     const apptSrc = fs.readFileSync(path.join(__dirname, '../services/appointment-reminders.js'), 'utf8');
     for (const key of ['held_notice_contact_enqueue_failed', 'no-show-notice-held:', 'no-show-email-held:']) {

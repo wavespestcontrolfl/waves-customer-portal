@@ -7647,6 +7647,50 @@ AppointmentReminders.REMINDER_BLOCKING_STATUSES = REMINDER_BLOCKING_STATUSES;
 AppointmentReminders.reminderRowCanSend = (row) => !!row
   && row.cancelled !== true && row.suppressed_by_sibling !== true && row.windows_preclosed !== true;
 
+function describeHeldNoShowSms(outcome, name, scheduledServiceId) {
+  const isCallbackHold = outcome.lastCode === 'CALLBACK_NUMBER_HOLD' || outcome.blockedCode === 'CALLBACK_NUMBER_HOLD';
+  const isPrefsUnavailable = outcome.lastCode === 'PREFERENCES_UNAVAILABLE' || outcome.blockedCode === 'REMINDER_PREFERENCES_HOLD';
+  const { fitAction } = require('./admin-alert-names');
+  if (isCallbackHold) {
+    return {
+      reason: 'callback_number_hold',
+      logReason: 'callback number check hold',
+      action: fitAction('Schedule', name, [
+        (w) => `verify ${w}'s number for no-show`,
+        () => 'verify number before no-show text',
+      ]),
+      why: 'A callback-number check held the no-show text; verify the number and preferences before reaching out.',
+      doneWhen: 'callback_number_verified',
+      detail: `The no-show text for ${name} (visit ${scheduledServiceId}) was held by a callback-number check. Verify the customer's phone number and contact preferences before contacting them.`,
+    };
+  }
+  if (isPrefsUnavailable) {
+    return {
+      reason: 'preferences_unavailable',
+      logReason: 'notification preferences unreadable',
+      action: fitAction('Schedule', name, [
+        (w) => `send ${w}'s no-show text`,
+        (w) => `contact ${w} about a no-show`,
+        () => 'send a no-show text manually',
+      ]),
+      why: 'Notification preferences could not be read, so the no-show text was not sent.',
+      doneWhen: 'customer_contacted',
+      detail: `The no-show text for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
+    };
+  }
+  return {
+    reason: outcome.lastCode || outcome.blockedCode || 'delivery_failed',
+    logReason: `delivery failed (${outcome.lastCode || outcome.blockedCode || 'unknown'})`,
+    action: fitAction('Schedule', name, [
+      (w) => `check ${w}'s no-show text delivery`,
+      () => 'check no-show text delivery',
+    ]),
+    why: 'The no-show text could not be delivered automatically; check delivery and contact permissions first.',
+    doneWhen: 'delivery_checked',
+    detail: `The no-show text for ${name} (visit ${scheduledServiceId}) could not be delivered automatically${outcome.lastCode ? ` (${outcome.lastCode})` : ''}. Check delivery status and contact permissions before reaching out.`,
+  };
+}
+
 async function alertHeldNoShowSms({ customer, scheduledServiceId, customerId, outcome }) {
   const isIntentionalHold = outcome.blockedCode === 'STREET_LEVEL_HOLD'
     || outcome.blockedCode === 'VISIT_ON_HOLD'
@@ -7655,42 +7699,30 @@ async function alertHeldNoShowSms({ customer, scheduledServiceId, customerId, ou
     logger.info(`[appt-remind] No-show notice intentionally held for ${scheduledServiceId} (${outcome.blockedCode})`);
     return;
   }
-  const isCallbackHold = outcome.lastCode === 'CALLBACK_NUMBER_HOLD' || outcome.blockedCode === 'CALLBACK_NUMBER_HOLD';
+  const { fullName } = require('./admin-alert-names');
+  const name = fullName(customer) || 'the customer';
+  const copy = describeHeldNoShowSms(outcome, name, scheduledServiceId);
   // No retry rail carries a no-show notice (the dispatcher's one click
   // is the send): say so loudly and bell the office rather than log
   // "sent" over a hold (in-session review on f9945dc89).
-  logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: ${isCallbackHold ? 'callback number hold' : 'notification preferences unreadable'} — office to follow up`);
+  logger.warn(`[appt-remind] No-show notice NOT sent for ${scheduledServiceId}: ${copy.logReason} — office to follow up`);
   try {
     const { raiseAdminAlert } = require('./admin-alert-compose');
-    const { fullName, fitAction } = require('./admin-alert-names');
-    const name = fullName(customer) || 'the customer';
     await raiseAdminAlert('appointment', {
       area: 'Schedule',
-      action: isCallbackHold
-        ? fitAction('Schedule', name, [
-          (w) => `verify ${w}'s number for no-show`,
-          () => 'verify number before no-show text',
-        ])
-        : fitAction('Schedule', name, [
-          (w) => `send ${w}'s no-show text`,
-          (w) => `contact ${w} about a no-show`,
-          () => 'send a no-show text manually',
-        ]),
-      why: isCallbackHold
-        ? 'The caller disclaimed this number, so the no-show text was held until staff confirm how to reach them.'
-        : 'Notification preferences could not be read, so the no-show text was not sent.',
+      action: copy.action,
+      why: copy.why,
       severity: 'needs-you',
       link: `/admin/customers?customerId=${encodeURIComponent(customerId)}`,
       subject: { type: 'visit', id: String(scheduledServiceId) },
-      doneWhen: isCallbackHold ? 'callback_number_verified' : 'customer_contacted',
+      doneWhen: copy.doneWhen,
       who: 'person',
     }, {
       bell: true,
+      refreshOnDedupe: true,
       dedupeKey: `no-show-notice-held:${scheduledServiceId}`,
-      detail: isCallbackHold
-        ? `The no-show text for ${name} (visit ${scheduledServiceId}) was held because the caller disclaimed this number. Verify the right phone number before contacting the customer.`
-        : `The no-show text for ${name} (visit ${scheduledServiceId}) could not be sent: notification preferences were unreadable. Please contact the customer.`,
-      metadata: { scheduledServiceId, customerId, reason: isCallbackHold ? 'callback_number_hold' : 'preferences_unavailable' },
+      detail: copy.detail,
+      metadata: { scheduledServiceId, customerId, reason: copy.reason },
     });
   } catch (bellErr) {
     logger.error(`[appt-remind] no-show hold bell failed for ${scheduledServiceId}: ${bellErr.message}`);
