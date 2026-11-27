@@ -2918,6 +2918,11 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
       const VisitRecipient = require('../services/call-visit-recipient');
       // The change and its audit row commit together (a restart clears stopped_by, so the audit row is the only record).
       const entry = await db.transaction(async (trx) => {
+        // A profile a merge retired (a screen opened before the merge) is refused under its row lock, the lock a merge
+        // takes: clearing its stop would reach the account that took it over.
+        const profile = await trx('customers').where({ id: req.params.id }).forUpdate().first('id', 'deleted_at');
+        if (!profile) return null;
+        if (profile.deleted_at) return 'retired';
         const changed = await VisitRecipient.setReminderContactStopped({ customerId: req.params.id, id: req.params.reminderId, stopped, by: 'staff', conn: trx });
         if (!changed) return null;
         // Audit only a real change: a stale screen's repeat Stop must not record that staff stopped someone the customer did.
@@ -2936,6 +2941,7 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
         });
         return changed;
       });
+      if (entry === 'retired') return res.status(409).json({ error: 'This customer record was merged into another one', code: 'CUSTOMER_RETIRED' });
       if (!entry) return res.status(404).json({ error: 'Not found' });
       res.json({ reminderContact: entry });
     } catch (err) { next(err); }

@@ -7,11 +7,22 @@
 // a delete, every visit row of the number) are proven on real SQL in call-visit-recipient-postgres.test.js.
 
 // The stop / restart write runs in a transaction that locks the profile's customers row (mockProfile answers it).
-const mockProfile = { current: null };
+// Every customers read answers from mockProfiles by id: an entry means "an active profile of the signed-in account"
+// (the route's own COALESCE(account_id, id) check is SQL, proven on real PostgreSQL elsewhere; here it is the answer).
+const mockProfiles = { current: {} };
 jest.mock('../models/db', () => {
-  const trx = () => ({ where: () => ({ forUpdate: () => ({ first: async () => mockProfile.current }) }) });
-  const db = jest.fn();
-  db.transaction = jest.fn(async (fn) => fn(trx));
+  const read = () => {
+    let id = null;
+    const q = {};
+    q.where = (arg) => { if (arg && arg.id) id = arg.id; return q; };
+    q.whereNull = () => q;
+    q.whereRaw = () => q;
+    q.forUpdate = () => q;
+    q.first = async () => mockProfiles.current[id] || undefined;
+    return q;
+  };
+  const db = jest.fn(read);
+  db.transaction = jest.fn(async (fn) => fn(Object.assign(jest.fn(read), { isTransaction: true })));
   return db;
 });
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
@@ -50,7 +61,7 @@ afterAll((done) => { server.close(done); });
 beforeEach(() => {
   jest.clearAllMocks();
   mockSession.current = { customerId: OWN, customer: { id: OWN } };
-  mockProfile.current = { id: OWN, deleted_at: null };
+  mockProfiles.current = { [OWN]: { id: OWN } };
 });
 
 const call = (method, path) => fetch(`${baseUrl}/api/notifications${path}`, { method, headers: { 'content-type': 'application/json' } })
@@ -93,11 +104,12 @@ test('a bad id is a 400; an id not on this customer\'s list is a 404', async () 
 });
 
 test('a profile merged away (or no longer on the account) between the check and the locked write changes nothing', async () => {
-  mockProfile.current = { id: OWN, deleted_at: '2026-11-27T10:00:00Z' };
-  expect((await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/restart`)).status).toBe(403);
-  mockProfile.current = { id: OWN, deleted_at: null };
-  const { accountPropertyIds } = require('../services/account-properties');
-  accountPropertyIds.mockResolvedValueOnce([OWN]).mockResolvedValueOnce([OTHER]);
+  // The first (unlocked) check sees the profile; the locked one in the write's transaction does not.
+  const db = require('../models/db');
+  db.transaction.mockImplementationOnce(async (fn) => {
+    mockProfiles.current = {};
+    return fn(Object.assign(jest.fn(() => db()), { isTransaction: true }));
+  });
   expect((await call('POST', `/reminder-contacts/${OWN}/${REMINDER}/restart`)).status).toBe(403);
   expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
 });

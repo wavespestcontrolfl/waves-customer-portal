@@ -19,9 +19,12 @@ jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error
 jest.mock('../services/audit-log', () => ({ recordAuditEvent: jest.fn(async () => {}) }));
 jest.mock('../services/irrigation-weekly-email', () => ({ hasLawnServiceEvidence: jest.fn(async () => false), hasIrrigationEmailOptIn: jest.fn(async () => false) }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(async () => ({ ok: true })) }));
+const mockProfile = { current: { id: 'c', deleted_at: null } };
 jest.mock('../models/db', () => {
   const dbFn = Object.assign(jest.fn(), { raw: jest.fn(), fn: { now: jest.fn() } });
-  dbFn.transaction = jest.fn(async (cb) => cb('TRX'));
+  // The write's transaction: trx('customers') answers the locked profile read (mockProfile.current).
+  const trx = Object.assign(() => ({ where: () => ({ forUpdate: () => ({ first: async () => mockProfile.current }) }) }), { tag: 'TRX' });
+  dbFn.transaction = jest.fn(async (cb) => cb(trx));
   return dbFn;
 });
 jest.mock('../services/call-visit-recipient', () => ({
@@ -66,9 +69,9 @@ test('staff read the list', async () => {
 test('a staff stop and restart are recorded as staff and audited', async () => {
   const stop = await run('post', '/:id/reminder-contacts/:reminderId/stop', { id: CUSTOMER, reminderId: REMINDER });
   expect(stop.body.reminderContact).toMatchObject({ stopped: true, stoppedBy: 'staff' });
-  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: CUSTOMER, id: REMINDER, stopped: true, by: 'staff', conn: 'TRX' });
+  expect(VisitRecipient.setReminderContactStopped).toHaveBeenLastCalledWith({ customerId: CUSTOMER, id: REMINDER, stopped: true, by: 'staff', conn: expect.any(Function) });
   // same transaction, and a failed audit write fails the change
-  expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_stopped', resource_id: CUSTOMER, critical: true, trx: 'TRX' }));
+  expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_stopped', resource_id: CUSTOMER, critical: true, trx: expect.any(Function) }));
   await run('post', '/:id/reminder-contacts/:reminderId/restart', { id: CUSTOMER, reminderId: REMINDER });
   expect(recordAuditEvent).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'customer.reminder_contact_restarted' }));
 });
@@ -85,4 +88,17 @@ test('bad ids are a 400; an id not on the list is a 404 with no audit row', asyn
   VisitRecipient.setReminderContactStopped.mockResolvedValueOnce(null);
   expect((await run('post', '/:id/reminder-contacts/:reminderId/stop', { id: CUSTOMER, reminderId: REMINDER })).status).toBe(404);
   expect(recordAuditEvent).not.toHaveBeenCalled();
+});
+
+test('a record a merge retired is refused under its row lock: nothing changes, no audit row', async () => {
+  mockProfile.current = { id: CUSTOMER, deleted_at: '2026-11-27T10:00:00Z' };
+  try {
+    const res = await run('post', '/:id/reminder-contacts/:reminderId/restart', { id: CUSTOMER, reminderId: REMINDER });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'CUSTOMER_RETIRED' });
+    expect(VisitRecipient.setReminderContactStopped).not.toHaveBeenCalled();
+    expect(recordAuditEvent).not.toHaveBeenCalled();
+  } finally {
+    mockProfile.current = { id: 'c', deleted_at: null };
+  }
 });
