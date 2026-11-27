@@ -38,7 +38,7 @@ const visit = (over = {}) => ({
   id: 'v1', service_type: 'Pest Control', scheduled_date: '2026-12-04', status: 'confirmed', window_start: '13:00:00', cancelled_at: null, ...over,
 });
 const move = (over = {}) => ({
-  id: 'rl-1', scheduled_service_id: 'v1', original_date: '2026-12-02', new_date: '2026-12-04',
+  id: 'rl-1', scheduled_service_id: 'v1', customer_id: 'c1', original_date: '2026-12-02', new_date: '2026-12-04',
   original_window: '09:00:00-10:00:00', new_window: '13:00:00-14:00:00', created_at: new Date('2026-11-24T15:00:00Z'), ...over,
 });
 // an UPCOMING SERVICES entry as context-aggregator builds it (the row id is non-enumerable there)
@@ -56,7 +56,11 @@ const conn = (visits, logs) => fakeConn({
     if (ids) return visits.filter((v) => ids.includes(v.id));
     return isStoppedQuery(ops) ? visits : [];
   },
-  reschedule_log: () => logs,
+  // the customer the query names: a log of another customer is never returned
+  reschedule_log: (ops) => {
+    const who = ops.find((o) => o.op === 'where' && o.args[0] && typeof o.args[0] === 'object' && 'customer_id' in o.args[0]);
+    return who ? logs.filter((l) => l.customer_id === who.args[0].customer_id) : logs;
+  },
 });
 // the aggregator's deriveWindow, by start (window_start first, as context-aggregator derives it)
 const deriveWindow = (row) => ({ '09:00:00': '9–11 AM', '13:00:00': '1–3 PM', '15:00:00': '3–5 PM' }[String(row.window_start)] || null);
@@ -90,6 +94,18 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
   test('a move logged with the customer_noshow reason (a rain-out move) still counts: non-moves drop by slot, not reason', async () => {
     const rain = move({ reason_code: 'customer_noshow' });
     expect((await read([visit()], [rain])).moves.map((m) => m.logId)).toEqual(['rl-1']);
+  });
+
+  test("a move logged while the visit belonged to another customer is never stated to this one", async () => {
+    expect((await read([visit()], [move({ customer_id: 'c-earlier' })])).moves).toEqual([]);
+  });
+
+  test('a reply held past ET midnight: yesterday\'s visit, even en route, is no longer listed (unverified at draft, dropped at send)', async () => {
+    const yesterday = visit({ scheduled_date: '2026-11-25', status: 'en_route', track_state: 'en_route' });
+    expect((await read([yesterday], [], [listedFor(yesterday)])).listed).toEqual([{ id: 'v1', unverified: true }]);
+    const held = await facts.loadScheduleChanges({ conn: conn([yesterday], []), customerId: 'c1', now: NOW, deriveWindow, strict: true,
+      upcomingServices: [{ scheduledServiceId: 'v1', date: '2026-11-25', start: '13:00:00', window: '1–3 PM', dayOnly: false }] });
+    expect(held.listed).toEqual([]);
   });
 
   test('a visit en route or on site today whose status still reads rescheduled is listed (UPCOMING SERVICES lists it): never unverified', async () => {

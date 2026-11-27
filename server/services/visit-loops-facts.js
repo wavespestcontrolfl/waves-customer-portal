@@ -623,6 +623,9 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
     conn('scheduled_services').where({ customer_id: customerId }).whereIn('id', ids)
       .select('id', 'service_type', 'scheduled_date', 'status', 'track_state', 'window_start', 'window_display', 'time_window'),
     conn('reschedule_log')
+      // the move must be this customer's: a visit handed to another customer keeps its
+      // id, and its earlier owner's moves are never told to the new one
+      .where({ customer_id: customerId })
       .whereIn('scheduled_service_id', ids)
       // non-moves are dropped by their slot, never their reason: a nightly "not closed
       // out" flag logs no new day, while a rain-out move can carry customer_noshow
@@ -635,7 +638,10 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
   // still reads `rescheduled` is listed there, so it is live here too.
   const { isUpcomingListedRow } = require('./visit-context/statuses');
   const today = etDateString(now);
-  const isListedRow = (v) => isUpcomingListedRow(v, today);
+  // and its date floor (today onward, ET): a reply held past midnight never names
+  // yesterday's visit, en route or not, as still listed
+  const { calendarDay: rowDay } = require('./live-eta-destination');
+  const isListedRow = (v) => Boolean(v) && (rowDay(v.scheduled_date) || '') >= today && isUpcomingListedRow(v, today);
   const byId = new Map((rows || []).map((r) => [String(r.id), r]));
   const liveRows = entries.map((e) => byId.get(listedId(e))).filter(isListedRow);
   const dayOnlyNow = await dayOnlyNowFor(conn, liveRows, now, entries.some((e) => 'start' in e));
