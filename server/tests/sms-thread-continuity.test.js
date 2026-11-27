@@ -21,6 +21,7 @@ const {
   buildThreadIdentityInput,
   disambiguateThreadIdentity,
   effectiveSchedulingIntent,
+  namedDayMatcherForThread,
 } = require('../services/sms-open-times-intent');
 const { smsThreadContinuityLive } = require('../config/feature-gates');
 
@@ -418,5 +419,56 @@ describe('threadSchedulingFollowUp', () => {
     expect(multiTurnServiceContext.anchorText).toContain('reschedule my lawn care visit');
     expect(multiTurnServiceContext.anchorText).toContain('Tuesday works');
     expect(multiTurnServiceContext.anchorText).toContain('Morning or afternoon for your visit?');
+
+    // Codex P2: reject explicit callback subjects in the current follow-up
+    const callbackFollowUp = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works for a callback',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: 'What day works best for your lawn care visit?', date: minsAgo(10), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+      ],
+    });
+    expect(callbackFollowUp.carried).toBe(false);
+
+    // Codex P2: preserve free re-service routing — never hijack re-service threads into ordinary OPEN TIMES
+    const reserviceFollowUp = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: 'What day works best for a free pest re-service?', date: minsAgo(10), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+        { direction: 'inbound', body: 'The ants are back in the kitchen', date: minsAgo(20), fromPhone: ME, toPhone: WAVES },
+      ],
+    });
+    expect(reserviceFollowUp.carried).toBe(false);
+
+    // Codex P2: carry requested day from thread anchor into namedDayMatcherForThread
+    const carriedDay = threadSchedulingFollowUp({
+      inboundMessage: 'Either works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: 'Morning or afternoon for your visit?', date: minsAgo(10), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+        { direction: 'inbound', body: 'Can we move my lawn visit to Friday?', date: minsAgo(20), fromPhone: ME, toPhone: WAVES },
+      ],
+    });
+    const matcher = namedDayMatcherForThread('Either works', carriedDay);
+    expect(matcher).toBeTruthy();
+    expect(matcher('Friday, December 11', '2026-12-11')).toEqual(['weekday:friday']);
+
+    // Local Codex P1: preserve service named in earlier staff scheduling question
+    const earlierStaffService = threadSchedulingFollowUp({
+      inboundMessage: 'Anytime works',
+      inboundPhone: ME,
+      now: NOW,
+      smsHistory: [
+        { direction: 'outbound', body: 'Morning or afternoon?', date: minsAgo(5), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+        { direction: 'inbound', body: 'Tuesday works', date: minsAgo(10), fromPhone: ME, toPhone: WAVES },
+        { direction: 'outbound', body: 'What day works best for your lawn visit?', date: minsAgo(15), type: 'manual', status: 'delivered', fromPhone: WAVES, toPhone: ME },
+      ],
+    });
+    expect(earlierStaffService.carried).toBe(true);
+    expect(earlierStaffService.anchorText).toContain('lawn visit');
   });
 });

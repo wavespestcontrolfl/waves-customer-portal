@@ -35,7 +35,7 @@ const { phoneIdentityKey } = require('../utils/phone');
 const { renderCompanyFactsSection, renderSmsBankFactsSection } = require('./sms-company-facts');
 const labelFactsLib = require('./sms-label-facts');
 const portalCancelFact = require('./sms-portal-cancel-fact');
-const { namedDayMatcher } = require('./sms-open-times-intent');
+const { namedDayMatcherForThread } = require('./sms-open-times-intent');
 const { PEST_PERSISTENCE_PHRASES_SOURCE } = require('./pest-persistence-phrases');
 const promptPatch = require('./sms-prompt-patch');
 const { TURF_INSECT_NOUN_SOURCES, specialtyLedLabel } = require('./covered-pests');
@@ -6579,7 +6579,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     ? { block: null, days: parseOpenTimesDaysFromFactsBlock(presetFactsBlock) }
     : await fetchOpenTimesData({
       city, customerId: context?.customer?.id || null, schedulingIntent: needsOpenTimes && identityCertain && !reserviceLaneDecides, estimateId: pricingEstimateId, serviceType,
-      schedulerOffer, namedDay: namedDayMatcher(inboundMessage),
+      schedulerOffer, namedDay: namedDayMatcherForThread(inboundMessage, threadFollowUp),
     });
   const openTimesFetch = { block: openTimesBlock, withheld: openTimesWithheldFetch };
   // B1: a covered pest report offers the free re-service booking page's own openings (a section of its own, never OPEN TIMES)

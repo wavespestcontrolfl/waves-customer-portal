@@ -109,6 +109,8 @@ const STAFF_EXPLICIT_VISIT_SUBJECT_RE = /\b(?:visit|appointment|service|tech|tec
 
 const NON_APPOINTMENT_SUBJECT_RE = /\b(?:phone\s*call|call\s+you|give\s+you\s+a\s+call|call\s+back|callback|quick\s+call|speak\s+by\s+phone|talk\s+on\s+the\s+phone|invoice|bill(?:ing)?|payment|charge|refund|card\s+on\s+file|autopay)\b/i;
 
+const RESERVICE_SUBJECT_RE = /\b(?:re-?service|retreat(?:ment)?|follow[- ]?up\s+(?:treatment|spray|visit)|warranty\s+visit|free\s+(?:pest\s+)?(?:visit|treatment|re-?service|retreat))\b/i;
+
 const CUSTOMER_WITHDRAWAL_RE = /\b(?:never\s*mind|nevermind|forget\s+it|disregard|keep\s+(?:my|our|the)\s+(?:visit|appointment|time|slot|date|schedule)|leave\s+it(?:\s+as\s+is)?|don'?t\s+(?:move|change|reschedule|worry\s+about\s+it)|no\s+need|we'?re\s+good|all\s+good|i'?m\s+good)\b/i;
 
 const CUSTOMER_SCHEDULING_ASK_RE = /\b(?:reschedule|rebook|schedule|book\s+(?:a|an|my|our)|move\s+(?:my|the|our)|change\s+(?:my|the|our)\s+(?:appointment|visit|day|time)|openings?|available|availability|when\s+can\s+(?:you|someone|a\s+tech)\s+come|come\s+out\s+(?:next|this|on|sooner|earlier))\b/i;
@@ -124,7 +126,14 @@ function isShortSchedulingFollowUp(text) {
   const words = clean.split(/\s+/).filter(Boolean);
   if (words.length > FOLLOWUP_MAX_WORDS) return false;
   if (CUSTOMER_WITHDRAWAL_RE.test(clean)) return false;
-  if (NON_SCHEDULING_ADMIN_TOPIC_RE.test(clean) || PEST_REPORT_TOPIC_RE.test(clean)) return false;
+  if (
+    NON_APPOINTMENT_SUBJECT_RE.test(clean)
+    || RESERVICE_SUBJECT_RE.test(clean)
+    || NON_SCHEDULING_ADMIN_TOPIC_RE.test(clean)
+    || PEST_REPORT_TOPIC_RE.test(clean)
+  ) {
+    return false;
+  }
   return FOLLOWUP_SCHEDULING_REPLY_RE.test(clean) || namedDaysIn(clean).length > 0;
 }
 
@@ -156,6 +165,7 @@ function isCustomerAppointmentAsk(body) {
   const clean = String(body || '');
   if (!CUSTOMER_SCHEDULING_ASK_RE.test(clean)) return false;
   if (NON_APPOINTMENT_SUBJECT_RE.test(clean)) return false;
+  if (RESERVICE_SUBJECT_RE.test(clean)) return false;
   if (CUSTOMER_WITHDRAWAL_RE.test(clean)) return false;
   if (NON_SCHEDULING_ADMIN_TOPIC_RE.test(clean)) return false;
   return true;
@@ -165,6 +175,7 @@ function isCustomerTopicBarrier(text) {
   return (
     CUSTOMER_WITHDRAWAL_RE.test(text)
     || NON_APPOINTMENT_SUBJECT_RE.test(text)
+    || RESERVICE_SUBJECT_RE.test(text)
     || NON_SCHEDULING_ADMIN_TOPIC_RE.test(text)
     || PEST_REPORT_TOPIC_RE.test(text)
   );
@@ -178,13 +189,16 @@ function isContinuingStaffQuestion(recent, idx) {
 
 function collectCurrentCustomerTurns(recent, startIdx) {
   const collected = [];
-  for (let j = startIdx; j < recent.length && collected.length < 3; j += 1) {
+  for (let j = startIdx; j < recent.length && collected.length < 4; j += 1) {
     // Continue through preceding staff scheduling questions in the same active
-    // thread so multi-turn exchanges preserve the requested service, while
+    // thread (preserving any service named in an earlier staff prompt) while
     // stopping at any staff closure, non-appointment question, withdrawal, or
     // topic switch.
     if (recent[j].direction === 'outbound') {
-      if (isContinuingStaffQuestion(recent, j)) continue;
+      if (isContinuingStaffQuestion(recent, j)) {
+        collected.push(`Staff asked: ${String(recent[j].body).trim()}`);
+        continue;
+      }
       break;
     }
     const text = String(recent[j].body).trim();
@@ -202,6 +216,7 @@ function isStaffAppointmentQuestion(body) {
   const clean = String(body || '');
   if (!STAFF_SCHEDULING_QUESTION_RE.test(clean)) return false;
   if (NON_APPOINTMENT_SUBJECT_RE.test(clean)) return false;
+  if (RESERVICE_SUBJECT_RE.test(clean)) return false;
   return true;
 }
 
@@ -209,7 +224,13 @@ function precedingCustomerIsNonAppointment(recent, staffIdx) {
   const prev = recent[staffIdx + 1];
   if (!prev || prev.direction !== 'inbound') return false;
   const text = String(prev.body || '');
-  return NON_APPOINTMENT_SUBJECT_RE.test(text) || NON_SCHEDULING_ADMIN_TOPIC_RE.test(text);
+  if (isCustomerAppointmentAsk(text)) return false;
+  return (
+    NON_APPOINTMENT_SUBJECT_RE.test(text)
+    || NON_SCHEDULING_ADMIN_TOPIC_RE.test(text)
+    || PEST_REPORT_TOPIC_RE.test(text)
+    || RESERVICE_SUBJECT_RE.test(text)
+  );
 }
 
 /**
@@ -321,8 +342,14 @@ function effectiveSchedulingIntent(directSchedulingIntent, openTimesStamp) {
   return Boolean(directSchedulingIntent || openTimesStamp?.open_times_from_thread);
 }
 
+function namedDayMatcherForThread(inboundMessage, threadFollowUp) {
+  return namedDayMatcher(inboundMessage)
+    || (threadFollowUp?.anchorText ? namedDayMatcher(threadFollowUp.anchorText) : null);
+}
+
 module.exports = {
   namedDayMatcher,
+  namedDayMatcherForThread,
   threadSchedulingFollowUp,
   resolveThreadSchedulingContext,
   buildThreadIdentityInput,
