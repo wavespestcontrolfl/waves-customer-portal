@@ -5482,6 +5482,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   }));
   const newCallerBodyRef = useRef('');
   newCallerBodyRef.current = newCallerBookMode && newCallerLine ? newCallerBody() : '';
+  // Why Book waits, as rendered now. A discount picked while Book re-reads the WDO price is not in its body, so the body
+  // compare cannot see it (pre-push audit P0).
+  const newCallerBlockReasonRef = useRef('');
+  newCallerBlockReasonRef.current = newCallerBlockReason;
   const bookNewCaller = async () => {
     if (!canBookNewCaller) return;
     const body = newCallerBody();
@@ -5500,6 +5504,10 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
       }
       if (newCallerBodyRef.current !== body) {
         setNewCallerError('The booking changed while the WDO price was checked. Check it, then press Book again.');
+        return;
+      }
+      if (newCallerBlockReasonRef.current) {
+        setNewCallerError(newCallerBlockReasonRef.current);
         return;
       }
       const result = await adminFetch('/admin/schedule/new-caller', { method: 'POST', body });

@@ -176,6 +176,38 @@ describe('CreateAppointmentModal new-caller Book', () => {
     expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(0);
   });
 
+  it('a discount picked while Book re-reads the WDO price books nothing, and says why', async () => {
+    const WDO = { id: 'svc-wdo', service_key: 'wdo_inspection', name: 'WDO Inspection Service', billing_type: 'one_time', base_price: 250, default_duration_minutes: 60 };
+    const CREDIT = { id: 'd-credit', name: 'Neighbor credit', discount_type: 'fixed_amount', amount: '10.00', max_discount_dollars: null, is_active: true, show_in_invoices: true };
+    const fetcher = installFetch({ catalog: [WDO] });
+    const base = fetcher.getMockImplementation();
+    const held = [];
+    let quoteReads = 0;
+    fetcher.mockImplementation((input, options = {}) => {
+      if (String(input).endsWith('/admin/discounts')) return Promise.resolve(json([CREDIT]));
+      if (!String(input).endsWith('/admin/schedule/wdo-inspection-quote')) return base(input, options);
+      quoteReads += 1;
+      const answer = json({ price: 200, source: 'wdo_table', basis: '2,600 sq ft, wood frame', staffNote: null });
+      // The line's first read answers; later reads wait until the test releases them.
+      return quoteReads === 1 ? Promise.resolve(answer) : new Promise((resolve) => { held.push(() => resolve(answer)); });
+    });
+    mount({ newCallerBooking: true });
+    fireEvent.click(screen.getByText('pick suggestion'));
+    expect(await screen.findByText('This call')).toBeTruthy();
+    await addService('WDO', /WDO Inspection Service/i);
+    const book = await screen.findByRole('button', { name: 'Book' });
+    await waitFor(() => expect(book.disabled).toBe(false));
+    fireEvent.click(book);
+    await waitFor(() => expect(quoteReads).toBe(2));
+    // The office picks a line discount while Book re-reads the price. Book's body cannot carry a discount.
+    fireEvent.focus(screen.getByPlaceholderText(/Search discounts for WDO Inspection Service/));
+    fireEvent.click(await screen.findByRole('button', { name: /Neighbor credit/ }));
+    held.forEach((release) => release());
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    expect((await screen.findAllByText('Discounts wait until the customer exists. Remove the discount to book now.')).length).toBeGreaterThan(0);
+    expect(posts(fetcher, '/admin/schedule/new-caller')).toHaveLength(0);
+  });
+
   it('books the visit by address with the one live call, and adds no customer', async () => {
     const fetcher = installFetch();
     const { onCreated } = mount({ newCallerBooking: true });
