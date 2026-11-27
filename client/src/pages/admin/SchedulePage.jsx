@@ -14351,6 +14351,20 @@ export function CompletionPanel({
     pestDefaultMixSeededRef.current = false;
     pestDefaultMixSnapshotRef.current = null;
   }, [visitOutcome, selectedProducts]);
+  // A confirmed no-card visit (owner pick D18: the actions read's noProtocol or the defaults read's no_protocol) is inspection
+  // only. A draft restored from before that answer may still carry the automatic house-mix or card-default rows and card
+  // action ticks: they are dropped, so nothing automatic submits under the "Inspection only, no product" note. A product
+  // row the tech added by hand stays (owner 2026-11-26: a check never stops him recording what he applied). Typed and
+  // specialty forms keep their own actions.
+  const noCardConfirmed = !isTypedFindings && !specialtyCompletion
+    && (protocolActionMeta?.noProtocol === true || protocolCompletionDefaults?.matchedVisit?.reason === "no_protocol");
+  useEffect(() => {
+    if (!noCardConfirmed) return;
+    if (selectedProducts.some((p) => p.protocolDefaultProduct || p.pestDefaultMixProduct)) {
+      setSelectedProducts((current) => current.filter((p) => !p.protocolDefaultProduct && !p.pestDefaultMixProduct));
+    }
+    setSelectedProtocolActionLabels((current) => (current.length ? [] : current));
+  }, [noCardConfirmed, selectedProducts]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
   useEffect(() => {

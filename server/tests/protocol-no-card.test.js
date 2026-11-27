@@ -124,6 +124,10 @@ describe('the matcher: a service no rule claims has no card', () => {
     expect(match('Service Visit', 'bee_wasp_removal')).toEqual(NO_CARD);
     // The bare-name words count only with no catalog key: a keyed service no rule claims keeps no card.
     expect(match('Wildlife Trapping Re-Service', 'wildlife_trapping')).toEqual(NO_CARD);
+    // With no key, the WHOLE name must be the bare word: a longer name keeps no card.
+    expect(match('Wildlife Trapping Re-Service')).toEqual(NO_CARD);
+    expect(match('Bee / Wasp Nest Removal Callback')).toEqual(NO_CARD);
+    expect(match('Re-Service Visit')).toEqual(['pest', 1, 'general_pest', true]);
     expect(match('Re-Service', 'bee_wasp_removal')).toEqual(NO_CARD);
     expect(match('Callback', 'bird_box_install')).toEqual(NO_CARD);
     // A general pest key keeps the card under these names.
@@ -253,6 +257,18 @@ describe('a service with no card on the schedule panel and the close-out', () =>
     expect((await call('/completion-actions', { serviceType: 'Lawn Visit', scheduledServiceId: VISIT, month: 'Nov' })).body.programKey).toBe('assessment');
     bookedAs('lawn_care_recurring');
     expect((await call('/completion-actions', { serviceType: 'Lawn Inspection', scheduledServiceId: VISIT, month: 'Nov' })).body.programKey).toBe('lawn');
+  });
+
+  test('a failed key read on a lawn close-out fails the read, never a lawn application list', async () => {
+    db.mockImplementation((table) => {
+      if (table === 'scheduled_services') throw Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+      return readQuery([]);
+    });
+    const res = { status: jest.fn(() => res), json: jest.fn(() => res) };
+    const next = jest.fn();
+    await routeHandler('/completion-actions')({ query: { serviceType: 'Lawn Inspection', scheduledServiceId: VISIT, month: 'Nov' } }, res, next);
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ code: 'ECONNRESET' }));
+    expect(res.json).not.toHaveBeenCalled();
   });
 
   test('the close-out seeds no product for a service with no card', () => {

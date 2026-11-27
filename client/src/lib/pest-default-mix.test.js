@@ -57,5 +57,8 @@ describe('isPestDefaultMixVisit: a re-service follows the server card by key', (
     expect(isPestDefaultMixVisit({ serviceType: 'Re-Service', serviceKey: 'pest_general_quarterly' })).toBe(true);
     expect(isPestDefaultMixVisit({ serviceType: 'Re-Service', serviceKey: 'web_sweep' })).toBe(false);
     expect(isPestDefaultMixVisit({ serviceType: 'Pest Control Re-Service', serviceKey: 'web_sweep' })).toBe(true);
+    // With no key the WHOLE name must be the bare word, as on the server.
+    expect(isPestDefaultMixVisit({ serviceType: 'Bird Box Re-Service' })).toBe(false);
+    expect(isPestDefaultMixVisit({ serviceType: 'Callback Visit' })).toBe(true);
   });
 });
