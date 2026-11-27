@@ -325,6 +325,12 @@ describe('the SCHEDULE CHANGES section', () => {
 
 describe('the send boundary, with the real loader', () => {
   const { openLoopsBlockReason } = require('../services/agent-decision-send-checks');
+  // The send-time rebuild reads the real clock (the date floor is today, ET): freeze only
+  // Date at NOW, so these December fixtures never age past the floor.
+  beforeEach(() => {
+    jest.useFakeTimers({ now: NOW, doNotFake: ['nextTick', 'setImmediate', 'clearImmediate', 'queueMicrotask', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'hrtime', 'performance'] });
+  });
+  afterEach(() => { jest.useRealTimers(); });
   // the aggregator's own deriveWindow (the send-time rebuild uses it)
   const aggregatorWindow = (row) => require('../services/context-aggregator').deriveWindow(row);
 
