@@ -20,7 +20,7 @@ const { techColumns, techStartPoint } = require('./tech-start-point');
 const { etParts, etDateString } = require('../../utils/datetime-et');
 const { stampedDivergesSql } = require('../stamped-address');
 const { applyAssignable, absentTechDays, loadTechShifts, shiftBounds } = require('../technician-eligibility');
-const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement } = require('./arrival-route');
+const { arrivalWindowRoutingEnabled, loadArrivalRouteContext, enumerateArrivalPlacements, evaluateArrivalPlacement, hasInsertionIncompatibleRow } = require('./arrival-route');
 const { SHIFT, capacityEnabled, placementFitsShift, customerMaxDetourMinutes, selfServeArrivalGraceMinutes } = require('./policy');
 const { zoneRouteDaysLive, schedulingPlanMinutesOnly } = require('../../config/feature-gates');
 const { readZoneRouteDays } = require('./zone-route-days');
@@ -307,6 +307,33 @@ function travelAllowance(opts) {
   return opts.providerTravel === false ? { maxRequests: 0 } : undefined;
 }
 
+function insertionOptionsFor(opts, context) {
+  if (opts.capacityPlacement === true) return { allowInsertion: true };
+  if (opts.arrivalSearch === true && opts.arrivalInsert === true && !hasInsertionIncompatibleRow(context)) {
+    return { allowInsertion: true, insertionMargin: true, preserveExistingOrder: true };
+  }
+  return { allowInsertion: false };
+}
+
+// When providerTravel is explicitly false (auto-dispatch arrivalSearch uses
+// maxRequests: 0 and runs road-check.js on winners only), travel.preload is a
+// no-op — skip the 3 extra simulation passes over every candidate.
+async function preloadCandidateTravel(candidates, travel, opts) {
+  if (opts.providerTravel === false) return;
+  for (let pass = 0; pass < 3; pass++) {
+    const legs = [];
+    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
+    await travel.preload(legs);
+  }
+}
+
+function candidateRouteOrderIds(opts, fit, targetId, options, context) {
+  if (!(opts.arrivalSearch === true && opts.arrivalInsert === true && options && options.allowInsertion === true) || !Array.isArray(fit.routeOrder)) return {};
+  const completed = new Set((context && context.rows || []).filter((r) => r && r.status === 'completed').map((r) => String(r.id)));
+  const active = fit.routeOrder.filter((id) => id === targetId || !completed.has(String(id)));
+  return { route_order_ids: active.map((id) => (id === targetId ? '__candidate__' : String(id))) };
+}
+
 async function findCapacitySlots(opts) {
   const { dateFrom, dateTo, durationMinutes = 30, technicianId, topN = 10 } = opts;
   let query = applyAssignable(db('technicians'));
@@ -381,6 +408,8 @@ async function findCapacitySlots(opts) {
           unit: opts.arrivalWindow.unit === true, alone: opts.arrivalWindow.alone === true,
         } : { prospective: { lat: opts.lat, lng: opts.lng, estimated_duration_minutes: durationMinutes,
           service_type: opts.serviceType || opts.serviceKey || requestedServices.map(row => row.service_type).join(' '),
+          ...(opts.isRecurring === true ? { is_recurring: true } : {}),
+          ...(opts.isCallback === true ? { is_callback: true } : {}),
           // Several services under one joined label name no single planning-minutes row (placedVisitMinutes).
           ...(requestedServices.length > 1 ? { combined_services: true } : {}) } }),
       });
@@ -420,7 +449,11 @@ async function findCapacitySlots(opts) {
         candidates.push({ context, date, tech, start, options: {
           windowStart: minutesToTime(start), windowEnd: minutesToTime(start + durationMinutes),
           // Owner policy: ordinary setup/closeout is already in the on-site allowance.
-          durationMinutes, bufferMinutes: 0, allowInsertion: opts.capacityPlacement === true,
+          // Standalone auto-dispatch arrival searches (opts.arrivalInsert) insert the
+          // moved visit into numbered destination days via apply.js placeInRoute
+          // (placeMovedVisit), so allow mid-route insertion with the same 15-minute
+          // insertion margin instead of forcing candidates behind route_order 999.
+          durationMinutes, bufferMinutes: 0, ...insertionOptionsFor(opts, context),
           // The route must also end the visit inside this technician's shift (both checks below).
           ...shiftEndOf(shift),
         } });
@@ -430,11 +463,7 @@ async function findCapacitySlots(opts) {
   // Pairwise matrix estimates generate candidates; repeated simulation asks
   // for affected legs at their predicted departures. All Google work shares
   // one bounded, request-local budget across the complete calendar horizon.
-  for (let pass = 0; pass < 3; pass++) {
-    const legs = [];
-    for (const candidate of candidates) evaluateArrivalPlacement(candidate.context, { ...candidate.options, collectLegs: legs });
-    await travel.preload(legs);
-  }
+  await preloadCandidateTravel(candidates, travel, opts);
   const slots = [];
   // Why each refused candidate was refused (arrival_window, day_overcommitted,
   // return_time, detour_cap, ...), so a thin week explains itself.
@@ -483,6 +512,7 @@ async function findCapacitySlots(opts) {
       score: fit.detourMinutes + daysOut * 0.5 - familyScore, service_family_score: familyScore,
       occupied_minutes: fit.occupiedMinutes, waiting_minutes: fit.waitingMinutes,
       estimated_arrival: fit.estimatedArrival, route_arrivals: fit.arrivals,
+      ...candidateRouteOrderIds(opts, fit, context.target.id, options, context),
       // The simulation's own arrival delay past THIS slot's start (same field
       // findArrivalWindowSlots already exposes) — packCapacityEnds' self-serve
       // arrival grace (owner ruling 2026-09-28) reads it to decide whether a

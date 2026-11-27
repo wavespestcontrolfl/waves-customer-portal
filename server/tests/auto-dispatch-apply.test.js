@@ -654,6 +654,52 @@ describe('grouped member guard (codex #3609 r13 P1)', () => {
     const opts = SmartRebooker.reschedule.mock.calls[0][5];
     expect(typeof opts.memberGuard).toBe('function');
     expect(typeof opts.moveGuard).toBe('function');
+    // Legacy/unverified candidate without route_order_ids keeps prior placement behavior.
+    expect(opts.placeInRoute).toBeUndefined();
+  });
+
+  test('placeInRouteOpts passes expectedNeighbours and vanDepartureMin for ordinary route_order_ids moves, and retries ROUTE_ORDER_CHANGED', async () => {
+    const prevShared = process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+    process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = 'true';
+    try {
+      const cand1 = { ...BEST, date: '2026-08-06', start_time: '10:00', end_time: '11:00', route_order_ids: ['p1', '__candidate__', 'n1'] };
+      const cand2 = { ...BEST, date: '2026-08-07', start_time: '11:00', end_time: '12:00', route_order_ids: ['p2', '__candidate__'] };
+      const row = readRow({ scheduled_date: '2026-08-04', window_start: '09:00', window_end: '11:00', technician_id: 't1', status: 'confirmed', auto_dispatch_locked: false, auto_dispatch_excluded: false });
+      const queue = [row, row, { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+      db.mockImplementation(() => queue.shift());
+      SmartRebooker.reschedule
+        .mockRejectedValueOnce(Object.assign(new Error('neighbors changed'), { code: 'ROUTE_ORDER_CHANGED', statusCode: 409 }))
+        .mockResolvedValueOnce({ success: true, landedStatus: 'confirmed' });
+      const out = await applyAutoDispatchMove(SERVICE, cand1, 'run1', { departureMinutes: 450, alternateCandidates: [cand2] });
+      expect(out.ok).toBe(true);
+      expect(out.attempts).toBe(2);
+      expect(out.applied).toBe(cand2);
+      expect(SmartRebooker.reschedule.mock.calls[0][5].placeInRoute).toBe(true);
+      expect(SmartRebooker.reschedule.mock.calls[0][5].placeInRouteOpts).toEqual({
+        autoDispatchPlace: true, startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p1', nextId: 'n1' },
+      });
+      expect(SmartRebooker.reschedule.mock.calls[1][5].placeInRoute).toBe(true);
+      expect(SmartRebooker.reschedule.mock.calls[1][5].placeInRouteOpts).toEqual({
+        autoDispatchPlace: true, startPoints: true, vanDepartureMin: 450, expectedNeighbours: { prevId: 'p2', nextId: null },
+      });
+
+      // Rescoring after ROUTE_ORDER_CHANGED allows retrying the SAME slot when refreshed with new neighbors.
+      SmartRebooker.reschedule.mockReset();
+      const cand1Refreshed = { ...cand1, route_order_ids: ['p1', '__candidate__', 'n2'] };
+      const queue2 = [row, row, { where() { return this; }, update: jest.fn().mockResolvedValue(1) }];
+      db.mockImplementation(() => queue2.shift());
+      SmartRebooker.reschedule
+        .mockRejectedValueOnce(Object.assign(new Error('neighbors changed'), { code: 'ROUTE_ORDER_CHANGED', statusCode: 409 }))
+        .mockResolvedValueOnce({ success: true, landedStatus: 'confirmed' });
+      const rescore = jest.fn().mockResolvedValue({ kind: 'move', rankedCandidates: [cand1Refreshed] });
+      const out2 = await applyAutoDispatchMove(SERVICE, cand1, 'run1', { departureMinutes: 450, rescore });
+      expect(out2.ok).toBe(true);
+      expect(out2.attempts).toBe(2);
+      expect(out2.applied).toBe(cand1Refreshed);
+    } finally {
+      if (prevShared === undefined) delete process.env.GATE_AUTO_DISPATCH_SHARED_MODEL;
+      else process.env.GATE_AUTO_DISPATCH_SHARED_MODEL = prevShared;
+    }
   });
 
   test('move guard: the tapped row (standalone or primary) is re-checked against the receiving tech inside the move trx — Off refuses, active/missing pass, tech unchanged included', async () => {

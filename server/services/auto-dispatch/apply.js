@@ -954,6 +954,35 @@ async function stampMovedRow({ id, slot, previousStatus, landedStatus, runId, la
  * transaction as well). Throws SLOT_TAKEN (or any other rebooker refusal)
  * exactly as before this lane's retry wrapper was added.
  */
+// Expected prev/next stop IDs around the moved visit from the arrival search's
+// certified route order, for ordinary optimization moves (forced conflict /
+// unplaced due-date moves always commit regardless of neighbor drift).
+function expectedNeighboursFor(service, best, config) {
+  if (!Array.isArray(best && best.route_order_ids)) return null;
+  const forced = Boolean((config && config.sourceConflict) || (service && service.recurring_dispatch_due_date && !service.window_start));
+  if (forced) return null;
+  const ids = best.route_order_ids;
+  const at = ids.indexOf('__candidate__');
+  if (at < 0) return null;
+  return { prevId: at > 0 ? ids[at - 1] : null, nextId: at < ids.length - 1 ? ids[at + 1] : null };
+}
+
+function placeInRouteOptsFor(service, best, config) {
+  const expectedNeighbours = expectedNeighboursFor(service, best, config);
+  return {
+    autoDispatchPlace: true,
+    startPoints: true,
+    ...(config && Number.isFinite(config.departureMinutes) ? { vanDepartureMin: config.departureMinutes } : {}),
+    ...(expectedNeighbours ? { expectedNeighbours } : {}),
+  };
+}
+
+function applyPlaceInRouteOptions(options, service, best, config) {
+  if (!Array.isArray(best && best.route_order_ids) || !best.route_order_ids.length) return;
+  options.placeInRoute = true;
+  options.placeInRouteOpts = placeInRouteOptsFor(service, best, config);
+}
+
 async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config) {
   const newWindow = { start: best.start_time, end: best.end_time };
   const options = {};
@@ -1014,6 +1043,13 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
   // The visit keeps its own status inside the move transaction (pending
   // stays pending), so no write after the commit has to put it back.
   options.keepStatus = true;
+  // When the arrival search certified a standalone mid-route order (route_order_ids),
+  // insert the moved visit into the destination day's route order on commit
+  // (arrival-route.js placeMovedVisit) from the same tech start point and
+  // departure time, verifying the road-checked neighbors under the lock.
+  // Legacy / shadow / grouped / unassigned-day candidates without a certified
+  // order keep the prior placement behavior so search, scoring, and commit agree.
+  applyPlaceInRouteOptions(options, service, best, config);
   const moveResult = (await SmartRebooker.reschedule(service.id, best.date, newWindow, 'auto_dispatch', 'auto_dispatch', options)) || {};
   // A grouped stop moved as a unit (visit-groups.moveVisitAsUnit) reports its
   // members here; a single-row move has none.
@@ -1098,19 +1134,28 @@ async function attemptApplyAutoDispatchMove(service, best, fresh, runId, config)
 // `rescore` hook the existing list is kept. Each fresh candidate is recorded
 // in `authorizedBy` against the re-evaluation that offered it, so the
 // caller audits it against THAT evaluation's current placement and scores.
-async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, authorizedBy) {
+function retryAttemptKey(cand, retryCode) {
+  const base = `${cand.date}|${cand.start_time}|${cand.technician_id}`;
+  if (retryCode !== 'ROUTE_ORDER_CHANGED') return base;
+  const ids = Array.isArray(cand.route_order_ids) ? cand.route_order_ids : [];
+  const at = ids.indexOf('__candidate__');
+  const prev = at > 0 ? ids[at - 1] : '';
+  const next = at >= 0 && at < ids.length - 1 ? ids[at + 1] : '';
+  return `${base}|${prev}>${next}`;
+}
+
+async function attemptsAfterSlotTaken(config, attempts, triedCount, serviceId, authorizedBy, retryCode = 'SLOT_TAKEN') {
   if (typeof config.rescore !== 'function') return attempts;
   const tried = attempts.slice(0, triedCount);
   try {
     const refreshed = await config.rescore();
     if (!refreshed || refreshed.kind !== 'move' || !Array.isArray(refreshed.rankedCandidates)) return tried;
-    const keyOf = (c) => `${c.date}|${c.start_time}|${c.technician_id}`;
-    const triedKeys = new Set(tried.map(keyOf));
-    const fresh = refreshed.rankedCandidates.filter((c) => c && !triedKeys.has(keyOf(c)));
+    const triedKeys = new Set(tried.map((c) => retryAttemptKey(c, retryCode)));
+    const fresh = refreshed.rankedCandidates.filter((c) => c && !triedKeys.has(retryAttemptKey(c, retryCode)));
     fresh.forEach((c) => authorizedBy.set(c, refreshed));
     return [...tried, ...fresh].slice(0, MAX_APPLY_ATTEMPTS);
   } catch (rescoreErr) {
-    logger.warn(`[auto-dispatch] re-evaluation after SLOT_TAKEN failed for ${serviceId}: ${rescoreErr.message}`);
+    logger.warn(`[auto-dispatch] re-evaluation after ${retryCode} failed for ${serviceId}: ${rescoreErr.message}`);
     return tried;
   }
 }
@@ -1190,9 +1235,9 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
       const evaluation = authorizedBy.get(attempts[i]);
       return { ...applied, attempts: i + 1, ...(evaluation ? { evaluation } : {}) };
     } catch (err) {
-      const slotTaken = sharedModelOn && err && err.code === 'SLOT_TAKEN' && i + 1 < MAX_APPLY_ATTEMPTS;
-      if (slotTaken) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id, authorizedBy);
-      if (!slotTaken || i + 1 >= attempts.length) {
+      const retryable = sharedModelOn && err && (err.code === 'SLOT_TAKEN' || err.code === 'ROUTE_ORDER_CHANGED') && i + 1 < MAX_APPLY_ATTEMPTS;
+      if (retryable) attempts = await attemptsAfterSlotTaken(config, attempts, i + 1, service.id, authorizedBy, err.code);
+      if (!retryable || i + 1 >= attempts.length) {
         // Gate on: name the candidate that actually failed last, for the
         // failure audit. Gate off: the error propagates untouched.
         if (sharedModelOn && err) {
@@ -1200,7 +1245,7 @@ async function applyAutoDispatchMove(service, best, runId, config = {}) {
         }
         throw err;
       }
-      logger.warn(`[auto-dispatch] SLOT_TAKEN for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);
+      logger.warn(`[auto-dispatch] ${err.code} for ${service.id} on attempt ${i + 1}/${attempts.length} — trying next-best candidate`);
     }
   }
   // Unreachable: `attempts` always holds `best`, and the loop returns or throws.

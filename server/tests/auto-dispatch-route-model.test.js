@@ -235,6 +235,24 @@ describe('routeCost: the canonical dispatch sequence', () => {
     expect(cost.driveWithMinutes).toBeCloseTo(chainDriveMinutes([NEAR_HQ, FAR, NEAR_HQ]), 5);
   });
 
+  test('insertByTime: standalone candidate inserts at its arrival window among numbered stops (not appended at 999)', () => {
+    const day = physicalStops([
+      { id: 'a', geo: NEAR_HQ, startMin: 540, window_start: '09:00', route_order: 1 },
+      { id: 'b', geo: FAR, startMin: 660, window_start: '11:00', route_order: 2 },
+    ]);
+    const chain = (startMin) => chainWithVisit(day, { id: 'v', geo: NEAR_HQ, startMin, route_order: null, insertByTime: true }).map((st) => st.id);
+    expect(chain(480)).toEqual(['v', 'a', 'b']); // 08:00 goes before #1 (09:00)
+    expect(chain(600)).toEqual(['a', 'v', 'b']); // 10:00 goes between #1 (09:00) and #2 (11:00)
+    expect(chain(780)).toEqual(['a', 'b', 'v']); // 13:00 goes after #2 (11:00)
+    // Detour and road-check neighbours reflect the real inserted chain HQ -> A -> v -> B -> HQ, not A -> B -> v.
+    const cost = routeCost([
+      { id: 'a', geo: NEAR_HQ, startMin: 540, window_start: '09:00', route_order: 1 },
+      { id: 'b', geo: FAR, startMin: 660, window_start: '11:00', route_order: 2 },
+    ], { id: 'v', geo: NEAR_HQ, startMin: 600, route_order: null, insertByTime: true });
+    expect(cost.driveWithMinutes).toBeCloseTo(chainDriveMinutes([NEAR_HQ, NEAR_HQ, FAR]), 5);
+    expect(cost.neighbours).toEqual({ prev: NEAR_HQ, stop: NEAR_HQ, next: FAR });
+  });
+
 });
 
 // Codex r5 (PRRT_kwDOR3YQi86mQ1x6): the moving unit takes its place in the
