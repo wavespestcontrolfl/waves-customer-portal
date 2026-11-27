@@ -70,7 +70,10 @@ const NON_MIX_SERVICE_RE =
 // off a bare name) — isPestDefaultMixVisit below covers the common bare-
 // label case separately, by the row's stable catalog key instead.
 const RECURRING_GENERAL_PEST_RE =
-  /general pest|quarterly|bi-?monthly|\bmonthly\b|semi-?annual|recurring pest|one[-\s]?time\s+pest\s+control/i;
+  /general pest|quarterly|bi-?monthly|\bmonthly\b|recurring pest|one[-\s]?time\s+pest\s+control/i;
+// "Semi-annual" counts as the server's general pest card does: with "pest" in the name, under a general pest key, or as a
+// WHOLE bare name ("Semi-Annual Service") with no key (protocol-matcher.js keylessNames).
+const SEMIANNUAL_RE = /semi-?annual/;
 
 // The mix belongs on recurring general-pest maintenance visits and pest
 // re-services ONLY. Callers on an un-gated surface pass the whole
@@ -79,7 +82,7 @@ const RECURRING_GENERAL_PEST_RE =
 // The general pest catalog keys (server protocol-matcher.js, the general pest rule's serviceKeys, less the two the name
 // test above always excludes: the initial cleanout and pest + rodent).
 // The server's keylessNames for the general pest card (protocol-matcher.js), on the same normalized name.
-const BARE_RESERVICE_RE = /^(re service|reservice|callback)( service| visit)?$/;
+const BARE_RESERVICE_RE = /^(re service|reservice|callback|semi annual|semiannual)( service| visit)?$/;
 const GENERAL_PEST_KEYS = new Set([
   "pest_general_quarterly", "pest_general_monthly", "pest_general_bimonthly", "pest_general_semiannual",
   "one_time_pest_control", "pest_re_service",
@@ -104,7 +107,8 @@ export function isPestDefaultMixVisit(service) {
   const bareReservice = !key && BARE_RESERVICE_RE.test(s.replace(/[^a-z0-9]+/g, " ").trim());
   const isReservice =
     (service?.isCallback === true && pestWork) || (/re-?service|callback/.test(s) && (pestWork || bareReservice));
-  if (isReservice || RECURRING_GENERAL_PEST_RE.test(s)) return true;
+  const semiannual = SEMIANNUAL_RE.test(s) && (pestWork || bareReservice);
+  if (isReservice || semiannual || RECURRING_GENERAL_PEST_RE.test(s)) return true;
   // The stable catalog key, not the label (Codex r3 P2, PR #5049): an
   // admin-created One-Time Pest Control Service job is often scheduled
   // under the bare "Pest Control Service" label (admin-schedule.js's

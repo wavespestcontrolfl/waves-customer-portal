@@ -62,3 +62,13 @@ describe('isPestDefaultMixVisit: a re-service follows the server card by key', (
     expect(isPestDefaultMixVisit({ serviceType: 'Callback Visit' })).toBe(true);
   });
 });
+
+describe('isPestDefaultMixVisit: a semi-annual name follows the server card by key', () => {
+  it('keeps the mix with pest in the name, a general pest key, or a bare keyless name; none under another service key', () => {
+    expect(isPestDefaultMixVisit({ serviceType: 'Semi-Annual Pest Control' })).toBe(true);
+    expect(isPestDefaultMixVisit({ serviceType: 'Semi-Annual Service' })).toBe(true);
+    expect(isPestDefaultMixVisit({ serviceType: 'Semi-Annual Service', serviceKey: 'pest_general_semiannual' })).toBe(true);
+    expect(isPestDefaultMixVisit({ serviceType: 'Semi-Annual Service', serviceKey: 'mud_dauber_removal' })).toBe(false);
+    expect(isPestDefaultMixVisit({ serviceType: 'Gutter Semi-Annual Service' })).toBe(false);
+  });
+});

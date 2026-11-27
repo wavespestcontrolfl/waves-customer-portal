@@ -313,6 +313,21 @@ it('a draft restored on a no-card visit drops its automatic house-mix rows and k
   expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
 });
 
+it('a no-card answer from the defaults read alone shows the note and no action picker when the actions read fails', async () => {
+  vi.stubGlobal('fetch', vi.fn(async (url) => {
+    if (String(url).includes('/completion-actions')) return { ok: false, status: 500, json: async () => ({ error: 'down' }) };
+    if (String(url).includes('/default-products')) {
+      return { ok: true, json: async () => ({ serviceId: 'cockroach-visit-1', programKey: null, matchedVisit: { visit: null, reason: 'no_protocol', matched: false }, source: 'none', products: [], unresolved: [], taurusYearly: { count: 0, high: 0, low: 0, eligible: true, year: 2026 } }) };
+    }
+    return { ok: true, json: async () => ({ customer: {}, actions: [], available: false }) };
+  }));
+  await act(async () => {
+    render(<CompletionPanel service={cockroachService({ serviceType: 'Courtesy Visit', completionProfile: null, findingsSchema: null })} products={cockroachCatalog} onClose={() => {}} onSubmit={vi.fn().mockResolvedValue({})} />);
+  });
+  expect(await screen.findByText(NO_CARD_NOTE)).toBeTruthy();
+  expect(screen.queryByLabelText('Add protocol action')).toBeNull();
+});
+
 it('a booked Waves Assessment under its old name "Lawn Inspection" asks for its own card by visit, not the lawn applications', async () => {
   stubFetchWithActions({ programKey: 'assessment', programName: 'Waves Assessment Protocol', visit: { visit: 1, month: 'Any' }, actions: [{ id: 'w1', label: 'Walk the outside of the home', treatmentApplied: false }] });
   await act(async () => {

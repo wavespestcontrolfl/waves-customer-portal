@@ -416,6 +416,8 @@ export function normalizedEntries(lines) {
       return text && !seen.has(key) && seen.add(key);
     });
 }
+// The no-card line (server admin-protocols.js NO_CARD_NOTE), shown when only the defaults read answered.
+const NO_CARD_NOTE = "Inspection only, no product: this service has no protocol card.";
 const PROTOCOL_MARKER_TAGS = ["protocol", "protocol optional", "action"];
 function parseMarkerLine(line) {
   const match = String(line || "").trim().match(MARKER_LINE_RX);
@@ -553,6 +555,8 @@ export function withoutProtocolMarkerLines(notes, labels) {
 // branching for it.
 const SAVED_TREATMENT_SCOPES = new Set(["interior", "exterior"]);
 const PROTOCOL_ACTION_RULES = [
+  // A confirmed no-card visit (owner pick D18) records no card action: inspection only.
+  (_label, c) => (c.noCardConfirmed ? false : null),
   // Specialty preset lanes (any service) accept only the preset's own actions
   // — membership cannot be bypassed by saved scope (codex P2 r7 #3701).
   (label, c) => (c.specialtyProtocolActions.length
@@ -581,9 +585,13 @@ export function protocolActionAllowed(label, context) {
 // completed-actions list the payload cap is checked against.
 export function reconcileProtocolActions({ labels, notes, context }) {
   const reportProtocolActions = labels.filter((label) => protocolActionAllowed(label, context));
+  // A confirmed no-card visit also drops the action markers a restored draft's notes carry without a selected label.
   const reportTechnicianNotes = withoutProtocolMarkerLines(
     notes,
-    labels.filter((label) => !reportProtocolActions.includes(label)),
+    [
+      ...labels.filter((label) => !reportProtocolActions.includes(label)),
+      ...(context?.noCardConfirmed ? markerTexts(notes, PROTOCOL_MARKER_TAGS) : []),
+    ],
   );
   const completedActions = normalizedEntries([
     ...reportProtocolActions,
@@ -14219,6 +14227,12 @@ export function CompletionPanel({
   // mix seed waits for the answer to settle (a failure settles it too, with the
   // count unknown, so Taurus stays off the mix; nothing blocks the close-out).
   const [protocolCompletionDefaults, setProtocolCompletionDefaults] = useState(null);
+  // A confirmed no-card visit (owner pick D18): the actions read's noProtocol or the defaults read's no_protocol, whichever
+  // answers. It is inspection only: the note in place of the action picker, no house mix, no card action at submit. One
+  // decision for all of them. Typed and specialty forms keep their own actions; a lawn visit's plan governs it (the matcher
+  // has no lawn rule, so a lawn alias such as "Fertilization" can read as no card there).
+  const noCardConfirmed = !isTypedFindings && !specialtyCompletion && !isLawn
+    && (protocolActionMeta?.noProtocol === true || protocolCompletionDefaults?.matchedVisit?.reason === "no_protocol");
   const [protocolCompletionDefaultsSettled, setProtocolCompletionDefaultsSettled] = useState(false);
   const taurusYearly = taurusYearlyOf(protocolCompletionDefaults?.taurusYearly);
   const pestDefaultMixSeededRef = useRef(false);
@@ -14228,9 +14242,8 @@ export function CompletionPanel({
     if (isTypedFindings || isBedBugVisit || !isRegularPestVisit) return;
     if (visitOutcome !== "completed") return;
     if (!protocolCompletionDefaultsSettled) return;
-    // The server's card answer first: a no-card visit (owner pick D18) is inspection only and seeds nothing, whichever read
-    // says so (the actions read's noProtocol or the defaults read's no_protocol). A failed actions read alone keeps the mix.
-    if (protocolCompletionDefaults?.matchedVisit?.reason === "no_protocol") return;
+    // The server's card answer first: a no-card visit (noCardConfirmed) seeds nothing. A failed actions read alone keeps the mix.
+    if (noCardConfirmed) return;
     if (service.serviceType && !protocolActionsLoaded && !protocolActionError) return;
     if (!Array.isArray(products) || products.length === 0) return;
     if (selectedProducts.length) {
@@ -14258,7 +14271,7 @@ export function CompletionPanel({
     if (!rows.length) return;
     pestDefaultMixSnapshotRef.current = JSON.stringify(rows);
     setSelectedProducts(rows);
-  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly, protocolActionsLoaded, protocolActionError, protocolCompletionDefaults]);
+  }, [products, service, selectedProducts, isTypedFindings, isBedBugVisit, isRegularPestVisit, visitOutcome, protocolCompletionDefaultsRemovedIds, protocolCompletionDefaultsSettled, taurusYearly, protocolActionsLoaded, protocolActionError, noCardConfirmed]);
   // Server-curated protocol/default-products prefill (owner ruling
   // 2026-09-26) for every non-lawn, non-pest program the server has a
   // curated product list for — cockroach today (Alpine WSG + Gentrol IGR +
@@ -14351,19 +14364,14 @@ export function CompletionPanel({
     pestDefaultMixSeededRef.current = false;
     pestDefaultMixSnapshotRef.current = null;
   }, [visitOutcome, selectedProducts]);
-  // A confirmed no-card visit (owner pick D18: the actions read's noProtocol or the defaults read's no_protocol) is inspection
-  // only. A draft restored from before that answer may still carry the automatic house-mix or card-default rows and card
-  // action ticks: they are dropped, so nothing automatic submits under the "Inspection only, no product" note. A product
-  // row the tech added by hand stays (owner 2026-11-26: a check never stops him recording what he applied). Typed and
-  // specialty forms keep their own actions.
-  const noCardConfirmed = !isTypedFindings && !specialtyCompletion
-    && (protocolActionMeta?.noProtocol === true || protocolCompletionDefaults?.matchedVisit?.reason === "no_protocol");
+  // A draft restored on a confirmed no-card visit (noCardConfirmed) may still carry the automatic house-mix or card-default
+  // rows from before that answer: they are dropped, so nothing automatic submits under the "Inspection only, no product"
+  // note. A product row the tech added by hand stays (owner 2026-11-26: a check never stops him recording what he
+  // applied). Card action ticks and their note markers are dropped at submit (reconcileProtocolActions).
   useEffect(() => {
     if (!noCardConfirmed) return;
-    if (selectedProducts.some((p) => p.protocolDefaultProduct || p.pestDefaultMixProduct)) {
-      setSelectedProducts((current) => current.filter((p) => !p.protocolDefaultProduct && !p.pestDefaultMixProduct));
-    }
-    setSelectedProtocolActionLabels((current) => (current.length ? [] : current));
+    if (!selectedProducts.some((p) => p.protocolDefaultProduct || p.pestDefaultMixProduct)) return;
+    setSelectedProducts((current) => current.filter((p) => !p.protocolDefaultProduct && !p.pestDefaultMixProduct));
   }, [noCardConfirmed, selectedProducts]);
   const lawnDefaultMixSeededRef = useRef(false);
   const lawnDefaultMixSnapshotRef = useRef(null);
@@ -18519,6 +18527,7 @@ export function CompletionPanel({
         actionScopeByLabel,
         isLawn,
         completionImprovements,
+        noCardConfirmed,
       },
     });
     // The server normalizer silently trims each observation/recommendation
@@ -19439,13 +19448,13 @@ export function CompletionPanel({
       : protocolActions;
   // A service with no protocol card (owner pick D18; the server's noProtocol answer) is inspection only: the form offers no
   // action to tick, the generic treatment chips included. A specialty form (bee and wasp) keeps its own actions.
-  const noProtocolCard = !specialtyCompletion && protocolActionMeta?.noProtocol === true;
+  const noProtocolCard = noCardConfirmed;
   const protocolActionFallbackChips = isLawn ? [] : CHIP_ACTIONS;
   // A regular pest visit has no Protocol actions field (owner 2026-10-04):
   // the product rows say what was done. An action a restored draft already
   // carries stays selected (its marker line shows in the notes) and submits.
   const hideProtocolActionsField =
-    isRegularPestVisit ||
+    (isRegularPestVisit && !noCardConfirmed) ||
     (isLawn &&
       !protocolActionsLoading &&
       !protocolActionError &&
@@ -20920,10 +20929,10 @@ export function CompletionPanel({
                     {/* A service with no protocol card (owner pick D18): the server's own line, in place of a list of actions. */}
                     {noProtocolCard && (
                       <div role="note" style={{ fontFamily: font, fontSize: 14, color: M.ink3, marginBottom: 8 }}>
-                        {protocolActionMeta.note}
+                        {protocolActionMeta?.note || NO_CARD_NOTE}
                       </div>
                     )}
-                    {!specialtyCompletion && protocolActionError && !protocolActions.length && (
+                    {!specialtyCompletion && protocolActionError && !protocolActions.length && !noProtocolCard && (
                       <div
                         style={{
                           fontFamily: font,
@@ -23462,10 +23471,10 @@ export function CompletionPanel({
                 <>
                   {noProtocolCard && (
                     <div role="note" style={{ fontSize: 14, color: D.muted, marginBottom: 6 }}>
-                      {protocolActionMeta.note}
+                      {protocolActionMeta?.note || NO_CARD_NOTE}
                     </div>
                   )}
-                  {!specialtyCompletion && protocolActionError && !protocolActions.length && (
+                  {!specialtyCompletion && protocolActionError && !protocolActions.length && !noProtocolCard && (
                     <div
                       style={{ fontSize: 12, color: D.muted, marginBottom: 6 }}
                     >
