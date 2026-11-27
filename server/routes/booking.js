@@ -1750,7 +1750,20 @@ function crewSlots(slots, crew) {
 // funneled far-south zone, the offered pool is funneled exactly as the estimate page's (funnelOfferPool).
 // Per truck (GATE_MULTI_TECH_CONFIRM, owner rule B) find-time's slots of a truck on another truck's zone
 // day go before any start is claimed (dropOtherTruckDays), so a start goes to the zone day's own truck.
-async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, crew, verifiedOnly }) {
+function shouldUseCapacityFanOut(noCustomerReads) {
+  return capacityEnabled() && !noCustomerReads;
+}
+
+function loadOfferFunnelIfAllowed({ noCustomerReads, slots, address, city, customerCity, dateFrom, dateTo, conn }) {
+  if (noCustomerReads || !slots?.length) return Promise.resolve(null);
+  return offerFunnelView({ address, city, customerCity, dateFrom, dateTo, conn });
+}
+
+function routeCheckSurfaceFor(surface, noCustomerReads) {
+  return noCustomerReads ? null : surface;
+}
+
+async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo, config, today, timeOfDay = 'any', expandOpenDays = false, excludeServiceIds = [], serviceKey = '', serviceIdentity = null, selfServeNotice = false, rankProfile, capacityPlacement, bookArrivalGrace, surface, serviceLines, bestSlotCount, technicianId, zoneFunnelAddress, zoneFunnelCity = null, zoneFunnelCustomerCity, paidLookups, noCustomerReads = false, crew, verifiedOnly }) {
   config = applySchedulingPolicy(config);
   // Service-line map LIVE (GATE_SERVICE_LINE_MAP=live): null (no query) unless the
   // caller names `serviceLines`, the gate is live and a line has a technician set.
@@ -1901,6 +1914,8 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // availabilityForPin's read-only caller passes it (the hourly route check's slot-rule
     // decision); unset for every other caller = the shared allowance, as before.
     providerTravel: paidLookups,
+    // Practice line boundary: skip all `customers` joins/reads when true.
+    noCustomerReads: noCustomerReads === true,
     // An unreadable closed-day list (find-time's blackout read) throws for a caller that
     // counts openings (availabilityForPin `verifiedOnly`), as for the nightly dispatch
     // search; every other caller fails open (closed days offered), as before.
@@ -1938,7 +1953,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
     // gated (violatesTravelGap itself returns false when the gate is off);
     // the anchor load is no longer where that gate lives (GH codex #3803
     // r2 P2's dark-scan optimization is superseded by the shared loader).
-    const anchors = await loadPackingAnchors({ dateFrom: rangeFrom, dateTo: rangeTo, excludeServiceIds });
+    const anchors = await loadPackingAnchors({ dateFrom: rangeFrom, dateTo: rangeTo, excludeServiceIds, noCustomerReads: noCustomerReads === true });
     occupiedByDate = new Map();
     for (const anchor of anchors) {
       const row = {
@@ -2109,16 +2124,17 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
 
   // The far-south funnel's zone days (zoneFunnelAddress), read before the claims: per truck, a truck on another
   // truck's zone day never claims a start, so the zone truck keeps each start it has. Null = no funnel.
-  const offerFunnel = result.slots?.length
-    ? await offerFunnelView({ address: zoneFunnelAddress, city: zoneFunnelCity, customerCity: zoneFunnelCustomerCity, dateFrom: rangeFrom, dateTo: rangeTo, conn: db })
-    : null;
+  const offerFunnel = await loadOfferFunnelIfAllowed({
+    noCustomerReads, slots: result.slots, address: zoneFunnelAddress, city: zoneFunnelCity, customerCity: zoneFunnelCustomerCity,
+    dateFrom: rangeFrom, dateTo: rangeTo, conn: db,
+  });
   const findTimeSlots = dropOtherTruckDays(result.slots || [], offerFunnel || {}, (slot) => slot?.technician?.id);
   // A graced build never offers a slot whose simulated arrival delay is past
   // its grace (bookSlotGrace's -1): verifyArrivalCapacity would refuse it at
   // confirm. Ungraced builds pass every slot through untouched.
   const offerSlots = orderByLineRank(crewSlots(graceBuild ? findTimeSlots.filter((slot) => bookSlotGrace(graceBuild, slot) >= 0) : findTimeSlots, crew), lineRanking);
   for (const slot of offerSlots) {
-    if (capacityEnabled()) {
+    if (shouldUseCapacityFanOut(noCustomerReads)) {
       // Capacity evaluates each start against the whole route and live blocks.
       // Never synthesize additional hours from an otherwise empty route.
       addCandidate(slot, timeToMin(slot.start_time));
@@ -2178,7 +2194,7 @@ async function buildBookingAvailability({ lat, lng, duration, rangeFrom, rangeTo
   const stampedCandidates = (await rainRank.stamp([...candidateMap.values()])).sort(compareRankedSlots);
   // GATE_CUSTOMER_ROUTE_CHECK (customer-route-check.js): null with the gate
   // off or no surface named, and nothing below runs.
-  const routeCheck = routeCheckPlan({ surface, lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
+  const routeCheck = routeCheckPlan({ surface: routeCheckSurfaceFor(surface, noCustomerReads), lat, lng, duration, excludeServiceIds, today, floor: !crew, verifiedOnly });
   // South-zone day funnel (GATE_SOUTH_ZONE_DAY_FUNNEL), opt-in per caller with the address text
   // (the lead assessment link): the pool narrows BEFORE the customer route check, as on the estimate page.
   const funneledCandidates = await funnelOfferPool(stampedCandidates, offerFunnel, { routeDaySlug: zoneSlug, conn: db });

@@ -1144,18 +1144,56 @@ function withShift(dayParams, shift) {
 // `params`: { services, geo, excludeSet, wantsPackedEnds,
 //   wantsExpectedMinutesCredit, slotStepMinutes, durationMinutes, dayOpen, dayClose,
 //   everyStepStart, lastEndMin }.
+function parseBlockMinute(value) {
+  const m = String(value || '').match(/^(\d{1,2}):(\d{2})/);
+  return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+}
+
+function blockDateString(value) {
+  return value instanceof Date ? value.toISOString().slice(0, 10) : String(value || '').slice(0, 10);
+}
+
+async function loadPracticeScheduleBlocks({ dateFrom, dateTo, noCustomerReads = false }) {
+  if (!noCustomerReads || !capacityEnabled()) return [];
+  const rows = await db('tech_schedule_blocks')
+    .whereBetween('date', [dateFrom, dateTo])
+    .whereNot('block_type', 'available')
+    .select('id', 'date', 'technician_id', 'start_time', 'end_time');
+  return Array.isArray(rows) ? rows : [];
+}
+
+function mergeScheduleBlockStops(dayStops, scheduleBlocks, date, techId) {
+  if (!Array.isArray(scheduleBlocks) || !scheduleBlocks.length) return dayStops;
+  const matching = scheduleBlocks
+    .filter((b) => blockDateString(b.date) === date && (b.technician_id == null || String(b.technician_id) === String(techId)))
+    .map((b) => ({ startMin: parseBlockMinute(b.start_time), endMin: parseBlockMinute(b.end_time), id: b.id }))
+    .filter((b) => Number.isFinite(b.startMin) && Number.isFinite(b.endMin) && b.endMin > b.startMin)
+    .map((b, idx) => ({
+      id: `schedule_block:${b.id || idx}`,
+      lat: null,
+      lng: null,
+      startMin: b.startMin,
+      endMin: b.endMin,
+      customer: 'Schedule block',
+      service_type: 'schedule_block',
+    }));
+  if (!matching.length) return dayStops;
+  return [...dayStops, ...matching].sort((a, b) => a.startMin - b.startMin);
+}
+
 function candidatesForDay(date, tech, params) {
   const {
     services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
-    durationMinutes, dayOpen, dayClose,
+    durationMinutes, dayOpen, dayClose, scheduleBlocks,
   } = params;
   // The last minute a job may end: the day's close, or this technician's
   // shift end when that is earlier (withShift). The home-base anchors below
   // stay at the day's own open and close.
   const lastEndMin = params.lastEndMin ?? dayClose;
-  const dayStops = buildDayStops(services, {
+  const rawDayStops = buildDayStops(services, {
     tech, date, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
   });
+  const dayStops = mergeScheduleBlockStops(rawDayStops, scheduleBlocks, date, tech.id);
   // Build virtual stop list: HQ ... stops ... HQ
   // "Stops" include timing. For gaps we evaluate between consecutive anchors.
   // HQ is this tech's start point for an opted-in staff caller: home under
@@ -1331,7 +1369,55 @@ function startFloorFor(date, earliestStartMin, startFloorByDate) {
 // empty techs array short-circuits (no services/dates query) — the caller
 // still owns the "no assignable technicians" early return, since that
 // shape is a findAvailableSlots response contract, not a loading concern.
-async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout, techStartPoints = false }) {
+const FIND_TIME_SERVICE_COLUMNS = [
+  'scheduled_services.id',
+  'scheduled_services.scheduled_date',
+  'scheduled_services.technician_id',
+  'scheduled_services.window_start',
+  'scheduled_services.window_end',
+  'scheduled_services.service_type',
+  'scheduled_services.service_key_snapshot',
+  'scheduled_services.estimated_duration_minutes',
+  'scheduled_services.is_recurring',
+  'scheduled_services.is_callback',
+  'scheduled_services.reservation_service_mix',
+  'scheduled_services.lat as svc_lat',
+  'scheduled_services.lng as svc_lng',
+];
+
+async function queryFindTimeServices({ dateFrom, dateTo, noCustomerReads = false }) {
+  const base = require('../visit-hold').excludeHeld(db('scheduled_services')
+    .whereBetween('scheduled_date', [dateFrom, dateTo])
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
+    .whereNotNull('scheduled_services.window_start')
+    .where((q) => {
+      q.whereNull('scheduled_services.reservation_expires_at')
+        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
+    });
+  if (noCustomerReads) {
+    return base.select(...FIND_TIME_SERVICE_COLUMNS);
+  }
+  return base
+    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
+    .select(
+      ...FIND_TIME_SERVICE_COLUMNS,
+      'customers.first_name',
+      'customers.last_name',
+      'customers.city',
+      db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END as cust_lat`),
+      db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
+    );
+}
+
+function shouldUseCapacitySlots(opts) {
+  return opts.noCustomerReads !== true && (capacityEnabled() || opts.arrivalSearch === true);
+}
+
+function shouldUseArrivalWindowSlots(opts) {
+  return opts.noCustomerReads !== true && Boolean((opts.arrivalWindow?.serviceId || opts.arrivalWindow?.prospective) && arrivalWindowRoutingEnabled());
+}
+
+async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates, strictBlackout, techStartPoints = false, noCustomerReads = false }) {
   // Only assignable techs (active employment AND field-dispatchable). Every
   // slot consumer (booking, estimate availability, reschedule, re-service,
   // voice relay, auto-dispatch) inherits this filter, so a prospective
@@ -1350,51 +1436,9 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
   const shiftOf = await loadTechShifts(db, { technicianIds: techs.map((tech) => tech.id) });
 
   // Load all scheduled services in date range, per tech, with coords
-  const services = await require('../visit-hold').excludeHeld(db('scheduled_services')
-    .whereBetween('scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
-    .whereNotNull('scheduled_services.window_start')
-    .where((q) => {
-      q.whereNull('scheduled_services.reservation_expires_at')
-        .orWhereRaw('scheduled_services.reservation_expires_at > NOW()');
-    })
-    .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
-    .select(
-      'scheduled_services.id',
-      'scheduled_services.scheduled_date',
-      'scheduled_services.technician_id',
-      'scheduled_services.window_start',
-      'scheduled_services.window_end',
-      'scheduled_services.service_type',
-      'scheduled_services.service_key_snapshot',
-      'scheduled_services.estimated_duration_minutes',
-      // Planning-minute inputs: stopCreditResolver credits a stop the owner
-      // table names at the router's minutes, as the booking check does.
-      'scheduled_services.is_recurring',
-      'scheduled_services.is_callback',
-      // Version-2 combined allocations (visit-capacity.js's occupiedRows,
-      // the same expansion occupancy.js's shared anchor loader runs) need
-      // this to know a row is one member of a summed allocation — without
-      // it, buildDayStops treated raw members as independent stops and
-      // never expanded through their real combined span (Codex r5 P1).
-      'scheduled_services.reservation_service_mix',
-      'scheduled_services.lat as svc_lat',
-      'scheduled_services.lng as svc_lng',
-      'customers.first_name',
-      'customers.last_name',
-      'customers.city',
-      // Canonical columns on customers are latitude/longitude (added
-      // by 20260414000029_geofence_timers.js). customers.lat / customers.lng
-      // don't exist on prod — reading them throws and kills the whole
-      // /available-slots query. Aliased back to cust_lat/cust_lng for
-      // the downstream code that consumes those names. Primary coords only
-      // stand in when the visit's stamped address doesn't DIVERGE from the
-      // primary — modeling a stamped rental stop at the primary home offers
-      // slots that don't fit the real route (codex round-8 P1); a divergent
-      // coordless stop degrades to no-drive-time instead.
-      db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.latitude END as cust_lat`),
-      db.raw(`CASE WHEN NOT ${stampedDivergesSql('scheduled_services', 'customers')} THEN customers.longitude END as cust_lng`),
-    );
+  // (omitting the customers join entirely when noCustomerReads is set).
+  const services = await queryFindTimeServices({ dateFrom, dateTo, noCustomerReads });
+  const scheduleBlocks = await loadPracticeScheduleBlocks({ dateFrom, dateTo, noCustomerReads });
 
   // Owner blackout days (admin Settings → Scheduling → Blackout days) are
   // removed from the offer enumeration here — /book, the reschedule page,
@@ -1412,7 +1456,7 @@ async function loadFindTimeContext({ dateFrom, dateTo, technicianId, includeWeek
     const blackout = await getBlackoutDates(dates[0], dates[dates.length - 1], undefined, { strict: strictBlackout === true });
     if (blackout.size) dates = dates.filter((d) => !blackout.has(d));
   }
-  return { techs, services, dates, absentDays, shiftOf };
+  return { techs, services, dates, absentDays, shiftOf, scheduleBlocks };
 }
 
 /**
@@ -1424,7 +1468,9 @@ async function findAvailableSlots(opts) {
   // opts.arrivalSearch: the nightly auto-dispatch search alone
   // (GATE_AUTO_DISPATCH_ARRIVAL_SEARCH, candidate-slots.js) — the arrival
   // engine for that call while every booking surface keeps this path.
-  if (capacityEnabled() || opts.arrivalSearch === true) return findCapacitySlots(opts);
+  // opts.noCustomerReads: practice line boundary — stays on scheduled_services-only
+  // gap evaluation without touching customers.
+  if (shouldUseCapacitySlots(opts)) return findCapacitySlots(opts);
   const {
     lat, lng, durationMinutes, dateFrom, dateTo, technicianId, topN,
     dayStartHour, dayEndHour, includeWeekends, slotStepMinutes,
@@ -1455,7 +1501,7 @@ async function findAvailableSlots(opts) {
     return { error: 'dateFrom and dateTo required', slots: [] };
   }
 
-  if ((opts.arrivalWindow?.serviceId || opts.arrivalWindow?.prospective) && arrivalWindowRoutingEnabled()) {
+  if (shouldUseArrivalWindowSlots(opts)) {
     return findArrivalWindowSlots(opts);
   }
 
@@ -1463,9 +1509,10 @@ async function findAvailableSlots(opts) {
   const dayOpen = dayStartHour * 60;
   const dayClose = dayEndHour * 60;
 
-  const { techs, services, dates, absentDays, shiftOf } = await loadFindTimeContext({
+  const { techs, services, dates, absentDays, shiftOf, scheduleBlocks } = await loadFindTimeContext({
     dateFrom, dateTo, technicianId, includeWeekends, includeBlackoutDates: opts.includeBlackoutDates, strictBlackout: opts.strictBlackout,
     techStartPoints: opts.techStartPoints === true,
+    noCustomerReads: opts.noCustomerReads === true,
   });
   if (!techs.length) return { slots: [], evaluated: 0, note: 'No assignable technicians found' };
 
@@ -1495,7 +1542,7 @@ async function findAvailableSlots(opts) {
   };
 
   const dayParams = {
-    services, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
+    services, scheduleBlocks, geo, excludeSet, wantsPackedEnds, wantsExpectedMinutesCredit,
     slotStepMinutes, durationMinutes, dayOpen, dayClose, everyStepStart,
     techStartPoints: opts.techStartPoints === true,
   };

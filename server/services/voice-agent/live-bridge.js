@@ -135,12 +135,12 @@ const TRIAL_LIMITS = [
 // Tools mode replaces TRIAL_LIMITS (which says nothing can be looked up).
 const TOOLS_LIMITS = [
   'TRIAL LIMITS (this overrides everything above):',
-  'This is a practice line. Delegate only these: prices, services offered, and a new-customer request. For',
-  'those, say only what the delegation result says; never guess or invent a price or service. A request is',
-  'practice and changes nothing, and the result says so. You cannot check open appointment times, accounts,',
-  'visits, invoices, estimates, messages or call history: if asked, say this practice line cannot check that,',
-  'and they can call or text the Waves office. You cannot send a text or transfer the call, and nobody will',
-  'call back from this line.',
+  'This is a practice line. Delegate only these: prices, services offered, open appointment times by city,',
+  'and a new-customer request. For those, say only what the delegation result says; never guess or invent',
+  'a price, service or time. Open times are practice-only and nothing is booked or held; a request changes',
+  'nothing. You cannot check accounts, visits, invoices, estimates, messages or call history: if asked,',
+  'say this practice line cannot check that, and they can call or text the Waves office. You cannot send a',
+  'text or transfer the call, and nobody will call back from this line.',
 ].join('\n');
 
 // ── Session setup pieces (pure, exported for tests) ────────────────────────
