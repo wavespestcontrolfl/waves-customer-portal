@@ -56,6 +56,21 @@ export async function minimizeOrExitAndroidApp(AppPlugin) {
 }
 
 /**
+ * If a visible accessible dialog/modal is currently mounted (e.g. Reschedule,
+ * Cancel, DocumentPreview inside a child tab), dispatch Escape to close it and
+ * return true. Returns false when no visible dialog is open.
+ */
+export function dismissVisibleDialog() {
+  if (typeof document === 'undefined') return false;
+  const openDialogs = Array.from(
+    document.querySelectorAll('[aria-modal="true"], [role="dialog"], [role="alertdialog"]'),
+  ).filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
+  if (openDialogs.length === 0) return false;
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+  return true;
+}
+
+/**
  * Dispatch an Android back-button event through the registered handler stack,
  * then fallback to browser history, then minimize the app.
  */
@@ -69,15 +84,7 @@ export async function handleAndroidBackButton(event = {}, AppPlugin = null) {
 
   // Fallback for open accessible dialogs inside child tabs (Reschedule, Cancel,
   // DocumentPreview, etc.) that already handle Escape via useModalFocus.
-  if (typeof document !== 'undefined') {
-    const openDialogs = Array.from(
-      document.querySelectorAll('[aria-modal="true"], [role="dialog"], [role="alertdialog"]'),
-    ).filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden');
-    if (openDialogs.length > 0) {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-      return 'dialog-escape';
-    }
-  }
+  if (dismissVisibleDialog()) return 'dialog-escape';
 
   const canGoBack = Boolean(event?.canGoBack);
   const atPortalHomeRoot = typeof window !== 'undefined'

@@ -52,7 +52,7 @@ import {
 import useIsMobile from '../hooks/useIsMobile';
 import useAppNotifications from '../hooks/useAppNotifications';
 import { isNativeApp, nativePlatform } from '../native/platform';
-import { registerBackButtonHandler } from '../native/nativeBackButton';
+import { dismissVisibleDialog, registerBackButtonHandler } from '../native/nativeBackButton';
 import { APP_STORE_URL, PLAY_STORE_URL } from '../components/estimate/AppShowcaseCard';
 import { canSaveNative, canShareNative, saveBlobNative, saveUrlNative, shareUrlNative } from '../native/nativeFile';
 import { captureCameraPhoto } from '../native/camera';
@@ -19029,6 +19029,9 @@ export default function PortalPage() {
     if (showPhotoId) { setShowPhotoId(false); return true; }
     if (showMoreSheet) { setShowMoreSheet(false); return true; }
     if (showMenu) { setShowMenu(false); return true; }
+    // Give any active accessible modal inside the current tab (e.g. DocumentPreview,
+    // Reschedule, Cancel) first chance to dismiss before switching tabs to Home.
+    if (dismissVisibleDialog()) return true;
     if (activeTab !== homeTab) {
       switchTab(homeTab);
       return true;

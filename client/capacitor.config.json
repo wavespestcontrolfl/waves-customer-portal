@@ -13,6 +13,7 @@
   },
   "server": {
     "url": "https://portal.wavespestcontrol.com",
+    "errorPath": "index.html",
     "cleartext": false
   },
   "plugins": {

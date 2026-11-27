@@ -56,31 +56,45 @@ router.post('/native-subscribe', async (req, res, next) => {
       contact_phone_key: req.contactSession ? req.contactSession.phoneKey : null,
     };
 
-    // Upsert by device_token so re-launch re-registration (or a device changing
-    // hands) is idempotent and re-points the token at the current customer.
-    const [saved] = await db('push_subscriptions')
-      .insert(row)
-      .onConflict('device_token')
-      .merge({
-        customer_id: row.customer_id,
-        role: row.role,
-        // Re-point platform + payload too, so a token previously stored under the
-        // wrong platform (e.g. an old build that posted 'ios' on Android) self-heals
-        // to the correct APNs/FCM routing on its next registration.
-        platform: row.platform,
-        subscription_data: row.subscription_data,
-        device_info: row.device_info,
-        contact_phone_key: row.contact_phone_key,
-        active: true,
-        // Heartbeat: registration re-fires on every app launch, so bumping
-        // updated_at here makes it a "customer recently opened the app"
-        // signal — push-channel-routing requires a FRESH heartbeat before a
-        // push may replace an SMS (provider acceptance alone cannot prove
-        // the OS will display the alert).
-        updated_at: db.fn.now(),
-      })
-      .returning('id');
+    // Serialize against DELETE /api/auth/account by locking the customer row
+    // and re-checking deleted_at inside the same transaction. Otherwise an
+    // in-flight registration that authenticated right before deletion could
+    // commit active=true after deletion deactivated push_subscriptions.
+    const saved = await db.transaction(async (trx) => {
+      const customer = await trx('customers')
+        .where({ id: req.customerId })
+        .forUpdate()
+        .first('id', 'deleted_at');
+      if (!customer || customer.deleted_at) return null;
 
+      // Upsert by device_token so re-launch re-registration (or a device changing
+      // hands) is idempotent and re-points the token at the current customer.
+      const [inserted] = await trx('push_subscriptions')
+        .insert(row)
+        .onConflict('device_token')
+        .merge({
+          customer_id: row.customer_id,
+          role: row.role,
+          // Re-point platform + payload too, so a token previously stored under the
+          // wrong platform (e.g. an old build that posted 'ios' on Android) self-heals
+          // to the correct APNs/FCM routing on its next registration.
+          platform: row.platform,
+          subscription_data: row.subscription_data,
+          device_info: row.device_info,
+          contact_phone_key: row.contact_phone_key,
+          active: true,
+          // Heartbeat: registration re-fires on every app launch, so bumping
+          // updated_at here makes it a "customer recently opened the app"
+          // signal — push-channel-routing requires a FRESH heartbeat before a
+          // push may replace an SMS (provider acceptance alone cannot prove
+          // the OS will display the alert).
+          updated_at: (trx.fn || db.fn).now(),
+        })
+        .returning('id');
+      return inserted;
+    });
+
+    if (!saved) return res.status(401).json({ error: 'Account deleted' });
     res.json({ ok: true, id: saved?.id || saved });
   } catch (err) { next(err); }
 });

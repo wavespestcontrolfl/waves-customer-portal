@@ -129,6 +129,32 @@ it('covers on background but skips re-prompting within the 5-minute grace window
   await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
 });
 
+it('expires biometric grace and re-prompts when the device clock moves backward', async () => {
+  vi.useFakeTimers();
+  vi.setSystemTime(new Date('2026-11-27T12:00:00Z'));
+  const { authenticateBiometric } = await import('../native/biometric');
+  authenticateBiometric.mockResolvedValue(true);
+
+  render(
+    <BiometricGate>
+      <div data-testid="account-content">Private account details</div>
+    </BiometricGate>,
+  );
+
+  await vi.waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  expect(authenticateBiometric).toHaveBeenCalledTimes(1);
+
+  // Advance past the 700ms prompt-dismiss suppression window, lock on background,
+  // then roll the wall clock backward before returning to foreground.
+  await vi.advanceTimersByTimeAsync(1500);
+  platformState.listeners.forEach((fn) => fn({ isActive: false }));
+  await vi.waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+
+  vi.setSystemTime(new Date('2026-11-27T11:55:00Z'));
+  platformState.listeners.forEach((fn) => fn({ isActive: true }));
+  await vi.waitFor(() => expect(authenticateBiometric).toHaveBeenCalledTimes(2));
+});
+
 it('minimizes the app on Android Back while locked instead of dismissing the lock', async () => {
   platformState.platform = 'android';
   const { App } = await import('@capacitor/app');

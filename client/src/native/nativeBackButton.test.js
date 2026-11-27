@@ -18,6 +18,7 @@ vi.mock('./platform', () => ({
 vi.mock('@capacitor/app', () => ({ App }));
 
 import {
+  dismissVisibleDialog,
   handleAndroidBackButton,
   initNativeBackButton,
   registerBackButtonHandler,
@@ -76,6 +77,34 @@ describe('nativeBackButton (Android hardware/gesture Back)', () => {
       expect(await handleAndroidBackButton({ canGoBack: true }, App)).toBe('dialog-escape');
       expect(onKeyDown).toHaveBeenCalledWith(expect.objectContaining({ key: 'Escape' }));
     } finally {
+      document.removeEventListener('keydown', onKeyDown);
+    }
+  });
+
+  it('lets a portal handler dismiss an active child-tab dialog before switching tabs to Home', async () => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.getClientRects = () => [{ width: 300, height: 300 }];
+    document.body.appendChild(dialog);
+
+    const switchTab = vi.fn();
+    const onKeyDown = vi.fn();
+    document.addEventListener('keydown', onKeyDown);
+    const unregister = registerBackButtonHandler(() => {
+      if (dismissVisibleDialog()) return true;
+      switchTab('dashboard');
+      return true;
+    });
+    try {
+      expect(await handleAndroidBackButton({ canGoBack: true }, App)).toBe('handled');
+      expect(onKeyDown).toHaveBeenCalledWith(expect.objectContaining({ key: 'Escape' }));
+      expect(switchTab).not.toHaveBeenCalled();
+
+      dialog.remove();
+      expect(await handleAndroidBackButton({ canGoBack: true }, App)).toBe('handled');
+      expect(switchTab).toHaveBeenCalledWith('dashboard');
+    } finally {
+      unregister();
       document.removeEventListener('keydown', onKeyDown);
     }
   });

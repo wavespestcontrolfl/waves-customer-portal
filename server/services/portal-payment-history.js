@@ -9,7 +9,16 @@ const StripeService = require('./stripe');
 const logger = require('./logger');
 const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf } = require('./payer-linkage');
 const { invoiceAmountDue } = require('./invoice-helpers');
+const { rowIsSelfPayDue } = require('./open-balance');
+const { loadFailedPaymentFacts, isNeverAttemptedDeferral, metadataInvoiceId } = require('./failed-payments');
 const { isEnabled } = require('../config/feature-gates');
+
+function isScopedCancellationError(err, database) {
+  return database !== db && (
+    ['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
+    || ['AbortError', 'KnexTimeoutError'].includes(err?.name)
+  );
+}
 
 // Receipt links per payment row. Two sources, in preference order:
 //   1. The Waves receipt — invoice.token drives the permanent
@@ -105,28 +114,48 @@ async function receiptIndexFor(customerId, visiblePayments, database = db) {
 // Payable-invoice resolution for FAILED payment rows (audit 2026-11-27):
 // A failed payment row must ONLY offer a direct "Pay" button for the SPECIFIC
 // invoice that attempt tried to collect, verified to belong to this customer,
-// non-payer-owned, and still carrying a positive remaining balance. Same
-// ownership + balance rules as GET /api/billing/balance's openInvoices list
-// (including failed draft invoices). Never point a failed row at an unrelated
-// invoice on the account.
+// non-payer-owned (including live payer re-resolution via rowIsSelfPayDue), and
+// still carrying a positive remaining balance. Draft invoices are eligible ONLY
+// when referenced by an unsuperseded, non-deferred failed attempt (matching
+// GET /api/billing/balance). Never point a failed row at an unrelated invoice.
+async function eligibleFailedDraftIds(customerId, database, uuidShape) {
+  const failedFacts = await loadFailedPaymentFacts(customerId, database);
+  return new Set(
+    failedFacts.rows
+      .filter((r) => !isNeverAttemptedDeferral(r))
+      .map(metadataInvoiceId)
+      .filter((id) => id && uuidShape.test(id) && !failedFacts.balanceCarryingInvoiceIds.has(id)),
+  );
+}
+
 async function payableInvoiceIndexFor(customerId, visiblePayments, database = db) {
   const payableByInvoiceId = new Map();
   const payableByNumber = new Map();
   if (!isEnabled('portalPayNow')) return { payableByInvoiceId, payableByNumber };
 
-  const failedRows = visiblePayments.filter((p) => String(p.status || '').toLowerCase() === 'failed');
+  const failedRows = visiblePayments.filter(
+    (p) => String(p.status || '').toLowerCase() === 'failed' && !p.superseded_by_payment_id,
+  );
   if (!failedRows.length) return { payableByInvoiceId, payableByNumber };
 
   const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-  const invoiceIds = [...new Set(failedRows.map(anyInvoiceIdOf).filter(Boolean))]
-    .filter((id) => UUID_SHAPE.test(id));
-  const invoiceNumbers = [...new Set(failedRows.map(invoiceNumberOf).filter(Boolean))];
+  const invoiceIds = [...new Set(failedRows.map(anyInvoiceIdOf).filter((id) => id && UUID_SHAPE.test(id)))];
+  // Only resolve description invoice numbers for rows without an explicit id:
+  // an explicit invoice_id is authoritative and must never fall back to a stale
+  // invoice number mentioned in description text.
+  const invoiceNumbers = [...new Set(
+    failedRows.filter((p) => !anyInvoiceIdOf(p)).map(invoiceNumberOf).filter(Boolean),
+  )];
   if (!invoiceIds.length && !invoiceNumbers.length) return { payableByInvoiceId, payableByNumber };
 
   try {
+    const draftIds = await eligibleFailedDraftIds(customerId, database, UUID_SHAPE);
     const rows = await database('invoices')
       .where({ customer_id: customerId })
-      .whereIn('status', ['draft', 'sent', 'viewed', 'overdue'])
+      .where(function openOrEligibleDraft() {
+        this.whereIn('status', ['sent', 'viewed', 'overdue']);
+        if (draftIds.size) this.orWhereIn('id', [...draftIds]);
+      })
       .whereNull('payer_id')
       .whereNull('payer_statement_id')
       .where(function withdrawnExcluded() {
@@ -137,23 +166,24 @@ async function payableInvoiceIndexFor(customerId, visiblePayments, database = db
         if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
         if (invoiceNumbers.length) qb.orWhereIn('invoice_number', invoiceNumbers);
       })
-      .select('id', 'token', 'invoice_number', 'due_date', 'total', 'credit_applied', 'amount_paid');
+      .select('id', 'status', 'token', 'invoice_number', 'due_date', 'total', 'credit_applied', 'amount_paid', 'scheduled_service_id');
 
-    rows.forEach((row) => {
-      const amountDue = invoiceAmountDue(row);
-      if (!row.token || amountDue <= 0) return;
+    for (const row of rows) {
+      if (!row.token || (row.status === 'draft' && !draftIds.has(String(row.id)))) continue;
+      // Live payer re-resolution (fail closed): a payer assigned after invoice
+      // creation can live only on scheduled_services or the customer default.
+      if (!(await rowIsSelfPayDue(customerId, row, { database }))) continue;
       const entry = {
         payUrl: `/pay/${row.token}`,
-        amountDue,
+        amountDue: invoiceAmountDue(row),
         invoiceNumber: row.invoice_number || null,
         dueDate: row.due_date || null,
       };
       payableByInvoiceId.set(String(row.id), entry);
       if (row.invoice_number) payableByNumber.set(row.invoice_number, entry);
-    });
+    }
   } catch (err) {
-    if (database !== db && (['PORTAL_CHAT_DEADLINE', 'ABORT_ERR', '57014'].includes(err?.code)
-      || ['AbortError', 'KnexTimeoutError'].includes(err?.name))) throw err;
+    if (isScopedCancellationError(err, database)) throw err;
     logger.warn(`[billing] payable invoice lookup failed for customer ${customerId}: ${err.message}`);
   }
   return { payableByInvoiceId, payableByNumber };
@@ -297,10 +327,13 @@ async function listPortalPayments(customerId, {
           ? (() => {
             const linkedId = anyInvoiceIdOf(p);
             const linkedNum = invoiceNumberOf(p);
-            const matchedPayable = payerLookupFailed ? null : (
-              (linkedId ? payableByInvoiceId.get(String(linkedId)) : null)
-              || (linkedNum ? payableByNumber.get(linkedNum) : null)
-              || null
+            // Keep an explicit invoice_id authoritative: if that invoice is
+            // already settled/ineligible, never fall back to a stale invoice
+            // number in description text that could point at a different bill.
+            const matchedPayable = (payerLookupFailed || p.superseded_by_payment_id) ? null : (
+              linkedId
+                ? (payableByInvoiceId.get(String(linkedId)) || null)
+                : (linkedNum ? (payableByNumber.get(linkedNum) || null) : null)
             );
             return {
               payableInvoice: matchedPayable,

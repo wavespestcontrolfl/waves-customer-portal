@@ -196,12 +196,11 @@ export default function BiometricGate({ children, graceMs = UNLOCK_GRACE_MS }) {
   useEffect(() => {
     if (!isNativeApp()) return undefined;
     attempt();
-    const withinGrace = () => (
-      graceMs > 0
-      && !needsPhoneCodeRef.current
-      && lastUnlockedAtRef.current > 0
-      && (Date.now() - lastUnlockedAtRef.current) < graceMs
-    );
+    const withinGrace = () => {
+      if (graceMs <= 0 || needsPhoneCodeRef.current || lastUnlockedAtRef.current <= 0) return false;
+      const elapsed = Date.now() - lastUnlockedAtRef.current;
+      return elapsed >= 0 && elapsed < graceMs;
+    };
     // Clear the app-switcher privacy cover immediately when returning within
     // the grace window; otherwise require fresh biometric auth.
     const unlockOrPrompt = () => {

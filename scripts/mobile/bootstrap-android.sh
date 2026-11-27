@@ -131,10 +131,28 @@ XML
   fi
 }
 
+inject_fcm_manifest_metadata() {
+  local manifest="${1:-${WAVES_ANDROID_MANIFEST:-android/app/src/main/AndroidManifest.xml}}"
+  [ -f "$manifest" ] || return 0
+  local ind="        "
+  local nl=$'\n'
+  local fcm_meta="${ind}<meta-data android:name=\"com.google.firebase.messaging.default_notification_icon\" android:resource=\"@drawable/ic_stat_waves\" />${nl}"
+  fcm_meta="${fcm_meta}${ind}<meta-data android:name=\"com.google.firebase.messaging.default_notification_color\" android:resource=\"@color/waves_notification_color\" />${nl}"
+  fcm_meta="${fcm_meta}${ind}<meta-data android:name=\"com.google.firebase.messaging.default_notification_channel_id\" android:value=\"waves_service_updates\" />"
+  FCM_META="$fcm_meta" perl -0pi -e '
+    s{\n?[ \t]*<meta-data\b[^>]*android:name="com\.google\.firebase\.messaging\.default_notification_(?:icon|color|channel_id)"[^>]*/>}{}gs;
+    s{(\n\s*</application>)}{\n$ENV{FCM_META}$1};
+  ' "$manifest"
+  echo "==> FCM default notification icon, color, and channel injected into $manifest ✓"
+}
+
 # Reinstall tracked Waves Android icons/splash/notification drawables without
 # running npm, Capacitor, or Android Studio. Safe for hermetic fixture tests.
 if [ "${1:-}" = "--assets-only" ]; then
   install_brand_assets
+  if [ -n "${WAVES_ANDROID_MANIFEST:-}" ]; then
+    inject_fcm_manifest_metadata "$WAVES_ANDROID_MANIFEST"
+  fi
   exit 0
 fi
 
@@ -277,13 +295,7 @@ if [ -f "$MANIFEST" ]; then
 
   # FCM defaults: monochrome status-bar icon, Waves navy accent color, and
   # default high-priority service-updates channel (matches server/services/fcm.js).
-  FCM_META="${IND}<meta-data android:name=\"com.google.firebase.messaging.default_notification_icon\" android:resource=\"@drawable/ic_stat_waves\" />${NL}"
-  FCM_META="${FCM_META}${IND}<meta-data android:name=\"com.google.firebase.messaging.default_notification_color\" android:resource=\"@color/waves_notification_color\" />${NL}"
-  FCM_META="${FCM_META}${IND}<meta-data android:name=\"com.google.firebase.messaging.default_notification_channel_id\" android:value=\"waves_service_updates\" />"
-  export FCM_META
-  perl -0pi -e 's{\n[ \t]*<meta-data android:name="com\.google\.firebase\.messaging\.default_notification_(?:icon|color|channel_id)"[^/]*/>}{}gs' "$MANIFEST"
-  perl -0pi -e 's{(\n\s*</application>)}{\n$ENV{FCM_META}$1}' "$MANIFEST"
-  echo "==> FCM default notification icon, color, and channel injected into AndroidManifest.xml ✓"
+  inject_fcm_manifest_metadata "$MANIFEST"
 fi
 
 # Optional release versioning for reproducible Play Console builds (mirrors

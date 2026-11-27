@@ -367,11 +367,15 @@ it('shows the permission popup before listener setup and bounds a stalled bind',
   expect(nativeMocks.PushNotifications.register).not.toHaveBeenCalled();
 });
 
-it('creates Android notification channels on Android startup without touching iOS', async () => {
+it('creates Android notification channels on Android startup using system default sound without touching iOS', async () => {
   vi.resetModules();
   nativeMocks.state.platform = 'android';
   const freshNativePush = await import('./nativePush');
   await freshNativePush.initNativePush();
-  const ids = nativeMocks.PushNotifications.createChannel.mock.calls.map(([ch]) => ch.id);
-  expect(ids).toEqual(['waves_service_updates', 'waves_billing', 'waves_messages']);
+  const channels = nativeMocks.PushNotifications.createChannel.mock.calls.map(([ch]) => ch);
+  expect(channels.map((ch) => ch.id)).toEqual(['waves_service_updates', 'waves_billing', 'waves_messages']);
+  // Capacitor interprets sound:'default' as a missing res/raw/default file; omitting sound inherits Android's system alert sound.
+  for (const ch of channels) {
+    expect(ch.sound).toBeUndefined();
+  }
 });

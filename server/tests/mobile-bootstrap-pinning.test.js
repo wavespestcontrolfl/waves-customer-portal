@@ -223,9 +223,10 @@ describe('native customer-app bootstrap reproducibility', () => {
     expect(unclaimed).toEqual([]);
   });
 
-  test('native shell uses slim native-shell webDir and configures Android edge-to-edge + StatusBar', () => {
+  test('native shell uses slim native-shell webDir, wires server.errorPath, and configures Android edge-to-edge + StatusBar', () => {
     const config = JSON.parse(fs.readFileSync(path.join(root, 'client/capacitor.config.json'), 'utf8'));
     expect(config.webDir).toBe('native-shell');
+    expect(config.server.errorPath).toBe('index.html');
     expect(fs.existsSync(path.join(root, 'client/native-shell/index.html'))).toBe(true);
     expect(fs.statSync(path.join(root, 'client/native-shell/index.html')).size).toBeLessThan(20 * 1024);
     expect(config.android).toMatchObject({
@@ -243,20 +244,43 @@ describe('native customer-app bootstrap reproducibility', () => {
     }
   });
 
-  test('bootstrap-android installs Waves launcher/adaptive icons, monochrome notification icon, and splash repeatably', () => {
+  test('bootstrap-android installs Waves launcher/adaptive icons, monochrome notification icon, splash, and idempotent FCM manifest metadata', () => {
     const fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'waves-android-assets-'));
     const resRoot = path.join(fixture, 'res');
+    const manifestPath = path.join(fixture, 'AndroidManifest.xml');
     try {
       fs.mkdirSync(path.join(resRoot, 'drawable-port-xxhdpi'), { recursive: true });
+      fs.writeFileSync(
+        manifestPath,
+        '<?xml version="1.0" encoding="utf-8"?>\n<manifest>\n    <application>\n        <activity android:name=".MainActivity" />\n    </application>\n</manifest>\n',
+      );
       const run = () => spawnSync('bash', [path.join(root, 'scripts/mobile/bootstrap-android.sh'), '--assets-only'], {
         cwd: root,
         encoding: 'utf8',
-        env: { ...process.env, WAVES_ANDROID_RES_ROOT: resRoot },
+        env: { ...process.env, WAVES_ANDROID_RES_ROOT: resRoot, WAVES_ANDROID_MANIFEST: manifestPath },
       });
 
-      const result = run();
-      expect(result.status).toBe(0);
-      expect(result.stdout).toContain('Waves launcher & adaptive icons installed');
+      const first = run();
+      expect(first.status).toBe(0);
+      expect(first.stdout).toContain('Waves launcher & adaptive icons installed');
+      // Running twice against the same AndroidManifest.xml must replace — never
+      // duplicate — the three FCM <meta-data> entries (even though @drawable/...
+      // and @color/... values contain forward slashes).
+      const second = run();
+      expect(second.status).toBe(0);
+      const manifestAfterTwoRuns = fs.readFileSync(manifestPath, 'utf8');
+      for (const name of [
+        'com.google.firebase.messaging.default_notification_icon',
+        'com.google.firebase.messaging.default_notification_color',
+        'com.google.firebase.messaging.default_notification_channel_id',
+      ]) {
+        const matches = manifestAfterTwoRuns.match(new RegExp(name.replace(/\./g, '\\.'), 'g')) || [];
+        expect(matches).toHaveLength(1);
+      }
+      expect(manifestAfterTwoRuns).toContain('android:resource="@drawable/ic_stat_waves"');
+      expect(manifestAfterTwoRuns).toContain('android:resource="@color/waves_notification_color"');
+      expect(manifestAfterTwoRuns).toContain('android:value="waves_service_updates"');
+
       for (const bucket of ['mipmap-mdpi', 'mipmap-hdpi', 'mipmap-xhdpi', 'mipmap-xxhdpi', 'mipmap-xxxhdpi']) {
         for (const file of ['ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png']) {
           const p = path.join(resRoot, bucket, file);
@@ -272,10 +296,6 @@ describe('native customer-app bootstrap reproducibility', () => {
       expect(fs.existsSync(path.join(resRoot, 'drawable-port-xxhdpi/splash.png'))).toBe(true);
 
       const source = fs.readFileSync(path.join(root, 'scripts/mobile/bootstrap-android.sh'), 'utf8');
-      expect(source).toContain('com.google.firebase.messaging.default_notification_icon');
-      expect(source).toContain('com.google.firebase.messaging.default_notification_color');
-      expect(source).toContain('com.google.firebase.messaging.default_notification_channel_id');
-      expect(source).toContain('waves_service_updates');
       expect(source).toContain('WAVES_ANDROID_VERSION_NAME');
       expect(source).toContain('WAVES_ANDROID_VERSION_CODE');
     } finally {
