@@ -113,4 +113,49 @@ describe('POST /api/push/native-subscribe — account deletion race serializatio
     });
     expect(res).toEqual({ status: 200, body: { ok: true, id: 'sub-ok' } });
   });
+
+  test('preserves previously saved Android channel mutes when disabledChannels is omitted, and clears them on explicit empty list', async () => {
+    let savedRows = [];
+    const wire = (existingSubscriptionData) => {
+      savedRows = [];
+      db.transaction = jest.fn(async (cb) => {
+        const trx = (table) => {
+          if (table === 'customers') {
+            return {
+              where: () => ({
+                forUpdate: () => ({ first: async () => ({ id: 'cust-1', deleted_at: null }) }),
+              }),
+            };
+          }
+          if (table === 'push_subscriptions') {
+            return {
+              where: () => ({
+                first: async () => (existingSubscriptionData ? { subscription_data: existingSubscriptionData } : null),
+              }),
+              insert: (row) => {
+                savedRows.push(row);
+                return { onConflict: () => ({ merge: () => ({ returning: async () => [{ id: 'sub-keep' }] }) }) };
+              },
+            };
+          }
+          throw new Error(`unexpected table ${table}`);
+        };
+        trx.fn = { now: () => 'NOW' };
+        return cb(trx);
+      });
+    };
+
+    wire(JSON.stringify({ token: 'fcm-token-456', disabledChannels: ['waves_billing'] }));
+    const preserveRes = await invokeRoute('POST', '/native-subscribe', { platform: 'android', token: 'fcm-token-456' });
+    expect(preserveRes.status).toBe(200);
+    expect(JSON.parse(savedRows[0].subscription_data)).toEqual({
+      token: 'fcm-token-456',
+      disabledChannels: ['waves_billing'],
+    });
+
+    wire(JSON.stringify({ token: 'fcm-token-456', disabledChannels: ['waves_billing'] }));
+    const clearRes = await invokeRoute('POST', '/native-subscribe', { platform: 'android', token: 'fcm-token-456', disabledChannels: [] });
+    expect(clearRes.status).toBe(200);
+    expect(JSON.parse(savedRows[0].subscription_data)).toEqual({ token: 'fcm-token-456' });
+  });
 });

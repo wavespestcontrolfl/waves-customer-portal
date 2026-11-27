@@ -7,8 +7,8 @@ jest.mock('../services/payer-linkage', () => ({
   ...jest.requireActual('../services/payer-linkage'),
   loadPayerLinkage: jest.fn(async () => ({ failed: false, payerInvoiceIds: new Set(), isPayerLinked: () => false })),
 }));
-jest.mock('../services/open-balance', () => ({
-  rowIsSelfPayDue: jest.fn(async () => true),
+jest.mock('../services/payer', () => ({
+  resolveForInvoice: jest.fn(async () => null),
 }));
 jest.mock('../services/failed-payments', () => ({
   ...jest.requireActual('../services/failed-payments'),
@@ -22,7 +22,7 @@ jest.mock('../services/failed-payments', () => ({
 const db = require('../models/db');
 const stripe = require('../services/stripe');
 const { loadPayerLinkage } = require('../services/payer-linkage');
-const { rowIsSelfPayDue } = require('../services/open-balance');
+const PayerService = require('../services/payer');
 const { loadFailedPaymentFacts } = require('../services/failed-payments');
 const { listPortalPayments } = require('../services/portal-payment-history');
 
@@ -69,6 +69,8 @@ function makeDb(invoiceRows = []) {
     query.whereNot = () => query;
     query.orWhereNot = () => query;
     query.whereRaw = () => query;
+    query.orderBy = () => query;
+    query.limit = () => query;
     query.whereIn = (col, vals) => {
       if (col === 'status') query._statuses = vals;
       return query;
@@ -100,7 +102,7 @@ const INV_DRAFT_SUPERSEDED = '55555555-5555-4555-8555-555555555555';
 beforeEach(() => {
   jest.clearAllMocks();
   loadPayerLinkage.mockResolvedValue({ failed: false, payerInvoiceIds: new Set(), isPayerLinked: () => false });
-  rowIsSelfPayDue.mockResolvedValue(true);
+  PayerService.resolveForInvoice.mockResolvedValue(null);
   loadFailedPaymentFacts.mockResolvedValue({
     rows: [],
     failedInvoiceIds: [],
@@ -152,7 +154,7 @@ describe('listPortalPayments — failed-row payableInvoice linkage', () => {
       invoiceNumber: 'WV-2002',
       dueDate: null,
     });
-    expect(rowIsSelfPayDue).toHaveBeenCalledWith('cust-1', expect.objectContaining({ id: INV_B, scheduled_service_id: 'svc-b' }), expect.any(Object));
+    expect(PayerService.resolveForInvoice).toHaveBeenCalledWith(expect.objectContaining({ customerId: 'cust-1', scheduledServiceId: 'svc-b' }));
 
     // Settled invoice: linked, so UI must NOT fall back to an unrelated invoice.
     expect(byId['fail-settled'].invoiceLinked).toBe(true);
@@ -164,7 +166,9 @@ describe('listPortalPayments — failed-row payableInvoice linkage', () => {
   });
 
   test('verifies live payer ownership via rowIsSelfPayDue before exposing any pay link', async () => {
-    rowIsSelfPayDue.mockImplementation(async (_custId, row) => row.id !== INV_B);
+    PayerService.resolveForInvoice.mockImplementation(async ({ scheduledServiceId }) => (
+      scheduledServiceId === 'svc-ap' ? { payerId: 'payer-99' } : null
+    ));
     db.mockImplementation(makeDb([
       { id: INV_A, token: 'tok-a', invoice_number: 'WV-2001', status: 'sent', total: 60, credit_applied: 0, amount_paid: 0, scheduled_service_id: 'svc-self' },
       { id: INV_B, token: 'tok-b', invoice_number: 'WV-2002', status: 'sent', total: 95, credit_applied: 0, amount_paid: 0, scheduled_service_id: 'svc-ap' },

@@ -227,8 +227,11 @@ describe('native customer-app bootstrap reproducibility', () => {
     const config = JSON.parse(fs.readFileSync(path.join(root, 'client/capacitor.config.json'), 'utf8'));
     expect(config.webDir).toBe('native-shell');
     expect(config.server.errorPath).toBe('index.html');
-    expect(fs.existsSync(path.join(root, 'client/native-shell/index.html'))).toBe(true);
-    expect(fs.statSync(path.join(root, 'client/native-shell/index.html')).size).toBeLessThan(20 * 1024);
+    const shellHtml = fs.readFileSync(path.join(root, 'client/native-shell/index.html'), 'utf8');
+    expect(Buffer.byteLength(shellHtml, 'utf8')).toBeLessThan(20 * 1024);
+    expect(shellHtml).toContain('document.referrer');
+    expect(shellHtml).toContain('parsed.origin === PORTAL_ORIGIN');
+    expect(shellHtml).toContain("window.addEventListener('online', retryNavigation)");
     expect(config.android).toMatchObject({
       backgroundColor: '#E5EFF7',
       adjustMarginsForEdgeToEdge: 'auto',

@@ -262,6 +262,90 @@ async function openBalanceSummary(customerId, { displayLimit = 5, ...opts } = {}
   };
 }
 
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OPEN_PORTAL_STATUSES = new Set(['sent', 'viewed', 'overdue']);
+
+function unsupersededFailedDraftIds(facts) {
+  const { isNeverAttemptedDeferral, metadataInvoiceId } = require('./failed-payments');
+  const carrying = facts?.balanceCarryingInvoiceIds || new Set();
+  const ids = (facts?.rows || [])
+    .filter((r) => !isNeverAttemptedDeferral(r))
+    .map(metadataInvoiceId)
+    .filter((id) => id && UUID_SHAPE.test(id) && !carrying.has(id));
+  return new Set(ids);
+}
+
+function queryPortalPayableCandidates(customerId, eligibleDraftIds, { invoiceIds, invoiceNumbers, limit, database }) {
+  const query = database('invoices')
+    .where({ customer_id: customerId })
+    .where(function openOrEligibleDraft() {
+      this.whereIn('status', ['sent', 'viewed', 'overdue']);
+      if (eligibleDraftIds.size) {
+        this.orWhere(function eligibleDraft() {
+          this.where('status', 'draft').whereIn('id', [...eligibleDraftIds]);
+        });
+      }
+    })
+    .whereNull('payer_id')
+    .whereNull('payer_statement_id')
+    .where(function withdrawnExcluded() {
+      this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
+    })
+    .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0');
+
+  if (invoiceIds?.length || invoiceNumbers?.length) {
+    query.where((qb) => {
+      if (invoiceIds?.length) qb.orWhereIn('id', invoiceIds);
+      if (invoiceNumbers?.length) qb.orWhereIn('invoice_number', invoiceNumbers);
+    });
+  }
+  query.orderBy('created_at', 'asc');
+  if (limit) query.limit(limit);
+
+  return query.select(
+    'id', 'status', 'token', 'invoice_number', 'due_date',
+    'total', 'credit_applied', 'amount_paid', 'scheduled_service_id',
+  );
+}
+
+/**
+ * Shared portal payable-invoice read used by BOTH GET /api/billing/balance
+ * (openInvoices) and listPortalPayments (failed-row payableInvoice links) so
+ * the two surfaces on the Billing tab can never disagree about whether an
+ * invoice is self-pay and payable.
+ */
+async function listPayablePortalInvoices(customerId, {
+  failedFacts = null,
+  invoiceIds = null,
+  invoiceNumbers = null,
+  limit = null,
+  database = db,
+} = {}) {
+  const { loadFailedPaymentFacts } = require('./failed-payments');
+  const facts = failedFacts || await loadFailedPaymentFacts(customerId, database);
+  const eligibleDraftIds = unsupersededFailedDraftIds(facts);
+  const rows = await queryPortalPayableCandidates(customerId, eligibleDraftIds, {
+    invoiceIds, invoiceNumbers, limit, database,
+  });
+
+  const payable = [];
+  for (const row of rows) {
+    const statusOk = !row.status
+      || OPEN_PORTAL_STATUSES.has(row.status)
+      || (row.status === 'draft' && eligibleDraftIds.has(String(row.id)));
+    if (!row.token || !statusOk) continue;
+    if (!(await rowIsSelfPayDue(customerId, row, { database }))) continue;
+    payable.push({
+      id: row.id != null ? String(row.id) : null,
+      payUrl: `/pay/${row.token}`,
+      amountDue: invoiceAmountDue(row),
+      invoiceNumber: row.invoice_number || null,
+      dueDate: row.due_date ?? null,
+    });
+  }
+  return payable;
+}
+
 module.exports = {
   // the shared open-self-pay definition (also the cash forecast's open invoices)
-  applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };
+  applyOpenSelfPayPredicates, openBalanceInvoices, openBalanceSummary, openBalanceExists, openSelfPayInvoicesByAmountDue, rowIsSelfPayDue, listPayablePortalInvoices, MAX_OPEN_INVOICES, MAX_AMOUNT_CANDIDATES };

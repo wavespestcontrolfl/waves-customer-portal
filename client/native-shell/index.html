@@ -72,7 +72,7 @@
       <div class="card">
         <h1>Connecting to Waves</h1>
         <p>Check your internet connection to open your account. We will reconnect as soon as signal returns.</p>
-        <button class="primary" type="button" onclick="window.location.replace('https://portal.wavespestcontrol.com/')">Try again</button>
+        <button class="primary" id="retry-btn" type="button">Try again</button>
         <div class="help">
           <a href="tel:+19412975749">Call us</a>
           <a href="sms:+19412975749">Text us</a>
@@ -80,9 +80,44 @@
       </div>
     </main>
     <script>
-      window.addEventListener('online', function () {
-        window.location.replace('https://portal.wavespestcontrol.com/');
-      });
+      (function () {
+        var PORTAL_ORIGIN = 'https://portal.wavespestcontrol.com';
+        var FALLBACK_URL = PORTAL_ORIGIN + '/';
+        var STORAGE_KEY = 'waves_offline_retry_url';
+
+        function validatedPortalUrl(raw) {
+          if (!raw) return null;
+          try {
+            var parsed = new URL(raw, FALLBACK_URL);
+            if (parsed.origin === PORTAL_ORIGIN && parsed.protocol === 'https:') {
+              return parsed.href;
+            }
+          } catch (_err) { /* ignore invalid URLs */ }
+          return null;
+        }
+
+        function resolveRetryUrl() {
+          var fromReferrer = validatedPortalUrl(document.referrer);
+          if (fromReferrer) {
+            try { sessionStorage.setItem(STORAGE_KEY, fromReferrer); } catch (_err) { /* noop */ }
+            return fromReferrer;
+          }
+          try {
+            var remembered = validatedPortalUrl(sessionStorage.getItem(STORAGE_KEY));
+            if (remembered) return remembered;
+          } catch (_err) { /* noop */ }
+          return FALLBACK_URL;
+        }
+
+        var retryTarget = resolveRetryUrl();
+        function retryNavigation() {
+          window.location.replace(retryTarget);
+        }
+
+        var btn = document.getElementById('retry-btn');
+        if (btn) btn.addEventListener('click', retryNavigation);
+        window.addEventListener('online', retryNavigation);
+      }());
     </script>
   </body>
 </html>

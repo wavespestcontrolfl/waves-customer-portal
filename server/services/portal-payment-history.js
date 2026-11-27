@@ -8,9 +8,7 @@ const { excludeHoldDeferralPlaceholders } = require('./collections/collection-ho
 const StripeService = require('./stripe');
 const logger = require('./logger');
 const { loadPayerLinkage, invoiceIdOf, aliasInvoiceIdOf, descriptionInvoiceNumberOf } = require('./payer-linkage');
-const { invoiceAmountDue } = require('./invoice-helpers');
-const { rowIsSelfPayDue } = require('./open-balance');
-const { loadFailedPaymentFacts, isNeverAttemptedDeferral, metadataInvoiceId } = require('./failed-payments');
+const { listPayablePortalInvoices } = require('./open-balance');
 const { isEnabled } = require('../config/feature-gates');
 
 function isScopedCancellationError(err, database) {
@@ -112,22 +110,9 @@ async function receiptIndexFor(customerId, visiblePayments, database = db) {
 }
 
 // Payable-invoice resolution for FAILED payment rows (audit 2026-11-27):
-// A failed payment row must ONLY offer a direct "Pay" button for the SPECIFIC
-// invoice that attempt tried to collect, verified to belong to this customer,
-// non-payer-owned (including live payer re-resolution via rowIsSelfPayDue), and
-// still carrying a positive remaining balance. Draft invoices are eligible ONLY
-// when referenced by an unsuperseded, non-deferred failed attempt (matching
-// GET /api/billing/balance). Never point a failed row at an unrelated invoice.
-async function eligibleFailedDraftIds(customerId, database, uuidShape) {
-  const failedFacts = await loadFailedPaymentFacts(customerId, database);
-  return new Set(
-    failedFacts.rows
-      .filter((r) => !isNeverAttemptedDeferral(r))
-      .map(metadataInvoiceId)
-      .filter((id) => id && uuidShape.test(id) && !failedFacts.balanceCarryingInvoiceIds.has(id)),
-  );
-}
-
+// Uses the shared open-balance listPayablePortalInvoices authority (identical
+// to GET /api/billing/balance openInvoices) so a failed payment row ONLY offers
+// a direct Pay button for its own verified, self-pay, still-open invoice.
 async function payableInvoiceIndexFor(customerId, visiblePayments, database = db) {
   const payableByInvoiceId = new Map();
   const payableByNumber = new Map();
@@ -149,44 +134,20 @@ async function payableInvoiceIndexFor(customerId, visiblePayments, database = db
   if (!invoiceIds.length && !invoiceNumbers.length) return { payableByInvoiceId, payableByNumber };
 
   try {
-    const draftIds = await eligibleFailedDraftIds(customerId, database, UUID_SHAPE);
-    const rows = await database('invoices')
-      .where({ customer_id: customerId })
-      .where(function openOrEligibleDraft() {
-        this.whereIn('status', ['sent', 'viewed', 'overdue']);
-        if (draftIds.size) {
-          this.orWhere(function eligibleDraft() {
-            this.where('status', 'draft').whereIn('id', [...draftIds]);
-          });
-        }
-      })
-      .whereNull('payer_id')
-      .whereNull('payer_statement_id')
-      .where(function withdrawnExcluded() {
-        this.whereNull('scheduled_send_error').orWhereNot('scheduled_send_error', 'like', 'payer_billed:%');
-      })
-      .whereRaw('GREATEST(total - COALESCE(credit_applied, 0) - COALESCE(amount_paid, 0), 0) > 0')
-      .where((qb) => {
-        if (invoiceIds.length) qb.orWhereIn('id', invoiceIds);
-        if (invoiceNumbers.length) qb.orWhereIn('invoice_number', invoiceNumbers);
-      })
-      .select('id', 'status', 'token', 'invoice_number', 'due_date', 'total', 'credit_applied', 'amount_paid', 'scheduled_service_id');
-
-    for (const row of rows) {
-      const statusEligible = ['sent', 'viewed', 'overdue'].includes(row.status)
-        || (row.status === 'draft' && draftIds.has(String(row.id)));
-      if (!row.token || !statusEligible) continue;
-      // Live payer re-resolution (fail closed): a payer assigned after invoice
-      // creation can live only on scheduled_services or the customer default.
-      if (!(await rowIsSelfPayDue(customerId, row, { database }))) continue;
+    const payableRows = await listPayablePortalInvoices(customerId, {
+      invoiceIds,
+      invoiceNumbers,
+      database,
+    });
+    for (const row of payableRows) {
       const entry = {
-        payUrl: `/pay/${row.token}`,
-        amountDue: invoiceAmountDue(row),
-        invoiceNumber: row.invoice_number || null,
-        dueDate: row.due_date || null,
+        payUrl: row.payUrl,
+        amountDue: row.amountDue,
+        invoiceNumber: row.invoiceNumber,
+        dueDate: row.dueDate,
       };
-      payableByInvoiceId.set(String(row.id), entry);
-      if (row.invoice_number) payableByNumber.set(row.invoice_number, entry);
+      if (row.id) payableByInvoiceId.set(row.id, entry);
+      if (row.invoiceNumber) payableByNumber.set(row.invoiceNumber, entry);
     }
   } catch (err) {
     if (isScopedCancellationError(err, database)) throw err;

@@ -45,6 +45,13 @@ let pushPluginPromise = null;
 // so a quick logout→login re-subscribe can't reach the server first and then
 // be deactivated when the older unsubscribe lands.
 let inflightDeactivation = null;
+// Active /push/native-subscribe request while it's on the wire. Logout awaits
+// it before calling /push/native-unsubscribe so deactivation always finishes last.
+let inflightRegistration = null;
+// Monotonic epoch incremented whenever logout begins so any in-flight
+// registration awaiting async plugin work (e.g. listChannels) aborts before
+// touching the server.
+let registrationEpoch = 0;
 const registrationWaiters = new Set();
 
 function finishRegistration(state) {
@@ -73,23 +80,24 @@ function authToken() {
 }
 
 async function readDisabledAndroidChannels() {
-  if (nativePlatform() !== 'android') return [];
+  if (nativePlatform() !== 'android') return null;
   try {
     const { PushNotifications } = await pushPlugin();
-    if (typeof PushNotifications?.listChannels !== 'function') return [];
+    if (typeof PushNotifications?.listChannels !== 'function') return null;
     const res = await PushNotifications.listChannels();
-    const list = Array.isArray(res?.channels) ? res.channels : [];
+    if (!Array.isArray(res?.channels)) return null;
     const known = new Set(ANDROID_NOTIFICATION_CHANNELS.map((c) => c.id));
-    return list
+    return res.channels
       .filter((ch) => known.has(ch?.id) && Number(ch?.importance) === 0)
       .map((ch) => ch.id)
       .sort();
   } catch {
-    return [];
+    return null;
   }
 }
 
 async function postToken(token) {
+  const epoch = registrationEpoch;
   rememberToken(token);
   const jwt = authToken();
   if (!jwt) {
@@ -102,18 +110,33 @@ async function postToken(token) {
   // token here.) Default to 'ios' for anything non-Android (this only runs on a
   // native platform — initNativePush gates on isNativeApp).
   const platform = nativePlatform() === 'android' ? 'android' : 'ios';
-  const disabledChannels = platform === 'android' ? await readDisabledAndroidChannels() : [];
+  const disabledChannels = platform === 'android' ? await readDisabledAndroidChannels() : null;
+  if (epoch !== registrationEpoch || !authToken()) return false;
   try {
     if (inflightDeactivation) await inflightDeactivation;
-    await api.request('/push/native-subscribe', {
+    // Re-check after awaiting deactivation (and listChannels above): if logout
+    // started in the meantime, abort cleanly so we never reactivate the prior
+    // customer's notifications after unsubscribe.
+    if (epoch !== registrationEpoch || !authToken()) return false;
+    const subscribePromise = api.request('/push/native-subscribe', {
       method: 'POST',
       body: JSON.stringify({
         platform,
         token,
         deviceInfo: `${platform} · WavesApp`,
-        ...(disabledChannels.length ? { disabledChannels } : {}),
+        // Send disabledChannels ONLY when listChannels() succeeded (including []
+        // to clear prior mutes); omit on lookup failure so the server preserves
+        // any previously reported mutes.
+        ...(disabledChannels !== null ? { disabledChannels } : {}),
       }),
     });
+    inflightRegistration = subscribePromise;
+    try {
+      await subscribePromise;
+    } finally {
+      if (inflightRegistration === subscribePromise) inflightRegistration = null;
+    }
+    if (epoch !== registrationEpoch) return false;
     if (authToken() !== jwt && !sameRequestSession(tokenSessionIdentity(jwt), tokenSessionIdentity(authToken()))) return false;
     pendingToken = null;
     // The Lock Screen visit card rides on this registration: the server keeps the card's start token on
@@ -121,6 +144,7 @@ async function postToken(token) {
     if (platform === 'ios') void reportVisitCard(token);
     return true;
   } catch (err) {
+    if (epoch !== registrationEpoch) return false;
     console.warn('[nativePush] token registration failed:', err?.message || err);
     pendingToken = token; // retry on next flush
     return false;
@@ -443,6 +467,9 @@ async function retryPendingRevocation() {
  */
 export async function deactivateNativePushToken() {
   if (!isNativeApp()) return;
+  // Invalidate any registration already awaiting async plugin work (such as
+  // Android listChannels) so it cannot post /push/native-subscribe after logout.
+  registrationEpoch += 1;
   // The access JWT can be expired at logout while the 30-day refresh token
   // is still valid (7d vs 30d defaults) — so this goes through the api
   // client, whose 401→refresh→retry path recovers that case. A raw fetch
@@ -464,6 +491,11 @@ export async function deactivateNativePushToken() {
   // until the next Capacitor registration event (app restart).
   pendingToken = token;
   const request = (async () => {
+    // Wait for any already-in-flight /push/native-subscribe to settle before
+    // sending /push/native-unsubscribe so deactivation always wins last.
+    if (inflightRegistration) {
+      try { await inflightRegistration; } catch { /* ignore */ }
+    }
     try {
       // api.request throws on non-OK, so a failed unsubscribe lands in the
       // catch — pendingToken stays armed and the next login's flush re-points

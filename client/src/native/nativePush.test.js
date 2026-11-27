@@ -410,3 +410,53 @@ it('reports Android channels disabled by the user (importance 0) when registerin
     }),
   );
 });
+
+it('omits disabledChannels when listChannels fails so server preserves previously reported mutes', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  nativeMocks.PushNotifications.listChannels = vi.fn(async () => { throw new Error('plugin unavailable'); });
+  localStorage.setItem('waves_token', 'jwt-android');
+  api.request.mockResolvedValueOnce({ ok: true, id: 'sub-a2' });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+  await nativeMocks.state.listeners.registration({ value: 'fcm-device-token' });
+
+  expect(api.request).toHaveBeenCalledWith(
+    '/push/native-subscribe',
+    expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({
+        platform: 'android',
+        token: 'fcm-device-token',
+        deviceInfo: 'android · WavesApp',
+      }),
+    }),
+  );
+});
+
+it('aborts an Android registration awaiting listChannels when logout starts so it cannot reactivate pushes', async () => {
+  vi.resetModules();
+  nativeMocks.state.platform = 'android';
+  let resolveChannels;
+  nativeMocks.PushNotifications.listChannels = vi.fn(() => new Promise((resolve) => { resolveChannels = resolve; }));
+  localStorage.setItem('waves_token', 'jwt-prior-customer');
+  api.request.mockResolvedValue({ ok: true, deactivated: 1 });
+
+  const freshNativePush = await import('./nativePush');
+  await freshNativePush.initNativePush();
+
+  // Registration starts and suspends while reading Android channel importance.
+  const regPromise = nativeMocks.state.listeners.registration({ value: 'fcm-shared-device' });
+  await vi.waitFor(() => expect(nativeMocks.PushNotifications.listChannels).toHaveBeenCalledTimes(1));
+
+  // Logout begins BEFORE listChannels resolves (credentials still live during deactivate).
+  await freshNativePush.deactivateNativePushToken();
+
+  // Now listChannels resolves while logout may still be clearing tokens.
+  resolveChannels({ channels: [{ id: 'waves_billing', importance: 4 }] });
+  await regPromise;
+
+  const paths = api.request.mock.calls.map(([p]) => p);
+  expect(paths).toEqual(['/push/native-unsubscribe']);
+});
