@@ -374,6 +374,21 @@ describe('a browser-priced save (the server could not price it)', () => {
       .not.toThrow();
   });
 
+  test('a one-time lawn row is refused under any price the page shows: its own breakdown reader decides what is a charge', () => {
+    const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+    for (const row of [
+      { label: 'One-Time Lawn', priceAfterDiscount: 137 },
+      { label: 'One-Time Lawn', totalAfterDiscount: 137 },
+      { name: 'One-Time Lawn Treatment', price: '137' },
+      { label: 'One-Time Lawn', price: 0, serviceSpecificDiscountApplied: true },
+    ]) {
+      const save = { result: { oneTime: { items: [row] } } };
+      // The page shows each one to the customer: as a charge, or as included at $0.
+      expect(normalizeOneTimeBreakdown(save).items).toEqual([expect.objectContaining({ label: row.label || row.name, kind: expect.stringMatching(/^(charge|included)$/) })]);
+      expect(() => guard(save)).toThrow(refused);
+    }
+  });
+
   test('free text names no row: a pest-only save whose note mentions lawn care is not refused', () => {
     for (const save of [
       { notes: 'Customer declined lawn care', result: { lineItems: [{ service: 'pest_control', price: 39 }] } },
@@ -417,6 +432,31 @@ describe('a browser-priced save (the server could not price it)', () => {
       { service: 'area_addon_lawn_insect_spot', name: 'Lawn Insect Spot Treatment', price: 95 },
       { serviceKey: 'area_addon_lawn_insect_preventive', name: 'Yearly Lawn Insect Preventive', price: 120 },
     ]) expect(() => guard({ result: { oneTime: { specItems: [row] } } })).not.toThrow();
+  });
+
+  test('the page\'s saved breakdown of the other turf work is not refused: its kind names the charge, not the service', () => {
+    const { normalizeOneTimeBreakdown } = require('../routes/estimate-public');
+    // Rows as the browser builds them (client/src/lib/estimateEngine.js otItems), and the breakdown the page saves for them on send.
+    const items = [
+      { name: 'Lawn Plugging Service', price: 900, detail: '1,200 sf | 2,700 plugs | $0.75/sf' },
+      { name: 'Lawn Top Dressing Service', price: 400 },
+      { name: 'Lawn Dethatching Service', price: 300 },
+      { serviceKey: 'area_addon_lawn_insect_preventive', name: 'Yearly Lawn Insect Preventive', price: 120 },
+    ];
+    const oneTimeBreakdown = normalizeOneTimeBreakdown({ result: { oneTime: { items } } });
+    expect(oneTimeBreakdown.items.map((row) => [row.service, row.kind])).toEqual(items.map(() => [null, 'charge']));
+    const save = { result: { oneTime: { items } }, sendSnapshot: { pricingBundle: { oneTimeBreakdown } } };
+    expect(() => guard(save)).not.toThrow();
+    expect(save.result.pricingMetadata.legacyLawnOneLane).toBe(false);
+    // The page's breakdown of a one-time lawn row or the lawn pest knockdown is still refused, as a charge or as included.
+    const lawnBreakdown = normalizeOneTimeBreakdown({ result: { oneTime: { items: [
+      { name: 'One-Time Lawn Treatment', price: 137 },
+      { label: 'Lawn Pest Knockdown', price: 0, serviceSpecificDiscountApplied: true },
+    ] } } });
+    expect(lawnBreakdown.items.map((row) => row.kind)).toEqual(['charge', 'included']);
+    for (const row of lawnBreakdown.items) {
+      expect(() => guard({ sendSnapshot: { pricingBundle: { oneTimeBreakdown: { items: [row] } } } })).toThrow(refused);
+    }
   });
 
   test('other turf services and the turf basis name no lawn price row', () => {

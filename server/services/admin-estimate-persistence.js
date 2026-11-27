@@ -2271,27 +2271,43 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
 // - a commercial row: this rule does not price commercial lawn. The browser's commercial manual-quote row (service
 //   commercial_lawn, price null) records the visitor's request as originalRequestedService 'lawn_care' (pre-push audit P1).
 // A service row is an object with a key-like identity (service, serviceKey, service_key, key, kind, catalogServiceKey), or a
-// name with a price beside it; a label with no price is a display line. Free text names no row (pre-push audit P1): a note
-// such as "Customer declined lawn care" prices nothing, so notes, details and reasons are never read. The rows the browser files
-// under a lawn result key without naming them (results.lawn tier rows, lawnMeta, lawnTiers) are refused by that key.
+// name with a price beside it; a name with no price is a display line. A price is read the way the readers read one: any field
+// whose name holds price, amount, total, monthly or annual, or is mo, ann or a per-visit price, holding a number or a numeric
+// string other than zero. That covers every field they take a price from: the one-time breakdown (normalizeOneTimeBreakdown)
+// shows price, amount, total and their AfterDiscount forms, the plan readers mo, ann, monthly, annual and their Before/After
+// Discount and AfterCredits forms (pre-push audit P0: a "One-Time Lawn" row with only priceAfterDiscount is a customer-visible
+// charge). A row the breakdown shows as included at $0 (serviceSpecificDiscountApplied) carries a price too. Free text names
+// no row (pre-push audit P1): a note such as "Customer declined lawn care" prices nothing, so notes, details and reasons are
+// never read. The rows the browser files under a lawn result key without naming them (results.lawn tier rows, lawnMeta,
+// lawnTiers) are refused by that key.
 const LAWN_ROW_KEY_FIELDS = ['service', 'serviceKey', 'service_key', 'key', 'kind', 'catalogServiceKey'];
 const LAWN_ROW_NAME_FIELDS = ['name', 'label', 'displayName', 'title', 'n'];
-const LAWN_ROW_PRICE_FIELDS = ['price', 'mo', 'monthly', 'ann', 'annual', 'perApp', 'perTreatment', 'perVisit', 'amount', 'total',
-  'monthlyBeforeDiscount', 'annualBeforeDiscount', 'monthlyAfterDiscount', 'annualAfterDiscount'];
+const LAWN_ROW_PRICE_FIELD = /price|amount|total|monthly|annual|^(mo|ann|perApp|perTreatment|perVisit)$/i;
+// The kind the one-time breakdown gives each row it keeps names the charge, not the service (pre-push audit P1: the saved
+// breakdown of a "Lawn Plugging Service" row, sendSnapshot.pricingBundle.oneTimeBreakdown, is { label, amount, kind: 'charge' }).
+// Such a kind marks a service row but never names one, so the row's label is its identity.
+const LAWN_ROW_CHARGE_KINDS = new Set(['charge', 'discount', 'included', 'quote_required']);
 const LAWN_OTHER_TURF_WORK = /top ?dress|dethatch|plugging|area ?addon|insect spot|insect preventive/;
 const LAWN_RESULT_ROW_KEY = /^lawn(Meta|Tiers)?$/;
+function lawnRowCarriesPrice(row) {
+  if (row.serviceSpecificDiscountApplied === true) return true;
+  return Object.entries(row).some(([field, value]) => LAWN_ROW_PRICE_FIELD.test(field)
+    && (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+    && Number.isFinite(Number(value)) && Number(value) !== 0);
+}
 // An exemption reads what the row IS, never a word anywhere on it: commercial = the key the page itself gives the row
 // (recurringServiceKey reads its first identity field), other turf work = the row's own first identity. So "Lawn Care
 // (commercial-grade)" under service lawn_care, or "Lawn Care (no plugging)", is still a lawn care row.
 function isLawnPriceRow(row) {
   const strings = (fields) => fields.map((field) => row[field]).filter((value) => typeof value === 'string' && value);
-  const keys = strings(LAWN_ROW_KEY_FIELDS);
-  const names = strings(LAWN_ROW_NAME_FIELDS);
-  if (!keys.length && !(names.length && LAWN_ROW_PRICE_FIELDS.some((field) => Number(row[field]) > 0))) return false;
+  const chargeKind = LAWN_ROW_CHARGE_KINDS.has(row.kind);
+  const identity = [...strings(LAWN_ROW_KEY_FIELDS.filter((field) => !(chargeKind && field === 'kind'))), ...strings(LAWN_ROW_NAME_FIELDS)];
+  const keyed = chargeKind || LAWN_ROW_KEY_FIELDS.some((field) => typeof row[field] === 'string' && row[field]);
+  if (!keyed && !(identity.length && lawnRowCarriesPrice(row))) return false;
   const words = (text) => text.toLowerCase().replace(/[_-]+/g, ' ');
-  if (!words([...keys, ...names, ...strings(['originalRequestedService'])].join(' ')).includes('lawn')) return false;
+  if (!words([...identity, ...strings(['originalRequestedService'])].join(' ')).includes('lawn')) return false;
   if (/^commercial_/.test(require('../routes/estimate-public').recurringServiceKey(row))) return false;
-  return !LAWN_OTHER_TURF_WORK.test(words([...keys, ...names][0]));
+  return !LAWN_OTHER_TURF_WORK.test(words(identity[0] || ''));
 }
 function saveHoldsLawnPriceRow(estimateData) {
   const seen = new Set();

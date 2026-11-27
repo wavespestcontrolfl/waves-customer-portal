@@ -393,18 +393,23 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
 
   it('a lawn row the server could not price is refused (409) and nothing is saved: only the server follows the live lawn tables', async () => {
     const errSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
-    const { database, getInsert } = makeDatabase();
-    await expect(createOrReuseAdminEstimate({
-      database,
-      now: NOW,
-      recompute: async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('boom') }),
-      body: baseBody({
-        monthlyTotal: 90,
-        annualTotal: 1080,
-        estimateData: { inputs: {}, result: { recurring: { grandTotal: 90, monthlyTotal: 90, annualTotal: 1080, services: [{ service: 'lawn_care', mo: 90 }] }, oneTime: { total: 0 } } },
-      }),
-    })).rejects.toMatchObject({ statusCode: 409 });
-    expect(getInsert()).toBeUndefined();
+    const plan = (services) => ({ grandTotal: 90, monthlyTotal: 90, annualTotal: 1080, services });
+    for (const { result, monthlyTotal, annualTotal, onetimeTotal } of [
+      { result: { recurring: plan([{ service: 'lawn_care', mo: 90 }]), oneTime: { total: 0 } }, monthlyTotal: 90, annualTotal: 1080, onetimeTotal: 0 },
+      // A plan line item under a catalog name: the page keys it as lawn care and carries its price to acceptance.
+      { result: { recurring: plan([]), lineItems: [{ service: 'lawn_fertilization', monthly: 90 }], oneTime: { total: 0 } }, monthlyTotal: 90, annualTotal: 1080, onetimeTotal: 0 },
+      // A one-time lawn row with only its discounted price: the page's breakdown shows that as the charge.
+      { result: { recurring: { grandTotal: 0, monthlyTotal: 0, annualTotal: 0, services: [] }, oneTime: { total: 137, items: [{ label: 'One-Time Lawn', priceAfterDiscount: 137 }] } }, monthlyTotal: 0, annualTotal: 0, onetimeTotal: 137 },
+    ]) {
+      const { database, getInsert } = makeDatabase();
+      await expect(createOrReuseAdminEstimate({
+        database,
+        now: NOW,
+        recompute: async () => ({ recomputed: false, reason: 'ENGINE_ERROR', error: new Error('boom') }),
+        body: baseBody({ monthlyTotal, annualTotal, onetimeTotal, estimateData: { inputs: {}, result } }),
+      })).rejects.toMatchObject({ statusCode: 409, message: expect.stringMatching(/lawn care or one-time lawn price/) });
+      expect(getInsert()).toBeUndefined();
+    }
     errSpy.mockRestore();
   });
 
