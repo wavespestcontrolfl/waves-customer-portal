@@ -44,13 +44,16 @@ const cooldownMs = () => positiveIntEnv('LLM_CIRCUIT_COOLDOWN_MS', DEFAULT_COOLD
 
 const breakers = new Map();
 // Temporary backup-selection exclusion for providers whose current credential
-// recently failed auth (401/403). Kept strictly separate from provider-wide
-// outage counting so an auth failure never trips the outage breaker.
+// recently failed auth (401 credential-wide) or model access (403/404 per
+// provider + credential + model). Kept strictly separate from provider-wide
+// outage counting so auth/access errors never trip the outage breaker.
 const authFailures = new Map();
-// Separate per-instance auth cooldown for injected SDK clients (e.g. a lane's
-// own Anthropic client) so a failed client becomes ineligible without
-// suppressing unrelated clients or the shared env key, and without leaking.
+const modelAccessFailures = new Map();
+// Separate per-instance auth & model-access cooldowns for injected SDK clients
+// (e.g. a lane's own Anthropic client) so a failed client/model cools down
+// without suppressing unrelated clients, other models, or the shared env key.
 let clientAuthFailures = new WeakMap();
+let clientModelAccessFailures = new WeakMap();
 
 function providerCredential(provider) {
   if (provider === 'openai') return process.env.OPENAI_API_KEY || '';
@@ -67,7 +70,12 @@ function providerCredential(provider) {
 
 function isCredentialFailureReason(provider, reason) {
   if (!provider || typeof reason !== 'string') return false;
-  return reason === `${provider}_401` || reason === `${provider}_403`;
+  return reason === `${provider}_401`;
+}
+
+function isModelAccessFailureReason(provider, reason) {
+  if (!provider || typeof reason !== 'string') return false;
+  return reason === `${provider}_403` || reason === `${provider}_404`;
 }
 
 // Non-ok outcomes that nonetheless came back from a live model response
@@ -102,6 +110,34 @@ function isAuthCoolingDown(provider, now, credential) {
     return false;
   }
   return entry.credential === current;
+}
+
+function isModelAccessCoolingDown(provider, model, now, credential) {
+  if (!model || credential === null) return false;
+  if (credential && typeof credential === 'object') {
+    const byModel = clientModelAccessFailures.get(credential);
+    const expiresAt = byModel?.get(model);
+    if (!expiresAt) return false;
+    if (now >= expiresAt) {
+      byModel.delete(model);
+      return false;
+    }
+    return true;
+  }
+  const key = `${provider}\0${model}`;
+  const entry = modelAccessFailures.get(key);
+  if (!entry) return false;
+  const current = credential === undefined ? providerCredential(provider) : credential;
+  if (now >= entry.expiresAt || entry.credential !== providerCredential(provider)) {
+    modelAccessFailures.delete(key);
+    return false;
+  }
+  return entry.credential === current;
+}
+
+function isBackupAuthOrAccessBlocked(provider, model, now, credential) {
+  return isAuthCoolingDown(provider, now, credential)
+    || isModelAccessCoolingDown(provider, model, now, credential);
 }
 
 function breakerFor(provider) {
@@ -139,10 +175,10 @@ function isProviderOutageReason(provider, reason, { legMs = null } = {}) {
  * probe in flight. Used before skipping an open primary so two open providers
  * keep primary-first ordering instead of pinning all traffic to the backup.
  */
-function isAvailable(provider, { now = null, credential } = {}) {
+function isAvailable(provider, { now = null, model = null, credential } = {}) {
   if (!llmCircuitBreakerLive() || !provider) return true;
   const ts = now ?? Date.now();
-  if (isAuthCoolingDown(provider, ts, credential)) return false;
+  if (isBackupAuthOrAccessBlocked(provider, model, ts, credential)) return false;
   const breaker = breakers.get(provider);
   if (!breaker || breaker.state === 'closed') return true;
   return breaker.isAvailable(ts, { cooldownMs: cooldownMs() });
@@ -153,16 +189,18 @@ function isAvailable(provider, { now = null, credential } = {}) {
  * A closed backup needs no probe reservation; an open/half-open backup whose
  * cooldown elapsed has its single recovery probe claimed atomically so
  * concurrent chains cannot all skip their primary onto the same backup.
- * Backups whose current credential recently returned 401/403 are excluded
- * temporarily so an open primary is not skipped onto a broken key.
+ * Backups whose credential failed 401 or whose (provider, credential, model)
+ * failed 403/404 are excluded temporarily so an open primary is not skipped
+ * onto a broken key or inaccessible model.
  */
 function reserveBackup(providers = [], { now = null } = {}) {
   const ts = now ?? Date.now();
   for (const item of providers) {
     const provider = typeof item === 'string' ? item : item?.provider;
+    const model = typeof item === 'string' ? null : (item?.model ?? null);
     const credential = typeof item === 'string' ? undefined : item?.credential;
     if (!provider) continue;
-    if (isAuthCoolingDown(provider, ts, credential)) continue;
+    if (isBackupAuthOrAccessBlocked(provider, model, ts, credential)) continue;
     const breaker = breakers.get(provider);
     if (!breaker || breaker.state === 'closed') {
       return { available: true, reservation: null };
@@ -219,30 +257,49 @@ function releaseDisabledProbe(provider, probeId) {
   if (existing) existing.releaseProbe(probeId);
 }
 
-function recordClientAuthOutcome(client, { ok, providerResponded, authFailed, ts }) {
+function recordClientAccessOutcome(client, { ok, providerResponded, authFailed, modelAccessFailed, model, ts }) {
   if (authFailed) clientAuthFailures.set(client, ts + cooldownMs());
-  else if (ok || providerResponded) clientAuthFailures.delete(client);
+  if (modelAccessFailed && model) {
+    let byModel = clientModelAccessFailures.get(client);
+    if (!byModel) {
+      byModel = new Map();
+      clientModelAccessFailures.set(client, byModel);
+    }
+    byModel.set(model, ts + cooldownMs());
+  }
+  if (ok || providerResponded) {
+    clientAuthFailures.delete(client);
+    if (model) clientModelAccessFailures.get(client)?.delete(model);
+  }
 }
 
-function recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential }) {
-  if (credential && typeof credential === 'object') {
-    recordClientAuthOutcome(credential, { ok, providerResponded, authFailed, ts });
+function recordEnvAccessOutcome(provider, usedCred, { ok, providerResponded, authFailed, modelAccessFailed, model, ts }) {
+  const matchesCurrent = usedCred === providerCredential(provider);
+  if (authFailed && matchesCurrent) {
+    authFailures.set(provider, { expiresAt: ts + cooldownMs(), credential: usedCred });
+  }
+  if (modelAccessFailed && model && matchesCurrent) {
+    modelAccessFailures.set(`${provider}\0${model}`, { expiresAt: ts + cooldownMs(), credential: usedCred });
+  }
+  if (ok || providerResponded) {
+    const existing = authFailures.get(provider);
+    if (existing && existing.credential === usedCred) authFailures.delete(provider);
+    if (model) {
+      const mKey = `${provider}\0${model}`;
+      const existingModel = modelAccessFailures.get(mKey);
+      if (existingModel && existingModel.credential === usedCred) modelAccessFailures.delete(mKey);
+    }
+  }
+}
+
+function recordAccessOutcome(provider, outcome) {
+  if (outcome.credential && typeof outcome.credential === 'object') {
+    recordClientAccessOutcome(outcome.credential, outcome);
     return;
   }
-  const usedCred = credential === undefined ? providerCredential(provider) : credential;
+  const usedCred = outcome.credential === undefined ? providerCredential(provider) : outcome.credential;
   if (!usedCred) return;
-  if (authFailed) {
-    // Ignore delayed 401/403 completions from a rotated-out credential so they
-    // never poison the replacement key.
-    if (usedCred === providerCredential(provider)) {
-      authFailures.set(provider, { expiresAt: ts + cooldownMs(), credential: usedCred });
-    }
-  } else if (ok || providerResponded) {
-    const existing = authFailures.get(provider);
-    if (existing && existing.credential === usedCred) {
-      authFailures.delete(provider);
-    }
-  }
+  recordEnvAccessOutcome(provider, usedCred, outcome);
 }
 
 function isActiveProbe(breaker, probeId) {
@@ -256,10 +313,26 @@ function isActiveProbe(breaker, probeId) {
  * `legMs` so tight caller deadlines do not trip the provider-wide breaker,
  * `disabled: true` when admitted while the gate was off so delayed completions
  * cannot count after a mid-flight gate flip, `credential` captured before
- * dispatch (env string or injected client instance) so auth cooldowns stay
- * scoped to the credential actually used, and `generation` from `beforeAttempt`
- * so stale pre-recovery completions never immediately reopen a recovered circuit.
+ * dispatch (env string or injected client instance) + `model` so 401 stays
+ * credential-wide while 403/404 stay scoped to (provider, credential, model),
+ * and `generation` from `beforeAttempt` so stale pre-recovery completions
+ * never immediately reopen a recovered circuit.
  */
+function classifyAttempt(provider, opts) {
+  const ok = Boolean(opts.ok);
+  const aborted = Boolean(opts.aborted);
+  const reason = opts.reason ?? null;
+  const nonAbortedFailure = !ok && !aborted;
+  return {
+    ok,
+    aborted,
+    outage: !ok && isProviderOutageReason(provider, reason, { legMs: opts.legMs ?? null }),
+    providerResponded: nonAbortedFailure && isModelResponseReason(provider, reason),
+    authFailed: nonAbortedFailure && isCredentialFailureReason(provider, reason),
+    modelAccessFailed: nonAbortedFailure && isModelAccessFailureReason(provider, reason),
+  };
+}
+
 function afterAttempt(provider, opts = {}) {
   if (!provider || opts.disabled) return;
   const probeId = opts.probeId ?? null;
@@ -269,22 +342,14 @@ function afterAttempt(provider, opts = {}) {
     releaseDisabledProbe(provider, probeId);
     return;
   }
-  const ok = Boolean(opts.ok);
-  const aborted = Boolean(opts.aborted);
-  const reason = opts.reason ?? null;
   const breaker = breakerFor(provider);
-  const outage = !ok && isProviderOutageReason(provider, reason, { legMs: opts.legMs ?? null });
-  const providerResponded = !ok && !aborted && isModelResponseReason(provider, reason);
-  const authFailed = !ok && !aborted && isCredentialFailureReason(provider, reason);
+  const cls = classifyAttempt(provider, opts);
   // Avoid calling Date.now() when nothing needs a timestamp.
-  const needsClock = outage || authFailed || isActiveProbe(breaker, probeId);
+  const needsClock = cls.outage || cls.authFailed || cls.modelAccessFailed || isActiveProbe(breaker, probeId);
   const ts = needsClock ? (opts.now ?? Date.now()) : 0;
-  recordAuthOutcome(provider, { ok, providerResponded, authFailed, ts, credential: opts.credential });
+  recordAccessOutcome(provider, { ...cls, model: opts.model ?? null, ts, credential: opts.credential });
   breaker.settleAttempt({
-    ok,
-    providerResponded,
-    outage,
-    aborted,
+    ...cls,
     probeId,
     generation: opts.generation ?? null,
     now: ts,
@@ -306,7 +371,9 @@ function getCircuitBreakerSnapshot(now = Date.now()) {
 function resetCircuitBreakers() {
   breakers.clear();
   authFailures.clear();
+  modelAccessFailures.clear();
   clientAuthFailures = new WeakMap();
+  clientModelAccessFailures = new WeakMap();
 }
 
 module.exports = {
@@ -318,6 +385,7 @@ module.exports = {
   isProviderOutageReason,
   isModelResponseReason,
   isCredentialFailureReason,
+  isModelAccessFailureReason,
   providerCredential,
   getCircuitBreakerSnapshot,
   resetCircuitBreakers,

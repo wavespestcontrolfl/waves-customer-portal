@@ -980,8 +980,11 @@ function allProvidersFailedDetail(s) {
   if (s.singleLeg) {
     return `${s.failed} of ${s.total} calls failed (single-leg policy, no fallback configured — callers fell back to safe copy or errored)`;
   }
-  if (s.circuitSkippedFailed > 0) {
-    return `${s.failed} of ${s.total} calls failed (${s.circuitSkippedFailed} skipped primary via open circuit and failed on backup — callers fell back to safe copy or errored)`;
+  if (s.circuitSkippedFailed > 0 || s.circuitSkippedUnattempted > 0) {
+    const parts = [];
+    if (s.circuitSkippedFailed > 0) parts.push(`${s.circuitSkippedFailed} skipped primary via open circuit and failed on backup`);
+    if (s.circuitSkippedUnattempted > 0) parts.push(`${s.circuitSkippedUnattempted} skipped primary via open circuit before backup ran`);
+    return `${s.failed} of ${s.total} calls failed (${parts.join('; ')} — callers fell back to safe copy or errored)`;
   }
   return `${s.failed} of ${s.total} calls failed on BOTH providers (callers fell back to safe copy or errored)`;
 }
@@ -1080,24 +1083,31 @@ async function loadStats(db, start, end) {
     .sum({ fallbacks: db.raw('CASE WHEN fallback_used THEN 1 ELSE 0 END') })
     .sum({ failed: db.raw('CASE WHEN ok THEN 0 ELSE 1 END') })
     // Legs configured/recorded on the worst failed chain (1 = single-leg policy
-    // like pinned sealed exams; 2 = multi-provider chain), plus a separate count
-    // of failed chains whose primary was short-circuited via `circuit_open` so
-    // the digest never misreports a circuit-skipped failure as either "no
-    // fallback configured" or "failed on BOTH providers".
+    // like pinned sealed exams; 2 = multi-provider chain), plus separate counts
+    // for failed chains whose primary was short-circuited via `circuit_open`:
+    //   - circuit_skipped_failed: backup actually ran and failed
+    //   - circuit_skipped_unattempted: deadline/abort stopped the chain before any backup ran
     .max({ max_failure_legs: db.raw("CASE WHEN ok THEN NULL ELSE jsonb_array_length(COALESCE(failure_reasons, '[]'::jsonb)) END") })
-    .sum({ circuit_skipped_failed: db.raw("CASE WHEN NOT ok AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' = 'circuit_open') THEN 1 ELSE 0 END") })
+    .sum({ circuit_skipped_failed: db.raw("CASE WHEN NOT ok AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' = 'circuit_open') AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' NOT IN ('circuit_open', 'timeout_budget_exhausted')) THEN 1 ELSE 0 END") })
+    .sum({ circuit_skipped_unattempted: db.raw("CASE WHEN NOT ok AND EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' = 'circuit_open') AND NOT EXISTS (SELECT 1 FROM jsonb_array_elements(COALESCE(failure_reasons, '[]'::jsonb)) AS f WHERE f->>'reason' NOT IN ('circuit_open', 'timeout_budget_exhausted')) THEN 1 ELSE 0 END") })
     // Distinct ET days the policy actually ran — the cadence evidence the
     // gone-silent check splits on. Window bounds are already ET-day-aligned.
     .countDistinct({ active_days: db.raw("(created_at AT TIME ZONE 'America/New_York')::date") });
-  return rows.map((r) => ({
-    policy: r.policy,
-    total: Number(r.total),
-    fallbacks: Number(r.fallbacks || 0),
-    failed: Number(r.failed || 0),
-    singleLeg: Number(r.failed || 0) > 0 && Number(r.max_failure_legs) === 1,
-    circuitSkippedFailed: Number(r.circuit_skipped_failed || 0),
-    activeDays: Number(r.active_days || 0),
-  }));
+  return rows.map((r) => {
+    const failed = Number(r.failed || 0);
+    const circuitSkippedFailed = Number(r.circuit_skipped_failed || 0);
+    const circuitSkippedUnattempted = Number(r.circuit_skipped_unattempted || 0);
+    return {
+      policy: r.policy,
+      total: Number(r.total),
+      fallbacks: Number(r.fallbacks || 0),
+      failed,
+      singleLeg: failed > 0 && circuitSkippedFailed === 0 && circuitSkippedUnattempted === 0 && Number(r.max_failure_legs) === 1,
+      circuitSkippedFailed,
+      circuitSkippedUnattempted,
+      activeDays: Number(r.active_days || 0),
+    };
+  });
 }
 
 /**

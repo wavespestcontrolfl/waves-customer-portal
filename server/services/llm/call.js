@@ -1009,6 +1009,7 @@ async function executeFallbackLeg(route, routePayload, legMs, { hardDeadline, ba
     probeId: gate.probeId,
     generation: gate.generation,
     legMs,
+    model: route.model,
     credential,
   });
   return result;
@@ -1058,7 +1059,7 @@ async function runFallbackChain(policy, payload, { validate, reserveFallbackBudg
       const routePayload = { ...payload, timeoutMs: legMs, policyLabel: chainLabel };
       const backupProviders = routes.slice(index + 1)
         .filter((backup) => canRouteServePayload(backup, payload))
-        .map((backup) => ({ provider: backup.provider, credential: credentialForPayload(backup.provider, payload) }));
+        .map((backup) => ({ provider: backup.provider, model: backup.model, credential: credentialForPayload(backup.provider, payload) }));
       const result = await executeFallbackLeg(route, routePayload, legMs, {
         hardDeadline,
         backupProviders,

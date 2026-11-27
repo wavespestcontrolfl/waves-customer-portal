@@ -533,11 +533,33 @@ describe('llm/circuit-breaker', () => {
 
     // Rotating the credential clears the exclusion immediately even inside cooldown,
     // so OpenAI (still cooling down at t=2600) now skips cleanly to Anthropic.
-    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_403', now: 2000 });
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 2000 });
     expect(cb.isAvailable('anthropic', { now: 2500 })).toBe(false);
     process.env.ANTHROPIC_API_KEY = 'rotated-key-2';
     expect(cb.isAvailable('anthropic', { now: 2600 })).toBe(true);
     expect(cb.beforeAttempt('openai', { backupProviders: ['anthropic'], now: 2600 }).allow).toBe(false);
+
+    // 403 and 404 are model-specific: failing one model on a credential must NOT
+    // block other models on that same credential, while that failed model IS excluded.
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_403', model: 'claude-restricted', now: 2700 });
+    expect(cb.isAvailable('anthropic', { model: 'claude-restricted', now: 2750 })).toBe(false);
+    expect(cb.isAvailable('anthropic', { model: MODELS.WORKHORSE, now: 2750 })).toBe(true);
+    expect(cb.beforeAttempt('openai', {
+      backupProviders: [{ provider: 'anthropic', model: 'claude-restricted' }],
+      now: 2750,
+    }).allow).toBe(true);
+    expect(cb.beforeAttempt('openai', {
+      backupProviders: [{ provider: 'anthropic', model: MODELS.WORKHORSE }],
+      now: 2750,
+    }).allow).toBe(false);
+
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_404', model: 'claude-missing', now: 2800 });
+    expect(cb.isAvailable('anthropic', { model: 'claude-missing', now: 2850 })).toBe(false);
+    expect(cb.isAvailable('anthropic', { model: MODELS.WORKHORSE, now: 2850 })).toBe(true);
+    // Rotating the key clears model-access cooldowns for the old credential too.
+    process.env.ANTHROPIC_API_KEY = 'rotated-key-2b';
+    expect(cb.isAvailable('anthropic', { model: 'claude-restricted', now: 2900 })).toBe(true);
+    expect(cb.isAvailable('anthropic', { model: 'claude-missing', now: 2900 })).toBe(true);
 
     // After auth cooldown expires without key rotation, Anthropic is eligible again.
     cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 3000 });
@@ -550,9 +572,14 @@ describe('llm/circuit-breaker', () => {
     expect(cb.isAvailable('anthropic', { now: 14100 })).toBe(true);
 
     // An injected client returning 401 cools down THAT client instance without
-    // suppressing unrelated injected clients or the shared env credential.
+    // suppressing unrelated injected clients or the shared env credential;
+    // 403/404 on an injected client cools down only that (client, model) pair.
     const injectedA = { messages: { create: jest.fn() } };
     const injectedB = { messages: { create: jest.fn() } };
+    cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_403', model: 'claude-restricted', now: 14150, credential: injectedA });
+    expect(cb.isAvailable('anthropic', { now: 14160, model: 'claude-restricted', credential: injectedA })).toBe(false);
+    expect(cb.isAvailable('anthropic', { now: 14160, model: MODELS.WORKHORSE, credential: injectedA })).toBe(true);
+    expect(cb.isAvailable('anthropic', { now: 14160, model: 'claude-restricted', credential: injectedB })).toBe(true);
     cb.afterAttempt('anthropic', { ok: false, reason: 'anthropic_401', now: 14200, credential: injectedA });
     expect(cb.isAvailable('anthropic', { now: 14300, credential: injectedA })).toBe(false);
     expect(cb.isAvailable('anthropic', { now: 14300, credential: injectedB })).toBe(true);
