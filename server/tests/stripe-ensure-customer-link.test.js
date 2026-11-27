@@ -21,6 +21,8 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
       q.whereNull = jest.fn((col) => { q._nulls.push(col); return q; });
       // the merge-retired guard: NOT (deleted_at IS NOT NULL AND phone LIKE 'merged-%')
       q.whereRaw = jest.fn(() => { q._notMerged = true; return q; });
+      // The reconcile's shared-profile check: no other row in this one-row table.
+      q.whereNot = jest.fn(() => ({ first: jest.fn(async () => null) }));
       q.first = jest.fn(async () => (state.row.id === q._where.id ? { ...state.row } : null));
       q.update = jest.fn(async (patch) => {
         if (beforeLink) { const fn = beforeLink; beforeLink = null; fn(state); }
@@ -34,6 +36,9 @@ describe('StripeService.ensureStripeCustomer link-back', () => {
       return q;
     };
     const database = jest.fn(query);
+    // Runs as a caller transaction, so the email reconcile takes its lock on this same handle.
+    database.isTransaction = true;
+    database.raw = jest.fn(async () => {});
     stripeClient = { customers: { create: jest.fn(async () => ({ id: 'cus_new' })), update: jest.fn(async () => ({})) } };
     logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn() };
     jest.doMock('../models/db', () => jest.fn());

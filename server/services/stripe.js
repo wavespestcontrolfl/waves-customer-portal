@@ -821,20 +821,26 @@ const StripeService = {
    * one). Returns 'updated' | 'not_linked' | 'no_email' | 'not_configured'. Throws on a Stripe or read failure; callers
    * run it after commit and log a failure.
    */
-  // Serialized per customer across processes (a transaction-scoped advisory lock): two overlapping syncs run one after
-  // the other, and each reads the email inside the lock, so the last one to finish always writes the newest address.
-  async syncStripeCustomerEmail(customerId) {
+  // Serialized per customer across processes (a transaction-scoped advisory lock): overlapping syncs, and the
+  // reconcile after a first-time link, run one after the other, and each reads the email inside the lock, so the last
+  // one to finish always writes the newest address. A Stripe customer that another customer row also links to (dedupe
+  // can leave two rows on one Stripe id) is never changed from here: 'shared', and the caller tells the office.
+  // `database`: a caller's transaction runs the lock on that same handle (it sees its own uncommitted link).
+  async syncStripeCustomerEmail(customerId, { database = null } = {}) {
     const stripe = getStripe();
     if (!stripe) return 'not_configured';
-    return db.transaction(async (trx) => {
+    const run = async (trx) => {
       await trx.raw('SELECT pg_advisory_xact_lock(hashtext(?))', [`stripe-customer-email:${customerId}`]);
       const customer = await trx('customers').where({ id: customerId }).first('id', 'email', 'stripe_customer_id');
       if (!customer?.stripe_customer_id) return 'not_linked';
       const email = String(customer.email || '').trim();
       if (!email) return 'no_email';
+      const other = await trx('customers').where({ stripe_customer_id: customer.stripe_customer_id }).whereNot({ id: customerId }).first('id');
+      if (other) return 'shared';
       await stripe.customers.update(customer.stripe_customer_id, { email });
       return 'updated';
-    });
+    };
+    return database && database.isTransaction ? run(database) : db.transaction(run);
   },
 
   /**
@@ -920,12 +926,12 @@ const StripeService = {
 
       logger.info(`[stripe] Customer created: ${stripeCustomerId} for ${customerId}`);
       // The email may have changed while Stripe was creating the customer (an app email change whose sync saw no link
-      // yet). Re-read it on the same handle and bring Stripe up to date; a failure is logged, the link stands.
+      // yet). When it did, the same locked sync brings Stripe up to date; a failure is logged, the link stands.
       try {
         const now = await database('customers').where({ id: customerId }).first('email');
         const nowEmail = String(now?.email || '').trim();
         if (nowEmail && nowEmail !== String(customer.email || '').trim()) {
-          await stripe.customers.update(stripeCustomerId, { email: nowEmail });
+          await this.syncStripeCustomerEmail(customerId, { database });
         }
       } catch (syncErr) {
         logger.warn(`[stripe] email reconcile after create failed for ${customerId}: ${syncErr.code || syncErr.type || syncErr.name || 'sync_failed'}`);

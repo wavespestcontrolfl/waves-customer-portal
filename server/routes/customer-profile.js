@@ -234,27 +234,46 @@ function emailChangeWhy(name, oldEmail, newEmail) {
   return fits(short) ? short : 'A customer changed their email, and both addresses are in the details.';
 }
 
-function afterEmailChange({ customerId, before, after, requestId }) {
+// What the alert says about Stripe, from the sync's own answer.
+const STRIPE_LINES = {
+  updated: 'Stripe: updated to the new email.',
+  not_linked: 'Stripe: no Stripe profile yet; it will get the new email when one is made.',
+  no_email: 'Stripe: not changed (no email on the record).',
+  not_configured: 'Stripe: not changed (Stripe is not set up here).',
+  shared: 'Stripe: NOT changed. Another customer record uses the same Stripe profile, so update it by hand if right.',
+};
+
+// Sync first (its answer goes on the alert), then the alert; neither ever undoes the change.
+async function afterEmailChange({ customerId, before, after, requestId }) {
   const name = [after.first_name, after.last_name].filter(Boolean).join(' ') || 'A customer';
   const oldEmail = clean(before.email);
   const newEmail = clean(after.email);
-  void Promise.resolve(require('../services/admin-alert-compose').raiseAdminAlert('customer', {
-    area: 'Customers',
-    action: 'Email changed in the app',
-    why: emailChangeWhy(name, oldEmail, newEmail),
-    severity: 'needs-you',
-    link: `/admin/customers?customerId=${customerId}`,
-    subject: { type: 'customer', id: String(customerId) },
-    doneWhen: 'email_change_reviewed',
-    who: 'person',
-  }, {
-    bell: true,
-    dedupeKey: `profile_email_change:${customerId}:${requestId}`,
-    detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.`,
-    metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
-  })).catch((err) => logger.warn(`[customer-profile] office email-change alert failed for ${customerId}: ${err.code || err.name || 'alert_failed'}`));
-  void Promise.resolve(require('../services/stripe').syncStripeCustomerEmail(customerId))
-    .catch((err) => logger.warn(`[customer-profile] Stripe email sync failed for ${customerId}: ${err.code || err.type || err.name || 'sync_failed'}`));
+  let stripeLine;
+  try {
+    stripeLine = STRIPE_LINES[await require('../services/stripe').syncStripeCustomerEmail(customerId)] || 'Stripe: not changed.';
+  } catch (err) {
+    logger.warn(`[customer-profile] Stripe email sync failed for ${customerId}: ${err.code || err.type || err.name || 'sync_failed'}`);
+    stripeLine = 'Stripe: the update failed, so Stripe still has the old email. Update it by hand.';
+  }
+  try {
+    await require('../services/admin-alert-compose').raiseAdminAlert('customer', {
+      area: 'Customers',
+      action: 'Email changed in the app',
+      why: emailChangeWhy(name, oldEmail, newEmail),
+      severity: 'needs-you',
+      link: `/admin/customers?customerId=${customerId}`,
+      subject: { type: 'customer', id: String(customerId) },
+      doneWhen: 'email_change_reviewed',
+      who: 'person',
+    }, {
+      bell: true,
+      dedupeKey: `profile_email_change:${customerId}:${requestId}`,
+      detail: `Old email: ${oldEmail || 'none'}\nNew email: ${newEmail}\nThe customer confirmed the new address with a code sent to it.\n${stripeLine}`,
+      metadata: { kind: 'customer_profile_email_change', customerId, oldEmail, newEmail },
+    });
+  } catch (err) {
+    logger.warn(`[customer-profile] office email-change alert failed for ${customerId}: ${err.code || err.name || 'alert_failed'}`);
+  }
 }
 
 function holderOnly(req, res) {
@@ -413,7 +432,7 @@ router.post('/confirm-email', gateOn, authenticateAllowInactive, async (req, res
     const { before, after, changes, emailSync, requestId } = outcome.edit;
     runPostCommitFanout(emailSync, customerId);
     if (Object.keys(changes).length) sendChangeNotices({ customerId, before, after, changes });
-    if (changes.email !== undefined) afterEmailChange({ customerId, before, after, requestId });
+    if (changes.email !== undefined) void afterEmailChange({ customerId, before, after, requestId });
     return res.json({ profile: profilePayload(after), changed: Object.keys(changes).map((k) => FIELD_NAMES[k]) });
   } catch (err) {
     if (err.profileStatus) return sendProfileError(res, err);

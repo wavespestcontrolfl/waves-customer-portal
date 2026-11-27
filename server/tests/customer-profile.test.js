@@ -527,6 +527,7 @@ describe('POST /api/customer/profile/confirm-email', () => {
     });
     expect(opts.detail).toContain(`Old email: ${OLD_EMAIL}`);
     expect(opts.detail).toContain(`New email: ${NEW_EMAIL}`);
+    expect(opts.detail).toContain('Stripe: updated to the new email.');
     expect(mockStripeSync).toHaveBeenCalledWith(CUSTOMER_ID);
   });
 
@@ -540,6 +541,18 @@ describe('POST /api/customer/profile/confirm-email', () => {
     const [, , body, opts] = mockNotifyAdmin.mock.calls[0];
     expect(body).toBe('A customer changed their email, and both addresses are in the details.');
     expect(opts.detail).toContain('New email: first_last@example.test');
+  });
+
+  test('a Stripe profile shared with another record, or a failed sync, is named on the alert for the office', async () => {
+    for (const [answer, line] of [['shared', 'Stripe: NOT changed. Another customer record uses the same Stripe profile'], [new Error('down'), 'Stripe: the update failed']]) {
+      mockNotifyAdmin.mockClear();
+      if (answer instanceof Error) mockStripeSync.mockRejectedValueOnce(answer); else mockStripeSync.mockResolvedValueOnce(answer);
+      mockCode.checkCode.mockResolvedValue(okCheck());
+      mockApplyEmail.mockImplementation(async () => changed());
+      expect((await confirm('123456')).status).toBe(200);
+      await flush();
+      expect(mockNotifyAdmin.mock.calls[0][3].detail).toContain(line);
+    }
   });
 
   test('a failed alert or Stripe sync never undoes or fails the change', async () => {

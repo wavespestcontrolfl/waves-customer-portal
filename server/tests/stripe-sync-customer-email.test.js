@@ -3,12 +3,18 @@
  * Stripe customer, read at sync time so a later edit wins. Synthetic data only; no network.
  */
 describe('syncStripeCustomerEmail', () => {
-  function load(row) {
+  function load(row, { sharedWith = null } = {}) {
     jest.resetModules();
     const update = jest.fn(async () => ({}));
     const stripeClient = { customers: { update } };
     const events = [];
-    const trx = jest.fn(() => ({ where: () => ({ first: jest.fn(async () => { events.push('read'); return row; }) }) }));
+    const trx = jest.fn(() => ({
+      where: (cond) => ({
+        first: jest.fn(async () => { events.push('read'); return row; }),
+        // The shared-profile check: another customer row on the same Stripe id.
+        whereNot: () => ({ first: jest.fn(async () => (cond.stripe_customer_id && sharedWith ? { id: sharedWith } : null)) }),
+      }),
+    }));
     trx.raw = jest.fn(async (sql, args) => { events.push(`lock:${args[0]}`); });
     const db = jest.fn();
     db.transaction = jest.fn(async (fn) => fn(trx));
@@ -26,6 +32,22 @@ describe('syncStripeCustomerEmail', () => {
     expect(update).toHaveBeenCalledWith('cus_1', { email: 'new@example.test' });
     expect(trx.raw.mock.calls[0][0]).toMatch(/pg_advisory_xact_lock/);
     expect(events).toEqual(['lock:stripe-customer-email:c1', 'read']);
+  });
+
+  test('never changes a Stripe customer another customer row also links to', async () => {
+    const { StripeService, update } = load({ id: 'c1', email: 'new@example.test', stripe_customer_id: 'cus_1' }, { sharedWith: 'c2' });
+    await expect(StripeService.syncStripeCustomerEmail('c1')).resolves.toBe('shared');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  test('a caller transaction runs the lock on that same handle', async () => {
+    const { StripeService, trx, update } = load({ id: 'c1', email: 'new@example.test', stripe_customer_id: 'cus_1' });
+    trx.isTransaction = true;
+    const dbMod = require('../models/db');
+    await expect(StripeService.syncStripeCustomerEmail('c1', { database: trx })).resolves.toBe('updated');
+    expect(dbMod.transaction).not.toHaveBeenCalled();
+    expect(trx.raw).toHaveBeenCalled();
+    expect(update).toHaveBeenCalledWith('cus_1', { email: 'new@example.test' });
   });
 
   test('does nothing for a customer with no Stripe customer or no email', async () => {
