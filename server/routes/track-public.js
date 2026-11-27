@@ -755,14 +755,12 @@ function withRecipientRow(query, hit, token) {
       });
     })
     // A stop on the customer's list (owner 2026-11-27) closes the link for every row of the number, in this same final read.
+    // A stop saved on a record merged into this customer counts too (call-visit-recipient.js stoppedOnList).
     .whereNotExists(function notStopped() {
       this.select(db.raw('1')).from('customer_reminder_contacts as st')
-        .whereRaw('st.customer_id = s.customer_id AND st.phone_key = r.phone_key AND st.stopped_at IS NOT NULL');
-    })
-    // The same stop stamped on a visit row of the number (it moves with its visit on a customer merge).
-    .whereNotExists(function notStampedStopped() {
-      this.select(db.raw('1')).from('visit_text_recipients as sr').join('scheduled_services as ss', 'ss.id', 'sr.scheduled_service_id')
-        .whereRaw('ss.customer_id = s.customer_id AND sr.phone_key = r.phone_key AND sr.stopped_at IS NOT NULL');
+        .whereRaw('st.phone_key = r.phone_key AND st.stopped_at IS NOT NULL AND st.customer_id IN ('
+          + 'WITH RECURSIVE lineage(id) AS (SELECT s.customer_id UNION SELECT j.loser_customer_id FROM customer_merge_journal j '
+          + 'JOIN lineage l ON j.winner_customer_id = l.id WHERE j.undone_at IS NULL) SELECT id FROM lineage)');
     });
 }
 

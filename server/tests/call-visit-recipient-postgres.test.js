@@ -532,23 +532,35 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           expect(await listed()).toHaveLength(1);
         });
 
-        test('a stop moves with its visit on a customer merge: the merged record never texts the person again', async () => {
+        test('a stop on a record merged into another counts there: no texts, no map link, even with the visits gone; Restart there clears it', async () => {
           await record();
           await stopBob();
           const [{ id: survivorId }] = await db('customers').insert({ first_name: 'Sam', last_name: 'Survivor', phone: phone(45) }).returning('id');
+          const [{ id: journalId }] = await db('customer_merge_journal').insert({
+            winner_customer_id: survivorId, loser_customer_id: customerId, loser_snapshot: JSON.stringify({}), tier: 'manual', performed_by: 'test',
+          }).returning('id');
+          const [{ id: survivorRow }] = await db('customer_reminder_contacts').insert({
+            customer_id: survivorId, phone_key: BOB.slice(-10), phone_e164: BOB, first_name: 'Bob', source: 'customer_reminder_contact',
+            consent_version: 'owner-ruling-2026-11-24-every-visit',
+          }).returning('id');
           try {
-            // A merge repoints the visit (and its call row) to the surviving record; the list stays on the old one.
-            await db('scheduled_services').where({ id: visitId }).update({ customer_id: survivorId });
+            // The survivor lists Bob too, and the old visits are gone: the stop on the old record still counts.
             expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(true);
-            expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
+            expect(await VisitRecipient.listReminderContacts(survivorId)).toEqual([expect.objectContaining({ stopped: true, stoppedBy: 'customer' })]);
+            // An undone merge no longer carries the stop.
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: db.fn.now(), undone_by: 'test' });
+            expect(await VisitRecipient.declinedByRecipient({ customerId: survivorId, phoneKey: BOB.slice(-10), phoneE164: BOB, purpose: 'confirmation' })).toBe(false);
+            await db('customer_merge_journal').where({ id: journalId }).update({ undone_at: null, undone_by: null });
+            // Restart on the survivor clears the stop it inherited.
+            expect(await VisitRecipient.setReminderContactStopped({ customerId: survivorId, id: survivorRow, stopped: false, by: 'customer' }))
+              .toMatchObject({ stopped: false, changed: true });
+            const [old] = await listed();
+            expect(old.stopped_at).toBeNull();
           } finally {
-            await db('scheduled_services').where({ id: visitId }).update({ customer_id: customerId });
+            await db('customer_reminder_contacts').where({ customer_id: survivorId }).del();
+            await db('customer_merge_journal').where({ id: journalId }).del();
             await db('customers').where({ id: survivorId }).del();
           }
-          const [listedBob] = await listed();
-          await VisitRecipient.setReminderContactStopped({ customerId, id: listedBob.id, stopped: false, by: 'customer' });
-          const rows = await db('visit_text_recipients').where({ scheduled_service_id: visitId });
-          expect(rows.every((r) => r.stopped_at === null)).toBe(true);
         });
 
         test('a later call naming the person again never clears a stop', async () => {

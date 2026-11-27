@@ -302,13 +302,34 @@ async function materializeForVisit(scheduledServiceId, conn = db, { expectedCust
 }
 
 // The account holder or staff stopped this number on the customer's list.
-// A stop on the customer's list, or the same stop stamped on a visit row of the number on this customer's visits (the
-// stamp moves with a visit when two customer records are merged; the list stays on the old record).
+// The customer and every record merged into it (a merge that was not undone), at any depth. A merge leaves the list on
+// the old record, so a stop saved there still counts for the record that took its visits.
+function lineageSql(customerExpr) {
+  return `WITH RECURSIVE lineage(id) AS (SELECT (${customerExpr})::uuid UNION SELECT j.loser_customer_id FROM customer_merge_journal j `
+    + 'JOIN lineage l ON j.winner_customer_id = l.id WHERE j.undone_at IS NULL) SELECT id FROM lineage';
+}
+
+// A stop on the customer's list, or on the list of a record merged into it.
 async function stoppedOnList(customerId, phoneKey, conn) {
   if (!customerId || !phoneKey) return false;
-  if (await conn(REMINDER_TABLE).where({ customer_id: customerId, phone_key: phoneKey }).whereNotNull('stopped_at').first('id')) return true;
-  return !!(await conn(`${TABLE} as r`).join('scheduled_services as s', 's.id', 'r.scheduled_service_id')
-    .where({ 's.customer_id': customerId, 'r.phone_key': phoneKey }).whereNotNull('r.stopped_at').first('r.id'));
+  return !!(await conn(REMINDER_TABLE).where({ phone_key: phoneKey }).whereNotNull('stopped_at')
+    .whereRaw(`customer_id IN (${lineageSql('?')})`, [customerId]).first('id'));
+}
+
+// Stops on the lists of records merged into this customer, by number (the customer's own rows are not included).
+async function inheritedStops(customerId, phoneKeys, conn) {
+  const out = new Map();
+  if (!phoneKeys.length) return out;
+  const rows = await conn(REMINDER_TABLE).whereIn('phone_key', phoneKeys).whereNotNull('stopped_at')
+    .whereNot({ customer_id: customerId }).whereRaw(`customer_id IN (${lineageSql('?')})`, [customerId])
+    .orderBy('stopped_at', 'asc').select('phone_key', 'stopped_at', 'stopped_by');
+  for (const r of rows) if (!out.has(r.phone_key)) out.set(r.phone_key, r);
+  return out;
+}
+
+function stopFields(row, inherited) {
+  const stop = row.stopped_at ? row : inherited.get(row.phone_key) || null;
+  return { stopped: !!stop, stoppedAt: stop ? stop.stopped_at : null, stoppedBy: stop ? stop.stopped_by || null : null };
 }
 
 // The customer lists the number for every visit.
@@ -959,14 +980,14 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
   const customer = await conn('customers').where({ id: customerId }).first();
   const { getServiceContactSlots, phoneKeyOf } = require('./customer-contact');
   const slotKeys = new Set(getServiceContactSlots(customer).map((slot) => phoneKeyOf(slot.phone)).filter(Boolean));
+  // A stop saved on a record merged into this one counts here too (the same check the senders use).
+  const inherited = await inheritedStops(customerId, rows.map((r) => r.phone_key), conn);
   return rows.map((row) => ({
     id: row.id,
     firstName: row.first_name || '',
     lastName: row.last_name || '',
     phone: row.phone_e164,
-    stopped: !!row.stopped_at,
-    stoppedAt: row.stopped_at || null,
-    stoppedBy: row.stopped_by || null,
+    ...stopFields(row, inherited),
     addedAt: row.created_at,
     // Also in one of the account's on-location contact spots: those texts have their own controls (the contacts editor);
     // a stop on this list still stops the texts this list sends.
@@ -982,25 +1003,27 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
 async function setReminderContactStopped({ customerId, id, stopped, by, conn = db }) {
   if (!customerId || !id || !['customer', 'staff'].includes(by)) return null;
   if (!conn.isTransaction) return conn.transaction((trx) => setReminderContactStopped({ customerId, id, stopped, by, conn: trx }));
-  const patch = stopped ? { stopped_at: conn.fn.now(), stopped_by: by } : { stopped_at: null, stopped_by: null };
-  const query = conn(REMINDER_TABLE).where({ id, customer_id: customerId });
-  // Only a real change writes: a repeat stop keeps the first stop's time and who made it; a restart needs a stop.
-  if (stopped) query.whereNull('stopped_at'); else query.whereNotNull('stopped_at');
   const cols = ['id', 'phone_key', 'stopped_at', 'stopped_by'];
-  const updated = await query.update(patch).returning(cols);
-  // The same stop (or restart) on the number's visit rows of this customer's visits, in the same transaction: the stamp
-  // moves with a visit on a customer merge, so a merged record never starts texting a stopped person again.
-  if (updated[0]) {
-    const visitIds = conn('scheduled_services').where({ customer_id: customerId }).select('id');
-    await conn(TABLE).where({ phone_key: updated[0].phone_key }).whereIn('scheduled_service_id', visitIds)
-      .update({ stopped_at: stopped ? updated[0].stopped_at : null });
+  const own = await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).forUpdate().first(cols);
+  if (!own) return null;
+  // Only a real change writes: a repeat stop keeps the first stop's time and who made it; a restart needs a stop. A
+  // restart also clears a stop saved on a record merged into this one (the same number), since that stop counts here.
+  let changed = false;
+  if (stopped) {
+    if (!own.stopped_at) {
+      changed = (await conn(REMINDER_TABLE).where({ id: own.id }).whereNull('stopped_at')
+        .update({ stopped_at: conn.fn.now(), stopped_by: by })) > 0;
+    }
+  } else {
+    changed = (await conn(REMINDER_TABLE).where({ phone_key: own.phone_key }).whereNotNull('stopped_at')
+      .whereRaw(`customer_id IN (${lineageSql('?')})`, [customerId])
+      .update({ stopped_at: null, stopped_by: null })) > 0;
   }
-  // The answer is the row as written (or as it stands, for a no-op): no other read, so a committed change is never
-  // reported as a failure. The caller merges it into the entry it shows. `changed`: false when nothing was written
-  // (the caller audits real changes only).
-  const row = updated[0] || await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).first(cols);
-  if (!row) return null;
-  return { id: row.id, stopped: !!row.stopped_at, stoppedAt: row.stopped_at || null, stoppedBy: row.stopped_by || null, changed: updated.length > 0 };
+  // The answer is the state as written, read in the same transaction. `changed`: false when nothing was written (the
+  // caller audits real changes only).
+  const row = changed ? await conn(REMINDER_TABLE).where({ id: own.id }).first(cols) : own;
+  const fields = stopFields(row, await inheritedStops(customerId, [row.phone_key], conn));
+  return { id: row.id, ...fields, changed };
 }
 
 module.exports = {
