@@ -2038,6 +2038,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
+  // MONDAY-SATURDAY 7:00AM ET — Weekly buy list (owner 2026-11-27: "once a week
+  // look at upcoming appts, and buy for the entire week, based on current
+  // inventory"). Monday: one admin alert per technician with what to buy for the
+  // Monday-Saturday week from that technician's supply store, and an end to last
+  // week's alerts. Tuesday-Saturday: the same run counted from today; it rings
+  // again only when a list grows, and closes an alert with nothing left to buy.
+  // Admin notifications only (no gate, no order, no customer message). A failure
+  // throws so job_health goes red. A deploy kill retries: a second run the same
+  // day dedupes onto the standing alerts.
+  // =========================================================================
+  const runWeeklyBuyListTick = () => runExclusive('weekly-buy-list', async () => {
+    const result = await require('./procurement/weekly-buy-alert').runWeeklyBuyList();
+    logger.info(`[weekly-buy-list] ${JSON.stringify(result)}`);
+  }).catch((err) => logger.error(`Weekly buy list failed: ${err.message}`));
+  cron.schedule('0 7 * * 1-6', runWeeklyBuyListTick, { timezone: 'America/New_York' });
+  registerDeployKillRetry('weekly-buy-list', runWeeklyBuyListTick);
+
+  // =========================================================================
   // MONTHLY, 1st at 9:00AM ET — SiteOne savings-programs check (owner
   // 2026-10-26). Signs in with the order bot's stored SiteOne login (read-only),
   // reads the Early Order Programs, promotions and Partners points, compares
@@ -2219,96 +2237,24 @@ function initScheduledJobs() {
   }, { timezone: 'America/New_York' });
 
   // =========================================================================
-  // DAILY 4:20AM — ROUTE-TIERS nightly intra-day reorder (tier 3: 72h–7d
-  // band). Rewrites route_order per tech-day via the shared optimizer when
-  // savings clear the floor; NEVER moves a visit's date/window/tech, skips any
-  // day containing a frozen visit (<72h or 72h reminder sent), never touches
-  // >25-stop tech-days (Google cap — logged, not truncated). Double-gated
-  // (cronJobs AND routeReorder); the tier day-moves themselves ride the 4:10
-  // auto-dispatch run above (its eligibility is tier-aware when
-  // GATE_ROUTE_TIERS is on). Zero customer comms by construction.
+  // DAILY 4:20AM — Schedule quality alert reconciliation.
+  // The legacy nightly Route-Tiers intra-day reorder pass (days 1-6) was
+  // retired: the 4:40 AM Day Re-Plan owns intra-day ordering across days 1-14
+  // with arrival-window flexibility and zero lock contention on
+  // 'auto-dispatch-recurring'. Quality alert reconciliation still runs here
+  // under its own gates with zero route_order writes.
   // =========================================================================
   cron.schedule('20 4 * * *', async () => {
-    // Call-time read (NOT the baked isEnabled snapshot) so a Railway var flip
-    // takes effect on the next tick without a redeploy — matching the
-    // documented gate contract and the service's own internal check.
-    if (!gateEnvValue('GATE_ROUTE_REORDER')) {
-      // The reorder pass below is also the ONLY nightly trigger for the
-      // route-quality alert reconciliation folded into it — with reorder
-      // off, existing defects never got an initial card and no card ever
-      // expired, even with the measurement + alert gates on (codex #4295
-      // r2 P2). Run just that reconciliation, under its own gates, over the
-      // same six-date band; skip repair and distance optimization entirely.
-      // No runExclusive: unlike the reorder pass, this never writes
-      // route_order, so it needs none of that writer-serialization, and
-      // the reconciler already self-serializes on its own advisory lock.
-      try {
-        const { runScheduleQualityAlertsOnly } = require('./route-reorder');
-        const result = await runScheduleQualityAlertsOnly();
-        if (result.status === 'failed') {
-          logger.error('[route-reorder] quality-alerts-only cron run failed');
-        } else if (result.status === 'reconciled') {
-          logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
-        }
-      } catch (err) {
-        logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
-      }
-      return;
-    }
-    logger.info('Running: Route-Tiers nightly reorder');
     try {
-      // runExclusive x2: 'route-tiers-nightly' guards against deploy-overlap
-      // double-runs of THIS job; nesting inside 'auto-dispatch-recurring'
-      // serializes the two autonomous schedule WRITERS — auto-dispatch's
-      // apply pass can land moves onto reorder-band days (destination floor
-      // is 5 days out, band is 1–6), and SERIALIZABLE isolation alone cannot
-      // fence a concurrent writer running at weaker isolation. If the 4:10
-      // run is still holding the lock, the reorder tick waits up to 25 min for
-      // it (nightPassLockOptions) and only a wait that runs out is skipped and
-      // picked up tomorrow (advisory lock is non-blocking).
-      await runExclusive('route-tiers-nightly', async () => {
-        const { runRouteReorderIfEnabled, recordSkippedTick } = require('./route-reorder');
-        // recordHealth:false — this invocation only BORROWS the writer lock;
-        // recording it would stamp a fresh 4:20 success under the 4:10 job's
-        // name, clearing real failures and falsifying last_success_at.
-        const inner = await runExclusive('auto-dispatch-recurring', async () => runRouteReorderIfEnabled(), nightPassLockOptions());
-        // STRICT boolean — a completed run returns skipped as a NUMERIC
-        // count of skipped tech-days (frozen days are routine), and a
-        // truthy check would ledger a false skipped tick + fail job health
-        // on any normal night with one skip. Only runExclusive's
-        // lock-contention shape ({ skipped: true, reason }) means the tick
-        // itself never ran (uncapped audit r27 P1).
-        if (inner && inner.skipped === true) {
-          // The 4:10 job still held the writer lock — the tick did NOT run.
-          // Ledger it as skipped so job health / the dispatch card never show
-          // a lock-starved night as a successful run with no output.
-          logger.warn(`[route-reorder] tick skipped (${inner.reason}) — auto-dispatch still holds the writer lock`);
-          const tickId = await recordSkippedTick(inner.reason);
-          // recordSkippedTick swallows insert errors and returns null — a
-          // lost skip ledger must fail job health like any lost ledger, or
-          // the night is invisible everywhere.
-          if (tickId == null) {
-            throw new Error(`route-reorder skipped tick (${inner.reason}) could not be ledgered`);
-          }
-          // Ledgered — but the night still had NO reorder pass. Returning
-          // normally would let the outer runExclusive stamp
-          // 'route-tiers-nightly' as a fresh SUCCESS, hiding the missed run
-          // from job health (uncapped audit r20 P1). Fail loud like every
-          // other not-fully-successful night; the ledger row keeps the
-          // dispatch card accurate either way.
-          throw new Error(`route-reorder tick skipped (${inner.reason}) — no reorder ran (ledger ${tickId})`);
-        }
-        const result = inner || {};
-        logger.info(`[route-reorder] cron run ${result.status}: applied=${result.applied ?? 0} skipped=${result.skipped ?? 0} failed=${result.failed ?? 0} ledger=${result.ledgerId ?? 'none'}`);
-        // Anything short of a fully-successful, ledgered run must FAIL job
-        // health — a guard outage (completed_with_errors) or a lost ledger
-        // otherwise reads as a healthy night with no visible output.
-        if (result.status !== 'gate_off' && (result.status !== 'completed' || result.ledgerId == null)) {
-          throw new Error(`route-reorder run unhealthy: status=${result.status ?? 'unknown'} ledger=${result.ledgerId ?? 'none'}`);
-        }
-      });
+      const { runScheduleQualityAlertsOnly } = require('./route-reorder');
+      const result = await runScheduleQualityAlertsOnly();
+      if (result.status === 'failed') {
+        logger.error('[route-reorder] quality-alerts-only cron run failed');
+      } else if (result.status === 'reconciled') {
+        logger.info(`[route-reorder] quality-alerts-only cron run: created=${result.created} resolved=${result.resolved}`);
+      }
     } catch (err) {
-      logger.error(`Route-Tiers reorder run failed: ${err.message}`);
+      logger.error(`[route-reorder] quality-alerts-only cron run failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -4460,9 +4406,10 @@ function initScheduledJobs() {
         // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
         // too: clearing the cutoff is a kill switch for every receipt write.
         if (result.skipped) return;
-        const { logged, held, errors } = summarize(result);
-        if (logged || held || errors) {
-          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        const { logged, held, errors, unappliedFailedLines } = summarize(result);
+        if (logged || held || errors || unappliedFailedLines) {
+          // job_health records this run as a success even when single lines failed; the failed-lines alert carries them.
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s), ${unappliedFailedLines} failed line(s) still not applied`);
         }
         // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
         // above just handed off as agent_pending (unmatched/needs_size/
@@ -7440,7 +7387,8 @@ function initScheduledJobs() {
               `, [smsResult.code === 'COLLECTION_HOLD_DEFER' ? 'collection_hold_deferred_at' : 'quiet_hours_hold_at', completedAt]),
             });
             logger.info(`[scheduled-sms] ${msg.id} held outside the 8AM-8PM ET send window — rescheduled for ${holdRetryAt.toISOString()} (attempt refunded)`);
-          } else if (smsResult.code === 'STREET_LEVEL_HOLD') {
+          } else if (smsResult.code === 'STREET_LEVEL_HOLD' || smsResult.code === 'VISIT_ON_HOLD') {
+            // GATE_VISIT_HOLD: a visit the customer asked us to hold waits the same way (VISIT_ON_HOLD): refunded, re-polled, sent after the release.
             // A visit the text is about is a street-level address hold awaiting the office confirm
             // (street-level-hold.js): a validator deferral that can last as long as the office takes, so it
             // must not spend the bounded 3-attempt rail and end terminally blocked. Like the send-window
@@ -10256,14 +10204,15 @@ function initScheduledJobs() {
         // are picked up today instead of never counting.
         const today = etDateString();
         const yesterday = etDateString(addETDays(new Date(), -1));
-        const candidates = await db('scheduled_services')
+        const candidates = await require('./visit-hold').excludeHeld(db('scheduled_services')
           .whereBetween('scheduled_date', [yesterday, today])
           .whereIn('status', ['pending', 'confirmed'])
           // A street-level address hold the office has not cleared was never dispatched, so it cannot be
           // a customer no-show (no customer_noshow row, no repeated-miss outreach).
           .whereNotExists(function unclearedAddressHold() {
             require('./street-level-hold').heldVisitSubquery(this, 'scheduled_services');
-          })
+          }), 'scheduled_services')
+          // GATE_VISIT_HOLD (above): a visit the customer asked us to hold was never due, so it cannot be a no-show.
           .select('id', 'scheduled_date', 'window_start', 'window_end');
 
         // Only flag services whose arrival window has already elapsed at
@@ -10475,6 +10424,23 @@ function initScheduledJobs() {
       });
     } catch (err) {
       logger.error(`Unassigned timed visits check failed: ${err.message}`);
+    }
+  }, { timezone: 'America/New_York' });
+
+  // =========================================================================
+  // DAILY 9:20AM — Visit-hold sweep (GATE_VISIT_HOLD, owner 2026-11-27). A visit the customer asked us to hold ("I will call
+  // you when ready"): when the next visit of the same plan series arrives first, the held visit closes as skipped (no make-up
+  // visit, no customer text); at day 14 one admin bell says to call and rebook; a bell whose hold ended closes itself.
+  // Gate off = no query. runExclusive: a deploy overlap must not run two. See server/services/visit-hold.js.
+  // =========================================================================
+  cron.schedule('20 9 * * *', async () => {
+    try {
+      await runExclusive('visit-hold-sweep', async () => {
+        const result = await require('./visit-hold').runVisitHoldSweep();
+        if (!result.skipped && (result.closed || result.rang || result.bellsClosed)) logger.info(`Visit-hold sweep: ${JSON.stringify(result)}`);
+      });
+    } catch (err) {
+      logger.error(`Visit-hold sweep failed: ${err.message}`);
     }
   }, { timezone: 'America/New_York' });
 
@@ -11063,8 +11029,7 @@ function initScheduledJobs() {
   // post-merge P2): the Monday irrigation send fires at 7:00 ET, so a
   // lawn-email gap alert after that is unactionable for the very send it
   // warns about — this tick must precede it. Still before the day's route
-  // starts, so a price gap rings first. Dark behind
-  // GATE_SCHEDULE_INTEGRITY_WATCHDOG. See
+  // starts, so a price gap rings first. See
   // server/services/schedule-integrity-watchdog.js.
   // =========================================================================
   cron.schedule('40 6 * * *', async () => {
@@ -11083,11 +11048,9 @@ function initScheduledJobs() {
   // booking with a visit TODAY or TOMORROW that has no time or technician
   // rings now, not at the next 6:40 run (by then a today visit is history).
   // Catches bookings made, and technicians removed, after the daily tick, and
-  // retries a failed write. Same gate as the watchdog it belongs to.
+  // retries a failed write.
   cron.schedule('25 7-20 * * *', async () => {
     try {
-      const { isEnabled } = require('../config/feature-gates');
-      if (!isEnabled('scheduleIntegrityWatchdog')) return;
       const result = await runExclusive('combined-booking-check-urgent', () =>
         require('./combined-booking-check').runCombinedBookingCheck({ urgentOnly: true }));
       if (result?.failed) logger.warn(`[combined-booking-check] urgent pass: ${result.failed} failed`);

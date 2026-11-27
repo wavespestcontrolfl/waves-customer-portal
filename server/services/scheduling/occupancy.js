@@ -67,6 +67,7 @@
  * slot-reservation.js) are verified correct and intentionally NOT refactored
  * onto this module — possible follow-up, not this lane.
  */
+const { excludeHeld } = require('../visit-hold');
 const { NOT_A_ROUTE_STOP_STATUSES } = require('../stops-ahead');
 const defaultDb = require('../../models/db');
 const { bookedVisitOrLiveHold } = require('./reservation-occupancy');
@@ -609,6 +610,8 @@ async function findConflictingVisits({
       "((window_start < ?::time AND COALESCE(window_end, window_start + ((COALESCE(NULLIF(estimated_duration_minutes, 0), ?)::text || ' minutes')::interval)) > ?::time) OR reservation_service_mix->>'version' = '2')",
       [windowEnd, DEFAULT_DURATION_MINUTES, windowStart],
     );
+  // GATE_VISIT_HOLD: a held visit blocks no time slot (gate off: no clause).
+  excludeHeld(query, 'scheduled_services');
   if (excludeIds.length) query.whereNotIn('id', excludeIds);
   if (scopeTechId) applyTechScope(query, 'technician_id', scopeTechId);
   if (excludeCustomerId) {
@@ -887,6 +890,7 @@ async function findConflictingVisitsWithTravel({
     .whereNotIn('scheduled_services.status', excludeStatuses)
     .where(bookedVisitOrLiveHold)
     .whereNotNull('scheduled_services.window_start');
+  excludeHeld(query, 'scheduled_services');
   if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
   if (scopeTechId) applyTechScope(query, 'scheduled_services.technician_id', scopeTechId);
   if (excludeCustomerId) {
@@ -980,6 +984,7 @@ async function listOccupiedWindows({
       .whereNotIn('scheduled_services.status', excludeStatuses)
       .where(occupiedHoldFilter(includeClaimedReservations, 'scheduled_services.reservation_expires_at'))
       .whereNotNull('scheduled_services.window_start');
+    excludeHeld(query, 'scheduled_services');
     if (excludeIds.length) query.whereNotIn('scheduled_services.id', excludeIds);
     rows = await query.select(...CONFLICT_COLUMNS.map((c) => `scheduled_services.${c}`), ...guardedCoordSelects(db));
   } else {
@@ -989,6 +994,7 @@ async function listOccupiedWindows({
       .where(occupiedHoldFilter(includeClaimedReservations, 'reservation_expires_at'))
       // Windowless placeholder rows are inert to conflicts (see header).
       .whereNotNull('window_start');
+    excludeHeld(query, 'scheduled_services');
     if (excludeIds.length) query.whereNotIn('id', excludeIds);
     rows = await query.select(CONFLICT_COLUMNS);
   }

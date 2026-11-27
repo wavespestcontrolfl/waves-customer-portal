@@ -672,13 +672,13 @@ describe('customerAskedFacts: one copy per wording within a scope, the newest ke
     expect(facts.items.map((i) => i.kind).sort()).toEqual(['booking_note', 'portal_message']);
   });
 
-  test('within the account scope the newest copy wins whatever the source order', async () => {
+  test('within the account scope the first by priority wins: the portal request before the portal message', async () => {
     process.env.GATE_PORTAL_MESSAGES = 'true';
     const rows = [formRow({ subject: 'Dog is in the yard', description: 'Dog is in the yard', metadata: { writer: 'portal_form' }, created_at: '2026-11-20T10:00:00.000Z' })];
     const facts = await customerAskedFacts({ ...SVC, scheduled_date: '2026-11-27' }, fakeDbh({ rows, messages: [{ body: 'Dog is in the yard', created_at: '2026-11-25T15:00:00.000Z' }] }));
     delete process.env.GATE_PORTAL_MESSAGES;
     expect(facts.items).toHaveLength(1);
-    expect(facts.items[0]).toMatchObject({ kind: 'portal_message', at: '2026-11-25T15:00:00.000Z' });
+    expect(facts.items[0]).toMatchObject({ kind: 'portal_request', at: '2026-11-20T10:00:00.000Z' });
   });
 
   test('a reschedule note and the same words said account-wide both show', async () => {
@@ -878,6 +878,64 @@ describe('customerAskedFacts: a marked typed row with no description', () => {
     expect(await customerAskedFacts(SVC, fakeDbh({ rows: [empty('Gate 4521 problem')] }))).toBeNull();
     expect(await customerAskedFacts(SVC, fakeDbh({ rows: [empty('My dog got sick after your spray')] }))).toBeNull();
     expect(await customerAskedFacts(SVC, fakeDbh({ rows: [empty('Ants in the kitchen', { propertyId: 'prop-1' })] }))).toBeNull();
+  });
+});
+
+describe('customerAskedFacts: cadence prices with no dollar sign', () => {
+  test.each([
+    '49 a month', '49/mo', '49 per month', '45 monthly', '99 a year', '35/visit', '40 per visit', '60 a quarter', '49 bucks', '5 a visit',
+    '99 yearly', '20 weekly', '45 / month', '４９ a month', 'it was 49 per application',
+  ])('"%s" is a price', (text) => expect(_test.moneyFree(text)).toBe(false));
+
+  test.each([
+    '2 dogs', '3 times a month', 'twice a month', 'once a week', 'every 2 weeks', '3 a day', 'room 12', 'ants for 2 weeks', 'a month ago', '2 cats and 4 kids',
+  ])('"%s" stays', (text) => expect(_test.moneyFree(text)).toBe(true));
+});
+
+describe('customerAskedFacts: repeated wording takes no slot before a source\'s cap', () => {
+  const VISIT = { ...SVC, scheduled_date: '2026-11-27' };
+  beforeEach(() => { process.env.GATE_PORTAL_MESSAGES = 'true'; });
+  afterAll(() => { delete process.env.GATE_PORTAL_MESSAGES; });
+
+  test('six copies of one message do not push distinct older messages out of the five', async () => {
+    const copies = Array.from({ length: 6 }, (_, n) => ({ body: 'Please come after noon', created_at: `2026-11-25T1${n}:00:00.000Z` }));
+    const older = ['Dog is in the yard', 'Side gate sticks', 'Call before you arrive'].map((body, n) => ({ body, created_at: `2026-11-22T1${n}:00:00.000Z` }));
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages: [...copies.reverse(), ...older.reverse()] }));
+    expect(facts.items.map((i) => i.text).sort()).toEqual(['Call before you arrive', 'Dog is in the yard', 'Please come after noon', 'Side gate sticks']);
+  });
+
+  test('spelling does not hide a repeat: case, spaces, full-width letters and trailing punctuation', async () => {
+    const messages = ['Gate is open!', 'gate  is   open', 'Ｇａｔｅ is open.', 'GATE IS OPEN...'].map((body, n) => ({ body, created_at: `2026-11-25T1${n}:00:00.000Z` }));
+    expect((await customerAskedFacts(VISIT, fakeDbh({ messages }))).items).toHaveLength(1);
+  });
+
+  test('five requests and five messages: wording repeated across them takes one slot, the distinct ones all show', async () => {
+    const rows = ['A', 'B', 'C', 'D', 'E'].map((x, n) => formRow({ subject: `Ask ${x}`, description: `Ask ${x}`, metadata: { writer: 'portal_form' }, created_at: `2026-11-1${n}T10:00:00.000Z` }));
+    const messages = [
+      ...['Ask A', 'Ask B', 'Ask C', 'Ask D', 'Ask E'].map((body, n) => ({ body, created_at: `2026-11-24T1${n}:00:00.000Z` })),
+      { body: 'Brand new question', created_at: '2026-11-23T10:00:00.000Z' },
+    ];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ rows, messages }));
+    expect(facts.items.map((i) => i.text).sort()).toEqual(['Ask A', 'Ask B', 'Ask C', 'Ask D', 'Ask E', 'Brand new question']);
+  });
+
+  test('Codex #8699: a copy cut by its own source cap does not hide the same words in a source with room', async () => {
+    // Six distinct requests: the oldest (Ask F) is past the five-request cap. A message repeating it must still show.
+    const rows = ['A', 'B', 'C', 'D', 'E', 'F'].map((x, n) => formRow({ subject: `Ask ${x}`, description: `Ask ${x}`, metadata: { writer: 'portal_form' }, created_at: `2026-11-1${9 - n}T10:00:00.000Z` }));
+    const messages = [{ body: 'Ask F', created_at: '2026-11-25T10:00:00.000Z' }];
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ rows, messages }));
+    const shown = facts.items.map((i) => `${i.kind}:${i.text}`);
+    expect(shown.filter((x) => x.startsWith('portal_request:'))).toHaveLength(5);
+    expect(shown).toContain('portal_message:Ask F');
+    expect(shown).not.toContain('portal_request:Ask F');
+  });
+
+  test('the return reason keeps its slot', async () => {
+    mockGather.mockResolvedValue(asks([askItem({ id: 'booking:svc-1', source: 'request_form', at: '2026-11-01T15:00:00.000Z', text: 'Ants in the kitchen.' })]));
+    const messages = Array.from({ length: 12 }, (_, n) => ({ body: `Message number ${'x'.repeat(n + 1)}`, created_at: `2026-11-2${n % 10}T15:00:00.000Z` }));
+    const facts = await customerAskedFacts(VISIT, fakeDbh({ messages }));
+    expect(facts.items.some((i) => i.kind === 'reservice_reason')).toBe(true);
+    expect(facts.items.length).toBeLessThanOrEqual(8);
   });
 });
 

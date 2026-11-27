@@ -10,8 +10,6 @@ const { previewProposal, applyProposal } = require('../services/call-reschedule-
 const { applyReviewedCallReschedule } = require('../services/call-reschedule-apply');
 
 test.each(['single', 'series', 'arrival-route'])('%s preview binds disclosed conflicts and saved property through Apply', async (mode) => {
-  const previousGate = process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-  process.env.GATE_RESCHEDULE_PROPOSAL_CARD = 'true';
   const now = new Date('2099-09-09T08:00:00-04:00');
   const target = '2099-09-10T14:00:00-04:00';
   const quote = 'Could you come Thursday at two instead?';
@@ -57,37 +55,32 @@ test.each(['single', 'series', 'arrival-route'])('%s preview binds disclosed con
     previewMoveConflicts: jest.fn(async () => conflicts),
     previewSeriesMove: jest.fn(async () => ({ collective: true, occurrenceIds: ['visit', 'later'],
       conflictSnapshot: conflicts })) };
-  try {
-    const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
-    expect(preview.displayAddress.address_line1).toBe('Saved property');
-    expect(preview.overlap.appointments[0].service_name).toBe(conflicts[0].warning || 'Other service');
-    if (mode === 'series') expect(preview.series.conflicts).toEqual([{ occurrenceId: 'later', date: '2099-10-10',
-      appointments: [{ id: 'later-conflict', service_name: 'Other service', status: 'confirmed', window_start: '14:30', window_end: '15:30' }] }]);
-    await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
-      previewHash: preview.preview_hash })).resolves.toEqual({ applied: true });
-    expect(applyReviewedCallReschedule).toHaveBeenLastCalledWith(expect.objectContaining({ conflictSnapshot: conflicts }));
-    const originalId = conflicts.at(-1).conflict_id;
-    conflicts.at(-1).conflict_id = 'replacement-with-same-count';
-    await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
-      previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
-    conflicts.at(-1).conflict_id = originalId;
-    for (const table of ['customers', 'customer_properties']) {
-      const saved = tables[table];
-      applyReviewedCallReschedule.mockImplementationOnce(async ({ conn: liveConn, guard }) => {
-        tables[table] = []; // Disappears after Apply's fresh preview, before its locked guard.
-        await guard(liveConn);
-        throw new Error('Missing identity must not pass the guard');
-      });
-      try {
-        await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
-          previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
-      } finally { tables[table] = saved; }
-    }
-    tables.customer_properties[0].address_line1 = 'Changed property';
-    await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
-      previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
-  } finally {
-    if (previousGate === undefined) delete process.env.GATE_RESCHEDULE_PROPOSAL_CARD;
-    else process.env.GATE_RESCHEDULE_PROPOSAL_CARD = previousGate;
+  const preview = await previewProposal(conn, 'card', { visitId: 'visit', now, rebooker });
+  expect(preview.displayAddress.address_line1).toBe('Saved property');
+  expect(preview.overlap.appointments[0].service_name).toBe(conflicts[0].warning || 'Other service');
+  if (mode === 'series') expect(preview.series.conflicts).toEqual([{ occurrenceId: 'later', date: '2099-10-10',
+    appointments: [{ id: 'later-conflict', service_name: 'Other service', status: 'confirmed', window_start: '14:30', window_end: '15:30' }] }]);
+  await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
+    previewHash: preview.preview_hash })).resolves.toEqual({ applied: true });
+  expect(applyReviewedCallReschedule).toHaveBeenLastCalledWith(expect.objectContaining({ conflictSnapshot: conflicts }));
+  const originalId = conflicts.at(-1).conflict_id;
+  conflicts.at(-1).conflict_id = 'replacement-with-same-count';
+  await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
+    previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
+  conflicts.at(-1).conflict_id = originalId;
+  for (const table of ['customers', 'customer_properties']) {
+    const saved = tables[table];
+    applyReviewedCallReschedule.mockImplementationOnce(async ({ conn: liveConn, guard }) => {
+      tables[table] = []; // Disappears after Apply's fresh preview, before its locked guard.
+      await guard(liveConn);
+      throw new Error('Missing identity must not pass the guard');
+    });
+    try {
+      await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
+        previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
+    } finally { tables[table] = saved; }
   }
+  tables.customer_properties[0].address_line1 = 'Changed property';
+  await expect(applyProposal(conn, 'card', { actorId: 'staff', visitId: 'visit', now, rebooker,
+    previewHash: preview.preview_hash })).rejects.toMatchObject({ status: 409 });
 });

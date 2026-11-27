@@ -170,6 +170,32 @@ async function streetLevelHoldBlocksSend(input) {
   return false;
 }
 
+// Visit on hold (GATE_VISIT_HOLD, owner 2026-11-27): NO automated customer text, email or app message about a visit the
+// customer asked us to hold ("I will call you when ready") goes out until the office releases it. Same shared send step as
+// the street-level hold above: every visit-scoped send names its visit (appointmentId, metadata.scheduled_service_id /
+// scheduledServiceId, the composer's linked ids). A cancellation notice is still sent (the office cancelled it on purpose),
+// and a text a person typed is never held. Gate off: false before any read. A lookup error holds the send (retryable).
+const VISIT_HOLD_BLOCK = Object.freeze({
+  code: 'VISIT_ON_HOLD',
+  reason: 'Visit is on hold: the customer will call',
+});
+async function visitHoldBlocksSend(input) {
+  if (!require('../visit-hold').visitHoldLive()) return false;
+  if (['internal', 'admin', 'tech'].includes(input.audience)) return false;
+  if (input.purpose === 'appointment_cancellation') return false;
+  if (input.metadata?.humanAuthored === true || input.metadata?.human_authored === true || input.operatorInitiated === true) return false;
+  const linked = Array.isArray(input.metadata?.linked_scheduled_service_ids) ? input.metadata.linked_scheduled_service_ids : [];
+  const ids = [heldVisitIdOf(input), ...linked].filter(Boolean);
+  if (!ids.length) return false;
+  return (await require('../visit-hold').heldVisitIds(ids)).size > 0;
+}
+
+// The hold that stops this send, or null: the street-level address hold first, else a visit on hold.
+async function holdBlockFor(input) {
+  if (await streetLevelHoldBlocksSend(input)) return STREET_LEVEL_HOLD_BLOCK;
+  return (await visitHoldBlocksSend(input)) ? VISIT_HOLD_BLOCK : null;
+}
+
 // A hand-composed text replayed from the scheduled-SMS queue whose reschedule link points at a visit that
 // can no longer be rescheduled (cancelled, skipped, completed, underway — the same status gate the
 // /reschedule/:token page applies on click, reschedule-eligibility RESCHEDULABLE_STATUSES) is a stale link:
@@ -1020,17 +1046,18 @@ async function sendCustomerMessageCore(input) {
     };
   }
 
-  // 6.35 Street-level address hold (see streetLevelHoldBlocksSend above): nothing about
-  //      a held visit reaches the customer before the office confirms the address.
-  if (await streetLevelHoldBlocksSend(sendInput)) {
-    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput) || 'linked in the body'} is a street-level address hold (${sendInput.purpose})`);
-    const blocked = { code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason };
+  // 6.35 Street-level address hold, or a visit on hold (see holdBlockFor): nothing about a held visit reaches
+  //      the customer before the office confirms the address / releases the hold.
+  const holdBlock = await holdBlockFor(sendInput);
+  if (holdBlock) {
+    logger.info(`[send_customer_message] held: visit ${heldVisitIdOf(sendInput) || 'linked in the body'} (${holdBlock.code}, ${sendInput.purpose})`);
+    const blocked = { code: holdBlock.code, reason: holdBlock.reason };
     const audit = await persistAudit({
       input: sendInput,
       policy,
       segmentMeta,
       validatorsPassed,
-      validatorsFailed: ['street_level_hold'],
+      validatorsFailed: [holdBlock.code.toLowerCase()],
       blockedBy: blocked,
       identityTrust: resolvedTrust,
       providerOutcome: null,
@@ -1320,12 +1347,13 @@ async function sendCustomerMessageCore(input) {
         'move_hold_boundary',
       );
     }
-    // Street-level address hold boundary re-check: a promotion that commits during the provider's
-    // own awaits must still hold the send (the same retryable deferral as the move hold).
-    if (await streetLevelHoldBlocksSend(sendInput)) {
+    // Hold boundary re-check (street-level address hold or visit on hold): a promotion or a hold that commits during
+    // the provider's own awaits must still hold the send (the same retryable deferral as the move hold).
+    const boundaryHold = await holdBlockFor(sendInput);
+    if (boundaryHold) {
       return rememberBoundaryBlock(
-        { ok: false, code: STREET_LEVEL_HOLD_BLOCK.code, reason: STREET_LEVEL_HOLD_BLOCK.reason, retryable: true },
-        'street_level_hold_boundary',
+        { ok: false, code: boundaryHold.code, reason: boundaryHold.reason, retryable: true },
+        `${boundaryHold.code.toLowerCase()}_boundary`,
       );
     }
     // Stale reschedule link boundary re-check: a visit cancelled / skipped / completed since step 6.36 read it
@@ -1908,5 +1936,6 @@ module.exports = {
     nextProviderRetryAt,
     isAutopayCustomerSms,
     checkAutopayCustomerSmsGate,
+    visitHoldBlocksSend,
   },
 };

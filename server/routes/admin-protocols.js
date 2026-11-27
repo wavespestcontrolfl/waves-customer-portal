@@ -63,14 +63,14 @@ const { lawnProtocols, isBahiaGrass, bahiaHasNoProgram } = require('../services/
 const { stripPriceTokensFromText, deepStripPriceTokens, stripOwnerOnlyProtocolCostFields } = require('../services/protocol-reader');
 const bermudaRemoval = require('../services/lawn-bermuda-removal');
 const roundsCatchUp = require('../services/lawn-rounds-catchup');
-const { tankReference, sprayerTestWarning } = require('../services/lawn-tank-reference');
+const { tankReferenceAcrossTanks, tanksDiffer, sprayerTestWarning } = require('../services/lawn-tank-reference');
 const { spreaderForLine } = require('../services/spreader-settings');
 
 // Only a spreader card (not a hand-shaker bait, a sprayed product or a SKIP line) gets a spreader number.
 const spreaderForTankLine = (product, line, amounts) => (amounts?.application === 'spreader' && amounts.applicator === 'spreader'
   ? spreaderForLine({ productName: product.name, raw: line.raw, rate: amounts.ratePer1000, rateUnit: amounts.rateUnit, substituted: Boolean(line.substitution) })
   : null);
-const { completionRateFields } = require('../utils/protocol-label-rate');
+const { completionRateFields, labelRateHoldText } = require('../utils/protocol-label-rate');
 const { addonCardHints, labelRateFor, resolveCatalogProductForName } = require('../services/completion-product-defaults');
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -768,6 +768,36 @@ async function getActiveCalibration(equipmentSystemId) {
   return query.first().catch(() => null);
 }
 
+// The sprayer line of each other big tank the sheet names an amount for (tankOptions: no sprayer picked, the tanks differ).
+function otherTankLines(calibration, bigTanks, items) {
+  if (!items.some((item) => item.tankAmounts?.tankOptions)) return [];
+  return bigTanks.filter((tank) => tank.equipment_system_id !== calibration?.equipment_system_id)
+    .map((tank) => sprayerTestWarning(tank, { code: 'other_tank_calibration_overdue_or_estimated', noteCode: 'other_tank_sprayer_number' }))
+    .filter(Boolean);
+}
+
+// A visit's own rig: its assigned equipment system, else the system of its assigned calibration (a visit can carry only that, as
+// the job card reads it); null for none.
+async function assignedRigId(scheduled) {
+  if (scheduled?.assigned_equipment_system_id) return scheduled.assigned_equipment_system_id;
+  if (!scheduled?.assigned_calibration_id) return null;
+  const row = await db('equipment_calibrations').where({ id: scheduled.assigned_calibration_id }).first('equipment_system_id');
+  return row?.equipment_system_id || null;
+}
+
+// Every active 110 gal tank's active calibration, tank #1 first (as getActiveCalibration orders them).
+async function getActiveBigTanks() {
+  return db('equipment_calibrations as ec')
+    .join('equipment_systems as es', 'ec.equipment_system_id', 'es.id')
+    .where({ 'ec.active': true, 'es.active': true, 'es.system_type': 'tank' })
+    .where('es.tank_capacity_gal', BIG_TANK_CAPACITY_GAL)
+    .select('ec.*', 'es.name as system_name', 'es.system_type', 'es.tank_capacity_gal')
+    .orderByRaw("case when es.name ilike '110-Gallon Spray Tank #1%' then 0 else 1 end")
+    // No catch: a failed read fails the sheet, never one tank's number shown as if it were the only tank.
+    .orderBy('es.name', 'asc');
+}
+const BIG_TANK_CAPACITY_GAL = 110;
+
 // The 4 gal FlowZone backpack's active calibration, for the tank sheet's "FlowZone 4 gal" amounts (lawn-tank-reference.js): the
 // sprayer is found by what it is (an active backpack system, 4 gal, named FlowZone), never by name order. With more than one, a field
 // verified test first, then the newest test. A FlowZone picked as the rig (`selected`) sizes its own fill. null when none is on file.
@@ -1043,10 +1073,32 @@ function lawnMixRig(calibration) {
   return { carrier, tankCoverageSqft, equipment };
 }
 
+// No sprayer picked while the big tanks are on different numbers (owner 2026-11-27): no single rig, carrier, coverage or full-tank
+// mix (each tank's comes in equipment.tankOptions and the items' tankAmounts.tankOptions), the name lists every tank; else the one
+// rig as lawnMixRig gives it.
+function lawnMixRigs(calibration, bigTanks) {
+  const rig = lawnMixRig(calibration);
+  if (!tanksDiffer(bigTanks) || !rig.equipment) return rig;
+  const tankOptions = bigTanks.map((tank) => lawnMixRig(tank).equipment);
+  const equipment = {
+    ...rig.equipment, equipmentSystemId: null, calibrationId: null, carrierGalPer1000: null, tankCoverageSqft: null,
+    systemName: `No sprayer picked: ${tankOptions.map((tank) => tank.systemName).join(' or ')}`, tankOptions,
+  };
+  return { ...rig, tankCoverageSqft: 0, equipment };
+}
+
+// With no single rig (lawnMixRigs), an area mix keeps its product amount but not the first tank's spray volume. A volume the line's
+// own row sets (the spring catch-up hose pass: roundsCatchUp.carrierFor) is no rig's, so it stays.
+const withoutRigCarrier = (mix) => (mix ? { ...mix, carrierGallons: null } : mix);
+function rigNeutralItems(items, equipment) {
+  return items.map(({ carrierFromRig, ...item }) => (equipment?.tankOptions && carrierFromRig
+    ? { ...item, jobMix: withoutRigCarrier(item.jobMix), plannedMix: withoutRigCarrier(item.plannedMix) } : item));
+}
+
 // The sheet's warnings: a missing rig, unmatched priced lines, the required v13 gate notes of the
 // selected items (as in the plan), the city hold (or, with no city resolved on the reference tab,
 // the restriction on every gated row), then the cadence and limit warnings.
-function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
+function lawnMixWarnings({ calibration, backpack, bigTanks = [], items, selectedItems, municipality, cadenceWarnings, limitCheck }) {
   const warnings = [];
   if (!calibration) {
     warnings.push({
@@ -1054,12 +1106,14 @@ function lawnMixWarnings({ calibration, backpack, items, selectedItems, municipa
       message: 'No sprayer test on file for the selected tank: amounts that need its spray volume are not shown.',
     });
   }
-  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide).
-  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated' });
+  // An overdue or estimated sprayer test keeps its amounts and says what they assume (owner 2026-11-26: warn, never hide). A standing
+  // number with no expiry (owner 2026-11-27) gets a neutral note instead.
+  const rigWarning = sprayerTestWarning(calibration, { code: 'calibration_overdue_or_estimated', noteCode: 'sprayer_number' });
   if (rigWarning) warnings.push(rigWarning);
+  warnings.push(...otherTankLines(calibration, bigTanks, items));
   const usesBackpackTest = items.some((item) => item.tankAmounts?.backpack4Gal?.carrierSource === 'calibration');
   const backpackWarning = usesBackpackTest && backpack?.equipment_system_id !== calibration?.equipment_system_id
-    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated' }) : null;
+    ? sprayerTestWarning(backpack, { code: 'backpack_calibration_overdue_or_estimated', noteCode: 'backpack_sprayer_number' }) : null;
   if (backpackWarning) warnings.push(backpackWarning);
   const unmatchedPricedLines = unmatchedPricedProtocolLines(items);
   if (unmatchedPricedLines.length) {
@@ -1215,10 +1269,16 @@ router.get('/lawn-mix', async (req, res, next) => {
     };
     const nitrogen = await visitNutrientTargets(db, scheduled, { visit: recipeStep, month, v13Active: await sheetReadsPlansStep(db, scheduled, { trackKey, month }), scout });
     const { visit, targets: nutrientTargets, chinchRate, productSwap } = nitrogen;
+    // A line's own declared label rate per gallon (its spot fill on the FlowZone: lawn-tank-reference.js).
+    const lineMeta = visit.lineMeta || {};
 
     const areaSqft = Math.max(0, Number(req.query.lawnSqft || 10000));
-    const calibration = await getActiveCalibration(req.query.equipmentSystemId || null);
+    // The picked sprayer, else the visit's own assigned rig; neither: every active 110 gal tank, so the sheet names each tank's
+    // amount when their numbers differ.
+    const rigId = req.query.equipmentSystemId || await assignedRigId(scheduled);
+    const calibration = await getActiveCalibration(rigId);
     const backpack = await getBackpackCalibration(calibration);
+    const bigTanks = rigId ? [] : await getActiveBigTanks();
     const products = await getProtocolProducts();
     const exactName = track.exact_catalog_names === true;
     const baseLines = parseProtocolLines(visit.primary, 'base', { exactName });
@@ -1272,7 +1332,7 @@ router.get('/lawn-mix', async (req, res, next) => {
     let resolvedLines = holdTetrinoWithoutScoutEvidence(matchedLines, v13Rows, scout);
     resolvedLines = holdUnresolvedTurfHerbicides(resolvedLines, v13Rows, unresolvedTurf);
     resolvedLines = holdNorthPortProducts(resolvedLines, v13Rows, municipality, ...(holdRoundsNitrogen ? [{ nitrogen: true }] : []));
-    const { carrier, tankCoverageSqft, equipment } = lawnMixRig(calibration);
+    const { carrier, tankCoverageSqft, equipment } = lawnMixRigs(calibration, bigTanks);
     const gateContext = { monthNumber: MONTH_ABBR.indexOf(month) + 1, ...roundsGateContext(rounds, holdRoundsNitrogen), municipality };
     const areaContext = {
       plan: req.query.plan,
@@ -1299,19 +1359,23 @@ router.get('/lawn-mix', async (req, res, next) => {
     // product gets no amount and its limit message (a block beside the apply-alone ones, not
     // holding the rest of the mix), a warning-level limit a sheet warning.
     const limitCheck = await v13VisitLimits(db, scheduled, resolvedLines, v13Rows, nutrientTargets);
+    // A line the shared label-rate hold covers (its card's rate is for another EPA number): no amount anywhere and no mixing step,
+    // only the hold's reason (lawn-tank-reference.js).
+    const heldIds = new Set(resolvedLines.filter((line) => line.product && labelRateHoldText(lineMeta[line.raw], line.product)).map((line) => String(line.product.id)));
     const builtItems = resolvedLines.map((line) => {
       const { product, selected } = line;
       // The plan's own decision for a v13 line (unlinked, spot and label-rate rows get
       // no quantity at all; a capped line none either).
       const v13Line = v13Active && product ? v13LineState(product, v13Rows, limitCheck.capped, gateContext, line) : null;
-      const lineCarrier = roundsCatchUp.carrierFor(line, v13Line?.row, carrier);
-      const canMix = Boolean(product && !line.fieldHold && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
+      const v13Row = v13Line?.row;
+      const lineCarrier = roundsCatchUp.carrierFor(line, v13Row, carrier);
+      const canMix = Boolean(product && !line.fieldHold && !heldIds.has(String(product.id)) && lineCarrier && (!v13Line || v13Line.state === 'calculate') && !(blocks.length && selected));
       const mixAt = (sqft, areaFactor) => calculateProductAmount({
-        product, lawnSqft: sqft, carrierGalPer1000: lineCarrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Line?.row),
+        product, lawnSqft: sqft, carrierGalPer1000: lineCarrier, areaFactor, ...nutrientTargets, ...v13RateOptions(v13Row),
       });
       // A sunny-turf-only row (Tetrino) narrows the whole-lawn line; the sheet has
       // no turf profile, so it takes the half the plan's own default assumes.
-      const sizedLine = v13Line?.row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
+      const sizedLine = v13Row?.gates?.sunnyTurfOnly ? { ...line, sunnyTurfOnly: true } : line;
       const areaFactor = effectiveAreaFactor(sizedLine, areaContext);
       // plannedMix mirrors jobMix for unselected conditionals: the mix a tech
       // would put down if the line's trigger fired (rescue threshold met,
@@ -1326,12 +1390,13 @@ router.get('/lawn-mix', async (req, res, next) => {
         return [job, job || (canMix && plannedAreaFactor > 0 ? mixAt(sqft, plannedFactor) : null)];
       };
       const [jobMix, plannedMix] = mixPair(areaSqft, areaFactor, plannedAreaFactor);
-      const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair(tankCoverageSqft) : [null, null];
-      const tankAmounts = tankReference({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack });
+      // A full tank at the line's own spray volume (a catch-up hose pass at 1 gal per 1,000 covers more than the rig's number).
+      const [fullTankMix, plannedFullTankMix] = tankCoverageSqft ? mixPair((tankCoverageSqft * carrier) / lineCarrier) : [null, null];
+      const tankAmounts = tankReferenceAcrossTanks({ product, item: line, v13Line, nutrientTargets, rig: calibration, backpack, lineMeta: lineMeta[line.raw], tanks: bigTanks });
       return {
         ...planLineFields(line),
         // Gate off: no v13 field at all.
-        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...nitrogenCutNotes(plannedMix, product, nitrogen), ...chinchTetrinoNotes(v13Line?.row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows), ...roundsCatchUp.catchUpNotes(line)]) : {}),
+        ...(v13Active ? v13ItemFields(v13Line, gateContext, product, [...nitrogenCutNotes(plannedMix, product, nitrogen), ...chinchTetrinoNotes(v13Row, plannedMix, chinchRate), ...productSwapNotes(product, productSwap, v13Rows), ...roundsCatchUp.catchUpNotes(line)]) : {}),
         matched: !!product,
         // Scout/task/expectation lines carry no "($N)" cost tag and never
         // resolve to a catalog row by design — flag them so the UI can render
@@ -1347,9 +1412,11 @@ router.get('/lawn-mix', async (req, res, next) => {
         tankAmounts,
         // The LESCO spreader number for a line that goes on with the spreader (spreader-settings.js), at the rate the sheet shows.
         spreader: spreaderForTankLine(product, line, tankAmounts),
+        // Internal (rigNeutralItems drops it): the spray volume is the rig's, not the line's own row (a catch-up hose pass).
+        carrierFromRig: roundsCatchUp.carrierFor(line, v13Row, null) == null,
       };
     });
-    const items = resolveMixWith(bermuda.decorate(builtItems), products);
+    const items = resolveMixWith(bermuda.decorate(rigNeutralItems(builtItems, equipment)), products);
     const selectedItems = items.filter((item) => item.selected);
     // A mixing-order input: the line's recipe text, its catalog product, and the step marks.
     const mixInput = (item) => ({
@@ -1363,13 +1430,13 @@ router.get('/lawn-mix', async (req, res, next) => {
       product: item.product,
       mix: item.jobMix,
     })));
-    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, backpack, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
+    const warnings = [...settled.warnings, ...catchUp.warnings, ...lawnMixWarnings({ calibration, backpack, bigTanks, items, selectedItems, municipality, cadenceWarnings, limitCheck })];
 
     res.json(lawnMixResponse({
       seesPricing: viewerSeesPricing(req),
       trackKey, track, month, visit, equipment, areaSqft, materialCostSummary, items, selectedItems, products, warnings, blocks, limitCheck,
       // The bermuda step: its lines stay out of the base mixing order, its own order and its blocks ride beside.
-      mixable: bermuda.mixable, mixInput, bermudaOrder: bermuda.mixOrderField(items.map(mixInput), blocks.length > 0), extraBlocks: settled.blocks,
+      mixable: (item) => bermuda.mixable(item) && !heldIds.has(String(item.product?.id)), mixInput, bermudaOrder: bermuda.mixOrderField(items.map(mixInput), blocks.length > 0), extraBlocks: settled.blocks,
       mixCheck: await sheetMixCheck(items),
     }));
   } catch (err) { next(err); }

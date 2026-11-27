@@ -87,10 +87,15 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
 
-function stubTables(rows, { ownsVisit = true, recheckOwns = null, movedTo = null } = {}) {
+function stubTables(rows, { ownsVisit = true, recheckOwns = null, movedTo = null, propertyNow } = {}) {
   db.mockImplementation((table) => {
     const q = {};
-    q.where = jest.fn((...args) => { if (args[0] === 'scheduled_services.scheduled_date') q.dateBound = args[1]; return q; });
+    q.where = jest.fn((...args) => {
+      if (args[0] === 'scheduled_services.scheduled_date') q.dateBound = args[1];
+      if (args[0] === 'scheduled_services.property_id') q.propertyBound = args[1];
+      return q;
+    });
+    q.whereNull = jest.fn((column) => { if (column === 'scheduled_services.property_id') q.propertyBound = null; return q; });
     q.whereNotIn = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
@@ -105,6 +110,8 @@ function stubTables(rows, { ownsVisit = true, recheckOwns = null, movedTo = null
     q.first = jest.fn(async (...cols) => {
       // movedTo: the visit's date changed mid-request; a recheck bound to the date read at the start no longer finds it.
       if (cols[0] === 'scheduled_services.id' && movedTo && q.dateBound && q.dateBound !== movedTo) return undefined;
+      // propertyNow: the visit's property changed mid-request (undefined = not simulated); a recheck bound to the property read at the start no longer finds it.
+      if (cols[0] === 'scheduled_services.id' && propertyNow !== undefined && q.propertyBound !== undefined && q.propertyBound !== propertyNow) return undefined;
       if (cols[0] === 'scheduled_services.id') return (recheckOwns ?? ownsVisit) ? { id: 'svc-1' } : undefined;
       if (cols[0] === 'scheduled_services.*') return ownsVisit ? rows[table] : undefined;
       return rows[table];
@@ -479,6 +486,32 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
     await withServer(async (base) => {
       const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
       expect(body.facts.customer_asked.items[0].text).toBe('Please text first');
+    });
+  });
+
+  test('customer_asked on the answer also binds the final recheck to the premises read at the start', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockDeterministicVisitFacts.mockResolvedValue({ access: null, last_visit: null, customer_asked: { items: [{ kind: 'portal_request', at: '2026-08-10T15:00:00.000Z', text: 'Gate sticks', source: 'portal' }] } });
+    const row = { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null, property_id: 'prop-1', service_address_line1: '100 Example Ave', source_estimate_id: null };
+    // The visit was moved to another property mid-request: the whole answer is withheld.
+    stubTables({ scheduled_services: row }, { propertyNow: 'prop-2' });
+    await withServer(async (base) => {
+      expect(await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json()).toEqual({ brief: null });
+    });
+    // Unchanged: the words ride the answer. The recheck bound every premises column present on the row (a null one by whereNull).
+    stubTables({ scheduled_services: row }, { propertyNow: 'prop-1' });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.facts.customer_asked.items[0].text).toBe('Gate sticks');
+    });
+  });
+
+  test('without customer_asked the premises are not bound', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockDeterministicVisitFacts.mockResolvedValue({ access: null, last_visit: null });
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null, property_id: 'prop-1' } }, { propertyNow: 'prop-2' });
+    await withServer(async (base) => {
+      expect((await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json()).facts).toBeTruthy();
     });
   });
 

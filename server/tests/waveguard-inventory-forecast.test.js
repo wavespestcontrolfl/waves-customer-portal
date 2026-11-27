@@ -167,6 +167,18 @@ test('non-program lanes are excluded in SQL before the limit when the column exi
   expect(visits.where.mock.invocationCallOrder.at(-1)).toBeLessThan(visits.limit.mock.invocationCallOrder[0]);
 });
 
+test('a caller\'s narrowing (the weekly buy list) is applied before the limit; without it nothing more is asked', async () => {
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  expect(visits.whereNotIn).toHaveBeenCalledTimes(1);
+  visits.whereNotIn.mockClear();
+  visits.where.mockClear();
+  await buildWaveGuardInventoryForecast({ days: 2, limit: 20, narrow: { excludeStatuses: ['rescheduled', 'skipped', 'no_show'], bookedOnly: true } });
+  expect(visits.whereNotIn).toHaveBeenCalledWith('ss.status', ['rescheduled', 'skipped', 'no_show']);
+  const narrowed = visits.whereNotIn.mock.invocationCallOrder.at(-1);
+  expect(narrowed).toBeLessThan(visits.limit.mock.invocationCallOrder.at(-1));
+  expect(visits.where.mock.invocationCallOrder.at(-1)).toBeLessThan(visits.limit.mock.invocationCallOrder.at(-1));
+});
+
 test('a legacy schema (no billing_mode column) adds no lane clause', async () => {
   customerBillingModeColumnExists.mockResolvedValue(false);
   await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
@@ -407,5 +419,95 @@ describe('technician forecast (audit A2 / C1): product totals for all, names onl
     };
     const projected = await forecastForTechnician(forecast, { technicianId: 'tech-1' }, db);
     expect(projected.skippedNonProgram).toEqual([{ serviceId: 'visit-1', scheduledDate: '2030-01-09', customerName: 'Pat Example' }]);
+  });
+
+  test('the list of every visit read (serviceIds, for procurement) never reaches a technician: not the projection, not the route', async () => {
+    const forecast = { products: [], errors: [], skippedNonProgram: [], serviceIds: ['visit-1', 'visit-2', 'visit-3'] };
+    const projected = await forecastForTechnician(forecast, { technicianId: 'tech-1' }, db);
+    expect(projected).not.toHaveProperty('serviceIds');
+    const technician = { techRole: 'technician', technicianId: 'tech-1' };
+    const { body } = await get('/waveguard-forecast', { days: '2', limit: '20' }, technician);
+    expect(body.forecast).not.toHaveProperty('serviceIds');
+    expect((await get('/waveguard-forecast', { days: '2', limit: '20' })).body.forecast.serviceIds).toEqual(['visit-1', 'visit-2', 'visit-3']);
+  });
+});
+
+describe('visits whose plan gives no usable amounts (the weekly buy list warns instead of reading zero)', () => {
+  const blocked = (code, items) => ({
+    propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [{ code, severity: 'block', message: code }] },
+    appointmentAssignment: {},
+    mixCalculator: { items },
+  });
+  const stock = { unit: 'gal', onHand: 1, lowStockThreshold: 0.25 };
+  const run = async (plansById) => {
+    visits = readQuery([{ id: 'v-a', scheduled_date: '2030-01-10' }, { id: 'v-b', scheduled_date: '2030-01-10' }, { id: 'v-c', scheduled_date: '2030-01-10' }, { id: 'v-d', scheduled_date: '2030-01-10' }]);
+    buildPlanForService.mockImplementation(async (id) => plansById[id]);
+    return buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+  };
+
+  test('every kind of block that leaves no amount is reported; a block that still gave an amount, and a plain empty visit, are not', async () => {
+    const result = await run({
+      'v-a': blocked('missing_lawn_area', [item('short', null, 'fl_oz', stock)]), // sqft missing: amounts are null
+      'v-b': blocked('lawn_v13_bahia_no_program', []), // no program for the grass: no lines at all
+      'v-c': blocked('missing_nutrient_rate', [item('short', 64, 'fl_oz', stock)]), // blocked, but the amount is there
+      'v-d': { propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [] }, appointmentAssignment: {}, mixCalculator: { items: [] } }, // nothing planned, nothing wrong
+    });
+    expect(result.noUsablePlan).toEqual(['v-a', 'v-b']);
+    expect(result.errors).toEqual([]);
+    expect(result.products.find((row) => row.productId === 'short').appointments.map((a) => a.serviceId)).toEqual(['v-c']);
+  });
+
+  test('lines with no amount and no block still read as no usable plan (an unmatched product, a zero amount)', async () => {
+    const result = await run({
+      'v-a': { propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [] }, appointmentAssignment: {}, mixCalculator: { items: [{ product: null, mix: { amount: 5 } }, item('short', 0, 'fl_oz', stock)] } },
+      'v-b': blocked('x', [item('short', 64, 'fl_oz', stock)]),
+      'v-c': blocked('x', [item('short', 64, 'fl_oz', stock)]),
+      'v-d': blocked('x', [item('short', 64, 'fl_oz', stock)]),
+    });
+    expect(result.noUsablePlan).toEqual(['v-a']);
+  });
+
+  test('a visit planned for some lines only is reported as partial: the lines with no product, no rate or no amount are missing from its totals', async () => {
+    const planned = (items) => ({ propertyGate: { serviceTier: 'Silver', billingMode: 'per_visit', blocks: [] }, appointmentAssignment: {}, mixCalculator: { items } });
+    const result = await run({
+      'v-a': planned([item('short', 64, 'fl_oz', stock), { product: null, mix: { amount: 5 } }]), // an unknown product
+      'v-b': planned([item('short', 64, 'fl_oz', stock), item('warning', null, 'fl_oz', stock)]), // a line with no rate, so no amount
+      'v-c': planned([item('short', 64, 'fl_oz', stock), item('warning', 32, 'fl_oz', stock)]), // complete
+      'v-d': planned([item('short', 64, 'fl_oz', stock), item('warning', 0, 'fl_oz', stock)]), // a zero amount
+    });
+    expect(result.partialPlan).toEqual(['v-a', 'v-b', 'v-d']);
+    expect(result.noUsablePlan).toEqual([]);
+  });
+
+  test('the technician projection never carries the ids, as with serviceIds', async () => {
+    const projected = await forecastForTechnician({ products: [], errors: [], skippedNonProgram: [], serviceIds: ['v-a'], noUsablePlan: ['v-a'], partialPlan: ['v-a'] }, { technicianId: 'tech-1' }, db);
+    expect(projected).not.toHaveProperty('noUsablePlan');
+    expect(projected).not.toHaveProperty('partialPlan');
+    expect(projected).not.toHaveProperty('serviceIds');
+  });
+});
+
+describe('explicit date range (the weekly buy list reads a Monday-Saturday week)', () => {
+  test('an explicit range replaces the rolling window and names the visits it read', async () => {
+    const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20, startDate: '2030-02-04', endDate: '2030-02-09' });
+    expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-02-04', '2030-02-09']);
+    expect(result).toMatchObject({ startDate: '2030-02-04', endDate: '2030-02-09', serviceCount: 3 });
+    expect(result.serviceIds).toEqual(['visit-1', 'visit-2', 'visit-3']);
+  });
+
+  test('no range keeps today through today + days, as before', async () => {
+    const result = await buildWaveGuardInventoryForecast({ days: 2, limit: 20 });
+    expect(visits.whereBetween).toHaveBeenCalledWith('ss.scheduled_date', ['2030-01-09', '2030-01-11']);
+    expect(result).toMatchObject({ startDate: '2030-01-09', endDate: '2030-01-11' });
+  });
+
+  test.each([
+    ['one end only', { startDate: '2030-02-04' }],
+    ['an impossible date', { startDate: '2030-02-30', endDate: '2030-03-02' }],
+    ['a start after the end', { startDate: '2030-02-09', endDate: '2030-02-04' }],
+    ['text that is not a date', { startDate: 'Monday', endDate: 'Saturday' }],
+  ])('%s is a 400, not a bad query', async (_label, range) => {
+    await expect(buildWaveGuardInventoryForecast({ days: 2, limit: 20, ...range })).rejects.toMatchObject({ statusCode: 400 });
+    expect(db).not.toHaveBeenCalled();
   });
 });

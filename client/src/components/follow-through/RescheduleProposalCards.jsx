@@ -386,7 +386,7 @@ export default function RescheduleProposalCards({ ui, pollMs = DEFAULT_POLL_MS, 
   };
 
   const { Button, Text } = ui;
-  const enabled = data?.proposals_enabled === true;
+  const enabled = Boolean(data);
   const proposals = data?.proposals || [];
   if (!enabled && !error) return null;
 

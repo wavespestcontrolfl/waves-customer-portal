@@ -1104,10 +1104,10 @@ async function writeTechDayOrder(conn, { dateStr, techId, techStops, finalOrdere
       await assertStartPointUnchanged(trx, techId, home,
         () => Object.assign(new Error('technician start point changed during the run'), { code: 'START_POINT_CHANGED' }));
     }
-    const live = await trx('scheduled_services')
+    const live = await require('./visit-hold').excludeHeld(trx('scheduled_services')
       .where('scheduled_services.scheduled_date', dateStr)
       .where('scheduled_services.technician_id', techId)
-      .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES)
+      .whereNotIn('scheduled_services.status', EXCLUDE_STATUSES), 'scheduled_services')
       .whereRaw(LIVE_HOLD_SQL)
       .forUpdate('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
@@ -1309,8 +1309,7 @@ function runTypeFor(opts) {
  */
 function refreshesQualityAlerts(opts, { qualityEnabled, runType, canonicalizeStaleEnabled }) {
   if (opts.dryRun || opts.repairOnly || !qualityEnabled) return false;
-  if (runType !== 'route_tiers_nightly' || hasCustomDates(opts, canonicalizeStaleEnabled)) return false;
-  return gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS');
+  return runType === 'route_tiers_nightly' && !hasCustomDates(opts, canonicalizeStaleEnabled);
 }
 
 /** Caller-named dates are honored: repairOnly, or canonicalize mode with a
@@ -2030,7 +2029,7 @@ async function runRouteReorderIfEnabled() {
 /**
  * With GATE_ROUTE_REORDER off, runRouteReorder (and the nightly alert
  * reconciliation folded into it, just above) never runs at all — so with
- * the measurement + alert gates ON but reorder off, existing route-quality
+ * the measurement gate ON but reorder off, existing route-quality
  * defects never get an initial card and no card ever expires (codex #4295
  * r2 P2). This is the standalone nightly trigger for that case: same
  * six-date band as the full pass, no repair, no distance optimization, no
@@ -2039,7 +2038,7 @@ async function runRouteReorderIfEnabled() {
  * it, so a date is never reconciled twice by the same tick.
  */
 async function runScheduleQualityAlertsOnly(now = new Date(), conn = db) {
-  if (!gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS') || !gateEnvValue('GATE_SCHEDULE_QUALITY_ALERTS')) {
+  if (!gateEnvValue('GATE_SCHEDULE_QUALITY_MEASUREMENTS')) {
     return { status: 'gate_off' };
   }
   const dates = Array.from({ length: TIER2_MIN_DAYS_OUT - 1 }, (_, index) => etDateString(addETDays(now, index + 1)));

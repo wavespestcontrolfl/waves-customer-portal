@@ -51,8 +51,8 @@ async function findStaleVisits(now = new Date()) {
   // floor on purpose: same-day misses belong to the 6PM checker; by this
   // sweep's definition every match is at least a day past.
   const today = etDateString(now);
-  return db('scheduled_services')
-    .whereIn('status', OPEN_STATUSES)
+  return require('./visit-hold').excludeHeld(db('scheduled_services')
+    .whereIn('status', OPEN_STATUSES), 'scheduled_services')
     .where('scheduled_date', '<', today)
     .select('id', 'status', 'scheduled_date', 'customer_id');
 }

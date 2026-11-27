@@ -125,8 +125,8 @@ async function unplannedDays(conn, planned, elig) {
   const days = findTime.enumerateDates(elig.from, elig.to);
   if (!elig.techIds.length || !days.length) return [];
   // Untimed rows are read too: a day with one is left out (it is not empty), and they hold no hour.
-  const rows = await conn('scheduled_services').whereBetween('scheduled_date', [elig.from, elig.to])
-    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+  const rows = await require('../visit-hold').excludeHeld(conn('scheduled_services').whereBetween('scheduled_date', [elig.from, elig.to])
+    .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
     .where((q) => q.whereNotNull('customer_id').orWhereNull('reservation_expires_at').orWhereRaw('reservation_expires_at > NOW()'))
     .select('id', 'technician_id', conn.raw("to_char(scheduled_date, 'YYYY-MM-DD') as day"), 'window_start', 'window_end', 'estimated_duration_minutes');
   const blocks = await conn('tech_schedule_blocks').whereBetween('date', [elig.from, elig.to]).whereNot('block_type', 'available')

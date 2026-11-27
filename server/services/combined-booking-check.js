@@ -27,7 +27,7 @@
  *   - a former customer's leftover work: the churned-live-work alert's.
  *
  * WHERE IT RUNS: inside the schedule-integrity watchdog (its daily tick, under
- * that job's runExclusive and GATE_SCHEDULE_INTEGRITY_WATCHDOG), over accepted
+ * that job's runExclusive), over accepted
  * estimates that settled at least SETTLE_MINUTES ago and still have an
  * upcoming visit with no time or technician (or an open bell) — not a hook in the
  * accept route (a money path: a hook could only add latency or a new way to

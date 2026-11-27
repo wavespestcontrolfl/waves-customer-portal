@@ -937,9 +937,9 @@ function rainoutKeepRainOk(reasonCode = null) {
 async function remainingRouteJobs(technicianId, todayStr, excludeServiceId = null, anchor = null, reasonCode = null) {
   if (!technicianId) return [];
   const keepRainOk = rainoutKeepRainOk(reasonCode);
-  const query = db('scheduled_services')
+  const query = require('./visit-hold').excludeHeld(db('scheduled_services')
     .where({ technician_id: technicianId, scheduled_date: todayStr })
-    .whereIn('status', MOVABLE_STATUSES)
+    .whereIn('status', MOVABLE_STATUSES), 'scheduled_services')
     .orderByRaw('COALESCE(route_order, 999), window_start NULLS LAST')
     .select(
       'id', 'status', 'scheduled_date', 'window_start', 'window_end', 'customer_id', 'service_type', 'route_order',

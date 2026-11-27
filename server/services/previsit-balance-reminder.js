@@ -691,7 +691,9 @@ async function deliverLegacySms({ visit, amount, duesCents, fresh, smsPolicyPerm
 }
 
 async function deliverLegacyEmail({ visit, amount, fresh, emailLegAvailable }) {
-  if (!emailLegAvailable) return false;
+  // GATE_VISIT_HOLD: a hold placed after the batch read keeps this visit silent; the caller releases the claim, so the
+  // reminder is retried on a later run once the hold ends. The email sender has no visit id, so the recheck is here.
+  if (!emailLegAvailable || await require('./visit-hold').isVisitHeld(visit.id)) return false;
   try {
     const emailLedger = await ContactLedger.recordContact(legacyLedgerInput(visit, amount, fresh, 'email'));
     const emailResult = await require('./account-membership-email').sendPrevisitBalanceReminder({
@@ -761,10 +763,10 @@ async function runSweepHeld(now) {
   const windowStartDate = iso(windowStart);
   const targetDate = iso(target);
 
-  const visits = await db('scheduled_services')
+  const visits = await require('./visit-hold').excludeHeld(db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [windowStartDate, targetDate])
-    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereIn('scheduled_services.status', ['pending', 'confirmed']), 'scheduled_services')
     .where('scheduled_services.is_recurring', true)
     .whereNull('scheduled_services.balance_reminder_sent_at')
     .whereNull('customers.deleted_at')
@@ -811,5 +813,5 @@ module.exports = {
   leadDays,
   DUES_GRACE_DAYS,
   OVERDUE_AFTER_DAYS,
-  _test: { previsitQuoteAuthority, freshOverdueRecurringInvoices, customerScheduleTouchedSince },
+  _test: { previsitQuoteAuthority, freshOverdueRecurringInvoices, customerScheduleTouchedSince, deliverLegacyEmail },
 };

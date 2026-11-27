@@ -64,6 +64,7 @@ function readQuery(rows) {
   }
   query.first = jest.fn(async () => rows[0] || null);
   query.catch = (onRejected) => Promise.resolve(rows).catch(onRejected);
+  query.then = (onFulfilled, onRejected) => Promise.resolve(rows).then(onFulfilled, onRejected);
   return query;
 }
 
@@ -91,6 +92,7 @@ function calibrationQuery() {
   const rows = () => [].concat(backpackOnly ? backpackCalibration : calibration).filter(Boolean);
   query.first = jest.fn(async () => rows()[0] || null);
   query.catch = (onRejected) => Promise.resolve(rows()).catch(onRejected);
+  query.then = (onFulfilled, onRejected) => Promise.resolve(rows()).then(onFulfilled, onRejected);
   return query;
 }
 

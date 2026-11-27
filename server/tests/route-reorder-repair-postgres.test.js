@@ -52,14 +52,14 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   });
   afterEach(async () => {
     delete process.env.GATE_ROUTE_REORDER;
-    delete process.env.GATE_SCHEDULE_QUALITY_ALERTS;
+    // The kill test below revokes it mid-run; every test starts with it on.
+    process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS = 'true';
     await mockConnection.rollback();
   });
 
   test('unrepairable routes get one Dispatch card and a later repair clears it', async () => {
     const { refreshScheduleQualityAfterChange } = require('../services/scheduling/quality-after-change');
     process.env.GATE_ROUTE_REORDER = 'true';
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     await mockConnection('scheduled_services').where('id', ids[0]).update({ auto_dispatch_locked: true });
     const first = await refreshScheduleQualityAfterChange({ jobId: ids[2], now }, mockConnection);
     expect(first.repair.applied).toBe(0);
@@ -78,7 +78,6 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
 
   test('missing locations and unallocated work surface without claiming capacity or changing appointments', async () => {
     const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     await mockConnection('scheduled_services').where('id', ids[0]).update({ lat: null, lng: null });
     await mockConnection('scheduled_services').where('id', ids[2]).update({ technician_id: null });
     const before = await mockConnection('scheduled_services').whereIn('id', ids).orderBy('id').select('*');
@@ -97,7 +96,6 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
     // stand in for the nine a real day can carry across six overnight dates.
     const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
     const { MAX_CARDS_PER_DATE } = require('../services/scheduling/quality-alerts');
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     await mockConnection('scheduled_services').where('id', ids[0]).update({ lat: null, lng: null });
     const extras = [randomUUID(), randomUUID(), randomUUID()];
     for (const techId of extras) {
@@ -127,7 +125,6 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   test('a kill during an alert insert rolls back the card and suppresses its broadcast', async () => {
     const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
     const { getIo } = require('../sockets');
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     getIo.mockClear();
     // Revoke after PostgreSQL has answered the insert, while the checker
     // still owns its transaction. All SQL and commit handling remain real.
@@ -136,7 +133,7 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
         const query = Reflect.apply(target, receiver, args);
         if (args[0] === 'dispatch_alerts') query.on('query-response', rows => {
           if (Array.isArray(rows) && rows.some(row => row.tech_id === technicianId)) {
-            delete process.env.GATE_SCHEDULE_QUALITY_ALERTS;
+            delete process.env.GATE_SCHEDULE_QUALITY_MEASUREMENTS;
           }
         });
         return query;
@@ -149,7 +146,6 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
 
   test('future-planning cards expire when their service day starts', async () => {
     const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     await refreshScheduleQualityAlerts({ dates: [date], now }, mockConnection);
     expect(await mockConnection('dispatch_alerts').where({ type: 'schedule_route_quality', tech_id: technicianId }).whereNull('resolved_at')).toHaveLength(1);
     await refreshScheduleQualityAlerts({ dates: [], now: parseETDateTime(`${date}T00:01`) }, mockConnection);
@@ -158,7 +154,6 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
 
   test('concurrent committed checkers create only one open route card', async () => {
     const { refreshScheduleQualityAlerts } = require('../services/scheduling/quality-alerts');
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     const concurrentTech = randomUUID();
     const concurrentCustomer = randomUUID();
     const concurrentJob = randomUUID();
@@ -193,7 +188,6 @@ postgres('route quality and repair on isolated PostgreSQL fixtures', () => {
   }, 30000);
 
   test('the nightly pass surfaces an unresolved pinned route in the existing Dispatch queue', async () => {
-    process.env.GATE_SCHEDULE_QUALITY_ALERTS = 'true';
     await mockConnection('scheduled_services').where('id', ids[0]).update({ auto_dispatch_locked: true });
     const result = await runRouteReorder({ now });
     expect(result).toMatchObject({ applied: 0, failed: 0 });

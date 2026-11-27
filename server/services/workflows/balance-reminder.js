@@ -58,10 +58,10 @@ class BalanceReminder {
   async imminentOverdueOwnerAlertSweep() {
     const today = etDateString();
     const tomorrow = etDateString(addETDays(new Date(), 1));
-    const upcoming = await db("scheduled_services")
+    const upcoming = await require('../visit-hold').excludeHeld(db("scheduled_services")
       .where("scheduled_date", ">=", today)
       .where("scheduled_date", "<=", tomorrow)
-      .whereIn("scheduled_services.status", ["pending", "confirmed"])
+      .whereIn("scheduled_services.status", ["pending", "confirmed"]), 'scheduled_services')
       .leftJoin("customers", "scheduled_services.customer_id", "customers.id")
       .where("customers.active", true)
       .whereNull("customers.deleted_at")

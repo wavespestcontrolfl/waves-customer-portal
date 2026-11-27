@@ -77,6 +77,7 @@ import MarkPrepaidModal from "../../components/schedule/MarkPrepaidModal";
 import RecurringAlertsBannerV2 from "../../components/schedule/RecurringAlertsBannerV2";
 import CreateAppointmentModal from "../../components/schedule/CreateAppointmentModal";
 import HeldVisitsStrip, { heldVisitFormDefaults } from "./HeldVisitsStrip";
+import OnHoldStrip from "./OnHoldStrip";
 import ScheduleListView from "../../components/schedule/ScheduleListView";
 import ScheduleCustomerSidebar from "../../components/schedule/ScheduleCustomerSidebar";
 import Customer360ProfileV2 from "../../components/admin/Customer360ProfileV2";
@@ -1972,6 +1973,14 @@ export default function DispatchPageV2({
               </div>
             );
           })()}
+          {/* GATE_VISIT_HOLD: the office list of held visits (they are off every day view). */}
+          <OnHoldStrip enabled={verifiedRole === "admin" && safeData.visitHold === true} refreshKey={scheduleRefreshKey} onChanged={() => fetchSchedule(date, { silent: true })}
+            // Reschedule opens the office's own reschedule modal; the move releases the hold.
+            onReschedule={(row) => setRescheduleService({
+              id: row.id, customerId: row.customerId, customerName: row.customerName, serviceType: row.serviceType,
+              scheduledDate: row.scheduledDate, windowStart: row.windowStart, windowEnd: row.windowEnd,
+              technicianId: row.technicianId, estimatedDuration: row.estimatedDuration, heldAt: row.heldAt,
+            })} />
           <HeldVisitsStrip heldVisits={heldVisits} onBook={bookHeldVisit} onDismiss={dismissHeldVisit} />
           {/* Day view keeps the per-technician swimlane layout (TimeGridDay)
               so dispatchers can drag jobs between tech lanes and create a
@@ -2624,6 +2633,9 @@ export default function DispatchPageV2({
           }}
           // GATE_NEW_CALLER_BOOKING: Link customer on a visit booked by address.
           newCallerBooking={safeData.newCallerBooking === true}
+          // GATE_VISIT_HOLD: the hold action (and Release hold for the office); a hold or release refetches the day.
+          visitHold={safeData.visitHold === true}
+          onHoldChanged={() => { closeFastSheetsBehindDetails(); fetchSchedule(date, { silent: true }); setScheduleRefreshKey((k) => k + 1); }}
           // A gate code was reported or added from
           // Details. Refetch the day (the list row shows it too) and hand the
           // sheet's Access section this visit's fresh row; the sheet keeps its

@@ -1299,29 +1299,23 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
   const visit = (address_diverges) => ({ id: 'svc1', customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', first_name: 'A', last_name: 'B', address_diverges, notes: 'Try 4545# first' });
 
   test('the scheduled T&S guide keeps the mix and warns beside it for an unverified product label (owner 2026-11-26)', async () => {
-    process.env.GATE_PROTOCOL_SOP = 'true';
-    try {
-      const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
-        products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
-      const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
-      const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
-      expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
-      expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toEqual([1.28, 1.28]);
-      expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toBe('Label rate not yet verified');
-      expect(card.protocol.procedure.fieldGuide.products.tritek.summary).not.toMatch(/Mix withheld/);
-      expect(card.protocol.procedure.fieldGuide.products.tritek.url).toMatch(/brandt/);
-      // Holding a job must not mutate the shared admin reference.
-      expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
-    } finally {
-      delete process.env.GATE_PROTOCOL_SOP;
-    }
+    const base = factsDb({ 'scheduled_services as ss': { ...visit(false), service_type: 'Tree & Shrub Care', scheduled_date: '2028-01-10' },
+      products_catalog: [{ id: 'oil', name: 'TriTek Spray Oil Emulsion (OMRI)', label_verified_at: null }] });
+    const dbh = Object.assign(table => Object.assign(base(table), { update: () => ({ catch: async () => null }) }), { raw: base.raw });
+    const card = await jobCard.buildJobCard('svc1', { dbh, deps: { getRecentCalls: async () => [], getHourly: async () => null }, now: new Date('2028-01-10T15:00:00Z') });
+    expect(card.protocol.procedure.fieldGuide.month).toBe('Jan');
+    expect(card.protocol.procedure.fieldGuide.products.tritek.mix).toEqual([1.28, 1.28]);
+    expect(card.protocol.procedure.fieldGuide.products.tritek.mixWarning).toBe('Label rate not yet verified');
+    expect(card.protocol.procedure.fieldGuide.products.tritek.summary).not.toMatch(/Mix withheld/);
+    expect(card.protocol.procedure.fieldGuide.products.tritek.url).toMatch(/brandt/);
+    // Holding a job must not mutate the shared admin reference.
+    expect(require('../config/tree-shrub-field-guide.json').products.tritek.mix).toEqual([1.28, 1.28]);
   });
 
   // Owner 2026-10-29 ("i just want to warn techs"): weather never withholds a guide
   // mix. A missing forecast shows it with no warning; an open label review (the label, not the weather) shows it with a
   // warning (owner 2026-11-26: warned, never blocked).
   test('the T&S guide shows a mix when only the forecast is missing, and a mix with a warning when a label review is open', async () => {
-    process.env.GATE_PROTOCOL_SOP = 'true';
     const sourceCheck = require('../services/epa-product-label').checkEpaSource;
     try {
       const guide = async (oil) => {
@@ -1346,7 +1340,6 @@ describe('PR review r7 (Adam-authorized r8 for the small guards)', () => {
       expect(held.mix).toEqual([1.28, 1.28]);
       expect(held.mixWarning).toBe('Label weather review still open, see product checks');
     } finally {
-      delete process.env.GATE_PROTOCOL_SOP;
       delete process.env.GATE_LABEL_PIPELINE;
     }
   });
@@ -2737,6 +2730,113 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     // Each service keeps its own row: 20 g per gallon from the pest line, 10 from the flea card, at 2 gal.
     expect(out.serviceAmounts.map((row) => [row.service, row.amount, row.conditional])).toEqual([['Quarterly Pest Control', 40, true], ['Flea Control Service', 20, true]]);
     expect(text).toMatch(/never tank-mix with oil/);
+  });
+
+  // Owner 2026-11-26 (warned, never blocked): a per-gallon range checked against the line's one-spray per-area label limit at the rig's volume.
+  describe('per-area one-spray limit at the rig volume (Acelepryn Tree & Shrub range)', () => {
+    const line = require('../config/protocols.json').tree_shrub.visits.flatMap((v) => String(v.secondary || '').split('\n')).find((l) => /^Acelepryn Insecticide: 2.16 fl oz\/100 gal/.test(l));
+    const run = async (carrier, pickRig = true) => {
+      const acelepryn = { id: 'ac', name: 'Acelepryn Insecticide', default_rate_per_1000: 0.37, rate_unit: 'fl oz', label_verified_at: '2026-07-12' };
+      const protocols = { tree_shrub: { visits: [{ visit: 1, month: 'Any', primary: 'Talus IGR 0.5 fl oz/gal', secondary: line }] } };
+      const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Spray truck', carrier_gal_per_1000: carrier, calibration_status: 'field_verified', tank_capacity_gal: '100.00' };
+      const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [acelepryn], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Spray truck', system_type: 'tank', tank_capacity_gal: '100.00' }], product_aliases: [], scheduled_service_addons: [] };
+      const dbh = (t) => {
+        const table = String(t).split(' as ')[0];
+        const chain = {};
+        for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+        chain.first = async () => (rows[table] || [])[0] ?? null;
+        chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+        chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+        return chain;
+      };
+      dbh.raw = (sql) => sql;
+      return jobCard.mixForProduct('ac', 100, { serviceId: 'svc1', ...(pickRig ? { equipmentSystemId: 'sys-1' } : {}), dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-09-03T14:00:00Z') });
+    };
+
+    test('the protocol line states the limit this test reads', () => {
+      expect(line).toMatch(/no more than 0\.37 fl oz per 1,000 sq ft in one spray/);
+    });
+
+    test('a rig spraying 5 gal per 1,000 sq ft: the range shows in full with a warning that it passes 0.37', async () => {
+      const out = await run(5);
+      // The amount is never hidden: the full 2-16 fl oz per 100 gal range for a 100 gal tank.
+      expect(out).toMatchObject({ amount: 2, amountMax: 16 });
+      const cap = out.warnings.find((w) => /no more than 0\.37 fl oz per 1,000 sq ft in one spray/.test(w) && /sprays 5 gal per 1,000 sq ft/.test(w));
+      expect(cap).toMatch(/0\.1-0\.8 fl oz per 1,000 sq ft/);
+    });
+
+    test('a rig spraying 2 gal per 1,000 sq ft keeps the range inside the limit: no warning', async () => {
+      const out = await run(2);
+      expect(out).toMatchObject({ amount: 2, amountMax: 16 });
+      expect(out.warnings.join(' ')).not.toMatch(/The label allows no more than/);
+    });
+
+    test('no rig volume on file: no limit check, no warning', async () => {
+      const out = await run(0, false);
+      expect(out.warnings.join(' ')).not.toMatch(/The label allows no more than/);
+    });
+
+    // A calibration on file that no one named for this dose is not the tech's sprayer: it never makes the claim.
+    test('a calibration no rig is assigned to or picked for says nothing of the limit, though the range shows', async () => {
+      const out = await run(5, false);
+      expect(out).toMatchObject({ amount: 2, amountMax: 16 });
+      expect(out.warnings.join(' ')).not.toMatch(/The label allows no more than/);
+    });
+  });
+
+  // Owner 2026-11-26: two booked services that name one product with different conditions but state no rate (both fall back to the
+  // catalog dose) each keep their own condition text.
+  test('two services naming one product with different conditions and no rate keep each service\'s condition', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Perimeter work', secondary: 'Atticus Antapex WSG on live finds only; keep people and pets out until dry' }] },
+      flea: { visits: [{ visit: 1, month: 'Any', primary: 'Flea work', secondary: 'Atticus Antapex WSG if fleas persist after the first pass' }] },
+    };
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [antapex], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', 2, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    // Each service has its own row on the catalog band, with its own condition.
+    expect(out.serviceAmounts.map((row) => [row.service, row.fromCard, row.conditional])).toEqual([['Quarterly Pest Control', false, true], ['Flea Control Service', false, true]]);
+    const text = out.warnings.join(' | ');
+    expect(text).toMatch(/Quarterly Pest Control: Applies to: .*live finds only/);
+    expect(text).toMatch(/Flea Control Service: Applies to: .*if fleas persist/);
+    expect(text).not.toMatch(/see its card/);
+  });
+
+  // The same, for a product with no tank dose at all (a granular): the dose is "apply as labeled", and each service still keeps its condition.
+  test('two services naming one granular with different conditions keep each condition though no tank amount exists', async () => {
+    const protocols = {
+      pest: { visits: [{ visit: 1, month: 'Any', primary: 'Perimeter work', secondary: 'Advion Fire Ant Granular on active mounds only; not within 10 ft of water' }] },
+      flea: { visits: [{ visit: 1, month: 'Any', primary: 'Flea work', secondary: 'Advion Fire Ant Granular if fleas persist in shaded yard areas' }] },
+    };
+    const granular = { id: 'gran', name: 'Advion Fire Ant Granular', application_method: 'granular', default_rate_per_1000: 1, rate_unit: 'lb', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [granular], equipment_calibrations: [], product_aliases: [],
+      scheduled_service_addons: [{ service_name: 'Flea Control Service', category: 'specialty', service_key: 'flea_tick' }] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('gran', 50, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, reason: 'Not a tank mix — apply as labeled' });
+    const text = out.warnings.join(' | ');
+    expect(text).toMatch(/Quarterly Pest Control: Applies to: .*active mounds only/);
+    expect(text).toMatch(/Flea Control Service: Applies to: .*shaded yard areas/);
   });
 
   // Owner 2026-11-26: a percentage in a product name ("6% Fe") is not a dilution; the per-area catalog rate stands.

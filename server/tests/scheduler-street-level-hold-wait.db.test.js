@@ -113,6 +113,20 @@ postgres('scheduled composer text held by a street-level address hold (real Post
     expect(new Date(row.scheduled_for).getTime()).toBeGreaterThan(Date.now() + 10 * 60 * 1000);
   });
 
+  test('a visit on hold (VISIT_ON_HOLD) waits the same way: refunded, rescheduled, never blocked, sent after the release', async () => {
+    const queued = await queue(2);
+    mockSendCustomerMessage.mockResolvedValue({ ...held(), code: 'VISIT_ON_HOLD', reason: 'Visit is on hold: the customer will call' });
+    await tick();
+    const row = await fixture.knex('sms_log').where({ id: queued.id }).first();
+    expect(row.status).toBe('scheduled');
+    expect(row.metadata).toMatchObject({ scheduled_sms_attempts: 2 });
+    expect(new Date(row.scheduled_for).getTime()).toBeGreaterThan(Date.now() + 10 * 60 * 1000);
+    await fixture.knex('sms_log').where({ id: queued.id }).update({ scheduled_for: new Date(0) });
+    mockSendCustomerMessage.mockResolvedValue({ sent: true, deliveryOutcome: 'accepted', providerMessageId: 'SMfixture2', blocked: false });
+    await tick();
+    expect((await fixture.knex('sms_log').where({ id: queued.id }).first()).status).not.toBe('scheduled');
+  });
+
   test('it stays held across many ticks, then sends once the office has confirmed', async () => {
     const queued = await queue(0);
     mockSendCustomerMessage.mockResolvedValue(held());

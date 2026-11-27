@@ -1772,10 +1772,11 @@ async function filterCollidingSlots(slots, {
       && !inactiveTechs.has(String(slot.techId)) && slotWindowFitsDay(slot.windowStart, slot.windowEnd) && insideShift(slot)),
     { conn, dateFrom, dateTo, ownEstimateId });
   }
-  let collisionQuery = conn('scheduled_services')
+  // GATE_VISIT_HOLD: a held visit blocks no hour here either (slot-reservation applies the same rule at the commit).
+  let collisionQuery = require('./visit-hold').excludeHeld(conn('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     .whereBetween('scheduled_services.scheduled_date', [dateFrom, dateTo])
-    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES)
+    .whereNotIn('scheduled_services.status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
     // A visit staff booked keeps its old hold timestamp until cleanup runs;
     // it is a booked stop, not a lapsed hold, so it still blocks its hour.
     .andWhere(bookedVisitOrLiveHold);
@@ -2034,9 +2035,10 @@ function dateHasStop(stopDates, slot) {
 async function stopDatesInRange(dateFrom, dateTo, ownEstimateId = null) {
   if (!dateFrom || !dateTo) return new Set();
   try {
-    let query = db('scheduled_services')
+    // GATE_VISIT_HOLD: a held visit packs no day (gate off: no clause).
+    let query = require('./visit-hold').excludeHeld(db('scheduled_services')
       .whereBetween('scheduled_date', [dateFrom, dateTo])
-      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES)
+      .whereNotIn('status', NOT_A_ROUTE_STOP_STATUSES), 'scheduled_services')
       .whereNotNull('window_start')
       // Same rule as the collision filter: a staff-booked visit stays a stop.
       .where(bookedVisitOrLiveHold);

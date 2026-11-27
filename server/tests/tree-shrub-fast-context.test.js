@@ -449,6 +449,47 @@ describe('buildTreeShrubFastContext', () => {
     expect(byId.palm.lastAmount).toBeUndefined();
   });
 
+  // Owner 2026-11-26: a line flagged over its product's ceiling is a recorded typo; it is never offered again as the next visit's default.
+  test('a flagged line is never a last amount or last-visit amount: the next older real amount stands (serviceProductId and older deductions)', async () => {
+    const records = [
+      { id: 'rec-3', status: 'completed', service_date: '2026-09-02', typed_values: {}, structured_notes: { inventoryDeductions: [{ status: 'not_deducted_implausible', serviceProductId: 'sp-3', productId: 'snapshot', amount: 9000, amountUnit: 'lb' }] } },
+      // An older deduction that kept no service product id: matched by product, unit and amount.
+      { id: 'rec-2', status: 'completed', service_date: '2026-07-01', typed_values: {}, structured_notes: JSON.stringify({ inventoryDeductions: [{ status: 'not_deducted_implausible', productId: 'palm', amount: 700, amountUnit: 'LB' }] }) },
+      { id: 'rec-1', status: 'completed', service_date: '2026-05-01', typed_values: {}, structured_notes: null },
+    ];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
+      service_products: [
+        { id: 'sp-3', service_record_id: 'rec-3', product_id: 'snapshot', product_name: 'Snapshot 2.5TG', total_amount: '9000.000', amount_unit: 'lb' },
+        { id: 'sp-2', service_record_id: 'rec-2', product_id: 'palm', product_name: 'LESCO 8-0-12 Palm', total_amount: '700.000', amount_unit: 'lb' },
+        { id: 'sp-1a', service_record_id: 'rec-1', product_id: 'snapshot', product_name: 'Snapshot 2.5TG', total_amount: '25.5', amount_unit: 'lb' },
+        { id: 'sp-1b', service_record_id: 'rec-1', product_id: 'palm', product_name: 'LESCO 8-0-12 Palm', total_amount: '3', amount_unit: 'lb' },
+      ],
+    }));
+    const byId = Object.fromEntries(ctx.monthProducts.map((m) => [m.productId, m]));
+    expect(byId.snapshot.lastAmount).toEqual({ totalAmount: 25.5, amountUnit: 'lb', serviceDate: '2026-05-01' });
+    expect(byId.palm.lastAmount).toEqual({ totalAmount: 3, amountUnit: 'lb', serviceDate: '2026-05-01' });
+    // The last visit still lists the product (the line is saved as entered) but offers no amount.
+    expect(ctx.lastVisit.products).toEqual([{ productId: 'snapshot', productName: 'Snapshot 2.5TG', totalAmount: null, amountUnit: null }]);
+  });
+
+  test('a flagged line with no earlier real amount leaves the amount blank', async () => {
+    const records = [{ id: 'rec-3', status: 'completed', service_date: '2026-09-02', typed_values: {}, structured_notes: { inventoryDeductions: [{ status: 'not_deducted_implausible', serviceProductId: 'sp-3' }] } }];
+    const ctx = await buildTreeShrubFastContext('visit-1', fakeKnex({
+      scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': records,
+      service_products: [{ id: 'sp-3', service_record_id: 'rec-3', product_id: 'palm', product_name: 'LESCO 8-0-12 Palm', total_amount: '700', amount_unit: 'lb' }],
+    }));
+    expect(ctx.monthProducts.find((m) => m.productId === 'palm').lastAmount).toBeUndefined();
+  });
+
+  test('the history read asks for the record notes and the product line ids it matches on', async () => {
+    const knex = fakeKnex({ scheduled_services: visit(), products_catalog: catalog, 'service_records as sr': [{ id: 'rec-1', status: 'completed', service_date: '2026-05-01', typed_values: {} }], service_products: [] });
+    await buildTreeShrubFastContext('visit-1', knex);
+    const selects = knex.calls.filter(([, m]) => m === 'select').map(([table, , ...cols]) => [table, cols]);
+    expect(selects.find(([t]) => t === 'service_records as sr')[1]).toContain('sr.structured_notes');
+    expect(selects.find(([t]) => t === 'service_products')[1]).toContain('id');
+  });
+
   test('the newest typed palm count at this property rides the context as lastPalms', async () => {
     const records = [
       { id: 'rec-3', status: 'completed', service_date: '2026-11-02', typed_values: { plant_groups: 'Shrubs' } },

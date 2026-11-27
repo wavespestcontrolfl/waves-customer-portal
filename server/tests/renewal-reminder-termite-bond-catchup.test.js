@@ -8,6 +8,8 @@ jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
 jest.mock('../services/messaging/send-customer-message', () => ({ sendCustomerMessage: jest.fn() }));
 jest.mock('../services/sms-template-renderer', () => ({ renderSmsTemplate: jest.fn() }));
+// The prepaid-year-end bell has its own suite; this one is about the other legs.
+jest.mock('../services/prepay-year-end-bell', () => ({ runPrepayYearEndBell: jest.fn(async () => ({ raised: 0, closed: 0 })) }));
 jest.mock('../services/annual-prepay-renewals', () => ({}));
 
 const db = require('../models/db');

@@ -246,6 +246,7 @@ Allow-list buckets: session, own-visits, estimates, own-time, own-texts, promise
 | POST | `/api/admin/schedule/:id/access-flags/:questionId` | admin-schedule |
 | GET | `/api/admin/schedule/:id/card-request` | admin-schedule |
 | GET | `/api/admin/schedule/:id/estimate-source` | admin-schedule |
+| POST | `/api/admin/schedule/:id/hold` | admin-schedule |
 | GET | `/api/admin/schedule/:id/home-note` | admin-schedule |
 | PUT | `/api/admin/schedule/:id/home-note` | admin-schedule |
 | POST | `/api/admin/schedule/:id/invoice` | admin-schedule |

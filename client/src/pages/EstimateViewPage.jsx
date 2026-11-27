@@ -5590,7 +5590,7 @@ const LAWN_SEASONS = [
   { key: 'fall', label: 'Fall', focus: 'Adjust as conditions change', detail: 'Reassess nutrition as fertilizer restrictions lift, manage weeds, and monitor disease as temperatures change.' },
   { key: 'winter', label: 'Winter', focus: 'Maintain lawn health', detail: 'Adjust care for slower growth, manage weeds where needed, and monitor turf condition and irrigation needs.' },
 ];
-const LAWN_SEASONS_INTRO = 'We inspect your lawn at each application and select treatments for your grass type, current conditions, and local fertilizer rules. What we apply changes throughout the year.';
+const LAWN_SEASONS_INTRO = 'We inspect your lawn at each application and select treatments for its current conditions and local fertilizer rules. What we apply changes throughout the year.';
 
 // `program` = { visitsPerYear } from the /data payload.
 export function LawnProgramCalendar({ program }) {

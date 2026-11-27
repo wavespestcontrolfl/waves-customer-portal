@@ -1,13 +1,14 @@
-// "Keep auto-dispatch off this visit" — the staff lock on one recurring
-// occurrence (scheduled_services.auto_dispatch_locked), shown on both
-// appointment edit forms (EditServiceModal and MobileServiceEditModal).
+// "Keep auto-dispatch off this visit" — the staff lock on a visit
+// (scheduled_services.auto_dispatch_locked), shown on both appointment edit
+// forms (EditServiceModal and MobileServiceEditModal).
 //
 // The forms keep the checked state and send it with their one save as
 // { autoDispatchLocked, autoDispatchLockedWas }; the server acts only when the
 // two differ (server/services/auto-dispatch/staff-edit-lock.js). A staff date
 // or time change no longer sets the lock by itself (owner 2026-11-22). Renders
-// nothing for a visit that is not a recurring occurrence: auto-dispatch never
-// moves those.
+// for every visit auto-dispatch can move (recurring visits, a plan's first
+// visit, and one-time visits; owner 2026-11-26) and hides only booster-month
+// rows (isRecurring=false with a recurringParentId).
 //
 // Monochrome, inline styles only, so either form's style system can host it;
 // each form passes its own row container props and helper-text color.
@@ -18,7 +19,7 @@ export function autoDispatchLockSeed(service) {
 }
 
 export default function AutoDispatchLockBox({ service, checked, onChange, disabled, rowProps, boxSize = 17, helperColor }) {
-  if (!service?.isRecurring || !service?.recurringParentId) return null;
+  if (!service || (!service.isRecurring && service.recurringParentId)) return null;
   return (
     <label {...rowProps} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer', ...rowProps?.style }}>
       <input
@@ -31,7 +32,7 @@ export default function AutoDispatchLockBox({ service, checked, onChange, disabl
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ fontSize: 14, fontWeight: 500 }}>Keep auto-dispatch off this visit</div>
         <div style={{ fontSize: 14, marginTop: 2, color: helperColor }}>
-          Auto-dispatch will not move this visit. Tick this when the customer asked for this day or time. A day or time the customer picked themselves stays protected when this is off.
+          Auto-dispatch will not move this visit. Tick this when the customer asked for this day or time.
         </div>
       </div>
     </label>

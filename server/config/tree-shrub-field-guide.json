@@ -31,7 +31,17 @@
         "hand",
         "push"
       ],
-      "summary": "2.3–4.6 lb / 1,000 sq ft"
+      "summary": "2.3–4.6 lb / 1,000 sq ft",
+      "mixRates": [
+        {
+          "product": "Snapshot 2.5TG",
+          "where": "Planting beds, before weeds germinate",
+          "dose": "2.3, 3.45 or 4.6 lb per 1,000 sq ft, by weed (see Label rates)",
+          "note": "Granular: spread by hand (LESCO handheld) or with the LESCO push spreader. No tank.",
+          "epa": "62719-175",
+          "limit": "No more than 600 lb per acre (13.8 lb per 1,000 sq ft) in 12 months. At 150 lb per acre (3.45 lb per 1,000) or more, repeat no sooner than 60 days. Water in."
+        }
+      ]
     },
     "f8012": {
       "kind": "Plant nutrition · granules",
@@ -60,7 +70,16 @@
         "hand",
         "push"
       ],
-      "summary": "lb per palm · canopy chart"
+      "summary": "lb per palm · canopy chart",
+      "mixRates": [
+        {
+          "product": "LESCO 8-0-12 #511542",
+          "where": "Palms, beds, trees and larger shrubs",
+          "dose": "Palms: lb per palm from the canopy chart. Beds: 1 to 1¼ lb per 100 sq ft (Waves cap: 1¼ lb is 1 lb nitrogen per 1,000 sq ft, the county limit; the bag's 1½ lb is over it). Trees and larger shrubs: ½ to 1 lb per inch of trunk diameter.",
+          "note": "Granular: spread by hand (LESCO handheld) or with the LESCO push spreader. No tank.",
+          "limit": "Up to 4 times a year. Spread over the whole canopy circle, not a ring. Never more than 1¼ lb per 100 sq ft of the area under a tree or shrub."
+        }
+      ]
     },
     "f0016": {
       "kind": "Plant nutrition · granules",
@@ -90,7 +109,16 @@
         "hand",
         "push"
       ],
-      "summary": "lb per palm · canopy chart"
+      "summary": "lb per palm · canopy chart",
+      "mixRates": [
+        {
+          "product": "LESCO 0-0-16 #510513",
+          "where": "Palms, beds, trees and larger shrubs",
+          "dose": "Palms: lb per palm from the canopy chart. Beds: 1 to 1½ lb per 100 sq ft. Trees and larger shrubs: ½ to 1 lb per inch of trunk diameter.",
+          "note": "Granular: spread by hand (LESCO handheld) or with the LESCO push spreader. No tank.",
+          "limit": "Up to 4 times a year. Spread over the whole canopy circle, not a ring."
+        }
+      ]
     },
     "mnsulfate": {
       "kind": "Plant nutrition · granules",
@@ -133,7 +161,15 @@
         "hand",
         "push"
       ],
-      "summary": "lb per palm · label size class"
+      "summary": "lb per palm · label size class",
+      "mixRates": [
+        {
+          "product": "Manganese sulfate (Southern Ag)",
+          "where": "Palms with frizzle top, shrubs, beds",
+          "dose": "Palms: small ½ to 1 lb, medium 1 to 3 lb, large 3 to 6 lb each. Large shrubs and trees: ¼ to ½ lb each. Beds: ¼ to ½ lb per 100 sq ft.",
+          "note": "Granular: spread by hand under the canopy or drip line. No spreader, no tank."
+        }
+      ]
     },
     "mainspring": {
       "kind": "Insects · foliar spray",
@@ -168,7 +204,25 @@
         0.04,
         0.08
       ],
-      "summary": ""
+      "summary": "",
+      "mixRates": [
+        {
+          "product": "Mainspring GNL",
+          "where": "Aphids and the other listed foliar pests",
+          "perGallon": {
+            "amount": 0.04,
+            "unit": "fl oz",
+            "amountMax": 0.08
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "100-1543",
+          "limit": "Label: 2 to 8 fl oz per 100 gal for pests other than aphids. No more than 32 fl oz per acre per year; 7 days between sprays."
+        }
+      ]
     },
     "acelepryn": {
       "kind": "Insects · foliar spray",
@@ -201,7 +255,25 @@
         0.02,
         0.16
       ],
-      "summary": ""
+      "summary": "",
+      "mixRates": [
+        {
+          "product": "Acelepryn Insecticide",
+          "where": "Leaf-feeding caterpillars, live finds only",
+          "perGallon": {
+            "amount": 0.02,
+            "unit": "fl oz",
+            "amountMax": 0.16
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "100-1489",
+          "limit": "At 16 fl oz per 100 gal, at most 2.3 gal of mix per 1,000 sq ft (0.37 fl oz of product per 1,000 sq ft per spray)."
+        }
+      ]
     },
     "distance": {
       "kind": "Insects · foliar spray",
@@ -240,7 +312,25 @@
         "rig"
       ],
       "summary": "Whitefly rate; scale on hold",
-      "program": "Owner follow-up: ask Valent which yearly limit applies to the scale use."
+      "program": "Owner follow-up: ask Valent which yearly limit applies to the scale use.",
+      "mixRates": [
+        {
+          "product": "Distance IGR",
+          "where": "Whiteflies",
+          "perGallon": {
+            "amount": 0.06,
+            "unit": "fl oz",
+            "amountMax": 0.08
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "59639-96",
+          "limit": "5 gal of mix per 1,000 sq ft (100 gal treats 20,000 sq ft). One spray at 8 fl oz per 100 gal a year, or 6 fl oz followed by 6 fl oz 21 to 28 days later. Scale and mealybug: on hold, call the office."
+        }
+      ]
     },
     "tristar": {
       "kind": "Insects · foliar spray",
@@ -294,7 +384,55 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Choose target rate"
+      "summary": "Choose target rate",
+      "mixRates": [
+        {
+          "product": "TriStar 8.5 SL",
+          "where": "Aphids",
+          "perGallon": {
+            "amount": 0.04,
+            "unit": "fl oz"
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "8033-106-1001",
+          "limit": "At most 4 sprays a year, 7 days apart."
+        },
+        {
+          "product": "TriStar 8.5 SL",
+          "where": "Mealybugs",
+          "perGallon": {
+            "amount": 0.085,
+            "unit": "fl oz"
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "8033-106-1001",
+          "limit": "At most 4 sprays a year, 7 days apart."
+        },
+        {
+          "product": "TriStar 8.5 SL",
+          "where": "Whiteflies or soft scales (higher rate for high pressure)",
+          "perGallon": {
+            "amount": 0.085,
+            "unit": "fl oz",
+            "amountMax": 0.165
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "8033-106-1001",
+          "limit": "At most 4 sprays a year, 7 days apart. At 16.5 fl oz per 100 gal, at most 3.5 gal of mix per 1,000 sq ft."
+        }
+      ]
     },
     "tritek": {
       "kind": "Insects, mites & diseases · contact oil",
@@ -328,7 +466,24 @@
         1.28,
         1.28
       ],
-      "summary": ""
+      "summary": "",
+      "mixRates": [
+        {
+          "product": "TriTek 1%",
+          "where": "Ornamentals, shade trees and shrubs",
+          "perGallon": {
+            "amount": 1.28,
+            "unit": "fl oz"
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "48813-1",
+          "limit": "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl or dimethoate. Do not spray during drought."
+        }
+      ]
     },
     "floramite": {
       "kind": "Mites · foliar spray",
@@ -358,7 +513,25 @@
         0.04,
         0.08
       ],
-      "summary": ""
+      "summary": "",
+      "mixRates": [
+        {
+          "product": "Floramite SC",
+          "where": "Mites (low rate light or preventive, high rate heavy)",
+          "perGallon": {
+            "amount": 0.04,
+            "unit": "fl oz",
+            "amountMax": 0.08
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "70506-537",
+          "limit": "At most 2 sprays a year. At 8 fl oz per 100 gal, at most 4.5 gal of mix per 1,000 sq ft."
+        }
+      ]
     },
     "merit": {
       "kind": "Insects · soil drench or injection",
@@ -388,7 +561,17 @@
       "source": "Envu · Merit 2F · 2025 specimen · pp. 12–13",
       "url": "https://www.domyown.com/msds/Envu_Merit_2F_Insecticide_Label_2025.pdf",
       "name": "Merit 2F",
-      "summary": "Dose by plant size"
+      "summary": "Dose by plant size",
+      "mixRates": [
+        {
+          "product": "Merit 2F",
+          "where": "Soil drench, FlowZone soil injector",
+          "dose": "0.1 to 0.2 fl oz per inch of trunk diameter, or per foot of shrub height. Armored scales and listed borers: 0.2 fl oz per inch or foot.",
+          "note": "Measure the finished solution in qt or gal. Trees 15 inches across or more have separate borer directions on the label.",
+          "epa": "432-1312",
+          "limit": "No more than 1.6 pints per acre per year."
+        }
+      ]
     },
     "reliant": {
       "kind": "Diseases · foliar spray",
@@ -422,6 +605,24 @@
       "mix": [
         0.3333333333333333,
         0.6666666666666666
+      ],
+      "mixRates": [
+        {
+          "product": "Reliant Systemic Fungicide",
+          "where": "Foliar, root rot (Phytophthora, Pythium)",
+          "perGallon": {
+            "amount": 0.3333333333333333,
+            "unit": "fl oz",
+            "amountMax": 0.6666666666666666
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "83416-1",
+          "limit": "2 to 4 tsp per gal. Repeat at 14 to 21 days as needed."
+        }
       ]
     },
     "conserve": {
@@ -453,7 +654,24 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Target-specific rate"
+      "summary": "Target-specific rate",
+      "mixRates": [
+        {
+          "product": "Conserve SC",
+          "where": "Caterpillars",
+          "perGallon": {
+            "amount": 0.06,
+            "unit": "fl oz"
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "62719-291",
+          "limit": "Other targets (thrips, leafminers, mites) use other label rows: check the label. Label maximum 0.2 fl oz per gal."
+        }
+      ]
     },
     "dipel": {
       "kind": "Insects · foliar spray (biological)",
@@ -484,7 +702,32 @@
         "flowzone",
         "rig"
       ],
-      "summary": "Trees by tank · shrubs by area"
+      "summary": "Trees by tank · shrubs by area",
+      "mixRates": [
+        {
+          "product": "DiPel PRO DF",
+          "where": "Ornamental and shade trees",
+          "perGallon": {
+            "amount": 0.08,
+            "unit": "oz",
+            "amountMax": 0.16
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "73049-39",
+          "limit": "½ to 1 lb per 100 gal (weigh the oz)."
+        },
+        {
+          "product": "DiPel PRO DF",
+          "where": "Shrubs, flowers and bedding plants",
+          "dose": "0.2 to 0.7 oz of product per 1,000 sq ft treated",
+          "epa": "73049-39",
+          "limit": "Measure by area, not by gallons sprayed. At least 50 gal of mix per acre."
+        }
+      ]
     },
     "zylam": {
       "kind": "Insects · foliar spray or soil drench",
@@ -524,7 +767,31 @@
         0.16
       ],
       "summary": "",
-      "mixLabel": "Foliar spray only"
+      "mixLabel": "Foliar spray only",
+      "mixRates": [
+        {
+          "product": "Zylam Liquid",
+          "where": "Foliar spray, ornamentals",
+          "perGallon": {
+            "amount": 0.0725,
+            "unit": "fl oz",
+            "amountMax": 0.16
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "2217-937",
+          "limit": "No more than 78.9 fl oz per acre per year; at most 3 applications."
+        },
+        {
+          "product": "Zylam Liquid",
+          "where": "Soil drench, shrubs and sagos",
+          "dose": "0.18 to 0.4 fl oz per foot of height (a sago from the soil to the frond tip)",
+          "epa": "2217-937"
+        }
+      ]
     },
     "tritek15": {
       "kind": "Insects, mites & diseases · contact oil",
@@ -558,7 +825,24 @@
         1.92,
         1.92
       ],
-      "summary": ""
+      "summary": "",
+      "mixRates": [
+        {
+          "product": "TriTek 1.5%",
+          "where": "Ornamentals, shade trees and shrubs",
+          "perGallon": {
+            "amount": 1.92,
+            "unit": "fl oz"
+          },
+          "sprayers": [
+            "bg",
+            "flowzone",
+            "rig"
+          ],
+          "epa": "48813-1",
+          "limit": "Do not mix with NPK foliar fertilizer, sulfur, captan, carbaryl or dimethoate. Do not spray during drought."
+        }
+      ]
     },
     "f13013": {
       "kind": "Plant nutrition · granules",
@@ -595,7 +879,16 @@
         "hand",
         "push"
       ],
-      "summary": "0.75 lb / 100 sq ft beds · ½ lb / inch trunk"
+      "summary": "0.75 lb / 100 sq ft beds · ½ lb / inch trunk",
+      "mixRates": [
+        {
+          "product": "LESCO 13-0-13",
+          "where": "Beds, trees and larger shrubs",
+          "dose": "Beds: 0.75 lb per 100 sq ft (Waves rate, under the bag's 1 to 1½ lb, for the 1 lb nitrogen limit). Trees and larger shrubs: ½ lb per inch of trunk diameter.",
+          "note": "Granular: spread by hand (LESCO handheld) or with the LESCO push spreader. No tank.",
+          "limit": "Never more than 0.75 lb per 100 sq ft of the area under a tree or shrub."
+        }
+      ]
     },
     "sequestar": {
       "kind": "Plant nutrition · iron",
@@ -625,7 +918,15 @@
       "url": "/labels/brandt-sequestar-6fe-eddha-label.pdf",
       "name": "Sequestar 6% Fe EDDHA",
       "equipment": [],
-      "summary": "2 oz / small shrub · up to 2 oz / inch trunk"
+      "summary": "2 oz / small shrub · up to 2 oz / inch trunk",
+      "mixRates": [
+        {
+          "product": "Sequestar 6% Fe EDDHA",
+          "where": "Iron chlorosis only: root zone, then irrigate in",
+          "dose": "Small shrubs: 2 oz each. Large shrubs and trees: up to 2 oz per inch of trunk diameter. Beds and groundcovers: up to 2 oz per 100 sq ft.",
+          "limit": "Never tank-mix with oil. No miticides in foliar sprays on trees."
+        }
+      ]
     },
     "copper": {
       "kind": "Diseases",
@@ -645,7 +946,14 @@
       "source": "Exact product label not on file",
       "name": "Copper",
       "equipment": [],
-      "summary": "Label needed"
+      "summary": "Label needed",
+      "mixRates": [
+        {
+          "product": "Copper",
+          "where": "Disease, only with the exact product",
+          "labelRateMissing": true
+        }
+      ]
     }
   },
   "equipment": {

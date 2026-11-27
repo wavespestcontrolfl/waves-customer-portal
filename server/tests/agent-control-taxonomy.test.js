@@ -183,6 +183,7 @@ describe('agent-control lane policies', () => {
       expect({ id, v: policies.CADENCE.includes(p.expected_cadence) }).toEqual({ id, v: true });
       expect({ id, v: p.stall_after_ms >= 2 * p.heartbeat_interval_ms }).toEqual({ id, v: true });
       expect({ id, v: p.hard_timeout_ms >= p.expected_duration_ms }).toEqual({ id, v: true });
+      expect({ id, v: p.hard_timeout_ms >= p.stall_after_ms }).toEqual({ id, v: true });
       expect({ id, v: tax.riskTierFor(p.side_effect_class) >= 0 }).toEqual({ id, v: true });
     }
   });

@@ -1,15 +1,19 @@
 /**
  * Auto-Dispatch orchestrator.
  *
- * Daily (or manually triggered) pass over FUTURE recurring scheduled_services
- * that are outside the 14-day lock window. For each eligible visit it scores the
- * current placement against travel-aware candidate slots that honor customer
- * preferences, and — only when the gain clears the configured threshold —
+ * Daily (or manually triggered) pass over FUTURE scheduled_services eligible
+ * under the active guard mode (flex: 25h / told-time freeze + ±5/±6/±7d band;
+ * tiers: days-out ladder; legacy: flat lock window; covering recurring visits,
+ * a plan's first visit, and one-time visits — excluding only booster-month
+ * rows). For each eligible visit it scores the current placement against
+ * travel-aware candidate slots that honor customer preferences, and — only when
+ * the gain clears the configured threshold (or minutes rule / conflict repair) —
  * records a recommendation (dry_run) or applies the move (apply).
  *
  * Conservative by construction: dry_run default, per-run change cap, stability
- * floor for already-moved visits, every evaluated/skipped service is audited,
- * and the move primitive is the same transactional rebooker staff use.
+ * floor and anti-oscillation bounce cooldown for already-moved visits, every
+ * evaluated/skipped service is audited, and the move primitive is the same
+ * transactional rebooker staff use.
  */
 const db = require('../../models/db');
 const logger = require('../logger');
@@ -39,6 +43,7 @@ const dryTime = require('./dry-time');
 const mowingDays = require('./mowing-days');
 const roadCheck = require('./road-check');
 const moveLimit = require('./move-limit');
+const bounceGuard = require('./bounce-guard');
 const reminderOff = require('./reminder-off');
 const needsPerson = require('./needs-person-notice');
 const moveCheck = require('./proofreader/nightly');
@@ -103,7 +108,7 @@ function makeCapabilityFn(map) {
 }
 
 function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
-  return db('scheduled_services')
+  return require('../visit-hold').excludeHeld(db('scheduled_services')
     .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
     // Every visit but a booster-month row (is_recurring=false WITH a parent;
     // waveguard-existing-services.js): plan visits, a plan's first visit and
@@ -115,7 +120,7 @@ function loadEligibleServices(lockBoundary, lookaheadEnd, today) {
     // Archiving a customer sets customers.deleted_at without clearing `active`,
     // so filter it here like the reminder/billing crons do.
     .whereNull('customers.deleted_at')
-    .whereIn('scheduled_services.status', ['pending', 'confirmed'])
+    .whereIn('scheduled_services.status', ['pending', 'confirmed']), 'scheduled_services')
     .where(function () {
       this.where('scheduled_services.scheduled_date', '>', lockBoundary)
         .orWhere(function () {
@@ -344,10 +349,10 @@ async function unloadedLiveVisitIds(run) {
   if (!run.lookaheadEnd || !run.today) return [];
   const loaded = new Set((run.loaded || []).map((s) => String(s.id)));
   try {
-    const rows = await db('scheduled_services')
+    const rows = await require('../visit-hold').excludeHeld(db('scheduled_services')
       .leftJoin('customers', 'scheduled_services.customer_id', 'customers.id')
       .whereNull('customers.deleted_at')
-      .whereIn('scheduled_services.status', [...VALID_STATUSES])
+      .whereIn('scheduled_services.status', [...VALID_STATUSES]), 'scheduled_services')
       .whereNotNull('scheduled_services.window_start')
       .where('scheduled_services.scheduled_date', '>', run.today)
       .where('scheduled_services.scheduled_date', '<=', run.lookaheadEnd)
@@ -466,7 +471,7 @@ async function evaluatePlacement(service, prefs, ctx, config, lockBoundary) {
   // road-check.js then asks real roads about the top slots (gate on, an
   // ordinary move only): it can drop a slot, never add one.
   const ranked = await roadCheck.confirmOnRoads(moveRules.rankCandidates({
-    service, current, currentScore, scored, threshold, config,
+    service, current, currentScore, scored, threshold, config, recentLeftDates: ctx.recentLeftDates,
   }), { service, current, config, travel: ctx.roadTravel });
   const { best } = ranked;
 
@@ -691,6 +696,12 @@ function noMoveReason(ranked, improvement, threshold, routeMetrics, config) {
     return {
       reason_code: 'NO_ROAD_DRIVE_SAVING',
       reason_description: `The model says the move saves ${routeMetrics.drive_saving_minutes} drive minutes; real roads say ${routeMetrics.road.saving_minutes} < ${ranked.roadFloor ?? config.minDayMoveDriveSavingMinutes} required`,
+    };
+  }
+  if (ranked.bounceBlocked) {
+    return {
+      reason_code: 'BOUNCE_COOLDOWN',
+      reason_description: `Best move returns to ${ranked.best && ranked.best.date}, which auto-dispatch moved this visit off within the last ${config.bounceCooldownDays} days`,
     };
   }
   if (ranked.floorFailed) {
@@ -1032,13 +1043,24 @@ async function logSkip(run, service, { reason_code: reasonCode, reason_descripti
   });
 }
 
-// The move limit (move-limit.js) for one visit, from `counts` (the run's bulk
-// read, or a fresh single-visit read in pass 2). Returns the skip row, or null
-// when the visit may move. A visit that MUST move (an unplaced due date, or in
-// conflict) and is at the limit is not moved, and a person is told instead.
-async function moveLimitGate(service, ctx, run, counts) {
+function bounceHistorySkip(service, recentMap, config) {
+  if (!bounceGuard.cooldownOf(config) || moveRules.isUnplacedDueDate(service)) return null;
+  if (recentMap) return null;
+  return { reason_code: 'BOUNCE_HISTORY_UNKNOWN', reason_description: 'Recent auto-dispatch move history unreadable — no move (fail closed)', unknown: true };
+}
+
+function recentLeftDatesFor(run, service) {
+  return run.recentLeftDates ? run.recentLeftDates.get(String(service.id)) || null : null;
+}
+
+// The move limit (move-limit.js) and bounce-history availability for one visit,
+// from `counts` (the run's bulk read, or a fresh single-visit read in pass 2).
+// Returns the skip row, or null when the visit may move. A visit that MUST move
+// (an unplaced due date, or in conflict) and is at the limit is not moved, and a
+// person is told instead.
+async function moveLimitGate(service, ctx, run, counts, recentMap = run.recentLeftDates) {
   const skip = moveLimit.limitSkip(service, counts, run.config);
-  if (!skip) return null;
+  if (!skip) return bounceHistorySkip(service, recentMap, run.config);
   if (!skip.unknown) {
     // Required lazily, like apply.js's conflict re-read.
     const conflict = await require('./candidate-slots')._internals.readCurrentConflict(service, ctx);
@@ -1057,6 +1079,13 @@ async function loadRunMoveCounts(run, services) {
   if (!run.moveCounts) run.guardReadDegraded = true;
 }
 
+// Pass 1's one bulk read of dates each loaded visit recently left by
+// auto-dispatch (bounce-guard.js). A failed read leaves null (fail closed).
+async function loadRunBounceDates(run, services) {
+  run.recentLeftDates = await bounceGuard.loadRecentLeftDates(db, services.map((s) => s.id), run.nowDate, run.config);
+  if (!run.recentLeftDates) run.guardReadDegraded = true;
+}
+
 // REMINDERS-OFF LOCK (owner 2026-11-07, reminder-off.js): pass 1's one bulk read of
 // every loaded visit's 24-hour reminder answer. A failed read leaves null:
 // every placed visit then skips, and the run is degraded.
@@ -1065,12 +1094,25 @@ async function loadRunReminderOff(run, services) {
   if (!run.reminderOffIds) run.guardReadDegraded = true;
 }
 
-// Pass 2's recheck: a fresh count for this one visit, so a move another run
-// landed since pass 1 is seen. Returns the skip row or null.
+// Pass 2's recheck: a fresh count and fresh recently-left dates for this one
+// visit, so a move another run landed since pass 1 is seen. Returns the skip
+// row or null.
 async function recheckMoveLimit(pm, run) {
   const counts = await moveLimit.loadMoveCounts(db, [pm.service.id], run.config);
   if (!counts) run.guardReadDegraded = true;
-  return moveLimitGate(pm.service, pm.ctx, run, counts);
+  let recent = run.recentLeftDates;
+  if (bounceGuard.cooldownOf(run.config)) {
+    recent = await bounceGuard.loadRecentLeftDates(db, [pm.service.id], new Date(), run.config);
+    if (!recent) run.guardReadDegraded = true;
+    else pm.ctx.recentLeftDates = recent.get(String(pm.service.id)) || null;
+  }
+  return moveLimitGate(pm.service, pm.ctx, run, counts, recent);
+}
+
+function groupPreviewConfig(evalResult, config, prefs, lockBoundary) {
+  return {
+    ...config, prefs, lockBoundary, sourceConflict: (evalResult.current && evalResult.current.conflict) || null,
+  };
 }
 
 // A day-move guard skip (or a grouped-move refusal), both { code,
@@ -1355,6 +1397,8 @@ async function evaluateServiceForRun(service, run) {
     keepTech: config.keepTech === true,
     // The flex candidate admission uses the 25 h freeze (flex-tier.js).
     nightLock24h: true,
+    // Anti-oscillation cooldown: dates auto-dispatch moved this visit off recently.
+    recentLeftDates: recentLeftDatesFor(run, service),
     // ROUTE-TIERS: pre-intersected candidate window (null/absent when the
     // gate is off — candidate-slots then runs its legacy window math).
     ...(guard.window ? { tierWindow: guard.window, tierMeta: guard.meta } : {}),
@@ -1375,7 +1419,7 @@ async function evaluateServiceForRun(service, run) {
   // a person-placed sibling must refuse a dry-run recommendation too), so
   // neither a recommendation nor a planned move carries one apply would refuse.
   const refusal = evalResult.kind === 'move'
-    ? await previewGroupMove(service, evalResult.best, { ...config, prefs, lockBoundary: run.lockBoundary })
+    ? await previewGroupMove(service, evalResult.best, groupPreviewConfig(evalResult, config, prefs, run.lockBoundary))
     : null;
   const noChange = evalResult.kind === 'no_change' ? evalResult : refusal && guardSkipReason(refusal);
   if (noChange) {
@@ -1794,6 +1838,7 @@ async function runAutoDispatch(opts = {}) {
     // Visits auto-dispatch cannot fix alone; raised once at run end (needs-person-notice.js).
     needsPerson: new Map(),
     moveCounts: new Map(),
+    recentLeftDates: new Map(),
     reminderOffIds: null, // pass 1's 24-hour reminder answers (loadRunReminderOff); null = unreadable
     // DAY RULES: visits this run may still move onto a Sunday (sundayBudget).
     sundays: sundayBudget(config),
@@ -1831,6 +1876,7 @@ async function runAutoDispatch(opts = {}) {
     run.guardCtx = await loadGuardContext(run.guardMode, services, nowDate);
     run.guardReadDegraded = run.guardCtx.degraded;
     await loadRunMoveCounts(run, services);
+    await loadRunBounceDates(run, services);
     await loadRunReminderOff(run, services);
     run.rainTerm = await rainTerm.start(run); // null unless GATE_AUTO_DISPATCH_RAIN_TERM='shadow'
 
