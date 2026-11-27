@@ -64,7 +64,7 @@ const OFFICE_COPY = {
   },
   gave_up: {
     why: 'Stripe did not take the new email after several tries.',
-    next: 'Compare the Stripe profile email with the customer record now, and fix Stripe by hand only if they differ.',
+    next: 'First confirm in Stripe that the profile belongs to this customer. Only then compare its email with the record, and fix it if they differ.',
   },
 };
 

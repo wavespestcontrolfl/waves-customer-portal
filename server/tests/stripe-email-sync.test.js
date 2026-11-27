@@ -145,6 +145,14 @@ describe('stripe-email-sync processJob', () => {
     expect(readOwner).toHaveBeenCalledWith('cus_1', { timeout: 10000, maxNetworkRetries: 0 });
   });
 
+  test('six failed ownership reads give up with an alert that says to confirm the owner first, and never write', async () => {
+    const sync = load({ job: { attempts: 5 }, customers: [cust()] });
+    readOwner.mockRejectedValue(Object.assign(new Error('x'), { type: 'StripeConnectionError' }));
+    await expect(sync.processJob('job-1')).resolves.toBe('gave_up');
+    expect(updateEmail).not.toHaveBeenCalled();
+    expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/^Email on the customer record: .*\nFirst confirm in Stripe that the profile belongs to this customer/s);
+  });
+
   test('the alert-only retry re-checks ownership first: a profile that became shared gets the shared alert instead', async () => {
     const sync = load({ job: { attempts: 6 }, customers: [cust(), cust({ id: 'c2' })] });
     await expect(sync.processJob('job-1')).resolves.toBe('shared');
@@ -281,7 +289,7 @@ describe('stripe-email-sync processJob', () => {
     expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/Do not change the Stripe email yet/);
     sync = load({ job: { attempts: 5 }, customers: [cust()], stripeResult: new Error('x') });
     await sync.processJob('job-1');
-    expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/fix Stripe by hand only if they differ/);
+    expect(raiseAdminAlert.mock.calls[0][2].detail).toMatch(/First confirm in Stripe that the profile belongs to this customer/);
   });
 
   test('a job already claimed or finished is left alone', async () => {
