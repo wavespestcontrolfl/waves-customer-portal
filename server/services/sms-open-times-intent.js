@@ -4,10 +4,11 @@
  * 2026-11-26 "BUILD 1-6"). Pure and deterministic: no database read, no model call.
  *
  *   threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now })
- *     -> { carried: boolean, reason: 'prior_inbound' | 'staff_asked' | null }
+ *     -> { carried: boolean, reason: 'prior_inbound' | 'staff_asked' | null, texts: string[] }
  *   A short follow-up ("Anytime is fine", "Yes, please!", "Totally flexible") carries the booking talk of the
  *   thread: the customer's own earlier text asked to book or move a visit, or the last staff reply asked which
- *   day or time works. Reminders, receipts and other automated texts never carry it (only the human reply
+ *   day or time works. `texts` is that booking text: the drafter's job identity step reads it with the follow-up,
+ *   so the times are sized for the job the thread named (Codex #8658 r1). Reminders, receipts and other automated texts never carry it (only the human reply
  *   types of sms-response-policy count), and a staff reply that asks nothing ends the booking talk.
  *
  *   namedDayMatcher(text)
@@ -51,7 +52,7 @@ function priorRows(smsHistory, inboundMessage) {
 }
 
 function threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now = Date.now() } = {}) {
-  const none = { carried: false, reason: null };
+  const none = { carried: false, reason: null, texts: [] };
   const sender = phoneIdentityKey(inboundPhone);
   if (!sender || !isFollowUpShape(inboundMessage)) return none;
   const cutoff = (now instanceof Date ? now.getTime() : Number(now)) - THREAD_WINDOW_MS;
@@ -63,11 +64,11 @@ function threadBookingIntent({ smsHistory, inboundMessage, inboundPhone, now = D
       // Automated texts (reminders, receipts, review asks) are skipped; the first human reply decides.
       if (!HUMAN_REPLY_TYPES.includes(row.type)) continue;
       const asked = outboundAsksForReply(row.body) && (hasSchedulingIntent(row.body) || BOOKING_RE.test(row.body));
-      return asked ? { carried: true, reason: 'staff_asked' } : none;
+      return asked ? { carried: true, reason: 'staff_asked', texts: [row.body] } : none;
     }
     // Another number's text in the thread is not this sender's booking talk.
     if (row.direction !== 'inbound' || phoneIdentityKey(row.fromPhone) !== sender) continue;
-    if (isBookingAsk(row.body)) return { carried: true, reason: 'prior_inbound' };
+    if (isBookingAsk(row.body)) return { carried: true, reason: 'prior_inbound', texts: [row.body] };
   }
   return none;
 }

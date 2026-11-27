@@ -3842,7 +3842,7 @@ function visitYear(value) {
   return Number.isInteger(year) && year > 1900 ? year : null;
 }
 
-function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
+function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, threadTexts = []) {
   // The next-one instruction exists only for a real series (the same deterministic test the
   // fallback uses), and then every visit date carries its YEAR (Codex #6172 r2): a series
   // crossing New Year reads "Oct 2" then "Jan 2" without one, and "earliest" would be a guess.
@@ -3850,7 +3850,9 @@ function serviceIdentityPrompt(inboundMessage, visits, openEstimate, services) {
   const dateLabel = (v) => (seriesNext && visitYear(v.date) ? `${formatEtDate(v.date)}, ${visitYear(v.date)}` : formatEtDate(v.date));
   const visitLines = visits.map((v) => `${v.id}: ${v.type}${v.date ? ` (${v.upcoming ? 'scheduled' : 'completed'} ${dateLabel(v)})` : ''}`);
   return [
-    'A customer of Waves Pest Control texted:',
+    // Gap 1 (Codex #8658 r1): a short follow-up ("Anytime is fine") is about the job its thread's booking talk named.
+    ...(threadTexts.length ? ['Earlier in this text thread, the booking talk this text answers:', ...threadTexts.map((t) => JSON.stringify(String(t))), ''] : []),
+    `A customer of Waves Pest Control texted${threadTexts.length ? ' (a reply to the booking talk above)' : ''}:`,
     JSON.stringify(String(inboundMessage || '')),
     '',
     'Their visits:',
@@ -3949,32 +3951,41 @@ function unnamedServiceIdentity(visits, openEstimate, { nextOfSeries = nextOfSer
 
 // Code accepts only an option it offered (the schema already constrains the
 // provider; this re-checks) — anything else is uncertain.
-function serviceIdentityFromAnswer(answer, visits, openEstimate, services) {
+function serviceIdentityFromAnswer(answer, visits, openEstimate, services, { threadCarried = false } = {}) {
   const visit = visits.find((v) => v.id === answer?.visit);
   const service = services.find((s) => s.service_key === answer?.service);
   if (answer?.about === 'visit' && visit) return { serviceType: visit.type, certain: true, reason: visit.upcoming ? 'named_scheduled_visit' : 'named_completed_visit', ...(visit.upcoming ? visitIdField(visit, visits) : {}) };
   if (answer?.about === 'estimate' && openEstimate) return { serviceType: null, certain: true, estimateId: openEstimate.id, reason: 'open_estimate' };
   if (answer?.about === 'new_service' && service) return { serviceType: String(service.name), certain: true, reason: 'new_booking', serviceKey: String(service.service_key) };
-  if (answer?.about === 'none') return unnamedServiceIdentity(visits, openEstimate);
+  if (answer?.about === 'none') return threadCarried && threadJobAmbiguous(visits, openEstimate) ? { serviceType: null, certain: false, reason: 'thread_ambiguous' } : unnamedServiceIdentity(visits, openEstimate);
   return { serviceType: null, certain: false, reason: answer?.about === 'unclear' ? 'unclear' : 'no_valid_answer' };
+}
+
+// Gap 1 (Codex #8658 r1): a follow-up whose thread booking talk names no service may fall back to the visit ladder only when the
+// customer has one job it could mean: one service type across their listed visits (upcoming and last completed), and no open
+// estimate beside a visit. Otherwise ("can you come out?" from a customer with a pest visit booked and a lawn visit done) the
+// draft withholds OPEN TIMES (identity_uncertain:thread_ambiguous) rather than offer the wrong job's times.
+function threadJobAmbiguous(visits, openEstimate) {
+  return new Set(visits.map((v) => v.type)).size > 1 || Boolean(openEstimate && visits.length);
 }
 
 // { serviceType, certain, reason, estimateId? } — estimateId when the open
 // estimate is the job.
-async function serviceIdentityFor(inboundMessage, context, { openEstimate = null } = {}) {
+// threadTexts (gap 1): the booking texts a carried follow-up answers (sms-open-times-intent threadBookingIntent); [] otherwise.
+async function serviceIdentityFor(inboundMessage, context, { openEstimate = null, threadTexts = [] } = {}) {
   const visits = serviceIdentityVisits(context);
   try {
     const services = (await require('./call-booking-catalog').loadBookableCallServices(db)).filter((s) => s && s.service_key && s.name);
     const { dispatchWithFallback } = require('./llm/call');
     const response = await dispatchWithFallback(MODELS.TEXT_POLICIES.fastStructured, {
       laneId: 'sms_service_identity',
-      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services),
+      text: serviceIdentityPrompt(inboundMessage, visits, openEstimate, services, threadTexts),
       jsonMode: true,
       jsonSchema: serviceIdentitySchema(visits, openEstimate, services),
       maxTokens: 100,
       timeoutMs: SERVICE_IDENTITY_TIMEOUT_MS,
     }, { reserveFallbackBudget: true });
-    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services);
+    return serviceIdentityFromAnswer(response?.ok ? response.json : null, visits, openEstimate, services, { threadCarried: threadTexts.length > 0 });
   } catch (err) {
     logger.warn(`[sms-shadow] service identity failed (${err.message}); OPEN TIMES withheld`);
     return { serviceType: null, certain: false, reason: 'no_valid_answer' };
@@ -6217,7 +6228,7 @@ function openTimesWithheldReason({ timesAsked, missedVisitListed, missedRebook, 
 // Gap 1: the thread's booking talk, read only for a live real-answers draft that the webhook's own test did not already
 // call scheduling (a gratitude "thanks" never; sms-open-times-intent threadBookingIntent). asOf (a late draft) is the inbound time.
 function threadOpenTimesIntent({ frozen, liveOpenTimes, schedulingIntent, intent, context, inboundMessage, inboundPhone, asOf }) {
-  if (frozen || !liveOpenTimes || schedulingIntent || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null };
+  if (frozen || !liveOpenTimes || schedulingIntent || intent?.intent === GRATITUDE_INTENT || !gateEnvValue('GATE_SMS_REAL_ANSWERS')) return { carried: false, reason: null, texts: [] };
   return openTimesIntent.threadBookingIntent({ smsHistory: context?.smsHistory, inboundMessage, inboundPhone, now: asOf instanceof Date ? asOf : Date.now() });
 }
 
@@ -6378,7 +6389,7 @@ async function generateGroundedDraft({ client, context, inboundMessage, inboundP
     && (Boolean(city) || (liveOpenTimes && gateEnvValue('GATE_SMS_OFFERS_SCHEDULER')))
     && gateEnvValue('GATE_SMS_REAL_ANSWERS');
   const identity = willFetchOpenTimes && !estimateId
-    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate }))
+    ? (missedRebook ? missedVisitIdentity(missedVisit) : await serviceIdentityFor(inboundMessage, context, { openEstimate, threadTexts: threadIntent.texts }))
     : { serviceType: liveServiceType(context), certain: true };
   const serviceType = identity.serviceType;
   const pricingEstimateId = estimateId || identity.estimateId || null;
