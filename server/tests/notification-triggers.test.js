@@ -2011,6 +2011,89 @@ describe('registry labels on the bell row', () => {
     expect(staleOutcome.inFlight).toBe(true);
     expect(staleOutcome.retryable).toBe(true);
     expect(store.get(claimKey)?.outcome).toBe('pending:replacement00001');
+
+    // Mixed sent + unconfigured-transport skipped stays retryable and preserves accepted device ID.
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      opts?.onDelivered?.({ id: 'sub-ios-1' });
+      return { sent: 1, failed: 0, skipped: 1, subscriptions: 2 };
+    });
+    const skippedPartial = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-partial-skip' },
+      { dedupeKey: 'relay-unbooked:CA-partial-skip' },
+    );
+    expect(skippedPartial.retryable).toBe(true);
+    expect(skippedPartial.deliveredSubscriptionIds).toEqual(['sub-ios-1']);
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-partial-skip')).toBeUndefined();
+
+    // Failed lease ownership check during beforeHandoff returns retryable pushFailed instead of superseded_before_push.
+    const dbErrKey = 'notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-lease-err';
+    const baseClaimsTable = claimsTable;
+    let failOwnerCheck = false;
+    let failSubList = false;
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'sms_send_claims') {
+        const base = baseClaimsTable();
+        return {
+          ...base,
+          where: (cond) => {
+            const w = base.where(cond);
+            return {
+              ...w,
+              first: async () => {
+                if (failOwnerCheck && cond.outcome) throw Object.assign(new Error('owner check lost'), { code: '57P01' });
+                return w.first();
+              },
+            };
+          },
+          whereRaw: (sql, params) => {
+            const wr = base.whereRaw(sql, params);
+            return {
+              select: async () => {
+                if (failSubList) throw Object.assign(new Error('sub list lost'), { code: '57P01' });
+                return wr.select();
+              },
+            };
+          },
+        };
+      }
+      return tableMock([]);
+    });
+
+    failOwnerCheck = true;
+    PushService.sendToAdminUsers.mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+      const ok = await opts.beforeHandoff();
+      expect(ok).toBe(false);
+      return { sent: 0, failed: 0, superseded: true, subscriptions: 1 };
+    });
+    const ownerErrRes = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-lease-err' },
+      { dedupeKey: 'relay-unbooked:CA-lease-err' },
+    );
+    expect(ownerErrRes.retryable).toBe(true);
+    expect(ownerErrRes.pushFailed).toBe('before_handoff');
+    expect(ownerErrRes.push?.skipped).not.toBe('superseded_before_push');
+    expect(store.get(dbErrKey)).toBeUndefined();
+    failOwnerCheck = false;
+
+    // Failed persisted delivery-history lookup aborts before send, releases lease, and returns retryable.
+    failSubList = true;
+    const callsBeforeSubErr = PushService.sendToAdminUsers.mock.calls.length;
+    const subErrRes = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-sub-err' },
+      { dedupeKey: 'relay-unbooked:CA-sub-err' },
+    );
+    expect(PushService.sendToAdminUsers.mock.calls.length).toBe(callsBeforeSubErr);
+    expect(subErrRes.retryable).toBe(true);
+    expect(subErrRes.pushFailed).toBe('before_handoff');
+    expect(store.get('notif_push_dedupe:relay_unbooked_call:relay-unbooked:CA-sub-err')).toBeUndefined();
+    failSubList = false;
   });
 
   test('sandy_transfer_no_context pushOnly banner sends committed row words with waves-missed-call.caf sound', async () => {

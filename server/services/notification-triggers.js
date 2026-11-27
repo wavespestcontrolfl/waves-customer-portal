@@ -2005,10 +2005,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
         await finalizeKeyedPushLease(pushLease, stats, {
-          newlyDeliveredIds, persistedSubIds, subPersistPromises, leaseLost: leaseGuard.isLost(),
+          newlyDeliveredIds, persistedSubIds, subPersistPromises,
+          leaseLost: leaseGuard.isLost(), lookupFailed: leaseGuard.isLookupFailed(),
         });
         // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
-        if (stats.push?.superseded && !stats.push.sent && !leaseGuard.isLost()) {
+        if (stats.push?.superseded && !stats.push.sent && !leaseGuard.isAborted()) {
           stats.push = { sent: 0, skipped: 'superseded_before_push' };
         }
       }
@@ -2086,13 +2087,10 @@ function leaseNonAcquiredResult(lease, stats) {
 
 async function loadPersistedPushSubs(claimKey) {
   if (!claimKey) return [];
-  try {
-    const { listPushDedupeDeliveredSubs } = require('./sms-send-claims');
-    return await listPushDedupeDeliveredSubs(claimKey, db);
-  } catch (err) {
-    logger.warn(`[notification-triggers] failed to load persisted push sub ids: ${err?.code || err?.message || 'error'}`);
-    return [];
-  }
+  // Propagate read errors so triggerNotification releases the lease and returns
+  // a retryable failure instead of re-pushing already-delivered devices.
+  const { listPushDedupeDeliveredSubs } = require('./sms-send-claims');
+  return listPushDedupeDeliveredSubs(claimKey, db);
 }
 
 async function persistDeliveredPushSub(claimKey, subscriptionId) {
@@ -2112,16 +2110,26 @@ function mergeDeliveredSubIds(callerIds, persistedIds) {
 
 function createLeasedBeforeHandoff(pushLease, callerBeforeHandoff) {
   let lost = false;
+  let lookupFailed = false;
   if (!pushLease) {
     return {
       beforeHandoff: typeof callerBeforeHandoff === 'function' ? callerBeforeHandoff : null,
       isLost: () => false,
+      isLookupFailed: () => false,
+      isAborted: () => false,
     };
   }
   return {
     beforeHandoff: async () => {
       const { isPushDedupeLeaseOwner } = require('./sms-send-claims');
-      const owned = await isPushDedupeLeaseOwner(pushLease.key, pushLease.ownerToken, db);
+      let owned;
+      try {
+        owned = await isPushDedupeLeaseOwner(pushLease.key, pushLease.ownerToken, db);
+      } catch (err) {
+        lookupFailed = true;
+        logger.warn(`[notification-triggers] push lease ownership check failed: ${err?.code || err?.message || 'error'}`);
+        return false;
+      }
       if (!owned) {
         lost = true;
         return false;
@@ -2129,6 +2137,8 @@ function createLeasedBeforeHandoff(pushLease, callerBeforeHandoff) {
       return typeof callerBeforeHandoff === 'function' ? callerBeforeHandoff() : true;
     },
     isLost: () => lost,
+    isLookupFailed: () => lookupFailed,
+    isAborted: () => lost || lookupFailed,
   };
 }
 
@@ -2149,13 +2159,19 @@ async function markKeyedPushDeliveredSafe(pushLease) {
   }
 }
 
+function hasIncompletePushTransport(pushStats) {
+  const failed = Number(pushStats?.failed) || 0;
+  const skipped = Number(pushStats?.skipped) || 0;
+  return failed > 0 || (skipped > 0 && !pushStats?.superseded);
+}
+
 // Stamp outcome='delivered' ONLY when every attempted device finished without
-// failures (and this worker still owns the lease). On partial delivery
-// (sent > 0 && failed > 0), persist accepted subscription IDs and release the
-// pending lease so retries finish only the failed devices without re-pushing
-// devices that already accepted. On zero delivery, release the pending lease.
+// failures or unconfigured-transport skips (and this worker still owns the
+// lease). On partial delivery or lookup errors, persist accepted subscription
+// IDs, mark retryable, and release our pending lease so retries finish only
+// the remaining devices without double-pushing accepted ones.
 async function finalizeKeyedPushLease(pushLease, stats, {
-  newlyDeliveredIds, persistedSubIds, subPersistPromises, leaseLost,
+  newlyDeliveredIds, persistedSubIds, subPersistPromises, leaseLost, lookupFailed,
 }) {
   if (!pushLease) return;
   await Promise.allSettled(subPersistPromises);
@@ -2163,7 +2179,6 @@ async function finalizeKeyedPushLease(pushLease, stats, {
   await persistExtraDeliveredPushSubs(pushLease.key, returnedIds, new Set([...persistedSubIds, ...newlyDeliveredIds]));
   const allDelivered = [...new Set([...persistedSubIds, ...newlyDeliveredIds, ...returnedIds])];
   const sent = Number(stats.push?.sent) || 0;
-  const failed = Number(stats.push?.failed) || 0;
   if (leaseLost) {
     if (sent === 0) {
       stats.inFlight = true;
@@ -2171,12 +2186,21 @@ async function finalizeKeyedPushLease(pushLease, stats, {
     }
     return;
   }
-  if (failed === 0 && (sent > 0 || persistedSubIds.length > 0)) {
+  if (lookupFailed) {
+    stats.retryable = true;
+    stats.pushFailed = sent > 0 ? 'push_dispatch' : 'before_handoff';
+    if (allDelivered.length > 0) stats.deliveredSubscriptionIds = allDelivered;
+    await releaseKeyedPushLease(pushLease, false);
+    return;
+  }
+  const incomplete = hasIncompletePushTransport(stats.push);
+  if (!incomplete && (sent > 0 || persistedSubIds.length > 0)) {
     await markKeyedPushDeliveredSafe(pushLease);
     return;
   }
-  if (failed > 0 && allDelivered.length > 0) {
-    stats.deliveredSubscriptionIds = allDelivered;
+  if (incomplete) {
+    stats.retryable = true;
+    if (allDelivered.length > 0) stats.deliveredSubscriptionIds = allDelivered;
   }
   await releaseKeyedPushLease(pushLease, false);
 }
