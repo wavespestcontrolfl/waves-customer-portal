@@ -247,6 +247,21 @@ describe('loadScheduleChanges: skipped and cancelled', () => {
     ]);
   });
 
+  test('a live visit at the other property never hides a cancel or skip; the same property (or none on both) does', async () => {
+    const live = visit({ id: 'v1', status: 'confirmed', scheduled_date: '2026-12-04', property_id: 'p-home' });
+    for (const status of ['cancelled', 'skipped']) {
+      const other = visit({ id: 'v3', status, scheduled_date: '2026-12-04', property_id: 'p-rental' });
+      expect((await read([live, other], [], [])).stopped.map((g) => g.visitIds)).toEqual([['v3']]);
+      expect((await read([live, { ...other, property_id: 'p-home' }], [], [])).stopped).toEqual([]);
+    }
+    const noProp = (over) => visit({ scheduled_date: '2026-12-04', property_id: null, ...over });
+    expect((await read([noProp({ id: 'v1' }), noProp({ id: 'v3', status: 'cancelled' })], [], [])).stopped).toEqual([]);
+    // cancelling the second property's visit changes the signature
+    const before = await read([live, visit({ id: 'v3', scheduled_date: '2026-12-04', property_id: 'p-rental' })], [], []);
+    const after = await read([live, visit({ id: 'v3', status: 'cancelled', scheduled_date: '2026-12-04', property_id: 'p-rental' })], [], []);
+    expect(facts.scheduleChangesSignature(after)).not.toBe(facts.scheduleChangesSignature(before));
+  });
+
   test('a replacement en route today whose status still reads rescheduled hides the cancel (UPCOMING SERVICES lists it)', async () => {
     const today = '2026-11-26';
     const cancelled = visit({ id: 'v3', status: 'cancelled', scheduled_date: today });

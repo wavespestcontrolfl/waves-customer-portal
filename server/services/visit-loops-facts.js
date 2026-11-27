@@ -745,10 +745,12 @@ async function loadStopped(conn, customerId, now) {
     .orderBy('scheduled_date').orderBy('window_start').orderBy('id')
     // one customer's next two months: a backstop, far above a real account
     .limit(200)
-    .select('id', 'service_type', 'scheduled_date', 'status', 'track_state', 'cancelled_at')) || [];
+    .select('id', 'service_type', 'scheduled_date', 'status', 'track_state', 'property_id', 'cancelled_at')) || [];
   // A skipped or cancelled row the schedule replaced (a live row of the same service on
   // the same day) is not news: the live visit is in UPCOMING SERVICES.
-  const dayKey = (r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}`;
+  // the same property too (no property on both = the same): a visit at the customer's
+  // other property never hides a cancel or skip here
+  const dayKey = (r) => `${calendarDay(r.scheduled_date)}|${r.service_type || ''}|${r.property_id ?? ''}`;
   // UPCOMING SERVICES' own row rule: a replacement en route today that still reads
   // rescheduled replaces the cancel too
   // rescheduled replaces the cancel too, and so does a replacement already completed
