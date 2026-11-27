@@ -2266,48 +2266,70 @@ function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimate
 // ones those readers key a row by (recurringServiceKey: service, key, name, label, displayName; oneTimeItemFamilyKeys adds
 // service_key, kind and catalogServiceKey), the browser estimator's own (serviceKey, title, n), and the request a manual-quote
 // row records (originalRequestedService). Any service row so named "lawn" is refused, except:
-// - the turf work the lawn tables do not price: plugging, top dressing, dethatching and the area add-ons (Lawn Insect Spot
-//   Treatment, Yearly Lawn Insect Preventive), as the page's own specialty test reads them;
+// - the turf work the lawn tables do not price (plugging, top dressing, dethatching, the lawn area add-ons), known only by the
+//   exact identities the engines give it (isOtherTurfRow);
 // - a commercial row: this rule does not price commercial lawn. The browser's commercial manual-quote row (service
 //   commercial_lawn, price null) records the visitor's request as originalRequestedService 'lawn_care' (pre-push audit P1).
 // A service row is an object with a key-like identity (service, serviceKey, service_key, key, kind, catalogServiceKey), or a
-// name with a price beside it; a name with no price is a display line. A price is read the way the readers read one: any field
-// whose name holds price, amount, total, monthly or annual, or is mo, ann or a per-visit price, holding a number or a numeric
-// string other than zero. That covers every field they take a price from: the one-time breakdown (normalizeOneTimeBreakdown)
-// shows price, amount, total and their AfterDiscount forms, the plan readers mo, ann, monthly, annual and their Before/After
-// Discount and AfterCredits forms (pre-push audit P0: a "One-Time Lawn" row with only priceAfterDiscount is a customer-visible
-// charge). A row the breakdown shows as included at $0 (serviceSpecificDiscountApplied) carries a price too. Free text names
+// name with a price beside it; a name with no price is a display line. A price is any field whose name holds price, amount,
+// total, monthly, annual, fee or charge, or is mo, ann, pa or a per-unit price (perApp, perTreatment, perVisit), holding a number
+// or a numeric string other than zero. That is wider than every field the readers take a price from: the one-time breakdown
+// (normalizeOneTimeBreakdown) shows price, amount, total and their AfterDiscount forms (pre-push audit P0: a "One-Time Lawn" row
+// with only priceAfterDiscount is a customer-visible charge); the plan readers take mo, ann, monthly, annual and their Before/
+// After Discount and AfterCredits forms, and the page's first-application price reads perTreatment, perApp, perVisit and pa
+// (pre-push audit P0: { name: 'Lawn Care', pa: 68 }). A row the breakdown shows as included at $0
+// (serviceSpecificDiscountApplied) carries a price too. Free text names
 // no row (pre-push audit P1): a note such as "Customer declined lawn care" prices nothing, so notes, details and reasons are
 // never read. The rows the browser files under a lawn result key without naming them (results.lawn tier rows, lawnMeta,
 // lawnTiers) are refused by that key.
 const LAWN_ROW_KEY_FIELDS = ['service', 'serviceKey', 'service_key', 'key', 'kind', 'catalogServiceKey'];
 const LAWN_ROW_NAME_FIELDS = ['name', 'label', 'displayName', 'title', 'n'];
-const LAWN_ROW_PRICE_FIELD = /price|amount|total|monthly|annual|^(mo|ann|perApp|perTreatment|perVisit)$/i;
+const LAWN_ROW_PRICE_FIELD = /[Pp]rice|[Aa]mount|[Tt]otal|[Mm]onthly|[Aa]nnual|[Ff]ee|[Cc]harge|^(mo|ann|pa)$|^per[A-Z]/;
+// The fields a plan reader takes a price from (above). Turf work is one-time work priced by `price`.
+const LAWN_ROW_PLAN_PRICE_FIELD = /[Mm]onthly|[Aa]nnual|^(mo|ann|pa)$|^per(App|Treatment|Visit)$/;
 // The kind the one-time breakdown gives each row it keeps names the charge, not the service (pre-push audit P1: the saved
 // breakdown of a "Lawn Plugging Service" row, sendSnapshot.pricingBundle.oneTimeBreakdown, is { label, amount, kind: 'charge' }).
 // Such a kind marks a service row but never names one, so the row's label is its identity.
 const LAWN_ROW_CHARGE_KINDS = new Set(['charge', 'discount', 'included', 'quote_required']);
-const LAWN_OTHER_TURF_WORK = /top ?dress|dethatch|plugging|area ?addon|insect spot|insect preventive/;
 const LAWN_RESULT_ROW_KEY = /^lawn(Meta|Tiers)?$/;
-function lawnRowCarriesPrice(row) {
-  if (row.serviceSpecificDiscountApplied === true) return true;
-  return Object.entries(row).some(([field, value]) => LAWN_ROW_PRICE_FIELD.test(field)
-    && (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
-    && Number.isFinite(Number(value)) && Number(value) !== 0);
+const holdsPrice = (row, fieldPattern) => Object.entries(row).some(([field, value]) => fieldPattern.test(field)
+  && (typeof value === 'number' || (typeof value === 'string' && value.trim() !== ''))
+  && Number.isFinite(Number(value)) && Number(value) !== 0);
+// The other turf work the lawn tables do not price, known only by the exact identities the engines give it (pre-push audit
+// P0: a word inside a name proves nothing, so "Lawn Care (no plugging)" is lawn care). The server's rows carry their service
+// (plugging, top_dressing, dethatching; an area add-on: area_addon, with its catalogServiceKey); the browser's and the mapper's
+// carry the fixed names; an area add-on's name and key are its catalog entry (AREA_ADDONS.items, which the Service Library sync
+// rebases).
+const LAWN_OTHER_TURF_IDENTITIES = new Set(['plugging', 'top_dressing', 'dethatching', 'area_addon',
+  'lawn plugging service', 'lawn top dressing service', 'lawn dethatching service']);
+function isOtherTurfIdentity(value) {
+  const text = String(value || '').trim().toLowerCase();
+  if (LAWN_OTHER_TURF_IDENTITIES.has(text)) return true;
+  const addOns = require('./pricing-engine/constants').AREA_ADDONS?.items || {};
+  return Object.values(addOns).some((addOn) => addOn && [addOn.serviceKey, addOn.name]
+    .some((identity) => typeof identity === 'string' && identity.trim().toLowerCase() === text));
 }
-// An exemption reads what the row IS, never a word anywhere on it: commercial = the key the page itself gives the row
-// (recurringServiceKey reads its first identity field), other turf work = the row's own first identity. So "Lawn Care
-// (commercial-grade)" under service lawn_care, or "Lawn Care (no plugging)", is still a lawn care row.
+// A row is that work only when the page reads it so (its first identity, the one recurringServiceKey reads: service, key, name,
+// label, displayName), every identity on it that names lawn is turf work too, and it carries no plan price: a plan reader keys
+// a lawn-named row as lawn care and takes that price.
+function isOtherTurfRow(row, lawnIdentities) {
+  return isOtherTurfIdentity(row.service || row.key || row.name || row.label || row.displayName)
+    && lawnIdentities.every(isOtherTurfIdentity)
+    && !holdsPrice(row, LAWN_ROW_PLAN_PRICE_FIELD);
+}
+// The commercial exemption reads what the row IS too: the key the page itself gives it (recurringServiceKey), so "Lawn Care
+// (commercial-grade)" under service lawn_care is still a lawn care row.
 function isLawnPriceRow(row) {
   const strings = (fields) => fields.map((field) => row[field]).filter((value) => typeof value === 'string' && value);
   const chargeKind = LAWN_ROW_CHARGE_KINDS.has(row.kind);
   const identity = [...strings(LAWN_ROW_KEY_FIELDS.filter((field) => !(chargeKind && field === 'kind'))), ...strings(LAWN_ROW_NAME_FIELDS)];
   const keyed = chargeKind || LAWN_ROW_KEY_FIELDS.some((field) => typeof row[field] === 'string' && row[field]);
-  if (!keyed && !(identity.length && lawnRowCarriesPrice(row))) return false;
-  const words = (text) => text.toLowerCase().replace(/[_-]+/g, ' ');
-  if (!words([...identity, ...strings(['originalRequestedService'])].join(' ')).includes('lawn')) return false;
+  const priced = row.serviceSpecificDiscountApplied === true || holdsPrice(row, LAWN_ROW_PRICE_FIELD);
+  if (!keyed && !(identity.length && priced)) return false;
+  const lawnIdentities = [...identity, ...strings(['originalRequestedService'])].filter((text) => /lawn/i.test(text));
+  if (!lawnIdentities.length) return false;
   if (/^commercial_/.test(require('../routes/estimate-public').recurringServiceKey(row))) return false;
-  return !LAWN_OTHER_TURF_WORK.test(words(identity[0] || ''));
+  return !isOtherTurfRow(row, lawnIdentities);
 }
 function saveHoldsLawnPriceRow(estimateData) {
   const seen = new Set();

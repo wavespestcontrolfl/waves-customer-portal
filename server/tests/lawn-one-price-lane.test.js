@@ -359,6 +359,9 @@ describe('a browser-priced save (the server could not price it)', () => {
       { service: 'lawn_fertilization', mo: 46 },
       { name: 'Lawn Fertilization & Weed Control', mo: 46 },
       { key: 'lawn_program', label: 'Lawn Program', monthly: 46 },
+      // Priced only per application: the page's first-application price reads pa, perApp, perTreatment and perVisit.
+      { name: 'Lawn Care', pa: 68, visitsPerYear: 9 },
+      { name: 'Lawn Care', perApp: 68 },
     ]) {
       expect(() => guard({ result: { recurring: { services: [row] } } })).toThrow(refused);
       expect(() => guard({ recurring: { services: [row] } })).toThrow(refused);
@@ -424,14 +427,24 @@ describe('a browser-priced save (the server could not price it)', () => {
     for (const forged of [{ service: 'lawn_care', name: 'Lawn Care (commercial-grade)', mo: 46 }, { service: 'lawn_care', name: 'Lawn Care (no plugging)', mo: 46 }]) {
       expect(() => guard({ result: { recurring: { services: [forged] } } })).toThrow(refused);
     }
-    // The other turf work keeps its own price: plugging, top dressing, dethatching, the area add-ons.
+    // The other turf work keeps its own price: plugging, top dressing, dethatching, the area add-ons, as the engines build them.
     for (const row of [
-      { service: 'lawn_plugging', name: 'Lawn Plugging Service', price: 900 },
+      { service: 'plugging', name: 'Lawn Plugging Service', label: '9" Standard', price: 900, lawnSqFt: 1200 },
+      { name: 'Lawn Plugging Service', price: 900, detail: '1,200 sf | 2,700 plugs | $0.75/sf' },
       { name: 'Lawn Top Dressing Service', price: 400 },
       { name: 'Lawn Dethatching Service', price: 300 },
-      { service: 'area_addon_lawn_insect_spot', name: 'Lawn Insect Spot Treatment', price: 95 },
-      { serviceKey: 'area_addon_lawn_insect_preventive', name: 'Yearly Lawn Insect Preventive', price: 120 },
+      { service: 'area_addon', addOnKey: 'lawn_insect_spot', name: 'Lawn Insect Spot Treatment', catalogServiceKey: 'area_addon_lawn_insect_spot', addOnCategory: 'lawn_care', price: 95 },
+      { service: 'area_addon', addOnKey: 'lawn_insect_preventive', name: 'Yearly Lawn Insect Preventive', catalogServiceKey: 'area_addon_lawn_insect_preventive', price: 120 },
     ]) expect(() => guard({ result: { oneTime: { specItems: [row] } } })).not.toThrow();
+    // Only those exact identities: a turf word inside a name, a lawn name beside a turf key, or a plan price is lawn care.
+    for (const save of [
+      { result: { recurring: { services: [{ name: 'Lawn Care (no plugging)', mo: 68 }] } } },
+      { result: { oneTime: { items: [{ name: 'One-Time Lawn (no dethatching)', price: 137 }] } } },
+      { result: { recurring: { services: [{ service: 'plugging', name: 'Lawn Care', mo: 46 }] } } },
+      { result: { oneTime: { items: [{ catalogServiceKey: 'area_addon_lawn_insect_spot', name: 'Lawn Care', price: 95 }] } } },
+      { result: { recurring: { services: [{ name: 'Lawn Plugging Service', mo: 68 }] } } },
+      { result: { recurring: { services: [{ service: 'area_addon', name: 'Lawn Insect Spot Treatment', pa: 68 }] } } },
+    ]) expect(() => guard(save)).toThrow(refused);
   });
 
   test('the page\'s saved breakdown of the other turf work is not refused: its kind names the charge, not the service', () => {

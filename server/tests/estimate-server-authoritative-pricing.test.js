@@ -398,6 +398,9 @@ describe('createOrReuseAdminEstimate — server authoritative on save', () => {
       { result: { recurring: plan([{ service: 'lawn_care', mo: 90 }]), oneTime: { total: 0 } }, monthlyTotal: 90, annualTotal: 1080, onetimeTotal: 0 },
       // A plan line item under a catalog name: the page keys it as lawn care and carries its price to acceptance.
       { result: { recurring: plan([]), lineItems: [{ service: 'lawn_fertilization', monthly: 90 }], oneTime: { total: 0 } }, monthlyTotal: 90, annualTotal: 1080, onetimeTotal: 0 },
+      // A plan row priced only per application, and one whose name merely holds a turf word.
+      { result: { recurring: plan([{ name: 'Lawn Care', pa: 68, visitsPerYear: 9 }]), oneTime: { total: 0 } }, monthlyTotal: 90, annualTotal: 1080, onetimeTotal: 0 },
+      { result: { recurring: plan([{ name: 'Lawn Care (no plugging)', mo: 90 }]), oneTime: { total: 0 } }, monthlyTotal: 90, annualTotal: 1080, onetimeTotal: 0 },
       // A one-time lawn row with only its discounted price: the page's breakdown shows that as the charge.
       { result: { recurring: { grandTotal: 0, monthlyTotal: 0, annualTotal: 0, services: [] }, oneTime: { total: 137, items: [{ label: 'One-Time Lawn', priceAfterDiscount: 137 }] } }, monthlyTotal: 0, annualTotal: 0, onetimeTotal: 137 },
     ]) {
