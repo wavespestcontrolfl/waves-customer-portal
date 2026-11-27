@@ -2241,17 +2241,19 @@ function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData =
 //  - "says it priced the new rule" is the stamp `false` in the metadata of the result the save prices from (the browser writes it
 //    there). A stamp on a line or in a send snapshot is not the browser's word: a cached page can post back a stored snapshot.
 //  - the stamp written is the server's reading, on every result container, so the reader finds it whichever one it picks.
+// Every posted shape is checked (the revise route takes any object, a list included, as the specialty check reads it): only a
+// plain record can carry the browser's stamp, and only a plain record is stamped.
 const WHOLE_HOME_SIZING_ROW_WORDS = /roach|rodent[ _-]?guarantee/i;
 function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
-  if (!isPlainRecord(estimateData)) return;
   const replay = require('./estimate-floor-signal-replay');
-  const posted = replay.readRuleStamp(estimateData, 'legacyWholeHomeSizing');
+  const posted = isPlainRecord(estimateData) ? replay.readRuleStamp(estimateData, 'legacyWholeHomeSizing') : {};
   const postedNewRule = posted.from === 'metadata' && posted.flag === false;
   const legacy = !!storedEstimateData && !postedNewRule
     && replay.savedLegacyWholeHomeSizingSignal(storedEstimateData).legacyWholeHomeSizing === true;
   if (!legacy && !postedNewRule && saveHoldsRowNamed(estimateData, WHOLE_HOME_SIZING_ROW_WORDS)) {
     throw errorWithStatus('This estimator is out of date for cockroach and rodent guarantee pricing (they now price on the whole home) — reload the page and regenerate the estimate.', 409);
   }
+  if (!isPlainRecord(estimateData)) return;
   const containers = [estimateData.result, estimateData.engineResult].filter(isPlainRecord);
   for (const container of containers.length ? containers : [estimateData]) {
     container.pricingMetadata = { ...(isPlainRecord(container.pricingMetadata) ? container.pricingMetadata : {}), legacyWholeHomeSizing: legacy };

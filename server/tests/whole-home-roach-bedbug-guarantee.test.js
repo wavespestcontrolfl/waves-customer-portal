@@ -666,6 +666,9 @@ describe('the deprecated browser estimator mirrors the server on total living ar
       expect(() => guard({ result: { lineItems: [{ service: 'rodent_guarantee', price: 249 }] } })).toThrow(expect.objectContaining({ statusCode: 409 }));
       expect(() => guard({ result: { oneTime: { specItems: [{ name: 'Cockroach Treatment Service', price: 239 }] } } })).toThrow(expect.objectContaining({ statusCode: 409 }));
       expect(() => guard(cachedBundle({ stories: 1 }))).toThrow(expect.objectContaining({ statusCode: 409 }));
+      // A list is read like any other posted shape (the revise route takes any object).
+      expect(() => guard([{ service: 'pest_initial_roach', price: 202.5 }])).toThrow(expect.objectContaining({ statusCode: 409 }));
+      expect(() => guard([{ service: 'lawn_care', price: 60 }])).not.toThrow();
       // A stored send snapshot or a line stamp posted back by the cached page is not the browser saying it priced the new rule.
       const withSnapshot = { ...cachedBundle(), sendSnapshot: { legacyWholeHomeSizing: false } };
       expect(() => guard(withSnapshot)).toThrow(expect.objectContaining({ statusCode: 409 }));
