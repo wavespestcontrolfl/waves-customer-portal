@@ -67,7 +67,7 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   test('dedupe, bell, link and metadata are unchanged; the rule stamps are added', async () => {
     await ring();
     const [, , , opts] = lastCall();
-    expect(opts).toMatchObject({ bell: true, dedupeKey: 'sms-commitment-customer:cust-1', dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true,
+    expect(opts).toMatchObject({ bell: true, dedupeKey: 'sms-commitment-customer:cust-1', dedupeOpenOnly: true, refreshOnDedupe: true,
       link: `/admin/customers?customerId=${CUSTOMER_ID}&tab=comms` });
     expect(opts.metadata).toMatchObject({ triggerKey: 'sms_operational_followup', customerId: CUSTOMER_ID, sms_log_id: 'sms-1',
       commitment_id: 'commit-1', kind: 'send_estimate', verification: 'open',
@@ -428,22 +428,10 @@ describe('follow-up bell (SMS and email share ringOverdueBell)', () => {
   });
 });
 
-describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => {
+describe('a promise rings once (owner 2026-10-14)', () => {
   // The open-row probe itself lives in notifyAdmin (dedupeOpenOnly; see
   // notification-admin-dedupe-window.test.js). Here: what ringOverdueBell asks for.
-  beforeEach(() => { process.env.GATE_ALERT_RING_ONCE = 'true'; });
-  afterEach(() => { delete process.env.GATE_ALERT_RING_ONCE; });
-
-  test('gate off: the 24-hour rolling dedupe, no open-only probe, no quiet refresh', async () => {
-    delete process.env.GATE_ALERT_RING_ONCE;
-    await ring();
-    const opts = lastCall()[3];
-    expect(opts).toMatchObject({ dedupeWindowMs: 24 * 3600 * 1000, refreshOnDedupe: true, bell: true });
-    expect(opts.dedupeOpenOnly).toBeUndefined();
-    expect(opts.ringOnRefresh).toBeUndefined();
-  });
-
-  test('gate on: only an open row is the standing one, at any age, and a refresh never rings', async () => {
+  test('only an open row is the standing one, at any age, and a refresh never rings', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-open', deduped: true });
     await ring();
     expect(NotificationService.notifyAdmin).toHaveBeenCalledTimes(1);
@@ -456,7 +444,7 @@ describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => 
     expect(sentUpdates[0].bindings).toContain('n-open');
   });
 
-  test('gate on: a fresh row (first time, or a person closed the old one) carries the same bell and metadata', async () => {
+  test('a fresh row (first time, or a person closed the old one) carries the same bell and metadata', async () => {
     NotificationService.notifyAdmin.mockResolvedValueOnce({ id: 'n-fresh', deduped: false });
     await ring();
     const opts = lastCall()[3];
@@ -465,7 +453,7 @@ describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => 
     expect(sentUpdates[0].bindings).toContain('n-fresh');
   });
 
-  test('gate on: an open row rings again, and rises, only when the checked promise brings a text the row does not show (a customer alert)', async () => {
+  test('an open row rings again, and rises, only when the checked promise brings a text the row does not show (a customer alert)', async () => {
     await ring({ args: { joins: true } });
     expect(lastCall()[3]).toMatchObject({ dedupeOpenOnly: true, refreshOnDedupe: true, bumpOnRefresh: true });
     expect(lastCall()[3].ringOnRefresh()).toBe(true);
@@ -474,7 +462,7 @@ describe('GATE_ALERT_RING_ONCE: a promise rings once (owner 2026-10-14)', () => 
     expect(lastCall()[3].ringOnRefresh()).toBe(false);
   });
 
-  test('gate on, email promise: same rule through the shared bell', async () => {
+  test('email promise: same rule through the shared bell', async () => {
     await ring({ args: { sourceIdField: 'email_id', triggerKey: 'email_operational_followup' } });
     expect(lastCall()[3]).toMatchObject({ dedupeOpenOnly: true });
     expect(lastCall()[3].metadata).toMatchObject({ triggerKey: 'email_operational_followup' });

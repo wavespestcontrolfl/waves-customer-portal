@@ -164,12 +164,11 @@ function buildRows() {
     unit: 'per treatment',
     // Standalone and recurring-plan-attached knockdowns, regular and German
     // scales, on typical homes.
-    // The bracket reads the home's total living area (owner 2026-11-26), so the sweep is the home-size percentiles.
     values: sweepValues(
-      TYPICAL_HOMES.flatMap((homeSqFt) =>
+      TYPICAL_FOOTPRINTS.flatMap((f) =>
         ['regular', 'german'].flatMap((roachType) =>
-          [true, false].map((standalone) => ({ homeSqFt, roachType, standalone })))),
-      ({ homeSqFt, roachType, standalone }) => sp.pricePestInitialRoach({ homeSqFt, stories: 1 }, { roachType, standalone }),
+          [true, false].map((standalone) => ({ f, roachType, standalone })))),
+      ({ f, roachType, standalone }) => sp.pricePestInitialRoach({ footprint: f }, { roachType, standalone }),
       (r) => r.price),
     notes: 'Standalone treatment, or added to a recurring plan at a lower rate; multi-visit German infestation cleanouts use the cleanout program. Larger homes price higher.',
   }));

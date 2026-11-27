@@ -1595,7 +1595,7 @@ async function resolveServerAuthoritativePricing({ estimateData, clientPreview, 
   assertSpecialtyClientFallbackSave(estimateData);
   stampPestAboveTableOnClientFallbackSave(estimateData, { storedEstimateData });
   stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData });
-  // A cockroach treatment or rodent guarantee row is refused too: the browser cannot set either price (see the function).
+  // A rodent guarantee row is refused too: the browser cannot set its price (see the function).
   guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData });
   // A lawn care or one-time lawn row is refused the same way (one lawn price lane, see the function).
   guardLawnOneLaneOnClientFallbackSave(estimateData, { storedEstimateData });
@@ -2229,23 +2229,19 @@ function stampSpecialtyOnClientFallbackSave(estimateData, { storedEstimateData =
   }
 }
 
-// Cockroach treatment and rodent guarantee rows on a save the server could not price (the CLIENT_FALLBACK authority). The browser
-// cannot set either price: its cockroach brackets are hard-coded dollars (a Settings change to pest_base.initial_roach never reaches
-// it), a page cached before the whole-home rule (owner 2026-11-26) prices the ground-floor footprint, and it has no rodent guarantee
-// price at all. A rule stamp posted by the browser proves none of that. So, the same rule as the specialty rows above: such a save
-// is refused (409, reload and let the server price it) when it NAMES a cockroach treatment (stand-alone or added by a pest plan) or
-// a rodent guarantee anywhere outside its inputs, whatever stamp it posts, new or re-saved, changed or not.
-// "roach" is read as a word or a camelCase part (pest_initial_roach, Cockroach Treatment, pestInitialRoach), never inside "approach".
-const WHOLE_HOME_SIZING_ROW_WORDS = {
-  test: (text) => /cockroach|(?<![a-z])roach|rodent[ _-]?guarantee/i.test(text) || /[a-z]Roach/.test(text),
-};
-// The whole-home rule stamp of a browser-priced save that passed the refusal (it holds none of the three rows: bed bug is refused by
-// the specialty check) is the server's reading, never the browser's: a revision keeps the stored estimate's stamp, so one of the
-// three added later by the server stays on the basis the estimate was sold on; a first save is new. Written on every result
-// container, so the reader finds it whichever one it picks.
+// Rodent guarantee rows on a save the server could not price (the CLIENT_FALLBACK authority). The browser has no rodent guarantee
+// price at all, and a rule stamp posted by the browser proves nothing. So, the same rule as the specialty rows above: such a save
+// is refused (409, reload and let the server price it) when it NAMES a rodent guarantee anywhere outside its inputs, whatever
+// stamp it posts, new or re-saved, changed or not. A cockroach treatment row is not refused: the cockroach treatment prices on the
+// ground-floor footprint again (owner 2026-11-27), the rule the browser mirror prices, as it did before the whole-home rule.
+const WHOLE_HOME_SIZING_ROW_WORDS = /rodent[ _-]?guarantee/i;
+// The whole-home rule stamp of a browser-priced save that passed the refusal (it holds no rodent guarantee row, and bed bug is
+// refused by the specialty check) is the server's reading, never the browser's: a revision keeps the stored estimate's stamp, so
+// a bed bug or rodent guarantee line added later by the server stays on the basis the estimate was sold on; a first save is new.
+// Written on every result container, so the reader finds it whichever one it picks.
 function guardWholeHomeSizingOnClientFallbackSave(estimateData, { storedEstimateData = null } = {}) {
   if (saveHoldsRowNamed(estimateData, WHOLE_HOME_SIZING_ROW_WORDS)) {
-    throw errorWithStatus('This estimate has a cockroach treatment or rodent guarantee price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
+    throw errorWithStatus('This estimate has a rodent guarantee price the browser cannot set — reload the page and regenerate the estimate so the server prices it.', 409);
   }
   if (!isPlainRecord(estimateData)) return;
   const legacy = !!storedEstimateData

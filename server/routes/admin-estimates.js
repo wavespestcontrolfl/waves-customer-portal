@@ -931,8 +931,8 @@ async function buildEstimateSendSnapshot(estimate, now = () => new Date(), { del
   // An unstamped estimate that kept only its inputs and asks for pest is a quote saved before the rule, on a first send and a resend alike.
   const priorPestAboveTable = require('../services/estimate-floor-signal-replay').savedLegacyPestAboveTableSignal(estimateData).legacyPestAboveTable;
   if (typeof priorPestAboveTable === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyPestAboveTable: priorPestAboveTable };
-  // The same for whole-home sizing (cockroach, bed bug, rodent guarantee on total living area; new quotes only, 2026-11-26): its own
-  // stamp, read before the snapshot is dropped. An unstamped estimate that kept only its inputs and asks for one of the three is a
+  // The same for whole-home sizing (bed bug, rodent guarantee on total living area; new quotes only, 2026-11-26): its own
+  // stamp, read before the snapshot is dropped. An unstamped estimate that kept only its inputs and asks for one of the two is a
   // quote saved before the rule, on a first send and a resend alike.
   const priorWholeHomeSizing = require('../services/estimate-floor-signal-replay').savedLegacyWholeHomeSizingSignal(estimateData).legacyWholeHomeSizing;
   if (typeof priorWholeHomeSizing === 'boolean') estimateDataForBundle.sendSnapshot = { ...(estimateDataForBundle.sendSnapshot || {}), legacyWholeHomeSizing: priorWholeHomeSizing };

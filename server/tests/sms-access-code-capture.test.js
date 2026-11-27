@@ -20,12 +20,7 @@ const ground = (item) => groundExtraction({ obligations: [], facts: [item], addi
   { message: source(item.quote), properties });
 const verdict = (item) => factVerdict(item, { properties, senderIsPrimary: true, messageBody: item.quote });
 
-describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)', () => {
-  const saved = process.env.GATE_ACCESS_CODE_CAPTURE;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_ACCESS_CODE_CAPTURE; else process.env.GATE_ACCESS_CODE_CAPTURE = saved;
-  });
-
+describe('access codes in the client\'s own wording', () => {
   const natural = [
     ['neighborhood_gate_code', 'Gate code is 5550', '5550'],
     ['neighborhood_gate_code', 'Our new gate code is 5550', '5550'],
@@ -36,15 +31,7 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['garage_code', 'Garage keypad 5550#', '5550#'],
   ];
 
-  test.each(natural)('gate off keeps the strict sentence form: %s "%s"', (field, quote, value) => {
-    delete process.env.GATE_ACCESS_CODE_CAPTURE;
-    const item = codeFact(field, quote, value);
-    expect(ground(item).facts).toEqual([]);
-    expect(verdict(item)).toBe('code_uncertain');
-  });
-
-  test.each(natural)('gate on saves %s from "%s"', (field, quote, value) => {
-    process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
+  test.each(natural)('saves %s from "%s"', (field, quote, value) => {
     const item = codeFact(field, quote, value);
     expect(ground(item)).toEqual({ obligations: [], facts: [item], additional_properties: [], dropped: 0 });
     expect(verdict(item)).toBe('apply');
@@ -103,24 +90,19 @@ describe('access codes in the client\'s own wording (GATE_ACCESS_CODE_CAPTURE)',
     ['the old code', 'neighborhood_gate_code', 'Old gate code 5550', '5550'],
     ['a price beside a kind word', 'neighborhood_gate_code', 'The gate repair costs 1500.', '1500'],
     ['a size beside a kind word', 'garage_code', 'Garage dimensions are 1200.', '1200'],
-  ])('gate on still refuses %s', (_name, field, quote, value) => {
-    process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
+  ])('still refuses %s', (_name, field, quote, value) => {
     const item = codeFact(field, quote, value);
     expect(ground(item).facts).toEqual([]);
     expect(verdict(item)).not.toBe('apply');
   });
 
-  test('the strict sentence form still saves with the gate on', () => {
-    process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
+  test('the strict sentence form still saves', () => {
     const item = codeFact('lockbox_code', 'Lockbox code is A5-B', 'A5-B');
     expect(ground(item).facts).toEqual([item]);
   });
 
-  test('the prompt names the plain gate rule only with the gate on', () => {
+  test('the prompt names the plain gate rule', () => {
     const context = { message: source('Gate code is 5550'), properties };
-    delete process.env.GATE_ACCESS_CODE_CAPTURE;
-    expect(buildPrompt(context).system).not.toContain('A plain "gate code"');
-    process.env.GATE_ACCESS_CODE_CAPTURE = 'true';
     expect(buildPrompt(context).system).toContain('A plain "gate code" with no side, back or yard word is the neighborhood gate');
   });
 });

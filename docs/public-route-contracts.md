@@ -6269,19 +6269,18 @@ site-selectable) and menu `lawn_pest_knockdown` → `lawnPestControl`
 (turf-priced on the forwarded track; a lot-only lookup routes it to manual
 review like the lawn programs). Catalog `cockroach_control` → `pestInitialRoach`
 (owner ruling 2026-09-03: the two-treatment package priced as one
-regular_standalone knockdown on the home footprint (since 2026-11-26, new quotes
-only: on the home's total living area, so a two-story home prices as a one-story
-home of the same size; a draft stored before that keeps its footprint price,
-estimate stamp `legacyWholeHomeSizing`; when the wizard keeps its 2,000 sq ft
-placeholder and the server's own lookup measured the home, the cockroach and bed
-bug treatments price on the measured living area, as flea does, and a
+regular_standalone knockdown on the home footprint (the ground-floor footprint:
+owner 2026-11-27 kept the cockroach treatment there when the bed bug treatment
+and the rodent guarantee moved to the home's total living area, so the server
+lookup's measured home never sizes it; when the wizard keeps its 2,000 sq ft
+placeholder and that lookup measured the home, the bed bug treatment and the
+rodent guarantee price on the measured living area, as flea does, and a
 customer-confirmed size still wins; a bed bug row held for inspection stores
 the same size fields, so a staff revision keeps the measured home; a
-commercial building is not a home and keeps its measured footprint; the
-measured home also satisfies the stand-alone package's "building size not
-measured" check, and a measured home above the 20,000 sq ft public ceiling
-that a line priced on parks the quote, `home_size_above_public_limit`, as a
-posted size above it does); species / severity /
+commercial building is not a home and keeps its measured footprint; a
+measured home above the 20,000 sq ft public ceiling that a line priced on
+parks the quote, `home_size_above_public_limit`, as a posted size above it
+does); species / severity /
 price override stay staff-scoped, the site prices the native scale; the
 included second visit is booked at completion at no charge). It prices
 instantly but never mints a self-book slot (`bookingUrl` null, like bed

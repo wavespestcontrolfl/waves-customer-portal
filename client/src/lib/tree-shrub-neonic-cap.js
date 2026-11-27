@@ -1,7 +1,6 @@
 // client/src/lib/tree-shrub-neonic-cap.js
 //
-// The yearly neonicotinoid cap on the Tree & Shrub Fast Complete sheet (GATE_TS_NEONIC_CAP,
-// owner 2026-10-09). Pure functions: the server sends `neonicCap` in the fast context (how much
+// The yearly neonicotinoid cap on the Tree & Shrub Fast Complete sheet (owner 2026-10-09). Pure functions: the server sends `neonicCap` in the fast context (how much
 // of each capped product's yearly amount the property has used, and the product amounts in the
 // product's own unit). This shows what is left and holds Complete on an amount over it, on a
 // product past its label's number of applications a year, and on a product with no limit on file. Like the
@@ -114,7 +113,7 @@ function ingredientResult(ingredient, rows) {
 }
 
 /**
- * context: the fast context's `neonicCap` (null = gate off, or the read failed: nothing shows and
+ * context: the fast context's `neonicCap` (null = not loaded yet, or the read failed: nothing shows and
  * nothing holds). rows: the sheet's product rows (only the active ones count).
  * Returns { lines: { [productId]: text }, holds: [text], blockMessage }.
  */

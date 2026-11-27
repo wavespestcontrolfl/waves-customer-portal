@@ -1,12 +1,11 @@
 /**
- * GATE_CALL_APPLICANT_HANDLING — job-applicant / vendor call hygiene (dark).
+ * Job-applicant / vendor call hygiene.
  *
  *   1. disposition: the nature default beats a model "no_action_needed";
  *   2. cards: no customer-only review card on those natures;
  *   3. promises: Waves-party promises are stored as kind 'other', no due time;
  *   4. Careers row: one comms-free job_applications row, idempotent by call and
  *      deduped by phone.
- * Off = byte-identical: every test also pins the gate-off behavior.
  * Synthetic names only.
  */
 
@@ -17,55 +16,31 @@ const {
 } = require('../services/call-triage-flags');
 const { recordCallCommitments, asThirdPartyPromise } = require('../services/call-commitments');
 const { createJobApplicationFromCall, OPEN_STATUSES } = require('../services/job-applications');
-const gates = require('../config/feature-gates');
-
-describe('GATE_CALL_APPLICANT_HANDLING reader', () => {
-  const saved = process.env.GATE_CALL_APPLICANT_HANDLING;
-  afterEach(() => {
-    if (saved === undefined) delete process.env.GATE_CALL_APPLICANT_HANDLING; else process.env.GATE_CALL_APPLICANT_HANDLING = saved;
-  });
-  test('dark unless exactly "true", read at call time', () => {
-    delete process.env.GATE_CALL_APPLICANT_HANDLING;
-    expect(gates.callApplicantHandlingLive()).toBe(false);
-    for (const v of ['1', 'on', 'TRUE', 'yes', '']) {
-      process.env.GATE_CALL_APPLICANT_HANDLING = v;
-      expect(gates.callApplicantHandlingLive()).toBe(false);
-    }
-    process.env.GATE_CALL_APPLICANT_HANDLING = 'true';
-    expect(gates.callApplicantHandlingLive()).toBe(true);
-    process.env.GATE_CALL_APPLICANT_HANDLING = 'false';
-    expect(gates.callApplicantHandlingLive()).toBe(false);
-  });
-});
 
 describe('1. disposition', () => {
   const ext = (nature, recommended) => ({ call_nature: nature, recommended_disposition: recommended });
 
-  test('gate off: the model "no_action_needed" still wins (byte-identical to main)', () => {
-    expect(decideDisposition({ extraction: ext('job_applicant', 'no_action_needed') }).disposition).toBe('no_action_needed');
-    expect(decideDisposition({ extraction: ext('job_applicant', 'no_action_needed'), thirdPartyNatureDefault: false }).disposition).toBe('no_action_needed');
-  });
 
-  test('gate on: job_applicant and vendor_or_partner keep the nature default vendor_logged', () => {
+  test('job_applicant and vendor_or_partner keep the nature default vendor_logged', () => {
     for (const nature of ['job_applicant', 'vendor_or_partner']) {
-      const out = decideDisposition({ extraction: ext(nature, 'no_action_needed'), thirdPartyNatureDefault: true });
+      const out = decideDisposition({ extraction: ext(nature, 'no_action_needed') });
       expect(out.disposition).toBe('vendor_logged');
       expect(out.reason).toBe('third_party_nature_default');
     }
   });
 
-  test('gate on: any other model recommendation still stands', () => {
-    const out = decideDisposition({ extraction: ext('job_applicant', 'voicemail_processed'), thirdPartyNatureDefault: true });
+  test('any other model recommendation still stands', () => {
+    const out = decideDisposition({ extraction: ext('job_applicant', 'voicemail_processed') });
     expect(out.disposition).toBe('voicemail_processed');
   });
 
-  test('gate on: other natures are untouched (silent_or_noise stays no_action_needed)', () => {
-    expect(decideDisposition({ extraction: ext('silent_or_noise', 'no_action_needed'), thirdPartyNatureDefault: true }).disposition).toBe('no_action_needed');
-    expect(decideDisposition({ extraction: ext('new_lead', 'no_action_needed'), thirdPartyNatureDefault: true }).disposition).toBe('no_action_needed');
+  test('other natures are untouched (silent_or_noise stays no_action_needed)', () => {
+    expect(decideDisposition({ extraction: ext('silent_or_noise', 'no_action_needed') }).disposition).toBe('no_action_needed');
+    expect(decideDisposition({ extraction: ext('new_lead', 'no_action_needed') }).disposition).toBe('no_action_needed');
   });
 
-  test('gate on: spam, booked and complaint precedence stay as they are', () => {
-    const base = { extraction: ext('job_applicant', 'no_action_needed'), thirdPartyNatureDefault: true };
+  test('spam, booked and complaint precedence stay as they are', () => {
+    const base = { extraction: ext('job_applicant', 'no_action_needed') };
     expect(decideDisposition({ ...base, spamVerdict: { verdict: 'spam' } }).disposition).toBe('spam_discarded');
     expect(decideDisposition({ ...base, outcome: { appointmentCreated: true } }).disposition).toBe('booked');
     expect(decideDisposition({
@@ -75,31 +50,24 @@ describe('1. disposition', () => {
     }).disposition).toBe('complaint_escalated');
   });
 
-  test('gate on: wrong_number nature still closes as wrong_number', () => {
-    expect(decideDisposition({ extraction: ext('wrong_number', 'no_action_needed'), thirdPartyNatureDefault: true }).disposition).toBe('wrong_number_closed');
+  test('wrong_number nature still closes as wrong_number', () => {
+    expect(decideDisposition({ extraction: ext('wrong_number', 'no_action_needed') }).disposition).toBe('wrong_number_closed');
   });
 
-  test('only the boolean true opts in', () => {
-    expect(decideDisposition({ extraction: ext('job_applicant', 'no_action_needed'), thirdPartyNatureDefault: 'true' }).disposition).toBe('no_action_needed');
-  });
 });
 
 describe('2. customer-only cards', () => {
-  test('gate off: nothing is dropped', () => {
-    expect(thirdPartyCustomerOnlyCards({ call_nature: 'job_applicant' })).toEqual([]);
-    expect(thirdPartyCustomerOnlyCards({ call_nature: 'job_applicant' }, { gateOn: false })).toEqual([]);
-  });
 
-  test('gate on: applicant and vendor drop the address, name, email, consent and visit cards', () => {
+  test('applicant and vendor drop the address, name, email, consent and visit cards', () => {
     for (const nature of ['job_applicant', 'vendor_or_partner']) {
-      const dropped = thirdPartyCustomerOnlyCards({ call_nature: nature }, { gateOn: true });
+      const dropped = thirdPartyCustomerOnlyCards({ call_nature: nature });
       // The live applicant shape: the model files service_intent 'quote_only' with no quote asked.
       const applicantShape = {
         call_nature: nature,
         scheduling: { status: 'none' },
         service_request: { service_intent: 'quote_only', quote_requested: false, quote_promised: false, price_discussed: false },
       };
-      expect(thirdPartyCustomerOnlyCards(applicantShape, { gateOn: true })).toContain('missing_service_address');
+      expect(thirdPartyCustomerOnlyCards(applicantShape)).toContain('missing_service_address');
       for (const code of [
         'missing_service_address', 'low_confidence_address', 'missing_unit_number',
         'email_unverified', 'email_invalid', 'missing_last_name', 'missing_first_name',
@@ -110,7 +78,7 @@ describe('2. customer-only cards', () => {
     }
   });
 
-  test('gate on: an applicant or vendor call that asks for service keeps every card', () => {
+  test('an applicant or vendor call that asks for service keeps every card', () => {
     const asks = [
       { scheduling: { status: 'requested' } },
       { scheduling: { status: 'confirmed' } },
@@ -125,7 +93,7 @@ describe('2. customer-only cards', () => {
     ];
     for (const nature of ['job_applicant', 'vendor_or_partner']) {
       for (const shape of asks) {
-        expect(thirdPartyCustomerOnlyCards({ call_nature: nature, ...shape }, { gateOn: true })).toEqual([]);
+        expect(thirdPartyCustomerOnlyCards({ call_nature: nature, ...shape })).toEqual([]);
       }
     }
   });
@@ -143,12 +111,12 @@ describe('2. customer-only cards', () => {
         ...overrides,
       },
     });
-    const withGate = (ext) => thirdPartyCustomerOnlyCards(ext, { gateOn: true });
+    const applicantCards = (ext) => thirdPartyCustomerOnlyCards(ext);
 
     test('inspection_only, quote_only and a null intent drop the customer cards, including caller_not_authorized', () => {
       for (const nature of ['vendor_or_partner', 'job_applicant']) {
         for (const intent of ['inspection_only', 'quote_only', null]) {
-          const out = withGate(noEvidence(nature, { service_intent: intent }));
+          const out = applicantCards(noEvidence(nature, { service_intent: intent }));
           expect(out).toEqual([...THIRD_PARTY_CUSTOMER_ONLY_CARDS]);
           expect(out).toContain('missing_service_address');
           expect(out).toContain('caller_not_authorized');
@@ -157,7 +125,7 @@ describe('2. customer-only cards', () => {
     });
 
     test('price discussed with no category, pest or address (a technician pay talk) still drops', () => {
-      expect(withGate(noEvidence('vendor_or_partner', { price_discussed: true }))).toContain('missing_service_address');
+      expect(applicantCards(noEvidence('vendor_or_partner', { price_discussed: true }))).toContain('missing_service_address');
     });
 
     test('the promise-SLA predicate is unchanged: inspection_only and price talk still count as a service ask there', () => {
@@ -165,7 +133,7 @@ describe('2. customer-only cards', () => {
       expect(thirdPartyCallMakesNoServiceAsk(noEvidence('job_applicant'))).toBe(false);
       expect(thirdPartyCallMakesNoServiceAsk(noEvidence('vendor_or_partner', { price_discussed: true }))).toBe(false);
       expect(thirdPartyCallMakesNoServiceAsk(noEvidence('vendor_or_partner', { service_intent: 'quote_only' }))).toBe(true);
-      expect(withGate(noEvidence('vendor_or_partner'))).toContain('caller_not_authorized');
+      expect(applicantCards(noEvidence('vendor_or_partner'))).toContain('caller_not_authorized');
     });
 
     test('callback_number_needed and caller_phone_missing are never dropped', () => {
@@ -174,10 +142,6 @@ describe('2. customer-only cards', () => {
       expect(THIRD_PARTY_CUSTOMER_ONLY_CARDS).toContain('caller_not_authorized');
     });
 
-    test('gate off: nothing is dropped, including caller_not_authorized', () => {
-      expect(thirdPartyCustomerOnlyCards(noEvidence('vendor_or_partner'))).toEqual([]);
-      expect(thirdPartyCustomerOnlyCards(noEvidence('vendor_or_partner'), { gateOn: false })).toEqual([]);
-    });
 
     test('any property-service evidence keeps every card, caller_not_authorized included', () => {
       const keeps = [
@@ -195,26 +159,26 @@ describe('2. customer-only cards', () => {
         { service_intent: 'complaint_or_callback' },
       ];
       for (const overrides of keeps) {
-        expect(withGate(noEvidence('vendor_or_partner', overrides))).toEqual([]);
+        expect(applicantCards(noEvidence('vendor_or_partner', overrides))).toEqual([]);
       }
       for (const address of [{ street_line_1: '1 Test St' }, { city: 'Testville' }, { postal_code: '00000' }, { raw_text: 'one test street' }]) {
         const ext = noEvidence('job_applicant');
         ext.property.service_address = { ...ext.property.service_address, ...address };
-        expect(withGate(ext)).toEqual([]);
+        expect(applicantCards(ext)).toEqual([]);
       }
       for (const status of ['requested', 'confirmed', 'offered']) {
         const ext = noEvidence('vendor_or_partner');
         ext.scheduling = { status };
-        expect(withGate(ext)).toEqual([]);
+        expect(applicantCards(ext)).toEqual([]);
       }
     });
   });
 
-  test('gate on: every other nature drops nothing', () => {
+  test('every other nature drops nothing', () => {
     for (const nature of ['new_lead', 'existing_customer_service', 'billing_question', 'voicemail_message', 'other', 'wrong_number', undefined]) {
-      expect(thirdPartyCustomerOnlyCards({ call_nature: nature }, { gateOn: true })).toEqual([]);
+      expect(thirdPartyCustomerOnlyCards({ call_nature: nature })).toEqual([]);
     }
-    expect(thirdPartyCustomerOnlyCards(null, { gateOn: true })).toEqual([]);
+    expect(thirdPartyCustomerOnlyCards(null)).toEqual([]);
   });
 
   test('the office keeps the numbers it needs to reach the applicant back', () => {
@@ -274,7 +238,7 @@ describe('3. promises', () => {
     expect(SLA_KINDS).not.toContain('other');
   });
 
-  test('gate off (thirdPartyCall false): the staff promise is stored as schedule_visit with its due time, as before', async () => {
+  test('a customer call (thirdPartyCall false): the staff promise is stored as schedule_visit with its due time', async () => {
     const { raw, conn, modelClient } = setup();
     await recordCallCommitments({ conn, call, transcript, procToken: 'tok', modelClient });
     const rows = inserted(raw);
@@ -283,7 +247,7 @@ describe('3. promises', () => {
     expect(rows.find((r) => r.kind === 'schedule_visit').dueAt).toBeInstanceOf(Date);
   });
 
-  test('gate on, applicant call: every Waves promise is stored as other, undated, wording kept', async () => {
+  test('applicant call: every Waves promise is stored as other, undated, wording kept', async () => {
     const { raw, conn, modelClient } = setup();
     await recordCallCommitments({ conn, call, transcript, procToken: 'tok', modelClient, thirdPartyCall: true });
     const rows = inserted(raw);
@@ -487,15 +451,12 @@ describe('4. Careers row', () => {
 
 describe('5. processor wiring (the pure parts are covered above)', () => {
   const src = fs.readFileSync(require.resolve('../services/call-recording-processor.js'), 'utf8');
-  test('the disposition caller passes the gate in as an argument', () => {
-    expect(src).toContain('thirdPartyNatureDefault: callApplicantHandlingLive(),');
-  });
-  test('the three card sites strip the customer-only cards behind the gate', () => {
+  test('the card sites strip the customer-only cards', () => {
     // enforce, shadow bridge, enforce-mode email branch + the phone-match link skip
     expect(src.match(/thirdPartyCustomerOnlyCards\(/g).length).toBe(4);
   });
-  test('the commitments step passes thirdPartyCall from gate + nature + no service ask', () => {
-    expect(src).toContain('thirdPartyCall: callApplicantHandlingLive() && thirdPartyCallNatureFromV2(v2Result)');
+  test('the commitments step passes thirdPartyCall from nature + no service ask', () => {
+    expect(src).toContain('thirdPartyCall: thirdPartyCallNatureFromV2(v2Result)');
     expect(src).toContain("&& v2Result?.status === 'valid' && thirdPartyCallMakesNoServiceAsk(v2Result.extraction),");
   });
   test('a mixed-purpose applicant call (asks for service) keeps customer promises', () => {
@@ -511,7 +472,7 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
     expect(thirdPartyCallMakesNoServiceAsk(vendorCallback)).toBe(false);
     expect(thirdPartyCallMakesNoServiceAsk(applicantCancels)).toBe(false);
   });
-  test('a phone match is not linked where the gate drops the cards: no backfill, no profile enrichment', () => {
+  test('a phone match is not linked where the cards are dropped: no backfill, no profile enrichment', () => {
     // Codex #7034 r2 + r3 security P2: with the review cards dropped, a linked phone match
     // would silently feed the email/address backfill and enrichFromCall (codes, pets, notes).
     // The link is skipped on exactly the card-drop predicate, so every customer write is.
@@ -533,23 +494,13 @@ describe('5. processor wiring (the pure parts are covered above)', () => {
   describe('fileApplicantCareersRowStep', () => {
     const { fileApplicantCareersRowStep } = require('../services/call-recording-processor')._test;
     const applicant = { status: 'valid', extraction: { call_nature: 'job_applicant', caller: { name_full: 'Pat Example' } } };
-    const saved = process.env.GATE_CALL_APPLICANT_HANDLING;
-    afterEach(() => {
-      if (saved === undefined) delete process.env.GATE_CALL_APPLICANT_HANDLING; else process.env.GATE_CALL_APPLICANT_HANDLING = saved;
-    });
-    test('gate off: does nothing at all', async () => {
-      delete process.env.GATE_CALL_APPLICANT_HANDLING;
-      expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: applicant })).toBeNull();
-    });
-    test('gate on: spam, a non-valid extraction and a customer call file nothing', async () => {
-      process.env.GATE_CALL_APPLICANT_HANDLING = 'true';
+    test('spam, a non-valid extraction and a customer call file nothing', async () => {
       expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: { is_spam: true }, v2Result: applicant })).toBeNull();
       expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: { ...applicant, status: 'schema_failed' } })).toBeNull();
       expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: { status: 'valid', extraction: { call_nature: 'new_lead' } } })).toBeNull();
       expect(await fileApplicantCareersRowStep({ call: { id: 'x' }, callSid: 'CAx', extracted: {}, v2Result: null })).toBeNull();
     });
-    test('gate on: a failed insert logs the error code only, never the bound applicant details', async () => {
-      process.env.GATE_CALL_APPLICANT_HANDLING = 'true';
+    test('a failed insert logs the error code only, never the bound applicant details', async () => {
       const jobApps = require('../services/job-applications');
       const logger = require('../services/logger');
       const insertErr = Object.assign(new Error('insert into "job_applications" ... values (Pat Example, +19415550100, pat@example.com)'), { code: '23505' });

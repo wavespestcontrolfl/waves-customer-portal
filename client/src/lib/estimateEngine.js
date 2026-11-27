@@ -2067,11 +2067,10 @@ export function calculateEstimate(inputs) {
 
   const LABOR = 35, DRIVE = 20;
   const footprint = homeSqFt > 0 ? Math.round(homeSqFt / stories) : 0;
-  // Cockroach and bed bug treatments size on the home's TOTAL living area, not the ground-floor footprint (owner ruling
-  // 2026-11-26 "whole home"; mirrors the server's resolveWholeHomeSize for a plain living-area input).
+  // The bed bug treatment sizes on the home's TOTAL living area, not the ground-floor footprint (owner ruling 2026-11-26
+  // "whole home"; mirrors the server's resolveWholeHomeSize for a plain living-area input). The cockroach treatment stays on
+  // the ground-floor footprint (owner 2026-11-27).
   const wholeHomeSqFt = homeSqFt > 0 ? Math.round(homeSqFt) : 0;
-  // The cockroach bracket's size: the whole home, or the 2,500 fallback when the home size is unknown.
-  const roachSizeSqFt = wholeHomeSqFt > 0 ? wholeHomeSqFt : 2500;
   const treeNum = treeDensity === 'HEAVY' ? 2 : treeDensity === 'MODERATE' ? 1 : 0;
   const estimateHardscape = () => {
     const pt = (propertyType || '').toLowerCase();
@@ -2172,9 +2171,9 @@ export function calculateEstimate(inputs) {
     // zero and the fallback is the new rule (false). Above it with pest requested the fallback priced the flat top, so it does not
     // claim the new rule (the stamp is left MISSING). The server refuses that save by the home size (409) and prices it itself.
     ...((svcPest || svcOnetimePest) && footprint > 5500 ? {} : { legacyPestAboveTable: false }),
-    // Whole-home sizing (2026-11-26): this fallback sizes the cockroach and bed bug treatments on total living area, as the
-    // server does, and says so. It is the preview's own record only: the server never stores a browser-priced cockroach, bed bug
-    // or rodent guarantee row (409), and writes its own reading of this stamp on a save it could not price.
+    // Whole-home sizing (2026-11-26): this fallback sizes the bed bug treatment on total living area, as the server does, and
+    // says so. It is the preview's own record only: the server never stores a browser-priced bed bug or rodent guarantee row
+    // (409), and writes its own reading of this stamp on a save it could not price.
     legacyWholeHomeSizing: false,
     // One lawn price lane (2026-11-26): this fallback prices lawn plans and one-time lawn under the rule, and says so. It is the
     // preview's own record only: the server never stores a browser-priced lawn row (409), and writes its own reading of this stamp
@@ -2679,7 +2678,7 @@ export function calculateEstimate(inputs) {
       }
     });
     R.pestRoachMod = roachMod;
-    R.pestInitialRoachPrice = initialRoachPrice(roachMod, roachSizeSqFt, false);
+    R.pestInitialRoachPrice = initialRoachPrice(roachMod, fpEff, false);
     wgServices.push({ name: 'Pest (' + R.pest.label + ')', service: 'pest_control', mo: R.pest.mo, perTreatment: R.pest.pa, visitsPerYear: R.pest.apps, pricingVersion: 'v2' });
   }
 
@@ -3598,7 +3597,8 @@ export function calculateEstimate(inputs) {
   /* ── Cockroach Treatment (from pest roach modifier) ──────── */
   if (R.pest && (roachMod === 'GERMAN' || roachMod === 'REGULAR')) {
     hasOT = true;
-    const fp = initialRoachPrice(roachMod, roachSizeSqFt, false);
+    const fpEff = footprint > 0 ? footprint : 2500;
+    const fp = initialRoachPrice(roachMod, fpEff, false);
     otItems.push({
       service: 'pest_initial_roach',
       // Static mirror of the server default (pest_base.initial_roach.display).
@@ -3675,10 +3675,11 @@ export function calculateEstimate(inputs) {
     const rt = roachType;
     if (rt === 'REGULAR') {
       if (R.pestRoachMod !== 'REGULAR') {
+        const fpEff = footprint > 0 ? footprint : 2500;
         specItems.push({
           service: 'pest_initial_roach',
           name: 'Cockroach Treatment Service',
-          price: initialRoachPrice(rt, roachSizeSqFt, true),
+          price: initialRoachPrice(rt, fpEff, true),
           det: 'Standalone knockdown',
           source: 'standalone_native_cockroach_treatment',
           standalone: true,

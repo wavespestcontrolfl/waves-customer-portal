@@ -45,7 +45,7 @@
  * else. More than MAX_OWN_CANDIDATES accounts suggests nothing. This basis is tried before the
  * caller's-own-account bases: a spoken number is stronger evidence than a first name.
  *
- * An office callback's voicemail number (GATE_CALLBACK_SPOKEN_NUMBER_LINK, dark; basis callback_spoken_number). The
+ * An office callback's voicemail number (basis callback_spoken_number). The
  * admin "Call back" dials the voicemail's caller ID, but the voicemail said another number to call, and exactly
  * one live account has that number as its PRIMARY phone under the same first name (the rules are in
  * call-recording-processor findCustomerViaCallbackSpokenNumber). Same suggest-only card; the pass also mints no
@@ -397,11 +397,11 @@ async function matchStatedAddressAccounts({ call, extracted, v2CanonicalExtracti
 // What the card suggests for this call: the family rule first, then a number the caller gave for
 // another person, else the caller's own account.
 /**
- * An office callback's voicemail number (GATE_CALLBACK_SPOKEN_NUMBER_LINK): the OUTBOUND callback dialed
+ * An office callback's voicemail number: the OUTBOUND callback dialed
  * the voicemail's caller ID, but the voicemail said another number to call, and exactly one live account
  * has that number as its PRIMARY phone under the same first name. The rules live in
  * findCustomerViaCallbackSpokenNumber (admin callback of an inbound voicemail from the dialed number,
- * gate on, no operator link, number not a near miss of the dialed one). Read-only.
+ * no operator link, number not a near miss of the dialed one). Read-only.
  */
 async function matchCallbackSpokenNumberAccount({ call, extracted, statedAddress, phone = null, contactLookupOpts = {}, conn = db }) {
   let override = null;

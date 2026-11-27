@@ -1,12 +1,12 @@
 'use strict';
 
-const { gateEnvValue, isEnabled } = require('../config/feature-gates');
+const { isEnabled } = require('../config/feature-gates');
 const { parseETDateTime, etDateString, addETDays } = require('../utils/datetime-et');
 const { getBlackoutLayers } = require('./scheduling/blackout-dates');
 const { recordAuditEvent } = require('./audit-log');
 const logger = require('./logger');
 
-const enabled = () => gateEnvValue('GATE_CALLBACK_CARD') && isEnabled('callCommitments');
+const enabled = () => isEnabled('callCommitments');
 const error = (message, status = 409) => Object.assign(new Error(message), { status });
 
 // Booking hours and the shared blackout calendar are the office calendar.
@@ -95,8 +95,8 @@ async function prepareCallbackCards(conn, { callId = null, customerId = null, le
 }
 
 // The canonical commitments feed carries callback ownership: who holds the
-// card and whether that account is still active. Gate off leaves the rows
-// as the existing feed already returns them.
+// card and whether that account is still active. With call commitments off the
+// rows stay as the existing feed already returns them.
 async function decorateCallbackRows(conn, rows) {
   if (!enabled()) return rows;
   const isCard = (r) => r.kind === 'callback' && r.party === 'waves';

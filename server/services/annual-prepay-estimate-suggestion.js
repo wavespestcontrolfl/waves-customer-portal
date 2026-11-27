@@ -70,7 +70,11 @@ function parseEstimateData(raw) {
   return {};
 }
 
-async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [], resolveLineCadence = null, db = null } = {}) {
+// `pricedOption` ({ bundle, key }): the caller NAMES the option to price, on the estimate page's own bundle: the plan that
+// page shows by default (the texting AI's pay-for-the-year sentence names that plan and its applications a year). A named
+// option is no guess about what a verbal accept chose, so a cadence ladder does not fail closed on it; every other rule
+// below applies to it unchanged, and with none named nothing here changes.
+async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEstimateIds = [], resolveLineCadence = null, db = null, pricedOption = null } = {}) {
   const estimate = pickAnnualPrepayEstimate(estimates, { excludeIds: excludeEstimateIds });
   if (!estimate) return null;
   const base = {
@@ -78,7 +82,10 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     shortRef: shortEstimateRef(estimate.id),
     status: estimate.status,
   };
-  const blocked = (blockReason) => ({ ...base, blocked: true, blockReason });
+  // `unverified`: the block reports a read this suggestion stands on that FAILED, not a verdict on the estimate. A caller
+  // that must tell "prepay is not offered" from "that could not be read" checks it (the texting AI's pay-for-the-year
+  // sentence, sms-staff-facts.js: a failed read there stays retryable at send, never "the price changed").
+  const blocked = (blockReason, unverified = false) => ({ ...base, blocked: true, blockReason, ...(unverified ? { unverified: true } : {}) });
 
   // Lazy requires: estimate-public is a route module and estimate-converter is
   // heavy — neither belongs in this module's load graph until a suggestion is
@@ -97,13 +104,14 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   // Fail closed when the linkage can't be checked (no connection, read
   // error) — non-engine estimates carry no callLogId and skip this.
   if (estData?.estimatorEngine?.callLogId) {
-    if (!db) return blocked('estimate call linkage could not be verified');
+    if (!db) return blocked('estimate call linkage could not be verified', true);
     try {
       const { callSideBlockForEstimateData } = require('../utils/estimate-claim-sql');
       const callBlock = await callSideBlockForEstimateData(db, estData, { estimateStatus: estimate.status });
-      if (callBlock) return blocked('estimate is quarantined by a call-linkage correction');
+      // (the verdict's own "unavailable" answer is a read that failed, not a quarantine)
+      if (callBlock) return blocked('estimate is quarantined by a call-linkage correction', /_verdict_unavailable$/.test(callBlock));
     } catch {
-      return blocked('estimate call linkage could not be verified');
+      return blocked('estimate call linkage could not be verified', true);
     }
   }
 
@@ -118,10 +126,12 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     const { prepayBookingEligibility } = require('./estimate-manual-acceptance');
     const bookingEligibility = await prepayBookingEligibility(estimate);
     if (!bookingEligibility?.eligible) {
-      return blocked(`estimate is not one-step prepay eligible (${bookingEligibility?.reason || 'unknown'})`);
+      const reason = bookingEligibility?.reason || 'unknown';
+      // ('live_plan_unknown': the guard could not read the customer's plan)
+      return blocked(`estimate is not one-step prepay eligible (${reason})`, reason === 'live_plan_unknown');
     }
   } catch {
-    return blocked('estimate prepay eligibility could not be verified');
+    return blocked('estimate prepay eligibility could not be verified', true);
   }
 
   // Canonical acceptance blockers the prepay guard doesn't carry: a pending
@@ -138,14 +148,14 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     const blockingAddOn = require('./pricing-engine/v1-legacy-mapper').annualPrepayBlockingAddOnReason(estData, { pricingAuthority: estimate.pricing_authority });
     if (blockingAddOn) return blocked(blockingAddOn);
   } catch {
-    return blocked('estimate acceptance blockers could not be verified');
+    return blocked('estimate acceptance blockers could not be verified', true);
   }
 
   // An open reservation deposit must be consumed by the estimate's OWN
   // accept flow — closing the quote here would leave paid deposit dollars
   // double-creditable (still refundable/applicable elsewhere). Fail closed
   // whenever the deposit state cannot be checked.
-  if (!db) return blocked('estimate deposit state could not be verified');
+  if (!db) return blocked('estimate deposit state could not be verified', true);
   try {
     const openDeposit = await db('estimate_deposits')
       .where({ estimate_id: estimate.id })
@@ -156,7 +166,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
       .first('id');
     if (openDeposit) return blocked('estimate has an open reservation deposit');
   } catch {
-    return blocked('estimate deposit state could not be verified');
+    return blocked('estimate deposit state could not be verified', true);
   }
 
   // Review-lane pricing never auto-applies (estimator-authority rule): the
@@ -185,7 +195,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
   let singleOptionMonthly = null;
   try {
     const { buildPricingBundle } = require('../routes/estimate-public');
-    const bundle = await buildPricingBundle(estimate);
+    const bundle = pricedOption ? pricedOption.bundle : await buildPricingBundle(estimate);
     // The finalized bundle's own state is authoritative — finalizePricingBundle
     // can mark an otherwise-eligible mix quote-required, and stamps per-tier
     // eligibility on the rows.
@@ -196,10 +206,14 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
     // Ambiguity is counted in selectable ROWS, not distinct prices: two
     // cadence/tier rows with the same annual are still two different
     // schedules. Exactly one selectable option or no amount.
-    const selectableRows = [
+    const offeredRows = [
       ...(Array.isArray(bundle?.frequencies) ? bundle.frequencies : []),
       ...(Array.isArray(bundle?.hiddenLawnFrequencies) ? bundle.hiddenLawnFrequencies : []),
     ];
+    // A named option is the one row carrying that key (two rows sharing it stay ambiguous).
+    const selectableRows = pricedOption
+      ? offeredRows.filter((row) => String(row?.key) === String(pricedOption.key))
+      : offeredRows;
     if (selectableRows.length !== 1) {
       return blocked(selectableRows.length === 0
         ? 'estimate has no selectable pricing option'
@@ -228,7 +242,7 @@ async function buildAnnualPrepayEstimateSuggestion(estimates = [], { excludeEsti
       || (Number(optionRow?.monthly) || 0) * 12) * 100);
     optionAnnuals = optionAnnualCents > 0 ? [optionAnnualCents] : [];
   } catch {
-    return blocked('estimate pricing options could not be verified');
+    return blocked('estimate pricing options could not be verified', true);
   }
 
   const annualTotal = Number(estimate.annual_total || 0);

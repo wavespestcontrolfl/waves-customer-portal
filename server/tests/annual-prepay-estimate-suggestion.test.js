@@ -160,6 +160,42 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     }
   });
 
+  // Owner 2026-11-26 (the texting AI states the pay-for-the-year total of the plan the estimate page shows by default): the caller names that
+  // option on the page's own bundle. A named option is no guess, so a cadence ladder prices it; every other rule still applies.
+  test('a named option prices that row of a cadence ladder on the given bundle; unnamed, missing, shared or ineligible it stays blocked', async () => {
+    const estimatePublic = require('../routes/estimate-public');
+    const ladder = { frequencies: [
+      { key: 'quarterly', monthly: 32, annual: 384, annualPrepayEligible: true, visitsPerYear: 4 },
+      { key: 'bimonthly', monthly: 45, annual: 540, annualPrepayEligible: true, visitsPerYear: 6 },
+    ] };
+    const spy = jest.spyOn(estimatePublic, 'buildPricingBundle').mockResolvedValue(ladder);
+    try {
+      // unnamed: a ladder is ambiguous (a verbal accept may have chosen either), as before
+      expect(await buildSuggestion([pestEstimate()])).toMatchObject({ blocked: true, blockReason: 'estimate offers multiple pricing options' });
+      expect(spy).toHaveBeenCalledTimes(1);
+      const named = (pricedOption) => buildSuggestion([pestEstimate()], { pricedOption });
+      const second = await named({ bundle: ladder, key: 'bimonthly' });
+      expect(second.blocked).toBeUndefined();
+      expect(second).toMatchObject({ baseAnnual: 540, coverageCadence: 'bimonthly', coverageVisitCount: 6 });
+      expect(second.amount).toBe(resolveAnnualPrepayInvoiceTotal({ baseAnnual: 540, recurringServices: [PEST_LINE], estimateData: pestEstimate().estimate_data }).amount);
+      expect(await named({ bundle: ladder, key: 'quarterly' })).toMatchObject({ baseAnnual: 384, coverageCadence: 'quarterly', coverageVisitCount: 4 });
+      // the named bundle is the one priced: no second build
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(await named({ bundle: ladder, key: 'monthly' })).toMatchObject({ blocked: true, blockReason: 'estimate has no selectable pricing option' });
+      const shared = { frequencies: ladder.frequencies, hiddenLawnFrequencies: [{ ...ladder.frequencies[0] }] };
+      expect(await named({ bundle: shared, key: 'quarterly' })).toMatchObject({ blocked: true, blockReason: 'estimate offers multiple pricing options' });
+      const ineligible = { frequencies: [{ ...ladder.frequencies[0], annualPrepayEligible: false }, ladder.frequencies[1]] };
+      expect(await named({ bundle: ineligible, key: 'quarterly' })).toMatchObject({ blocked: true, blockReason: 'estimate is not annual-prepay eligible' });
+      expect(await named({ bundle: { ...ladder, quoteRequired: true }, key: 'quarterly' })).toMatchObject({ blocked: true, blockReason: 'estimate needs a manual quote' });
+      expect(await named({ bundle: { ...ladder, serviceCadenceCombos: [{ selection: {} }] }, key: 'quarterly' })).toMatchObject({ blocked: true });
+      // the row's own count must still agree with its cadence
+      const miscounted = { frequencies: [{ ...ladder.frequencies[0], visitsPerYear: 6 }, ladder.frequencies[1]] };
+      expect(await named({ bundle: miscounted, key: 'quarterly' })).toMatchObject({ blocked: true, blockReason: 'estimate option visit count disagrees with its cadence' });
+    } finally {
+      jest.restoreAllMocks();
+    }
+  });
+
   test('seasonal mosquito (prepay-unsupported schedule) never auto-prices', async () => {
     const seasonal = pestEstimate({
       monthly_total: 55,
@@ -311,6 +347,44 @@ describe('buildAnnualPrepayEstimateSuggestion', () => {
     });
     expect(quarantined.blocked).toBe(true);
     expect(quarantined.amount).toBeUndefined();
+  });
+
+  // Owner 2026-11-26 (the texting AI's pay-for-the-year sentence): its send-time recheck must tell "prepay is not offered on this
+  // estimate" (a verdict: the sentence is gone) from "that could not be read" (an outage: retry). Both used to be one `blocked`.
+  test('a block that reports a failed read carries unverified; a verdict on the estimate does not', async () => {
+    const engineDraft = pestEstimate({ estimate_data: { estimatorEngine: { callLogId: 'c-1' }, result: { recurring: { services: [PEST_LINE] } } } });
+    const unread = { blocked: true, unverified: true };
+    // no connection to read the call, or the deposits, with
+    expect(await buildSuggestion([engineDraft], { db: null })).toMatchObject({ ...unread, blockReason: 'estimate call linkage could not be verified' });
+    expect(await buildSuggestion([pestEstimate()], { db: null })).toMatchObject({ ...unread, blockReason: 'estimate deposit state could not be verified' });
+    // the call row could not be read (the verdict's own "unavailable" answer); a quarantine it DID read is a verdict
+    const callDb = (first) => () => ({ where: () => ({ first }) });
+    expect(await buildSuggestion([engineDraft], { db: callDb(async () => { throw new Error('connection reset'); }) })).toMatchObject(unread);
+    const quarantined = await buildSuggestion([engineDraft], { db: callDb(async () => ({ metadata: { estimator_draft_block: { reason: 'wrong_identity' } } })) });
+    expect(quarantined).toMatchObject({ blocked: true, blockReason: 'estimate is quarantined by a call-linkage correction' });
+    expect(quarantined.unverified).toBeUndefined();
+    // the deposit ledger could not be read; an open deposit it DID read is a verdict
+    const depositsDown = (table) => { if (table === 'estimate_deposits') throw new Error('relation unavailable'); return stubDb()(table); };
+    expect(await buildSuggestion([pestEstimate()], { db: depositsDown })).toMatchObject({ ...unread, blockReason: 'estimate deposit state could not be verified' });
+    expect((await buildSuggestion([pestEstimate()], { db: stubDb({ deposits: [{ id: 'd-1' }] }) })).unverified).toBeUndefined();
+    const guard = jest.spyOn(require('../services/estimate-manual-acceptance'), 'prepayBookingEligibility');
+    const bundle = jest.spyOn(require('../routes/estimate-public'), 'buildPricingBundle');
+    try {
+      // the prepay guard could not read the customer's plan (its own "unknown"), or failed outright; "already a customer" is a verdict
+      guard.mockResolvedValueOnce({ eligible: false, reason: 'live_plan_unknown' });
+      expect(await buildSuggestion([pestEstimate()])).toMatchObject(unread);
+      guard.mockRejectedValueOnce(new Error('connection reset'));
+      expect(await buildSuggestion([pestEstimate()])).toMatchObject({ ...unread, blockReason: 'estimate prepay eligibility could not be verified' });
+      guard.mockResolvedValueOnce({ eligible: false, reason: 'existing_customer' });
+      const existing = await buildSuggestion([pestEstimate()]);
+      expect(existing).toMatchObject({ blocked: true, blockReason: 'estimate is not one-step prepay eligible (existing_customer)' });
+      expect(existing.unverified).toBeUndefined();
+      // the pricing options could not be built
+      bundle.mockRejectedValueOnce(new Error('connection reset'));
+      expect(await buildSuggestion([pestEstimate()])).toMatchObject({ ...unread, blockReason: 'estimate pricing options could not be verified' });
+    } finally {
+      jest.restoreAllMocks();
+    }
   });
 
   test('quote-required estimates never auto-price (review-lane guard)', async () => {

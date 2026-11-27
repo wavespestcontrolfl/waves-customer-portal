@@ -389,32 +389,27 @@ function savedLegacyPestAboveTableSignal(rawEstData) {
   return { legacyPestAboveTable: flag };
 }
 
-// Whole-home sizing (owner 2026-11-26 "whole home": the cockroach treatment, the bed bug treatment and the yearly rodent guarantee
-// size on the home's TOTAL living area, as flea does), new quotes only. Its own stamp, read by the same reader: true = priced before
-// the rule (the ground-floor footprint, the existing code), false = priced under it. An estimate with priced lines and no stamp
-// predates the rule; one with no priced lines pins nothing. An estimate that kept only its inputs but asks for one of the three
-// was saved before the rule too, on a first send, a resend and every replay (a fresh draft the engine priced carries its stamp,
-// false). Plan-wide, no per-service marker: a service a revision adds to a legacy estimate stays on the old rule, so a replay
-// never raises a sold price (the whole home is never smaller than its ground floor).
-const roachRequested = (value) => !['', 'none', 'no', 'false', 'null', 'undefined'].includes(String(value ?? '').trim().toLowerCase());
+// Whole-home sizing (owner 2026-11-26 "whole home": the bed bug treatment and the yearly rodent guarantee size on the home's TOTAL
+// living area, as flea does), new quotes only. The cockroach treatment went back to the ground-floor footprint (owner 2026-11-27
+// "skip the cockroach"; no quote was ever priced on its whole-home basis), so a cockroach request is no evidence here. Its own
+// stamp, read by the same reader: true = priced before the rule (the ground-floor footprint, the existing code), false = priced
+// under it. An estimate with priced lines and no stamp predates the rule; one with no priced lines pins nothing. An estimate that
+// kept only its inputs but asks for one of the two was saved before the rule too, on a first send, a resend and every replay (a
+// fresh draft the engine priced carries its stamp, false). Plan-wide, no per-service marker: a service a revision adds to a legacy
+// estimate stays on the old rule, so a replay never raises a sold price (the whole home is never smaller than its ground floor).
 function storedRequestsWholeHomeSizing(estData) {
   const data = normalizeStored(estData);
   if (!data || typeof data !== 'object') return false;
   const container = require('./estimate-result-container').storedEstimateContainer(data) || null;
   const request = data.engineRequest && typeof data.engineRequest === 'object' ? data.engineRequest : null;
-  // The builder request names its services as tokens: ROACH (the standalone treatment), BEDBUG, RODENT_GUARANTEE, and PEST, whose
-  // plan adds the cockroach treatment when its roach option is set (recurringRoachType / roachModifier).
+  // The builder request names its services as tokens: BEDBUG and RODENT_GUARANTEE.
   const tokens = request && Array.isArray(request.selectedServices)
     ? request.selectedServices.map((key) => String(key || '').toUpperCase())
     : [];
-  if (tokens.some((key) => ['ROACH', 'BEDBUG', 'RODENT_GUARANTEE'].includes(key))) return true;
-  const options = request && request.options && typeof request.options === 'object' ? request.options : {};
-  if (options.standaloneRoachTreatment) return true;
-  if (tokens.includes('PEST') && roachRequested(options.recurringRoachType ?? options.roachModifier)) return true;
+  if (tokens.some((key) => ['BEDBUG', 'RODENT_GUARANTEE'].includes(key))) return true;
   return [data.engineInputs, data.inputs, data.engineInput, container && container.inputs, request && request.inputs]
     .some((carrier) => carrier && typeof carrier === 'object' && carrier.services && typeof carrier.services === 'object'
-      && !!(carrier.services.pestInitialRoach || carrier.services.bedBug || carrier.services.rodentGuarantee
-        || (carrier.services.pest && roachRequested(carrier.services.pest.roachType))));
+      && !!(carrier.services.bedBug || carrier.services.rodentGuarantee));
 }
 
 function savedLegacyWholeHomeSizingSignal(rawEstData) {

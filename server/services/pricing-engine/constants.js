@@ -159,8 +159,6 @@ const PEST = {
   // exactly-2,500 sf footprint lands in the mid tier — the docstring above
   // says "1,500 – 2,500" is inclusive on both ends. Keep this in mind if
   // you re-tune via the admin Pricing Logic panel.
-  // Since 2026-11-26 (owner "whole home", new quotes only) the size read against these brackets is the home's TOTAL living area,
-  // not the ground-floor footprint; a quote priced before that keeps the footprint (estimate stamp legacyWholeHomeSizing).
   pestInitialRoach: {
     regular: [
       { sqft: 1500, price: r(119) },
