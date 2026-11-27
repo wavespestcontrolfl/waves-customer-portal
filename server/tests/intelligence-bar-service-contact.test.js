@@ -66,7 +66,7 @@ describe('set_customer_service_contact preview', () => {
     expect(p._version.body).toMatchObject({ serviceContact2Name: 'Sam Example', serviceContact2Phone: '(941) 555-0122', serviceContact3Name: '' });
     const lines = effectText(p);
     expect(lines).toMatch(/sam@example\.invalid can get this account's appointment emails and service reports, as the account's notification settings/);
-    expect(lines).toMatch(/No contact gets texts until the account holder confirms the contact list/);
+    expect(lines).toMatch(/No contact gets texts until their consent is recorded/);
     expect(lines).toMatch(/Nothing is sent now/);
     expect(cardLines('set_customer_service_contact', p)[0].text).toBe('Add contact: Sam Example (family member, +19415550122, sam@example.invalid) on Robin Sample');
     const contract = buildContract({ toolName: 'set_customer_service_contact', params: { customer_id: CUST }, displayParams: {}, preview: p, summary: 'x' });
@@ -96,7 +96,7 @@ describe('set_customer_service_contact preview', () => {
     const p = await preview({ action: 'remove', slot: 2 });
     expect(p.contacts_after).toEqual(['Ava Example (+19415550111)', 'Lee Example (lee@example.invalid)']);
     const lines = effectText(p);
-    expect(lines).toMatch(/every contact, including the ones who stay, loses app sign-in/);
+    expect(lines).toMatch(/every contact, including the ones who stay, loses app sign-in and texts/);
     expect(lines).toMatch(/\+19415550122 is no longer a contact number: anyone signed into the app with it is signed out/);
   });
 
@@ -135,6 +135,15 @@ describe('set_customer_service_contact preview', () => {
     expect(effectText(p)).toMatch(/\+19415550111 has no email after this/);
   });
 
+  test('removing a tenant who shares an email with another contact says that address can now get reports', async () => {
+    Object.assign(state.customer, {
+      service_contact_name: 'Tess Tenant', service_contact_email: 'home@example.invalid', service_contact_role: 'tenant',
+      service_contact2_name: 'Fran Family', service_contact2_email: 'home@example.invalid', service_contact2_role: 'family_member',
+    });
+    const p = await preview({ action: 'remove', slot: 1 });
+    expect(effectText(p)).toMatch(/home@example\.invalid can now get service reports/);
+  });
+
   test('a phone another slot still lists is not described as signed out', async () => {
     Object.assign(state.customer, {
       service_contact_name: 'Ava Example', service_contact_phone: '+19415550111',
@@ -149,6 +158,9 @@ describe('set_customer_service_contact preview', () => {
     const input = { action: 'add', relationship: 'family_member', name: 'Sam Example', phone: '+19415550122' };
     const p = await preview(input);
     state.customer.service_contacts_consent_at = new Date('2026-11-20T12:00:00Z');
+    // The route's own preview fingerprint sees the renewal too (it drops keys ending in _at).
+    const { previewFingerprint } = require('../services/intelligence-bar/authorization-contract');
+    expect(previewFingerprint(await preview(input))).not.toBe(previewFingerprint(p));
     expect((await confirm(input, p._version)).code).toBe('preview_changed');
     expect(Customers.setServiceContactsFromBar).not.toHaveBeenCalled();
   });

@@ -192,10 +192,9 @@ function textLines({ plan, consentOnFile, consentCleared }) {
   const { serviceContactsConsented } = require('../customer-contact');
   const checkOff = serviceContactsConsented({ service_contacts_consent_at: null });
   return [
-    consentCleared ? { kind: 'comms', text: 'Clears the consent on file for this account\'s contacts: every contact, including the ones who stay, loses app sign-in until the account holder confirms the contact list again in the app. The account holder is not affected.' } : null,
+    consentCleared ? { kind: 'comms', text: 'Clears the consent on file for this account\'s contacts: every contact, including the ones who stay, loses app sign-in and texts until that consent is recorded again (the account holder confirming the contact list in the app, or the contacts\' own opt-in replies). The account holder is not affected.' } : null,
     checkOff ? { kind: 'comms', text: 'Texts to contacts follow the account\'s notification settings (the contact texting consent check is switched off).' } : null,
-    !checkOff && consentCleared ? { kind: 'comms', text: 'No contact gets texts until the account holder confirms the contact list again in the app.' } : null,
-    !checkOff && !consentOnFile && plan.action !== 'remove' ? { kind: 'comms', text: 'No contact gets texts until the account holder confirms the contact list in the app. The account holder\'s texts do not change.' } : null,
+    !checkOff && !consentOnFile && plan.action !== 'remove' ? { kind: 'comms', text: 'No contact gets texts until their consent is recorded (the account holder confirming the contact list in the app, or the contacts\' own opt-in replies). The account holder\'s texts do not change.' } : null,
   ];
 }
 
@@ -207,6 +206,14 @@ function planEffects({ account, name, before, after, target, plan, consentOnFile
       : `${name || 'This account'} has no extra contacts after this.` },
   ];
   if (plan.action !== 'remove') lines.push(emailLine(account, target));
+  // Report access per address, before and after: an address any withheld slot carries is withheld (the report
+  // resolver's deny-wins rule), so removing or re-labelling one slot can open reports for a shared address.
+  const { slotWithheldFromReports } = require('../customer-contact');
+  const withheld = (slots) => new Set(slots.filter((slot) => slot.email && slotWithheldFromReports(account, { contactRole: slot.role })).map((slot) => slot.email.toLowerCase()));
+  const withheldBefore = withheld(before);
+  const withheldAfter = withheld(after);
+  const opened = after.filter((slot) => slot.email && withheldBefore.has(slot.email.toLowerCase()) && !withheldAfter.has(slot.email.toLowerCase()));
+  for (const slot of opened) lines.push({ kind: 'comms', text: `${slot.email} can now get service reports: no slot that withholds them lists it after this.` });
   // Slot 1 is the one contact the single-recipient notices go to (customer-contact.js getServiceContact).
   const firstBefore = before.find(isFilled);
   if (after[0] && isFilled(after[0]) && (!firstBefore || describe(firstBefore) !== describe(after[0]))) {
@@ -273,7 +280,8 @@ async function buildPlan(input, { database = db, lock = false } = {}) {
     // What the confirm and the locked re-check compare: the customer, the stored slots, the stamp and the write.
     _version: { customer_id: customer.id, customer_name: name, account_role: text(account.account_contact_role ?? account.contact_role) || null,
       holder_phone: text(account.phone), holder_email: text(account.email),
-      before, consent_at: consentOnFile ? new Date(customer.service_contacts_consent_at).toISOString() : null, body, roles: roleColumns, after },
+      before, // Not a key ending in _at: the route's preview fingerprint drops those, and this one must bind the card.
+      consent_stamp: consentOnFile ? new Date(customer.service_contacts_consent_at).toISOString() : null, body, roles: roleColumns, after },
     note: 'PREVIEW ONLY — nothing was changed. Confirm saves exactly these contacts; if anything changed it refuses.',
   };
 }
