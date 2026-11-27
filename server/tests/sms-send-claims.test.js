@@ -3,7 +3,7 @@
 jest.mock('../models/db', () => jest.fn());
 const fs = require('fs');
 const path = require('path');
-const { takeSendClaim, releaseSendClaim } = require('../services/sms-send-claims');
+const { takeSendClaim, releaseSendClaim, pruneSmsSendClaims, MONTHLY_CLAIM_PREFIXES } = require('../services/sms-send-claims');
 
 function fakeConn({ deleteFails = false } = {}) {
   const held = new Set();
@@ -49,4 +49,34 @@ test('both daily banners take and release their claim through this module', () =
     expect(src).not.toMatch(/INSERT INTO sms_send_claims/);
     expect(src).not.toMatch(/db\('sms_send_claims'\)/);
   }
+});
+
+test('pruneSmsSendClaims retains notif_push_dedupe: claims for 30 days instead of daily cleanup', async () => {
+  expect(MONTHLY_CLAIM_PREFIXES).toContain('notif_push_dedupe:');
+  const clauses = [];
+  const makeBuilder = () => {
+    const b = {
+      where(a, b2, c) {
+        if (typeof a === 'function') a(makeBuilder());
+        else clauses.push(['where', a, b2, c]);
+        return b;
+      },
+      orWhere(fn) {
+        fn(makeBuilder());
+        return b;
+      },
+      whereRaw(sql, bindings) {
+        clauses.push(['whereRaw', sql, bindings]);
+        return b;
+      },
+      del: jest.fn(async () => 1),
+    };
+    return b;
+  };
+  const conn = jest.fn(() => makeBuilder());
+  conn.raw = jest.fn((sql) => sql);
+  await pruneSmsSendClaims(conn);
+  expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) <> ?', ['notif_push_dedupe:'.length, 'notif_push_dedupe:']]);
+  expect(clauses).toContainEqual(['whereRaw', 'left(claim_key, ?) = ?', ['notif_push_dedupe:'.length, 'notif_push_dedupe:']]);
+  expect(clauses).toContainEqual(['where', 'created_at', '<', "NOW() - interval '30 days'"]);
 });

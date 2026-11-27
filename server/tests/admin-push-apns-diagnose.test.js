@@ -119,12 +119,12 @@ describe('GET /api/admin/notifications/diagnose APNs/FCM reporting', () => {
       fcm: { configured: false },
     });
     db.mockImplementation((table) => {
-      if (table === 'technicians') return chain([{ id: 1, active: true, name: 'Synthetic Admin' }]);
+      if (table === 'technicians') return chain([{ id: 1, active: true, role: 'admin', auth_token_version: 2, name: 'Synthetic Admin' }]);
       if (table === 'push_subscriptions') {
         return chain([
-          { id: 's1', active: true, platform: 'ios' },
-          { id: 's2', active: true, platform: 'web' },
-          { id: 's3', active: false, platform: 'android' },
+          { id: 's1', active: true, platform: 'ios', staff_token_version: 2 },
+          { id: 's2', active: true, platform: 'web', staff_token_version: 2 },
+          { id: 's3', active: false, platform: 'android', staff_token_version: 2 },
         ]);
       }
       if (table === 'notification_preferences') return chain([]);
@@ -146,9 +146,61 @@ describe('GET /api/admin/notifications/diagnose APNs/FCM reporting', () => {
         inactive: 1,
         byPlatform: { web: 1, ios: 1, android: 0 },
       });
-      expect(json.checks.pushTransportMatch).toMatchObject({ ok: true, active: 2, reachable: 1 });
+      expect(json.checks.pushTransportMatch).toMatchObject({ ok: true, active: 2, eligible: 2, reachable: 1 });
       expect(json.summary).toEqual([]);
     });
+  });
+
+  test('excludes stale token-version and non-MFA staff devices from reachable count while preserving raw totals', async () => {
+    PushService.status.mockReturnValue({
+      available: true,
+      configured: false,
+      error: null,
+      apns: { configured: true, production: true },
+      fcm: { configured: false },
+    });
+    // Stale staff_token_version: raw active=1, eligible=0, reachable=0 -> flagged in summary.
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return chain([{ id: 1, active: true, role: 'admin', auth_token_version: 3, name: 'Stale Session Admin' }]);
+      if (table === 'push_subscriptions') return chain([{ id: 's-ios', active: true, platform: 'ios', staff_token_version: 2 }]);
+      if (table === 'notification_preferences') return chain([]);
+      if (table === 'notifications') return chain([{ c: '3' }]);
+      return chain([]);
+    });
+    await withApp(adminNotificationsRouter, '/api/admin/notifications', async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/admin/notifications/diagnose`);
+      const json = await res.json();
+      expect(res.status).toBe(200);
+      expect(json.checks.pushSubscriptions).toMatchObject({ ok: true, active: 1, byPlatform: { ios: 1, web: 0, android: 0 } });
+      expect(json.checks.pushTransportMatch).toMatchObject({ ok: false, active: 1, eligible: 0, reachable: 0 });
+      expect(json.summary).toContain('pushTransportMatch');
+    });
+
+    // Under GATE_ADMIN_MFA=true, an MFA-enrolled admin's non-MFA subscription is ineligible.
+    const prevMfa = process.env.GATE_ADMIN_MFA;
+    process.env.GATE_ADMIN_MFA = 'true';
+    try {
+      db.mockImplementation((table) => {
+        if (table === 'technicians') {
+          return chain([{ id: 1, active: true, role: 'admin', auth_token_version: 3, mfa_enabled_at: '2026-11-01T00:00:00Z', name: 'MFA Admin' }]);
+        }
+        if (table === 'push_subscriptions') return chain([{ id: 's-ios', active: true, platform: 'ios', staff_token_version: 3, staff_mfa: false }]);
+        if (table === 'notification_preferences') return chain([]);
+        if (table === 'notifications') return chain([{ c: '3' }]);
+        return chain([]);
+      });
+      await withApp(adminNotificationsRouter, '/api/admin/notifications', async (baseUrl) => {
+        const res = await fetch(`${baseUrl}/api/admin/notifications/diagnose`);
+        const json = await res.json();
+        expect(res.status).toBe(200);
+        expect(json.checks.pushSubscriptions).toMatchObject({ ok: true, active: 1 });
+        expect(json.checks.pushTransportMatch).toMatchObject({ ok: false, active: 1, eligible: 0, reachable: 0 });
+        expect(json.summary).toContain('pushTransportMatch');
+      });
+    } finally {
+      if (prevMfa === undefined) delete process.env.GATE_ADMIN_MFA;
+      else process.env.GATE_ADMIN_MFA = prevMfa;
+    }
   });
 
   test('flags pushTransportMatch in summary when active subscriptions have no matching configured transport', async () => {

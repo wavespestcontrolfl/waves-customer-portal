@@ -1857,10 +1857,11 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
       if (enabledUserIds.length > 0) {
         const claim = await claimBelllessKeyedPush({
-          triggerKey, dedupeKey, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
+          triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
         });
         if (!claim.claimed) return { ...stats, deduped: true };
         belllessClaimKey = claim.key;
+        const newlyDeliveredIds = [];
         const wantsSoundByUser = new Map(
           activeAdmins.map((u) => {
             const pref = prefsByUser.get(u.id);
@@ -1979,12 +1980,17 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
           // beforeHandoff (optional): the push service's own check before EACH device's handoff (push-notifications.js).
           // A false answer, or a throw, skips that device and every later one, so a change made while an earlier
           // device's request runs still stops the rest.
-          { beforeDispatch, ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}), ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}) },
+          {
+            beforeDispatch,
+            ...(typeof beforeHandoff === 'function' ? { beforeHandoff } : {}),
+            ...(deliveredSubscriptionIds ? { deliveredSubscriptionIds } : {}),
+            ...(belllessClaimKey ? { onDelivered: (sub) => { if (sub?.id) newlyDeliveredIds.push(sub.id); } } : {}),
+          },
         );
         if (dedupeKey && stats.push?.failed > 0) stats.retryable = true;
+        await finalizeBelllessKeyedPush(belllessClaimKey, stats, newlyDeliveredIds);
         // Stopped before any device: nothing went. A fan-out beforeHandoff stopped part way keeps its count.
         if (stats.push?.superseded && !stats.push.sent) {
-          await releaseBelllessKeyedPush(belllessClaimKey, false);
           stats.push = { sent: 0, skipped: 'superseded_before_push' };
         }
       }
@@ -2005,28 +2011,57 @@ async function triggerNotification(triggerKey, payload = {}, { beforePush = null
 
 const BELLLESS_PUSH_CLAIM_PREFIX = 'notif_push_dedupe:';
 
-function belllessPushClaimKey(triggerKey, dedupeKey) {
-  const raw = `${BELLLESS_PUSH_CLAIM_PREFIX}${triggerKey}:${dedupeKey}`;
+function belllessPushClaimKey(triggerKey, token) {
+  const raw = `${BELLLESS_PUSH_CLAIM_PREFIX}${triggerKey}:${token}`;
   if (raw.length <= 200) return raw;
   const hash = require('crypto').createHash('sha256').update(raw).digest('hex');
   return `${BELLLESS_PUSH_CLAIM_PREFIX}${hash}`;
 }
 
+function resolveBelllessClaimToken({ triggerKey, dedupeKey, payload, refreshOnDedupe }) {
+  // Rolling thread triggers (sms_reply, tracking-line new_lead, or any
+  // refreshOnDedupe caller) reuse one thread dedupeKey across distinct messages.
+  // Key the push claim by per-message Twilio MessageSid when present, and never
+  // suppress future messages on a shared thread key.
+  if (payload?.twilioSid) return `twilio:${payload.twilioSid}`;
+  if (refreshOnDedupe || triggerKey === 'sms_reply' || triggerKey === 'new_lead') return null;
+  return dedupeKey || null;
+}
+
 // When every active admin disabled bells (push-only preference), writeBell never
 // runs so notifications.dedupe_key cannot suppress a replayed keyed push. Claim
-// the keyed push in sms_send_claims so replays stay single-shot independently of
-// bell visibility.
+// the keyed push in sms_send_claims (retained 30d by pruneSmsSendClaims) so
+// replays stay single-shot independently of bell visibility.
 async function claimBelllessKeyedPush({
-  triggerKey, dedupeKey, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
+  triggerKey, dedupeKey, payload, refreshOnDedupe, pushOnly, pushOnDedupe, deliveredSubscriptionIds, anyBellEnabled, enabledUserIds,
 }) {
   if (!dedupeKey || pushOnly || pushOnDedupe || Array.isArray(deliveredSubscriptionIds) || anyBellEnabled || !enabledUserIds.length) {
     return { claimed: true, key: null };
   }
-  if (typeof db.raw !== 'function') return { claimed: true, key: null };
-  const key = belllessPushClaimKey(triggerKey, dedupeKey);
+  const token = resolveBelllessClaimToken({ triggerKey, dedupeKey, payload, refreshOnDedupe });
+  if (!token || typeof db.raw !== 'function') return { claimed: true, key: null };
+  const key = belllessPushClaimKey(triggerKey, token);
   const { takeSendClaim } = require('./sms-send-claims');
   const claimed = await takeSendClaim(key, db);
   return { claimed, key };
+}
+
+// Confirmed zero-delivery failures (all devices failed or superseded before
+// delivery) release the claim so the retry can contact devices. Partial
+// deliveries keep the claim and surface deliveredSubscriptionIds so callers
+// retrying remaining devices can pass deliveredSubscriptionIds without
+// double-pushing already-delivered devices.
+async function finalizeBelllessKeyedPush(claimKey, stats, newlyDeliveredIds) {
+  if (!claimKey) return;
+  const sent = Number(stats.push?.sent) || 0;
+  const failed = Number(stats.push?.failed) || 0;
+  if (sent === 0 && (failed > 0 || stats.push?.superseded)) {
+    await releaseBelllessKeyedPush(claimKey, false);
+    return;
+  }
+  if (sent > 0 && failed > 0 && newlyDeliveredIds.length > 0) {
+    stats.deliveredSubscriptionIds = [...new Set(newlyDeliveredIds)];
+  }
 }
 
 async function releaseBelllessKeyedPush(claimKey, handoffStarted) {

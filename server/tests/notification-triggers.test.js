@@ -1742,6 +1742,113 @@ describe('registry labels on the bell row', () => {
     expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(1);
   });
 
+  test('push-only prefs: distinct SMS thread messages push separately by twilioSid while replay of the second is deduped', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const claims = new Set();
+    db.raw = jest.fn(async (sql, params) => {
+      if (/INSERT INTO sms_send_claims/i.test(sql)) {
+        const key = params[0];
+        if (claims.has(key)) return { rows: [] };
+        claims.add(key);
+        return { rows: [{ id: claims.size }] };
+      }
+      return { rows: [] };
+    });
+    db.mockImplementation((table) => (
+      table === 'technicians' ? tableMock([{ id: 'admin-1', role: 'admin' }])
+        : table === 'notification_preferences'
+          ? tableMock([{ admin_user_id: 'admin-1', trigger_key: 'sms_reply', bell_enabled: false, push_enabled: true, sound_enabled: true }])
+          : tableMock([])
+    ));
+    PushService.sendToAdminUsers.mockClear();
+
+    await triggerNotification(
+      'sms_reply',
+      { customerName: 'Alex', customerId: 'cust-1', message: 'First text', twilioSid: 'SM-thread-1' },
+      { dedupeKey: 'inbound-sms:cust-1', refreshOnDedupe: true },
+    );
+    await triggerNotification(
+      'sms_reply',
+      { customerName: 'Alex', customerId: 'cust-1', message: 'Second text', twilioSid: 'SM-thread-2' },
+      { dedupeKey: 'inbound-sms:cust-1', refreshOnDedupe: true },
+    );
+    const replaySecond = await triggerNotification(
+      'sms_reply',
+      { customerName: 'Alex', customerId: 'cust-1', message: 'Second text', twilioSid: 'SM-thread-2' },
+      { dedupeKey: 'inbound-sms:cust-1', refreshOnDedupe: true },
+    );
+
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(2);
+    expect(replaySecond.deduped).toBe(true);
+  });
+
+  test('push-only prefs: zero-delivery provider failure releases claim for retry; partial delivery reports deliveredSubscriptionIds', async () => {
+    const PushService = PushServiceHeld;
+    const bellPolicy = require('../services/notification-bell-policy');
+    bellPolicy.clearOverrideCache();
+    spy(bellPolicy, 'isBellPolicyEnabled').mockReturnValue(false);
+    const claims = new Set();
+    db.raw = jest.fn(async (sql, params) => {
+      if (/INSERT INTO sms_send_claims/i.test(sql)) {
+        const key = params[0];
+        if (claims.has(key)) return { rows: [] };
+        claims.add(key);
+        return { rows: [{ id: claims.size }] };
+      }
+      return { rows: [] };
+    });
+    db.mockImplementation((table) => {
+      if (table === 'technicians') return tableMock([{ id: 'admin-1', role: 'admin' }]);
+      if (table === 'notification_preferences') {
+        return tableMock([{ admin_user_id: 'admin-1', trigger_key: 'relay_unbooked_call', bell_enabled: false, push_enabled: true, sound_enabled: true }]);
+      }
+      if (table === 'sms_send_claims') {
+        return { where: ({ claim_key: k }) => ({ del: async () => { claims.delete(k); return 1; } }) };
+      }
+      return tableMock([]);
+    });
+
+    // Zero-delivery failure releases claim so retry runs cleanly.
+    PushService.sendToAdminUsers.mockClear();
+    PushService.sendToAdminUsers
+      .mockResolvedValueOnce({ sent: 0, failed: 1, subscriptions: 1 })
+      .mockImplementationOnce(async (_ids, _payloadFor, opts) => {
+        opts?.onDelivered?.({ id: 'sub-1' });
+        return { sent: 1, failed: 1, subscriptions: 2 };
+      })
+      .mockResolvedValueOnce({ sent: 1, failed: 0, subscriptions: 2 });
+
+    const failedAll = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1' },
+    );
+    expect(failedAll.retryable).toBe(true);
+    expect(claims.size).toBe(0);
+
+    // Retry hits partial delivery (sub-1 ok, sub-2 failed): keeps claim and reports deliveredSubscriptionIds.
+    const partial = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1' },
+    );
+    expect(partial.retryable).toBe(true);
+    expect(partial.deliveredSubscriptionIds).toEqual(['sub-1']);
+    expect(claims.size).toBe(1);
+
+    // Caller retries with deliveredSubscriptionIds: bypasses bell-less claim to finish sub-2.
+    const finished = await triggerNotification(
+      'relay_unbooked_call',
+      { from: '+19415550199', callSid: 'CA-retry-1' },
+      { dedupeKey: 'relay-unbooked:CA-retry-1', deliveredSubscriptionIds: partial.deliveredSubscriptionIds },
+    );
+    expect(finished.deduped).toBeUndefined();
+    expect(PushService.sendToAdminUsers).toHaveBeenCalledTimes(3);
+  });
+
   test('sandy_transfer_no_context pushOnly banner sends committed row words with waves-missed-call.caf sound', async () => {
     const PushService = PushServiceHeld;
     const bellPolicy = require('../services/notification-bell-policy');

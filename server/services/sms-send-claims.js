@@ -16,20 +16,31 @@
 const db = require('../models/db');
 
 const WEEKLY_CLAIM_PREFIXES = ['bi_briefing_sms:'];
+// Bell-less keyed push dedupe claims (notification-triggers.js): retained 30 days
+// so webhook/call replays across the full replay window stay single-shot even after
+// daily SMS claim cleanup runs.
+const MONTHLY_CLAIM_PREFIXES = ['notif_push_dedupe:'];
 
 // async: a sync throw while building the query becomes a rejection, which
 // the routes' fire-and-forget `.catch(() => {})` already swallows.
 async function pruneSmsSendClaims(conn = db) {
+  const longerPrefixes = [...WEEKLY_CLAIM_PREFIXES, ...MONTHLY_CLAIM_PREFIXES];
   return conn('sms_send_claims')
     .where((q) => {
       q.where((daily) => {
         daily.where('created_at', '<', conn.raw("NOW() - interval '1 day'"));
-        for (const prefix of WEEKLY_CLAIM_PREFIXES) daily.whereRaw('left(claim_key, ?) <> ?', [prefix.length, prefix]);
+        for (const prefix of longerPrefixes) daily.whereRaw('left(claim_key, ?) <> ?', [prefix.length, prefix]);
       });
       for (const prefix of WEEKLY_CLAIM_PREFIXES) {
         q.orWhere((weekly) => {
           weekly.whereRaw('left(claim_key, ?) = ?', [prefix.length, prefix]);
           weekly.where('created_at', '<', conn.raw("NOW() - interval '8 days'"));
+        });
+      }
+      for (const prefix of MONTHLY_CLAIM_PREFIXES) {
+        q.orWhere((monthly) => {
+          monthly.whereRaw('left(claim_key, ?) = ?', [prefix.length, prefix]);
+          monthly.where('created_at', '<', conn.raw("NOW() - interval '30 days'"));
         });
       }
     })
@@ -54,4 +65,4 @@ async function releaseSendClaim(claimKey, conn = db) {
   await conn('sms_send_claims').where({ claim_key: claimKey }).del();
 }
 
-module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, WEEKLY_CLAIM_PREFIXES };
+module.exports = { pruneSmsSendClaims, takeSendClaim, releaseSendClaim, WEEKLY_CLAIM_PREFIXES, MONTHLY_CLAIM_PREFIXES };

@@ -404,16 +404,37 @@ function buildPushTransportChecks(pushStatus) {
   };
 }
 
-function summarizeSubscriptions(subs, transportChecks) {
+function isEligibleStaffSubscription(sub, tech) {
+  if (!sub?.active || !tech || !tech.active) return false;
+  if (tech.role && tech.role !== 'admin' && tech.role !== 'technician') return false;
+  if (tech.auth_token_version !== undefined && tech.auth_token_version !== null) {
+    if (sub.staff_token_version === undefined || sub.staff_token_version === null) return false;
+    if (Number(sub.staff_token_version) !== Number(tech.auth_token_version)) return false;
+  }
+  const { adminMfaLive, adminMfaEnforceLive } = require('../services/staff-mfa');
+  if (adminMfaLive()) {
+    if (tech.mfa_enabled_at && sub.staff_mfa !== true) return false;
+    if (adminMfaEnforceLive() && tech.role === 'admin' && !tech.mfa_enabled_at) return false;
+  }
+  return true;
+}
+
+function summarizeSubscriptions(subs, transportChecks, tech) {
   const activeSubs = subs.filter((s) => s.active);
   const byPlatform = { web: 0, ios: 0, android: 0 };
+  const eligibleByPlatform = { web: 0, ios: 0, android: 0 };
+  let eligibleCount = 0;
   for (const s of activeSubs) {
     const p = s.platform === 'ios' || s.platform === 'android' ? s.platform : 'web';
     byPlatform[p] += 1;
+    if (isEligibleStaffSubscription(s, tech)) {
+      eligibleCount += 1;
+      eligibleByPlatform[p] += 1;
+    }
   }
-  const reachable = (transportChecks?.vapid?.ok ? byPlatform.web : 0)
-    + (transportChecks?.apns?.ok ? byPlatform.ios : 0)
-    + (transportChecks?.fcm?.ok ? byPlatform.android : 0);
+  const reachable = (transportChecks?.vapid?.ok ? eligibleByPlatform.web : 0)
+    + (transportChecks?.apns?.ok ? eligibleByPlatform.ios : 0)
+    + (transportChecks?.fcm?.ok ? eligibleByPlatform.android : 0);
   return {
     pushSubscriptions: {
       ok: activeSubs.length > 0,
@@ -425,8 +446,10 @@ function summarizeSubscriptions(subs, transportChecks) {
     pushTransportMatch: {
       ok: activeSubs.length === 0 || reachable > 0,
       active: activeSubs.length,
+      eligible: eligibleCount,
       reachable,
       byPlatform,
+      eligibleByPlatform,
     },
   };
 }
@@ -450,12 +473,13 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     report.checks.webPushModule = { ok: webpushLoaded };
 
     // 3. technicians.active — the trigger loop skips inactive users entirely
+    let targetTech = null;
     try {
-      const tech = await db('technicians').where({ id: userId }).first();
+      targetTech = await db('technicians').where({ id: userId }).first();
       report.checks.technicianActive = {
-        ok: Boolean(tech && tech.active),
-        active: tech ? tech.active : null,
-        name: tech ? tech.name : null,
+        ok: Boolean(targetTech && targetTech.active),
+        active: targetTech ? targetTech.active : null,
+        name: targetTech ? targetTech.name : null,
       };
     } catch (err) {
       report.checks.technicianActive = { ok: false, error: err.message };
@@ -464,7 +488,7 @@ router.get('/diagnose', requireAdmin, async (req, res, next) => {
     // 4. push_subscriptions — auto-deactivated rows (410/404) are a common cause
     try {
       const subs = await db('push_subscriptions').where({ admin_user_id: userId });
-      Object.assign(report.checks, summarizeSubscriptions(subs, report.checks));
+      Object.assign(report.checks, summarizeSubscriptions(subs, report.checks, targetTech));
     } catch (err) {
       report.checks.pushSubscriptions = { ok: false, error: err.message };
     }
