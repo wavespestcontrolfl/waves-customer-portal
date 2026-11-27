@@ -9763,7 +9763,7 @@ function CustomerReminderContacts({ customerId, isAdmin }) {
         { method: "POST" },
       );
       if (seqRef.current === seq && response?.reminderContact) {
-        setList((prev) => prev.map((x) => (x.id === person.id ? response.reminderContact : x)));
+        setList((prev) => prev.map((x) => (x.id === person.id ? { ...x, ...response.reminderContact } : x)));
       }
     } catch (e) {
       if (seqRef.current === seq) setErr(e.message || "Could not update this person");

@@ -525,7 +525,7 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
           expect(sentTo()).toEqual([BOB]);
           const before = (await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId])).length;
           const stopped = await stopBob();
-          expect(stopped).toMatchObject({ stopped: true, stoppedBy: 'customer' });
+          expect(stopped).toMatchObject({ stopped: true, stoppedBy: 'customer', changed: true });
           expect(await VisitRecipient.contactsForVisit(visitId, 'reminder_24h')).toEqual([]);
           expect(await VisitRecipient.contactsForVisit(otherVisitId, 'reminder_24h')).toEqual([]);
           expect((await db('visit_text_recipients').whereIn('scheduled_service_id', [visitId, otherVisitId])).length).toBe(before);
@@ -574,6 +574,10 @@ const extraction = (...entries) => ({ secondary_contacts: entries });
             expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: false })]);
             await db('customers').where({ id: customerId }).update({ service_contacts_consent_at: new Date() });
             expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ inContacts: true, hasAppAccess: true, canGiveAppAccess: false })]);
+            // an inactive profile admits no contact login
+            await db('customers').where({ id: customerId }).update({ active: false });
+            expect(await VisitRecipient.listReminderContacts(customerId)).toEqual([expect.objectContaining({ hasAppAccess: false })]);
+            await db('customers').where({ id: customerId }).update({ active: true });
           } finally {
             delete process.env.GATE_CONTACT_LOGIN;
           }

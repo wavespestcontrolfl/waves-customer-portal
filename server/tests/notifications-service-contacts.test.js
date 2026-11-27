@@ -56,6 +56,20 @@ describe('on-location contact slot helpers', () => {
     });
   });
 
+  test('serviceContactSlotUpdates gives a number a call recorded as a tenant the tenant role, new or matched (owner 2026-11-27)', () => {
+    const before = {
+      service_contact_name: 'Sam Spouse', service_contact_phone: '+15553330000', service_contact_email: '', service_contact_role: 'spouse_partner',
+    };
+    const updates = serviceContactSlotUpdates([
+      { name: 'Sam Spouse', phone: '+15553330000', email: '' },
+      // added from the app's "Give app access": a new slot would carry no role
+      { name: 'Terry Tenant', phone: '(555) 222-0000', email: '' },
+    ], before, new Set(['5552220000']));
+    expect(updates.service_contact_role).toBe('spouse_partner');
+    // a tenant never reaches the service reports (slotWithheldFromReports)
+    expect(updates.service_contact2_role).toBe('tenant');
+  });
+
   test('serviceContactSlotUpdates clears every slot (and role) for an empty list', () => {
     const before = {
       service_contact_name: 'Terry Tenant', service_contact_phone: '+15552220000',

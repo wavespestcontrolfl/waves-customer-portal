@@ -14,6 +14,8 @@
 
 jest.mock('../models/db', () => jest.fn());
 jest.mock('../services/logger', () => ({ info: jest.fn(), warn: jest.fn(), error: jest.fn() }));
+// The holder's contact save reads which numbers a call recorded as tenants (none here).
+jest.mock('../services/call-visit-recipient', () => ({ tenantPhoneKeys: jest.fn(async () => new Set()) }));
 jest.mock('../services/account-membership-email', () => ({ sendAccountUpdated: jest.fn(() => Promise.resolve()) }));
 jest.mock('../services/recipient-optin', () => ({
   onRecipientConfirmed: jest.fn(() => Promise.resolve()),

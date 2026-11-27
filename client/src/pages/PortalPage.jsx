@@ -5494,7 +5494,7 @@ function ReminderContactsSection({ property, enabled, savedContactsKey, editorLo
         : await api.stopReminderContact(profileId, person.id);
       if (res?.reminderContact) {
         readSeq.current += 1;
-        setList((prev) => prev.map((x) => (x.id === person.id ? res.reminderContact : x)));
+        setList((prev) => prev.map((x) => (x.id === person.id ? { ...x, ...res.reminderContact } : x)));
       }
     } catch (err) {
       console.error(err);

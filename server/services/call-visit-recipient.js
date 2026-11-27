@@ -954,14 +954,11 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
   if (!rows.length) return [];
   const customer = await conn('customers').where({ id: customerId }).first();
   const { getServiceContactSlots, phoneKeyOf, contactSlotMayLogIn, unconsentedSlotPhoneKeys } = require('./customer-contact');
-  const loginLive = require('../config/feature-gates').contactLoginLive();
+  // Contact login admits only an active, undeleted profile.
+  const loginLive = require('../config/feature-gates').contactLoginLive() && !!customer && customer.active === true && !customer.deleted_at;
   // Numbers waiting on their own YES reply: the holder's save keeps that hold, so it cannot give sign-in.
   const held = unconsentedSlotPhoneKeys(customer || {});
-  // A number some call recorded as a TENANT on this customer (any visit row, or the list's own first role): the contacts
-  // save stores no role, and a tenant must never reach the service reports.
-  const tenantKeys = new Set((await conn(TABLE).where({ customer_id: customerId }).whereRaw("lower(trim(coalesce(role, ''))) = 'tenant'")
-    .distinct('phone_key')).map((r) => r.phone_key));
-  for (const row of rows) if (String(row.role || '').trim().toLowerCase() === 'tenant') tenantKeys.add(row.phone_key);
+  const tenantKeys = await tenantPhoneKeys(customerId, { conn });
   // A number that is someone's own Waves account signs in as that account (the login's holder-first rule), never as a contact.
   const ownAccount = new Set();
   if (loginLive) {
@@ -991,6 +988,21 @@ async function listReminderContacts(customerId, { conn = db } = {}) {
 }
 
 /**
+ * Numbers a call recorded as a TENANT on this customer: any visit row or the list's own role. The holder's contacts save
+ * gives such a number the tenant role in its slot (routes/notifications.js serviceContactSlotUpdates), so a tenant never
+ * reaches the service reports, and the app offers them no "Give app access".
+ */
+async function tenantPhoneKeys(customerId, { conn = db } = {}) {
+  if (!customerId) return new Set();
+  const isTenant = "lower(trim(coalesce(role, ''))) = 'tenant'";
+  const [visitRows, listRows] = await Promise.all([
+    conn(TABLE).where({ customer_id: customerId }).whereRaw(isTenant).distinct('phone_key'),
+    conn(REMINDER_TABLE).where({ customer_id: customerId }).whereRaw(isTenant).distinct('phone_key'),
+  ]);
+  return new Set([...visitRows, ...listRows].map((r) => r.phone_key));
+}
+
+/**
  * Stop or restart the visit texts for one person on the customer's list. `by`: 'customer' (the account holder in the
  * app) or 'staff'. Scoped to the customer: an id of another customer's list changes nothing and answers null. A stop
  * is a mark, never a delete; a later call never clears it. Returns the updated entry, or null when not found.
@@ -1001,16 +1013,19 @@ async function setReminderContactStopped({ customerId, id, stopped, by, conn = d
   const query = conn(REMINDER_TABLE).where({ id, customer_id: customerId });
   // Only a real change writes: a repeat stop keeps the first stop's time and who made it; a restart needs a stop.
   if (stopped) query.whereNull('stopped_at'); else query.whereNotNull('stopped_at');
-  const updated = await query.update(patch).returning('id');
-  if (!updated.length && !(await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).first('id'))) return null;
-  const want = String(id).toLowerCase();
-  const entry = (await listReminderContacts(customerId, { conn })).find((e) => String(e.id).toLowerCase() === want) || null;
-  // `changed`: false when the row already was in that state (the caller audits real changes only).
-  return entry && { ...entry, changed: updated.length > 0 };
+  const cols = ['id', 'stopped_at', 'stopped_by'];
+  const updated = await query.update(patch).returning(cols);
+  // The answer is the row as written (or as it stands, for a no-op): no other read, so a committed change is never
+  // reported as a failure. The caller merges it into the entry it shows. `changed`: false when nothing was written
+  // (the caller audits real changes only).
+  const row = updated[0] || await conn(REMINDER_TABLE).where({ id, customer_id: customerId }).first(cols);
+  if (!row) return null;
+  return { id: row.id, stopped: !!row.stopped_at, stoppedAt: row.stopped_at || null, stoppedBy: row.stopped_by || null, changed: updated.length > 0 };
 }
 
 module.exports = {
   listReminderContacts,
+  tenantPhoneKeys,
   setReminderContactStopped,
   gateLive,
   SOURCE,

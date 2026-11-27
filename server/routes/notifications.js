@@ -75,7 +75,7 @@ function serviceContactsPayload(customerRow) {
 
 // Map an ordered contact list (≤3, already trimmed of empty entries) onto the
 // slot columns, nulling everything past the last filled slot.
-function serviceContactSlotUpdates(contacts = [], before = {}) {
+function serviceContactSlotUpdates(contacts = [], before = {}, tenantKeys = new Set()) {
   const updates = {};
   const slotColumns = [
     ['service_contact_name', 'service_contact_phone', 'service_contact_email', 'service_contact_role'],
@@ -107,7 +107,9 @@ function serviceContactSlotUpdates(contacts = [], before = {}) {
     updates[nameCol] = contact?.name || null;
     updates[phoneCol] = contact?.phone || null;
     updates[emailCol] = contact?.email || null;
-    updates[roleCol] = matchPrev(contact)?.role || null;
+    // A number a call recorded as a TENANT on this customer stays a tenant in the slot (deny wins): a tenant never reaches
+    // the service reports (slotWithheldFromReports), however the person was added (owner 2026-11-27, Give app access).
+    updates[roleCol] = contact && tenantKeys.has(phoneKey(contact.phone)) ? 'tenant' : (matchPrev(contact)?.role || null);
   });
   return updates;
 }
@@ -1259,20 +1261,20 @@ async function reminderContactProfile(req, res) {
   return req.params.customerId;
 }
 
-const REMINDER_PARAMS = Joi.object({
-  customerId: Joi.string().guid().required(),
-  reminderId: Joi.string().guid(),
-});
+const UUID_PARAM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// Both ids are uuids (a bad one is a 400, never a database error).
+function reminderParamsValid(params) {
+  return UUID_PARAM.test(String(params.customerId || '')) && (params.reminderId === undefined || UUID_PARAM.test(String(params.reminderId)));
+}
 
 router.get('/reminder-contacts/:customerId', async (req, res, next) => {
   try {
-    await REMINDER_PARAMS.validateAsync(req.params);
+    if (!reminderParamsValid(req.params)) return res.status(400).json({ error: 'Invalid request' });
     const customerId = await reminderContactProfile(req, res);
     if (!customerId) return undefined;
     const VisitRecipient = require('../services/call-visit-recipient');
     res.json({ reminderContacts: await VisitRecipient.listReminderContacts(customerId) });
   } catch (err) {
-    if (err.isJoi) return res.status(400).json({ error: 'Invalid request' });
     next(err);
   }
   return undefined;
@@ -1281,7 +1283,7 @@ router.get('/reminder-contacts/:customerId', async (req, res, next) => {
 for (const [action, stopped] of [['stop', true], ['restart', false]]) {
   router.post(`/reminder-contacts/:customerId/:reminderId/${action}`, async (req, res, next) => {
     try {
-      await REMINDER_PARAMS.validateAsync(req.params);
+      if (!reminderParamsValid(req.params)) return res.status(400).json({ error: 'Invalid request' });
       const customerId = await reminderContactProfile(req, res);
       if (!customerId) return undefined;
       const VisitRecipient = require('../services/call-visit-recipient');
@@ -1289,8 +1291,7 @@ for (const [action, stopped] of [['stop', true], ['restart', false]]) {
       if (!entry) return res.status(404).json({ error: 'Not found' });
       res.json({ reminderContact: entry });
     } catch (err) {
-      if (err.isJoi) return res.status(400).json({ error: 'Invalid request' });
-      next(err);
+        next(err);
     }
     return undefined;
   });
@@ -1378,7 +1379,8 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
         priorPhones: [beforeRow.service_contact_phone, beforeRow.service_contact2_phone, beforeRow.service_contact3_phone],
         propertyAddress: [beforeRow.address_line1, beforeRow.city].filter(Boolean).join(', '),
       } : null;
-      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow);
+      const tenantKeys = await require('../services/call-visit-recipient').tenantPhoneKeys(req.params.customerId);
+      const slotUpdates = serviceContactSlotUpdates(contacts, beforeRow, tenantKeys);
       const consentUpdates = serviceContactConsentUpdates(contacts, updates.serviceContactsConsent);
       let lockedBefore = beforeRow;
       let lockedAt = null;
@@ -1458,7 +1460,7 @@ router.put('/property-preferences/:customerId', async (req, res, next) => {
           error: 'Saving a contact with a phone number requires confirming the text-message consent statement. Refresh the portal and try again.',
         });
       }
-      const slot1 = serviceContactSlotUpdates([contact], beforeRow);
+      const slot1 = serviceContactSlotUpdates([contact], beforeRow, await require('../services/call-visit-recipient').tenantPhoneKeys(req.params.customerId));
       // Same artifact rule AND same claim-in-transaction opt-in flow as the
       // list save — the legacy shape must not be a loophole that enrolls a
       // new phone without the confirmation flow or its rollback semantics.
