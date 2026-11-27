@@ -54,6 +54,7 @@ const { parseAmazonDeliveredEmail, AMAZON_DELIVERY_FROM } = require('./amazon-de
 const { processReceiptLine, parseMultipack, PACK_CLAIM_RE } = require('./receipt-processor');
 const { alertUndeliveredShipments, closeDeliveredUndeliveredBells } = require('./undelivered-shipments');
 const siteOne = require('./siteone-invoices');
+const { reconcileFailedLineAlert, failedLineEntry } = require('./failed-lines-alert');
 const { LIVE_RESTOCK_STATUSES } = require('../procurement/live-restock-request');
 const { raiseAdminAlert, breaksAlertRules, cutAtWord, MAX_WHY_CHARS } = require('../admin-alert-compose');
 const { raiserFor } = require('../admin-alert-injected');
@@ -116,7 +117,8 @@ const heldDoneWhen = (status) => HELD_DONE_WHEN[status] || 'line_logged_by_hand'
 // array is always truthy, so runPurchaseReceiptRestockSweep's
 // `if (result.skipped)` would swallow every processed email.
 function emptySummary() {
-  const summary = { alreadyProcessed: [], errors: [] };
+  // failedLines: the lines in `errors` that threw, with what the failed-lines alert needs to carry them past the lookback.
+  const summary = { alreadyProcessed: [], errors: [], failedLines: [] };
   for (const bucket of Object.values(SUMMARY_BUCKETS)) summary[bucket] = [];
   return summary;
 }
@@ -125,7 +127,10 @@ function emptySummary() {
 function summarize(result) {
   const held = Object.values(SUMMARY_BUCKETS).filter((bucket) => !['logged', 'unmatched', 'agentPending'].includes(bucket))
     .reduce((sum, bucket) => sum + result[bucket].length, result.undelivered.length);
-  return { logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length };
+  return {
+    logged: result.logged.length, held, errors: result.errors.length, agentPending: result.agentPending.length,
+    unappliedFailedLines: result.unappliedFailedLines || 0,
+  };
 }
 
 function displayUnit(unit) {
@@ -261,6 +266,7 @@ async function recordLineOutcome({ receipt, email, orderNumber, shipmentKey, ite
   } catch (err) {
     logger.error(`[purchase-receipts] item "${item.title}" on email ${email.id} failed: ${err.message}`);
     summary.errors.push({ title: item.title, message: err.message });
+    summary.failedLines.push(failedLineEntry({ receipt, email, orderNumber, shipmentKey, lineNo, item, err }));
     return;
   }
   const bucket = SUMMARY_BUCKETS[outcome.status];
@@ -463,6 +469,9 @@ async function runPurchaseReceiptRestockSweep({ notify: notifyAdmin } = {}) {
   await processSiteOneInvoices({ floor, since, now, notifyAdmin, totals });
   await closeLoggedDeliveryBells().catch((err) => logger.warn(`[purchase-receipts] close pass failed: ${err.message}`));
   await closeDeliveredUndeliveredBells().catch((err) => logger.warn(`[purchase-receipts] undelivered close pass failed: ${err.message}`));
+  // job_health stays 'success' when single lines fail (the run worked), so the alert is what carries them, past the lookback too.
+  totals.unappliedFailedLines = await reconcileFailedLineAlert({ failed: totals.failedLines, floor })
+    .catch((err) => { logger.error(`[purchase-receipts] failed-lines alert failed: ${err.message}`); return totals.failedLines.length; });
   return totals;
 }
 

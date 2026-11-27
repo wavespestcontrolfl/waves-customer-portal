@@ -4406,9 +4406,10 @@ function initScheduledJobs() {
         // A skipped sweep (no valid PURCHASE_RECEIPT_SINCE) stops the agent
         // too: clearing the cutoff is a kill switch for every receipt write.
         if (result.skipped) return;
-        const { logged, held, errors } = summarize(result);
-        if (logged || held || errors) {
-          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s)`);
+        const { logged, held, errors, unappliedFailedLines } = summarize(result);
+        if (logged || held || errors || unappliedFailedLines) {
+          // job_health records this run as a success even when single lines failed; the failed-lines alert carries them.
+          logger.info(`[purchase-receipt-restock] ${logged} logged, ${held} held for a person, ${errors} error(s), ${unappliedFailedLines} failed line(s) still not applied`);
         }
         // Inventory agent (GATE_INVENTORY_AGENT): resolves lines the sweep
         // above just handed off as agent_pending (unmatched/needs_size/
