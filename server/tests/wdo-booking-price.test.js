@@ -204,13 +204,18 @@ describe('the office booking keeps the price a person gives', () => {
     expect(trx).not.toHaveBeenCalled();
   });
 
-  test('a WDO main line with add-on lines keeps the catalog price, and nothing is read (its WDO filing bills the flat fee)', async () => {
+  test('a WDO main line beside a paid add-on line keeps the catalog price; a free one leaves the table price (the WDO filing fills its fee from the visit price only when the inspection is the only paid line)', async () => {
     lookup.mockResolvedValue(record(1600, 'block'));
     const PEST = { id: 'svc-pest', service_key: 'one_time_pest', category: 'pest_control', base_price: '150.00' };
     wireDb({ customer_properties: undefined, customers: HOME, services: (cond) => (cond.id === 'svc-pest' ? PEST : WDO) });
-    const pricing = await bookBlankWdo({ serviceAddons: [{ serviceId: 'svc-pest', name: 'One-Time Pest', basePrice: 150, price: 150 }] });
-    expect(pricing.finalPrice).toBe(400);
-    expect(lookup).not.toHaveBeenCalled();
+    const pest = (basePrice) => [{ serviceId: 'svc-pest', name: 'One-Time Pest', basePrice, price: basePrice }];
+    expect((await bookBlankWdo({ serviceAddons: pest(150) })).finalPrice).toBe(400);
+    // The screen showed the catalog price for that line, and the save is checked against it.
+    expect((await bookBlankWdo({ serviceAddons: pest(150), wdoExpectedPrice: 250 })).finalPrice).toBe(400);
+    await expect(bookBlankWdo({ serviceAddons: pest(150), wdoExpectedPrice: 150 })).rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    // A free add-on line ($0, or left blank): the inspection is still the visit's only paid line.
+    expect((await bookBlankWdo({ serviceAddons: pest(0) })).finalPrice).toBe(150);
+    expect((await bookBlankWdo({ serviceAddons: pest(null), wdoExpectedPrice: 150 })).finalPrice).toBe(150);
     // The same inspection alone on its visit takes the table price.
     expect((await bookBlankWdo()).finalPrice).toBe(150);
   });
@@ -366,6 +371,22 @@ describe('phone bookings (the call pipeline, the voice agent, the new caller boo
     const pest = { service_key: 'one_time_pest' };
     expect(await wdoCallBookingPrice(CATALOG, { catalogRow: pest, customerId: CUSTOMER_ID, linkage: { address: ADDRESS } })).toBe(CATALOG);
     expect(lookup).not.toHaveBeenCalled();
+  });
+
+  test('a call booked at an address that is not the customer\'s home is priced on its own record: the home\'s commercial records do not apply there', async () => {
+    lookup.mockResolvedValue(record(2600, 'frame'));
+    const elsewhere = { propertyId: null, address: { ...ADDRESS, line1: '300 Sample Ct' } };
+    // The customer's primary property is a commercial site.
+    wireDb({ customers: HOME, customer_properties: { ...RENTAL, is_primary: true, occupancy_type: 'commercial' } });
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: elsewhere }))
+      .toMatchObject({ price: 200, source: 'wdo_table' });
+    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('300 Sample Ct'));
+    // A call for that commercial site itself: the catalog price stands.
+    const site = { line1: RENTAL.address_line1, line2: '', city: RENTAL.city, state: RENTAL.state, zip: RENTAL.zip };
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: { propertyId: null, address: site } })).toBe(CATALOG);
+    // A commercial account is commercial at any address.
+    wireDb({ customers: { ...HOME, waveguard_tier: 'commercial' }, customer_properties: undefined });
+    expect(await wdoCallBookingPrice(CATALOG, { catalogRow: WDO, customerId: CUSTOMER_ID, linkage: elsewhere })).toBe(CATALOG);
   });
 
   test('the call pipeline reads the table before its transaction, and keeps it only for the same home', async () => {

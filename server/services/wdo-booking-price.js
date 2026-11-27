@@ -59,11 +59,17 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, co
   const row = customer || (customerId ? await conn('customers').where({ id: customerId }).first() : null);
   const written = !propertyId && serviceAddress?.line1 ? serviceAddressText(serviceAddress) : null;
   if (!row) return written ? { address: written } : { refusal: 'no customer and no service address' };
-  const { customerAtBookingProperty } = require('./one-time-pest-booking-price');
+  const { customerAtBookingProperty, sameHome } = require('./one-time-pest-booking-price');
   const { addressForCustomer } = require('./customer-pricing-ai');
   const at = await customerAtBookingProperty(row, propertyId, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
-  if (at.commercial) return { refusal: 'the stored records call this a commercial property' };
+  // A written address that is not the customer's home is read on its own record: only the account's own tier calls it
+  // commercial, never the home's records (pre-push audit P0).
+  const writtenRow = written && { address_line1: serviceAddress.line1, address_line2: serviceAddress.line2 || null, city: serviceAddress.city, zip: serviceAddress.zip };
+  const commercial = writtenRow && !sameHome(writtenRow, at.customer)
+    ? require('./pricing-engine/commercial-helpers').normalizePropertyType(row.waveguard_tier) === 'commercial'
+    : at.commercial;
+  if (commercial) return { refusal: 'the stored records call this a commercial property' };
   return { address: written || addressForCustomer(at.customer) };
 }
 
@@ -209,11 +215,12 @@ function wdoTableNote(table) {
     .filter(Boolean).join(' ');
 }
 
-// A WDO inspection that is the main line of a visit with other lines keeps the catalog price (pre-push audit P0). Its WDO
-// filing bills the inspection fee, and the filing form fills that fee from the visit's price only when the inspection is
-// the visit's only paid line (wdoFeeSeedFromVisit, CreateProjectModal.jsx); a blank fee bills the flat default. A WDO
-// add-on line on another service's visit is billed with that visit's total, so it keeps the table price.
-const WDO_WITH_OTHER_LINES_NOTE = 'Other services are booked on this WDO visit, so the WDO line keeps the catalog price. Book the inspection as its own visit for the home size and construction price.';
+// A WDO inspection that is the main line of a visit with another paid line keeps the catalog price (pre-push audit P0). Its
+// WDO filing bills the inspection fee, and the filing form fills that fee from the visit's price only when the inspection
+// is the visit's only paid line (wdoFeeSeedFromVisit, CreateProjectModal.jsx); a blank fee bills the flat default. A free
+// line beside it changes nothing. A WDO add-on line on another service's visit is billed with that visit's total, so it
+// keeps the table price.
+const WDO_WITH_OTHER_LINES_NOTE = 'Other paid services are booked on this WDO visit, so the WDO line keeps the catalog price. Book the inspection as its own visit for the home size and construction price.';
 
 function operationalError(status, message, code) {
   return Object.assign(new Error(message), { status, statusCode: status, isOperational: true, ...(code ? { code } : {}) });

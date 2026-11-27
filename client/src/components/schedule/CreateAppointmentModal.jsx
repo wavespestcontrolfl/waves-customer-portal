@@ -2770,10 +2770,12 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const blankWdoLines = services.filter(lineIsBlankWdo).length;
   const hasBlankWdoLine = blankWdoLines > 0;
   // The appointments this form saves (the grouping helpers below are hoisted). A WDO line that is the main line of an
-  // appointment with other lines keeps the catalog price (the server's rule: the WDO filing's invoice could not carry
-  // the table price), so the question says so. A WDO add-on line keeps the table price.
+  // appointment with another paid line (a price above $0, or a line the server prices itself) keeps the catalog price
+  // (the server's rule: the WDO filing fills its fee from the visit's price only when the inspection is the only paid
+  // line), so the question says so. A free line beside it, or a WDO add-on line, keeps the table price.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
-  const wdoWithOtherLines = appointmentSubmitGroups.some((group) => group.lines.length > 1 && lineIsBlankWdo(group.lines[0]));
+  const lineIsPaid = (svc) => (lineHasEnteredPrice(svc) ? lineBaseAmount(svc) > 0 : lineIsServerPriced(svc));
+  const wdoWithOtherLines = appointmentSubmitGroups.some((group) => lineIsBlankWdo(group.lines[0]) && group.lines.slice(1).some(lineIsPaid));
   const wdoQuoteKey = blankWdoLines === 1 ? wdoQuoteQuery({
     customerId: selectedCustomer?.id,
     propertySettled: ['ready', 'hidden', 'error'].includes(bookingPropertyState),
@@ -4498,6 +4500,14 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setTimeout(() => setToast(''), wdoHold.holdMs);
         return;
       }
+      // A line or the property changed while the WDO price was re-read: this save would post the form as it was at the
+      // click, so it posts nothing (pre-push audit P1; Book checks its whole body the same way).
+      const latestForm = latestSaveRef.current;
+      if (unsavedBlankWdoLines > 0 && (latestForm.services !== services || latestForm.selectedPropertyId !== selectedPropertyId)) {
+        setToast('The booking changed while the WDO price was checked — check it, then save again');
+        setTimeout(() => setToast(''), 3200);
+        return;
+      }
       // Keep this as the final await before the first appointment POST.
       const recheckController = new AbortController();
       addressSubmitRecheckRef.current?.controller.abort();
@@ -5512,7 +5522,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // form as it is when it fires (a technician or note changed during the wait
   // is booked as shown), never the values from when the wait began.
   const latestSaveRef = useRef(null);
-  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine };
+  latestSaveRef.current = { handleSubmit, canSubmit, displayedTotal, hasAutoMosquitoLine, hasBlankWdoLine, services, selectedPropertyId };
   useEffect(() => {
     if (!pendingQuickAddSave) return undefined;
     if (selectedCustomerIdRef.current !== pendingQuickAddSave.customerId) {

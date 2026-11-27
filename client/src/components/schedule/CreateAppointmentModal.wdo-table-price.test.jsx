@@ -365,8 +365,8 @@ describe('a WDO line in the modal', () => {
     await waitFor(() => expect(hint()?.textContent).toBe(`Catalog price: $250.00. ${note}`));
   });
 
-  it('a WDO main line with another line asks for that, and the line shows the catalog price and why', async () => {
-    const note = 'Other services are booked on this WDO visit, so the WDO line keeps the catalog price.';
+  it('a WDO main line with another paid line asks for that, and the line shows the catalog price and why; a free line changes nothing', async () => {
+    const note = 'Other paid services are booked on this WDO visit, so the WDO line keeps the catalog price.';
     const fetcher = installFetch({
       quote: (body) => (body.withOtherLines === '1' ? { price: 250, source: 'catalog_base', basis: null, staffNote: note } : FRAME_2600),
     });
@@ -376,5 +376,35 @@ describe('a WDO line in the modal', () => {
     await addLine('Pest', /One-Time Pest Service/i);
     await waitFor(() => expect(hint()?.textContent).toBe(`Catalog price: $250.00. ${note}`));
     expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a', withOtherLines: '1' });
+    // The pest line made free ($0): the inspection is the only paid line again, so it takes the table price.
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '0' } });
+    await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
+    expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a' });
+  });
+
+  it('a line edited while Save re-reads the WDO price books nothing; the next save books what the form shows', async () => {
+    let holdReads = false;
+    const releases = [];
+    const fetcher = installFetch({
+      quote: () => (holdReads ? new Promise((resolve) => { releases.push(() => resolve(FRAME_2600)); }) : FRAME_2600),
+    });
+    mount();
+    await addWdoLine();
+    await waitFor(() => expect(hint()?.textContent).toContain('$200.00'));
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    holdReads = true;
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(releases).toHaveLength(1));
+    // The office types a price while the price is re-read.
+    fireEvent.change(screen.getByPlaceholderText('Auto (home size)'), { target: { value: '260' } });
+    releases.forEach((release) => release());
+    expect(await screen.findByText(/The booking changed while the WDO price was checked/)).toBeTruthy();
+    expect(schedulePosts(fetcher)).toHaveLength(0);
+    holdReads = false;
+    await waitFor(() => expect(saveButton().disabled).toBe(false));
+    fireEvent.click(saveButton());
+    await waitFor(() => expect(schedulePosts(fetcher)).toHaveLength(1));
+    expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', primaryLinePrice: 260 });
+    expect(schedulePosts(fetcher)[0]).not.toHaveProperty('wdoExpectedPrice');
   });
 });

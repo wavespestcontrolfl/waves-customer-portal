@@ -3175,18 +3175,16 @@ async function wdoTableForBooking({ customer, propertyId = null, estimateId = nu
 }
 
 // The server's own price for a blank line of one of those services, or null: the line takes its catalog price, as before
-// (mosquito: no lot size and no member perk; WDO: no table price, or a WDO main line with add-on lines).
+// (mosquito: no lot size and no member perk; WDO: no table price). A WDO main line with a paid add-on line is priced at
+// the catalog price by buildAppointmentPricing.
 // `context` is buildAppointmentPricing's: the customer, recurringMembershipBooking, refillContext (the booking's property and
 // linked estimate) and conn. The WDO answer is read once and kept on it (wdoTable), so a primary line and an add-on of one
 // booking price the same home the same way.
-async function blankLineServerPrice(service, context, { mainLineWithAddons = false } = {}) {
+async function blankLineServerPrice(service, context) {
   if (service?.service_key === 'mosquito_one_time') {
     return mosquitoOneTimeDefaultPrice(context.customer, service.base_price, { recurringOverride: context.recurringMembershipBooking });
   }
   if (!isWdoInspectionService(service) || !context.customer?.id) return null;
-  // A WDO main line with add-on lines keeps the catalog price: its invoice could not carry the table price
-  // (WDO_WITH_OTHER_LINES_NOTE, wdo-booking-price.js).
-  if (mainLineWithAddons) return null;
   if (context.wdoTable === undefined) {
     if (context.conn !== db) throw new Error('A WDO table price is read before the booking transaction opens');
     context.wdoTable = await wdoTableForBooking({
@@ -3283,8 +3281,8 @@ async function wdoCatalogQuote(staffNote = null) {
 // construction, what it was read at (`basis`) and the office note, else the catalog price. A new caller booked by address
 // (no customer yet) sends the picked address instead (line1, line2, city, state, zip, lat, lng), checked as the Book saves
 // it. A POST body, never a query string, so no address reaches a request log (pre-push audit P1). withOtherLines ('1'): the
-// inspection is the main line of a visit with other lines, so it keeps the catalog price (blankLineServerPrice) and the
-// answer says why. The booking's own reads: wdoTableForBooking for a customer, wdoBookingPrice for an address, the
+// inspection is the main line of a visit with another paid line, so it keeps the catalog price (buildAppointmentPricing)
+// and the answer says why. The booking's own reads: wdoTableForBooking for a customer, wdoBookingPrice for an address, the
 // catalog row's base_price when neither has a table price. READ ONLY, cache-only (no live or paid lookup). requireAdmin,
 // like the quotes above.
 router.post('/wdo-inspection-quote', requireAdmin, async (req, res, next) => {
@@ -3292,7 +3290,8 @@ router.post('/wdo-inspection-quote', requireAdmin, async (req, res, next) => {
     const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     const body = req.body || {};
     const param = (name) => (body[name] == null ? '' : String(body[name]).trim());
-    // A WDO main line with other lines keeps the catalog price, whatever the home (blankLineServerPrice): nothing is read.
+    // A WDO main line with another paid line keeps the catalog price, whatever the home (buildAppointmentPricing): nothing
+    // is read.
     if (param('withOtherLines') === '1') return res.json(await wdoCatalogQuote(WDO_WITH_OTHER_LINES_NOTE));
     const customerId = param('customerId');
     let table;
@@ -3404,23 +3403,22 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
   // check it against, refuses (409) before any write (wdoPriceCheck).
   const serverPricing = { customer, recurringMembershipBooking, refillContext, conn, wdoTable };
   const wdoCheck = wdoPriceCheck(wdoExpectedPrice);
-  const mainLineWithAddons = Array.isArray(serviceAddons) && serviceAddons.length > 0;
-  const primaryServerPrice = primaryLinePrice == null ? await blankLineServerPrice(serviceRecord, serverPricing, { mainLineWithAddons }) : null;
+  // The main line at a base price: its line discount and its net.
+  const priceMainLine = async (base) => {
+    const discount = await resolveLineDiscount(primaryLineDiscount, base || 0, customer, {
+      serviceKey: serviceRecord?.service_key,
+      serviceCategory: serviceRecord?.category,
+      recurringMembershipBooking,
+    }, conn);
+    return { base, discount, net: base == null ? null : Math.max(0, Math.round((base - (discount?.discountDollars || 0)) * 100) / 100) };
+  };
+  const primaryServerPrice = primaryLinePrice == null ? await blankLineServerPrice(serviceRecord, serverPricing) : null;
   const primaryBaseFallback = primaryServerPrice != null
     ? primaryServerPrice
     : (serviceRecord?.base_price != null ? serviceRecord.base_price : estimatedPrice);
-  if (primaryLinePrice == null && isWdoInspectionService(serviceRecord)) wdoCheck.line(primaryBaseFallback);
-  const primaryBase = parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice');
-  const primaryDiscount = await resolveLineDiscount(primaryLineDiscount, primaryBase || 0, customer, {
-    serviceKey: serviceRecord?.service_key,
-    serviceCategory: serviceRecord?.category,
-    recurringMembershipBooking,
-  }, conn);
-  const primaryNet = primaryBase == null
-    ? null
-    : Math.max(0, Math.round((primaryBase - (primaryDiscount?.discountDollars || 0)) * 100) / 100);
+  let mainLine = await priceMainLine(parseMoneyInput(primaryLinePrice ?? primaryBaseFallback, 'primaryLinePrice'));
   const appointmentServiceLines = [{
-    amount: primaryNet || 0,
+    amount: mainLine.net || 0,
     serviceKey: serviceRecord?.service_key || null,
     serviceCategory: serviceRecord?.category || null,
   }];
@@ -3487,7 +3485,17 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
       weekendShift: addon.weekendShift,
     });
   }
+  // A blank WDO main line beside a paid add-on line keeps the catalog price (WDO_WITH_OTHER_LINES_NOTE): the WDO filing
+  // fills its fee from the visit's price only when the inspection is the visit's only paid line. A free add-on line
+  // leaves the table price (pre-push audit P0).
+  const blankWdoMain = primaryLinePrice == null && isWdoInspectionService(serviceRecord);
+  if (blankWdoMain && primaryServerPrice != null && addonLines.some((line) => Number(line.base) > 0)) {
+    mainLine = await priceMainLine(parseMoneyInput(serviceRecord.base_price ?? estimatedPrice, 'primaryLinePrice'));
+    appointmentServiceLines[0].amount = mainLine.net || 0;
+  }
+  if (blankWdoMain) wdoCheck.line(mainLine.base);
   wdoCheck.done();
+  const { base: primaryBase, discount: primaryDiscount, net: primaryNet } = mainLine;
 
   const hasAnyPrice = primaryBase != null || addonLines.some((line) => line.price != null);
   // ONE result-assembly path (Codex pre-push audit P2, GitHub round 2 on

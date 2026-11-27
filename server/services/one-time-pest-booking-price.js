@@ -133,4 +133,4 @@ async function oneTimePestBookingPrice(customerId, { conn = db, propertyId = nul
 }
 
 // customerAtBookingProperty: also how the WDO booking price reads the booked home (wdo-booking-price.js).
-module.exports = { oneTimePestBookingPrice, customerAtBookingProperty };
+module.exports = { oneTimePestBookingPrice, customerAtBookingProperty, sameHome };
