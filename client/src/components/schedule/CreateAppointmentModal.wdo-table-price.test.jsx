@@ -155,7 +155,7 @@ function futureDate(days = 30) {
 const PEST_ONCE = { id: 'svc-pest1', service_key: 'one_time_pest', name: 'One-Time Pest Service', billing_type: 'one_time', base_price: 150, default_duration_minutes: 30 };
 
 // `quote(body)` answers the line's POST (read each time, so a test can change the answer); `save(body)` answers a save.
-function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [WDO, PEST_ONCE], estimates = [] }) {
+function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [WDO, PEST_ONCE], estimates = [], discounts = [] }) {
   const fetcher = vi.fn((input, options = {}) => {
     const url = String(input);
     if (url.endsWith('/admin/schedule/wdo-inspection-quote') && options.method === 'POST') {
@@ -172,7 +172,7 @@ function installFetch({ quote, save = () => json({ id: 'appt-1' }), catalog = [W
     if (url.includes('/properties?context=appointment_address')) return Promise.resolve(json({ properties: [] }));
     if (url.includes('/schedule-estimates')) return Promise.resolve(json({ estimates }));
     if (url.endsWith('/admin/technicians')) return Promise.resolve(json({ technicians: [] }));
-    if (url.endsWith('/admin/discounts')) return Promise.resolve(json([]));
+    if (url.endsWith('/admin/discounts')) return Promise.resolve(json(discounts));
     if (url.endsWith('/annual-prepay-availability')) return Promise.resolve(json({ enabled: false }));
     if (url.endsWith('/card-request-availability')) return Promise.resolve(json({ enabled: false }));
     if (url.endsWith('/admin/dispatch/slot-check')) return Promise.resolve(json({ ok: true, results: [{ conflicts: [] }] }));
@@ -370,6 +370,7 @@ describe('a WDO line in the modal', () => {
     const note = 'Other paid services are booked on this WDO visit, so the WDO line keeps the catalog price.';
     const fetcher = installFetch({
       quote: (body) => (body.withOtherLines === '1' ? { price: 250, source: 'catalog_base', basis: null, staffNote: note } : FRAME_2600),
+      discounts: [{ id: 'd-free', name: 'Free add-on', discount_type: 'percentage', amount: '100.00', is_active: true, show_in_invoices: true }],
     });
     mount();
     await addWdoLine();
@@ -381,6 +382,15 @@ describe('a WDO line in the modal', () => {
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '0' } });
     await waitFor(() => expect(hint()?.textContent).toBe('Table price: $200.00 (2,600 sq ft, wood frame).'));
     expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a' });
+    // A price a discount takes to $0 is still a paid line (the server's rule: beside an appointment credit, the discount
+    // stacking stores part of that price on the line, and the WDO filing reads it as paid).
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '50' } });
+    await waitFor(() => expect(hint()?.textContent).toBe(`Catalog price: $250.00. ${note}`));
+    fireEvent.focus(screen.getByPlaceholderText(/Search discounts for One-Time Pest/));
+    fireEvent.click(await screen.findByRole('button', { name: /Free add-on/ }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Remove discount' })).toBeTruthy());
+    expect(hint()?.textContent).toBe(`Catalog price: $250.00. ${note}`);
+    expect(quoteCalls(fetcher).at(-1)).toEqual({ customerId: 'customer-a', withOtherLines: '1' });
   });
 
   it('Save counts the form as changed when any field it posts moved: a line, the day, the prepay choice, a note', () => {
@@ -395,7 +405,7 @@ describe('a WDO line in the modal', () => {
     // the form it compares.
     const saveFormLiteral = modalSource.slice(modalSource.indexOf('  const saveForm = {'), modalSource.indexOf('  };', modalSource.indexOf('  const saveForm = {')));
     for (const field of ['services', 'selectedPropertyId', 'wdoQuoteKey', 'linkedEstimate', 'apptDate', 'windowStart', 'techMode', 'techId',
-      'customerAskedTime', 'customerNotes', 'internalNotes', 'customerWords', 'usedSuggestion', 'recurringCount', 'skipWeekends',
+      'customerAskedTime', 'customerNotes', 'internalNotes', 'customerWords', 'usedSuggestion', 'separateProgramReason', 'recurringCount', 'skipWeekends',
       'weekendShift', 'appointmentDiscount', 'collectPrepay', 'billAsAnnualPrepay', 'billAsManualPrepay', 'prepayMethod', 'prepayNote',
       'manualPrepay', 'sendCardLink', 'cardHere', 'sendSms']) {
       expect(saveFormLiteral).toMatch(new RegExp(`\\b${field}\\b`));
@@ -430,14 +440,17 @@ describe('a WDO line in the modal', () => {
     expect(schedulePosts(fetcher)[0]).toMatchObject({ serviceId: 'svc-wdo', ...posted });
   });
 
-  it('Save compares the form after its last read (the address re-read), just before its first POST', () => {
-    const lastRead = modalSource.indexOf('? await recheckAddressAskAtSubmit({');
-    const compare = modalSource.indexOf('if (unsavedBlankWdoLines > 0 && saveFormMoved(latestSaveRef.current.saveForm, saveForm)) {');
-    const firstPost = modalSource.indexOf('const groups = groupServicesForAppointmentSubmit(services);', lastRead);
-    expect(lastRead).toBe(modalSource.lastIndexOf('? await recheckAddressAskAtSubmit({'));
-    expect(lastRead).toBeGreaterThan(0);
-    expect(compare).toBeGreaterThan(lastRead);
-    expect(firstPost).toBeGreaterThan(compare);
+  it('Save compares the form after its last wait, just before each POST', () => {
+    const compareText = 'if (unsavedBlankWdoLines > 0 && saveFormMoved(latestSaveRef.current.saveForm, saveForm)) {';
+    const post = modalSource.indexOf("const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });");
+    const compare = modalSource.indexOf(compareText);
+    // One compare, inside the group loop: after the address and discount-setting reads, with no wait before the POST.
+    expect(modalSource.indexOf(compareText, compare + 1)).toBe(-1);
+    expect(modalSource.lastIndexOf('? await recheckAddressAskAtSubmit({', post)).toBeGreaterThan(0);
+    expect(compare).toBeGreaterThan(modalSource.lastIndexOf('? await recheckAddressAskAtSubmit({', post));
+    expect(compare).toBeGreaterThan(modalSource.lastIndexOf('await ensureStackingFresh();', post));
+    expect(post).toBeGreaterThan(compare);
+    expect(modalSource.slice(compare, post)).not.toMatch(/\bawait\b/);
   });
 
   it('an estimate unlinked while Save re-reads the WDO price books nothing, so the quote is not marked accepted', async () => {

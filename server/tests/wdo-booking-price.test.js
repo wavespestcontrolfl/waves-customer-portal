@@ -223,43 +223,48 @@ describe('a blank WDO line books at the table price of the home', () => {
     expect(lookup).toHaveBeenCalledTimes(1);
   });
 
-  test('a booking from an estimate that quotes the customer\'s own address is priced at that address, never at a lone other property', async () => {
+  test('a booking from an estimate that quotes the customer\'s own address is priced there, and never beside a stamp at another property', async () => {
     const { assertWdoTableHomeUnchanged } = adminSchedule._test;
     lookup.mockResolvedValue(record(1600, 'block'));
     const ESTIMATE_ID = 'f7a8b9c0-4444-4d5e-8f6a-8b9c0d1e2f3a';
+    const estimates = () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' });
+    const fromEstimate = { refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } };
+    // The customer's one active property is a rental at another address. The save stamps the visit with it, so the
+    // estimate's home and the visit's are two homes: the catalog price stands.
     wireDb({
-      customers: HOME,
-      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
-      // The customer's one active property is a rental at another address.
+      customers: HOME, estimates,
       customer_properties: (cond) => (cond.id ? [RENTAL].find((property) => property.id === cond.id) : (cond.is_primary ? undefined : [RENTAL])),
     });
-    const pricing = await bookBlankWdo({ refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } });
-    expect(pricing.finalPrice).toBe(150);
-    expect(lookup).toHaveBeenCalledTimes(1);
-    expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
-    // The save's own check reads that same home, so it goes on.
-    await expect(assertWdoTableHomeUnchanged(pricing.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock }))
-      .resolves.toBeUndefined();
-    // A primary property saved at another address does not stand in for it either; the account's own type still counts.
-    lookup.mockClear();
+    const stampedElsewhere = await bookBlankWdo(fromEstimate);
+    expect(stampedElsewhere.finalPrice).toBe(250);
+    expect(stampedElsewhere.wdoTable).toBeUndefined();
+    expect(lookup).not.toHaveBeenCalled();
+    // Two active properties, the primary saved at another address: the save stamps neither, so the visit is the customer's
+    // own address and is priced there. A primary elsewhere does not stand in for it.
     const primaryElsewhere = { ...RENTAL, is_primary: true };
-    wireDb({
-      customers: HOME,
-      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
-      customer_properties: (cond) => (cond.id === RENTAL.id || cond.is_primary ? primaryElsewhere : [primaryElsewhere]),
-    });
-    const atAddress = await bookBlankWdo({ refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } });
+    const SECOND = { ...RENTAL, id: 'b3c4d5e6-1111-4a2b-8c3d-4e5f6a7b8c9d', address_line1: '300 Sample Ave' };
+    const twoProperties = (cond) => {
+      if (cond.id) return [primaryElsewhere, SECOND].find((property) => property.id === cond.id);
+      return cond.is_primary ? primaryElsewhere : [primaryElsewhere, SECOND];
+    };
+    wireDb({ customers: HOME, estimates, customer_properties: twoProperties });
+    const atAddress = await bookBlankWdo(fromEstimate);
     expect(atAddress.finalPrice).toBe(150);
     expect(lookup).toHaveBeenCalledTimes(1);
     expect(lookup).toHaveBeenCalledWith(expect.stringContaining('100 Example Ln'));
+    // The save's own check: no property stamped, the same home, so it goes on.
     await expect(assertWdoTableHomeUnchanged(atAddress.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock }))
       .resolves.toBeUndefined();
-    wireDb({
-      customers: { ...HOME, property_type: 'commercial' },
-      estimates: () => ({ id: ESTIMATE_ID, customer_id: CUSTOMER_ID, property_id: null, address: '100 Example Ln, Bradenton, FL 34201' }),
-      customer_properties: (cond) => (cond.id === RENTAL.id || cond.is_primary ? primaryElsewhere : [primaryElsewhere]),
-    });
-    expect((await bookBlankWdo({ customer: { ...HOME, property_type: 'commercial' }, refillContext: { propertyId: null, sourceEstimateId: ESTIMATE_ID } })).finalPrice).toBe(250);
+    // A visit stamped with another property than the estimate's address is refused before any write, as is one whose
+    // other property became the only active one in between (the save would stamp it).
+    await expect(assertWdoTableHomeUnchanged(atAddress.wdoTable, { customerId: CUSTOMER_ID, propertyId: SECOND.id, estimateId: ESTIMATE_ID, trx: dbMock }))
+      .rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    wireDb({ customers: HOME, estimates, customer_properties: (cond) => (cond.id === RENTAL.id || cond.is_primary ? primaryElsewhere : [primaryElsewhere]) });
+    await expect(assertWdoTableHomeUnchanged(atAddress.wdoTable, { customerId: CUSTOMER_ID, propertyId: null, estimateId: ESTIMATE_ID, trx: dbMock }))
+      .rejects.toMatchObject({ status: 409, code: 'WDO_PRICE_CHANGED' });
+    // The account's own type still counts at that address.
+    wireDb({ customers: { ...HOME, property_type: 'commercial' }, estimates, customer_properties: twoProperties });
+    expect((await bookBlankWdo({ customer: { ...HOME, property_type: 'commercial' }, ...fromEstimate })).finalPrice).toBe(250);
   });
 
   test('the office save runs that check inside its transaction, right after it stamps the sole active property', () => {
@@ -339,8 +344,9 @@ describe('the office booking keeps the price a person gives', () => {
     // A free add-on line ($0, or left blank): the inspection is still the visit's only paid line.
     expect((await bookBlankWdo({ serviceAddons: pest(0) })).finalPrice).toBe(150);
     expect((await bookBlankWdo({ serviceAddons: pest(null), wdoExpectedPrice: 150 })).finalPrice).toBe(150);
-    // An add-on line discounted to $0 is free too: the filing reads its net price.
-    expect((await bookBlankWdo({ serviceAddons: [{ ...pest(50)[0], discountId: 'disc-free' }] })).finalPrice).toBe(150);
+    // An add-on line with a price is a paid line even when a discount takes it to $0: beside an appointment credit, the
+    // discount stacking stores part of that price on it, and the filing reads it as paid.
+    expect((await bookBlankWdo({ serviceAddons: [{ ...pest(50)[0], discountId: 'disc-free' }] })).finalPrice).toBe(250);
     // A main-line discount is checked once, at the price the line books at: one that needs a $200 line passes at the
     // $250 catalog price beside a paid line ($230 + $150), and is refused at the $150 table price alone.
     manualEligibilityFailures.mockClear();

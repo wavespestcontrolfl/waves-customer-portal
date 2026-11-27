@@ -69,15 +69,17 @@ async function bookedHome({ customer, customerId, propertyId, serviceAddress, cu
   const { addressKey } = require('./customer-properties');
   // No property named: a booking stamps the customer's sole active property when there is exactly one
   // (customer-properties soleActivePropertyId), so that property is the home priced, even one not marked primary
-  // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row. A booking whose linked
-  // estimate quoted the customer's own address is that address, never a lone other property (pre-push audit P0).
-  const activeRows = propertyId || written || customerAddress ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
+  // (pre-push audit P0). Read only here: the stamp's own read can add a missing primary row.
+  const activeRows = propertyId || written ? null : await conn('customer_properties').where({ customer_id: row.id, active: true }).select('id');
   const soleActive = Array.isArray(activeRows) && activeRows.length === 1 ? activeRows[0].id : null;
   let at = await customerAtBookingProperty(row, propertyId || soleActive, conn);
   if (!at) return { refusal: 'the booking property is not an active property of this customer' };
-  // The customer's own address a linked estimate quoted: a primary property saved at another address does not stand in for
+  // A linked estimate quoted the customer's own address. A sole active property at another address is the one the save
+  // stamps the visit with: another home than the one quoted, so the home cannot be told (pre-push audit P0). With no sole
+  // property the visit is the customer's own address: a primary property saved at another address does not stand in for
   // it, and only the account's own records can call it commercial (pre-push audit P0).
   if (customerAddress && at.otherProperty) {
+    if (soleActive) return { refusal: 'the estimate quotes the customer\'s own address, and the visit is stamped with a property at another address' };
     const { normalizePropertyType } = require('./pricing-engine/commercial-helpers');
     at = {
       customer: row,

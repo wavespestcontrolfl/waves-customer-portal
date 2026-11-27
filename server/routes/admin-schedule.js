@@ -3185,9 +3185,11 @@ async function assertWdoTableHomeUnchanged(table, { customerId, propertyId = nul
   if (!table) return;
   const home = estimateId ? await bookedHomeProperty({ customerId, propertyId: null, estimateId, conn: trx }) : { propertyId };
   const customer = home.unsure ? null : await trx('customers').where({ id: customerId }).first();
-  if (customer && await wdoTableStillApplies(table, {
-    customer, propertyId: home.propertyId || null, customerAddress: home.customerAddress === true, conn: trx,
-  })) return;
+  const stillApplies = (at) => wdoTableStillApplies(table, { customer, conn: trx, ...at });
+  // A linked estimate's home must also be the property the visit is stamped with, when one is (pre-push audit P0).
+  if (customer
+    && await stillApplies({ propertyId: home.propertyId || null, customerAddress: home.customerAddress === true })
+    && (!estimateId || !propertyId || await stillApplies({ propertyId }))) return;
   throw Object.assign(
     httpError(409, 'The home for this visit changed while saving, so its WDO price may be different. This visit was not booked. Check the price and save again.'),
     { code: 'WDO_PRICE_CHANGED' },
@@ -3513,9 +3515,11 @@ async function buildAppointmentPricing({ serviceRecord, serviceType, serviceId, 
     });
   }
   if (mainLineAfterAddons) {
-    // The WDO filing fills its fee from the visit's price only when the inspection is the visit's only paid line: an
-    // add-on line whose own net (after its line discount) is above $0 is a paid line; a free one leaves the table price.
-    const paidAddon = addonLines.some((line) => Number(line.price) > 0);
+    // The WDO filing fills its fee from the visit's price only when the inspection is the visit's only paid line
+    // (wdoFeeSeedFromVisit reads each add-on's stored price). An add-on line with a price is a paid line even when a
+    // discount takes it to $0: beside an appointment credit, the discount stacking stores part of that price on it
+    // (pre-push audit P0). Only a line with no price ($0, or left blank) leaves the table price.
+    const paidAddon = addonLines.some((line) => Number(line.base) > 0);
     mainLine = await priceMainLine(parseMoneyInput(paidAddon ? (serviceRecord.base_price ?? estimatedPrice) : primaryBaseFallback, 'primaryLinePrice'));
     appointmentServiceLines[0].amount = mainLine.net || 0;
   }

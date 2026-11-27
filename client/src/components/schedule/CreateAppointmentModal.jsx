@@ -1297,6 +1297,9 @@ export function submitFailureNotice({ firstError, created, total }) {
       alertText: null,
     };
   }
+  if (firstError.formMoved) {
+    return { toastText: created ? `${created} of ${total} appointment series saved. ${SAVE_FORM_MOVED_TEXT}.` : SAVE_FORM_MOVED_TEXT, alertText: null };
+  }
   const lead = created > 0
     ? `${created} of ${total} appointment series created. ${firstError.label} failed: ${firstError.message}.`
     : `Failed: ${firstError.message}`;
@@ -1686,6 +1689,7 @@ export function lineIsRetiredSale(line) {
 // Whether the form changed after Save was pressed: `atClick` is the form Save posts (saveForm, as rendered at the click),
 // `latest` the same fields as rendered now. Each field is a state value, so an unchanged field keeps its identity.
 export const saveFormMoved = (latest, atClick) => Object.keys(atClick).some((field) => latest?.[field] !== atClick[field]);
+const SAVE_FORM_MOVED_TEXT = 'The booking changed while the WDO price was checked — check it, then save again';
 
 export default function CreateAppointmentModal({ defaultDate, defaultWindowStart, defaultDurationMinutes, defaultTechId, defaultCustomer = null, defaultEstimateId = null, defaultInternalNotes = '', defaultAnnualPrepay = false, newCallerBooking = false, requireTimeChoice = false, onClose, onCreated, onChange }) {
   const dialogRef = useModalFocus(true, onClose);
@@ -2775,14 +2779,11 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   const hasBlankWdoLine = blankWdoLines > 0;
   // The appointments this form saves (the grouping helpers below are hoisted). A WDO line that is the main line of an
   // appointment with another paid line keeps the catalog price (the server's rule: the WDO filing fills its fee from the
-  // visit's price only when the inspection is the only paid line), so the question says so. A paid line's own net is
-  // above $0: an entered price or the mosquito ladder, less its line discount. A free line beside it, or a WDO add-on
-  // line, keeps the table price.
+  // visit's price only when the inspection is the only paid line), so the question says so. A paid line has a price (an
+  // entered price or the mosquito ladder), even one a discount takes to $0: beside an appointment credit, the discount
+  // stacking stores part of it on the line. A line with no price beside it, or a WDO add-on line, keeps the table price.
   const appointmentSubmitGroups = groupServicesForAppointmentSubmit(services);
-  const lineIsPaid = (svc) => {
-    const base = lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0);
-    return base - previewLineDiscount(svc?.lineDiscount, base) > 0;
-  };
+  const lineIsPaid = (svc) => (lineHasEnteredPrice(svc) ? lineBaseAmount(svc) : (mosquitoAutoAmount(svc) ?? 0)) > 0;
   const wdoWithOtherLines = appointmentSubmitGroups.some((group) => lineIsBlankWdo(group.lines[0]) && group.lines.slice(1).some(lineIsPaid));
   const wdoQuoteKey = blankWdoLines === 1 ? wdoQuoteQuery({
     customerId: selectedCustomer?.id,
@@ -4437,7 +4438,7 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
   // messages and the card choice.
   const saveForm = {
     services, selectedPropertyId, wdoQuoteKey, linkedEstimate, apptDate, windowStart, techMode, techId, customerAskedTime,
-    customerNotes, internalNotes, customerWords, usedSuggestion, recurringCount, skipWeekends, weekendShift,
+    customerNotes, internalNotes, customerWords, usedSuggestion, separateProgramReason, recurringCount, skipWeekends, weekendShift,
     appointmentDiscount, collectPrepay, billAsAnnualPrepay, billAsManualPrepay, prepayMethod, prepayNote, manualPrepay,
     sendCardLink, cardHere, sendSms,
   };
@@ -4542,14 +4543,6 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
         setTimeout(() => {
           if (modalMountedRef.current) setToast('');
         }, 4000);
-        return;
-      }
-      // The form changed while the WDO price or the address was re-read (above): this save would post the form as it was at
-      // the click, so it posts nothing (pre-push audit P1; Book checks its whole body the same way). Checked after the last
-      // read, just before the first POST.
-      if (unsavedBlankWdoLines > 0 && saveFormMoved(latestSaveRef.current.saveForm, saveForm)) {
-        setToast('The booking changed while the WDO price was checked — check it, then save again');
-        setTimeout(() => setToast(''), 3200);
         return;
       }
       const groups = groupServicesForAppointmentSubmit(services);
@@ -4823,6 +4816,13 @@ export default function CreateAppointmentModal({ defaultDate, defaultWindowStart
             confirmedGroupRegime = verdict.regime;
             body.expected_discount_stacking = confirmedGroupRegime;
             body.expected_price = verdict.price;
+          }
+          // The form changed while this save waited (its WDO price, address and discount-setting reads, or an earlier
+          // group's POST): the body holds the form as it was at the click, so this group posts nothing (pre-push audit P1;
+          // Book checks its whole body the same way). Checked after the last wait, just before each POST.
+          if (unsavedBlankWdoLines > 0 && saveFormMoved(latestSaveRef.current.saveForm, saveForm)) {
+            firstError = { label: groupLabel(group), message: SAVE_FORM_MOVED_TEXT, formMoved: true, duplicate: false };
+            break;
           }
           bookingPostAttempted = true;
           const r = await adminFetch('/admin/schedule', { method: 'POST', body: JSON.stringify(body) });
