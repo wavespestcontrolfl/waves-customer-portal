@@ -6132,7 +6132,9 @@ function initScheduledJobs() {
       // delivery/claim failures instead of a false success.
       await runExclusive('morning-banner', async () => {
         const result = await require('./morning-banner').runMorningBanner();
-        if (result?.error) throw new Error(`morning banner: ${result.error}`);
+        if (result?.error || result?.uncertain) {
+          throw new Error(`morning banner: ${result.error || 'delivery_uncertain'}`);
+        }
         return result;
       });
     } catch (err) {

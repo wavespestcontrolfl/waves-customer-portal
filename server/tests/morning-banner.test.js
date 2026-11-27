@@ -250,7 +250,9 @@ describe('once per ET day', () => {
       return origImpl(table);
     });
     await expect(runMorningBanner({ now: MORNING })).resolves.toEqual({ count: 2, sent: false, error: 'dispatch_failed' });
-    expect(claimed.size).toBe(0);
+    // Rollout fence stays held so older instances cannot send ownerOnly counts,
+    // while both per-audience keys remain unclaimed so a new-release rerun succeeds.
+    expect([...claimed].sort()).toEqual(['morning_banner:2026-11-03', 'morning_banner:2026-11-03:scoped']);
     await expect(runMorningBanner({ now: MORNING })).resolves.toMatchObject({ count: 2, sent: true });
     expect(mockTrigger).toHaveBeenCalledTimes(1);
   });
@@ -413,8 +415,8 @@ describe('once per ET day', () => {
     });
     expect(claimed.has('morning_banner:2026-11-03:owner')).toBe(true);
 
-    // Scheduler surfaces morning-banner result.error inside runExclusive for job health.
+    // Scheduler surfaces morning-banner error AND uncertain delivery inside runExclusive for job health.
     const schedulerSrc = fs.readFileSync(path.join(__dirname, '../services/scheduler.js'), 'utf8');
-    expect(schedulerSrc).toMatch(/runExclusive\('morning-banner',[\s\S]*?if \(result\?\.error\) throw new Error\(`morning banner: \$\{result\.error\}`\)/);
+    expect(schedulerSrc).toMatch(/runExclusive\('morning-banner',[\s\S]*?if \(result\?\.error \|\| result\?\.uncertain\)/);
   });
 });

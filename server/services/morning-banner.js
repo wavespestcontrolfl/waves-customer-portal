@@ -222,16 +222,12 @@ function summarizeOutcomes(day, ownerSummary, outcomes) {
 
 // Always claim stable per-audience keys (`:owner` and `:shared`) so a same-day
 // alert-mix change (shared-only -> mixed, or owner-only -> mixed) can never
-// re-notify an audience that already received today's banner. Look up
-// recipients BEFORE reserving any claim so a DB lookup failure leaves no
-// stranded daily claim; once recipients are loaded, reserve AND retain the
-// legacy bare-date key alongside `:scoped` in one transaction (even when no
-// recipients qualify or every audience skips/fails) so an older instance can
-// never grab the legacy key and broadcast ownerOnly alert counts to office
-// admins, while new-release retries always resume unclaimed audiences via `:scoped`.
+// re-notify an audience that already received today's banner. Reserve AND
+// retain the legacy bare-date key alongside `:scoped` in one transaction BEFORE
+// recipient lookup so an older instance during rollout can never grab the
+// legacy key and broadcast ownerOnly alert counts to office admins even if
+// recipient lookup fails, while new-release retries always resume via `:scoped`.
 async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
-  const audiences = buildAudiences(day, ownerSummary, sharedSummary, await splitAdminIdsByOwnerAccess());
-
   const legacyKey = `${CLAIM_PREFIX}${day}`;
   const markerKey = `${CLAIM_PREFIX}${day}:scoped`;
   let gate;
@@ -245,6 +241,7 @@ async function dispatchScopedBanners(day, ownerSummary, sharedSummary) {
     logger.info(`[morning-banner] ${day}: already sent or in flight, skipped`);
     return { count: ownerSummary.count, sent: false, skipped: 'already_claimed' };
   }
+  const audiences = buildAudiences(day, ownerSummary, sharedSummary, await splitAdminIdsByOwnerAccess());
   if (audiences.length === 0) return { count: ownerSummary.count, sent: false, skipped: 'no_recipients' };
 
   const outcomes = await Promise.all(audiences.map(sendClaimedAudience));
