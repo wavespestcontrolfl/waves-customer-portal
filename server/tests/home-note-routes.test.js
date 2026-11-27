@@ -47,12 +47,14 @@ function stubDb({ ownsVisit = true, customerExists = true } = {}) {
     const q = {};
     q.where = jest.fn(() => q);
     q.whereNotIn = jest.fn(() => q);
+    q.whereNull = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.forUpdate = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
     q.first = jest.fn(async () => {
       if (name === 'customers') return customerExists ? { id: CUSTOMER } : undefined;
       const owns = visitReads.length > 1 ? visitReads.shift() : visitReads[0];
+      if (owns === 'throw') throw new Error('connection lost');
       return owns ? VISIT_ROW : undefined;
     });
     return q;
@@ -191,6 +193,25 @@ describe('reassignment between the first read and the answer', () => {
     stubDb({ ownsVisit: [true, true] });
     await withServer(async (base) => {
       expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null, homeNote: NOTE });
+    });
+  });
+});
+
+describe('the ownership check cannot run', () => {
+  test('visit-brief withholds the whole answer, whatever the brief gates (cached access codes never go out)', async () => {
+    stubDb({ ownsVisit: [true, 'throw'] });
+    await withServer(async (base) => {
+      const res = await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ brief: null });
+    });
+  });
+
+  test('visit-brief withholds the answer when the note read itself fails but the visit was lost', async () => {
+    stubDb({ ownsVisit: [true, false] });
+    mockRead.mockRejectedValueOnce(new Error('db down'));
+    await withServer(async (base) => {
+      expect(await (await call(base, `/admin/schedule/${VISIT}/visit-brief`, { role: 'technician' })).json()).toEqual({ brief: null });
     });
   });
 });

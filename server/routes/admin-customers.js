@@ -5273,7 +5273,7 @@ const homeNoteCustomer = async (req, res) => {
     res.status(404).json({ error: 'Customer not found' });
     return null;
   }
-  const customer = await db('customers').where({ id }).first('id');
+  const customer = await db('customers').where({ id }).whereNull('deleted_at').first('id');
   if (!customer) res.status(404).json({ error: 'Customer not found' });
   return customer ? { customer_id: customer.id } : null;
 };

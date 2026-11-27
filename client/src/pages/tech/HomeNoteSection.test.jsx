@@ -107,6 +107,17 @@ describe('HomeNoteSection (office page: reads its own path)', () => {
     expect(screen.getByLabelText('About this home')).toBeInTheDocument();
   });
 
+  it('an unreadable success answer (no note field) keeps the draft and says the save is unconfirmed', async () => {
+    const request = vi.fn(async (_path, options) => (options?.method === 'PUT' ? {} : { note: NOTE, editable: true }));
+    render(<HomeNoteSection request={request} path={PATH} />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText('About this home'), { target: { value: 'Mine' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByText(/Could not confirm the save/)).toBeInTheDocument();
+    expect(screen.getByLabelText('About this home')).toHaveValue('Mine');
+    expect(screen.queryByText('Saved.')).toBeNull();
+  });
+
   it('renders nothing for a 403 and offers Retry when the read fails', async () => {
     const { container } = render(<HomeNoteSection request={vi.fn(async () => { throw refusal(403, {}); })} path={PATH} />);
     await waitFor(() => expect(container).toBeEmptyDOMElement());

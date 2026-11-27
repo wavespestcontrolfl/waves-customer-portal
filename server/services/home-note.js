@@ -48,6 +48,9 @@ async function readHomeNote(row, { conn = db } = {}) {
   return { status: 200, note: await shapeNote(await currentRow(conn, customerId), conn), editable: true };
 }
 
+// A database error can carry the bound values (the note's text) in its message; only the operation and the code go on.
+const sanitized = (err) => Object.assign(new Error(`home note save failed (${(err && err.code) || 'unknown'})`), { code: 'home_note_save_failed' });
+
 const refusal = (status, error, extra = {}) => ({ status, error, ...extra });
 
 async function writeRow(trx, customerId, current, body, actor) {
@@ -72,10 +75,13 @@ async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, { co
   if (text.length > MAX_LENGTH) return refusal(400, `The note can be at most ${MAX_LENGTH} characters.`, { code: 'too_long' });
   const customerId = row && row.customer_id;
   if (!customerId) return refusal(422, 'This visit has no customer, so there is no note to keep.');
-  const changed = async (current) => refusal(409, 'Someone else changed this note.', { code: 'note_changed', note: await shapeNote(current, conn) });
+  const changed = async (current, handle = conn) => refusal(409, 'Someone else changed this note.', { code: 'note_changed', note: await shapeNote(current, handle) });
   const run = async (trx) => {
+    // A merged-away (archived) customer takes no note: the lock also holds a merge off until this save commits.
+    const live = await trx('customers').where({ id: customerId }).whereNull('deleted_at').forShare().first('id');
+    if (!live) return refusal(404, 'Customer not found');
     const current = await currentRow(trx, customerId, { lock: true });
-    if (!sameInstant(current ? current.updated_at : null, expectedUpdatedAt || null)) return changed(current);
+    if (!sameInstant(current ? current.updated_at : null, expectedUpdatedAt || null)) return changed(current, trx);
     if (!text && !current) return { status: 200, note: null };
     let noteId = current && current.id;
     if (!text) await trx('home_notes').where({ id: current.id }).del();
@@ -100,7 +106,7 @@ async function saveHomeNote(row, { body, expectedUpdatedAt = null, actor }, { co
     return await conn.transaction(run);
   } catch (err) {
     // Two first saves for a new customer race on the unique key: the loser sees the winner's note.
-    if (!(err && err.code === '23505')) throw err;
+    if (!(err && err.code === '23505')) throw sanitized(err);
     return changed(await currentRow(conn, customerId));
   }
 }

@@ -105,7 +105,9 @@ export default function HomeNoteSection({ request, path, services, byService, on
     setState({ ...IDLE, busy: true });
     try {
       const out = await request(route, { method: 'PUT', body: JSON.stringify({ body: draft, expectedUpdatedAt: base }) });
-      setLoad({ status: 'ready', note: out?.note || null });
+      // An answer with no `note` field (an unreadable 2xx) is an unknown outcome: the draft stays.
+      if (!out || !('note' in out)) throw new Error('Could not confirm the save. Your text is still here; check the note and try again.');
+      setLoad({ status: 'ready', note: out.note || null });
       setDraft(null);
       setState({ ...IDLE, saved: true });
       onSaved?.();

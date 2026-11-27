@@ -29,7 +29,7 @@ jest.setTimeout(30000);
     database = knex({ client: 'pg', connection: process.env.DATABASE_URL, searchPath: [schema], pool: { min: 0, max: 4 } });
     mockHolder.db = database;
     await database.raw('CREATE SCHEMA ??', [schema]);
-    await database.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid())');
+    await database.raw('CREATE TABLE customers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), deleted_at timestamptz)');
     await database.raw('CREATE TABLE customer_properties (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), customer_id uuid NOT NULL REFERENCES customers(id) ON DELETE CASCADE, active boolean NOT NULL DEFAULT true)');
     await database.raw('CREATE TABLE technicians (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), name text)');
     await database.raw(`CREATE TABLE audit_log (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), actor_type varchar(32) NOT NULL, actor_id uuid, action varchar(96) NOT NULL,
@@ -128,6 +128,19 @@ jest.setTimeout(30000);
     await saveHomeNote({ customer_id: loserId }, { body: 'Only theirs.', actor: actor() });
     await database.transaction((trx) => mergeHomeNotes(trx, 'home_notes', 'customer_id', customerId, loserId));
     expect(await database('home_notes').select('customer_id', 'body')).toEqual([{ customer_id: customerId, body: 'Only theirs.' }]);
+  });
+
+  test('a merged-away (archived) customer takes no note', async () => {
+    await database('customers').where({ id: customerId }).update({ deleted_at: new Date() });
+    expect(await saveHomeNote(visit(), { body: 'Late save.', actor: actor() })).toMatchObject({ status: 404 });
+    expect(await database('home_notes').count('* as n').first()).toMatchObject({ n: '0' });
+  });
+
+  test('a database error reaches the caller with the operation and code only, never the note text', async () => {
+    const err = await saveHomeNote(visit(), { body: 'private text\u0000here', actor: actor() }).catch((e) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err.message).toMatch(/^home note save failed \(/);
+    expect(err.message).not.toContain('private');
   });
 
   test('the table checks refuse an empty body and an unknown role; deleting the customer deletes the note', async () => {

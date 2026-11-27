@@ -24895,18 +24895,27 @@ router.get(['/:id/visit-brief', '/:id/wdo-brief'], async (req, res, next) => {
     };
     // "About this home" (services/home-note.js): the customer's one staff note rides every answer, so the tech's Visit Brief
     // shows it at the top with no request of its own. `homeNote` is the note or null (no note yet); the key is left out when
-    // the visit has no customer or the read fails, so those answers are exactly as before. Whichever brief gates are on, a
-    // served note is followed by its own ownership check (homeNoteStillOwned): a visit reassigned (or moved to another
-    // customer) during the read withholds the whole answer, the same `{ brief: null }` as finalRecheck.
+    // the visit has no customer or the read fails, so those answers are exactly as before. Whichever brief gates are on, the
+    // read is followed by its own ownership check (homeNoteStillOwned): a visit reassigned (or moved to another customer)
+    // during the read, or a check that cannot run, withholds the whole answer: the same `{ brief: null }` as finalRecheck.
     const withHomeNote = async (payload) => {
+      let out = null;
       try {
-        const out = await require('../services/home-note').readHomeNote(svc);
-        if (!out.editable) return payload;
-        return (await homeNoteStillOwned(req, svc)) ? { ...payload, homeNote: out.note } : { brief: null };
+        out = await require('../services/home-note').readHomeNote(svc);
       } catch (err) {
         logger.warn(`[admin-schedule] visit-brief home note failed for ${svc.id}: ${err.message}`);
-        return payload;
       }
+      // No customer: no note and no new lookup, the answer as before. Otherwise this is the last ownership check, so a
+      // check that fails or cannot run withholds the whole answer (cached access codes included), whichever gates are on.
+      if (out && !out.editable) return payload;
+      let owned = false;
+      try {
+        owned = Boolean(await homeNoteStillOwned(req, svc));
+      } catch (err) {
+        logger.warn(`[admin-schedule] visit-brief home note recheck failed for ${svc.id}: ${err.message}`);
+      }
+      if (!owned) return { brief: null };
+      return out ? { ...payload, homeNote: out.note } : payload;
     };
     // THE chokepoint for a reassignment or a customer merge/undo during any lookup above: the LAST database operation
     // before the answer goes out, whenever the facts, Away Watch or access-flag lookup ran. The payload may hold live
