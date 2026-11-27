@@ -87,10 +87,10 @@ const express = require('express');
 const db = require('../models/db');
 const router = require('../routes/admin-schedule');
 
-function stubTables(rows, { ownsVisit = true, recheckOwns = null } = {}) {
+function stubTables(rows, { ownsVisit = true, recheckOwns = null, movedTo = null } = {}) {
   db.mockImplementation((table) => {
     const q = {};
-    q.where = jest.fn(() => q);
+    q.where = jest.fn((...args) => { if (args[0] === 'scheduled_services.scheduled_date') q.dateBound = args[1]; return q; });
     q.whereNotIn = jest.fn(() => q);
     q.whereNot = jest.fn(() => q);
     q.modify = jest.fn((cb) => { cb(q); return q; });
@@ -103,6 +103,8 @@ function stubTables(rows, { ownsVisit = true, recheckOwns = null } = {}) {
     // it AFTER computing facts, so a test can simulate a reassignment
     // landing between the atomic fetch and the facts response.
     q.first = jest.fn(async (...cols) => {
+      // movedTo: the visit's date changed mid-request; a recheck bound to the date read at the start no longer finds it.
+      if (cols[0] === 'scheduled_services.id' && movedTo && q.dateBound && q.dateBound !== movedTo) return undefined;
       if (cols[0] === 'scheduled_services.id') return (recheckOwns ?? ownsVisit) ? { id: 'svc-1' } : undefined;
       if (cols[0] === 'scheduled_services.*') return ownsVisit ? rows[table] : undefined;
       return rows[table];
@@ -461,6 +463,33 @@ describe('GET /:id/visit-brief (+ /wdo-brief alias)', () => {
       expect(await res.json()).toEqual({ brief: null });
     });
     expect(mockDeterministicVisitFacts).toHaveBeenCalled();
+  });
+
+  test('customer_asked on the answer binds the final recheck to the visit date read at the start', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockDeterministicVisitFacts.mockResolvedValue({ access: null, last_visit: null, customer_asked: { items: [{ kind: 'booking_note', at: '2026-08-10T15:00:00.000Z', text: 'Please text first' }] } });
+    const row = { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null };
+    stubTables({ scheduled_services: row }, { movedTo: '2026-08-20' });
+    await withServer(async (base) => {
+      const res = await fetch(`${base}/admin/schedule/svc-1/visit-brief`);
+      expect(await res.json()).toEqual({ brief: null });
+    });
+    // The date did not move: the answer carries the words.
+    stubTables({ scheduled_services: row }, { movedTo: '2026-08-13' });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.facts.customer_asked.items[0].text).toBe('Please text first');
+    });
+  });
+
+  test('facts without customer_asked do not add the date binding (the answer is as before)', async () => {
+    mockFactsGateEnabled.mockReturnValue(true);
+    mockDeterministicVisitFacts.mockResolvedValue({ access: null, last_visit: null });
+    stubTables({ scheduled_services: { ...VISIT_BRIEF_ROW, pre_service_brief: null, pre_service_brief_type: null } }, { movedTo: '2026-08-20' });
+    await withServer(async (base) => {
+      const body = await (await fetch(`${base}/admin/schedule/svc-1/visit-brief`)).json();
+      expect(body.facts).toBeTruthy();
+    });
   });
 
   test('a reassignment detected mid-request withholds a SERVED brief too (cached codes never reach the former tech)', async () => {
