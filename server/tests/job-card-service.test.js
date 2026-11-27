@@ -2115,7 +2115,7 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     buildPlan.mockClear();
     expect(out.context).toEqual({ line: 'Tree & Shrub Care', conditional: true });
     expect(out.amount).toBe(0.5);
-    expect(out.warnings).toEqual(['Listed as "if needed" on Tree & Shrub Care — confirm the call before mixing']);
+    expect(out.warnings).toEqual(['Listed as "if needed" on Tree & Shrub Care — confirm the call before mixing', 'Applies to: Headway only for labeled ornamental disease and only if FRAC history allows']);
     // The same product as a selected primary line doses normally.
     protocols.tree_shrub.visits[0] = { visit: 9, month: 'Sep', primary: 'Headway 0.75 fl oz/gal foliar', secondary: '' };
     const selected = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
@@ -2130,7 +2130,8 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const primary = await jobCard.mixForProduct('h', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(primary.context).toEqual({ line: null, conditional: true });
     expect(primary.amount).toBe(0.5);
-    expect(primary.warnings).toEqual(['Listed as "if needed" on this visit\'s protocol — confirm the call before mixing']);
+    expect(primary.warnings[0]).toBe('Listed as "if needed" on this visit\'s protocol — confirm the call before mixing');
+    expect(primary.warnings[1]).toMatch(/^Applies to: Headway only for labeled ornamental disease/);
     rows.products_catalog = [{ ...product, id: 't', name: 'Talus IGR' }];
     const talus = await jobCard.mixForProduct('t', 1, { serviceId: 'svc1', dbh, deps: { buildPlan, protocols }, now: new Date('2026-09-03T14:00:00Z') });
     expect(talus.context).toEqual({ line: null, conditional: false });
@@ -2515,6 +2516,67 @@ describe('follow-up PR: add-on lines + tank-search spray check', () => {
     const out = await jobCard.mixForProduct('di', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
     expect(out).toMatchObject({ amount: 6.6, sprayVolumeGalPer1000: 5, coversSqft: 55000, labelCoversSqft: 22000, rigSprayGalPer1000: 2 });
     expect(out.warnings.join(' ')).toMatch(/The card's rate is for 5 gal per 1,000 sq ft\. Tank #1 sprays 2/);
+  });
+
+  // Owner 2026-11-26: the flea cards state "1 gallon per 1,000 sq ft" in their own text; a rig at another volume is compared to it.
+  test('the flea Antapex line warns when the picked rig sprays another volume than the 1 gal per 1,000 sq ft it states', async () => {
+    const protocols = require('../config/protocols.json');
+    const antapex = { id: 'antapex', name: 'Atticus Antapex WSG', default_rate: '10-30', default_unit: 'g/gal', label_verified_at: '2026-07-12' };
+    const rig = { id: 'cal-1', equipment_system_id: 'sys-1', system_type: 'tank', system_name: 'Tank #1', carrier_gal_per_1000: 2, calibration_status: 'field_verified', tank_capacity_gal: '110.00' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-12-09', service_type: 'Flea Control Service', service_category: 'specialty', service_key: 'flea_tick' }], products_catalog: [antapex], equipment_calibrations: [rig], equipment_systems: [{ id: 'sys-1', name: 'Tank #1', system_type: 'tank', tank_capacity_gal: '110.00' }], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('antapex', null, { serviceId: 'svc1', equipmentSystemId: 'sys-1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-12-08T14:00:00Z') });
+    expect(out).toMatchObject({ amount: 1100, sprayVolumeGalPer1000: 1, coversSqft: 55000, labelCoversSqft: 110000, rigSprayGalPer1000: 2 });
+    expect(out.warnings.join(' ')).toMatch(/The card's rate is for 1 gal per 1,000 sq ft\. Tank #1 sprays 2/);
+  });
+
+  // Owner 2026-11-26: the "if needed" amount names the use it covers, in the line's own words.
+  test('the April Distance IGR "if needed" rate names the whitefly use and the scale hold', async () => {
+    const protocols = require('../config/protocols.json');
+    const distance = { id: 'di', name: 'Distance IGR', default_rate: '0.06-0.12', default_unit: 'fl_oz/gal', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-04-15', service_type: 'Tree & Shrub Care', service_category: 'tree_shrub', service_key: 'tree_shrub_care' }], products_catalog: [distance], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('di', 100, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols }, now: new Date('2026-04-14T14:00:00Z') });
+    const applies = out.warnings.find((w) => w.startsWith('Applies to: '));
+    expect(applies).toMatch(/live whitefly finds only/);
+    expect(applies).toMatch(/scale: HOLD/);
+    expect(applies).not.toMatch(/\$\d/);
+  });
+
+  // Owner 2026-11-26: with no usable carrier the known per-area rate still shows; the missing carrier is the total's reason.
+  test('a per-1,000 sq ft product with no carrier keeps its rate and unit and gives the carrier reason for the total', async () => {
+    const product = { id: 'p1', name: 'Celsius WG', default_rate_per_1000: 0.113, rate_unit: 'oz', label_verified_at: '2026-07-12' };
+    const rows = { scheduled_services: [{ customer_id: 'c1', scheduled_date: '2026-09-04', service_type: 'Quarterly Pest Control', service_category: 'pest_control', service_key: 'pest_general_quarterly' }], products_catalog: [product], equipment_calibrations: [], product_aliases: [], scheduled_service_addons: [] };
+    const dbh = (t) => {
+      const table = String(t).split(' as ')[0];
+      const chain = {};
+      for (const m of ['join', 'leftJoin', 'where', 'whereIn', 'whereNotNull', 'select', 'orderByRaw', 'orderBy', 'modify']) chain[m] = () => chain;
+      chain.first = async () => (rows[table] || [])[0] ?? null;
+      chain.catch = (fn) => Promise.resolve(rows[table] || []).catch(fn);
+      chain.then = (res, rej) => Promise.resolve(rows[table] || []).then(res, rej);
+      return chain;
+    };
+    dbh.raw = (sql) => sql;
+    const out = await jobCard.mixForProduct('p1', 110, { serviceId: 'svc1', dbh, deps: { buildPlan: jest.fn(), protocols: { pest: { visits: [{ visit: 1, month: 'Any', primary: 'Celsius WG per label' }] } } }, now: new Date('2026-09-03T14:00:00Z') });
+    expect(out).toMatchObject({ amount: null, unit: 'oz', ratePer1000: 0.113, reason: 'No carrier rate on file' });
   });
 
   test('specialty treatments are admitted by catalog identity; mechanical lawn services resolve no chemical plan (r6 P1 ×2)', async () => {

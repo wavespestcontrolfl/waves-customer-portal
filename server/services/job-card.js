@@ -2382,12 +2382,11 @@ async function mixForProduct(productId, gallons, { serviceId, equipmentSystemId 
     mix = single;
   }
   const packSizes = await loadPackSizes(dbh, [product.id]);
-  // The label rate rides with the amount; with no number to show (see above) there is no rate to pair with it.
-  const permitted = mix.amount != null || Boolean(mix.serviceAmounts);
   return {
     productId: product.id,
     name: product.name,
-    ratePer1000: governedRate ? governedRate.ratePer1000 : ((permitted || !tankMixable) && ratePer1000 != null ? Number(ratePer1000) : null),
+    // The known per-1,000 sq ft rate always shows, even when no carrier lets the tank total be worked out (its reason rides on the total).
+    ratePer1000: governedRate ? governedRate.ratePer1000 : (ratePer1000 != null ? Number(ratePer1000) : null),
     ratePerGallon: mix.amount != null ? perGallon : null,
     ...(governedRate?.text ? { rateText: governedRate.text } : {}),
     ...(governedRows.length ? { governedRates: governedRows.map(({ warnings: _w, ...row }) => row) } : {}),
@@ -2441,7 +2440,7 @@ function conflictAmounts(conflictLines, labelPerGallon, volume, rigCtx) {
     const lineCarrier = lineCarrierOf(band, line);
     const dose = perGallonDose({ band: used, volume, lineCarrier, rigCarrier: rigCtx.rigCarrier });
     const rigWarning = rigVolumeWarning({ lineCarrier, ...rigCtx });
-    const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, rigWarning].filter(Boolean);
+    const warning = [line.conditional && `Listed as "if needed" on ${line.name} — confirm the call before mixing`, line.conditional && line.useText && `Applies to: ${line.useText}`, rigWarning].filter(Boolean);
     const { amount, amountMax, unit, sprayVolumeGalPer1000, coversSqft, labelCoversSqft, rigSprayGalPer1000 } = dose;
     return {
       service: line.name, amount, amountMax: amountMax ?? null, unit, ratePerGallon: used, fromCard: Boolean(band),
@@ -2476,6 +2475,8 @@ function mixWarnings(c) {
     // The booked rate's own words (its carrier instruction) and its grass restriction (owner 2026-11-26: warned, never blocked).
     ...c.governedRows.flatMap((row) => row.warnings.map((text) => [true, `${lineFacts.governed ? '' : `${row.service}: `}${text}`])),
     [lineFacts.selected === false, `Listed as "if needed" on ${lineFacts.addon || "this visit's protocol"} — confirm the call before mixing`],
+    // The target and restriction the "if needed" rate covers, in the line's own words (rates and prices stripped).
+    [lineFacts.selected === false && Boolean(lineFacts.useText), `Applies to: ${lineFacts.useText}`],
     [!c.tankMixable, 'Not a tank mix — apply as labeled'],
     [!product.label_verified_at, 'Label rate not yet verified'],
     [sprayCheck.verdict === 'hold', `Spray check: ${sprayCheck.reason}`],
@@ -2538,15 +2539,18 @@ async function protocolLineForProduct(dbh, serviceId, svc, product, scheduledDat
   const [selected] = selectedHits;
   const rateOf = ({ hit }) => (hit.labelRateRefused ? null : hit.declaredRate || lineRate(hit.raw, { conditional: hit.selected === false }));
   // The spray volume a line states for its own rate: a label-use card's carrier, or the protocol text's "at the label volume of N gal"
-  // (the April Distance IGR line: 5 gal of mix per 1,000 sq ft). "At least N gal" is a floor, not a volume, and is never read.
+  // (the April Distance IGR line) or "N gallon(s) per 1,000 sq ft" (the flea Antapex and Onslaught lines). "At least N gal" is a floor,
+  // not a volume, and is never read.
   const statedVolumeOf = (hit) => {
-    const m = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(hit.raw || ''));
+    const m = /\bat the label volume of (\d+(?:\.\d+)?)\s*gal\b/i.exec(String(hit.raw || ''))
+      || /(?<!at least\s)\b(\d+(?:\.\d+)?)\s*gal(?:lons?)?\s*(?:of mix\s*)?per\s*1,?000\s*sq/i.exec(String(hit.raw || ''));
     return m && Number(m[1]) > 0 ? Number(m[1]) : null;
   };
   const lineOf = (h) => {
     const stated = h.hit.labelCarrierGalPer1000 ? null : statedVolumeOf(h.hit);
     return {
       rate: rateOf(h), declared: Boolean(h.hit.declaredRate), labelUse: Boolean(h.hit.labelUseRate), conditional: h.hit.selected === false,
+      ...(h.hit.selected === false ? { useText: clean(describeLine(h.hit.raw), 420) } : {}),
       ...(h.hit.labelCarrierGalPer1000 ? { carrier: h.hit.labelCarrierGalPer1000 } : {}),
       ...(stated ? { carrier: stated, statedVolume: true } : {}),
     };
