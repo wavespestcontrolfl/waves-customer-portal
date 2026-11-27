@@ -621,7 +621,7 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
   const ids = [...new Set(entries.map(listedId))];
   const [rows, logs] = await Promise.all([
     conn('scheduled_services').where({ customer_id: customerId }).whereIn('id', ids)
-      .select('id', 'service_type', 'scheduled_date', 'status', 'window_start', 'window_display', 'time_window'),
+      .select('id', 'service_type', 'scheduled_date', 'status', 'track_state', 'window_start', 'window_display', 'time_window'),
     conn('reschedule_log')
       .whereIn('scheduled_service_id', ids)
       // non-moves are dropped by their slot, never their reason: a nightly "not closed
@@ -631,16 +631,20 @@ async function loadListedMoves(conn, customerId, upcomingServices, deriveWindow,
       .limit(500)
       .select('id', 'scheduled_service_id', 'original_date', 'new_date', 'original_window', 'new_window', 'notes', 'created_at'),
   ]);
-  const { UPCOMING_SERVICE_STATUSES } = require('./visit-context/statuses');
+  // UPCOMING SERVICES' own row rule: an en-route or on-site visit today whose status
+  // still reads `rescheduled` is listed there, so it is live here too.
+  const { isUpcomingListedRow } = require('./visit-context/statuses');
+  const today = etDateString(now);
+  const isListedRow = (v) => isUpcomingListedRow(v, today);
   const byId = new Map((rows || []).map((r) => [String(r.id), r]));
-  const liveRows = entries.map((e) => byId.get(listedId(e))).filter((v) => v && UPCOMING_SERVICE_STATUSES.includes(v.status));
+  const liveRows = entries.map((e) => byId.get(listedId(e))).filter(isListedRow);
   const dayOnlyNow = await dayOnlyNowFor(conn, liveRows, now, entries.some((e) => 'start' in e));
   const moves = [];
   const listed = [];
   for (const entry of entries) {
     const visit = byId.get(listedId(entry));
     // a listed visit that is gone or no longer live (cancelled since) states no move
-    const slot = visit && UPCOMING_SERVICE_STATUSES.includes(visit.status) ? listedSlot(entry, visit, deriveWindow, dayOnlyNow) : null;
+    const slot = isListedRow(visit) ? listedSlot(entry, visit, deriveWindow, dayOnlyNow) : null;
     if (!slot) {
       // Drafting: the prompt still shows this visit as UPCOMING SERVICES read it, but the row
       // no longer holds that slot (it changed between the two reads). It is marked

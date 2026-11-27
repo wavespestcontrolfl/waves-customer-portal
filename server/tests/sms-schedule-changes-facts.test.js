@@ -92,6 +92,20 @@ describe('loadScheduleChanges: moves of the visits UPCOMING SERVICES lists', () 
     expect((await read([visit()], [rain])).moves.map((m) => m.logId)).toEqual(['rl-1']);
   });
 
+  test('a visit en route or on site today whose status still reads rescheduled is listed (UPCOMING SERVICES lists it): never unverified', async () => {
+    const today = '2026-11-26';
+    for (const track of ['en_route', 'on_property']) {
+      const live = visit({ scheduled_date: today, status: 'rescheduled', track_state: track });
+      const out = await read([live], [], [listedFor(live)]);
+      expect(out.listed).toEqual([expect.objectContaining({ id: 'v1', date: today })]);
+      expect(out.listed[0].unverified).toBeUndefined();
+    }
+    // a tracker state left on another day, or on a terminal row, is not live
+    for (const row of [visit({ scheduled_date: '2026-12-04', status: 'rescheduled', track_state: 'en_route' }), visit({ scheduled_date: today, status: 'cancelled', track_state: 'on_property' })]) {
+      expect((await read([row], [], [listedFor(row)])).listed).toEqual([{ id: 'v1', unverified: true }]);
+    }
+  });
+
   test('a visit moved between the UPCOMING SERVICES read and this one states no move (never the old window on the new day)', async () => {
     const later = move({ id: 'rl-3', original_date: '2026-12-04', new_date: '2026-12-05', original_window: '13:00:00-14:00:00', new_window: '15:00:00-16:00:00', created_at: new Date('2026-11-26T16:59:00Z') });
     const now = visit({ scheduled_date: '2026-12-05', window_start: '15:00:00' });
