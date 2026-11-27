@@ -636,11 +636,25 @@ async function commitmentsChanged(conn, refs, customerId) {
 // a failed read throws — and with commitments) and compare their signature with
 // the draft's; an open promise or request the draft did not show (recorded since,
 // or unreadable when it was drafted) refuses too, so it goes to review.
-async function visitStatusReason(conn, signature, customerId, refs) {
+// SCHEDULE CHANGES (texting AI gap 3): a draft that carries `schedule` (the signature of the moves, skips and cancels it was written
+// beside) is rebuilt with them too, and refuses when one was recorded, changed or cleared since. A draft from before them carries no
+// `schedule` and is not asked.
+async function visitStatusReason(conn, status, customerId, refs) {
   if (!customerId) return 'visit_status_changed';
+  const signature = status.signature || null;
+  const withSchedule = typeof status.schedule === 'string';
   const facts = require('./visit-loops-facts');
-  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true });
+  // the same UPCOMING SERVICES visits the draft listed, in its order, each with the slot the draft verified
+  const upcomingServices = withSchedule
+    // an `unverified` entry carries no slot: it rebuilds as a mismatch, so the send refuses
+    ? [].concat(status.scheduleVisits || []).filter((e) => e && typeof e.id === 'string' && e.id)
+      .map((e) => ({ scheduledServiceId: e.id, date: e.date ?? null, start: e.start ?? null, window: e.window ?? null, dayOnly: e.dayOnly === true }))
+    : [];
+  // the window text is re-derived the way UPCOMING SERVICES derives it (context-aggregator deriveWindow)
+  const deriveWindow = withSchedule ? (row) => require('./context-aggregator').deriveWindow(row) : null;
+  const fresh = await facts.loadVisitLoops({ customerId, conn, strict: true, withCommitments: true, withScheduleChanges: withSchedule, upcomingServices, deriveWindow });
   if (facts.visitStatusSignature(fresh) !== signature) return 'visit_status_changed';
+  if (withSchedule && facts.scheduleChangesSignature(fresh.scheduleChanges) !== status.schedule) return 'schedule_changed';
   // the displayed commitments, from this same rebuild (a second read could miss one
   // closed between the two): each must still be listed, unedited
   const listed = new Map([...(fresh.weOwe || []), ...(fresh.customerWaiting || [])]
@@ -664,7 +678,7 @@ async function openLoopsBlockReason({ decision, customerId = decision?.customer_
   try {
     const conn = dbh || require('../models/db');
     if (refs.length && await commitmentsChanged(conn, refs, customerId)) return 'commitment_closed';
-    return status ? await visitStatusReason(conn, status.signature || null, customerId, refs) : null;
+    return status ? await visitStatusReason(conn, status, customerId, refs) : null;
   } catch (err) {
     require('./logger').warn(`[agent-decision-send-checks] open-loop recheck failed: ${err.message}; blocking send`);
     return 'open_loops_recheck_failed';

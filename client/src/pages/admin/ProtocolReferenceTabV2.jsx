@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Button, Badge, Card, Input, ScanStrip, Select } from "../../components/ui";
 import { cn } from "../../components/ui/cn";
 import ProtocolTankSheet from "./ProtocolTankSheet";
+import ProtocolMixTable from "../../components/admin/ProtocolMixTable";
 import TreeShrubFieldGuide from "../../components/admin/TreeShrubFieldGuide";
 import { EPA_REG_PATTERN, productLabelLink } from "../../lib/product-label";
 import {
@@ -363,6 +364,7 @@ function CurrentVisitCardV2({ visit, isLawnTrack, pricingRestricted, description
             )}
           </div>
         )}
+        <ProtocolMixTable mixRates={visit.mixRates} />
         {" "}
         <div className="mb-3 rounded-sm border-hairline border-zinc-200 overflow-hidden">
           {" "}
