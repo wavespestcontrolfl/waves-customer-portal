@@ -149,6 +149,9 @@ async function loadPastVisits(dbh, svc) {
       .leftJoin('services as catalog', 'catalog.id', 'ss.service_id')
       .where({ 'sr.customer_id': svc.customer_id, 'sr.status': 'completed' })
       .where('sr.service_date', '<', viewedDay)
+      // The viewed visit's own record can carry an earlier date (a project completion uses its project date):
+      // leave it out by identity too. IS DISTINCT FROM keeps a legacy record with no schedule link.
+      .whereRaw('sr.scheduled_service_id IS DISTINCT FROM ?', [svc.id])
       .orderBy('sr.service_date', 'desc')
       .orderBy('sr.created_at', 'desc')
       .orderBy('sr.id', 'desc')

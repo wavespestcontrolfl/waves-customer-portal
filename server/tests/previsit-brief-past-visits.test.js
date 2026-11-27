@@ -48,11 +48,15 @@ const PRODUCTS = [
 // strictly-before date bound and the limit to ROWS.
 function fakeDbh({ throws = {}, rows = ROWS } = {}) {
   return (table) => {
-    const state = { beforeDay: null, limit: null };
+    const state = { beforeDay: null, limit: null, notVisit: undefined };
     const q = {};
     for (const m of ['whereIn', 'whereNotIn', 'orderBy', 'offset', 'leftJoin', 'modify']) q[m] = () => q;
     q.where = (arg, op, val) => {
       if (arg === 'sr.service_date' && op === '<') state.beforeDay = val;
+      return q;
+    };
+    q.whereRaw = (sql, bindings) => {
+      if (/sr\.scheduled_service_id IS DISTINCT FROM \?/.test(sql)) [state.notVisit] = bindings;
       return q;
     };
     q.limit = (n) => { state.limit = n; return q; };
@@ -63,6 +67,7 @@ function fakeDbh({ throws = {}, rows = ROWS } = {}) {
       // No bound given = every row: a test fails if the code ever drops the bound.
       return rows
         .filter((r) => !state.beforeDay || r.service_date < state.beforeDay)
+        .filter((r) => state.notVisit === undefined || r.scheduled_service_id !== state.notVisit)
         .slice(0, state.limit ?? rows.length);
     };
     q.first = async () => undefined;
@@ -81,6 +86,16 @@ describe('deterministicVisitFacts past_visits', () => {
   test('nothing from the viewed day is listed: the stop\'s own records and a sibling\'s just-completed one stay out', async () => {
     const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh());
     expect(visits.map((v) => v.date)).not.toContain('2026-11-26');
+  });
+
+  test('the viewed visit\'s own record is left out even when it is dated earlier; a record with no schedule link stays', async () => {
+    const rows = [
+      rec('own', '2026-11-20', 'Pest Control Service', { scheduled_service_id: 'svc-now' }),
+      rec('legacy', '2026-11-15', 'Pest Control Service', { scheduled_service_id: null }),
+      ...ROWS,
+    ];
+    const { past_visits: visits } = await deterministicVisitFacts(SVC, fakeDbh({ rows }));
+    expect(visits.map((v) => v.date)).toEqual(['2026-11-15', '2026-11-10', '2026-10-20', '2026-09-01', '2026-08-01']);
   });
 
   test('an older stop never lists a later visit', async () => {
