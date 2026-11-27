@@ -380,42 +380,42 @@ function isAcceptedV2Price(entry) {
     : entry.accepted === true));
 }
 
-// Only an accepted, single-amount one-time price counts here: an accepted
-// recurring plan rate (per_quarter / per_month / per_year / per_application)
-// or a stated range when quoted_price_usd is null is NOT a paid one-time
-// visit quote and must not block a covered callback.
-function isAcceptedOneTimeV2Price(entry) {
-  return Boolean(isAcceptedV2Price(entry)
-    && entry.unit === 'one_time'
-    && entry.amount_max_usd == null
-    && sanitizeQuotedCallPrice(entry.amount_usd) !== null);
-}
-
-// True when V2's structured price entries describe `amount` solely as a
-// recurring plan cadence (e.g. model echoed a quarterly rate into
-// quoted_price_usd, which flatView also copies into extracted.quoted_price).
+// True when V2's structured price entries identify `amount` as a recurring
+// plan rate rather than an accepted one-time visit price (e.g. model echoed a
+// quarterly rate into quoted_price_usd, even if a declined one-time offer
+// shared the same dollar amount).
 function isRecurringOnlyV2Amount(amount, entries) {
   const matching = entries.filter((e) => sanitizeQuotedCallPrice(e.amount_usd) === amount);
-  return matching.length > 0 && matching.every((e) => RECURRING_V2_PRICE_UNITS.has(e.unit));
+  if (matching.length === 0) return false;
+  const accepted = matching.filter(isAcceptedV2Price);
+  const nonDeclined = matching.filter((e) => e.caller_response !== 'declined' && e.accepted !== false);
+  const relevant = accepted.length > 0 ? accepted : nonDeclined;
+  return relevant.length > 0 && relevant.every((e) => RECURRING_V2_PRICE_UNITS.has(e.unit));
 }
 
 // Single validated one-time visit price shared by re-service eligibility AND
-// resolveCallBookingPrice so selection and invoicing always agree: recurring
-// plan rates echoed into quoted_price_usd are ignored, while an accepted
-// one_time structured price entry is honored even when quoted_price_usd is null.
+// resolveCallBookingPrice: uses ONLY the booked service's quoted total
+// (quoted_price_usd / extracted.quoted_price), never arbitrary sr.price /
+// sr.prices entries (which can carry a plan setup fee or another service's
+// price when quoted_price_usd is null), and rejects recurring plan rates
+// echoed into quoted_price_usd.
 function agreedOneTimeVisitPrice(extracted = {}, v2Extraction = null) {
-  const entries = v2PriceEntries(v2Extraction);
   const scalar = sanitizeQuotedCallPrice(v2Extraction?.service_request?.quoted_price_usd)
     ?? sanitizeQuotedCallPrice(extracted?.quoted_price);
-  if (scalar !== null && !isRecurringOnlyV2Amount(scalar, entries)) return scalar;
-  const oneTimeEntry = entries.find(isAcceptedOneTimeV2Price);
-  return oneTimeEntry ? sanitizeQuotedCallPrice(oneTimeEntry.amount_usd) : null;
+  if (scalar === null) return null;
+  return isRecurringOnlyV2Amount(scalar, v2PriceEntries(v2Extraction)) ? null : scalar;
 }
 
-function v2PrimaryCategoryLane(v2Extraction) {
-  const category = String(v2Extraction?.service_request?.primary_service_category || '').trim();
+function v2CategoryLaneForReService(v2Extraction) {
+  const sr = v2Extraction?.service_request;
+  if (!sr || typeof sr !== 'object') return null;
+  const category = String(sr.primary_service_category || '').trim();
+  const secondary = Array.isArray(sr.secondary_categories)
+    ? sr.secondary_categories.filter((c) => c && c !== category)
+    : [];
+  if (secondary.length > 0) return 'blocked';
   if (!category || category === 'other') return null;
-  return STRUCTURED_RE_SERVICE_CATEGORY_LANE[category] || 'uncovered';
+  return STRUCTURED_RE_SERVICE_CATEGORY_LANE[category] || 'blocked';
 }
 
 function hasNegatedReServiceIntent(text) {
@@ -435,13 +435,8 @@ function structuredReServiceCategoryLane(v2Extraction) {
   const isServiceFollowUp = intent === 'follow_up_existing_service'
     && nature === 'existing_customer_service';
   if (!isCallback && !isServiceFollowUp) return null;
-  const category = String(sr.primary_service_category || '');
-  const lane = STRUCTURED_RE_SERVICE_CATEGORY_LANE[category] || null;
-  if (!lane) return null;
-  const secondary = Array.isArray(sr.secondary_categories)
-    ? sr.secondary_categories.filter((c) => c && c !== category)
-    : [];
-  return secondary.length > 0 ? null : lane;
+  const lane = v2CategoryLaneForReService(v2Extraction);
+  return lane && lane !== 'blocked' ? lane : null;
 }
 
 function structuredReServiceLane(extracted = {}, v2Extraction = null) {
@@ -609,12 +604,12 @@ function reServiceOverrideRow({ extracted, haystack, reServices, reServiceLanes,
   const hasExplicitIntent = !!intentText && hasAffirmativeReServiceIntent(intentText);
   const structuredLane = hasExplicitIntent ? null : structuredReServiceLane(extracted, v2Extraction);
   if (!hasExplicitIntent && !structuredLane) return null;
-  // Preserve V2's primary service category even when explicit callback wording
-  // established intent: a V2 pest complaint must never book a lawn callback on
-  // a lawn-only customer, and an uncovered V2 category (mosquito, termite, etc.)
-  // declines instead of dispatching a pest/lawn re-service.
-  const v2CategoryLane = v2PrimaryCategoryLane(v2Extraction);
-  if (v2CategoryLane === 'uncovered') return null;
+  // Preserve V2's primary service category and mixed-service guard even when
+  // explicit callback wording established intent: a V2 pest complaint must
+  // never book a lawn callback on a lawn-only customer, and an uncovered or
+  // multi-category call declines instead of dispatching a pest/lawn re-service.
+  const v2CategoryLane = v2CategoryLaneForReService(v2Extraction);
+  if (v2CategoryLane === 'blocked') return null;
   const effectiveLane = structuredLane || v2CategoryLane;
   const structuredPin = effectiveLane === 'pest' || effectiveLane === 'lawn' ? effectiveLane : null;
   const coarse = coarseServiceLabel ? String(coarseServiceLabel) : null;
