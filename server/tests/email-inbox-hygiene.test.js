@@ -1007,6 +1007,34 @@ describe('reply drafts honor Reply-To', () => {
     expect(result).toBeNull();
     expect(gmailClient.createDraft).not.toHaveBeenCalled();
   });
+
+  test('preserves reply drafts for reply-enabled ticketing notification addresses', async () => {
+    process.env.GATE_EMAIL_AUTO_DRAFTS = 'true';
+    setupDb();
+    gmailClient.getThread.mockResolvedValue({ messages: [] });
+    const result = await draftReplyForEmail({
+      id: 'e-ticket-notif',
+      gmail_id: 'g-ticket-notif',
+      gmail_thread_id: 't-ticket-notif',
+      from_address: 'no-reply@helpdesk.example',
+      from_name: 'Customer Support Portal',
+      subject: 'Ticket #123: reschedule request',
+      body_text: 'Please move Friday service to Monday.',
+      label_ids: JSON.stringify(['INBOX']),
+      message_id: '<ticket-123@helpdesk.example>',
+      reply_to: 'notifications+ticket123@helpdesk.example',
+      received_at: '2026-11-27T17:44:20Z',
+      draft_gmail_id: null,
+    });
+    expect(result).toBe('draft-1');
+    expect(gmailClient.createDraft).toHaveBeenCalledWith(
+      'notifications+ticket123@helpdesk.example',
+      expect.any(String),
+      expect.any(String),
+      't-ticket-notif',
+      '<ticket-123@helpdesk.example>'
+    );
+  });
 });
 
 describe('stripPlaceholderSignOff', () => {

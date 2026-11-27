@@ -691,6 +691,14 @@ function isHardSkippedLeadSender(fromAddress, subject = null) {
   return domainMatches(domainFromAddress(normalized), LEAD_MARKETPLACE_SOLICITOR_DOMAINS);
 }
 
+function isNoReplyAddress(address) {
+  const normalized = normalizeAddress(address);
+  const at = normalized.lastIndexOf('@');
+  if (at < 1) return false;
+  const baseLocalPart = normalized.slice(0, at).split('+')[0];
+  return AUTOMATED_NOREPLY_TOKEN_RE.test(baseLocalPart);
+}
+
 function isAutomatedSender(fromAddress) {
   const normalized = normalizeAddress(fromAddress);
   const at = normalized.lastIndexOf('@');
@@ -1242,13 +1250,15 @@ const DRAFT_TONE_RULES = Object.freeze({
 });
 
 // Resolves the actionable reply recipient for an auto-draft, or null when the
-// message should never get a draft (self-sent/self-targeted or addressed to an
-// automated no-reply mailbox with no real Reply-To).
+// message should never get a draft (self-sent/self-targeted or addressed to a
+// no-reply mailbox with no real Reply-To). Uses isNoReplyAddress rather than
+// the broader isAutomatedSender so reply-enabled ticketing mailboxes like
+// notifications+ticket123@example.com keep getting service/complaint drafts.
 function resolveDraftReplyAddress(email) {
   const ownAddress = ownMailboxAddress(process.env.GMAIL_USER_EMAIL || 'contact@wavespestcontrol.com');
   if (ownMailboxAddress(email.from_address) === ownAddress) return null;
   const replyAddress = email.reply_to || email.from_address;
-  if (!replyAddress || ownMailboxAddress(replyAddress) === ownAddress || isAutomatedSender(replyAddress)) return null;
+  if (!replyAddress || ownMailboxAddress(replyAddress) === ownAddress || isNoReplyAddress(replyAddress)) return null;
   return replyAddress;
 }
 
